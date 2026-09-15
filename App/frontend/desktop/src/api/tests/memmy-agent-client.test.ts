@@ -81,6 +81,25 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it.each(["today", "all"] as const)("clears %s Computer History with the server-side clear endpoint", async (scope) => {
+    const snapshot = {
+      observation: { state: "stopped", startedAt: null, segmentId: null, segmentStartedAt: null, error: null, narrationError: null },
+      histories: [],
+      workflows: [],
+      privacy: { screenshots: false, audio: false, rawRetentionHours: 48, markdownDirectory: "/tmp/histories", eventStreamDirectory: "/tmp/segments" },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      expect(url.pathname).toBe("/api/computer-history/clear");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({ scope });
+      return json(snapshot);
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.clearComputerHistories(scope)).resolves.toEqual(snapshot);
+  });
+
   it("reads the workspace snapshot, changed files, and a selected diff", async () => {
     const calls: string[] = [];
     const workspaceState = (project: boolean, branch = "zy_git_v1.0.7") => ({

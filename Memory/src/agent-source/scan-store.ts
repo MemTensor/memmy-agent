@@ -33,9 +33,23 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
   if (!db.prepare("SELECT 1 FROM scan_meta WHERE id=1").get()) db.prepare("INSERT INTO scan_meta(id,job_id,source_id,mode,phase,created_at,updated_at,error) VALUES(1,@jobId,@sourceId,@mode,@phase,@createdAt,@updatedAt,@error)").run({ ...job, error: job.error ?? null });
   let ordinal = Number((db.prepare("SELECT COALESCE(MAX(ordinal),-1) AS value FROM staged_messages WHERE job_id=?").get(job.jobId) as { value: number }).value) + 1;
   const insert = db.prepare("INSERT OR IGNORE INTO staged_messages(job_id,source_id,conversation_id,message_id,role,content,created_at,workspace_path,git_root,raw_meta_json,ordinal) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+  const refreshCodex = db.prepare(`UPDATE staged_messages
+    SET conversation_id=?,role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
+    WHERE job_id=? AND source_id=? AND message_id=?`);
   const store: MemoryAgentSourceScanStore = {
     path,
-    stage(message) { const bytes = Buffer.byteLength(JSON.stringify(message)); if (bytes > MAX_RECORD_BYTES) throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`); return Number(insert.run(job.jobId,message.sourceId,message.conversationId,message.messageId,message.role,message.content,message.createdAt,message.workspacePath,message.gitRoot,JSON.stringify(message.rawMeta),ordinal++).changes)>0; },
+    stage(message) {
+      const bytes = Buffer.byteLength(JSON.stringify(message));
+      if (bytes > MAX_RECORD_BYTES) throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`);
+      const rawMetaJson = JSON.stringify(message.rawMeta);
+      const inserted = Number(insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, ordinal++).changes) > 0;
+      if (!inserted && message.sourceId === "codex" && typeof message.rawMeta.sourceTurnState === "string") {
+        // Retrying a staged turn can add native identity or completion evidence
+        // to an existing message. Preserve its ordinal and the insertion count.
+        refreshCodex.run(message.conversationId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.messageId);
+      }
+      return inserted;
+    },
     stageBatch(messages) { const tx = db.transaction(() => { let count = 0; for (const message of messages) if (store.stage(message)) count += 1; return count; }); return tx(); },
     messages(sourceId, cursor, limit=500) { limit=Math.min(500,Math.max(1,limit)); const params: unknown[]=[job.jobId,sourceId]; let where="job_id=? AND source_id=?"; if(cursor){where += " AND ((conversation_id > ?) OR (conversation_id = ? AND (created_at > ? OR (created_at = ? AND (message_id > ? OR (message_id = ? AND ordinal > ?))))))"; params.push(cursor.conversationId,cursor.conversationId,cursor.createdAt,cursor.createdAt,cursor.messageId,cursor.messageId,cursor.ordinal);} const rows = db.prepare(`SELECT source_id AS sourceId,conversation_id AS conversationId,message_id AS messageId,role,content,created_at AS createdAt,workspace_path AS workspacePath,git_root AS gitRoot,raw_meta_json AS rawMetaJson,ordinal FROM staged_messages WHERE ${where} ORDER BY conversation_id,created_at,message_id,ordinal LIMIT ?`).iterate(...params,limit) as Iterable<Record<string,unknown>>; return (function*(){let bytes=0; let count=0; for(const row of rows){const message=rowToMessage(row); yield message; count+=1; bytes+=Buffer.byteLength(JSON.stringify(message)); if(count>=500||bytes>=MAX_PAGE_BYTES) break;}})(); },
     saveScanCursor(s,c){db.prepare("INSERT INTO scan_cursors(source_id,conversation_id,created_at,message_id,ordinal) VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET conversation_id=excluded.conversation_id,created_at=excluded.created_at,message_id=excluded.message_id,ordinal=excluded.ordinal").run(s,c.conversationId,c.createdAt,c.messageId,c.ordinal);},

@@ -1,0 +1,8 @@
+{
+  "platform": "win32",
+  "arch": "x64",
+  "binaries": ["bin/soffice.exe", "bin/pdfinfo.exe", "bin/pdftoppm.exe"],
+  "toolVersions": {},
+  "sha256": {},
+  "provisionedBy": "release packaging"
+}

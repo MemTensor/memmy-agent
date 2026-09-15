@@ -14,11 +14,14 @@ describe("desktop runtime manifest", () => {
         JSON.stringify({ edition: "cn", cloudService: "https://api.example.test" }),
       ),
     ).toBe("https://api.example.test");
+    expect(normalizePublicCloudService(" http://192.0.2.10:8101/ ")).toBe(
+      "http://192.0.2.10:8101",
+    );
   });
 
   it.each([
     "",
-    "http://api.example.test",
+    "ftp://api.example.test",
     "https://user:password@api.example.test",
     "https://api.example.test/path",
     "https://api.example.test?token=secret",

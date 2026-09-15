@@ -45,6 +45,11 @@ export function displayMemoryTitle(item: MemoryDisplayItem, ...candidates: Array
     return spanGoal(item.metadata) ?? item.title;
   }
 
+  if (item.kind === "work_memory") {
+    const topic = cleanMemoryText(item.title);
+    if (topic && !isInternalTitle(topic)) return topic;
+  }
+
   const summary = readySummary(item.summary);
   if (item.kind === "trace" && summary) {
     return summary;

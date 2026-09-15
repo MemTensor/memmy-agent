@@ -69,6 +69,63 @@ function openAiInput(revision: string, presetId?: string): ModelConfigInput {
 }
 
 describe("model config catalog", () => {
+  it("round-trips StepFun and Xiaomi MiMo connections back into the view", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [
+        {
+          provider: "stepfun",
+          apiKey: "sk-stepfun-secret",
+          endpoints: [{
+            endpointId: "chat",
+            apiBase: "https://api.stepfun.com/v1",
+            protocol: "openai-chat-completions"
+          }],
+          models: [{
+            endpointId: "chat",
+            model: "step-3.5-flash",
+            source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          }]
+        },
+        {
+          provider: "xiaomi_mimo",
+          apiKey: "sk-mimo-secret",
+          endpoints: [{
+            endpointId: "chat",
+            apiBase: "https://api.xiaomimimo.com/v1",
+            protocol: "openai-chat-completions"
+          }],
+          models: [{
+            endpointId: "chat",
+            model: "mimo-v2.5-pro",
+            source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          }]
+        }
+      ],
+      modelAssignments: emptyAssignments()
+    });
+
+    // The desktop client matches the model it just saved by provider/endpoint/model,
+    // so a provider missing from the view surfaces as "Unable to resolve server preset".
+    const savedModels = saved.providers.flatMap((provider) => provider.models);
+    expect(savedModels.map((model) => [model.provider, model.model])).toEqual(
+      expect.arrayContaining([
+        ["stepfun", "step-3.5-flash"],
+        ["xiaomi_mimo", "mimo-v2.5-pro"]
+      ])
+    );
+
+    const reread = await readModelConfigCatalog(file);
+    expect(reread.providers.map((provider) => provider.provider)).toEqual(
+      expect.arrayContaining(["stepfun", "xiaomi_mimo"])
+    );
+  });
+
   it("persists the reserved built-in local Embedding assignment without a preset", async () => {
     const file = fixture({ modelAssignments: emptyAssignments() });
     const current = await readModelConfigCatalog(file);

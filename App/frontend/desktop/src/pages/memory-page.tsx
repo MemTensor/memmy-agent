@@ -15,6 +15,7 @@ import { useAppState } from "../state/app-state.js";
 import { writeSettingsTabHash } from "./settings-nav.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
+import { ComputerHistorySubPage } from "./memory/computer-history-sub-page.js";
 import { LogsSubPage } from "./memory/logs-sub-page.js";
 import {
   resolveMemoryReferencePage,
@@ -48,6 +49,7 @@ import {
 
 export type MemorySubPageId =
   | "overview"
+  | "computer-history"
   | "memories"
   | "user-memories"
   | "tasks"
@@ -79,7 +81,8 @@ const memoryNavSections: MemoryNavSection[] = [
       { id: "policies", labelKey: "memory.nav.policies", icon: <Sparkles size={16} /> },
       { id: "world-model", labelKey: "memory.nav.worldModel", icon: <Globe2 size={16} /> },
       { id: "skills", labelKey: "memory.nav.skills", icon: <Wand2 size={16} /> },
-      { id: "user-memories", labelKey: "memory.nav.userMemories", icon: <UserRound size={16} /> }
+      { id: "user-memories", labelKey: "memory.nav.userMemories", icon: <UserRound size={16} /> },
+      { id: "computer-history", labelKey: "memory.nav.computerHistory", icon: <ScrollText size={16} /> }
     ]
   },
   {
@@ -140,6 +143,7 @@ export function MemoryPage(props: MemoryPageProps) {
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
       overview: <OverviewSubPage client={client} onNavigate={handleSubPageChange} />,
+      "computer-history": <ComputerHistorySubPage client={clients?.memmyAgent ?? null} />,
       memories: (
         <MemoriesSubPage
           client={client}
@@ -177,7 +181,7 @@ export function MemoryPage(props: MemoryPageProps) {
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client, dispatch, handleOpenMemoryReference, handleSubPageChange, referenceRequest]
+    [client, clients?.memmyAgent, dispatch, handleOpenMemoryReference, handleSubPageChange, referenceRequest]
   );
 
   useEffect(() => {
@@ -362,6 +366,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
 function createPreviewChildByPage(t: (key: MessageKey) => string): Record<MemorySubPageId, ReactNode> {
   return {
     overview: <div>{t("memory.overview.total")}</div>,
+    "computer-history": <div>{t("memory.nav.computerHistory")}</div>,
     memories: <div>{t("memory.memories.title")}</div>,
     "user-memories": <div>{t("memory.userMemories.title")}</div>,
     tasks: <div>{t("memory.tasks.title")}</div>,

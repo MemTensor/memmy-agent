@@ -1,5 +1,5 @@
 /** Login page module. */
-import type { OnboardingStateDto } from "@memmy/local-api-contracts";
+import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } from "@memmy/local-api-contracts";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
 import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
@@ -10,9 +10,11 @@ import { buildAccountOnboardingStartPatch, resolvePostLoginRoute, shouldShowFirs
 import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
+import { SocialLoginButtons } from "../components/social-login-buttons.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
+import { useSocialLogin } from "../components/use-social-login.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -26,6 +28,7 @@ export function LoginPage() {
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
   const verificationCodeAuth = useVerificationCodeAuth();
+  const socialLogin = useSocialLogin();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -43,18 +46,20 @@ export function LoginPage() {
     setModePersistenceFeedback(null);
     setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
-  }, [channel, verificationCodeAuth.resetInteractionState]);
+    socialLogin.reset();
+  }, [channel, verificationCodeAuth.resetInteractionState, socialLogin.reset]);
 
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
     verificationCodeAuth.clearFeedback();
+    socialLogin.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
   }
 
   async function submitLogin() {
-    if (verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || socialLogin.pendingProvider || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
@@ -70,6 +75,21 @@ export function LoginPage() {
       code,
       invitationEnabled ? inviteCode : undefined
     );
+    await finishAccountLogin(loginResult, channel);
+  }
+
+  async function startSocialLogin(provider: SocialLoginProvider) {
+    const loginResult = await socialLogin.start(
+      provider,
+      invitationEnabled ? inviteCode : undefined
+    );
+    await finishAccountLogin(loginResult, provider);
+  }
+
+  async function finishAccountLogin(
+    loginResult: AccountLoginResultView | null,
+    method: "email" | "phone" | SocialLoginProvider
+  ) {
     if (!loginResult || !loginResult.session.authenticated) {
       return;
     }
@@ -82,7 +102,7 @@ export function LoginPage() {
     }
 
     track(buildInvitationSignupEvent({
-      channel,
+      channel: method,
       isNewUser: session.isNewUser,
       invitationCode: invitationEnabled ? inviteCode : undefined
     }));
@@ -157,8 +177,8 @@ export function LoginPage() {
             identifierType={channel}
             code={code}
             inviteCode={inviteCode}
-            disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
-            sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+            disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}
+            sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}
             sendCodeLabel={verificationCodeAuth.sendCodeLabel}
             feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
             onIdentifierChange={setIdentifier}
@@ -169,6 +189,14 @@ export function LoginPage() {
             onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
             onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
           />
+          {channel === "email" ? (
+            <SocialLoginButtons
+              pendingProvider={socialLogin.pendingProvider}
+              disabled={verificationCodeAuth.loginPending || modePersistencePending}
+              feedback={socialLogin.feedback}
+              onLogin={(provider) => void startSocialLogin(provider)}
+            />
+          ) : null}
         </div>
       </section>
     </main>

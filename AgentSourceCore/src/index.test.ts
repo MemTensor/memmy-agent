@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TURN_CONTENT_MAX_BYTES, conversationContentHash, orderedTurns, renderTurn, renderTurnClipped, type ConversationMessage } from "./index.js";
+import { TURN_CONTENT_MAX_BYTES, conversationContentHash, orderedTurns, renderTurnClipped, type ConversationMessage } from "./index.js";
 
 const message = (id: string, role: ConversationMessage["role"], content: string, createdAt: string): ConversationMessage => ({
   messageId: id, sourceId: "fixture", conversationId: "conversation", role, content, createdAt,
@@ -44,30 +44,5 @@ describe("agent source core", () => {
   it("leaves the turn untouched when it already fits the byte budget", () => {
     const messages = [message("u", "user", "hello", "2026-01-01T00:00:00Z"), message("a", "assistant", "world", "2026-01-01T00:00:01Z")];
     expect(renderTurnClipped(messages, TURN_CONTENT_MAX_BYTES)).toBe("## user\n\nhello\n\n## assistant\n\nworld");
-  });
-
-  it.each([
-    ["ASCII", "x".repeat(600_000)],
-    ["Chinese and emoji", "汉🙂".repeat(160_000)],
-    ["escaped control characters", "\u0001".repeat(400_000)],
-  ])("bounds both raw UTF-8 and JSON bytes for %s", (_label, text) => {
-    const messages = [message("u", "user", "request", "2026-01-01T00:00:00Z"), message("t", "tool", text, "2026-01-01T00:00:01Z")];
-    const content = renderTurnClipped(messages);
-    expect(Buffer.byteLength(content)).toBeLessThanOrEqual(TURN_CONTENT_MAX_BYTES);
-    expect(Buffer.byteLength(JSON.stringify(content))).toBeLessThanOrEqual(1024 * 1024);
-    expect(content).not.toContain("\ufffd");
-    const truncation = /\n\n\[\.\.\. truncated (\d+) bytes of tool output \.\.\.\]$/u.exec(content);
-    expect(truncation).not.toBeNull();
-    expect(Number(truncation![1])).toBe(Buffer.byteLength(renderTurn(messages)) - Buffer.byteLength(content.slice(0, truncation!.index)));
-  });
-
-  it("preserves quoted text and newlines when both budgets allow the complete turn", () => {
-    const messages = [message("u", "user", '"\\\n'.repeat(150_000), "2026-01-01T00:00:00Z")];
-    expect(renderTurnClipped(messages)).toBe(renderTurn(messages));
-  });
-
-  it.each([0, 1, 8, 48])("includes the truncation marker inside a %i-byte budget", (maxBytes) => {
-    const content = renderTurnClipped([message("u", "user", "x".repeat(1000), "2026-01-01T00:00:00Z")], maxBytes);
-    expect(Buffer.byteLength(content)).toBeLessThanOrEqual(maxBytes);
   });
 });

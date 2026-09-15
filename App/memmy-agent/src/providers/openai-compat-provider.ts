@@ -901,7 +901,10 @@ export class OpenAICompatProvider extends LLMProvider {
           finishReason = String(choiceMap.finish_reason);
       }
       if (!content) content = OpenAICompatProvider.extractTextContent(msg.content);
-      if (!content && msg.reasoning && this.spec?.reasoningAsContent) {
+      // A truncated choice carries an unfinished thought rather than an answer, so
+      // promoting its reasoning would surface raw thinking as the assistant reply.
+      const truncated = String(choiceMap.finish_reason ?? finishReason) === "length";
+      if (!content && !truncated && msg.reasoning && this.spec?.reasoningAsContent) {
         content = OpenAICompatProvider.extractTextContent(msg.reasoning);
       }
       if (!reasoningContent)

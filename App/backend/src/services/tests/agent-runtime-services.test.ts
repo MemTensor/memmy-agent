@@ -82,14 +82,20 @@ describe("agent runtime services", () => {
       async panelItems(input, context) {
         contexts.push(context);
         return baseClient.panelItems(input, context);
+      },
+      async deletePanelTask(id, context) {
+        contexts.push(context);
+        return { ok: true, id, deletedMemoryIds: [], serverTime: "2026-05-29T10:00:00.000Z" };
       }
     };
     const service = createPanelService({ memoryClient, getUserId: () => "account-user-1" });
 
     await service.overview(runtimeCtx());
     await service.items({ layer: "UserMemory" }, runtimeCtx());
+    await service.deleteTask("episode-1", runtimeCtx());
 
     expect(contexts).toEqual([
+      expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" }),
       expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" }),
       expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" })
     ]);

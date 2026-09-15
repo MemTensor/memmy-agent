@@ -262,6 +262,46 @@ describe("SkillsLoader listSkills", () => {
 });
 
 describe("SkillsLoader disabled skills", () => {
+  it("hides Office skills from the builtin surface but keeps same-named workspace skills", () => {
+    const { workspace, builtin } = makeWorkspace();
+    for (const name of ["docx", "pptx", "xlsx"]) {
+      writeSkill(builtin, name, { metadataJson: { always: true }, body: `# builtin ${name}` });
+    }
+    writeSkill(builtin, "computer-history", { body: "# Computer History" });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    for (const name of ["docx", "pptx", "xlsx"]) {
+      expect(loader.listSkills(false).map((entry) => entry.name)).not.toContain(name);
+      expect(loader.loadSkill(name)).toBeNull();
+      expect(loader.getAlwaysSkills()).not.toContain(name);
+      expect(loader.findExplicitSkillNames(`please use $${name}`)).not.toContain(name);
+    }
+    expect(loader.listSkills(false).map((entry) => entry.name)).toContain("computer-history");
+    expect(loader.buildSkillsSummary()).toContain("computer-history");
+    expect(loader.loadSkillsForContext(["docx", "computer-history"])).not.toContain("# builtin docx");
+    expect(loader.loadSkillsForContext(["docx", "computer-history"])).toContain("# Computer History");
+
+    const workspaceDocx = writeSkill(path.join(workspace, "skills"), "docx", {
+      body: "# workspace docx",
+    });
+    const workspaceLoader = new SkillsLoader(workspace, builtin);
+    expect(workspaceLoader.listSkills(false)).toEqual(
+      expect.arrayContaining([{ name: "docx", path: workspaceDocx, source: "workspace" }]),
+    );
+    expect(workspaceLoader.loadSkill("docx")).toContain("# workspace docx");
+  });
+
+  it("only suppresses Office skills from the configured builtin root", () => {
+    const { workspace, builtin, root } = makeWorkspace();
+    const custom = path.join(root, "custom-skills");
+    const customPptx = writeSkill(custom, "pptx", { body: "# custom pptx" });
+    const loader = new SkillsLoader([path.join(workspace, "skills"), builtin, custom]);
+
+    expect(loader.loadSkill("pptx")).toContain("# custom pptx");
+    expect(loader.roots).toContain(custom);
+    expect(fs.readFileSync(customPptx, "utf8")).toContain("# custom pptx");
+  });
+
   it("excludes disabled skills from listSkills", () => {
     const { workspace, builtin } = makeWorkspace();
     writeSkill(path.join(workspace, "skills"), "alpha", { body: "# Alpha" });

@@ -6,6 +6,10 @@ import {
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
+  SocialLoginStatusInputSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginInputSchema,
+  StartSocialLoginResponseSchema,
   UpdateAccountProfileInputSchema,
   VerifyCodeInputSchema,
   type AccountInvitationView,
@@ -16,6 +20,10 @@ import {
   type RuntimeConfig,
   type SendCodeInput,
   type SendCodeResponse,
+  type SocialLoginStatusInput,
+  type SocialLoginStatusResponse,
+  type StartSocialLoginInput,
+  type StartSocialLoginResponse,
   type UpdateAccountProfileInput,
   type VerifyCodeInput
 } from "@memmy/local-api-contracts";
@@ -52,6 +60,8 @@ export type AccountCodeValidationResult =
 export interface AccountClient {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
   verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
+  getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
@@ -76,6 +86,24 @@ export function createHttpAccountClient(config: RuntimeConfig): AccountClient {
         path: "/api/account/verify-code",
         schema: AccountLoginResultViewSchema,
         body: VerifyCodeInputSchema.parse(input)
+      });
+    },
+
+    async startSocialLogin(input) {
+      return requestJson({
+        config,
+        path: "/api/account/oauth/start",
+        schema: StartSocialLoginResponseSchema,
+        body: StartSocialLoginInputSchema.parse(input)
+      });
+    },
+
+    async getSocialLoginStatus(input) {
+      return requestJson({
+        config,
+        path: "/api/account/oauth/status",
+        schema: SocialLoginStatusResponseSchema,
+        body: SocialLoginStatusInputSchema.parse(input)
       });
     },
 

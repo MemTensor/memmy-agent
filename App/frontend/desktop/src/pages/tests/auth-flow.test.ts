@@ -47,9 +47,9 @@ describe("auth flow pages", () => {
     const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
 
     expect(source).toContain("feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}");
-    expect(source).toContain("sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}");
+    expect(source).toContain("sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}");
     expect(source).toContain("sendCodeLabel={verificationCodeAuth.sendCodeLabel}");
-    expect(source).toContain("disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}");
+    expect(source).toContain("disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}");
     expect(hookSource).toContain("validateAuthIdentifier(channel, rawIdentifier)");
     expect(hookSource).toContain("resolveIdentifierValidationMessage(channel, validation.reason, t)");
     expect(hookSource).toContain('"login.error.invalidPhone"');
@@ -83,6 +83,19 @@ describe("auth flow pages", () => {
     expect(source).toContain("setModePersistenceFeedback(null);");
     expect(hookSource).toContain("resetInteractionState:");
     expect(hookSource).toContain("clearInterval(timerRef.current);");
+  });
+
+  it.each([
+    ["welcome-page.tsx"],
+    ["token-detail-page.tsx"],
+    ["login-page.tsx"]
+  ])("%s 只在国际版邮箱通道展示 Google/GitHub 登录", (fileName) => {
+    const source = readSource(fileName);
+
+    expect(source).toContain("useSocialLogin");
+    expect(source).toContain("<SocialLoginButtons");
+    expect(source).toContain('channel === "email" ? (');
+    expect(source).not.toContain('channel === "phone" ? (\n            <SocialLoginButtons');
   });
 
   it.each([

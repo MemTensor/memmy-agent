@@ -22,6 +22,7 @@ import type {
   RuntimeNamespace,
   SessionOpenRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
@@ -64,6 +65,7 @@ export const API_ROUTES = [
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
+  "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
@@ -627,6 +629,39 @@ async function routeRequest(
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicStartTurnResponse(result);
+  }
+
+  if (method === "POST" && path === "/api/v1/source-turns/complete") {
+    requireMemoryWrite(principal);
+    const input = asObject(body, "source-turn.complete");
+    const sourceIdentity = isRecord(input.sourceTurn) ? input.sourceTurn : {};
+    const requestedScope = isRecord(input.namespace) ? input.namespace : {};
+    const namespace = {
+      source: sourceIdentity.source,
+      profileId: sourceIdentity.profileId,
+      sessionKey: sourceIdentity.conversationId,
+      ...requestedScope
+    };
+    // Local headers may carry the generic default source; it is not a source restriction.
+    let scopedPrincipal = principal;
+    if ((principal.kind === "local" || principal.kind === "anonymous") &&
+        principal.namespace?.source === DEFAULT_NAMESPACE_SOURCE && typeof namespace.source === "string") {
+      scopedPrincipal = { ...principal, namespace: { ...principal.namespace, source: namespace.source } };
+    }
+    const request = strictEnvelopeWithPrincipal({ ...input, namespace }, scopedPrincipal) as unknown as SourceTurnCompleteRequest;
+    requireStringField(request, "query", "source-turn.complete");
+    requireStringField(request, "answer", "source-turn.complete");
+    const result = service.completeSourceTurn({
+      namespace: request.namespace, timeZone: request.timeZone, source: request.source,
+      sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      sessionId: request.sessionId, episodeId: request.episodeId,
+      query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
+      toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
+      sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
+      tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
+    });
+    if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
+    return result;
   }
 
   const turnComplete = match(path, /^\/api\/v1\/turns\/([^/]+)\/complete$/);

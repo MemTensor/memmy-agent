@@ -9,6 +9,10 @@ import {
   SendCodeInputSchema,
   SendCodeResponseSchema,
   SetAvatarInputSchema,
+  SocialLoginStatusInputSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginInputSchema,
+  StartSocialLoginResponseSchema,
   UpdateAccountProfileInputSchema,
   VerifyCodeInputSchema
 } from "@memmy/local-api-contracts";
@@ -42,6 +46,30 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
     withErrorEnvelope(async (request, reply) => {
       const input = VerifyCodeInputSchema.parse(request.body);
       const response = AccountLoginResultViewSchema.parse(await options.account.verifyCode(input));
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/oauth/start",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = StartSocialLoginInputSchema.parse(request.body);
+      const response = StartSocialLoginResponseSchema.parse(
+        await options.account.startSocialLogin(input)
+      );
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/oauth/status",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = SocialLoginStatusInputSchema.parse(request.body);
+      const response = SocialLoginStatusResponseSchema.parse(
+        await options.account.getSocialLoginStatus(input)
+      );
       return reply.send(response);
     })
   );

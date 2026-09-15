@@ -16,6 +16,8 @@ import type {
   TokenQuotaEligibility,
   CloudLoginInput,
   CloudLogoutInput,
+  CloudSocialLoginCredentials,
+  CloudStartSocialLoginInput,
   SendEmailCodeInput,
   SendPhoneCodeInput,
   SendTelemetryInput,
@@ -107,6 +109,22 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
         isNewUser: true,
         profile
       };
+    },
+
+    async startSocialLogin(input: CloudStartSocialLoginInput) {
+      return {
+        flowId: "mock-social-flow-id",
+        pollToken: "mock-social-poll-token-000000000000",
+        authorizationUrl: input.provider === "google"
+          ? "https://accounts.google.com/o/oauth2/v2/auth"
+          : "https://github.com/login/oauth/authorize",
+        expiresInSec: 600,
+        pollIntervalSec: 2
+      };
+    },
+
+    async getSocialLoginStatus(_input: CloudSocialLoginCredentials) {
+      return { status: "pending" as const };
     },
 
     async logout(_input: CloudLogoutInput) {

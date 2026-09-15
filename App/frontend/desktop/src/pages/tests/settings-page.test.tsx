@@ -28,7 +28,8 @@ import {
   availableConnectionProtocols,
   editorProtocolForCapabilities,
   modelCapabilitiesForKind,
-  normalizeEditorCapabilities
+  normalizeEditorCapabilities,
+  protocolFromConnection
 } from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
@@ -700,6 +701,16 @@ describe("SettingsPageView", () => {
     expect(workspaceSource).toContain("testEditorConnection");
   });
 
+  it("把 catalog 侧的 provider id 还原回工作区协议", () => {
+    expect(protocolFromConnection("volcengine")).toBe("doubao");
+    expect(protocolFromConnection("qianfan")).toBe("baidu");
+    expect(protocolFromConnection("dashscope")).toBe("qwen");
+    expect(protocolFromConnection("xiaomi_mimo")).toBe("xiaomi");
+    expect(protocolFromConnection("xiaomi")).toBe("xiaomi");
+    expect(protocolFromConnection("stepfun")).toBe("stepfun");
+    expect(protocolFromConnection("unknown-provider")).toBe("openai");
+  });
+
   it("模型工作区协议默认地址与模型配置常量保持一致", () => {
     const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const modelSource = readFileSync(modelConfigSourcePath, "utf8");
@@ -714,7 +725,9 @@ describe("SettingsPageView", () => {
       ["moonshot", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
       ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
-      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"]
+      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"],
+      ["stepfun", "https://api.stepfun.com/v1", "step-3.5-flash"],
+      ["xiaomi", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"]
     ];
 
     for (const [protocol, endpoint, placeholder] of defaults) {

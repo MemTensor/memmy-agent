@@ -70,6 +70,35 @@ describe("StepFun reasoning", () => {
     expect(result.reasoningContent).toBe("Let me think... The answer is 42.");
   });
 
+  it("does not promote reasoning when StepFun truncates the response", () => {
+    // Captured from api.stepfun.com for a 96-token title request: the model burned
+    // the whole budget thinking, so the reasoning is an unfinished thought.
+    const truncatedReasoning =
+      "Got it, let's see. The user said \u4f60\u597d, which is Chinese. Need a 3-8 word title, "
+      + "no punctuation, same language. Wait, what's appropriate? Oh right, maybe \u4f60\u597d\u95ee\u5019\u4ea4\u6d41";
+    const result = stepfunProvider().parseResponse({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "",
+            reasoning: truncatedReasoning,
+            reasoning_content: truncatedReasoning,
+          },
+          finish_reason: "length",
+        },
+      ],
+    });
+
+    // Empty content stays empty instead of inheriting the unfinished reasoning.
+    expect(result.content).toBe("");
+    expect(result.content).not.toContain("Got it");
+    expect(result.finishReason).toBe("length");
+    // The thinking stays available to the UI, it just never becomes the reply.
+    expect(result.reasoningContent).toBe(truncatedReasoning);
+  });
+
   it("keeps reasoning_content priority while using reasoning as visible content", () => {
     const result = stepfunProvider().parseResponse({
       choices: [

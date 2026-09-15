@@ -1,5 +1,5 @@
 import { StrictMode, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { App } from "./app.js";
 import { AppProviders } from "./app/providers.js";
 import { initGtag } from "./analytics/gtag-init.js";
@@ -80,8 +80,14 @@ if (!root) {
 }
 
 const previewMode = readDevPreviewMode();
+const rendererWindow = window as Window & { __memmyReactRoot?: Root };
+const reactRoot = rendererWindow.__memmyReactRoot ?? createRoot(root);
 
-createRoot(root).render(
+if (import.meta.env.DEV) {
+  rendererWindow.__memmyReactRoot = reactRoot;
+}
+
+reactRoot.render(
   <StrictMode>
     {previewMode === "startup" ? (
       <I18nProvider language="zh-CN">

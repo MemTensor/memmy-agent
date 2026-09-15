@@ -145,6 +145,112 @@ describe("cloud client", () => {
     expect(receivedDeviceId).toBeUndefined();
   });
 
+  it("starts and polls a Google login without exposing the cloud credential in the authorization URL", async () => {
+    const requests: Array<{ path: string; body: unknown }> = [];
+    server = createServer(async (request, response) => {
+      const body = await readJson(request);
+      requests.push({ path: request.url ?? "", body });
+      if (request.url === "/api/agentUser/oauth/start") {
+        sendJson(response, {
+          code: 0,
+          message: "ok",
+          data: {
+            flowId: "social-flow-id-0001",
+            pollToken: "social-poll-token-0000000000000001",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=opaque-state",
+            expiresInSec: 600,
+            pollIntervalSec: 2
+          }
+        });
+        return;
+      }
+      sendJson(response, {
+        code: 0,
+        message: "ok",
+        data: {
+          status: "completed",
+          result: {
+            id: "1972215566392614914",
+            email: "hello@example.com",
+            userName: "hello",
+            userType: "NEW_USER",
+            uuid: "cloud.social.login.uuid",
+            invitationResult: { status: "not_provided" }
+          }
+        }
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind");
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    const start = await client.startSocialLogin({
+      provider: "google",
+      locale: "en",
+      loginSource: "Memmy"
+    });
+    const status = await client.getSocialLoginStatus({
+      flowId: start.flowId,
+      pollToken: start.pollToken
+    });
+
+    expect(start.authorizationUrl).not.toContain("cloud.social.login.uuid");
+    expect(status).toMatchObject({
+      status: "completed",
+      result: {
+        uuid: "cloud.social.login.uuid",
+        isNewUser: true,
+        profile: { email: "hello@example.com" }
+      }
+    });
+    expect(requests).toEqual([
+      {
+        path: "/api/agentUser/oauth/start",
+        body: { provider: "google", locale: "en", loginSource: "memmy" }
+      },
+      {
+        path: "/api/agentUser/oauth/status",
+        body: {
+          flowId: "social-flow-id-0001",
+          pollToken: "social-poll-token-0000000000000001"
+        }
+      }
+    ]);
+  });
+
+  it("rejects a social-login authorization URL outside the provider allowlist", async () => {
+    server = createServer((_request, response) => {
+      sendJson(response, {
+        code: 0,
+        message: "ok",
+        data: {
+          flowId: "social-flow-id-0001",
+          pollToken: "social-poll-token-0000000000000001",
+          authorizationUrl: "https://example.com/fake-google-login",
+          expiresInSec: 600,
+          pollIntervalSec: 2
+        }
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind");
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await expect(client.startSocialLogin({
+      provider: "google",
+      locale: "en",
+      loginSource: "Memmy"
+    })).rejects.toThrow(/not allowed/);
+  });
+
   it("sends the international edition through X-Agent-Region", async () => {
     let receivedRegion: string | undefined;
     vi.stubEnv("MEMMY_APP_EDITION", "intl");

@@ -96,13 +96,22 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
   }
   let ordinal = Number((db.prepare("SELECT COALESCE(MAX(ordinal), -1) AS value FROM staged_messages WHERE job_id=?").get(job.jobId) as { value: number }).value) + 1;
   const insert = db.prepare("INSERT OR IGNORE INTO staged_messages(job_id,source_id,conversation_id,message_id,role,content,created_at,workspace_path,git_root,raw_meta_json,ordinal) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+  const refreshCodex = db.prepare(`UPDATE staged_messages
+    SET conversation_id=?,role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
+    WHERE job_id=? AND source_id=? AND message_id=?`);
   const store: AppAgentSourceScanStore = {
     path,
     stage(message) {
       const bytes = Buffer.byteLength(JSON.stringify(message));
       if (bytes > MAX_RECORD_BYTES) throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`);
-      const result = insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, JSON.stringify(message.rawMeta), ordinal++);
-      return Number(result.changes) > 0;
+      const rawMetaJson = JSON.stringify(message.rawMeta);
+      const inserted = Number(insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, ordinal++).changes) > 0;
+      if (!inserted && message.sourceId === "codex" && typeof message.rawMeta.sourceTurnState === "string") {
+        // Retrying a staged turn can add native identity or completion evidence
+        // to an existing message. Preserve its ordinal and the insertion count.
+        refreshCodex.run(message.conversationId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.messageId);
+      }
+      return inserted;
     },
     stageBatch(messages) {
       let inserted = 0;

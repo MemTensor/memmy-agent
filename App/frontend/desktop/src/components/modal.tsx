@@ -36,6 +36,7 @@ export interface ModalProps {
 export function Modal(props: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement | null>(null);
+  const backdropPressRef = useRef(false);
   const wasOpenRef = useRef(false);
   const showHeader = props.showHeader ?? true;
   const showCloseButton = props.showCloseButton ?? Boolean(props.onClose);
@@ -82,7 +83,22 @@ export function Modal(props: ModalProps) {
     <div
       className={["modal-backdrop", props.backdropClassName].filter(Boolean).join(" ")}
       role="presentation"
-      onClick={(event) => shouldCloseModalByBackdrop(event) && props.onClose?.()}
+      onPointerDown={(event) => {
+        backdropPressRef.current = event.target === event.currentTarget;
+      }}
+      onPointerUp={(event) => {
+        backdropPressRef.current = backdropPressRef.current && event.target === event.currentTarget;
+      }}
+      onPointerCancel={() => {
+        backdropPressRef.current = false;
+      }}
+      onClick={(event) => {
+        const shouldClose = backdropPressRef.current && shouldCloseModalByBackdrop(event);
+        backdropPressRef.current = false;
+        if (shouldClose) {
+          props.onClose?.();
+        }
+      }}
     >
       <section
         ref={dialogRef}

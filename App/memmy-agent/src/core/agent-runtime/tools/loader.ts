@@ -7,6 +7,12 @@ import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
 import { AgentSourceTool } from "./agent-source.js";
 import { CronTool } from "./cron.js";
+import { ComputerHistoryTool } from "../../../tools/computer-history/mac/computer-history.js";
+import {
+  ComputerHistoryGetSettingsTool,
+  ComputerHistoryStatusTool,
+  ComputerHistoryUpdateSettingsTool,
+} from "../../../tools/computer-history/mac/computer-history-settings.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
 import { ImageGenerationTool } from "./image-generation.js";
@@ -41,6 +47,10 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   AgentSourceTool,
   ApplyPatchTool,
+  ComputerHistoryTool,
+  ComputerHistoryStatusTool,
+  ComputerHistoryGetSettingsTool,
+  ComputerHistoryUpdateSettingsTool,
   CreateGoalTool,
   CronTool,
   EditFileTool,

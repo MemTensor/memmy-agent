@@ -1,3 +1,5 @@
+import { buildSourceTurnRequest, type SourceTurn } from "@memmy/agent-source-core";
+export { readCodexSourceTurn } from "@memmy/agent-source-core";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -230,6 +232,31 @@ export async function completeRuntimeTurn(
         ...input,
       };
   await client.post(`/api/v1/turns/${encodeURIComponent(input.turnId)}/complete`, compact(body));
+}
+
+/** Submit a completed native turn without opening a new runtime Session before deduplication. */
+export async function completeSourceTurn(input: {
+  configUrl: URL;
+  turn: SourceTurn;
+  sessionId?: string;
+  sourceMemoryIds?: string[];
+  profileId?: string;
+}): Promise<Record<string, unknown>> {
+  const config = await readRuntimeConfig(input.configUrl, true);
+  const client = new RuntimeHttpClient(config);
+  const profileId = input.profileId || "default";
+  return objectValue(await client.post("/api/v1/source-turns/complete", compact({
+    ...buildSourceTurnRequest(input.turn, "hook", profileId),
+    namespace: {
+      source: input.turn.source,
+      profileId,
+      userId: config.userId,
+      sessionKey: input.turn.conversationId,
+    },
+    sessionId: input.sessionId,
+    sourceMemoryIds: input.sourceMemoryIds,
+    adapterId: "memmy-codex-hook",
+  })));
 }
 
 class RuntimeHttpClient {

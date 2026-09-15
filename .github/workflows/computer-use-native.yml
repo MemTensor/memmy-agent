@@ -1,0 +1,75 @@
+name: Computer Use native runtime
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/computer-use-native.yml"
+      - "App/memmy-agent/package*.json"
+      - "App/memmy-agent/src/tools/computer-use/**"
+      - "App/shell/desktop/electron-builder*.yml"
+      - "scripts/internal/shared/check-open-computer-use.mjs"
+      - "scripts/internal/linux/**"
+      - "scripts/internal/mac/build-dmg.sh"
+      - "scripts/internal/win/build-nsis.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the pinned native package into an isolated directory
+        run: |
+          version="$(node -p "require('./App/memmy-agent/package.json').dependencies['open-computer-use']")"
+          npm install --prefix "$RUNNER_TEMP/ocu-native" --ignore-scripts --no-audit --no-fund "open-computer-use@$version"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const root = path.join(process.env.RUNNER_TEMP, 'ocu-native/node_modules/open-computer-use');
+          const arch = process.arch === 'x64' ? 'amd64' : process.arch;
+          const relative = process.platform === 'darwin'
+            ? 'dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse'
+            : `dist/${process.platform === 'win32' ? 'windows' : 'linux'}/${arch}/open-computer-use${process.platform === 'win32' ? '.exe' : ''}`;
+          fs.appendFileSync(process.env.GITHUB_ENV, `OCU_BINARY=${path.join(root, relative)}\n`);
+          NODE
+      - name: Prepare an isolated Linux desktop session
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 xvfb
+          bash scripts/internal/linux/install-computer-use-deps.sh
+          bash scripts/internal/linux/install-computer-use-deps.sh
+      - name: Check Linux MCP and desktop backend
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" --list-apps | tee ocu-native-result.json
+      - name: Check Windows MCP and desktop backend
+        if: runner.os == 'Windows'
+        run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" --list-apps | tee ocu-native-result.json
+      - name: Check macOS MCP discovery
+        if: runner.os == 'macOS'
+        run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" | tee ocu-native-result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocu-native-${{ matrix.runner }}
+          path: ocu-native-result.json
+          if-no-files-found: warn
+      - name: Record validation boundary
+        if: always()
+        run: echo 'Native checks validate MCP discovery and, on Linux/Windows, desktop enumeration. Signed installers, permission prompts, screenshots and input still require desktop acceptance.' >> "$GITHUB_STEP_SUMMARY"

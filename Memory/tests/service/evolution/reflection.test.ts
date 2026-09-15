@@ -633,10 +633,10 @@ describe("MemoryService / evolution / reflection", () => {
     expect(payload.steps).toHaveLength(1);
     expect(payload.steps[0]!.tool_calls).toMatchObject([{
       name: "shell",
-      input: "",
-      output: ""
+      input: "npm run migrate",
+      output: "error: missing sqlite migration 003"
     }]);
-    expect(JSON.stringify(payload)).not.toContain("npm run migrate");
+    expect(JSON.stringify(payload)).toContain("npm run migrate");
     expect(payload.steps[0]!.action).toContain("inspected the migration failure");
     expect(calls.some((call) => call.options.operation === "capture.alpha.reflection.score.v3")).toBe(false);
     db.close();
@@ -780,9 +780,11 @@ describe("MemoryService / evolution / reflection", () => {
       task_context?: string | null;
     };
     expect(payload.task_context).toContain("debug migration");
-    const toolInputs = payload.steps.flatMap((step) => step.tool_calls.map((call) => call.input)).join("\n");
-    expect(toolInputs).not.toContain("npm run migrate");
-    expect(toolInputs).not.toContain("npm test -- memory-service");
+    const toolCalls = payload.steps.flatMap((step) => step.tool_calls);
+    expect(toolCalls).toMatchObject([
+      { input: "npm run migrate", output: "error: missing sqlite migration 003" },
+      { input: "npm test -- memory-service", output: "1 test passed" }
+    ]);
     db.close();
   });
 

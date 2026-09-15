@@ -72,10 +72,14 @@ export interface WorkerJobProcessors {
     applyReward(job: EvolutionJobRecord): MaybePromise<void>;
     reflectTrace(job: EvolutionJobRecord): MaybePromise<void>;
     resolveSkillTrial(job: EvolutionJobRecord): MaybePromise<void>;
+    createDecisionRepair(job: EvolutionJobRecord): MaybePromise<void>;
   };
   embedding: {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
     embedUserMemory(job: EvolutionJobRecord): MaybePromise<void>;
+  };
+  workMemory: {
+    extract(job: EvolutionJobRecord): MaybePromise<void>;
   };
 }
 
@@ -273,8 +277,14 @@ export async function processJob(
     case "skill_trial_resolve":
       await deps.processors.feedback.resolveSkillTrial(job);
       return;
+    case "decision_repair":
+      await deps.processors.feedback.createDecisionRepair(job);
+      return;
     case "l2_association":
       await deps.processors.evolution.associateL2(job);
+      return;
+    case "work_memory_extract":
+      await deps.processors.workMemory.extract(job);
       return;
     default:
       throw new Error(`unsupported job type: ${job.jobType}`);
@@ -594,6 +604,14 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
           ? `negative_experience:${input.episodeId}`
           : undefined;
     }
+    case "decision_repair": {
+      const feedbackId = payloadString("feedbackId");
+      return feedbackId
+        ? `decision_repair:${feedbackId}`
+        : input.episodeId
+          ? `decision_repair:${input.episodeId}`
+          : undefined;
+    }
     case "l2_association":
       return target ? `l2_association:${target}` : undefined;
     case "l2_induction": {
@@ -614,6 +632,10 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;
       return trial ? `skill_trial_resolve:${trial}` : input.episodeId ? `skill_trial_resolve:${input.episodeId}` : undefined;
+    }
+    case "work_memory_extract": {
+      const trajectoryHash = payloadString("trajectoryHash");
+      return trajectoryHash ? `work_memory_extract:${trajectoryHash}` : undefined;
     }
   }
 }
