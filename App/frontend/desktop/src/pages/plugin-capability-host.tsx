@@ -334,8 +334,9 @@ function InteractionCard(props: {
     ?? (props.request.type === "approval" ? t("plugin.ui.approval") : t("plugin.ui.question"));
   const description = firstString(payload, ["description", "detail", "hint"]);
   const options = readOptions(payload.options);
+  const questions = readQuestions(payload.questions);
   const multiple = payload.multiple === true;
-  const allowText = options.length === 0 || payload.allowText === true;
+  const allowText = questions.length === 0 && (options.length === 0 || payload.allowText === true);
   const disabled = status === "submitting" || status === "answered";
 
   const submit = async (response: unknown) => {
@@ -381,6 +382,9 @@ function InteractionCard(props: {
           <p className="text-sm font-medium text-text-ink/80">{title}</p>
           {description ? <p className="mt-1 text-xs leading-relaxed text-text-ink/50">{description}</p> : null}
           <div className="mt-2 flex flex-wrap gap-2">
+            {questions.length > 0 ? (
+              <QuestionFields questions={questions} disabled={disabled} onSubmit={(answers) => void submit({ answers })} />
+            ) : null}
             {props.request.type === "approval" ? (
               <>
                 <ResponseButton disabled={disabled} onClick={() => void submit(true)}>{t("plugin.ui.approve")}</ResponseButton>
@@ -836,6 +840,73 @@ function FileInputCard(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * One form for a card that asks several things at once.
+ *
+ * A plugin that needs twenty blanks filled has no way to ask for them one at a
+ * time without twenty consecutive cards, so `payload.questions` collects them
+ * into a single form answered as `{ answers: { [id]: value } }`.
+ *
+ * A blank is left out of the answers entirely rather than sent as an empty
+ * string: skipping a question and answering it with nothing are different
+ * statements, and the plugin marks the skipped ones as unverified.
+ */
+function QuestionFields(props: {
+  questions: PluginQuestionField[];
+  disabled: boolean;
+  onSubmit: (answers: Record<string, string>) => void;
+}) {
+  const { t } = useTranslation();
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const filled = props.questions.filter((question) => (answers[question.id] ?? "").trim());
+  const incomplete = props.questions.some((question) => question.required && !(answers[question.id] ?? "").trim());
+  const set = (id: string, value: string) => setAnswers((current) => ({ ...current, [id]: value }));
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    props.onSubmit(Object.fromEntries(filled.map((question) => [question.id, answers[question.id]!.trim()])));
+  };
+
+  return (
+    <form className="flex w-full flex-col gap-2" onSubmit={submit}>
+      <div className="flex max-h-72 flex-col gap-2 overflow-y-auto pr-1">
+        {props.questions.map((question) => (
+          <label key={question.id} className="flex flex-col gap-1">
+            <span className="text-xs text-text-ink/65">{question.required ? `${question.label} *` : question.label}</span>
+            {question.options.length > 0 ? (
+              <select
+                value={answers[question.id] ?? ""}
+                onChange={(event) => set(question.id, event.target.value)}
+                disabled={props.disabled}
+                className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
+              >
+                <option value="">{t("plugin.ui.optionalPlaceholder")}</option>
+                {question.options.map((option, index) => (
+                  <option key={`${index}:${option}`} value={option}>{option}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={answers[question.id] ?? ""}
+                onChange={(event) => set(question.id, event.target.value)}
+                disabled={props.disabled}
+                placeholder={question.required ? t("plugin.ui.responsePlaceholder") : t("plugin.ui.optionalPlaceholder")}
+                className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
+              />
+            )}
+          </label>
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-xs text-text-ink/40">
+          {t("plugin.ui.answerCount", { filled: filled.length, total: props.questions.length })}
+        </span>
+        <ResponseButton disabled={props.disabled || incomplete}>{t("plugin.ui.submit")}</ResponseButton>
+      </div>
+    </form>
   );
 }
 
@@ -1296,6 +1367,38 @@ function readOptions(value: unknown): Array<{ label: string; value: unknown }> {
     const option = asRecord(item);
     const label = firstString(option, ["label", "name", "title"]);
     return label ? [{ label, value: "value" in option ? option.value : label }] : [];
+  });
+}
+
+export interface PluginQuestionField {
+  id: string;
+  label: string;
+  /** Answers are strings on the wire, so option values are read as their labels. */
+  options: string[];
+  required: boolean;
+}
+
+/**
+ * Reads the fields of a multi-question card.
+ *
+ * An entry without an id has nowhere to put its answer and one without a label
+ * asks the user nothing, so both are dropped rather than rendered blank.
+ */
+export function readQuestions(value: unknown): PluginQuestionField[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    const question = asRecord(item);
+    const id = firstString(question, ["id", "key", "name"]);
+    const label = firstString(question, ["label", "question", "prompt", "title"]);
+    if (!id || !label || seen.has(id)) return [];
+    seen.add(id);
+    return [{
+      id,
+      label,
+      options: readOptions(question.options).map((option) => option.label),
+      required: question.required === true
+    }];
   });
 }
 
