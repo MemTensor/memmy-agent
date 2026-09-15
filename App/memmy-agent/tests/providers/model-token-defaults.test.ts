@@ -18,7 +18,7 @@ describe("model token defaults", () => {
       .sort();
     const tokenDefaultModels = Object.keys(MODEL_TOKEN_DEFAULTS).sort();
 
-    expect(tokenDefaultModels).toHaveLength(241);
+    expect(tokenDefaultModels).toHaveLength(243);
     expect(tokenDefaultModels).toEqual(inputCapabilityModels);
     expect(MODEL_TOKEN_DEFAULTS_REVIEWED_AT >= MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe(true);
     expect(Object.isFrozen(MODEL_TOKEN_DEFAULTS)).toBe(true);
@@ -55,6 +55,14 @@ describe("model token defaults", () => {
       maxTokens: 65_536,
     });
     expect(getModelTokenDefaults("xopdeepseekv4pro")).toEqual({
+      contextWindowTokens: 1_000_000,
+      maxTokens: 384_000,
+    });
+    expect(getModelTokenDefaults("deepseek-flash")).toEqual({
+      contextWindowTokens: 1_000_000,
+      maxTokens: 384_000,
+    });
+    expect(getModelTokenDefaults("deepseek-v4.1-flash")).toEqual({
       contextWindowTokens: 1_000_000,
       maxTokens: 384_000,
     });
