@@ -129,15 +129,15 @@ describe("PluginCapabilityHost", () => {
     await act(async () => root.render(<PluginUiProvider><Sender /><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={client} /></I18nProvider></PluginUiProvider>));
     const iframe = container.querySelector("iframe")!;
     const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
-    await act(async () => ui!.notifyChatMessage("chat-2", { message: "Unrelated", clientRequestId: "other" }));
+    expect(ui!.routeChatFeedback("chat-2", { message: "Unrelated", clientRequestId: "other" })).toBe(false);
     expect(postMessage).not.toHaveBeenCalled();
-    await act(async () => ui!.notifyChatMessage("chat-1", { message: "Revise outline", clientRequestId: "feedback" }));
+    expect(ui!.routeChatFeedback("chat-1", { message: "Revise outline", clientRequestId: "feedback" })).toBe(true);
     expect(postMessage).toHaveBeenCalledWith({ type: "memmy.plugin.chat-feedback", version: 1, interactionId: "outline-1", message: "Revise outline", clientRequestId: "feedback" }, "*");
     const response = { action: "chat-feedback", message: "Revise outline", values: { outline: [{ title: "User edit" }] } };
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { type: "memmy.plugin.interaction-response", version: 1, interactionId: "outline-1", response } })));
     expect(respond).toHaveBeenCalledWith(plugin.id, call.callId, "outline-1", response);
     expect(container.querySelector("iframe")).toBeNull();
-    await act(async () => ui!.notifyChatMessage("chat-1", { message: "Another change", clientRequestId: "next" }));
+    expect(ui!.routeChatFeedback("chat-1", { message: "Another change", clientRequestId: "next" })).toBe(false);
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
@@ -155,7 +155,7 @@ describe("PluginCapabilityHost", () => {
     const picker = container.querySelector('input[type="file"]')!;
     Object.defineProperty(picker, "files", { value: [new File(["test"], "selected.pdf", { type: "application/pdf" })] });
     await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
-    await act(async () => ui!.notifyChatMessage("chat-1", { message: "Is this format supported?", clientRequestId: "feedback" }));
+    expect(ui!.routeChatFeedback("chat-1", { message: "Is this format supported?", clientRequestId: "feedback" })).toBe(true);
     expect(uploadFiles).not.toHaveBeenCalled();
     expect(respond).toHaveBeenCalledWith(plugin.id, "files-1", "files-1", expect.objectContaining({ action: "chat-feedback", files: [], values: { selectedFileNames: ["selected.pdf"] } }));
     await act(async () => mount("files-2"));
@@ -163,7 +163,7 @@ describe("PluginCapabilityHost", () => {
     let finishUpload!: (files: UploadedAgentMedia[]) => void;
     uploadFiles.mockImplementation(() => new Promise<UploadedAgentMedia[]>((resolve) => { finishUpload = resolve; }));
     await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click());
-    await act(async () => ui!.notifyChatMessage("chat-1", { message: "Wait, check this file", clientRequestId: "during-file-upload" }));
+    expect(ui!.routeChatFeedback("chat-1", { message: "Wait, check this file", clientRequestId: "during-file-upload" })).toBe(true);
     expect(respond).toHaveBeenCalledTimes(1);
     await act(async () => finishUpload([{ path: "/staged/selected.pdf", name: "selected.pdf", kind: "file", mime: "application/pdf", bytes: 4, url: "http://localhost/file" }]));
     expect(respond).toHaveBeenLastCalledWith(plugin.id, "files-2", "files-2", expect.objectContaining({ action: "chat-feedback", files: [], message: "Wait, check this file" }));

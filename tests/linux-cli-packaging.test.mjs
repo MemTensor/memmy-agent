@@ -263,6 +263,22 @@ describe("Linux CLI package boundary", () => {
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
   });
 
+  it("keeps the Office rendering payload required unless a build opts out", () => {
+    const builder = readFileSync(builderPath, "utf8");
+    const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
+
+    expect(builder).toContain('ALLOW_MISSING_OFFICE_PAYLOAD="${MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD:-0}"');
+    expect(builder).toContain("Missing Office rendering binary");
+    expect(builder).toContain("Office rendering binary is not executable");
+    // The opt-out never covers a manifest that names hashes: those describe a
+    // real payload and stay verified.
+    expect(builder).toContain("Office rendering hash mismatch");
+    // Release publishes and manual uploads keep the payload mandatory.
+    expect(linuxWorkflow).toContain(
+      "MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}",
+    );
+  });
+
   it("installs standalone Agent dependencies before Linux archive contract tests", () => {
     const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
     const agentInstall = "run: npm ci --prefix App/memmy-agent";
@@ -285,7 +301,12 @@ describe("Linux CLI package boundary", () => {
     const result = spawnSync("bash", [builderPath, "--output", output], {
       cwd: repoRoot,
       encoding: "utf8",
-      env: cleanNpmLifecycleEnv({ MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)) }),
+      env: cleanNpmLifecycleEnv({
+        MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)),
+        // Release packaging provisions the Office rendering executables, so a
+        // contract run builds the archive without them.
+        MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: "1",
+      }),
     });
     expect(result.status, result.stderr).toBe(0);
 

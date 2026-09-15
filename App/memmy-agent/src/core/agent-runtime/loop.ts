@@ -80,7 +80,6 @@ import {
   type GoalStatus,
 } from "../session/goal-state.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
-import { extractDocuments } from "../../utils/document.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
@@ -100,6 +99,7 @@ import {
   type GoalTurnInboxEntry,
   type WebuiQueueSteerTransferRecord,
 } from "./goal-runtime.js";
+import { TaskPlanRuntime } from "./task-plan-runtime.js";
 import { resolveToolResultMaxChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "./tool-result-budget.js";
 import { AgentProgressHook } from "./progress-hook.js";
 import { createTurnCancellationBoundary, type TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
@@ -736,10 +736,12 @@ export class AgentLoop {
   startTime: number;
   lastUsageBySession: Map<string, Record<string, number>>;
   goalRuntime: GoalRuntime;
+  taskPlanRuntime: TaskPlanRuntime;
   scheduledGoalSessions: Map<string, { goalId: string; updatedAt: string }>;
   activeTasks: Map<string, any[]>;
   pendingQueues: Map<string, AsyncQueue<InboundMessage>>;
   turnSlots: Map<string, TurnSlot[]>;
+  imAttachmentBuffer: Map<string, string[]>;
   sessionDeletionQueues: Map<string, InboundMessage[]>;
   sessionLocks: Map<string, AsyncMutex>;
   queueMutationLocks: Map<string, AsyncMutex>;
@@ -774,6 +776,7 @@ export class AgentLoop {
     this.activeTasks = new Map();
     this.pendingQueues = new Map();
     this.turnSlots = new Map();
+    this.imAttachmentBuffer = new Map();
     this.sessionDeletionQueues = new Map();
     this.sessionLocks = new Map();
     this.queueMutationLocks = new Map();
@@ -842,6 +845,10 @@ export class AgentLoop {
       cancelActiveTasks: (sessionKey) => this.cancelActiveTasks(sessionKey),
       scheduleGoalWork: (sessionKey, goal) => this.scheduleGoalWork(sessionKey, goal),
       invalidateGoalWork: (sessionKey) => this.scheduledGoalSessions.delete(sessionKey),
+    });
+    this.taskPlanRuntime = new TaskPlanRuntime({
+      sessions: this.sessions,
+      bus: this.bus,
     });
     this.projectStore = init.projectStore ?? null;
     this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
@@ -1010,6 +1017,7 @@ export class AgentLoop {
       fileStateStore: this.fileStateStore,
       browserSessionManager: this.browserSessionManager,
       goalRuntime: this.goalRuntime,
+      taskPlanRuntime: this.taskPlanRuntime,
       readonlySkillRoots,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
@@ -1189,6 +1197,7 @@ export class AgentLoop {
       expectedTurnId = message.expectedTurnId,
       turnSource = message.turnSource,
       metadata = message.metadata,
+      media = message.media,
       turnId = null,
     }: {
       sessionKeyOverride?: string | null;
@@ -1196,6 +1205,7 @@ export class AgentLoop {
       expectedTurnId?: string | null;
       turnSource?: TurnSource | null;
       metadata?: Record<string, any>;
+      media?: string[];
       turnId?: string | null;
     } = {},
   ): InboundMessage {
@@ -1204,7 +1214,7 @@ export class AgentLoop {
       chatId: message.chatId,
       senderId: message.senderId,
       content: message.content,
-      media: message.media,
+      media,
       metadata: turnId
         ? { ...metadata, ...turnMetadata(turnId) }
         : metadata,
@@ -1910,6 +1920,26 @@ export class AgentLoop {
     });
   }
 
+  private applyImAttachmentBuffer(msg: InboundMessage): InboundMessage | null {
+    const source = sharedTurnSource(msg);
+    if (source?.kind !== "im" || msg.internal) return msg;
+
+    const sessionKey = this.effectiveSessionKey(msg);
+    const buffered = this.imAttachmentBuffer.get(sessionKey) ?? [];
+    const hasText = msg.content.trim().length > 0;
+    const hasMedia = msg.media.length > 0;
+
+    if (!hasText && hasMedia) {
+      this.imAttachmentBuffer.set(sessionKey, [...buffered, ...msg.media]);
+      return null;
+    }
+
+    if (!buffered.length) return msg;
+
+    this.imAttachmentBuffer.delete(sessionKey);
+    return this.cloneInboundMessage(msg, { media: [...buffered, ...msg.media] });
+  }
+
   isSessionBusy(sessionKey: string): boolean {
     const tasks = this.activeTasks.get(sessionKey) ?? [];
     const hasActiveTask = tasks.some((task) => {
@@ -2516,9 +2546,8 @@ export class AgentLoop {
   }
 
   private async pendingToUserMessage(msg: InboundMessage): Promise<Record<string, any> | null> {
-    let content = msg.content;
-    let media = msg.media ?? [];
-    if (media.length) [content, media] = await extractDocuments(content, media);
+    const content = msg.content;
+    const media = msg.media ?? [];
     const hasText = typeof content === "string" && content.trim().length > 0;
     if (!hasText && !media.length) return null;
     const clientRequestId = typeof msg.metadata?.client_request_id === "string"
@@ -3745,24 +3774,6 @@ export class AgentLoop {
     );
     ctx.sessionWorkspace = binding.cwd;
     ctx.sessionProjectId = binding.projectId;
-    if (msg.media.length) {
-      const [content, imageOnly] = await extractDocuments(msg.content, msg.media);
-      msg = ctx.msg = new InboundMessage({
-        channel: msg.channel,
-        chatId: msg.chatId,
-        senderId: msg.senderId,
-        content,
-        media: imageOnly,
-        metadata: msg.metadata,
-        sessionKey: ctx.sessionKey,
-        sessionKeyOverride: msg.sessionKeyOverride,
-        timestamp: msg.timestamp,
-        internal: msg.internal,
-        turnAdmission: msg.turnAdmission,
-        expectedTurnId: msg.expectedTurnId,
-        turnSource: msg.turnSource,
-      });
-    }
     markWebuiSession(ctx.session, msg.metadata);
     let changed = this.restoreRuntimeCheckpoint(ctx.session);
     changed = this.restorePendingUserTurn(ctx.session) || changed;
@@ -5225,7 +5236,9 @@ export class AgentLoop {
         await sleep(100);
         continue;
       }
-      const msg = this.normalizeSharedInboundMessage(inbound);
+      const buffered = this.applyImAttachmentBuffer(this.normalizeSharedInboundMessage(inbound));
+      if (!buffered) continue;
+      const msg = buffered;
       const canReloadMcp = this.activeTasks.size === 0 && this.pendingQueues.size === 0 && this.turnSlots.size === 0;
       if (await handleRuntimeControl(this, msg, this.tools, canReloadMcp)) continue;
       const raw = msg.content.trim();

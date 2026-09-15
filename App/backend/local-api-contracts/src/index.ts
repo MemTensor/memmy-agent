@@ -665,7 +665,9 @@ export const ModelProviderSchema = z.enum([
     "kimi",
     "minimax",
     "baidu",
-    "doubao"
+    "doubao",
+    "stepfun",
+    "xiaomi"
 ]);
 export type ModelProvider = z.infer<typeof ModelProviderSchema>;
 
@@ -680,6 +682,8 @@ export const CatalogProviderIdSchema = z.enum([
     "minimax",
     "qianfan",
     "volcengine",
+    "stepfun",
+    "xiaomi_mimo",
     "memmy_account"
 ]);
 export type CatalogProviderId = z.infer<typeof CatalogProviderIdSchema>;
@@ -690,7 +694,8 @@ const CATALOG_PROVIDER_ALIASES: Readonly<Record<string, CatalogProviderId>> = {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
 };
 
 export function canonicalCatalogProviderId(value: string): CatalogProviderId | null {

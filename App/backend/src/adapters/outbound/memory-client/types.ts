@@ -11,6 +11,8 @@ import type {
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
+  SourceTurnCompleteInput,
+  SourceTurnCompleteOutput,
   EnqueueImportSummariesOutput,
   GetMemoryOutput,
   MemoryApiLogsInput,
@@ -53,6 +55,8 @@ export interface MemoryClient {
 
   startTurn(input: StartTurnInput, context?: MemoryRequestContext): Promise<StartTurnOutput>;
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
+
+  completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
   embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;

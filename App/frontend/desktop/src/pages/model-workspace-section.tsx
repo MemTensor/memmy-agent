@@ -1456,11 +1456,12 @@ function connectionProtocolLabel(
   return option ? t(option.labelKey) : provider;
 }
 
-function protocolFromConnection(provider: string): Protocol {
+export function protocolFromConnection(provider: string): Protocol {
   if (provider === "moonshot" || provider === "kimi") return "moonshot";
   if (provider === "dashscope") return "qwen";
   if (provider === "qianfan") return "baidu";
   if (provider === "volcengine") return "doubao";
+  if (provider === "xiaomi_mimo") return "xiaomi";
   if (PROTOCOL_OPTIONS.some((option) => option.value === provider)) return provider as Protocol;
   return "openai";
 }

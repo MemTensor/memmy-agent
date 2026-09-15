@@ -45,6 +45,7 @@ import type {
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
+import { taskPlanStateWsBlob } from "../../core/session/task-plan-state.js";
 import {
   readWebuiSessionBinding,
   Session,
@@ -118,7 +119,6 @@ import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
 } from "../../session-dag/index.js";
-import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
@@ -175,7 +175,6 @@ type WebuiUploadClassification = {
   kind: "image" | "file" | "audio";
   mime: string;
   extension: string;
-  maxBytes: number;
 };
 type WebuiQueuedMessage = {
   client_request_id: string;
@@ -299,12 +298,7 @@ function normalizeAgentQuestionResponse(
   return { requestId, answers };
 }
 
-const MAX_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
-// An hours-long interview recording dwarfs any document, and it reaches the
-// Host as one upload before the `asr` host service can touch it.
-const MAX_AUDIO_BYTES = 200 * 1024 * 1024;
-const MAX_WEBUI_UPLOAD_BODY_BYTES = MAX_ATTACHMENTS_PER_MESSAGE * MAX_AUDIO_BYTES + 1024 * 1024;
+const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
 // eslint-disable-next-line no-control-regex, no-useless-escape
 const UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
@@ -1221,6 +1215,17 @@ export class WebSocketChannel extends BaseChannel {
     await this.sendGoalState(chatId, blob);
   }
 
+  async maybePushTaskPlanState(chatId: string): Promise<void> {
+    if (!this.sessionManager) return;
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey) return;
+    const row = this.readSessionFile(sessionKey);
+    const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
+    const blob = taskPlanStateWsBlob(metadata);
+    if (!blob.plan_id) return;
+    await this.sendTaskPlanState(chatId, blob);
+  }
+
   async maybePushTurnRunWallClock(chatId: string): Promise<void> {
     const terminalRun = this.terminalRunStateForChatId(chatId);
     const startedAt = websocketTurnWallStartedAt(chatId)
@@ -1290,6 +1295,7 @@ export class WebSocketChannel extends BaseChannel {
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
     await this.maybePushActiveGoalState(chatId);
+    await this.maybePushTaskPlanState(chatId);
     await this.maybePushTurnRunWallClock(chatId);
   }
 
@@ -2234,7 +2240,6 @@ export class WebSocketChannel extends BaseChannel {
 
     const files = form.getAll("files");
     if (!files.length) return httpError(400, "missing files");
-    if (files.length > MAX_ATTACHMENTS_PER_MESSAGE) return httpError(400, "too many attachments");
 
     const mediaDir = path.join(getMediaDir("websocket"), "webui");
     fs.mkdirSync(mediaDir, { recursive: true });
@@ -2256,7 +2261,6 @@ export class WebSocketChannel extends BaseChannel {
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
         if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
-        if (bytes.length > classification.maxBytes) return failUpload(httpError(413, classification.kind === "image" ? "image too large" : "file too large"));
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const filename = `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeOriginalName}`;
         const target = path.join(mediaDir, filename);
@@ -3084,7 +3088,6 @@ export class WebSocketChannel extends BaseChannel {
   resolveEnvelopeMediaPaths(value: any): [string[], string | null] {
     if (value == null) return [[], null];
     if (!Array.isArray(value)) return [[], "malformed"];
-    if (value.length > MAX_ATTACHMENTS_PER_MESSAGE) return [[], "too_many_attachments"];
     const mediaRoot = realpathIfExists(getMediaDir("websocket"));
     const out: string[] = [];
     for (const item of value) {
@@ -3101,7 +3104,6 @@ export class WebSocketChannel extends BaseChannel {
       const bytes = fs.readFileSync(resolved);
       const classification = classifySavedWebuiAttachment(resolved, bytes);
       if (!classification) return [[], "mime"];
-      if (stat.size > classification.maxBytes) return [[], "size"];
       out.push(resolved);
     }
     return [out, null];
@@ -3890,6 +3892,7 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRunStatusSnapshot(connection, chatId);
       await this.sendWebuiQueueSnapshot(connection, chatId);
       await this.maybePushActiveGoalState(chatId);
+      await this.maybePushTaskPlanState(chatId);
       return;
     }
     if (type === "status") {
@@ -4401,6 +4404,15 @@ export class WebSocketChannel extends BaseChannel {
       );
       return;
     }
+    if (message.metadata?.taskPlanStateSync) {
+      await this.sendTaskPlanState(
+        message.chatId,
+        typeof message.metadata.taskPlanState === "object"
+          ? message.metadata.taskPlanState
+          : taskPlanStateWsBlob(),
+      );
+      return;
+    }
     if (message.metadata?.runStatusEvent) {
       await this.sendRunStatus(message.chatId, String(message.metadata.runStatus), {
         startedAt: numberOrNull(message.metadata.startedAt),
@@ -4625,6 +4637,14 @@ export class WebSocketChannel extends BaseChannel {
 
   async sendGoalState(chatId: string, blob: Record<string, any>): Promise<void> {
     await this.broadcast(chatId, { event: "goal_state", chat_id: chatId, goal_state: blob });
+  }
+
+  async sendTaskPlanState(chatId: string, blob: Record<string, any>): Promise<void> {
+    await this.broadcast(chatId, {
+      event: "task_plan_state",
+      chat_id: chatId,
+      task_plan_state: blob,
+    });
   }
 
   async sendRunStatus(chatId: string, status: string, {
@@ -5075,7 +5095,6 @@ function classifyWebuiUploadAttachment(name: string, declaredMime: string, bytes
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -5102,7 +5121,6 @@ function classifySavedWebuiAttachment(filePath: string, bytes: Buffer): WebuiUpl
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -5119,7 +5137,6 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
       kind: "audio",
       mime: audioMime,
       extension,
-      maxBytes: MAX_AUDIO_BYTES,
     };
   }
   const mime = DOCUMENT_MIME_BY_EXTENSION[extension] ?? TEXT_MIME_BY_EXTENSION[extension];
@@ -5128,7 +5145,6 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
     kind: "file",
     mime,
     extension,
-    maxBytes: MAX_FILE_SIZE,
   };
 }
 

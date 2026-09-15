@@ -167,7 +167,9 @@ function describeRetrievalFilterCandidate(hit: RecallHit, bodyChars: number): st
     case "Skill":
       return `[SKILL] ${title}${body ? `\n   ${body}` : ""}`;
     case "L1":
-      return `[TRACE] ${body || title}`;
+      return hit.kind === "work_memory"
+        ? `[WORK MEMORY] ${body || title}`
+        : `[TRACE] ${body || title}`;
     case "L2":
       return `[EXPERIENCE] ${title}${body ? `\n   ${body}` : ""}`;
     case "L3":
@@ -519,7 +521,7 @@ function stringArray(value: unknown): string[] { return Array.isArray(value) ? v
 function stringValue(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
-type InjectedSnippetRefKind = "user-memory" | "skill" | "episode" | "trace" | "experience" | "world-model";
+type InjectedSnippetRefKind = "user-memory" | "skill" | "episode" | "trace" | "experience" | "world-model" | "work-memory";
 
 interface RenderedInjectedSection {
   refKind: InjectedSnippetRefKind;
@@ -814,6 +816,22 @@ function renderInjectedSnippet(
     };
   }
 
+  if (hit.kind === "work_memory") {
+    const internal: Record<string, unknown> = memory?.properties.internal_info ?? {};
+    const topic = stringValue(internal.work_topic) ?? hit.title ?? "Work requirements";
+    const requirement = stringValue(internal.requirement) ?? hit.snippet;
+    const reason = stringValue(internal.reason) ?? "(not provided)";
+    return {
+      refKind: "work-memory",
+      title: topic,
+      body: truncateInjectedSnippet([
+        `id: ${hit.id}`,
+        `Requirement: ${requirement}`,
+        `Requirement rationale: ${reason}`
+      ].join("\n"))
+    };
+  }
+
   if (hit.kind === "span") {
     const internalSpan = memory && isRecord(memory.properties.internal_info.span)
       ? memory.properties.internal_info.span
@@ -1018,10 +1036,15 @@ function renderInjectedMarkdown(
   const userMemories = sections.filter((section) => section.refKind === "user-memory");
   const episodes = sections.filter((section) => section.refKind === "episode");
   const traces = sections.filter((section) => section.refKind === "trace");
+  const workMemories = sections.filter((section) => section.refKind === "work-memory");
   const experiences = sections.filter((section) => section.refKind === "experience");
   const worlds = sections.filter((section) => section.refKind === "world-model");
 
   parts.push(...renderInjectedMemoriesSection(userMemories, traces, episodes));
+
+  if (workMemories.length > 0) {
+    parts.push(renderWorkMemoriesSection(workMemories));
+  }
 
   if (experiences.length > 0) {
     parts.push("## L2 Experience Memories\n");
@@ -1053,6 +1076,29 @@ function renderInjectedMarkdown(
   const footer = injectedFooterFor(sections, options.skillInjectionMode ?? "summary", standaloneMathFinalAnswer);
   if (footer) parts.push(footer);
   return prependResearchPlaybook(parts.join("\n\n"), options.domain);
+}
+
+function renderWorkMemoriesSection(sections: RenderedInjectedSection[]): string {
+  const groups = new Map<string, RenderedInjectedSection[]>();
+  for (const section of sections) {
+    const topic = section.section.title || "Work requirements";
+    const bucket = groups.get(topic) ?? [];
+    bucket.push(section);
+    groups.set(topic, bucket);
+  }
+  const parts = ["## L1 Work Memories"];
+  for (const [topic, bucket] of groups.entries()) {
+    parts.push(`### ${topic}`);
+    bucket.forEach((section, index) => {
+      const body = section.section.content
+        .split("\n")
+        .filter((line) => !/^id:\s*/i.test(line))
+        .join("\n")
+        .trim();
+      parts.push(indentInjectedBlock(`${index + 1}. ${body}`));
+    });
+  }
+  return parts.join("\n\n");
 }
 
 const RESEARCH_RETRIEVAL_PLAYBOOK = `## Research retrieval playbook
@@ -1405,7 +1451,7 @@ function contextMemoriesForInjectedSources(memories: MemoryRow[], sourceMemoryId
   }
   for (const memory of memories) {
     if (!visibleIds.has(memory.id)) continue;
-    if (memory.memoryLayer === "L1") {
+    if (memory.memoryLayer === "L1" && memory.properties.internal_info.memory_kind !== "work_memory") {
       const trace = traceMetaFromMemory(memory);
       if (trace?.episodeId) visibleEpisodeIds.add(trace.episodeId);
     }
@@ -1439,7 +1485,7 @@ function contextMemoriesForRecallHits(hits: RecallHit[], memories: MemoryRow[]):
     const memory = byId.get(hit.id);
     if (!memory) continue;
     selected.set(memory.id, memory);
-    if (memory.memoryLayer === "L1") {
+    if (memory.memoryLayer === "L1" && memory.properties.internal_info.memory_kind !== "work_memory") {
       hitTraceIds.add(memory.id);
       const trace = traceMetaFromMemory(memory);
       if (trace?.episodeId) hitEpisodeIds.add(trace.episodeId);
@@ -1796,7 +1842,8 @@ export class RetrievalService {
       : this.candidatePool.retrievalCandidateCount({
           userId: context.userId,
           layers: semanticLayers,
-          tags: request.tags
+          tags: request.tags,
+          projectId: context.namespace.projectId?.trim() || null
         }) + userMemoryCount;
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
@@ -1824,6 +1871,7 @@ export class RetrievalService {
         })
       : await this.retrieveSearchMemories({
           userId: context.userId,
+          projectId: context.namespace.projectId?.trim() || null,
           query: retrievalQuery,
           queryVectorText,
           queryExtract,
@@ -2135,6 +2183,7 @@ export class RetrievalService {
 
   private async retrieveSearchMemories(input: {
     userId: string;
+    projectId?: string | null;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -2161,7 +2210,8 @@ export class RetrievalService {
       const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
         userId: input.userId,
         layers: input.layers,
-        tags: input.tags
+        tags: input.tags,
+        projectId: input.projectId
       });
       const queryVector = hasVectorCandidates ? await this.queryVector(queryVectorText) : undefined;
       const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
@@ -2169,6 +2219,7 @@ export class RetrievalService {
         compiledQuery,
         queryVector,
         layers: input.layers,
+        projectId: input.projectId,
         tags: input.tags,
         targetSkillId: input.targetSkillId,
         currentAgentId: input.currentAgentId,

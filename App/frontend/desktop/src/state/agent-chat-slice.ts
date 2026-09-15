@@ -18,6 +18,7 @@ import type {
   MemmyAgentWsEvent,
   AgentGoalState,
   AgentGoalControlAction,
+  AgentTaskPlanState,
   WebuiSessionTarget,
   WebuiQueuedMessage,
   ChatModelPreset,
@@ -27,6 +28,7 @@ import {
   chatIdToSessionKey,
   isAgentGoalState,
   isAgentGoalStatus,
+  isAgentTaskPlanState,
   parseAgentTurnSource,
   parseMemmyAgentModelSelection
 } from "../api/memmy-agent-client.js";
@@ -84,6 +86,7 @@ export type AgentChatMediaAttachment = {
   path?: string;
 };
 export type { AgentGoalState } from "../api/memmy-agent-client.js";
+export type { AgentTaskPlanState } from "../api/memmy-agent-client.js";
 
 export interface AgentTaskView {
   sessionKey: string;
@@ -233,6 +236,8 @@ export interface AgentState {
   lastTaskCompletion: { chatId: string; at: number } | null;
   goalStatesByChatId: Record<string, AgentGoalState>;
   goalState: AgentGoalState | null;
+  taskPlanStatesByChatId: Record<string, AgentTaskPlanState>;
+  taskPlanState: AgentTaskPlanState | null;
   goalRunClockByChatId: Record<string, AgentGoalRunClock | null>;
   goalMutationPendingByChatId: Record<string, {
     requestId: string;
@@ -295,6 +300,7 @@ export type AgentAction =
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
   | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }
+  | { type: "agent/pluginFeedbackRecorded"; chatId: string; content: string; clientRequestId: string }
   | { type: "agent/queueItemRemoveStarted"; chatId: string; clientRequestId: string }
   | { type: "agent/queueItemRemoveFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
   | { type: "agent/queueItemSteerStarted"; chatId: string; clientRequestId: string }
@@ -394,6 +400,8 @@ export const initialAgentState: AgentState = {
   lastTaskCompletion: null,
   goalStatesByChatId: {},
   goalState: null,
+  taskPlanStatesByChatId: {},
+  taskPlanState: null,
   goalRunClockByChatId: {},
   goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
@@ -583,6 +591,8 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return clearTransientSend(state, action.chatId);
     case "agent/userMessageQueued":
       return queueOptimisticUserMessage(state, action);
+    case "agent/pluginFeedbackRecorded":
+      return recordPluginFeedbackMessage(state, action);
     case "agent/queueItemRemoveStarted":
       return updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "removing");
     case "agent/queueItemRemoveFailed":
@@ -1039,6 +1049,32 @@ function queueOptimisticUserMessage(
   });
 }
 
+function recordPluginFeedbackMessage(
+  state: AgentState,
+  action: Extract<AgentAction, { type: "agent/pluginFeedbackRecorded" }>
+): AgentState {
+  const existingMessages = chatMessagesForId(state, action.chatId);
+  if (existingMessages.some((message) => message.clientRequestId === action.clientRequestId)) {
+    return state;
+  }
+  const message: AgentChatMessage = {
+    id: nextMessageId(existingMessages, "user"),
+    role: "user",
+    content: action.content,
+    createdAt: Date.now(),
+    clientRequestId: action.clientRequestId
+  };
+  const messages = [...existingMessages, message];
+  const nextState = {
+    ...state,
+    messagesByChatId: { ...state.messagesByChatId, [action.chatId]: messages },
+    completedUnseenByChatId: clearChatMapValue(state.completedUnseenByChatId, action.chatId)
+  };
+  return action.chatId === state.currentChatId && !state.blankDraftActive
+    ? { ...nextState, messages }
+    : nextState;
+}
+
 function settleTaskState(
   state: AgentState,
   action: Extract<AgentAction, { type: "agent/taskStateSettled" }>
@@ -1391,6 +1427,7 @@ function enterBlankDraft(state: AgentState, newChatRequestId: number): AgentStat
     isSending: false,
     isLoadingHistory: false,
     goalState: null,
+    taskPlanState: null,
     blankDraftActive: true,
     chatSelectionEpoch: state.chatSelectionEpoch + 1,
     newChatRequestId
@@ -1947,6 +1984,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
       chatSelectionEpoch: cachedState.blankDraftActive ? cachedState.chatSelectionEpoch + 1 : cachedState.chatSelectionEpoch,
       blankDraftActive: false,
       goalState: cachedState.goalStatesByChatId[chatId] ?? cachedState.goalState,
+      taskPlanState: cachedState.taskPlanStatesByChatId[chatId] ?? cachedState.taskPlanState,
       isSending: isChatBusy(cachedState, chatId)
     });
   }
@@ -1958,6 +1996,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
     currentSessionKey: sessionKey,
     messages: cachedState.messagesByChatId[chatId] ?? [],
     goalState: cachedState.goalStatesByChatId[chatId] ?? null,
+    taskPlanState: cachedState.taskPlanStatesByChatId[chatId] ?? null,
     isSending: isChatBusy(cachedState, chatId),
     blankDraftActive: false
   });
@@ -2760,6 +2799,8 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       return updateRunStatus(state, event);
     case "goal_state":
       return updateGoalState(state, event.chat_id, event.goal_state);
+    case "task_plan_state":
+      return updateTaskPlanState(state, event.chat_id, event.task_plan_state);
     case "turn_end":
       return event.chat_id
         ? endTurn(state, event.chat_id, event.latency_ms, eventTurnId(event), event)
@@ -2949,7 +2990,8 @@ function withScopedChatMessages(
     messages: state.messagesByChatId[chatId] ?? [],
     isSending: isChatBusy(state, chatId),
     blankDraftActive: false,
-    goalState: state.goalStatesByChatId[chatId] ?? null
+    goalState: state.goalStatesByChatId[chatId] ?? null,
+    taskPlanState: state.taskPlanStatesByChatId[chatId] ?? null
   };
   const reduced = reducer(scopedState);
   const messagesByChatId = {
@@ -2968,7 +3010,10 @@ function withScopedChatMessages(
         || chatHasLiveStream({ ...reduced, currentChatId: state.currentChatId, messages: state.messages, messagesByChatId }, currentChatId)
       : false,
     blankDraftActive: state.blankDraftActive,
-    goalState: currentChatId ? reduced.goalStatesByChatId[currentChatId] ?? null : null
+    goalState: currentChatId ? reduced.goalStatesByChatId[currentChatId] ?? null : null,
+    taskPlanState: currentChatId
+      ? reduced.taskPlanStatesByChatId[currentChatId] ?? null
+      : null
   };
   return deriveTasks(nextState);
 }
@@ -2982,11 +3027,6 @@ function mediaRejectedMessageKey(reason: string | undefined): string {
     case "mime":
     case "deprecated_payload":
       return "home.media.error.sendUnsupported";
-    case "size":
-      return "home.media.error.sendFileSize";
-    case "too_many_images":
-    case "too_many_attachments":
-      return "home.media.error.sendTooManyAttachments";
     case "decode":
     case "malformed":
       return "home.media.error.sendReadFailed";
@@ -4501,6 +4541,23 @@ function updateGoalState(state: AgentState, chatId: string | null | undefined, r
     goalStatesByChatId: { ...state.goalStatesByChatId, [chatId]: goalState },
     goalState: chatId === state.currentChatId ? goalState : state.goalState,
     goalRunClockByChatId
+  };
+}
+
+function updateTaskPlanState(
+  state: AgentState,
+  chatId: string | null | undefined,
+  rawTaskPlanState: unknown,
+): AgentState {
+  if (!chatId || !isAgentTaskPlanState(rawTaskPlanState)) return state;
+  const taskPlanState: AgentTaskPlanState = rawTaskPlanState;
+  return {
+    ...state,
+    taskPlanStatesByChatId: {
+      ...state.taskPlanStatesByChatId,
+      [chatId]: taskPlanState,
+    },
+    taskPlanState: chatId === state.currentChatId ? taskPlanState : state.taskPlanState,
   };
 }
 

@@ -444,7 +444,7 @@ describe("MemoryService / session / turn capture", () => {
       };
     };
     expect(properties.internal_info.summary).toBe("");
-    expect(properties.internal_info.trace.tool_calls[0]?.output).toBeUndefined();
+    expect(properties.internal_info.trace.tool_calls[0]?.output).toBe(expectedTrace.toolCalls[0]?.output);
     expect(defaultTrace.errorSignatures).toContain("SENTINEL_ERROR_CODE");
     expect(expectedTrace.errorSignatures).not.toContain("SENTINEL_ERROR_CODE");
     expect(properties.internal_info.trace.error_signatures).toEqual(expectedTrace.errorSignatures);

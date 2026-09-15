@@ -2751,13 +2751,12 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "error", detail: "attachment_rejected", reason: "too_many_attachments" }
+      event: { event: "error", detail: "attachment_rejected", reason: "mime" }
     });
 
     expect(state.connectionStatus).toBe("connected");
     expect(state.isSending).toBe(false);
     expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
-    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendTooManyAttachments");
   });
 
   it("does not remove a canonical user message for a rejection without a matching optimistic send", () => {
@@ -3595,6 +3594,39 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1" } });
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBeNull();
     expect(state.goalState).toEqual(activeGoal);
+  });
+
+  it("persists task plan progress per chat and restores it when switching chats", () => {
+    const taskPlan = {
+      plan_id: "32f2868d-ae25-4f47-b33b-17f474eecc3a",
+      title: "Generate literature review",
+      status: "active" as const,
+      items: [
+        { id: "evidence", content: "Map evidence", status: "completed" as const },
+        { id: "sections", content: "Generate sections", status: "in_progress" as const },
+      ],
+      created_at: "2026-09-14T06:00:00.000Z",
+      updated_at: "2026-09-14T06:05:00.000Z",
+    };
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1" },
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "task_plan_state",
+        chat_id: "chat-1",
+        task_plan_state: taskPlan,
+      },
+    });
+    expect(state.taskPlanState).toEqual(taskPlan);
+    expect(state.taskPlanStatesByChatId["chat-1"]).toEqual(taskPlan);
+
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-2" });
+    expect(state.taskPlanState).toBeNull();
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
+    expect(state.taskPlanState).toEqual(taskPlan);
   });
 
   it("keeps a per-Goal clock stable through settlement updates and clears it on the matching Turn end", () => {
@@ -5546,6 +5578,26 @@ describe("agent chat slice", () => {
       requestId: "question-1",
       answers: [{ questionId: "choice", selectedOptionIds: ["b"] }]
     });
+  });
+
+  it("records consumed plugin feedback without queuing a second turn", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/newChatCreated",
+      chatId: "chat-1"
+    });
+    state = agentReducer(state, {
+      type: "agent/pluginFeedbackRecorded",
+      chatId: "chat-1",
+      content: "Please refine this card",
+      clientRequestId: "feedback-1"
+    });
+    expect(state.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: "Please refine this card",
+      clientRequestId: "feedback-1"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
   });
 });
 

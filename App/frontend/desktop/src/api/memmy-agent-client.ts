@@ -43,6 +43,22 @@ export type AgentGoalControlResult = {
   warning?: "turn_cancel_failed";
 };
 
+export type AgentTaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+export type AgentTaskPlanStatus = "active" | "completed" | "blocked";
+
+export type AgentTaskPlanState = {
+  plan_id: string | null;
+  title: string;
+  status: AgentTaskPlanStatus | null;
+  items: Array<{
+    id: string;
+    content: string;
+    status: AgentTaskPlanItemStatus;
+  }>;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
 const AgentGoalStateSchema = z.object({
   goal_id: z.string().nullable(),
   status: z.union([
@@ -61,6 +77,19 @@ const AgentGoalStateSchema = z.object({
   updated_at: z.string().nullable()
 }).strict();
 
+const AgentTaskPlanStateSchema = z.object({
+  plan_id: z.string().nullable(),
+  title: z.string(),
+  status: z.enum(["active", "completed", "blocked"]).nullable(),
+  items: z.array(z.object({
+    id: z.string(),
+    content: z.string(),
+    status: z.enum(["pending", "in_progress", "completed", "blocked"])
+  }).strict()),
+  created_at: z.string().nullable(),
+  updated_at: z.string().nullable()
+}).strict();
+
 export function isAgentGoalStatus(value: unknown): value is AgentGoalStatus {
   return value === "active"
     || value === "paused"
@@ -72,6 +101,10 @@ export function isAgentGoalStatus(value: unknown): value is AgentGoalStatus {
 
 export function isAgentGoalState(value: unknown): value is AgentGoalState {
   return AgentGoalStateSchema.safeParse(value).success;
+}
+
+export function isAgentTaskPlanState(value: unknown): value is AgentTaskPlanState {
+  return AgentTaskPlanStateSchema.safeParse(value).success;
 }
 
 export const DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL = "http://127.0.0.1:18980";
@@ -661,6 +694,7 @@ export type MemmyAgentWsEvent = {
   agent_ui?: unknown;
   edits?: unknown;
   goal_state?: AgentGoalState;
+  task_plan_state?: AgentTaskPlanState;
   goal_id?: string;
   goal_outcome?: AgentGoalStatus;
   compaction_id?: string;
@@ -1461,6 +1495,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
   private readonly goalStateByChatId = new Map<string, AgentGoalState>();
+  private readonly taskPlanStateByChatId = new Map<string, AgentTaskPlanState>();
 
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
@@ -1945,6 +1980,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.goalStateByChatId.get(chatId);
   }
 
+  getTaskPlanState(chatId: string): AgentTaskPlanState | undefined {
+    return this.taskPlanStateByChatId.get(chatId);
+  }
+
   requestRunStatusSnapshot(
     chatId: string,
     expectedGeneration: number,
@@ -2159,6 +2198,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.recordRunStatus(chatId, normalized);
     this.recordGoalState(chatId, normalized);
+    this.recordTaskPlanState(chatId, normalized);
     this.resolveRunStatusSnapshot(chatId, normalized, generation);
     this.dispatchChat(chatId, normalized);
   }
@@ -2626,6 +2666,13 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         pending.reject(new MemmyAgentGoalControlError("result_unknown", { unknownResult: true }));
       }
     }
+  }
+
+  private recordTaskPlanState(chatId: string, event: MemmyAgentWsEvent): void {
+    if (event.event !== "task_plan_state") return;
+    const parsed = AgentTaskPlanStateSchema.safeParse(event.task_plan_state);
+    if (!parsed.success) return;
+    this.taskPlanStateByChatId.set(chatId, parsed.data);
   }
 
   private resolvePendingGoalControl(event: MemmyAgentWsEvent): void {

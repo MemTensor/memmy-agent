@@ -30,8 +30,6 @@ import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
-  AGENT_ATTACHMENT_MAX_COUNT,
-  AGENT_FILE_TARGET_MAX_BYTES,
   agentAttachmentAccept,
   classifyAgentAttachmentFile,
   safeAgentAttachmentFilename,
@@ -78,6 +76,7 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
+import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import {
   type AgentQuestionCardPayload,
@@ -213,7 +212,6 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendSize",
   "home.media.error.sendFileSize",
   "home.media.error.sendTooManyImages",
-  "home.media.error.sendTooManyAttachments",
   "home.media.error.sendReadFailed",
   "home.media.error.sendFailed",
   "home.media.error.messageTooBig",
@@ -336,7 +334,6 @@ export interface SubmitAgentComposerMessageInput {
   clearComposer: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
-  onMessageAccepted?: (chatId: string, feedback: { message: string; clientRequestId: string }) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -1026,7 +1023,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     }));
   }
   input.clearComposer();
-  input.onMessageAccepted?.(chatId, { message: text, clientRequestId });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
   }
@@ -1123,7 +1119,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
-  const { calls: pluginUiCalls, openSurface, notifyChatMessage } = usePluginUi();
+  const { calls: pluginUiCalls, openSurface, routeChatFeedback } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1301,6 +1297,9 @@ export function HomePage() {
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
   const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const currentTaskPlan = state.agent.taskPlanState?.plan_id
+    ? state.agent.taskPlanState
+    : null;
   const isCurrentGoalActive = currentGoal?.status === "active";
   const currentActiveTurnId = state.agent.currentChatId
     ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
@@ -2162,6 +2161,20 @@ export function HomePage() {
     if (runExactLocalSlashCommand(input)) {
       return;
     }
+    const clientRequestId = crypto.randomUUID();
+    const currentChatId = state.agent.currentChatId;
+    if (
+      currentChatId
+      && Boolean(input.trim())
+      && pendingAttachments.length === 0
+      && !input.trimStart().startsWith("/")
+      && routeChatFeedback(currentChatId, { message: input, clientRequestId })
+    ) {
+      dispatch(agentActions.pluginFeedbackRecorded(currentChatId, input, clientRequestId));
+      clearComposerAfterSend(chatScopeKey);
+      track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+      return;
+    }
     if (resolvedConversationModel.unavailable) {
       dispatch(agentActions.operationFailed("chat", createAgentOperationError({
         source: "send",
@@ -2183,7 +2196,6 @@ export function HomePage() {
     }
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
-    const clientRequestId = crypto.randomUUID();
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2198,7 +2210,6 @@ export function HomePage() {
         chatId: state.agent.currentChatId,
         target,
         clientRequestId,
-        onMessageAccepted: notifyChatMessage,
         connection,
         ensureChatSubscription,
         content: agentRoutedPluginPrompt ?? input,
@@ -3189,7 +3200,6 @@ export function HomePage() {
       const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
       const validFiles = validation.files;
       if (!validFiles.length) {
-        setComposerMediaErrorForScope(scopeKey, t("home.media.error.duplicateAttachment"));
         return;
       }
       const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
@@ -3420,6 +3430,7 @@ export function HomePage() {
         </div>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}
+      windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div
         className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
@@ -3768,6 +3779,9 @@ export function HomePage() {
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                     onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
                   />
+                  {currentTaskPlan ? (
+                    <AgentTaskPlanBar plan={currentTaskPlan} />
+                  ) : null}
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
@@ -4630,11 +4644,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
   if (classifications.some((item) => !item)) {
     throw new Error(translate("home.media.error.unsupported"));
   }
-  for (const [index] of classifications.entries()) {
-    if (files[index]!.size > AGENT_FILE_TARGET_MAX_BYTES) {
-      throw new Error(translate("home.media.error.fileTooLarge"));
-    }
-  }
 
   const seenSourceKeys = new Set(existingAttachments.map((item) => item.sourceKey));
   const resultFiles: ValidatedAgentMediaFile[] = [];
@@ -4650,9 +4659,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
     }
     seenSourceKeys.add(sourceKey);
     resultFiles.push({ file, classification, sourceKey });
-    if (existingAttachments.length + resultFiles.length > AGENT_ATTACHMENT_MAX_COUNT) {
-      throw new Error(translate("home.media.error.tooManyAttachments"));
-    }
   }
 
   return { files: resultFiles, duplicateCount };

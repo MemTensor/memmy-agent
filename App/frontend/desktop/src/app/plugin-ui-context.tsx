@@ -33,8 +33,8 @@ export interface PluginChatFeedback {
 }
 
 interface PluginUiContextValue {
-  registerChatFeedback(conversationId: string, handler: (feedback: PluginChatFeedback) => void): () => void;
-  notifyChatMessage(chatId: string, feedback: PluginChatFeedback): void;
+  registerChatFeedback(conversationId: string, handler: (feedback: PluginChatFeedback) => boolean): () => void;
+  routeChatFeedback(chatId: string, feedback: PluginChatFeedback): boolean;
   fileDrafts: Map<string, File[]>;
   calls: PluginUiCall[];
   activeSurface: PluginInvocationContext | null;
@@ -47,18 +47,21 @@ const MAX_PLUGIN_CALLS = 50;
 const PluginUiContext = createContext<PluginUiContextValue | null>(null);
 
 export function PluginUiProvider(props: { children: ReactNode }) {
-  const feedbackHandlers = useRef(new Map<symbol, { conversationId: string; handler: (feedback: PluginChatFeedback) => void }>());
+  const feedbackHandlers = useRef(new Map<symbol, { conversationId: string; handler: (feedback: PluginChatFeedback) => boolean }>());
   const fileDrafts = useRef(new Map<string, File[]>()).current;
-  const registerChatFeedback = useCallback((conversationId: string, handler: (feedback: PluginChatFeedback) => void) => {
+  const registerChatFeedback = useCallback((conversationId: string, handler: (feedback: PluginChatFeedback) => boolean) => {
     const id = Symbol();
     feedbackHandlers.current.set(id, { conversationId, handler });
     return () => { feedbackHandlers.current.delete(id); };
   }, []);
-  const notifyChatMessage = useCallback((chatId: string, feedback: PluginChatFeedback) => {
+  const routeChatFeedback = useCallback((chatId: string, feedback: PluginChatFeedback) => {
     const sessionKey = chatId.startsWith("websocket:") ? chatId : `websocket:${chatId}`;
-    for (const entry of [...feedbackHandlers.current.values()]) {
-      if (entry.conversationId === chatId || entry.conversationId === sessionKey) entry.handler(feedback);
+    for (const entry of [...feedbackHandlers.current.values()].reverse()) {
+      if (entry.conversationId === chatId || entry.conversationId === sessionKey) {
+        if (entry.handler(feedback)) return true;
+      }
     }
+    return false;
   }, []);
   const [calls, setCalls] = useState<PluginUiCall[]>([]);
   const [activeSurface, setActiveSurface] = useState<PluginInvocationContext | null>(null);
@@ -67,7 +70,7 @@ export function PluginUiProvider(props: { children: ReactNode }) {
   }, []);
   const openSurface = useCallback((context: PluginInvocationContext) => setActiveSurface(context), []);
   const closeSurface = useCallback(() => setActiveSurface(null), []);
-  const value = useMemo(() => ({ calls, activeSurface, openSurface, closeSurface, receive, registerChatFeedback, notifyChatMessage, fileDrafts }), [activeSurface, calls, closeSurface, openSurface, receive, registerChatFeedback, notifyChatMessage, fileDrafts]);
+  const value = useMemo(() => ({ calls, activeSurface, openSurface, closeSurface, receive, registerChatFeedback, routeChatFeedback, fileDrafts }), [activeSurface, calls, closeSurface, openSurface, receive, registerChatFeedback, routeChatFeedback, fileDrafts]);
   return <PluginUiContext.Provider value={value}>{props.children}</PluginUiContext.Provider>;
 }
 
@@ -115,7 +118,7 @@ function mergeCapabilityEvent(events: CapabilityEvent[], event: CapabilityEvent)
 }
 
 /** Optional for standalone renderer previews; routes only messages from the same conversation. */
-export function usePluginChatFeedback(conversationId: string | undefined, handler: (feedback: PluginChatFeedback) => void) {
+export function usePluginChatFeedback(conversationId: string | undefined, handler: (feedback: PluginChatFeedback) => boolean) {
   const context = useContext(PluginUiContext);
   const latest = useRef(handler);
   latest.current = handler;

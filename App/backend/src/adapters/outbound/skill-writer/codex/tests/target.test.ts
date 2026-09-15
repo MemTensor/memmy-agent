@@ -273,7 +273,7 @@ describe("codex skill target", () => {
     }
   });
 
-  it("uses turn.complete as the only write phase for a completed Codex turn", async () => {
+  it("uses native source completion as the only write phase for a completed Codex turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -296,8 +296,8 @@ describe("codex skill target", () => {
         });
         return;
       }
-      if (request.method === "POST" && url.pathname === "/api/v1/turns/turn-stop-1/complete") {
-        writeJsonResponse(response, 200, { turnId: "turn-stop-1", l1MemoryId: "trace_1" });
+      if (request.method === "POST" && url.pathname === "/api/v1/source-turns/complete") {
+        writeJsonResponse(response, 200, { status: "stored", result: { turnId: "turn-stop-1", l1MemoryId: "trace_1" } });
         return;
       }
       writeJsonResponse(response, 404, {});
@@ -331,10 +331,18 @@ describe("codex skill target", () => {
         }
       });
 
+      const transcriptPath = join(rootDirectory, "rollout-stop.jsonl");
+      writeFileSync(transcriptPath, [
+        { type: "session_meta", payload: { id: "codex-session-1", cwd: "/tmp/memmy-project" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn-stop-1" } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ text: "请继续完成数据分析报告" }] } },
+        { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ text: "已经完成数据分析报告" }] } }
+      ].map(record => JSON.stringify({ ...record, timestamp: "2026-09-09T10:00:00.000Z" })).join("\n") + "\n");
       const run = await runNodeHook(
         hookScriptPath,
         JSON.stringify({
           hook_event_name: "Stop",
+          transcript_path: transcriptPath,
           session_id: "codex-session-1",
           turn_id: "turn-stop-1",
           cwd: "/tmp/memmy-project",
@@ -349,9 +357,7 @@ describe("codex skill target", () => {
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
-        "/api/v1/health",
-        "/api/v1/sessions/open",
-        "/api/v1/turns/turn-stop-1/complete"
+        "/api/v1/source-turns/complete"
       ]);
       expect(requests[1]?.body).toMatchObject({
         sessionId: "codex-memory-codex-session-1",
@@ -365,9 +371,10 @@ describe("codex skill target", () => {
         turnId: "turn-stop-1",
         query: "请继续完成数据分析报告"
       });
-      expect(requests[5]?.body).toMatchObject({
+      expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-codex-hook",
-        requestId: expect.stringMatching(/^codex-complete:turn-stop-1:/u),
+        channel: "hook",
+        sourceTurn: expect.objectContaining({ conversationId: "codex-session-1", turnId: "turn-stop-1" }),
         sessionId: "memmy-session-1",
         query: "请继续完成数据分析报告",
         answer: "已经完成数据分析报告",
@@ -375,7 +382,7 @@ describe("codex skill target", () => {
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
-      expect(requests[5]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

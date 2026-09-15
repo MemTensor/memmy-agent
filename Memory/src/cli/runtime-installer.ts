@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,6 +10,8 @@ import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
+/** Time allowed for a new lock file to record its owner before it counts as abandoned. */
+const INSTALL_LOCK_WRITE_GRACE_MS = 2_000;
 const SERVICE_STOP_TIMEOUT_MS = 5_000;
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 120_000;
 
@@ -847,6 +849,7 @@ function resolveHealthCheckTimeoutMs(value: number | undefined): number {
 async function acquireInstallLock(path: string): Promise<{ release(): Promise<void> }> {
   await mkdir(dirname(path), { recursive: true });
   const startedAt = Date.now();
+  let reclaimed = false;
   for (;;) {
     try {
       const handle = await open(path, "wx", 0o600);
@@ -854,9 +857,66 @@ async function acquireInstallLock(path: string): Promise<{ release(): Promise<vo
       return { async release() { await handle.close(); await unlink(path).catch(() => undefined); } };
     } catch (error) {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      // An installer that crashed or was killed never runs release(), so its
+      // lock file outlives it and would otherwise block every later install.
+      // Reclaim it once per call when its owner is gone; a live owner still
+      // gets the full wait so concurrent installers stay serialized.
+      if (!reclaimed && !(await isInstallLockHeldByLiveOwner(path))) {
+        reclaimed = true;
+        await unlink(path).catch((unlinkError: unknown) => {
+          if (!isNodeError(unlinkError) || unlinkError.code !== "ENOENT") throw unlinkError;
+        });
+        continue;
+      }
       if (Date.now() - startedAt > INSTALL_LOCK_TIMEOUT_MS) throw new Error(`timed out waiting for installer lock: ${path}`);
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     }
+  }
+}
+
+/**
+ * Reports whether an existing installer lock still belongs to a running process.
+ *
+ * A lock whose pid cannot be read counts as abandoned once it is older than the
+ * write grace period: interrupted writes can leave the file empty, and holding
+ * the install back on an unreadable lock strands the runtime with no recovery.
+ * @param path Path of the lock file to inspect.
+ * @returns Whether the recorded owner process is still alive.
+ */
+async function isInstallLockHeldByLiveOwner(path: string): Promise<boolean> {
+  let contents: string;
+  try {
+    contents = await readFile(path, "utf8");
+  } catch (error) {
+    // The owner released the lock while it was being inspected.
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+  const pid = Number.parseInt(contents.trim(), 10);
+  if (Number.isInteger(pid) && pid > 0) {
+    if (pid === process.pid) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM means the pid is live but owned by another user.
+      return isNodeError(error) && error.code === "EPERM";
+    }
+  }
+  // The pid is missing or unreadable. Between open() and writeFile() the lock
+  // exists with no owner recorded, so treat it as live until it is old enough
+  // that the writing process must have failed.
+  const age = await installLockAgeMs(path);
+  return age !== undefined && age < INSTALL_LOCK_WRITE_GRACE_MS;
+}
+
+async function installLockAgeMs(path: string): Promise<number | undefined> {
+  try {
+    return Date.now() - (await stat(path)).mtimeMs;
+  } catch (error) {
+    // A vanished lock is released, not abandoned.
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
