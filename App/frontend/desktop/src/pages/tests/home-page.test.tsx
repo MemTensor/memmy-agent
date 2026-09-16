@@ -33,6 +33,7 @@ import {
   selectPinnedPluginCommands,
   selectSlashPluginCommands,
   selectTopbarPluginCommand,
+  selectOpenPinnedCapabilities,
   selectPinnedDismissal,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
@@ -228,6 +229,37 @@ describe("HomePage", () => {
     expect(
       selectPinnedDismissal([call("older", "user", live), call("newer", "user", live)], "com.example.review", "run")
     ).toBe("newer");
+    // A card the user just closed is still in the call list until the plugin's
+    // cancellation comes back. It is not something a press can close again, so
+    // counting it would turn the next press into a no-op instead of reopening.
+    expect(
+      selectPinnedDismissal([call("closed", "user", live)], "com.example.review", "run", new Set(["closed"]))
+    ).toBeNull();
+    // With the closed one out of the way the press finds the card still open.
+    expect(
+      selectPinnedDismissal(
+        [call("closed", "user", live), call("open", "user", live)],
+        "com.example.review",
+        "run",
+        new Set(["closed"])
+      )
+    ).toBe("open");
+  });
+
+  it("stops highlighting a pinned button the moment its card is closed", () => {
+    const openCall = (callId: string): PluginUiCall => ({
+      pluginId: "com.example.review",
+      capabilityId: "run",
+      callId,
+      conversationId: "websocket:chat-1",
+      origin: "user",
+      events: [{ type: "interaction", request: { interactionId: "guide", type: "question", payload: {} } }]
+    });
+
+    // The cancellation round trip takes a moment, so the button cannot wait for
+    // it to stop looking pressed: the card is already gone from the screen.
+    expect(selectOpenPinnedCapabilities([openCall("live")])).toEqual(new Set(["com.example.review:run"]));
+    expect(selectOpenPinnedCapabilities([openCall("live")], new Set(["live"]))).toEqual(new Set());
   });
 
   it("keeps the conversation reachable when a pinned card is on screen", () => {

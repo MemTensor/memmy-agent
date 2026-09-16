@@ -577,10 +577,17 @@ function PinnedPluginCommandBar(props: {
  * A pinned call is the user's own, and it holds the screen until it finishes or
  * they close it, so its button is highlighted for exactly that long.
  */
-export function selectOpenPinnedCapabilities(calls: readonly PluginUiCall[]): Set<string> {
+export function selectOpenPinnedCapabilities(
+  calls: readonly PluginUiCall[],
+  dismissedCallIds?: ReadonlySet<string>
+): Set<string> {
   const open = new Set<string>();
   for (const call of calls) {
     if (call.origin !== "user") continue;
+    // A card the user just closed is gone before its cancellation has made it
+    // back from the plugin, so the button has to stop reading as open now
+    // rather than a round trip later.
+    if (dismissedCallIds?.has(call.callId)) continue;
     if (call.events.some((event) => event.type === "result" || event.type === "error")) continue;
     open.add(`${call.pluginId}:${call.capabilityId}`);
   }
@@ -598,12 +605,17 @@ export function selectOpenPinnedCapabilities(calls: readonly PluginUiCall[]): Se
 export function selectPinnedDismissal(
   calls: readonly PluginUiCall[],
   pluginId: string,
-  capabilityId: string
+  capabilityId: string,
+  dismissedCallIds?: ReadonlySet<string>
 ): string | null {
   for (let index = calls.length - 1; index >= 0; index -= 1) {
     const call = calls[index]!;
     if (call.pluginId !== pluginId || call.capabilityId !== capabilityId) continue;
     if (call.origin !== "user") continue;
+    // A card already closed is not something a press can close again. Its
+    // cancellation is still in flight, and treating it as the open card would
+    // make the button a no-op until the plugin answers.
+    if (dismissedCallIds?.has(call.callId)) continue;
     if (call.events.some((event) => event.type === "result" || event.type === "error")) continue;
     return call.callId;
   }
@@ -1309,7 +1321,10 @@ export function HomePage() {
     || call.conversationId === state.agent.currentSessionKey
     || call.conversationId === chatScopeKey
   )), [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
-  const openPinnedCapabilities = useMemo(() => selectOpenPinnedCapabilities(visiblePluginCalls), [visiblePluginCalls]);
+  const openPinnedCapabilities = useMemo(
+    () => selectOpenPinnedCapabilities(visiblePluginCalls, dismissedPluginCalls),
+    [dismissedPluginCalls, visiblePluginCalls]
+  );
   // The recorder is the one card that lives in the side column rather than in
   // the pinned bar, so the page needs to know whether it is there and what to
   // call it before it can lay the column out.
@@ -2050,7 +2065,12 @@ export function HomePage() {
     // A second press closes what the first one opened. The card is the user's
     // own, so closing it is a cancel: the plugin stops waiting and nothing is
     // sent to the model, which is what "关闭卡片不触发模型思考" asks for.
-    const openCallId = selectPinnedDismissal(visiblePluginCalls, target.plugin.id, target.command.capabilityId);
+    const openCallId = selectPinnedDismissal(
+      visiblePluginCalls,
+      target.plugin.id,
+      target.command.capabilityId,
+      dismissedPluginCalls
+    );
     if (openCallId) {
       setDismissedPluginCalls((current) => new Set(current).add(openCallId));
       void clients.plugins.cancel(target.plugin.id, openCallId).catch(() => undefined);
