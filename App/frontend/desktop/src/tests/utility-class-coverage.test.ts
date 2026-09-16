@@ -14,8 +14,6 @@ const bundlePath = resolve(srcDir, "prototype-utilities.css");
  * page it sits on.
  */
 const knownMissingBorderColors = new Set([
-  "pages/agent-question-card.tsx: border-border-stone/55",
-  "pages/agent-question-card.tsx: hover:border-action-sky/45",
   "pages/agent-thread-messages.tsx: border-red-200/70",
   "pages/first-encounter-relay-challenge.tsx: hover:border-border-stone/35",
   "pages/memory-sources-page.tsx: border-status-error/25",

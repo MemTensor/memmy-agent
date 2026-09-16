@@ -14422,3 +14422,23 @@ input[type="checkbox"].check-sky:checked::after {
 .home-scenario-card:hover .home-scenario-card__cta {
   background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
 }
+
+/*
+ * The numbered badge on an agent question option.
+ *
+ * Sized here rather than with `h-5 w-5`: the precompiled utility bundle in
+ * `prototype-utilities.css` carries `h-5` but not `w-5`, so a `w-5` next to it
+ * reads like a Tailwind class while doing nothing — the badge collapses to a
+ * narrow oval. The design draws it as a 20px circle.
+ */
+.agent-question-card__index {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
