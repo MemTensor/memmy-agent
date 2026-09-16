@@ -86,7 +86,8 @@ export type JobType =
   | "skill_cluster_assign"
   | "skill_batch_evolve"
   | "skill_trial_resolve"
-  | "work_memory_extract";
+  | "work_memory_extract"
+  | "work_memory_idle_flush";
 
 export interface RuntimeNamespace {
   source: string;

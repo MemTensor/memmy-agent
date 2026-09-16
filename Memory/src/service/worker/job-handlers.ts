@@ -83,6 +83,7 @@ export interface WorkerJobProcessors {
   };
   workMemory: {
     extract(job: EvolutionJobRecord): MaybePromise<void>;
+    flushIdle(job: EvolutionJobRecord): MaybePromise<void>;
   };
   episodeTitle: {
     generate(job: EvolutionJobRecord): MaybePromise<void>;
@@ -297,6 +298,9 @@ export async function processJob(
       return;
     case "work_memory_extract":
       await deps.processors.workMemory.extract(job);
+      return;
+    case "work_memory_idle_flush":
+      await deps.processors.workMemory.flushIdle(job);
       return;
     case "episode_title":
       await deps.processors.episodeTitle.generate(job);
@@ -687,6 +691,10 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "work_memory_extract": {
       const trajectoryHash = payloadString("trajectoryHash");
       return trajectoryHash ? `work_memory_extract:${trajectoryHash}` : undefined;
+    }
+    case "work_memory_idle_flush": {
+      const sessionId = payloadString("sessionId");
+      return sessionId ? `work_memory_idle_flush:${sessionId}` : undefined;
     }
   }
 }

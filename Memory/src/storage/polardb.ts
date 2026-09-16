@@ -373,6 +373,11 @@ export function polardbMigrationSql(): string[] {
       last_scheduled_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_scheduled_seq >= 0),
       updated_at TIMESTAMPTZ NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS work_memory_session_cursors (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      last_extracted_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_extracted_seq >= 0),
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (
       session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       trace_seq BIGINT NOT NULL CHECK (trace_seq >= 1),

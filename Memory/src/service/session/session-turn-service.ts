@@ -815,6 +815,13 @@ export class SessionTurnService {
       });
       this.deps.finalizeClosedEpisode(episode, at, "session_closed");
     }
+    if (session.meta.l3_world_model_protocol_version === 2) {
+      this.deps.extractUnextractedWorkMemory(
+        session.id,
+        this.deps.repos.l3WorldModels.maxInputTraceSeq(session.id),
+        at
+      );
+    }
     this.deps.repos.runtime.appendChange({
       memoryId: session.id,
       namespaceId: this.deps.namespaceIdFromSession(closedWithMeta),
@@ -895,6 +902,11 @@ export class SessionTurnService {
           trigger: "session_close",
           at
         });
+        this.deps.extractUnextractedWorkMemory(
+          sessionId,
+          this.deps.repos.l3WorldModels.maxInputTraceSeq(sessionId),
+          at
+        );
       }
       const changeSeq = this.deps.repos.runtime.appendChange({
         memoryId: sessionId,
@@ -2061,6 +2073,13 @@ export class SessionTurnService {
             createdAt: at
           }));
         }
+      }
+      if (
+        rawTurnFirstCompleted &&
+        !completedEndTopicDecision &&
+        session.meta.l3_world_model_protocol_version === 2
+      ) {
+        this.deps.armWorkMemoryIdleFlush(session.id, at);
       }
       const uniqueClosedEpisodeIds = uniq(closedEpisodeIds);
       const responseChangeSeq = this.deps.repos.runtime.latestChangeSeq(session.userId, this.deps.namespaceIdFromSession(session));

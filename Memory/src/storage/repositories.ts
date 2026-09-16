@@ -62,6 +62,7 @@ const BUNDLE_TABLES = [
   "user_memories",
   "sessions",
   "l3_world_model_session_cursors",
+  "work_memory_session_cursors",
   "episodes",
   "raw_turns",
   "l3_world_model_input_traces",
@@ -347,6 +348,12 @@ export interface L3WorldModelInputTraceRecord {
   rawTurnId: string;
   episodeId?: string;
   createdAt: string;
+}
+
+export interface WorkMemorySessionCursorRecord {
+  sessionId: string;
+  lastExtractedSeq: number;
+  updatedAt: string;
 }
 
 export interface L3WorldModelEvidenceBatchRecord {
@@ -3086,6 +3093,97 @@ export class RuntimeRepository {
     return Number(row.next_seq);
   }
 
+  /**
+   * Read the Work Memory extraction cursor for a Session.
+   *
+   * A missing row is seeded from the L3 cursor so Sessions that predate this
+   * table do not re-extract windows the L3 boundary already covered.
+   */
+  getWorkMemoryCursor(sessionId: string, at = nowIso()): WorkMemorySessionCursorRecord {
+    const seed = this.db.prepare(
+      `SELECT COALESCE(
+         (SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?),
+         0
+       ) AS last_seq`
+    ).get(sessionId) as { last_seq: number };
+    return this.ensureWorkMemoryCursor(sessionId, Number(seed.last_seq), at);
+  }
+
+  /** Create the Work Memory cursor row for a Session when it is still missing. */
+  ensureWorkMemoryCursor(
+    sessionId: string,
+    lastExtractedSeq: number,
+    at = nowIso()
+  ): WorkMemorySessionCursorRecord {
+    this.db.prepare(
+      `INSERT INTO work_memory_session_cursors (session_id, last_extracted_seq, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO NOTHING`
+    ).run(sessionId, lastExtractedSeq, at);
+    const row = this.db.prepare(
+      `SELECT session_id, last_extracted_seq, updated_at
+       FROM work_memory_session_cursors WHERE session_id = ?`
+    ).get(sessionId) as { session_id: string; last_extracted_seq: number; updated_at: string };
+    return {
+      sessionId: row.session_id,
+      lastExtractedSeq: Number(row.last_extracted_seq),
+      updatedAt: row.updated_at
+    };
+  }
+
+  /** Advance the Work Memory extraction cursor. */
+  setWorkMemoryCursor(sessionId: string, lastExtractedSeq: number, at = nowIso()): void {
+    this.db.prepare(
+      `UPDATE work_memory_session_cursors
+       SET last_extracted_seq = ?, updated_at = ?
+       WHERE session_id = ?`
+    ).run(lastExtractedSeq, at, sessionId);
+  }
+
+  /**
+   * Arm the Work Memory idle flush for a Session, pushing `runAfter` forward.
+   *
+   * The generic enqueue path merges `runAfter` by keeping the earlier value,
+   * which is the opposite of re-arming. This upsert therefore reuses terminal
+   * rows as well and clears the retry bookkeeping, so the auto worker keeps
+   * scheduling the job.
+   */
+  armWorkMemoryIdleFlush(input: {
+    sessionId: string;
+    userId: string;
+    lastActivityAt: string;
+    runAfter: string;
+    at?: string;
+  }): EvolutionJobRecord {
+    const at = input.at ?? nowIso();
+    const dedupeKey = `work_memory_idle_flush:${input.sessionId}`;
+    const payload = toJson({ lastActivityAt: input.lastActivityAt, runAfter: input.runAfter });
+    const existing = this.getJobByDedupeKey(dedupeKey);
+    if (existing) {
+      this.db.prepare(
+        `UPDATE evolution_jobs
+         SET status = 'queued',
+             payload_json = ?,
+             attempts = 0,
+             leased_until = NULL,
+             last_error = NULL,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(payload, at, existing.id);
+    } else {
+      this.db.prepare(
+        `INSERT INTO evolution_jobs (
+           id, job_type, status, dedupe_key, user_id, session_id, episode_id,
+           target_memory_id, scope_key, scope_seq, payload_json, attempts,
+           max_attempts, leased_until, last_error, created_at, updated_at
+         ) VALUES (?, 'work_memory_idle_flush', 'queued', ?, ?, ?, NULL, NULL, NULL, NULL, ?, 0, 3, NULL, NULL, ?, ?)`
+      ).run(newId("job"), dedupeKey, input.userId, input.sessionId, payload, at, at);
+    }
+    const job = this.getJobByDedupeKey(dedupeKey);
+    if (!job) throw new Error(`failed to arm work memory idle flush: ${input.sessionId}`);
+    return job;
+  }
+
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
     void userId;
     const clauses: string[] = [];
@@ -4694,6 +4792,39 @@ export class L3WorldModelRepository {
     return row ? l3WorldModelInputTraceFromSql(row) : undefined;
   }
 
+  /** Highest trace sequence registered for a Session, or 0 when it has none. */
+  maxInputTraceSeq(sessionId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).get(sessionId) as { trace_seq: number };
+    return Number(row.trace_seq);
+  }
+
+  /** Input traces for a Session in an inclusive trace sequence range, ascending. */
+  listInputTracesInRange(
+    sessionId: string,
+    afterTraceSeq: number,
+    throughTraceSeq: number
+  ): L3WorldModelInputTraceRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq > ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(sessionId, afterTraceSeq, throughTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+  }
+
+  /** Most recent input trace timestamp, used as the real last activity of a Session. */
+  latestInputTraceCreatedAt(sessionId: string): string | undefined {
+    const row = this.db.prepare(
+      `SELECT created_at FROM l3_world_model_input_traces
+       WHERE session_id = ?
+       ORDER BY trace_seq DESC LIMIT 1`
+    ).get(sessionId) as { created_at: string } | undefined;
+    return row?.created_at;
+  }
+
   freezeBatches(input: {
     sessionId: string;
     trigger: L3WorldModelBatchTrigger;
@@ -5748,7 +5879,7 @@ function l3WorldModelSourceMemoryIds(memory?: MemoryRow): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
 }
 
-function splitL3TracesByRawTurn(
+export function splitL3TracesByRawTurn(
   traces: L3WorldModelInputTraceRecord[],
   maxRawTurns: number
 ): L3WorldModelInputTraceRecord[][] {
@@ -7352,6 +7483,7 @@ function bundleIdentity(
     source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
+    work_memory_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],

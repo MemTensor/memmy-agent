@@ -458,6 +458,17 @@ describe("MemoryService / session / lifecycle", () => {
       query: "add a project rule",
       answer: "the project rule was added"
     });
+    expect(complete.jobs.map((job) => job.jobType)).toEqual([
+      "trace_summary",
+      "episode_idle_close",
+      "episode_title"
+    ]);
+    expect(db.db.prepare(
+      `SELECT job_type, status, session_id
+       FROM evolution_jobs WHERE job_type = 'work_memory_idle_flush'`
+    ).all()).toEqual([
+      { job_type: "work_memory_idle_flush", status: "queued", session_id: opened.sessionId }
+    ]);
     expect(db.db.prepare(
       `SELECT l1_memory_id, raw_turn_id, trace_seq
        FROM l3_world_model_input_traces WHERE session_id = ?`
