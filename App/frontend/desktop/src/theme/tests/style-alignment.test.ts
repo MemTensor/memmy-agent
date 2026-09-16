@@ -101,10 +101,10 @@ describe("prototype style alignment", () => {
     const sidebarToolbarPositionRule = globalCss.match(/\.sidebar-toolbar-button\s*\{[^}]*\}/)?.[0] ?? "";
     const sidebarRestoreButtonRule = Array.from(globalCss.matchAll(/\.sidebar-restore-button\s*\{[^}]*\}/g)).at(-1)?.[0] ?? "";
     const dragRegionRule = globalCss.match(/\.window-drag-region\s*\{[^}]*\}/)?.[0] ?? "";
-    const dragExclusionRule = globalCss.match(/\.window-drag-exclusion\s*\{[^}]*\}/)?.[0] ?? "";
-    const sidebarToggleExclusionRule = globalCss.match(/\.window-drag-exclusion--sidebar-toggle\s*\{[^}]*\}/)?.[0] ?? "";
+    const leadingDragRegionRule = globalCss.match(/\.window-drag-region--leading\s*\{[^}]*\}/)?.[0] ?? "";
+    const trailingDragRegionRule = globalCss.match(/\.window-drag-region--trailing\s*\{[^}]*\}/)?.[0] ?? "";
+    const appShellDragRegionRule = globalCss.match(/body:has\(\.sidebar-shell\)\s+\.window-drag-region\s*\{[^}]*\}/)?.[0] ?? "";
     const edgeAlignedWindowControlsRule = globalCss.match(/body\.memmy-platform-windows,\s*body\.memmy-window-fullscreen\s*\{[^}]*\}/)?.[0] ?? "";
-    const memoryDrawerDragTrimRule = globalCss.match(/body:has\(\.memory-drawer\)\s+\.window-drag-region\s*\{[^}]*\}/)?.[0] ?? "";
     const resizeHandleRule = Array.from(globalCss.matchAll(/^\.sidebar-resize-handle\s*\{[^}]*\}/gm)).at(-1)?.[0] ?? "";
 
     expect(appSidebarRule).toContain("width: var(--codex-sidebar-width);");
@@ -176,8 +176,6 @@ describe("prototype style alignment", () => {
     expect(memoryBackButtonRule).toContain("font-size: var(--codex-text-base);");
     expect(memorySectionHeaderRule).toContain("padding: 0 14px 0 30px;");
     expect(dragRegionRule).toContain("position: fixed;");
-    expect(dragRegionRule).toContain("right: 0;");
-    expect(dragRegionRule).toContain("left: 0;");
     expect(dragRegionRule).toContain("z-index: 9998;");
     expect(dragRegionRule).toContain("height: var(--codex-toolbar-height);");
     expect(dragRegionRule).toContain("pointer-events: none;");
@@ -185,14 +183,12 @@ describe("prototype style alignment", () => {
     expect(dragRegionRule).not.toContain("background:");
     expect(dragRegionRule).not.toContain("backdrop-filter:");
     expect(dragRegionRule).toContain("-webkit-app-region: drag;");
-    expect(dragExclusionRule).toContain("position: fixed;");
-    expect(dragExclusionRule).toContain("z-index: 9999;");
-    expect(dragExclusionRule).toContain("height: var(--codex-toolbar-height);");
-    expect(dragExclusionRule).toContain("pointer-events: none;");
-    expect(dragExclusionRule).toContain("-webkit-app-region: no-drag;");
-    expect(sidebarToggleExclusionRule).toContain("left: var(--codex-window-control-inset);");
-    expect(sidebarToggleExclusionRule).toContain("width: var(--codex-toolbar-button-size);");
-    expect(memoryDrawerDragTrimRule).toContain("right: min(680px, calc(100vw - 24px));");
+    expect(leadingDragRegionRule).toContain("left: calc(var(--codex-window-control-inset) + var(--codex-toolbar-button-size));");
+    expect(leadingDragRegionRule).toContain("right: 50%;");
+    expect(trailingDragRegionRule).toContain("left: 50%;");
+    expect(trailingDragRegionRule).toContain("right: 120px;");
+    expect(appShellDragRegionRule).toContain("display: none;");
+    expect(globalCss).not.toContain(".window-drag-exclusion");
     expect(resizeHandleRule).toContain("flex: 0 0 8px;");
     expect(resizeHandleRule).toContain("margin-right: -4px;");
     expect(resizeHandleRule).toContain("margin-left: -4px;");
@@ -205,6 +201,7 @@ describe("prototype style alignment", () => {
     const conversationPanelFontRule = conversationPanelRules.find((rule) => rule.includes("font-family")) ?? "";
     const messageContentRule = globalCss.match(/^\.agent-message-content\s*\{[^}]*\}/m)?.[0] ?? "";
     const contentTopbarRule = globalCss.match(/^\.app-frame-content-topbar\s*\{[^}]*\}/m)?.[0] ?? "";
+    const contentTopbarDragSpaceRule = globalCss.match(/\.app-frame-content-topbar__drag-space\s*\{[^}]*\}/)?.[0] ?? "";
     const contentTopbarBorderedRule = globalCss.match(/\.app-frame-content-topbar--bordered\s*\{[^}]*\}/)?.[0] ?? "";
     const conversationTitleRule = globalCss.match(/\.agent-conversation-title\s*\{[^}]*\}/)?.[0] ?? "";
     const conversationScrollRule = globalCss.match(/\.agent-conversation-scroll\s*\{[^}]*\}/)?.[0] ?? "";
@@ -227,7 +224,9 @@ describe("prototype style alignment", () => {
     expect(contentTopbarRule).toContain("align-items: center;");
     expect(contentTopbarRule).toContain("overflow: hidden;");
     expect(contentTopbarRule).toContain("padding: 0 var(--codex-content-padding-x);");
-    expect(contentTopbarRule).toContain("-webkit-app-region: drag;");
+    expect(contentTopbarRule).toContain("-webkit-app-region: no-drag;");
+    expect(contentTopbarDragSpaceRule).toContain("pointer-events: auto;");
+    expect(contentTopbarDragSpaceRule).toContain("-webkit-app-region: drag;");
     expect(contentTopbarRule).not.toContain("border-bottom:");
     expect(contentTopbarBorderedRule).toContain("background: transparent");
     expect(contentTopbarBorderedRule).toContain("border-bottom: none");
@@ -240,6 +239,8 @@ describe("prototype style alignment", () => {
     expect(conversationTitleRule).toContain("text-overflow: ellipsis;");
     expect(conversationTitleRule).toContain("user-select: none;");
     expect(conversationTitleRule).toContain("white-space: nowrap;");
+    expect(conversationTitleRule).toContain("pointer-events: auto;");
+    expect(conversationTitleRule).toContain("-webkit-app-region: drag;");
     expect(conversationScrollRule).toContain("padding-top: 12px;");
     expect(conversationScrollRule).toContain("padding-bottom: calc(var(--agent-composer-overlay-height, 120px) + 8px);");
     expect(conversationScrollRule).not.toContain("var(--color-action-sky)");

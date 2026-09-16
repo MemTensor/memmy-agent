@@ -281,9 +281,8 @@ export function AppRouter(props: { onRetry: () => void }) {
 function WindowDragRegion() {
   return (
     <>
-      <div aria-hidden="true" className="window-drag-region" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--sidebar-toggle" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--lang-toggle" />
+      <div aria-hidden="true" className="window-drag-region window-drag-region--leading" />
+      <div aria-hidden="true" className="window-drag-region window-drag-region--trailing" />
     </>
   );
 }
