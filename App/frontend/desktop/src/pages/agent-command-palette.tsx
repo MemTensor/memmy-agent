@@ -1,5 +1,6 @@
 import {
   Activity,
+  AudioLines,
   BookOpen,
   Brain,
   CircleQuestionMark,
@@ -45,6 +46,7 @@ export interface SlashCommandStorageLike {
 
 const iconByName: Record<string, LucideIcon> = {
   activity: Activity,
+  "audio-lines": AudioLines,
   "book-open": BookOpen,
   brain: Brain,
   "circle-help": CircleQuestionMark,

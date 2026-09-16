@@ -120,7 +120,16 @@ export const PluginCommandContributionSchema = z.object({
    * For capabilities the user reaches repeatedly and out of order, where
    * finding a slash command each time is the wrong interaction.
    */
-  pinned: z.boolean().optional()
+  pinned: z.boolean().optional(),
+  /**
+   * Also offer this command as an icon button in the conversation top bar.
+   *
+   * For a capability whose panel is a place the user works alongside the
+   * conversation rather than a step in it — recording an interview is the
+   * case this exists for. The button toggles the panel; it does not start any
+   * work on its own.
+   */
+  topbar: z.boolean().optional()
 });
 export type PluginCommandContribution = z.infer<typeof PluginCommandContributionSchema>;
 

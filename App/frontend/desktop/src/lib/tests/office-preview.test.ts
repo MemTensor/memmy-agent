@@ -124,6 +124,21 @@ describe("xlsx preview parser", () => {
     expect(sheets[1]?.rows).toEqual([["判定"]]);
   });
 
+  it("fills the rows a worksheet skips over, leaving nothing for a caller to trip on", async () => {
+    // The generated diagnosis workbook numbers its rows with gaps, which used
+    // to leave holes in this grid. `map` preserves holes, so the preview read
+    // `undefined` for a row it had been promised and took the whole app down
+    // with it. Spreading here is what a caller does, and what exposes a hole.
+    const sheets = await readXlsxSheets(await buildXlsx([{
+      name: "Gaps",
+      rows: `<row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="4"><c r="A4" t="s"><v>1</v></c></row>`
+    }]));
+
+    const rows = sheets[0]?.rows ?? [];
+    expect([...rows]).toEqual([["板块"], [""], [""], ["判定"]]);
+    expect(rows.every((row) => Array.isArray(row))).toBe(true);
+  });
+
   it("drops trailing blank rows", async () => {
     const sheets = await readXlsxSheets(await buildXlsx([{
       name: "Trailing",

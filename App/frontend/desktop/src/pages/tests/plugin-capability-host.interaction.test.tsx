@@ -170,6 +170,42 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("selected.pdf");
   });
 
+  it("keeps a single-file card to one file, so a second pick replaces the first", async () => {
+    const respond = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond };
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "single-file",
+      conversationId: "websocket:chat-1",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "single-file",
+          type: "file-input",
+          payload: { cardType: "material-collect", accept: [".pdf"], multiple: false }
+        }
+      }]
+    };
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} uploadFiles={vi.fn()} />
+      </I18nProvider>
+    ));
+    const picker = container.querySelector('input[type="file"]')!;
+
+    // Appending is only right when the card asked for several files. On a
+    // single-file card the second pick is a new choice, and accumulating would
+    // leave two files where the plugin promised to accept one.
+    Object.defineProperty(picker, "files", { value: [new File(["a"], "first.pdf", { type: "application/pdf" })], configurable: true });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    Object.defineProperty(picker, "files", { value: [new File(["b"], "second.pdf", { type: "application/pdf" })], configurable: true });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+
+    expect(container.textContent).toContain("second.pdf");
+    expect(container.textContent).not.toContain("first.pdf");
+  });
+
   it("allows selected source files to be removed before upload", async () => {
     const respond = vi.fn(async () => undefined);
     const uploadFiles = vi.fn();
@@ -199,13 +235,21 @@ describe("PluginCapabilityHost", () => {
       value: [new File(["first"], "first.pdf", { type: "application/pdf" })]
     });
     await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
-    Object.defineProperty(picker, "files", {
-      configurable: true,
-      value: [new File(["second"], "second.pdf", { type: "application/pdf" })]
+    const secondPdf = () => new File(["second"], "second.pdf", {
+      type: "application/pdf",
+      lastModified: Date.UTC(2026, 8, 16, 3, 0, 0)
     });
+    Object.defineProperty(picker, "files", { configurable: true, value: [secondPdf()] });
     await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
     expect(container.textContent).toContain("first.pdf");
     expect(container.textContent).toContain("second.pdf");
+
+    // Re-picking a document already in the list must not queue it twice. The
+    // picker hands back a new object each time with the same stamp, which is the
+    // case identity has to cover.
+    Object.defineProperty(picker, "files", { configurable: true, value: [secondPdf()] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent?.match(/second\.pdf/g)?.length).toBe(1);
 
     await act(async () => (
       container.querySelector('button[aria-label="Remove file first.pdf"]') as HTMLButtonElement

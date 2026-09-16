@@ -7,15 +7,18 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const desktopRoot = join(repositoryRoot, "App", "shell", "desktop");
 const lockPath = join(desktopRoot, "resources", "bundled-plugins.json");
-const outputDirectory = resolve(process.argv[2] ?? join(desktopRoot, "dist", "bundled-plugins"));
+const args = process.argv.slice(2);
+const optional = args.includes("--optional");
+const outputDirectory = resolve(
+  args.find((value) => !value.startsWith("--"))
+    ?? join(desktopRoot, "dist", "bundled-plugins")
+);
 const configuredSourceDirectory = process.env.MEMMY_BUNDLED_PLUGIN_SOURCE_DIR?.trim();
-const requireBundledPlugins = process.env.MEMMY_REQUIRE_BUNDLED_PLUGINS === "1";
 const stateFile = "bundled-plugins-state.json";
 
 const lock = JSON.parse(await readFile(lockPath, "utf8"));
 if (
   lock.schemaVersion !== 1
-  || (lock.bundlePolicy !== "omit" && lock.bundlePolicy !== "required")
   || !Array.isArray(lock.plugins)
   || lock.plugins.length === 0
 ) {
@@ -23,23 +26,19 @@ if (
 }
 for (const expected of lock.plugins) assertLockEntry(expected);
 
+if (!configuredSourceDirectory && !optional) {
+  throw new Error(
+    "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is required and must point to the locked plugin release descriptors and MPP archives; pass --optional only for an intentionally plugin-free build"
+  );
+}
+
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 
-if (requireBundledPlugins && lock.bundlePolicy === "omit" && configuredSourceDirectory) {
-  throw new Error(
-    "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR must not be set for a package whose bundled plugin policy is omit"
-  );
-}
 if (!configuredSourceDirectory) {
-  if (requireBundledPlugins && lock.bundlePolicy === "required") {
-    throw new Error(
-      "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is required when MEMMY_REQUIRE_BUNDLED_PLUGINS=1 and must point to the locked plugin release descriptors and MPP archives"
-    );
-  }
-  console.warn(requireBundledPlugins && lock.bundlePolicy === "omit"
-    ? "[bundled-plugins] release policy intentionally omits bundled plugins."
-    : "[bundled-plugins] MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is not set; continuing with no bundled plugins. Set it to a release directory for local plugin integration.");
+  console.warn(
+    "[bundled-plugins] optional build is continuing with no bundled plugin releases."
+  );
 } else {
   const sourceDirectory = resolve(configuredSourceDirectory);
   for (const expected of lock.plugins) {

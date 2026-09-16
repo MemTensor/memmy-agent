@@ -15,6 +15,10 @@ export interface PluginArtifactPreviewPanelProps {
   readArtifact: PluginsClient["readArtifact"];
   onClose(): void;
   onWidthChange?: (width: number) => void;
+  /** Measured inline size of the row this pane shares with the chat. */
+  sharedRowWidth?: number | null;
+  /** Space the shared row always keeps for the chat beside this pane. */
+  sharedRowReservedWidth?: number;
 }
 
 export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProps) {
@@ -24,9 +28,11 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
     defaultWidth: 560,
     minWidth: 380,
     maxWidth: 880,
-    resizeDirection: -1
+    resizeDirection: -1,
+    availableWidth: props.sharedRowWidth ?? null,
+    reservedPrimaryWidth: props.sharedRowReservedWidth
   });
-  useEffect(() => props.onWidthChange?.(resize.width), [props.onWidthChange, resize.width]);
+  useEffect(() => props.onWidthChange?.(resize.appliedWidth), [props.onWidthChange, resize.appliedWidth]);
 
   const download = async () => {
     const blob = await props.readArtifact(props.artifact.downloadUri ?? props.artifact.uri);
@@ -52,9 +58,9 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
     <>
       <SidebarResizeHandle
         label={t("workspaceArtifact.resize")}
-        width={resize.width}
-        minWidth={resize.minWidth}
-        maxWidth={resize.maxWidth}
+        width={resize.appliedWidth}
+        minWidth={resize.appliedMinWidth}
+        maxWidth={resize.appliedMaxWidth}
         isResizing={resize.isResizing}
         onResizeStart={resize.beginResize}
         onResizeBy={resize.resizeBy}

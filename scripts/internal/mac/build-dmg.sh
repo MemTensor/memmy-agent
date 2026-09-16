@@ -1009,8 +1009,8 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_DIR"
 package_step_start "Prepare bundled first-party plugins"
-MEMMY_REQUIRE_BUNDLED_PLUGINS=1 node "$ROOT_DIR/scripts/internal/shared/prepare-bundled-plugins.mjs" \
-  "$DESKTOP_DIR/dist/bundled-plugins"
+node "$ROOT_DIR/scripts/internal/shared/prepare-bundled-plugins.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins" --optional
 package_step_start "Prepare bundled embedding model"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"

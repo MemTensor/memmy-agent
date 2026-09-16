@@ -27,7 +27,8 @@ import type {
   CapabilityEvent,
   InstalledPlugin,
   PluginArtifactRef,
-  PluginInteractionRequest
+  PluginInteractionRequest,
+  PluginInvocationOrigin
 } from "@memmy/local-api-contracts";
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
@@ -154,6 +155,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             events={call.events}
             conversationId={call.conversationId}
             pluginId={call.pluginId}
+            origin={call.origin}
             onRespond={respond}
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
@@ -210,6 +212,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
 function GenericPluginCards(props: {
   conversationId?: string;
   pluginId?: string;
+  origin?: PluginInvocationOrigin;
   events: CapabilityEvent[];
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onCancel(): Promise<void>;
@@ -231,7 +234,9 @@ function GenericPluginCards(props: {
         if (event.type === "interaction") {
           return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} onDismiss={props.onDismiss} onRecordingSession={props.onRecordingSession} asrClient={props.asrClient} />;
         }
-        if (event.type === "error") return <ErrorCard key="error" event={event} />;
+        if (event.type === "error") {
+          return props.origin === "user" && isCancellation(event.code) ? null : <ErrorCard key="error" event={event} />;
+        }
         return null;
       })}
       {artifactEvents.length > 1 ? (
@@ -714,8 +719,13 @@ function FileInputCard(props: {
   const fileStates = files.map((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t));
   const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
-    const selected = Array.from(event.target.files ?? []);
-    const next = payload.multiple === true ? appendUniqueFiles(files, selected) : selected;
+    // Picking again adds to the selection instead of replacing it. A lawyer
+    // assembling a case pulls together a transcript, a workbook and a handful
+    // of scans; replacing meant each new file pushed the last one out, so the
+    // only way to send several was to hand over a whole folder. A single-file
+    // card keeps replacing, where the second pick is a new choice.
+    const picked = Array.from(event.target.files ?? []);
+    const next = payload.multiple === true ? appendUniqueFiles(files, picked) : picked;
     event.target.value = "";
     setFiles(next);
     if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
@@ -1369,6 +1379,18 @@ function readOptions(value: unknown): Array<{ label: string; value: unknown }> {
     const label = firstString(option, ["label", "name", "title"]);
     return label ? [{ label, value: "value" in option ? option.value : label }] : [];
   });
+}
+
+/**
+ * Whether an error is the call ending because it was cancelled.
+ *
+ * A card the user raised is cancelled by the user closing it, so the plugin's
+ * report of that cancellation says nothing they do not already know — they
+ * asked for the card to go away, not to be told it went away. Whatever the call
+ * had already delivered stays on screen; only this notice is dropped.
+ */
+export function isCancellation(code: string): boolean {
+  return code === "cancelled" || code === "interaction_cancelled" || code === "plugin_call_cancelled";
 }
 
 export interface PluginQuestionField {
