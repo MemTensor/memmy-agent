@@ -13,6 +13,29 @@ afterEach(() => {
 });
 
 describe("loadBundledPluginCatalog", () => {
+  it("accepts an empty catalog for plugin-free development", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-empty-bundled-registry-"));
+    const catalog = await loadBundledPluginCatalog(root);
+
+    expect(catalog.releases).toEqual([]);
+    expect(catalog.managedPluginIds).toEqual([]);
+    await expect(catalog.registry.resolve("literature-review"))
+      .rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("retains managed IDs when releases are intentionally omitted", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-omitted-bundled-registry-"));
+    writeFileSync(join(root, "bundled-plugins-state.json"), JSON.stringify({
+      schemaVersion: 1,
+      managedPluginIds: ["literature-review"]
+    }));
+
+    const catalog = await loadBundledPluginCatalog(root);
+
+    expect(catalog.releases).toEqual([]);
+    expect(catalog.managedPluginIds).toEqual(["literature-review"]);
+  });
+
   it("pins local artifacts to the descriptor SHA-256", async () => {
     root = mkdtempSync(join(tmpdir(), "memmy-bundled-registry-"));
     const bundleRoot = join(root, "bundled");
@@ -41,6 +64,7 @@ describe("loadBundledPluginCatalog", () => {
     }));
 
     const catalog = await loadBundledPluginCatalog(bundleRoot);
+    expect(catalog.managedPluginIds).toEqual(["literature-review"]);
     await expect(catalog.registry.resolve("literature-review", "0.5.17")).resolves.toMatchObject({
       manifest: { id: "literature-review", version: "0.5.17" },
       artifact: { localPath: join(catalog.trustedArtifactRoot, "review.mpp.zip"), sha256 }

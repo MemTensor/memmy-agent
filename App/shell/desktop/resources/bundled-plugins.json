@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "bundlePolicy": "omit",
   "plugins": [
     {
       "id": "literature-review",
