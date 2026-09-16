@@ -104,6 +104,7 @@ Var pid
   ; Legacy or uncertain layouts still relay through a copy outside $INSTDIR so old install-local
   ; data survives the uninstall. The relayed child carries an explicit marker to prevent recursion.
   !macro customInit
+    StrCpy $MemmyIsRelayedUpgrade "0"
     StrCpy $MemmyDirectMigrationPrepared "0"
     StrCpy $MemmyStandardUpgradeSafe "0"
     StrCpy $MemmyPreparedInstallDir ""
@@ -117,6 +118,15 @@ Var pid
     ReadRegStr $MemmyPreviousInstalledVersion HKCU "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
     Call MemmyRelayLegacyUpgrade
     StrCmp $MemmyIsRelayedUpgrade "1" memmy_custom_init_done
+    ; Direct upgrades must start from the recorded install directory. Relayed
+    ; upgrades receive their target through /D and keep that target unchanged.
+    StrCmp $MemmyPreviousInstallDir "" memmy_custom_init_no_previous_install
+    StrCpy $INSTDIR "$MemmyPreviousInstallDir"
+    ${IfNot} ${Silent}
+      Call MemmyNotifyPreviousInstallDirectory
+    ${EndIf}
+
+    memmy_custom_init_no_previous_install:
     ${If} ${Silent}
       Call MemmyValidateSelectedDirectories
       Pop $0
@@ -255,6 +265,38 @@ Function MemmyResolveMigrationPaths
     StrCpy $MemmyDirectSourceAuthority "current-install-authority"
 FunctionEnd
 
+Function MemmyNotifyPreviousInstallDirectory
+  StrCpy $R8 "Memmy is already installed in:$\r$\n$MemmyPreviousInstallDir$\r$\n$\r$\nKeep this directory for the upgrade to complete. If you want to use another directory, manually move the existing Memmy files first and then run the installer again."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_notify_previous_install_directory
+  StrCpy $R8 "检测到之前安装的 Memmy，安装目录为：$\r$\n$MemmyPreviousInstallDir$\r$\n$\r$\n请使用此目录完成升级，以确保安装成功。如需更换目录，请先手动迁移原安装目录中的 Memmy 文件，然后重新运行安装器。"
+
+  memmy_notify_previous_install_directory:
+    MessageBox MB_OK|MB_ICONINFORMATION "$R8"
+FunctionEnd
+
+; A direct installer cannot safely relocate an existing installation because
+; the recorded install-local and external data paths are tied to that location.
+; The user-facing path is kept explicit so a manual migration can happen before
+; a fresh installation is attempted in another directory.
+Function MemmyValidatePreviousInstallDirectory
+  StrCmp $MemmyIsRelayedUpgrade "1" memmy_previous_install_directory_valid
+  StrCmp $MemmyPreviousInstallDir "" memmy_previous_install_directory_valid
+  GetFullPathName $R0 "$INSTDIR"
+  GetFullPathName $R1 "$MemmyPreviousInstallDir"
+  StrCmp $R0 $R1 memmy_previous_install_directory_valid
+
+  StrCpy $R8 "Memmy is already installed in $\"$MemmyPreviousInstallDir$\". Keep this directory to upgrade Memmy successfully. If you want to use another directory, manually move the existing Memmy files first and then run the installer again."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_previous_install_directory_invalid
+  StrCpy $R8 "Memmy 已安装在“$MemmyPreviousInstallDir”。请使用此目录完成升级。如需更换目录，请先手动迁移原安装目录中的 Memmy 文件，然后重新运行安装器。"
+
+  memmy_previous_install_directory_invalid:
+    Push "0"
+    Return
+
+  memmy_previous_install_directory_valid:
+    Push "1"
+FunctionEnd
+
 ; Input: $R0 is the exact directory to validate. Output: pushes "1" when
 ; that directory supports create/write/delete operations, else "0".
 Function MemmyProbeWritableDirectory
@@ -328,6 +370,13 @@ FunctionEnd
 ; installation-drive runtime folder. Output: pushes "1" on success, else "0".
 Function MemmyValidateSelectedDirectories
   Call MemmyNormalizeInstallDirectory
+  Call MemmyValidatePreviousInstallDirectory
+  Pop $0
+  StrCmp $0 "1" memmy_validate_selected_directories_paths
+  Push "0"
+  Return
+
+  memmy_validate_selected_directories_paths:
   Call MemmyResolveMigrationPaths
 
   StrCpy $R0 "$INSTDIR"

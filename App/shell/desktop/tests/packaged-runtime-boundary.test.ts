@@ -862,6 +862,38 @@ describe("desktop packaged runtime boundaries", () => {
     expect(customInstallIndex).toBeGreaterThan(customInitIndex);
   });
 
+  it("shows the recorded install directory and rejects direct relocation", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const customInitStart = includeSource.indexOf("!macro customInit");
+    const customInitEnd = includeSource.indexOf("!macroend", customInitStart);
+    const customInitSource = includeSource.slice(customInitStart, customInitEnd);
+    const notifyStart = includeSource.indexOf("Function MemmyNotifyPreviousInstallDirectory");
+    const notifyEnd = includeSource.indexOf("FunctionEnd", notifyStart);
+    const notifySource = includeSource.slice(notifyStart, notifyEnd);
+    const validationStart = includeSource.indexOf("Function MemmyValidatePreviousInstallDirectory");
+    const validationEnd = includeSource.indexOf("FunctionEnd", validationStart);
+    const validationSource = includeSource.slice(validationStart, validationEnd);
+    const selectedDirectoriesStart = includeSource.indexOf("Function MemmyValidateSelectedDirectories");
+    const selectedDirectoriesEnd = includeSource.indexOf("FunctionEnd", selectedDirectoriesStart);
+    const selectedDirectoriesSource = includeSource.slice(
+      selectedDirectoriesStart,
+      selectedDirectoriesEnd,
+    );
+
+    expect(customInitSource).toContain('StrCpy $INSTDIR "$MemmyPreviousInstallDir"');
+    expect(customInitSource).toContain("Call MemmyNotifyPreviousInstallDirectory");
+    expect(customInitSource.indexOf("Call MemmyRelayLegacyUpgrade")).toBeLessThan(
+      customInitSource.indexOf('StrCpy $INSTDIR "$MemmyPreviousInstallDir"'),
+    );
+    expect(notifySource).toContain("$MemmyPreviousInstallDir");
+    expect(notifySource).toContain("手动迁移");
+    expect(validationSource).toContain('GetFullPathName $R0 "$INSTDIR"');
+    expect(validationSource).toContain('GetFullPathName $R1 "$MemmyPreviousInstallDir"');
+    expect(validationSource).toContain("手动迁移");
+    expect(validationSource).toContain('StrCmp $MemmyIsRelayedUpgrade "1"');
+    expect(selectedDirectoriesSource).toContain("Call MemmyValidatePreviousInstallDirectory");
+  });
+
   it("adds packaged Windows CLI launchers to the user PATH", () => {
     const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
@@ -955,7 +987,6 @@ describe("desktop packaged runtime boundaries", () => {
       includeSource.indexOf('RMDir /r "$LOCALAPPDATA\\Memmy\\launcher"')
     );
     expect(includeSource).not.toContain("MsgBox");
-    expect(includeSource).not.toContain("MessageBox MB_OK|MB_ICONINFORMATION");
     expect(includeSource).not.toContain("Memmy 将安装到当前用户目录");
     expect(updatePromptSource).toContain("function Resolve-MemmyPromptLanguage");
     expect(updatePromptSource).toContain("function Test-MemmyUpdatePromptDone");
