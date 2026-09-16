@@ -2103,7 +2103,17 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   padding-right: 44px;
 }
 
-@container agent-workspace (max-width: 960px) {
+/*
+  The preview and the chat share this row, and the preview pane caps its own
+  width so the chat keeps its share (pages/sidebar-resize.tsx). The rules below
+  are the fallback for a row too narrow for the chat to stay usable even with
+  the pane at its minimum: there the preview takes the whole row rather than
+  leaving two unusable slivers.
+
+  479px is SHARED_ROW_MIN_PANE_WIDTH (240) + SHARED_ROW_MIN_CHAT_WIDTH (240) - 1,
+  and the desktop window's minimum width keeps the app's narrowest row above it.
+*/
+@container agent-workspace (max-width: 479px) {
   .agent-workspace-layout--preview-open > .sidebar-resize-handle {
     display: none;
   }
@@ -2190,7 +2200,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   max-height: calc(100% - var(--codex-toolbar-height) - 20px);
 }
 
-@container agent-workspace (max-width: 960px) {
+@container agent-workspace (max-width: 479px) {
   .agent-workspace-layout--preview-open .agent-environment-panel {
     right: 12px;
   }
@@ -13706,6 +13716,247 @@ input[type="checkbox"].check-sky:checked::after {
 .pinned-command-chip:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Filled while this button's card is open, so the two read as one action. */
+.pinned-command-chip[data-open="true"] {
+  border-color: color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--color-brand-primary) 12%, var(--color-background-paper));
+  color: var(--color-brand-primary);
+}
+
+/* A tab in the preview strip that is a page rather than a file. */
+.workspace-artifact-file-tab__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  margin-right: 4px;
+}
+
+/*
+ * The recording page, shown as a preview tab beside the previewed files.
+ * It reuses the recording panel's classes for the transcript and player, so
+ * the two read as the same feature; only the page frame is its own.
+ */
+.recording-page {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.recording-page__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+}
+
+.recording-page__title {
+  display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+}
+
+.recording-page__controls {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.recording-page__hint,
+.recording-page__error {
+  margin: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.recording-page__hint {
+  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+}
+
+.recording-page__error {
+  color: var(--color-status-error);
+}
+
+/* The page owns its own scroll, like the recording panel's body. */
+.recording-page > .recording-panel__status,
+.recording-page > .recording-panel__player,
+.recording-page > .recording-panel__section,
+.recording-page > .recording-panel__lines,
+.recording-page > .recording-panel__turns,
+.recording-page > .recording-panel__flat-text {
+  margin: 0 12px 8px;
+}
+
+.recording-page > .recording-panel__section {
+  margin-top: 12px;
+}
+
+.recording-page {
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+.recording-page__deliverables {
+  margin: 12px 12px 0;
+}
+
+.recording-page__deliverables ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recording-page__deliverables li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-page__deliverables li span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-page__footer {
+  display: flex;
+  justify-content: flex-end;
+  margin: 12px 12px 0;
+}
+
+/* The 录音列表 view: the page's home, as the design has it. */
+.recording-page__back {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-btn, 8px);
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
+  cursor: pointer;
+}
+
+.recording-page__back:hover {
+  background: color-mix(in srgb, var(--color-border-stone) 22%, transparent);
+}
+
+.recording-page__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0 12px;
+  list-style: none;
+}
+
+/*
+ * One row per recording: the title and its facts on the left, the two ways to
+ * send it on the right. The whole left side opens the transcript, so the row
+ * itself does not have to be a button and the send actions stay reachable.
+ */
+.recording-page__list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
+  border-radius: var(--radius-card, 12px);
+  background: var(--color-background-paper);
+}
+
+.recording-page__list-open {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recording-page__list-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+}
+
+.recording-page__list-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.recording-page__list-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-page__list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+}
+
+.recording-page__list-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.recording-page__list-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-btn, 8px);
+  background: transparent;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink) 65%, transparent);
+  cursor: pointer;
+}
+
+.recording-page__list-action:hover {
+  background: color-mix(in srgb, var(--color-brand-primary) 10%, transparent);
+  color: var(--color-brand-primary);
 }
 
 /* Recording bar above the composer, and the panel it transcribes into. */

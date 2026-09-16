@@ -31,6 +31,14 @@ describe("desktop pet window mode", () => {
     expect(resolveFullWindowButtonPosition()).toEqual({ x: 14, y: 14 });
   });
 
+  it("keeps the chat usable beside a docked preview at the minimum width", () => {
+    // The renderer falls back to covering the chat with the preview below a
+    // 479px workspace row; the widest app sidebar is 520px, so the window floor
+    // has to keep the row above that. Mirrors SHARED_ROW_MIN_PANE_WIDTH +
+    // SHARED_ROW_MIN_CHAT_WIDTH in frontend/desktop/src/pages/sidebar-resize.tsx.
+    expect(fullWindowOptions.minWidth - 520).toBeGreaterThan(479);
+  });
+
   it("uses the Windows title-bar overlay without changing macOS traffic lights", () => {
     expect(resolveFullWindowChromeOptions("win32")).toEqual({
       titleBarStyle: "hidden",
@@ -52,7 +60,7 @@ describe("desktop pet window mode", () => {
   it("clamps the full desktop window size to the primary display work area", () => {
     expect(resolveFullWindowSize({ width: 1512, height: 945 })).toEqual({ width: 1200, height: 780 });
     expect(resolveFullWindowSize({ width: 1366, height: 728 })).toEqual({ width: 1200, height: 664 });
-    expect(resolveFullWindowSize({ width: 1024, height: 700 })).toEqual({ width: 980, height: 640 });
+    expect(resolveFullWindowSize({ width: 1024, height: 700 })).toEqual({ width: 1024, height: 640 });
   });
 
   it("uses a transparent frameless always-on-top window for pet mode", () => {

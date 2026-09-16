@@ -101,3 +101,15 @@ describe("recording deliverables", () => {
     expect(recordingFormat("audio/exotic")).toEqual({ extension: ".webm", mime: "audio/webm" });
   });
 });
+
+describe("the transcript's speaker label", () => {
+  it("is resolved rather than shipped as a template", () => {
+    // The catalogue writes the label with `{index}`, and the panel passed `id`,
+    // so every turn rendered the literal 「【说话人 {index}】」. The message
+    // renders with whatever a caller supplies, which is why this is asserted
+    // through the catalogue instead of against a literal.
+    expect(zhCNMessages["plugin.ui.audio.speakerLabel"]).toBeDefined();
+    expect(formatMessage(zhCNMessages["plugin.ui.audio.speakerLabel"], { index: 2 })).toBe("发言人 2");
+    expect(formatMessage(zhCNMessages["plugin.ui.audio.speakerLabel"], { index: 2 })).not.toContain("{index}");
+  });
+});

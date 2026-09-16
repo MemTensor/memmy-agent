@@ -242,8 +242,12 @@ function readSheetRows(document: Document, sharedStrings: readonly string[], dat
   for (const [index, cells] of grid.entries()) {
     if (cells?.some((value) => value)) lastUsedRow = index;
   }
-  return grid.slice(0, lastUsedRow + 1).map((cells) => (
-    Array.from({ length: width }, (_value, index) => cells?.[index] ?? "")
+  // Built by index, so a worksheet that skips row numbers leaves holes behind,
+  // and `map` would copy them through: `Array.prototype.map` skips holes rather
+  // than filling them. A caller that spreads the result then reads `undefined`
+  // where it was promised a row. Rebuilt by index instead, which fills them.
+  return Array.from({ length: lastUsedRow + 1 }, (_row, rowIndex) => (
+    Array.from({ length: width }, (_value, index) => grid[rowIndex]?.[index] ?? "")
   ));
 }
 

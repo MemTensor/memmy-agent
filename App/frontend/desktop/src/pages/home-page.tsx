@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution, PluginScenarioContribution } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
-import { usePluginUi } from "../app/plugin-ui-context.js";
+import { usePluginUi, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
@@ -85,6 +85,7 @@ import {
 } from "./agent-question-card.js";
 import { PluginCapabilityHost } from "./plugin-capability-host.js";
 import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
+import { RecordingEntryPage, useRecordingEntry, type RecordingDeliverFn } from "./recording-entry.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
@@ -115,6 +116,7 @@ import {
 import {
   WorkspaceArtifactPanel
 } from "./workspace-artifact-panel.js";
+import { SHARED_ROW_PRIMARY_RESERVE, useSharedRowWidth } from "./sidebar-resize.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
 import { ArrowDown, ArrowRight, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
@@ -481,6 +483,23 @@ export function selectPinnedPluginCommands(targets: PluginCommandTarget[]): Plug
 }
 
 /**
+ * Selects the command a plugin offered for the conversation top bar.
+ *
+ * The top bar belongs to the conversation, not to any one plugin, so a button
+ * only appears there because a plugin asked for it. Recording an interview is
+ * the case this exists for: it is a place the user works alongside the
+ * conversation rather than a step in it, and it has to stay reachable while
+ * the conversation moves on. When several plugins ask, the first one wins —
+ * two buttons for one slot would leave the user guessing which is which.
+ *
+ * @param targets Available plugin commands.
+ * @returns The target whose command claims the top bar, if any.
+ */
+export function selectTopbarPluginCommand(targets: PluginCommandTarget[]): PluginCommandTarget | null {
+  return targets.find((target) => target.command.topbar === true) ?? null;
+}
+
+/**
  * Selects the commands the slash palette should list.
  *
  * @param targets Available plugin commands.
@@ -519,6 +538,8 @@ export function collectPluginScenarios(plugins: InstalledPlugin[]): PluginScenar
 function PinnedPluginCommandBar(props: {
   targets: PluginCommandTarget[];
   disabled: boolean;
+  /** Buttons whose card is on screen, as `pluginId:capabilityId`. */
+  active: ReadonlySet<string>;
   onInvoke(target: PluginCommandTarget): void;
 }) {
   if (props.targets.length === 0) return null;
@@ -526,6 +547,7 @@ function PinnedPluginCommandBar(props: {
     <div className="pinned-command-bar">
       {props.targets.map((target) => {
         const Icon = resolveContributionIcon(target.command.icon);
+        const open = props.active.has(`${target.plugin.id}:${target.command.capabilityId}`);
         return (
           <button
             key={`${target.plugin.id}:${target.command.command}`}
@@ -533,6 +555,10 @@ function PinnedPluginCommandBar(props: {
             disabled={props.disabled}
             title={target.command.description}
             className="pinned-command-chip"
+            // These buttons stay on screen while their card is open, so without
+            // this the card and the button that raised it look unrelated.
+            data-open={open ? "true" : undefined}
+            aria-pressed={open}
             onClick={() => props.onInvoke(target)}
           >
             <Icon size={13} aria-hidden="true" />
@@ -542,6 +568,22 @@ function PinnedPluginCommandBar(props: {
       })}
     </div>
   );
+}
+
+/**
+ * Which pinned buttons currently have a card on screen.
+ *
+ * A pinned call is the user's own, and it holds the screen until it finishes or
+ * they close it, so its button is highlighted for exactly that long.
+ */
+export function selectOpenPinnedCapabilities(calls: readonly PluginUiCall[]): Set<string> {
+  const open = new Set<string>();
+  for (const call of calls) {
+    if (call.origin !== "user") continue;
+    if (call.events.some((event) => event.type === "result" || event.type === "error")) continue;
+    open.add(`${call.pluginId}:${call.capabilityId}`);
+  }
+  return open;
 }
 
 export function parsePluginCommandInvocation(input: string, targets: PluginCommandTarget[]): {
@@ -1168,6 +1210,9 @@ export function HomePage() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const conversationPanelRef = useRef<HTMLElement | null>(null);
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  // The row the chat and the side preview share, so the preview can cap itself
+  // to leave the chat visible instead of covering it.
+  const [workspaceLayoutRef, workspaceLayoutWidth] = useSharedRowWidth<HTMLDivElement>();
   const pendingStatusChatRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1213,6 +1258,18 @@ export function HomePage() {
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
+  // The recording entry in the top bar. Separate from the composer's recorder:
+  // that one dictates into the input box, this one captures an interview and
+  // opens a page for it.
+  //
+  // How a recording reaches the conversation is wired further down, once the
+  // composer's own helpers exist; the hook only needs a stable way to call it.
+  const deliverRecordingRef = useRef<RecordingDeliverFn | undefined>(undefined);
+  const recordingEntry = useRecordingEntry(
+    clients?.asr,
+    clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
+    (transcript, mode) => deliverRecordingRef.current?.(transcript, mode)
+  );
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const pluginUiPluginKey = useMemo(() => [...new Set(pluginUiCalls.map((call) => call.pluginId))].sort().join("\n"), [pluginUiCalls]);
   const visiblePluginCalls = useMemo(() => pluginUiCalls.filter((call) => (
@@ -1220,6 +1277,7 @@ export function HomePage() {
     || call.conversationId === state.agent.currentSessionKey
     || call.conversationId === chatScopeKey
   )), [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
+  const openPinnedCapabilities = useMemo(() => selectOpenPinnedCapabilities(visiblePluginCalls), [visiblePluginCalls]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
@@ -1934,6 +1992,9 @@ export function HomePage() {
     COMPOSER_GOAL_COMMAND,
     ...slashCommands.map((command) => command.command)
   ]);
+  // No plugin, no button: the top bar is the conversation's, and only a plugin
+  // that asked for a place there gets one.
+  const topbarPluginCommand = selectTopbarPluginCommand(pluginCommandTargets);
   // A pinned button is a shortcut for typing the command, so it invokes the
   // same capability the same way. `origin: "user"` is what tells the card it
   // may be closed outright instead of having to answer the model.
@@ -3195,6 +3256,26 @@ export function HomePage() {
     });
   }
 
+  /**
+   * Sends a recording's transcript into the conversation.
+   *
+   * The design offers two destinations, and they differ in one thing:
+   * 添加到会话 drops the file into the conversation already on screen, while
+   * 总结 starts a fresh task so the summary does not land in the middle of
+   * whatever the user was already doing. The prompt is the design's own.
+   */
+  deliverRecordingRef.current = (transcript, mode) => {
+    if (mode === "summarize") {
+      const draftScope = agentChatScopeKey(null, state.agent.newChatRequestId + 1);
+      dispatch(agentActions.newChatRequested());
+      dispatch(agentActions.composerDraftUpdated(draftScope, t("recording.summaryPrompt")));
+      void attachMediaFilesToScope(draftScope, [transcript]);
+      dispatch(appActions.navigate("/main"));
+      return;
+    }
+    void attachMediaFilesToScope(chatScopeKey, [transcript]);
+  };
+
   async function attachMediaFilesToScope(scopeKey: string, files: File[]) {
     if (!files.length) {
       return;
@@ -3351,7 +3432,7 @@ export function HomePage() {
     />
   ) : null;
 
-  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null;
+  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null || recordingEntry.open;
   const previewToggle = previewScope ? (
     <button
       type="button"
@@ -3361,6 +3442,9 @@ export function HomePage() {
       title={t("common.preview")}
       onClick={() => {
         setPluginArtifactPreview(null);
+        // The two share the side panel, so showing the files takes the
+        // recording page back out of the strip.
+        if (recordingEntry.open) recordingEntry.close();
         setPreviewPanelOpen((open) => !open);
       }}
     >
@@ -3372,7 +3456,19 @@ export function HomePage() {
     <WorkspaceArtifactPanel
       key={`${previewScope.kind}:${previewScope.key}`}
       scope={previewScope}
-      hidden={!previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null}
+      hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recordingSession !== null}
+      extraTabs={recordingEntry.open && topbarPluginCommand ? [{
+        id: "interview-recording",
+        // The label and icon come from the plugin that asked for the button, so
+        // the tab and the button that opens it read as one thing.
+        label: topbarPluginCommand.command.name,
+        icon: (() => {
+          const Icon = resolveContributionIcon(topbarPluginCommand.command.icon);
+          return <Icon size={12} aria-hidden="true" />;
+        })(),
+        render: () => <RecordingEntryPage session={recordingEntry.session} />,
+        onClose: recordingEntry.close
+      }] : []}
       rootLabel={previewRootLabel}
       loadDirectory={loadPreviewDirectory}
       loadFile={loadWorkspaceFile}
@@ -3381,6 +3477,8 @@ export function HomePage() {
       onAddToChat={addComposerContextChip}
       refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
       onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
       toolbarEnd={previewToggle}
       emptyLabel={t("workspaceArtifact.noFiles")}
       emptyDetail={previewRootLabel}
@@ -3393,6 +3491,8 @@ export function HomePage() {
       readArtifact={clients.plugins.readArtifact}
       onClose={() => setPluginArtifactPreview(null)}
       onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
     />
   ) : null;
   // A running interview takes over the visible side panel while the workspace
@@ -3401,6 +3501,8 @@ export function HomePage() {
     <InterviewRecordingPanel
       session={recordingSession}
       onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
       toolbarEnd={previewToggle}
     />
   ) : null;
@@ -3440,6 +3542,36 @@ export function HomePage() {
                 <SlidersHorizontal size={15} aria-hidden="true" />
               </button>
             ) : null}
+            {/*
+              The recording entry sits with the preview controls: it is the
+              other panel the conversation can show, and a second click on it —
+              or opening the file preview — swaps which one is in view.
+            */}
+            {topbarPluginCommand ? (
+              <button
+                type="button"
+                className={`agent-preview-toggle${recordingEntry.open ? " agent-preview-toggle--active" : ""}`}
+                aria-label={topbarPluginCommand.command.name}
+                aria-pressed={recordingEntry.open}
+                title={topbarPluginCommand.command.name}
+                data-recording-toggle
+                onClick={() => {
+                  // One panel at a time: the recording page and the file
+                  // preview share the side panel, so opening one closes the
+                  // other.
+                  if (!recordingEntry.open) {
+                    setPluginArtifactPreview(null);
+                    setPreviewPanelOpen(false);
+                  }
+                  recordingEntry.toggle();
+                }}
+              >
+                {(() => {
+                  const Icon = resolveContributionIcon(topbarPluginCommand.command.icon);
+                  return <Icon size={15} aria-hidden="true" />;
+                })()}
+              </button>
+            ) : null}
             {!sidePreviewOpen ? previewToggle : null}
           </div>
         </div>
@@ -3448,6 +3580,7 @@ export function HomePage() {
       windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div
+        ref={workspaceLayoutRef}
         className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
         style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
       >
@@ -3775,6 +3908,7 @@ export function HomePage() {
                 <PinnedPluginCommandBar
                   targets={selectPinnedPluginCommands(pluginCommandTargets)}
                   disabled={!clients}
+                  active={openPinnedCapabilities}
                   onInvoke={invokePinnedPluginCommand}
                 />
                 <div className="agent-composer-stack">

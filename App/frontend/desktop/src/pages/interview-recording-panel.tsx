@@ -43,6 +43,10 @@ export interface InterviewRecordingPanelProps {
   session: RecordingPanelSession;
   onWidthChange?: (width: number) => void;
   toolbarEnd?: ReactNode;
+  /** Measured inline size of the row this pane shares with the chat. */
+  sharedRowWidth?: number | null;
+  /** Space the shared row always keeps for the chat beside this pane. */
+  sharedRowReservedWidth?: number;
 }
 
 /**
@@ -60,20 +64,22 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
     defaultWidth: 520,
     minWidth: 360,
     maxWidth: 760,
-    resizeDirection: -1
+    resizeDirection: -1,
+    availableWidth: props.sharedRowWidth ?? null,
+    reservedPrimaryWidth: props.sharedRowReservedWidth
   });
 
   useEffect(() => {
-    props.onWidthChange?.(resize.width);
-  }, [resize.width, props.onWidthChange]);
+    props.onWidthChange?.(resize.appliedWidth);
+  }, [resize.appliedWidth, props.onWidthChange]);
 
   return (
     <>
       <SidebarResizeHandle
         label={t("workspaceArtifact.resize")}
-        width={resize.width}
-        minWidth={resize.minWidth}
-        maxWidth={resize.maxWidth}
+        width={resize.appliedWidth}
+        minWidth={resize.appliedMinWidth}
+        maxWidth={resize.appliedMaxWidth}
         isResizing={resize.isResizing}
         onResizeStart={resize.beginResize}
         onResizeBy={resize.resizeBy}
@@ -180,7 +186,7 @@ function TranscriptTurns(props: { transcript: RecordingPanelTranscript }): React
               {(turn.speakerId ?? 0) + 1}
             </span>
             <span className="recording-panel__speaker-name">
-              {t("plugin.ui.audio.speaker", { id: (turn.speakerId ?? 0) + 1 })}
+              {t("plugin.ui.audio.speakerLabel", { index: (turn.speakerId ?? 0) + 1 })}
             </span>
             {turn.startMs === undefined ? null : (
               <span className="recording-panel__turn-time">{formatClock(turn.startMs)}</span>

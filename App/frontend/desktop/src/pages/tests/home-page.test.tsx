@@ -31,6 +31,7 @@ import {
   collectPluginScenarios,
   selectPinnedPluginCommands,
   selectSlashPluginCommands,
+  selectTopbarPluginCommand,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -150,6 +151,50 @@ describe("HomePage", () => {
     // A pinned command already has a button; listing it in the palette too
     // would offer the same action twice.
     expect(selectSlashPluginCommands(targets).map((item) => item.command.command)).toEqual(["/review"]);
+  });
+
+  it("puts a top-bar button up only for a plugin that asked for one", () => {
+    const pluginWith = (id: string, command: string, topbar?: boolean) => InstalledPluginSchema.parse({
+      id,
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id,
+        name: id,
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [{
+          command,
+          name: "Record",
+          description: "Record an interview",
+          capabilityId: "run",
+          ...(topbar === undefined ? {} : { topbar })
+        }],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+
+    // The top bar belongs to the conversation, so a plugin that never asked is
+    // not given a button there — the recording entry is opt-in per plugin.
+    expect(selectTopbarPluginCommand(collectPluginCommandTargets([pluginWith("com.example.a", "/record")]))).toBeNull();
+    expect(
+      selectTopbarPluginCommand(collectPluginCommandTargets([pluginWith("com.example.a", "/record", true)]))?.command.command
+    ).toBe("/record");
+    // Only one button fits the slot, so the first claim wins rather than two
+    // buttons leaving the user to guess.
+    expect(
+      selectTopbarPluginCommand(collectPluginCommandTargets([
+        pluginWith("com.example.a", "/record", true),
+        pluginWith("com.example.b", "/other", true)
+      ]))?.command.command
+    ).toBe("/record");
   });
 
   it("collects scenario entry cards only from plugins that can serve them", () => {
@@ -551,7 +596,9 @@ describe("HomePage", () => {
     expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
-    expect(source).toContain("hidden={!previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null}");
+    // The recording page shares the panel, so the panel stays mounted when the
+    // file preview is closed but a recording is open.
+    expect(source).toContain("hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recordingSession !== null}");
     expect(source).toContain("toolbarEnd={previewToggle}");
     expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
@@ -891,7 +938,7 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
     expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
     expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
-    expect(styles).toContain("@container agent-workspace (max-width: 960px)");
+    expect(styles).toContain("@container agent-workspace (max-width: 479px)");
     expect(styles).toContain(".agent-workspace-layout--preview-open > .workspace-artifact-preview-pane");
     expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
     expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");

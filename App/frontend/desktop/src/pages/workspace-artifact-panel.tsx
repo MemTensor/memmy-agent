@@ -40,6 +40,9 @@ const WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.previewWid
 const WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.fileBrowserWidth";
 const ROOT_DIRECTORY_KEY = "";
 
+/** Marks a reducer entry that names an extra tab rather than a workspace file. */
+const EXTRA_TAB_PREFIX = "extra:";
+
 interface PreviewTabsState {
   paths: string[];
   activePath: string | null;
@@ -92,6 +95,16 @@ export interface WorkspaceArtifactPanelProps {
   refreshKey?: string | number;
   /** Reports the persisted outer pane width to layouts that anchor overlays beside it. */
   onWidthChange?: (width: number) => void;
+  /**
+   * Measured inline size of the row this pane shares with the chat.
+   *
+   * Passed only when the host owns that row; the pane then caps itself so the
+   * chat stays visible instead of being pushed out of the row. Left undefined,
+   * the pane keeps its own bounds.
+   */
+  sharedRowWidth?: number | null;
+  /** Space the shared row always keeps for the chat beside this pane. */
+  sharedRowReservedWidth?: number;
   /** Hides the pane without unmounting it, preserving open tabs and view state. */
   hidden?: boolean;
   /** Controls rendered at the far right of the native file-tab toolbar. */
@@ -99,6 +112,24 @@ export interface WorkspaceArtifactPanelProps {
   emptyLabel?: string;
   emptyDetail?: string;
   truncatedLabel?: string;
+  /**
+   * A page that shares this panel's tab strip without being a file.
+   *
+   * The recording page belongs beside the previewed documents — a lawyer
+   * records the interview and reads the contract in the same panel — but it has
+   * no workspace path, so it cannot go through the file-tab machinery. It is
+   * drawn as one more tab, keyed by {@link ExtraPreviewTab.id}.
+   */
+  extraTabs?: readonly ExtraPreviewTab[];
+}
+
+/** A non-file page in the preview panel's tab strip. */
+export interface ExtraPreviewTab {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  render(): ReactNode;
+  onClose(): void;
 }
 
 function fileNameFromPath(path: string): string {
@@ -132,6 +163,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     { paths: [], activePath: null }
   );
   const [previewViewState, setPreviewViewState] = useState<Record<string, FilePreviewViewState>>({});
+  const openPreviewTabsRef = useRef<string[]>([]);
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
   const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
   const [internalRefreshKey, setInternalRefreshKey] = useState(0);
@@ -145,7 +177,9 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     defaultWidth: 520,
     minWidth: 360,
     maxWidth: 760,
-    resizeDirection: -1
+    resizeDirection: -1,
+    availableWidth: props.sharedRowWidth ?? null,
+    reservedPrimaryWidth: props.sharedRowReservedWidth
   });
   const fileBrowserResize = useResizableSidebar({
     storageKey: WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY,
@@ -156,8 +190,10 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   });
 
   useEffect(() => {
-    props.onWidthChange?.(previewResize.width);
-  }, [previewResize.width, props.onWidthChange]);
+    // Report the rendered width, not the preference: the top-bar actions are
+    // positioned against this value and must track the pane as it narrows.
+    props.onWidthChange?.(previewResize.appliedWidth);
+  }, [previewResize.appliedWidth, props.onWidthChange]);
 
   const requestDirectory = useCallback(async (
     scope: WorkspaceFilesScope,
@@ -358,17 +394,43 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     props.scope.kind,
     props.scope.key
   ]);
+  openPreviewTabsRef.current = openPreviewTabs;
   const breadcrumbParts = previewPath?.replace(/\\/g, "/").split("/").filter(Boolean) ?? [];
 
+  // An extra tab is opened by being offered: the top bar's toggle adds it and
+  // removes it, so the panel follows the toggle rather than tracking its own
+  // copy of the open state. A tab that is taken away has its entry dropped, or
+  // closing it would leave a path in the strip that names nothing.
+  const extraTabs = props.extraTabs ?? [];
+  const extraIds = extraTabs.map((tab) => tab.id).join(",");
+  useEffect(() => {
+    const offered = new Set(extraTabs.map((tab) => tab.id));
+    for (const tab of extraTabs) {
+      dispatchPreviewTabs({ type: "select", path: `${EXTRA_TAB_PREFIX}${tab.id}` });
+    }
+    for (const path of openPreviewTabsRef.current) {
+      if (path.startsWith(EXTRA_TAB_PREFIX) && !offered.has(path.slice(EXTRA_TAB_PREFIX.length))) {
+        dispatchPreviewTabs({ type: "close", path });
+      }
+    }
+  }, [extraIds]);
+
   if (props.hidden) return null;
+
+  const extraFor = (path: string): ExtraPreviewTab | undefined => (
+    path.startsWith(EXTRA_TAB_PREFIX)
+      ? extraTabs.find((tab) => `${EXTRA_TAB_PREFIX}${tab.id}` === path)
+      : undefined
+  );
+  const activeExtra = previewPath ? extraFor(previewPath) : undefined;
 
   return (
     <>
       <SidebarResizeHandle
         label={t("workspaceArtifact.resize")}
-        width={previewResize.width}
-        minWidth={previewResize.minWidth}
-        maxWidth={previewResize.maxWidth}
+        width={previewResize.appliedWidth}
+        minWidth={previewResize.appliedMinWidth}
+        maxWidth={previewResize.appliedMaxWidth}
         isResizing={previewResize.isResizing}
         onResizeStart={previewResize.beginResize}
         onResizeBy={previewResize.resizeBy}
@@ -378,16 +440,19 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
           <div className="workspace-artifact-file-tabs" role="tablist" aria-label={t("workspaceArtifact.openFiles")}>
             {openPreviewTabs.map((path) => {
               const active = previewPath === path;
+              const extra = extraFor(path);
+              const label = extra?.label ?? fileNameFromPath(path);
               return (
                 <div key={path} className={`workspace-artifact-file-tab${active ? " workspace-artifact-file-tab--active" : ""}`} role="presentation">
                   <button
                     type="button"
                     role="tab"
                     aria-selected={active}
-                    title={path}
+                    title={label}
                     onClick={() => dispatchPreviewTabs({ type: "activate", path })}
                   >
-                    {fileNameFromPath(path)}
+                    {extra ? <span className="workspace-artifact-file-tab__icon">{extra.icon}</span> : null}
+                    {label}
                   </button>
                   <button
                     type="button"
@@ -397,12 +462,12 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
                     onPointerUp={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      closePreviewTab(path);
+                      extra ? extra.onClose() : closePreviewTab(path);
                     }}
                     onClick={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      closePreviewTab(path);
+                      extra ? extra.onClose() : closePreviewTab(path);
                     }}
                   >
                     <X size={11} />
@@ -419,6 +484,9 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
             {props.toolbarEnd}
           </div>
         </header>
+        {/* A recording has no workspace path, so a breadcrumb would be a trail
+            to nowhere. */}
+        {activeExtra ? null : (
         <div className="workspace-artifact-breadcrumb-bar">
           <nav className="workspace-artifact-breadcrumbs" aria-label={t("workspaceArtifact.breadcrumbs")}>
             <button type="button" title={resolvedRootLabel} onClick={() => revealBreadcrumbDirectory("")}>
@@ -449,9 +517,12 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
             </button>
           ) : null}
         </div>
+        )}
         <div className="workspace-artifact-preview-body">
           <section className="workspace-artifact-preview-main">
-            {previewPath && previewResource ? (
+            {activeExtra ? (
+              activeExtra.render()
+            ) : previewPath && previewResource ? (
               <FilePreview
                 resource={previewResource}
                 viewState={previewViewState[previewPath]}
@@ -469,7 +540,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
               </div>
             )}
           </section>
-          {fileTreeOpen && hasEntries ? (
+          {fileTreeOpen && hasEntries && !activeExtra ? (
             <SidebarResizeHandle
               label={t("workspaceArtifact.resizeFiles")}
               width={fileBrowserResize.width}
@@ -481,10 +552,10 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
             />
           ) : null}
           <aside
-            className={`workspace-artifact-file-browser${fileTreeOpen && hasEntries ? "" : " workspace-artifact-file-browser--collapsed"}`}
+            className={`workspace-artifact-file-browser${fileTreeOpen && hasEntries && !activeExtra ? "" : " workspace-artifact-file-browser--collapsed"}`}
             style={fileBrowserResize.sidebarStyle}
           >
-            {fileTreeOpen && hasEntries ? (
+            {fileTreeOpen && hasEntries && !activeExtra ? (
               <nav className="workspace-artifact-file-list">
                 <div className="workspace-artifact-file-root" title={resolvedRootLabel}>
                   {resolvedRootLabel}
