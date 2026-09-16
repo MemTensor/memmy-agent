@@ -3,6 +3,7 @@ import path from "node:path";
 
 const DEFAULT_MAX_ENTRIES = 500;
 const MAX_RELATIVE_PATH_LENGTH = 4_096;
+const DEFAULT_MAX_PREVIEW_BYTES = 100 * 1024 * 1024;
 
 export type WorkspaceFilesRootKind = "project" | "task";
 export type WorkspaceFileEntryKind = "directory" | "file";
@@ -23,6 +24,18 @@ export type WorkspaceFilesListing = {
   path: string;
   entries: WorkspaceFileEntry[];
   truncated: boolean;
+};
+
+export type WorkspaceFileLocation = {
+  path: string;
+  absolutePath: string;
+  name: string;
+  size: number;
+  modifiedAt: string | null;
+};
+
+export type WorkspaceFileContent = WorkspaceFileLocation & {
+  body: Buffer;
 };
 
 export class WorkspaceFilesError extends Error {
@@ -180,4 +193,79 @@ export function listWorkspaceFiles(
     entries: entries.slice(0, maxEntries),
     truncated: entries.length > maxEntries,
   };
+}
+
+/**
+ * Resolves one regular file below a workspace root without following symlinks.
+ *
+ * The same relative-path grammar as directory listings is used so callers
+ * cannot switch to an absolute path or escape the selected project/task root.
+ */
+export function resolveWorkspaceFile(
+  rootPath: string,
+  relativePath: string,
+): WorkspaceFileLocation {
+  const root = canonicalRoot(rootPath);
+  const parts = relativePathParts(relativePath);
+  if (!parts.length) {
+    throw new WorkspaceFilesError("workspace_file_not_found", 404);
+  }
+
+  let candidate = root;
+  let metadata: fs.Stats | null = null;
+  for (const part of parts) {
+    candidate = path.join(candidate, part);
+    try {
+      metadata = fs.lstatSync(candidate);
+    } catch {
+      throw new WorkspaceFilesError("workspace_file_not_found", 404);
+    }
+    if (metadata.isSymbolicLink()) {
+      throw new WorkspaceFilesError("workspace_files_symlink_not_expandable", 400);
+    }
+  }
+
+  if (!metadata?.isFile()) {
+    throw new WorkspaceFilesError("workspace_file_not_found", 404);
+  }
+
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(candidate);
+  } catch {
+    throw new WorkspaceFilesError("workspace_file_not_found", 404);
+  }
+  if (!isContainedPath(root, canonical)) {
+    throw new WorkspaceFilesError("workspace_files_path_invalid", 400);
+  }
+  return {
+    path: apiPath(parts),
+    absolutePath: canonical,
+    name: parts.at(-1) ?? path.basename(canonical),
+    size: metadata.size,
+    modifiedAt: Number.isFinite(metadata.mtimeMs) ? metadata.mtime.toISOString() : null,
+  };
+}
+
+/** Reads one resolved workspace file while enforcing the preview byte limit. */
+export function readWorkspaceFile(
+  rootPath: string,
+  relativePath: string,
+  maxBytes = DEFAULT_MAX_PREVIEW_BYTES,
+): WorkspaceFileContent {
+  const file = resolveWorkspaceFile(rootPath, relativePath);
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || file.size > maxBytes) {
+    throw new WorkspaceFilesError("workspace_file_too_large", 413);
+  }
+  try {
+    const body = fs.readFileSync(file.absolutePath);
+    // Re-check after reading to close the lstat/read race if the file grew.
+    if (body.byteLength > maxBytes) {
+      throw new WorkspaceFilesError("workspace_file_too_large", 413);
+    }
+    return { ...file, size: body.byteLength, body };
+  } catch (error) {
+    if (error instanceof WorkspaceFilesError) throw error;
+    throw new WorkspaceFilesError("workspace_file_unavailable", 403);
+  }
 }

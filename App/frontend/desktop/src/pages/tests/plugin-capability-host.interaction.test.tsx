@@ -40,7 +40,6 @@ const plugin = InstalledPluginSchema.parse({
   createdAt: "2026-08-31T00:00:00.000Z",
   updatedAt: "2026-08-31T00:00:00.000Z"
 });
-
 describe("PluginCapabilityHost", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -942,7 +941,6 @@ describe("PluginCapabilityHost", () => {
     );
   });
 });
-
 describe("plugin UI event reduction", () => {
   it("marks an interaction stale when a newer task artifact is observed", () => {
     const calls: PluginUiCall[] = [
@@ -1145,7 +1143,6 @@ describe("plugin UI event reduction", () => {
     expect(document).toContain("form-action 'none'");
   });
 });
-
 describe("readQuestions", () => {
   it("drops entries that cannot be asked or answered, and keeps the rest in order", () => {
     expect(readQuestions([
@@ -1169,7 +1166,6 @@ describe("readQuestions", () => {
     expect(readQuestions("not a list")).toEqual([]);
   });
 });
-
 describe("summarizeAcceptedFormats", () => {
   const t = ((key: string) => ({
     "plugin.ui.format.image": "图片",
@@ -1190,7 +1186,6 @@ describe("summarizeAcceptedFormats", () => {
     expect(summarizeAcceptedFormats(".doc,.docx", t)).toBe("Word");
   });
 });
-
 describe("isBarePresentation", () => {
   const call = (events: PluginUiCall["events"]): PluginUiCall => ({
     pluginId: "demo", capabilityId: "run", callId: "c", conversationId: "websocket:chat-1", origin: "user", events
@@ -1215,7 +1210,6 @@ describe("isBarePresentation", () => {
     ]))).toBe(false);
   });
 });
-
 describe("selectRegionPluginCalls", () => {
   const call = (origin: "user" | "agent", callId: string, events: PluginUiCall["events"]): PluginUiCall => ({
     pluginId: "demo", capabilityId: "run", callId, conversationId: "websocket:chat-1", origin, events
@@ -1233,4 +1227,3 @@ describe("selectRegionPluginCalls", () => {
     expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
   });
 });
-

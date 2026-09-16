@@ -18,6 +18,7 @@ import {
   type MemmyAgentWebSocketConnection,
   type UploadAgentMediaInput,
   type UploadedAgentMedia,
+  type WorkspaceFilesScope,
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
@@ -112,8 +113,7 @@ import {
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
 import {
-  WorkspaceArtifactPanel,
-  type WorkspaceArtifactContent
+  WorkspaceArtifactPanel
 } from "./workspace-artifact-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
@@ -129,9 +129,6 @@ const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
-const WORKSPACE_TEXT_PREVIEW_PATTERN = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html?|ini|java|js|json|jsx|log|md|mjs|py|rb|rs|sh|sql|tex|toml|ts|tsx|txt|xml|ya?ml)$/i;
-const WORKSPACE_TEXT_PREVIEW_MAX_CHARS = 512 * 1024;
-
 export function updateAgentComposerOverlayHeight(
   panel: HTMLElement,
   composer: HTMLElement,
@@ -1275,8 +1272,14 @@ export function HomePage() {
     ? state.agent.projects.find((project) => project.id === activeProjectId) ?? null
     : null;
   const previewRootLabel = activeProject?.name
+    ?? selectedDraftProject?.name
     ?? activeTask?.title
     ?? t("workspaceArtifact.taskFolder");
+  const previewScope: WorkspaceFilesScope | null = previewSessionKey
+    ? { kind: "session", key: previewSessionKey }
+    : selectedDraftProject
+      ? { kind: "project", key: selectedDraftProject.id }
+      : null;
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1319,11 +1322,17 @@ export function HomePage() {
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
 
   useEffect(() => {
-    if (!hasActiveConversation) {
+    if (!previewScope) {
       setPreviewPanelOpen(false);
       setPluginArtifactPreview(null);
     }
-  }, [hasActiveConversation]);
+  }, [previewScope?.kind, previewScope?.key]);
+
+  useEffect(() => {
+    if (!previewPanelOpen && pluginArtifactPreview === null) return;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, [pluginArtifactPreview, previewPanelOpen]);
 
   useEffect(() => {
     if (!environmentScope) setEnvironmentPanelOpen(false);
@@ -1344,31 +1353,26 @@ export function HomePage() {
       openArtifact: (path: string) => client.openArtifact(path, sessionKey)
     };
   }, [clients?.memmyAgent, state.agent.currentSessionKey]);
-  const loadPreviewDirectory = useCallback((sessionKey: string, relativePath: string) => {
+  const loadPreviewDirectory = useCallback((scope: WorkspaceFilesScope, relativePath: string) => {
     const client = clients?.memmyAgent;
     if (!client) return Promise.reject(new Error("agent_client_unavailable"));
-    return client.listWorkspaceFiles(sessionKey, relativePath);
+    return client.listWorkspaceFiles(scope, relativePath);
   }, [clients?.memmyAgent]);
-  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<WorkspaceArtifactContent | null> => {
+  const loadWorkspaceFile = useCallback((relativePath: string, signal?: AbortSignal): Promise<Blob> => {
     const client = clients?.memmyAgent;
-    if (!client || !previewSessionKey) return null;
-    const artifact = await client.resolveArtifact(relativePath, previewSessionKey);
-    const extension = artifact.name.includes(".") ? artifact.name.split(".").pop()?.toUpperCase() ?? "" : "";
-    if (artifact.media_url && WORKSPACE_TEXT_PREVIEW_PATTERN.test(artifact.name)) {
-      const response = await fetch(artifact.media_url);
-      if (response.ok) {
-        const text = (await response.text()).slice(0, WORKSPACE_TEXT_PREVIEW_MAX_CHARS);
-        return {
-          title: artifact.name,
-          sections: [{ heading: extension || t("common.preview"), body: text || artifact.path }]
-        };
-      }
-    }
-    return {
-      title: artifact.name,
-      sections: [{ heading: extension || t("common.preview"), body: artifact.path }]
-    };
-  }, [clients?.memmyAgent, previewSessionKey, t]);
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.readWorkspaceFile(previewScope, relativePath, signal);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
+  const openWorkspaceFile = useCallback((relativePath: string): Promise<void> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.openWorkspaceFile(previewScope, relativePath);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
+  const revealWorkspaceFile = useCallback((relativePath: string): Promise<void> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.revealWorkspaceFile(previewScope, relativePath);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -3348,7 +3352,7 @@ export function HomePage() {
   ) : null;
 
   const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null;
-  const previewToggle = hasActiveConversation ? (
+  const previewToggle = previewScope ? (
     <button
       type="button"
       className={`agent-preview-toggle${previewPanelOpen ? " agent-preview-toggle--active" : ""}`}
@@ -3364,30 +3368,16 @@ export function HomePage() {
     </button>
   ) : null;
 
-  // A running interview takes over the side panel: the transcript arriving
-  // there is the thing the user is watching, and it is transient, so it takes
-  // precedence over the file previews the panel otherwise shows.
-  const previewPanel = recordingSession ? (
-    <InterviewRecordingPanel
-      session={recordingSession}
-      onWidthChange={setPreviewPanelWidth}
-      toolbarEnd={previewToggle}
-    />
-  ) : pluginArtifactPreview && clients ? (
-    <PluginArtifactPreviewPanel
-      key={pluginArtifactPreview.id}
-      artifact={pluginArtifactPreview}
-      readArtifact={clients.plugins.readArtifact}
-      onClose={() => setPluginArtifactPreview(null)}
-      onWidthChange={setPreviewPanelWidth}
-    />
-  ) : previewPanelOpen && hasActiveConversation ? (
+  const workspacePreviewPanel = previewScope ? (
     <WorkspaceArtifactPanel
-      key={previewSessionKey ?? chatScopeKey}
-      sessionKey={previewSessionKey ?? ""}
+      key={`${previewScope.kind}:${previewScope.key}`}
+      scope={previewScope}
+      hidden={!previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null}
       rootLabel={previewRootLabel}
       loadDirectory={loadPreviewDirectory}
-      loadPreview={loadWorkspaceFilePreview}
+      loadFile={loadWorkspaceFile}
+      openFile={openWorkspaceFile}
+      revealFile={revealWorkspaceFile}
       onAddToChat={addComposerContextChip}
       refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
       onWidthChange={setPreviewPanelWidth}
@@ -3396,6 +3386,31 @@ export function HomePage() {
       emptyDetail={previewRootLabel}
     />
   ) : null;
+  const pluginPreviewPanel = pluginArtifactPreview && clients && !recordingSession ? (
+    <PluginArtifactPreviewPanel
+      key={pluginArtifactPreview.id}
+      artifact={pluginArtifactPreview}
+      readArtifact={clients.plugins.readArtifact}
+      onClose={() => setPluginArtifactPreview(null)}
+      onWidthChange={setPreviewPanelWidth}
+    />
+  ) : null;
+  // A running interview takes over the visible side panel while the workspace
+  // preview remains mounted in the background so its tabs and view state survive.
+  const recordingPreviewPanel = recordingSession ? (
+    <InterviewRecordingPanel
+      session={recordingSession}
+      onWidthChange={setPreviewPanelWidth}
+      toolbarEnd={previewToggle}
+    />
+  ) : null;
+  const previewPanel = (
+    <>
+      {workspacePreviewPanel}
+      {recordingPreviewPanel}
+      {pluginPreviewPanel}
+    </>
+  );
 
   return (
     <AppFrame

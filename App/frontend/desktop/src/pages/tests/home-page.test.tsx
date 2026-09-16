@@ -548,9 +548,10 @@ describe("HomePage", () => {
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
     expect(source).toContain('className="agent-conversation-composer"');
     expect(source).toContain("{environmentScope ? (");
-    expect(source).toContain("const previewToggle = hasActiveConversation ? (");
+    expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
+    expect(source).toContain("hidden={!previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null}");
     expect(source).toContain("toolbarEnd={previewToggle}");
     expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
@@ -895,6 +896,8 @@ describe("HomePage", () => {
     expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
     expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
     expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
+    expect(styles).toMatch(/body:has\(\.agent-workspace-layout--preview-open\) \.window-drag-region\s*{[^}]*display:\s*none;/s);
+    expect(styles).toMatch(/body:has\(\.agent-workspace-layout--preview-open\) \.app-frame-content-topbar\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
     expect(styles).toContain("right: calc(44px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
