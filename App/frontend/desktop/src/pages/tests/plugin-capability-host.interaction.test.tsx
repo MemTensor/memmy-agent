@@ -1144,6 +1144,18 @@ describe("plugin UI event reduction", () => {
     expect(occludeUserRaisedCalls([pinned, asked]).map((call) => call.callId)).toEqual(["asked"]);
   });
 
+  it("never hides the recorder while the Agent waits for its own answer", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const recorder = { ...base, callId: "recorder", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "rec", type: "audio-record" as const, payload: {} } }] };
+    const guide = { ...base, callId: "guide", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "g", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Hiding the recorder would unmount the card holding the microphone, and a
+    // recording in progress cannot be taken again. It also is not competing for
+    // the same answer, so the Agent's card loses nothing by leaving it up.
+    expect(occludeUserRaisedCalls([recorder, guide, asked]).map((call) => call.callId)).toEqual(["recorder", "asked"]);
+  });
+
   it("brings the user's card back once the Agent's card is no longer waiting", () => {
     const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
     const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
@@ -1274,5 +1286,37 @@ describe("selectRegionPluginCalls", () => {
     ];
     expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
     expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
+  });
+
+  it("sends the interview recorder to the side column, not over the conversation", () => {
+    const recorder: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } }
+    ];
+    const calls = [
+      call("user", "recorder", recorder),
+      call("user", "guide", live),
+      call("agent", "asked", live)
+    ];
+
+    // The recorder draws its own bar and runs for as long as the interview, so
+    // it belongs in the column beside the transcript it feeds.
+    expect(selectRegionPluginCalls(calls, "panel").map((item) => item.callId)).toEqual(["recorder"]);
+    // Everything else the user raised keeps its place over the composer, and
+    // the recorder does not appear in both regions at once.
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["guide"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["asked"]);
+  });
+
+  it("leaves a finished recorder in the transcript with its deliverables", () => {
+    const delivered: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } },
+      { type: "result", output: {} }
+    ];
+    const calls = [call("user", "done-recorder", delivered)];
+
+    // Once the recording is answered there is nothing left to record, so the
+    // column closes and the files it produced stay in the history.
+    expect(selectRegionPluginCalls(calls, "panel")).toEqual([]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-recorder"]);
   });
 });

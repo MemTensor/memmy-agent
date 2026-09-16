@@ -9,6 +9,7 @@ import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../ap
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
+import type { PluginUiCall } from "../../app/plugin-ui-context.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
@@ -32,6 +33,7 @@ import {
   selectPinnedPluginCommands,
   selectSlashPluginCommands,
   selectTopbarPluginCommand,
+  selectPinnedDismissal,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -72,6 +74,7 @@ import {
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
 const agentModelSelectorSourcePath = fileURLToPath(new URL("../../components/agent-model-selector.tsx", import.meta.url));
+const pluginCapabilityHostSourcePath = fileURLToPath(new URL("../plugin-capability-host.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
@@ -195,6 +198,60 @@ describe("HomePage", () => {
         pluginWith("com.example.b", "/other", true)
       ]))?.command.command
     ).toBe("/record");
+  });
+
+  it("finds the card a pinned button opened so a second press closes it", () => {
+    const call = (callId: string, origin: "user" | "agent", events: PluginUiCall["events"]): PluginUiCall => ({
+      pluginId: "com.example.review",
+      capabilityId: "run",
+      callId,
+      conversationId: "websocket:chat-1",
+      origin,
+      events
+    });
+    const live: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: {} } }
+    ];
+    const finished: PluginUiCall["events"] = [{ type: "result", output: {} }];
+
+    // A live card the user opened is what the button closes.
+    expect(selectPinnedDismissal([call("live", "user", live)], "com.example.review", "run")).toBe("live");
+    // An Agent's question is not this button's to close, even under the same
+    // plugin and capability: the Agent is still waiting on the answer.
+    expect(selectPinnedDismissal([call("asked", "agent", live)], "com.example.review", "run")).toBeNull();
+    // A card that already delivered has nothing left to close, so its button
+    // goes back to opening a new one.
+    expect(selectPinnedDismissal([call("done", "user", finished)], "com.example.review", "run")).toBeNull();
+    // Another plugin's card must not be mistaken for this button's.
+    expect(selectPinnedDismissal([call("live", "user", live)], "com.example.other", "run")).toBeNull();
+    // With both on screen the newest is the one the button just opened.
+    expect(
+      selectPinnedDismissal([call("older", "user", live), call("newer", "user", live)], "com.example.review", "run")
+    ).toBe("newer");
+  });
+
+  it("keeps the conversation reachable when a pinned card is on screen", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    // The overlay sits on top of the scroller, so a card tall enough to reach
+    // the pane's top would otherwise take the wheel with it and leave the
+    // conversation above it unreachable.
+    expect(styles).toMatch(/\.plugin-capability-region--pinned\s*\{[^}]*max-height:/s);
+    expect(styles).toMatch(/\.plugin-capability-region--pinned\s*\{[^}]*overflow-y:\s*auto;/s);
+
+    // Only the controls take the pointer; the backdrop between them lets a
+    // gesture through to the transcript underneath.
+    expect(styles).toMatch(/\.agent-conversation-composer\s*>\s*\*\s*\{[^}]*pointer-events:\s*none;/s);
+    expect(styles).toMatch(/\.agent-conversation-composer\s*>\s*\*\s*>\s*\*\s*\{[^}]*pointer-events:\s*auto;/s);
+
+    // The pinned host is the one that carries the cap.
+    const host = readFileSync(pluginCapabilityHostSourcePath, "utf8");
+    expect(host).toContain("plugin-capability-region plugin-capability-region--pinned");
+    // A card closed from its button must stay closed rather than being
+    // replaced by the cancellation it caused.
+    expect(host).toContain("props.dismissedCallIds?.has(call.callId)");
+    expect(source).toContain("dismissedCallIds={dismissedPluginCalls}");
   });
 
   it("collects scenario entry cards only from plugins that can serve them", () => {
@@ -596,9 +653,9 @@ describe("HomePage", () => {
     expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
-    // The recording page shares the panel, so the panel stays mounted when the
-    // file preview is closed but a recording is open.
-    expect(source).toContain("hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recordingSession !== null}");
+    // The recorder shares the panel, so the file preview stays mounted when it
+    // is closed but a recorder is on screen, and hides behind one that is open.
+    expect(source).toContain("hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recorderPaneOpen}");
     expect(source).toContain("toolbarEnd={previewToggle}");
     expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
