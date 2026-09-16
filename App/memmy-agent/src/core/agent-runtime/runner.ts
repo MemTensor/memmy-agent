@@ -1097,6 +1097,7 @@ export class AgentRunner {
         toolName: call.name,
         callId: call.id ?? null,
         sessionKey: spec.sessionKey ?? null,
+        modelPreset: spec.actualModelContext?.presetId ?? null,
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {
             path: path.resolve(outcome.path),

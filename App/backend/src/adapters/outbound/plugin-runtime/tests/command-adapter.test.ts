@@ -184,7 +184,7 @@ describe("CommandPluginAdapter", () => {
 
   it("brokers approved Host-service requests over the private NDJSON channel", async () => {
     const adapter = createCommandPluginAdapter({
-      hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}` }) },
+      hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}:${call.modelPreset}` }) },
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", `
@@ -206,8 +206,9 @@ describe("CommandPluginAdapter", () => {
     pluginContext.plugin.approvedPermissions = [permission];
     const session = await adapter.activate(pluginContext);
     expect(await collect(adapter.invoke(session, {
-      callId: "call-1", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
-    }))).toEqual([{ type: "result", output: { host: { content: "model:conversation-1" } } }]);
+      callId: "call-1", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1",
+      modelPreset: "account-deepseek-v4.1-flash", input: {}
+    }))).toEqual([{ type: "result", output: { host: { content: "model:conversation-1:account-deepseek-v4.1-flash" } } }]);
   });
 
   it("aborts in-flight Host services when a command-plugin run is cancelled", async () => {

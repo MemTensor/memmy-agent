@@ -39,6 +39,26 @@ describe("插件模型策略", () => {
     });
   });
 
+  it("优先解析发起插件调用的对话模型预设", async () => {
+    const resolveAssignedModel = vi.fn(async () => ACCOUNT_PRESET);
+
+    const resolved = await resolvePluginModelSelection({
+      accountOnly: true,
+      userMode: "account",
+      account: signedIn() as never,
+      requestedPreset: "account-deepseek-v4.1-flash",
+      resolveAssignedModel: resolveAssignedModel as never
+    });
+
+    expect(resolved).toBe(ACCOUNT_PRESET);
+    expect(resolveAssignedModel).toHaveBeenCalledWith({
+      mode: "account",
+      activeAccountId: "u-1",
+      capability: "agent",
+      requestedPreset: "account-deepseek-v4.1-flash"
+    });
+  });
+
   it("account-only 插件在 BYOK 模式下拿不到模型", async () => {
     const resolveAssignedModel = vi.fn(async () => BYOK_PRESET);
 

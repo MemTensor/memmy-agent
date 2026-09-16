@@ -228,6 +228,8 @@ export const CapabilityCallSchema = z.object({
   pluginId: PluginIdentifierSchema,
   capabilityId: PluginIdentifierSchema,
   conversationId: z.string().trim().min(1),
+  /** Exact Agent preset selected for the turn that initiated this call. */
+  modelPreset: z.string().trim().min(1).optional(),
   input: z.unknown(),
   deadline: z.string().datetime().optional()
 });

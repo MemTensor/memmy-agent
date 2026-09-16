@@ -340,6 +340,7 @@ async function respondToHostServiceRequest(
         pluginId: session.pluginId,
         callId: call.callId,
         conversationId: call.conversationId,
+        modelPreset: call.modelPreset,
         service: request.service,
         input: request.input,
         deadline: call.deadline,

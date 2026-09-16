@@ -170,10 +170,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   });
   const pluginFileInputRoots = [join(resolveAgentDataRoot(process.env), "media")];
   const pluginModelInference = createPluginModelInferenceService({
-    resolveModel: (pluginId) => resolvePluginModelSelection({
+    resolveModel: (pluginId, requestedPreset) => resolvePluginModelSelection({
       accountOnly: pluginRepository.get(pluginId)?.manifest.modelPolicy?.requiredSource === "account",
       userMode: options.appStateStore.repositories.bootstrap.getAppSettings().userMode,
       account: accountSessionRepository.get(),
+      requestedPreset,
       resolveAssignedModel: memmyConfigWriter.resolveAssignedModel
     }),
     embeddingInference: options.memoryClient.embeddingInference

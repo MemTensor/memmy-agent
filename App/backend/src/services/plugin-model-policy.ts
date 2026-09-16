@@ -7,6 +7,8 @@ export interface ResolvePluginModelSelectionInput {
   accountOnly: boolean;
   userMode: UserMode | string;
   account: AccountSessionView;
+  /** Exact preset selected for the conversation turn, if the call came from Agent. */
+  requestedPreset?: string;
   resolveAssignedModel: MemmyConfigWriter["resolveAssignedModel"];
 }
 
@@ -32,7 +34,8 @@ export async function resolvePluginModelSelection(
     const preset = await input.resolveAssignedModel?.({
       mode: "account",
       activeAccountId,
-      capability: "agent"
+      capability: "agent",
+      ...(input.requestedPreset ? { requestedPreset: input.requestedPreset } : {})
     });
     return preset?.ok && preset.context.source === "account" ? preset : null;
   }
@@ -41,6 +44,7 @@ export async function resolvePluginModelSelection(
   return await input.resolveAssignedModel?.({
     mode: input.userMode,
     activeAccountId,
-    capability: "agent"
+    capability: "agent",
+    ...(input.requestedPreset ? { requestedPreset: input.requestedPreset } : {})
   }) ?? null;
 }
