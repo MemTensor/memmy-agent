@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentHook, AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
-import { Tool } from "../../../src/core/agent-runtime/tools/base.js";
+import { Tool, type ToolExecutionContext } from "../../../src/core/agent-runtime/tools/base.js";
 import { ToolRegistry } from "../../../src/core/agent-runtime/tools/registry.js";
 import {
   type AccountImageTextFallbackArgs,
@@ -105,6 +105,15 @@ class ImageTool extends StaticTool {
       image_url: { url: "data:image/png;base64,tool" },
       meta: { path: "/media/tool.png" },
     }] as any;
+  }
+}
+
+class ContextTool extends StaticTool {
+  context: ToolExecutionContext | undefined;
+
+  async execute(_params: Record<string, any>, context?: ToolExecutionContext): Promise<string> {
+    this.context = context;
+    return "tool result";
   }
 }
 
@@ -375,6 +384,35 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(provider.mainCalls).toHaveLength(0);
     expect(result.hadInjections).toBe(false);
     expect(injectionCallback).not.toHaveBeenCalled();
+  });
+
+  it("passes the selected turn model preset into tool execution context", async () => {
+    const provider = new AccountFallbackProvider([
+      new LLMResponse({
+        content: "checking",
+        toolCalls: [new ToolCallRequest({ id: "call-model-context", name: "inspect", arguments: {} })],
+        finishReason: "tool_calls",
+      }),
+      new LLMResponse({ content: "done" }),
+    ], []);
+    const tool = new ContextTool();
+    const tools = new ToolRegistry();
+    tools.register(tool);
+
+    await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [{ role: "user", content: "Inspect" }],
+      provider,
+      tools,
+      model: "agent_chat",
+      sessionKey: "desktop:conversation-1",
+      actualModelContext: modelContext(),
+    }));
+
+    expect(tool.context).toMatchObject({
+      sessionKey: "desktop:conversation-1",
+      callId: "call-model-context",
+      modelPreset: "account-default",
+    });
   });
 
   it("reuses one image description through a tool iteration", async () => {

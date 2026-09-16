@@ -10,6 +10,8 @@ export type ToolExecutionContext = {
   toolName?: string;
   callId?: string | null;
   sessionKey?: string | null;
+  /** The exact model preset selected for the turn that owns this tool call. */
+  modelPreset?: string | null;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
 };
 

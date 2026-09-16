@@ -11,9 +11,11 @@ describe("plugin model inference Host service", () => {
         usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
-    const service = createPluginModelInferenceService({ resolveModel: async () => resolved(), fetch: fetch as typeof globalThis.fetch });
+    const resolveModel = vi.fn(async () => resolved());
+    const service = createPluginModelInferenceService({ resolveModel, fetch: fetch as typeof globalThis.fetch });
     const result = await service.invoke({
-      pluginId: "literature-review", callId: "call-1", conversationId: "conversation-1", service: "model-inference",
+      pluginId: "literature-review", callId: "call-1", conversationId: "conversation-1",
+      modelPreset: "account-deepseek-v4.1-flash", service: "model-inference",
       input: { messages: [{ role: "user", content: "Summarize evidence" }], responseFormat: "json", maxOutputTokens: 500 }
     });
     expect(result).toEqual({
@@ -22,6 +24,7 @@ describe("plugin model inference Host service", () => {
       model: { provider: "openai", model: "current-user-model" }
     });
     expect(JSON.stringify(result)).not.toContain("secret-key");
+    expect(resolveModel).toHaveBeenCalledWith("literature-review", "account-deepseek-v4.1-flash");
     expect(fetch).toHaveBeenCalledWith("https://models.example/v1/chat/completions", expect.any(Object));
   });
 

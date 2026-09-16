@@ -57,7 +57,7 @@ export interface PluginModelInferenceResult {
 
 export interface CreatePluginModelInferenceServiceOptions {
   /** Resolves the model preset the calling plugin is allowed to reach, honouring its manifest model policy. */
-  resolveModel: (pluginId: string) => Promise<ModelSelectionResolution | null>;
+  resolveModel: (pluginId: string, requestedPreset?: string) => Promise<ModelSelectionResolution | null>;
   embeddingInference?: (input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }) => Promise<EmbeddingInferenceOutput>;
   fetch?: typeof fetch;
   timeoutMs?: number;
@@ -88,7 +88,7 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       }
       if (call.service !== "model-inference") throw serviceError("host_service_unavailable", `Unknown Host service: ${call.service}`, false);
       const input = ModelInferenceInputSchema.parse(call.input);
-      const resolved = await options.resolveModel(call.pluginId);
+      const resolved = await options.resolveModel(call.pluginId, call.modelPreset);
       if (!resolved?.ok) throw serviceError("model_unavailable", "The current user model is not configured or available", false);
       const configuredAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
       const maxAttempts = input.maxAttempts === undefined ? configuredAttempts : Math.min(configuredAttempts, input.maxAttempts);

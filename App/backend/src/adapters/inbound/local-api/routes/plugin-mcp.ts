@@ -49,12 +49,14 @@ export function buildPluginMcpServer(
     if (!tool) return toolError(`Plugin capability is not active: ${request.params.name}`);
     const callId = randomUUID();
     const conversationId = metaString(extra._meta, "memmy.dev/session-key") ?? `mcp:${callId}`;
+    const modelPreset = metaString(extra._meta, "memmy.dev/model-preset");
     const input = tool.wrapsInput ? request.params.arguments?.input : (request.params.arguments ?? {});
     const call: CapabilityCall = {
       callId,
       pluginId: tool.plugin.id,
       capabilityId: tool.capability.id,
       conversationId,
+      ...(modelPreset ? { modelPreset } : {}),
       input
     };
     const cancel = () => void plugins.cancel(tool.plugin.id, callId).catch(() => undefined);

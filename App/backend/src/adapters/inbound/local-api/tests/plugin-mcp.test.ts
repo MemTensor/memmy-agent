@@ -90,7 +90,10 @@ describe("plugin MCP bridge", () => {
     const result = await client.callTool({
       name: tools.tools[0]!.name,
       arguments: { topic: "Agent Memory" },
-      _meta: { "memmy.dev/session-key": "desktop:conversation-1" }
+      _meta: {
+        "memmy.dev/session-key": "desktop:conversation-1",
+        "memmy.dev/model-preset": "account-deepseek-v4.1-flash"
+      }
     });
 
     expect(result).toMatchObject({ structuredContent: { review: "done" } });
@@ -98,6 +101,7 @@ describe("plugin MCP bridge", () => {
       pluginId: plugin.id,
       capabilityId: "run",
       conversationId: "desktop:conversation-1",
+      modelPreset: "account-deepseek-v4.1-flash",
       input: { topic: "Agent Memory" }
     }));
     expect(events).toHaveLength(2);

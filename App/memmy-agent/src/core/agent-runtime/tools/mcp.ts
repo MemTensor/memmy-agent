@@ -440,6 +440,7 @@ function pluginCallMeta(context?: ToolExecutionContext): Record<string, string> 
   const entries = [
     ["memmy.dev/session-key", context?.sessionKey],
     ["memmy.dev/tool-call-id", context?.callId],
+    ["memmy.dev/model-preset", context?.modelPreset],
   ].filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
   return entries.length ? Object.fromEntries(entries) : undefined;
 }

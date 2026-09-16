@@ -10,6 +10,8 @@ export interface PluginHostServiceCall {
   pluginId: string;
   callId: string;
   conversationId: string;
+  /** Exact Agent preset selected for the conversation turn, when available. */
+  modelPreset?: string;
   service: string;
   input: unknown;
   deadline?: string;
