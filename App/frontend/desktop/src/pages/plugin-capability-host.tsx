@@ -714,7 +714,8 @@ function FileInputCard(props: {
   const fileStates = files.map((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t));
   const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
-    const next = Array.from(event.target.files ?? []);
+    const selected = Array.from(event.target.files ?? []);
+    const next = payload.multiple === true ? appendUniqueFiles(files, selected) : selected;
     event.target.value = "";
     setFiles(next);
     if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
@@ -1451,6 +1452,20 @@ function classifyPluginInputFile(
 function validateReadyFileCount(files: File[], maxFiles: number | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (maxFiles && files.length > maxFiles) return t("plugin.ui.fileCountExceeded");
   return null;
+}
+
+function appendUniqueFiles(existing: File[], selected: File[]): File[] {
+  const files = [...existing];
+  for (const file of selected) {
+    if (!files.some((candidate) => (
+      candidate.name === file.name
+      && candidate.size === file.size
+      && candidate.lastModified === file.lastModified
+      && candidate.type === file.type
+      && candidate.webkitRelativePath === file.webkitRelativePath
+    ))) files.push(file);
+  }
+  return files;
 }
 
 /**

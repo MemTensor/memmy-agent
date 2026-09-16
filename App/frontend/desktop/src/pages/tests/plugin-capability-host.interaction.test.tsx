@@ -195,12 +195,17 @@ describe("PluginCapabilityHost", () => {
     ));
     const picker = container.querySelector('input[type="file"]')!;
     Object.defineProperty(picker, "files", {
-      value: [
-        new File(["first"], "first.pdf", { type: "application/pdf" }),
-        new File(["second"], "second.pdf", { type: "application/pdf" })
-      ]
+      configurable: true,
+      value: [new File(["first"], "first.pdf", { type: "application/pdf" })]
     });
     await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    Object.defineProperty(picker, "files", {
+      configurable: true,
+      value: [new File(["second"], "second.pdf", { type: "application/pdf" })]
+    });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("first.pdf");
+    expect(container.textContent).toContain("second.pdf");
 
     await act(async () => (
       container.querySelector('button[aria-label="Remove file first.pdf"]') as HTMLButtonElement
