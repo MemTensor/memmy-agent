@@ -125,7 +125,7 @@ describe("DeepSeek Harness skill target", () => {
 
     let definition: Record<string, any> | undefined;
     const client = handoff?.factory();
-    expect(client?.inject).toEqual([]);
+    expect(client?.inject).toEqual(["uiConversation"]);
     client?.apply({
       get(name: string) {
         return name === "conversationEvents"
