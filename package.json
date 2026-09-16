@@ -27,7 +27,7 @@
     "typecheck": "npm run memory:lint && npm run workspace:typecheck",
     "test": "npm run test:release-workflow && npm run test:packaging-guards && npm run memory:test && npm run workspace:test && npm run agent:test:tui-cursor",
     "test:release-workflow": "vitest run tests/release-workflow.test.ts tests/oss-crc64.test.mjs tests/windows-memory-workflow.test.ts",
-    "test:packaging-guards": "vitest run tests/package-version-guard.test.mjs tests/packaged-runtime-config.test.mjs tests/prune-packaged-runtime.test.mjs tests/package-logging.test.mjs",
+    "test:packaging-guards": "vitest run tests/package-version-guard.test.mjs tests/packaged-runtime-config.test.mjs tests/prune-packaged-runtime.test.mjs tests/package-logging.test.mjs tests/bundled-plugins-source.test.mjs",
     "test:literature-review-plugin:e2e": "node scripts/test-literature-review-plugin-e2e.mjs",
     "test:literature-review-plugin:live-agent-e2e": "LITERATURE_REVIEW_LIVE_AGENT=1 node scripts/test-literature-review-plugin-e2e.mjs",
     "test:literature-review-plugin:live-model": "LITERATURE_REVIEW_LIVE_MODEL=1 LITERATURE_REVIEW_PLUGIN_ROOT=../Literature-Review-Plugin vitest run App/backend/src/tests/literature-review-plugin-live-model.test.ts",

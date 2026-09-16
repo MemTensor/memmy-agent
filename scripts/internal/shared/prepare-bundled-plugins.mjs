@@ -7,12 +7,19 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const desktopRoot = join(repositoryRoot, "App", "shell", "desktop");
 const lockPath = join(desktopRoot, "resources", "bundled-plugins.json");
-const outputDirectory = resolve(process.argv[2] ?? join(desktopRoot, "dist", "bundled-plugins"));
+const args = process.argv.slice(2);
+// Bundled plugins are released from their own repositories, so a machine that
+// only runs the app from source has nothing to copy. `--optional` lets that be
+// a skip instead of a failed startup; the packaging scripts pass no flag and
+// keep failing, because an installer missing a locked plugin is a broken build.
+const optional = args.includes("--optional");
+const outputDirectory = resolve(args.find((value) => !value.startsWith("--")) ?? join(desktopRoot, "dist", "bundled-plugins"));
 const configuredSourceDirectory = process.env.MEMMY_BUNDLED_PLUGIN_SOURCE_DIR?.trim();
 if (!configuredSourceDirectory) {
-  throw new Error(
-    "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is required and must point to a directory containing the locked plugin release descriptors and MPP archives"
-  );
+  const requirement = "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is required and must point to a directory containing the locked plugin release descriptors and MPP archives";
+  if (!optional) throw new Error(requirement);
+  process.stderr.write(`Skipping bundled plugins: ${requirement}\n`);
+  process.exit(0);
 }
 const sourceDirectory = resolve(configuredSourceDirectory);
 
