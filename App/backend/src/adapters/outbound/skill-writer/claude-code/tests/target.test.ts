@@ -245,7 +245,7 @@ describe("claude code skill target", () => {
     }
   });
 
-  it("uses turn.complete as the only write phase for a completed Claude Code turn", async () => {
+  it("uses native source completion as the only write phase for a completed Claude Code turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -268,8 +268,8 @@ describe("claude code skill target", () => {
         });
         return;
       }
-      if (url.pathname === "/api/v1/turns/claude-turn-1/complete") {
-        writeJsonResponse(response, 200, { turnId: "claude-turn-1", l1MemoryId: "trace-1" });
+      if (url.pathname === "/api/v1/source-turns/complete") {
+        writeJsonResponse(response, 200, { status: "stored", result: { l1MemoryIds: ["trace-1"] } });
         return;
       }
       writeJsonResponse(response, 404, {});
@@ -283,6 +283,18 @@ describe("claude code skill target", () => {
     );
     const target = createClaudeCodeSkillTarget({ rootDirectory, memmyConfigPath });
 
+    // Stop rereads the session file rather than trusting last_assistant_message, so the
+    // scan recomputes the same turn identity from the same rows.
+    const transcriptPath = join(rootDirectory, "claude-session-1.jsonl");
+    const shared = { sessionId: "claude-session-1", cwd: "/tmp/claude-project", isSidechain: false };
+    writeFileSync(transcriptPath, [
+      { ...shared, type: "user", origin: { kind: "human" }, promptId: "claude-prompt-1", uuid: "user-uuid",
+        timestamp: "2026-09-16T10:00:00.000Z", message: { role: "user", content: "继续修复 episode 切换问题" } },
+      { ...shared, type: "assistant", uuid: "assistant-uuid", timestamp: "2026-09-16T10:00:10.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "修复已经完成" }] } },
+      { ...shared, type: "system", subtype: "turn_duration", uuid: "duration-uuid", timestamp: "2026-09-16T10:00:11.000Z" }
+    ].map((row) => JSON.stringify(row)).join("\n"), "utf8");
+
     try {
       await target.installPlugin?.("claude_code");
       const hookScriptPath = join(rootDirectory, "hooks", "memmy-resume-hook.mjs");
@@ -291,6 +303,7 @@ describe("claude code skill target", () => {
         JSON.stringify({
           hook_event_name: "UserPromptSubmit",
           session_id: "claude-session-1",
+          prompt_id: "claude-prompt-1",
           prompt: "继续修复 episode 切换问题",
           cwd: "/tmp/claude-project"
         })
@@ -307,7 +320,9 @@ describe("claude code skill target", () => {
         JSON.stringify({
           hook_event_name: "Stop",
           session_id: "claude-session-1",
+          prompt_id: "claude-prompt-1",
           cwd: "/tmp/claude-project",
+          transcript_path: transcriptPath,
           last_assistant_message: "修复已经完成"
         })
       );
@@ -317,9 +332,7 @@ describe("claude code skill target", () => {
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
-        "/api/v1/health",
-        "/api/v1/sessions/open",
-        "/api/v1/turns/claude-turn-1/complete"
+        "/api/v1/source-turns/complete"
       ]);
       expect(requests[1]?.body).toMatchObject({
         sessionId: "claude_code-memory-claude-session-1",
@@ -331,14 +344,21 @@ describe("claude code skill target", () => {
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题"
       });
-      expect(requests[5]?.body).toMatchObject({
+      expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-claude_code-hook",
+        channel: "hook",
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题",
         answer: "修复已经完成",
-        sourceMemoryIds: ["claude-memory-1"]
+        sourceMemoryIds: ["claude-memory-1"],
+        sourceTurn: {
+          source: "claude_code",
+          conversationId: "claude-session-1",
+          turnId: "claude-prompt-1",
+          completionEvidence: "turn_duration:duration-uuid"
+        }
       });
-      expect(requests[5]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

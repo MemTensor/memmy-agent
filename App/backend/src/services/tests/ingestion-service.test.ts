@@ -146,6 +146,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
+      importSummaryMemoryIds: ["memory-1", "memory-2"],
       conversations: 2,
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: ["conv-a"],
@@ -395,6 +396,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1"],
+      importSummaryMemoryIds: ["memory-1"],
       conversations: 2,
       completedConversationIds: ["conv-a", "conv-b"],
       incompleteConversationIds: [],
@@ -435,6 +437,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -507,6 +510,7 @@ describe("ingestion service", () => {
       dedupedMemories: 1,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -557,7 +561,8 @@ describe("ingestion service", () => {
       deduped: 2,
       writtenMemories: 0,
       dedupedMemories: 1,
-      memoryIds: []
+      memoryIds: [],
+      importSummaryMemoryIds: []
     });
     expect(succeeded).toEqual([
       expect.objectContaining({ storedCount: 0 })

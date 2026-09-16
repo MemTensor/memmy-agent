@@ -52,6 +52,7 @@ import {
   renderTurnClipped,
   stableTurnIdentity,
   isCompleteTurn,
+  hasStagedSourceTurn,
   legacyTurnId,
   legacyTurnRequestId
 } from "@memmy/agent-source-core";
@@ -70,6 +71,12 @@ const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
 const INITIAL_ABSENT_SOURCE_MEMORY_LIMIT = 200;
 const INITIAL_SOURCE_MEMORY_LIMIT = 1_000;
+
+/** A finished non-persistent ingest, plus the ids that still need a summary job. */
+interface IngestedSourceOutcome {
+  result: ScanResult;
+  importSummaryMemoryIds: string[];
+}
 
 /** Contract for agent source service. */
 export interface AgentSourceService {
@@ -141,8 +148,13 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     async scanAll(scanOptions = {}) {
       if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
         const collected = await this.collectAll(scanOptions);
-        const results = await this.ingestCollected(collected, scanOptions);
-        const failures = await this.processImportSummaries(results.filter((result) => result.sourceId !== "codex").flatMap((result) => result.memoryIds ?? []), { ...scanOptions, progressSourceId: "all" });
+        const outcomes: IngestedSourceOutcome[] = [];
+        for (const source of collected) {
+          scanOptions.signal?.throwIfAborted();
+          outcomes.push(await ingestCollectedSource(options, source, scanOptions, now));
+        }
+        const results = outcomes.map((outcome) => outcome.result);
+        const failures = await this.processImportSummaries(outcomes.flatMap((outcome) => outcome.importSummaryMemoryIds), { ...scanOptions, progressSourceId: "all" });
         appendProcessingFailuresToResults(results, failures);
         return results;
       }
@@ -167,7 +179,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       const results: ScanResult[] = [];
       for (const source of collected) {
         scanOptions.signal?.throwIfAborted();
-        results.push(await ingestCollectedSource(options, source, scanOptions, now));
+        results.push((await ingestCollectedSource(options, source, scanOptions, now)).result);
       }
       return results;
     },
@@ -179,8 +191,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     async scanOne(sourceId, scanOptions = {}) {
       if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
         const collected = await this.collectOne(sourceId, scanOptions);
-        const result = await ingestCollectedSource(options, collected, scanOptions, now);
-        const failures = sourceId === "codex" ? [] : await processPendingImportSummaries(options, result.memoryIds ?? [], { ...scanOptions, progressSourceId: sourceId });
+        const { result, importSummaryMemoryIds } = await ingestCollectedSource(options, collected, scanOptions, now);
+        const failures = await processPendingImportSummaries(options, importSummaryMemoryIds, { ...scanOptions, progressSourceId: sourceId });
         appendProcessingFailures(result, failures);
         return result;
       }
@@ -741,7 +753,7 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
   let first = true;
   let latest: ConversationMessage | null = null;
   const flushTurn = () => {
-    if (!currentTurn.length || (sourceId !== "codex" && !isCompleteTurn(currentTurn))) return;
+    if (!currentTurn.length || (!hasStagedSourceTurn(currentTurn[0]) && !isCompleteTurn(currentTurn))) return;
     const firstMessage = currentTurn[0]!;
     const lastMessage = currentTurn[currentTurn.length - 1]!;
     const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex, messages: currentTurn };
@@ -784,14 +796,14 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
         hash.update("[");
         first = true;
       }
-      if (currentTurn.length > 0 && (sourceId === "codex" ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
+      if (currentTurn.length > 0 && (hasStagedSourceTurn(message) ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
         flushTurn();
         currentTurn = [];
       }
       currentTurn.push(message);
       if (!first) hash.update(",");
       first = false;
-      hash.update(JSON.stringify({ messageId: message.messageId, role: message.role, content: message.content, createdAt: message.createdAt, toolName: hashMetaString(message, "toolName") ?? hashMetaString(message, "hermesToolName"), toolCallId: hashMetaString(message, "toolCallId") ?? hashMetaString(message, "hermesToolCallId"), ...(sourceId === "codex" ? { sourceTurn: message.rawMeta } : {}) }));
+      hash.update(JSON.stringify({ messageId: message.messageId, role: message.role, content: message.content, createdAt: message.createdAt, toolName: hashMetaString(message, "toolName") ?? hashMetaString(message, "hermesToolName"), toolCallId: hashMetaString(message, "toolCallId") ?? hashMetaString(message, "hermesToolCallId"), ...(hasStagedSourceTurn(message) ? { sourceTurn: message.rawMeta } : {}) }));
       latest = message;
     }
     const last = page[page.length - 1]!;
@@ -862,7 +874,7 @@ async function ingestPersistentSource(
     if (conversationMeta?.selected === false) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
-    if (sourceId === "codex") {
+    if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
@@ -1089,7 +1101,7 @@ async function ingestCollectedSource(
   collected: CollectedSourceScan,
   scanOptions: AgentSourceScanOptions,
   now: () => string
-): Promise<ScanResult> {
+): Promise<IngestedSourceOutcome> {
   let skipped = 0;
   let stats: IngestionStats | undefined;
   const errors = [...collected.errors];
@@ -1149,12 +1161,15 @@ async function ingestCollectedSource(
   }
   errors.push(...(await ingestSourceSkills(options, collected.sourceId, scanOptions)).errors);
   return {
-    sourceId: collected.sourceId,
-    discoveredConversations: collected.conversationIds.length,
-    emittedMessages: collected.messages.length,
-    skipped,
-    memoryIds: stats?.memoryIds ?? [],
-    errors
+    result: {
+      sourceId: collected.sourceId,
+      discoveredConversations: collected.conversationIds.length,
+      emittedMessages: collected.messages.length,
+      skipped,
+      memoryIds: stats?.memoryIds ?? [],
+      errors
+    },
+    importSummaryMemoryIds: stats?.importSummaryMemoryIds ?? []
   };
 }
 
@@ -1324,7 +1339,7 @@ function conversationContentHash(messages: readonly ConversationMessage[]): stri
     createdAt: message.createdAt,
     toolName: conversationMetaString(message, "toolName") ?? conversationMetaString(message, "hermesToolName"),
     toolCallId: conversationMetaString(message, "toolCallId") ?? conversationMetaString(message, "hermesToolCallId"),
-    ...(message.sourceId === "codex" ? { sourceTurn: message.rawMeta } : {})
+    ...(hasStagedSourceTurn(message) ? { sourceTurn: message.rawMeta } : {})
   }));
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
@@ -1411,7 +1426,7 @@ function buildConversationMemoryUnits(sourceId: string, messages: readonly Conve
   let current: ConversationMessage[] = [];
 
   for (const message of messages) {
-    if (sourceId === "codex") {
+    if (hasStagedSourceTurn(message)) {
       if (current.length > 0 && current[0]?.rawMeta.sourceTurnId !== message.rawMeta.sourceTurnId) {
         pushCompleteMemoryUnit(sourceId, current, units);
         current = [];
@@ -1439,7 +1454,7 @@ function pushCompleteMemoryUnit(
   messages: readonly ConversationMessage[],
   units: SourceMemoryUnit[]
 ): void {
-  if (messages.length === 0 || (sourceId !== "codex" && !isCompleteMemoryTurn(messages))) {
+  if (messages.length === 0 || (!hasStagedSourceTurn(messages[0]) && !isCompleteMemoryTurn(messages))) {
     return;
   }
   const userMessage = messages[0]!;

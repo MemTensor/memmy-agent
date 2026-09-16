@@ -898,8 +898,10 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -1203,37 +1205,44 @@ class MemmyMemoryProvider(MemoryProvider):
 
     def _sync_turn(self, active_session: str, user_content: str, assistant_content: str) -> None:
         query = _sanitize_memmy_protocol_text(_clean_text(user_content))
-        answer = _sanitize_memmy_protocol_text(_clean_text(assistant_content))
-        if not query or not answer:
+        if not query:
             return
         try:
+            parsed = _read_hermes_source_turn(active_session, query)
+            if not parsed:
+                logger.warning("memmy-memory turn capture skipped: identity_unresolved")
+                return
             state = self._ensure_runtime_session(active_session)
-            memory_session_id = state["sessionId"]
             with self._lock:
                 turn = self._turns.pop(active_session, None)
-            if not turn:
-                started = _session_post(state, "/api/v1/turns/start", {
-                    "sessionId": memory_session_id,
-                    "turnId": "hermes-turn-" + uuid.uuid4().hex,
-                    "query": query,
-                })
-                turn = {
-                    "sessionId": memory_session_id,
-                    "turnId": str(started.get("turnId") or ""),
-                    "episodeId": str(started.get("episodeId") or ""),
-                    "sourceMemoryIds": started.get("sourceMemoryIds") if isinstance(started.get("sourceMemoryIds"), list) else None,
-                    "query": query,
-                }
-            turn_id = turn.get("turnId") or ""
-            if not turn_id:
-                raise RuntimeError("Memmy did not return a turnId")
-            _session_post(state, "/api/v1/turns/" + quote(turn_id, safe="") + "/complete", {
-                "sessionId": memory_session_id,
-                "episodeId": turn.get("episodeId") or None,
-                "query": turn.get("query") or query,
-                "answer": answer,
-                "status": "succeeded",
-                "sourceMemoryIds": turn.get("sourceMemoryIds"),
+            _memmy_post("/api/v1/source-turns/complete", {
+                "channel": "hook",
+                "source": "hermes",
+                "adapterId": "memmy-hermes-adapter",
+                "sessionId": state["sessionId"],
+                "sourceMemoryIds": turn.get("sourceMemoryIds") if isinstance(turn, dict) else None,
+                "namespace": {
+                    "source": "hermes",
+                    "profileId": "default",
+                    "userId": state["runtime"].get("userId"),
+                    "sessionKey": parsed["conversationId"],
+                },
+                "sourceTurn": {
+                    "source": parsed["source"],
+                    "profileId": "default",
+                    "conversationId": parsed["conversationId"],
+                    "turnId": parsed["turnId"],
+                    "startedAt": parsed["startedAt"],
+                    "completedAt": parsed["completedAt"],
+                    "sequence": parsed["sequence"],
+                    "completionEvidence": parsed["completionEvidence"],
+                },
+                "query": parsed["query"],
+                "answer": parsed["answer"],
+                "status": parsed.get("status") or "succeeded",
+                "toolCalls": parsed.get("toolCalls") or [],
+                "toolResults": parsed.get("toolResults") or [],
+                "workspacePath": parsed.get("workspacePath"),
             })
         except Exception as exc:
             logger.warning("memmy-memory sync failed: %s", exc)
@@ -1485,6 +1494,291 @@ def _notify_boundary(state: Dict[str, Any], trigger: str) -> bool:
         {**envelope, "trigger": trigger, "throughL1MemoryId": through},
     )
     return True
+
+
+_HERMES_COMPRESSED_SUMMARY_PREFIX = "[PRIOR CONTEXT"
+
+
+def _hermes_state_db_path() -> Path:
+    home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser()
+    profile = _clean_text(os.environ.get("HERMES_PROFILE"))
+    return (home / "profiles" / profile / "state.db") if profile else (home / "state.db")
+
+
+def _read_hermes_source_turn(session_id: str, user_content: str) -> Optional[Dict[str, Any]]:
+    path = _hermes_state_db_path()
+    if not path.is_file():
+        return None
+    conn = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+        if "sessions" not in tables or "messages" not in tables:
+            return None
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if not {"id", "session_id", "role", "content", "timestamp"}.issubset(columns):
+            return None
+        def col(name: str) -> str:
+            return '"' + name + '"' if name in columns else "NULL"
+        rows = [dict(row) for row in conn.execute(
+            "SELECT id, role, content, "
+            + col("tool_call_id") + " AS tool_call_id, "
+            + col("tool_calls") + " AS tool_calls, "
+            + col("tool_name") + " AS tool_name, timestamp, "
+            + col("finish_reason") + " AS finish_reason, "
+            + col("_compressed_summary") + " AS compressed_summary, "
+            + col("active") + " AS active, "
+            + col("compacted") + " AS compacted "
+            + "FROM messages WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()]
+        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        cwd = _clean_text(cwd_row["cwd"]) if cwd_row else ""
+    finally:
+        conn.close()
+    return _hermes_turn_from_rows(session_id, user_content, rows, cwd)
+
+
+def _hermes_turn_from_rows(session_id: str, user_content: str, rows: List[Dict[str, Any]], cwd: str) -> Optional[Dict[str, Any]]:
+    needle = _clean_text(user_content)
+    if not needle or not rows:
+        return None
+    originals = [row for row in rows if _hermes_first_copy_id(rows, row) == row["id"] and not _hermes_is_summary(row)]
+    turns: List[List[Dict[str, Any]]] = []
+    current: Optional[List[Dict[str, Any]]] = None
+    for row in originals:
+        if row.get("role") == "user":
+            current = []
+            turns.append(current)
+        if current is not None:
+            current.append(row)
+    matches = [row for row in rows if row.get("role") == "user" and _clean_text(row.get("content")) == needle]
+    if not matches:
+        return None
+    latest = max(float(row.get("timestamp") or 0) for row in matches)
+    group = [row for row in matches if float(row.get("timestamp") or 0) == latest]
+    turn_id = session_id + ":" + str(min(_hermes_first_copy_id(rows, row) for row in group))
+    selected = next((turn for turn in turns if turn and turn[0]["role"] == "user" and session_id + ":" + str(turn[0]["id"]) == turn_id), None)
+    if not selected or _hermes_is_retracted(rows, selected[0]):
+        return None
+    user_rows = [row for row in selected if row.get("role") == "user"]
+    query = "\n\n".join(_clean_text(row.get("content")) for row in user_rows if _clean_text(row.get("content")))
+    answer_rows = [row for row in selected if row.get("role") == "assistant" and _clean_text(row.get("content")) and not _hermes_is_summary(row)]
+    answer = "\n\n".join(_clean_text(row.get("content")) for row in answer_rows)
+    closing = next((row for row in reversed(answer_rows) if row.get("finish_reason") == "stop"), None)
+    if not query or closing is None:
+        return None
+    started_at = _hermes_epoch_iso(user_rows[0].get("timestamp") if user_rows else None)
+    completed_at = _hermes_epoch_iso(closing.get("timestamp"))
+    if not started_at or not completed_at:
+        return None
+    tool_calls: List[Dict[str, Any]] = []
+    tool_results: List[Dict[str, Any]] = []
+    for row in selected:
+        if row.get("role") == "assistant":
+            tool_calls.extend(_hermes_parse_tool_calls(row.get("tool_calls")))
+        elif row.get("role") == "tool":
+            result_id = _clean_text(row.get("tool_call_id")) or None
+            tool_results.append(_compact_record({
+                "id": result_id,
+                "output": row.get("content"),
+                "status": "completed",
+                "success": True,
+            }))
+    paired = _hermes_pair_tools(tool_calls, tool_results)
+    turn: Dict[str, Any] = {
+        "source": "hermes",
+        "conversationId": session_id,
+        "turnId": turn_id,
+        "profileId": "default",
+        "startedAt": started_at,
+        "completedAt": completed_at,
+        "sequence": selected[0]["id"],
+        "completionEvidence": "assistant_stop:" + str(closing["id"]),
+        "query": _redact_secrets(query),
+        "answer": _redact_secrets(answer),
+        "status": "succeeded",
+        "toolCalls": [_compact_record(_redact_tool_record(call)) for call in paired],
+        "toolResults": [_compact_record(_redact_tool_record(result)) for result in tool_results],
+    }
+    if cwd:
+        turn["workspacePath"] = cwd
+    return turn
+
+
+def _hermes_row_identity(row: Dict[str, Any]) -> tuple:
+    return (row.get("role"), row.get("timestamp"), row.get("content") or "", row.get("tool_call_id") or "", row.get("tool_calls") or "")
+
+
+def _hermes_first_copy_id(rows: List[Dict[str, Any]], row: Dict[str, Any]) -> int:
+    key = _hermes_row_identity(row)
+    return min((item["id"] for item in rows if _hermes_row_identity(item) == key), default=row["id"])
+
+
+def _hermes_is_summary(row: Dict[str, Any]) -> bool:
+    return row.get("compressed_summary") == 1 or _clean_text(row.get("content")).startswith(_HERMES_COMPRESSED_SUMMARY_PREFIX)
+
+
+def _hermes_is_retracted(rows: List[Dict[str, Any]], row: Dict[str, Any]) -> bool:
+    if row.get("active") != 0 or row.get("compacted") == 1:
+        return False
+    key = _hermes_row_identity(row)
+    return not any(item.get("active") == 1 and _hermes_row_identity(item) == key for item in rows)
+
+
+def _hermes_parse_tool_calls(value: Any) -> List[Dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    calls = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        fn = entry.get("function") if isinstance(entry.get("function"), dict) else {}
+        call: Dict[str, Any] = {
+            "id": _clean_text(entry.get("call_id")) or _clean_text(entry.get("id")) or None,
+            "name": _clean_text(fn.get("name")) or _clean_text(entry.get("name")) or "tool",
+        }
+        arguments = fn.get("arguments") if "arguments" in fn else entry.get("arguments", entry.get("input"))
+        if arguments is not None:
+            call["input"] = arguments
+        calls.append(_compact_record(call))
+    return calls
+
+
+def _hermes_pair_tools(tool_calls: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    results_by_id: Dict[str, Dict[str, Any]] = {}
+    duplicates = set()
+    for result in tool_results:
+        result_id = _clean_text(result.get("id"))
+        if not result_id:
+            continue
+        if result_id in results_by_id:
+            duplicates.add(result_id)
+        else:
+            results_by_id[result_id] = result
+    call_counts: Dict[str, int] = {}
+    for call in tool_calls:
+        call_id = _clean_text(call.get("id"))
+        if call_id:
+            call_counts[call_id] = call_counts.get(call_id, 0) + 1
+    paired = []
+    for call in tool_calls:
+        call_id = _clean_text(call.get("id"))
+        result = results_by_id.get(call_id) if call_id and call_counts.get(call_id) == 1 and call_id not in duplicates else None
+        if result:
+            merged = {**call, **result, "name": call.get("name")}
+            if "input" in call:
+                merged["input"] = call["input"]
+            paired.append(_compact_record(merged))
+        else:
+            paired.append(_compact_record(call))
+    return paired
+
+
+_REDACT_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
+_REDACT_BEARER = re.compile(r"\b(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+", re.I)
+_REDACT_ANTHROPIC = re.compile(r"\bsk-ant-api\d{2}-[A-Za-z0-9_-]{40,}\b")
+_REDACT_OPENAI = re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}\b")
+_REDACT_GOOGLE = re.compile(r"\bAIza[A-Za-z0-9_-]{32,}\b")
+_REDACT_PASSWORD = re.compile(r"\b([A-Za-z0-9_]*password[A-Za-z0-9_]*\s*[:=]\s*)(?:\"[^\n\"]+\"|'[^\n']+'|[^\s#&]+)", re.I)
+_BASE64_SECRET_TOKEN = "[REDACTED:base64_secret]"
+_BASE64_SECRET_MIN_LENGTH = 32
+_LARGE_BASE64_PAYLOAD_MIN_LENGTH = 4096
+
+
+def _redact_secrets(value: Any) -> str:
+    text = value if isinstance(value, str) else ""
+    text = _redact_base64_runs(text, _LARGE_BASE64_PAYLOAD_MIN_LENGTH)
+    text = _REDACT_PRIVATE_KEY.sub("[REDACTED:ssh_private_key]", text)
+    text = _REDACT_BEARER.sub(r"\1[REDACTED:authorization_bearer]", text)
+    text = _REDACT_ANTHROPIC.sub("[REDACTED:anthropic_api_key]", text)
+    text = _REDACT_OPENAI.sub("[REDACTED:openai_api_key]", text)
+    text = _REDACT_GOOGLE.sub("[REDACTED:google_api_key]", text)
+    text = _REDACT_PASSWORD.sub(r"\1[REDACTED:password]", text)
+    return _redact_base64_runs(text, _BASE64_SECRET_MIN_LENGTH)
+
+
+_TOOL_IDENTITY_KEYS = {"id", "toolCallId", "tool_call_id", "callId", "call_id"}
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_secrets(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
+
+
+def _redact_tool_record(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _redact_value(value)
+    return {key: item if key in _TOOL_IDENTITY_KEYS else _redact_value(item) for key, item in value.items()}
+
+
+def _compact_record(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if item is not None}
+
+
+def _redact_base64_runs(text: str, min_length: int) -> str:
+    output = []
+    cursor = 0
+    index = 0
+    while index < len(text):
+        code = ord(text[index])
+        if not _is_base64_core(code):
+            index += 1
+            continue
+        start = index
+        while index < len(text) and _is_base64_core(ord(text[index])):
+            index += 1
+        core_end = index
+        padding = 0
+        while padding < 2 and index < len(text) and text[index] == "=":
+            index += 1
+            padding += 1
+        if core_end - start >= min_length and _has_base64_boundary(text, start, index):
+            output.append(text[cursor:start])
+            output.append(_BASE64_SECRET_TOKEN)
+            cursor = index
+    if cursor == 0:
+        return text
+    output.append(text[cursor:])
+    return "".join(output)
+
+
+def _is_base64_core(code: int) -> bool:
+    return (65 <= code <= 90) or (97 <= code <= 122) or (48 <= code <= 57) or code in (43, 47)
+
+
+def _has_base64_boundary(text: str, start: int, end: int) -> bool:
+    before = ord(text[start - 1]) if start > 0 else 0
+    after = ord(text[end]) if end < len(text) else 0
+    return not _is_ascii_word(before) and not _is_ascii_word(after)
+
+
+def _is_ascii_word(code: int) -> bool:
+    return (65 <= code <= 90) or (97 <= code <= 122) or (48 <= code <= 57) or code == 95
+
+
+def _hermes_epoch_iso(value: Any) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if seconds != seconds:
+        return ""
+    millis = int(round(seconds * 1000))
+    return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis % 1000:03d}Z"
 
 
 def _hermes_workspace_root(session_id: str) -> Optional[str]:

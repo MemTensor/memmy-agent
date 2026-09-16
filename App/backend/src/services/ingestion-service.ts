@@ -1,6 +1,6 @@
 /** Ingestion service module. */
 import { createHash } from "node:crypto";
-import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest } from "@memmy/agent-source-core";
+import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest, hasStagedSourceTurn } from "@memmy/agent-source-core";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -56,6 +56,12 @@ export interface IngestionStats {
   dedupedMemories: number;
   failedMemories: number;
   memoryIds: string[];
+  /**
+   * Subset of `memoryIds` written through the legacy add-memory path, which still needs a
+   * summary job. A native turn is summarized inside the Memory capture transaction, so its
+   * id must not be queued again: it has no import processing state to wait on.
+   */
+  importSummaryMemoryIds: string[];
   conversations: number;
   completedConversationIds: string[];
   incompleteConversationIds: string[];
@@ -95,6 +101,7 @@ export function createIngestionService(options: CreateIngestionServiceOptions): 
         dedupedMemories: 0,
         failedMemories: 0,
         memoryIds: [],
+        importSummaryMemoryIds: [],
         conversations: 0,
         completedConversationIds: [],
         incompleteConversationIds: [],
@@ -164,7 +171,7 @@ async function processConversation(
   ctx: IngestionContext,
   stats: IngestionStats
 ): Promise<void> {
-  if (ctx.sourceId === "codex") {
+  if (hasStagedSourceTurn(messages[0])) {
     await processNativeConversation(options, messages, ctx, stats);
     return;
   }
@@ -244,6 +251,7 @@ async function processConversation(
         stats.written += turn.messages.length;
         stats.writtenMemories += 1;
         stats.memoryIds.push(added.id);
+        stats.importSummaryMemoryIds.push(added.id);
       }
       options.memoryAddAnalytics?.trackAddSucceeded({
         ...addAnalyticsBase,

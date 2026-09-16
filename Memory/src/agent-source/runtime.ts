@@ -32,6 +32,7 @@ import { createQwenworkSourceAdapter } from "./adapters/qwenwork/index.js";
 import { createSourceRegistry, type SourceRegistry } from "./adapters/source-registry.js";
 import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapters/types.js";
 import {
+  hasStagedSourceTurn,
   isCompleteTurn,
   orderedTurns,
   sourceTurnFromMessages,
@@ -787,7 +788,7 @@ async function ingestStagedMessages(
     if (conversationMeta?.selected === false) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
-    if (sourceId === "codex") {
+    if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
@@ -860,7 +861,7 @@ async function prepareStandaloneSource(
   sourceHash.update("[");
   let firstSourceMessage = true;
   const flushTurn = () => {
-    if (!currentTurn.length || (sourceId !== "codex" && !isCompleteTurn(currentTurn))) return;
+    if (!currentTurn.length || (!hasStagedSourceTurn(currentTurn[0]) && !isCompleteTurn(currentTurn))) return;
     const firstMessage = currentTurn[0]!;
     const lastMessage = currentTurn[currentTurn.length - 1]!;
     const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex: 0, messages: currentTurn };
@@ -904,7 +905,7 @@ async function prepareStandaloneSource(
         hash.update("[");
         first = true;
       }
-      if (currentTurn.length > 0 && (sourceId === "codex" ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
+      if (currentTurn.length > 0 && (hasStagedSourceTurn(message) ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
         flushTurn();
         currentTurn = [];
       }
@@ -918,7 +919,7 @@ async function prepareStandaloneSource(
         createdAt: message.createdAt,
         toolName: hashMeta(message, "toolName") ?? hashMeta(message, "hermesToolName"),
         toolCallId: hashMeta(message, "toolCallId") ?? hashMeta(message, "hermesToolCallId"),
-        ...(sourceId === "codex" ? { sourceTurn: message.rawMeta } : {})
+        ...(hasStagedSourceTurn(message) ? { sourceTurn: message.rawMeta } : {})
       };
       const serialized = JSON.stringify(hashable);
       if (!firstSourceMessage) sourceHash.update(",");

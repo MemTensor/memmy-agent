@@ -17,7 +17,9 @@ import {
   closeRuntimeSession,
   completeRuntimeTurn,
   completeSourceTurn,
+  readClaudeCodeSourceTurn,
   readCodexSourceTurn,
+  readCursorHookSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
@@ -234,6 +236,14 @@ async function captureCompletedTurn(payload) {
     await captureCodexSourceTurn(payload);
     return;
   }
+  if (MODE === "cursor") {
+    await captureCursorSourceTurn(payload);
+    return;
+  }
+  if (MODE === "claude-code") {
+    await captureClaudeCodeSourceTurn(payload);
+    return;
+  }
   const pending = await readTurnState(payload);
   const status = completedTurnStatus(payload);
   if (status === "cancelled") {
@@ -306,11 +316,70 @@ async function captureCodexSourceTurn(payload) {
     await clearTurnState(payload);
     return;
   }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function captureCursorSourceTurn(payload) {
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
+  const conversationId = sessionStateKey(payload);
+  const requestId = platformTurnId(payload);
+  if (!conversationId || !requestId) {
+    reportCaptureFailure("identity_unresolved", undefined, payload);
+    return;
+  }
+  const pending = await readTurnState(payload);
+  const parsed = await readCursorHookSourceTurn({ conversationId, requestId });
+  if (!parsed.turn) {
+    reportCaptureFailure(parsed.reason || "identity_unresolved", undefined, payload);
+    return;
+  }
+  if (isResumeCommand(parsed.turn.query)) {
+    await clearTurnState(payload);
+    return;
+  }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function captureClaudeCodeSourceTurn(payload) {
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
+  const transcriptPath = normalizeText(payload.transcript_path || payload.transcriptPath);
+  const promptId = platformTurnId(payload);
+  if (!transcriptPath || !promptId) {
+    reportCaptureFailure(transcriptPath ? "identity_unresolved" : "transcript_unavailable", undefined, payload);
+    return;
+  }
+  const pending = await readTurnState(payload);
+  const parsed = await readClaudeCodeSourceTurn(transcriptPath, {
+    conversationId: sessionStateKey(payload) || undefined,
+    promptId,
+    stop: status === "succeeded"
+  });
+  if (!parsed.turn) {
+    reportCaptureFailure(parsed.reason || "identity_unresolved", undefined, payload);
+    return;
+  }
+  if (isResumeCommand(parsed.turn.query)) {
+    await clearTurnState(payload);
+    return;
+  }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function submitSourceTurn(turn, pending, payload) {
   const result = await completeSourceTurn({
     configUrl: CONFIG_URL,
-    turn: parsed.turn,
+    turn,
     sessionId: normalizeText(pending && pending.sessionId) || undefined,
-    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
+    adapterId: "memmy-" + SOURCE + "-hook"
   });
   if (result.status === "stored" || result.status === "existing" || result.status === "rejected") {
     await clearTurnState(payload);
@@ -555,7 +624,9 @@ function platformTurnId(payload) {
   return normalizeText(payload.turn_id) ||
     normalizeText(payload.turnId) ||
     normalizeText(payload.generation_id) ||
-    normalizeText(payload.generationId);
+    normalizeText(payload.generationId) ||
+    normalizeText(payload.prompt_id) ||
+    normalizeText(payload.promptId);
 }
 
 function workspacePath(payload) {

@@ -1819,7 +1819,7 @@ export class RuntimeRepository {
   sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
     return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
-        OR (@source = 'codex' AND host_session_key = 'codex-memory-' || @conversationId))
+        OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
   }
 

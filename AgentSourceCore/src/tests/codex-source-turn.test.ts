@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, type ConversationMessage } from "./index.js";
+import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, type ConversationMessage } from "../index.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const path of dirs.splice(0)) rmSync(path, { recursive: true, force: true }); });
