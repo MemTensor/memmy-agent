@@ -346,7 +346,9 @@ export function MemoryPageView(props: MemoryPageViewProps) {
           sidebarHidden ? " memory-page-main--sidebar-hidden" : ""
         }`}
       >
-        <header className="app-frame-content-topbar" />
+        <header className="app-frame-content-topbar">
+          <div aria-hidden="true" className="app-frame-content-topbar__drag-space" />
+        </header>
         <div className="app-frame-page-content min-h-0 flex-1 overflow-y-auto py-6">{childByPage[props.activePage]}</div>
       </div>
     </div>

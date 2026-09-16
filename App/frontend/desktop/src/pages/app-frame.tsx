@@ -1648,6 +1648,7 @@ export function AppFrame(props: AppFrameProps) {
         {props.reserveTopBar !== false && (
           <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
             {props.topBar}
+            <div aria-hidden="true" className="app-frame-content-topbar__drag-space" />
           </header>
         )}
         <div

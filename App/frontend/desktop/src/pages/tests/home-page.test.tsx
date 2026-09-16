@@ -896,8 +896,11 @@ describe("HomePage", () => {
     expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
     expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
     expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
-    expect(styles).toMatch(/body:has\(\.agent-workspace-layout--preview-open\) \.window-drag-region\s*{[^}]*display:\s*none;/s);
-    expect(styles).toMatch(/body:has\(\.agent-workspace-layout--preview-open\) \.app-frame-content-topbar\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
+    expect(styles).toMatch(/body:has\(\.sidebar-shell\) \.window-drag-region\s*{[^}]*display:\s*none;/s);
+    expect(styles).toMatch(/\.agent-conversation-title\s*{[^}]*-webkit-app-region:\s*drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tabs\s*{[^}]*-webkit-app-region:\s*drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tab\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tab__close\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
     expect(styles).toContain("right: calc(44px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });

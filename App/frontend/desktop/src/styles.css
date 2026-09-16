@@ -1664,8 +1664,6 @@ body.memmy-window-fullscreen {
 .window-drag-region {
   position: fixed;
   top: 0;
-  right: 0;
-  left: 0;
   z-index: 9998;
   height: var(--codex-toolbar-height);
   pointer-events: none;
@@ -1674,37 +1672,18 @@ body.memmy-window-fullscreen {
   -webkit-user-select: none;
 }
 
-body:has(.memory-drawer) .window-drag-region {
-  right: min(680px, calc(100vw - 24px));
+.window-drag-region--leading {
+  left: calc(var(--codex-window-control-inset) + var(--codex-toolbar-button-size));
+  right: 50%;
 }
 
-.window-drag-exclusion {
-  position: fixed;
-  top: 0;
-  z-index: 9999;
-  height: var(--codex-toolbar-height);
-  pointer-events: none;
-  user-select: none;
-  -webkit-app-region: no-drag;
-  -webkit-user-select: none;
+.window-drag-region--trailing {
+  left: 50%;
+  right: 120px;
 }
 
-.window-drag-exclusion--sidebar-toggle {
-  left: var(--codex-window-control-inset);
-  width: var(--codex-toolbar-button-size);
-}
-
-.window-drag-exclusion--lang-toggle {
-  right: 0;
-  width: 120px;
-}
-
-body:has(.agent-workspace-layout--preview-open) .window-drag-region {
+body:has(.sidebar-shell) .window-drag-region {
   display: none;
-}
-
-body:has(.agent-workspace-layout--preview-open) .app-frame-content-topbar {
-  -webkit-app-region: no-drag;
 }
 
 .sidebar-window-toolbar {
@@ -1929,8 +1908,20 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   font-family: var(--font-sans);
   pointer-events: none;
   user-select: none;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
   -webkit-user-select: none;
+}
+
+.app-frame-content-topbar__drag-space {
+  align-self: stretch;
+  min-width: 24px;
+  flex: 1 1 auto;
+  pointer-events: auto;
+  -webkit-app-region: drag;
+}
+
+.app-frame-content-topbar:has(.agent-conversation-topbar) > .app-frame-content-topbar__drag-space {
+  display: none;
 }
 
 .app-frame-content-topbar :is(button, input, textarea, select, a) {
@@ -1960,6 +1951,8 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   text-overflow: ellipsis;
   user-select: none;
   white-space: nowrap;
+  pointer-events: auto;
+  -webkit-app-region: drag;
   -webkit-user-select: none;
 }
 
@@ -12719,6 +12712,7 @@ input[type="checkbox"].check-sky:checked::after {
   min-width: 0;
   height: 100%;
   overflow-x: auto;
+  -webkit-app-region: drag;
 }
 
 .workspace-artifact-file-tab {
@@ -13862,6 +13856,7 @@ input[type="checkbox"].check-sky:checked::after {
   font-size: 13px;
   font-weight: 500;
   color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+  -webkit-app-region: drag;
 }
 
 .recording-panel__action {

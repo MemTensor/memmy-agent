@@ -8,10 +8,13 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const desktopRoot = join(repositoryRoot, "App", "shell", "desktop");
 const lockPath = join(desktopRoot, "resources", "bundled-plugins.json");
 const outputDirectory = resolve(process.argv[2] ?? join(desktopRoot, "dist", "bundled-plugins"));
-const sourceDirectory = resolve(
-  process.env.MEMMY_BUNDLED_PLUGIN_SOURCE_DIR
-    ?? join(repositoryRoot, "..", "Literature-Review-Plugin", "release")
-);
+const configuredSourceDirectory = process.env.MEMMY_BUNDLED_PLUGIN_SOURCE_DIR?.trim();
+if (!configuredSourceDirectory) {
+  throw new Error(
+    "MEMMY_BUNDLED_PLUGIN_SOURCE_DIR is required and must point to a directory containing the locked plugin release descriptors and MPP archives"
+  );
+}
+const sourceDirectory = resolve(configuredSourceDirectory);
 
 const lock = JSON.parse(await readFile(lockPath, "utf8"));
 if (lock.schemaVersion !== 1 || !Array.isArray(lock.plugins) || lock.plugins.length === 0) {
