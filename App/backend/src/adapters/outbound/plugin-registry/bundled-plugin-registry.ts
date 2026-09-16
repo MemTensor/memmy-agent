@@ -6,6 +6,8 @@ import { PluginManifestSchema, type PluginManifest } from "@memmy/local-api-cont
 import type { PluginRegistry, PluginRelease } from "./index.js";
 
 const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
+const BUNDLED_PLUGIN_STATE_FILE = "bundled-plugins-state.json";
+const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 export interface BundledPluginRelease {
   id: string;
@@ -15,6 +17,8 @@ export interface BundledPluginRelease {
 export interface BundledPluginCatalog {
   registry: PluginRegistry;
   releases: BundledPluginRelease[];
+  /** Plugin IDs owned by the bundle policy, including intentionally omitted releases. */
+  managedPluginIds: string[];
   trustedArtifactRoot: string;
 }
 
@@ -35,12 +39,13 @@ export async function loadBundledPluginCatalog(directory: string): Promise<Bundl
   }
   const trustedArtifactRoot = await realpath(requestedRoot);
 
-  const descriptorNames = (await readdir(trustedArtifactRoot))
+  const resourceNames = await readdir(trustedArtifactRoot);
+  const descriptorNames = resourceNames
     .filter((name) => name.endsWith(".release.json"))
     .sort();
-  if (descriptorNames.length === 0) {
-    throw invalidBundle("Bundled plugin directory has no release descriptors");
-  }
+  const declaredManagedPluginIds = resourceNames.includes(BUNDLED_PLUGIN_STATE_FILE)
+    ? await readManagedPluginIds(trustedArtifactRoot)
+    : null;
 
   const releases = new Map<string, PluginRelease>();
   for (const descriptorName of descriptorNames) {
@@ -74,12 +79,20 @@ export async function loadBundledPluginCatalog(directory: string): Promise<Bundl
     });
   }
 
+  const bundledReleases = [...releases.values()].map((release) => ({
+    id: release.manifest.id,
+    version: release.manifest.version
+  }));
+  if (
+    declaredManagedPluginIds
+    && bundledReleases.some((release) => !declaredManagedPluginIds.includes(release.id))
+  ) {
+    throw invalidBundle("Bundled plugin release is missing from managed plugin state");
+  }
   return {
     trustedArtifactRoot,
-    releases: [...releases.values()].map((release) => ({
-      id: release.manifest.id,
-      version: release.manifest.version
-    })),
+    releases: bundledReleases,
+    managedPluginIds: declaredManagedPluginIds ?? bundledReleases.map((release) => release.id),
     registry: {
       async resolve(pluginId, version) {
         const release = releases.get(pluginId);
@@ -93,6 +106,28 @@ export async function loadBundledPluginCatalog(directory: string): Promise<Bundl
       }
     }
   };
+}
+
+async function readManagedPluginIds(root: string): Promise<string[]> {
+  const path = resolve(root, BUNDLED_PLUGIN_STATE_FILE);
+  await assertRegularChild(root, path, "state");
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw invalidBundle("Invalid bundled plugin state");
+  }
+  if (!value || typeof value !== "object") throw invalidBundle("Invalid bundled plugin state");
+  const candidate = value as { schemaVersion?: unknown; managedPluginIds?: unknown };
+  if (
+    candidate.schemaVersion !== 1
+    || !Array.isArray(candidate.managedPluginIds)
+    || candidate.managedPluginIds.some((id) => typeof id !== "string" || !PLUGIN_ID_PATTERN.test(id))
+    || new Set(candidate.managedPluginIds).size !== candidate.managedPluginIds.length
+  ) {
+    throw invalidBundle("Invalid bundled plugin state");
+  }
+  return [...candidate.managedPluginIds].sort();
 }
 
 function parseDescriptor(value: unknown): ReleaseDescriptor {

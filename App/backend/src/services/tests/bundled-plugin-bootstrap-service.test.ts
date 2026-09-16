@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@memmy/local-api-contracts";
-import { reconcileBundledPlugins } from "../bundled-plugin-bootstrap-service.js";
+import {
+  reconcileBundledPlugins,
+  suppressBundledPlugins
+} from "../bundled-plugin-bootstrap-service.js";
 import type { PluginService } from "../plugin-service.js";
 
 const manifest = {
@@ -72,5 +75,43 @@ describe("reconcileBundledPlugins", () => {
     expect(service.update).toHaveBeenCalledWith(manifest.id, manifest.version);
     expect(service.disable).toHaveBeenCalledWith(manifest.id);
     expect(service.uninstall).not.toHaveBeenCalled();
+  });
+});
+
+describe("suppressBundledPlugins", () => {
+  it("deactivates a persisted active plugin omitted by this distribution", async () => {
+    const active = { ...installed(), state: "active" as const };
+    const service = {
+      list: vi.fn(() => [active]),
+      disable: vi.fn(async () => ({ ...active, state: "disabled" as const })),
+      uninstall: vi.fn()
+    } as unknown as PluginService;
+
+    await expect(suppressBundledPlugins({
+      plugins: service,
+      releases: [],
+      managedPluginIds: [manifest.id],
+      enabledById: {}
+    })).resolves.toEqual([]);
+
+    expect(service.disable).toHaveBeenCalledWith(manifest.id);
+    expect(service.uninstall).not.toHaveBeenCalled();
+  });
+
+  it("keeps an included and enabled plugin active", async () => {
+    const active = { ...installed(), state: "active" as const };
+    const service = {
+      list: vi.fn(() => [active]),
+      disable: vi.fn()
+    } as unknown as PluginService;
+
+    await suppressBundledPlugins({
+      plugins: service,
+      releases: [{ id: manifest.id, version: manifest.version }],
+      managedPluginIds: [manifest.id],
+      enabledById: { [manifest.id]: true }
+    });
+
+    expect(service.disable).not.toHaveBeenCalled();
   });
 });

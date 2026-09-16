@@ -44,7 +44,10 @@ import {
   type BundledPluginCatalog,
   type PluginRegistry
 } from "./adapters/outbound/plugin-registry/index.js";
-import { reconcileBundledPlugins } from "./services/bundled-plugin-bootstrap-service.js";
+import {
+  reconcileBundledPlugins,
+  suppressBundledPlugins
+} from "./services/bundled-plugin-bootstrap-service.js";
 import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
 
 export type { BootstrapScenario };
@@ -152,21 +155,9 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     const bundledPreferences = bundledCatalog
       ? await readBundledPluginPreferences(
           memmyConfigPath,
-          bundledCatalog.releases.map((release) => release.id)
+          bundledCatalog.managedPluginIds
         )
       : {};
-    if (bundledCatalog && bundledPreferences) {
-      for (const release of bundledCatalog.releases) {
-        if (
-          bundledPreferences[release.id]?.enabled === false
-          && appStateStore.repositories.plugins.get(release.id)?.state === "active"
-        ) {
-          // No plugin runtime exists yet, so persist the disabled state before
-          // restoreActive() can reactivate a plugin disabled in config.yaml.
-          appStateStore.repositories.plugins.setState(release.id, "disabled");
-        }
-      }
-    }
     const services = createBackendServices({
       appStateStore,
       agentAdapterRegistry,
@@ -187,6 +178,24 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
+    if (bundledCatalog) {
+      const failures = await suppressBundledPlugins({
+        plugins: services.plugins,
+        releases: bundledCatalog.releases,
+        managedPluginIds: bundledCatalog.managedPluginIds,
+        enabledById: Object.fromEntries(
+          bundledCatalog.managedPluginIds.map((pluginId) => [
+            pluginId,
+            bundledPreferences?.[pluginId]?.enabled !== false
+          ])
+        )
+      });
+      for (const failure of failures) {
+        console.warn(
+          `Suppressed bundled plugin deactivation failed for ${failure.pluginId}: ${failure.message}`
+        );
+      }
+    }
     await services.plugins.restoreActive();
     if (bundledCatalog && bundledPreferences) {
       const failures = await reconcileBundledPlugins({

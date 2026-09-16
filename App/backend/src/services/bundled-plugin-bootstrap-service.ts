@@ -13,6 +13,35 @@ export interface ReconcileBundledPluginsOptions {
   enabledById: Readonly<Record<string, boolean>>;
 }
 
+export interface SuppressBundledPluginsOptions extends ReconcileBundledPluginsOptions {
+  managedPluginIds: readonly string[];
+}
+
+/**
+ * Deactivates persisted bundled plugins that the current distribution omitted
+ * or explicitly disabled, while preserving their artifacts and task data.
+ */
+export async function suppressBundledPlugins(
+  options: SuppressBundledPluginsOptions
+): Promise<BundledPluginBootstrapFailure[]> {
+  const releaseIds = new Set(options.releases.map((release) => release.id));
+  const failures: BundledPluginBootstrapFailure[] = [];
+  for (const pluginId of options.managedPluginIds) {
+    if (releaseIds.has(pluginId) && options.enabledById[pluginId] !== false) continue;
+    const installed = options.plugins.list().find((plugin) => plugin.id === pluginId);
+    if (!installed || !["active", "enabling", "failed"].includes(installed.state)) continue;
+    try {
+      await options.plugins.disable(pluginId);
+    } catch (error) {
+      failures.push({
+        pluginId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return failures;
+}
+
 /**
  * Installs or upgrades trusted bundled releases, grants their fixed declared
  * permissions, and applies the config.yaml desired state without deleting data.

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -19,7 +19,10 @@ afterEach(() => {
 function prepare({ args, sourceDirectory }) {
   return spawnSync(process.execPath, [script, ...args], {
     encoding: "utf8",
-    env: { ...process.env, MEMMY_BUNDLED_PLUGIN_SOURCE_DIR: sourceDirectory ?? "" }
+    env: {
+      ...process.env,
+      MEMMY_BUNDLED_PLUGIN_SOURCE_DIR: sourceDirectory ?? ""
+    }
   });
 }
 
@@ -30,32 +33,28 @@ function outputDirectory() {
 }
 
 describe("bundled plugin preparation", () => {
-  it("fails a packaging run that has no source directory to copy from", () => {
-    const result = prepare({ args: [outputDirectory()] });
-    // An installer missing a locked plugin is a broken build, so this must stay
-    // loud on the packaging path, which passes no flags.
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("MEMMY_BUNDLED_PLUGIN_SOURCE_DIR");
-  });
-
-  it("skips an optional run instead of blocking startup, and leaves the output alone", () => {
+  it("prepares state metadata without release artifacts for an optional build", () => {
     const output = outputDirectory();
-    mkdirSync(output, { recursive: true });
-    // A dev machine running from source may hold plugins here from elsewhere —
-    // the Host reads this directory at startup, so a skip must not wipe it.
-    writeFileSync(join(output, "in-place.release.json"), "{}", "utf8");
-
     const result = prepare({ args: [output, "--optional"] });
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain("Skipping bundled plugins");
-    expect(readdirSync(output)).toEqual(["in-place.release.json"]);
+    expect(result.stderr).toContain("optional build is continuing");
+    expect(readdirSync(output)).toEqual(["bundled-plugins-state.json"]);
+    expect(JSON.parse(readFileSync(join(output, "bundled-plugins-state.json"), "utf8")))
+      .toEqual({
+        schemaVersion: 1,
+        managedPluginIds: ["literature-review"]
+      });
+  });
+
+  it("fails a build with no source unless omission is explicit", () => {
+    const result = prepare({ args: [outputDirectory()] });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("pass --optional");
   });
 
   it("still fails an optional run whose configured source directory is incomplete", () => {
     const source = mkdtempSync(join(tmpdir(), "bundled-plugins-source-"));
     roots.push(source);
-    // Naming a directory is a statement that the releases are there. Skipping
-    // on a typo would ship a desktop build quietly missing its plugins.
     const result = prepare({ args: [outputDirectory(), "--optional"], sourceDirectory: source });
     expect(result.status).not.toBe(0);
   });
