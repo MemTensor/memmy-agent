@@ -172,9 +172,11 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const calls = useMemo(
     () => selectRegionPluginCalls(
       occludeUserRaisedCalls(
-        selectVisiblePluginCalls(props.calls, answeredInteractions)
-          .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
-          .filter((call) => !props.dismissedCallIds?.has(call.callId))
+        selectCurrentPluginCalls(
+          selectVisiblePluginCalls(props.calls, answeredInteractions)
+            .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
+            .filter((call) => !props.dismissedCallIds?.has(call.callId))
+        )
       ),
       region
     ),
@@ -299,6 +301,13 @@ function GenericPluginCards(props: {
 }) {
   const terminal = props.events.some((event) => event.type === "result" || event.type === "error");
   const artifactEvents = props.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
+  // Setup files (templates, checklists) and deliverables are both files, but
+  // they answer different questions — "what do I take with me" and "what did
+  // this produce" — so they are listed apart and named differently. A single
+  // list called 交付文件 made a card full of blank templates read as a finished
+  // engagement.
+  const setupEvents = artifactEvents.filter((event) => event.artifact.role === "setup");
+  const deliverableEvents = artifactEvents.filter((event) => event.artifact.role !== "setup");
   return (
     <div className="space-y-2">
       {props.events.filter((event) => event.type !== "artifact").map((event) => {
@@ -312,15 +321,24 @@ function GenericPluginCards(props: {
         }
         return null;
       })}
-      {artifactEvents.length > 1 ? (
-        <ArtifactCollection
-          events={artifactEvents}
+      {setupEvents.length > 0 ? (
+        <ArtifactGroup
+          events={setupEvents}
+          labelKey="plugin.ui.setupCollection"
           onAddToChat={props.onAddArtifact}
           onOpen={props.onOpenArtifact}
           onRead={props.onReadArtifact}
         />
-      ) : artifactEvents[0] ? (
-        <ArtifactCard event={artifactEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
+      ) : null}
+      {deliverableEvents.length > 1 ? (
+        <ArtifactCollection
+          events={deliverableEvents}
+          onAddToChat={props.onAddArtifact}
+          onOpen={props.onOpenArtifact}
+          onRead={props.onReadArtifact}
+        />
+      ) : deliverableEvents[0] ? (
+        <ArtifactCard event={deliverableEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
       ) : null}
     </div>
   );
@@ -1071,6 +1089,57 @@ function ArtifactCard(props: {
   );
 }
 
+/**
+ * Lists one group of files, named for what they are.
+ *
+ * Two files go straight on screen: a card that hides the two things it was
+ * opened to hand over is a card that made the user click twice for nothing.
+ * Past that the rows collapse behind a count, because the card is not the
+ * place to read a long file list — the preview panel is.
+ *
+ * @param props Files, the label naming the group, and the row actions.
+ * @returns The group as one block.
+ */
+function ArtifactGroup(props: {
+  events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
+  labelKey: MessageKey;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const rows = props.events.length <= 2 || expanded
+    ? props.events.map((event) => (
+      <ArtifactCard
+        key={`artifact:${event.artifact.id}`}
+        event={event}
+        onAddToChat={props.onAddToChat}
+        onOpen={props.onOpen}
+        onRead={props.onRead}
+      />
+    ))
+    : null;
+  return (
+    <>
+      {props.events.length > 2 ? (
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 rounded-card border border-border-stone/30 bg-canvas-oat/30 px-3 py-2 text-left text-xs text-text-ink/60 transition-colors hover:bg-canvas-oat/60"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <FileOutput size={15} className="shrink-0 text-action-sky" aria-hidden="true" />
+          <span className="font-medium">{t(props.labelKey, { count: props.events.length })}</span>
+          <span className="ml-auto text-text-ink/40">{expanded ? t("plugin.ui.collapse") : t("plugin.ui.expand")}</span>
+          <ChevronRight size={14} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
+        </button>
+      ) : null}
+      {rows}
+    </>
+  );
+}
+
 function ArtifactCollection(props: {
   events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
   onAddToChat?: (artifact: PluginArtifactRef) => void;
@@ -1113,6 +1182,47 @@ function interactionKey(call: Pick<PluginUiCall, "pluginId" | "callId">, interac
   return `${call.pluginId}:${call.callId}:${interactionId}`;
 }
 
+/**
+ * Reduces the calls of one capability to the ones worth a card.
+ *
+ * The conversation is not a log of everything the plugin did — it is where the
+ * work is happening. So for each capability only two things survive: the run
+ * that is still going, and the most recent run that produced something. An
+ * earlier attempt that failed, a run the user started again, a cancelled one:
+ * those are history, and rendering each as its own card buries the one card the
+ * user is supposed to act on.
+ *
+ * A newer live run supersedes an older one for the same reason the plugin can
+ * only serve one at a time — only the newest is still answering.
+ *
+ * @param calls Calls the region is considering, oldest first.
+ * @returns The calls that deserve a card, oldest first.
+ */
+export function selectCurrentPluginCalls(calls: readonly PluginUiCall[]): PluginUiCall[] {
+  const isLive = (call: PluginUiCall) => !call.events.some((event) => event.type === "result" || event.type === "error");
+  const groups = new Map<string, { live?: PluginUiCall; finished?: PluginUiCall }>();
+  const order: string[] = [];
+  for (const call of calls) {
+    const key = `${call.pluginId}:${call.capabilityId}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {};
+      groups.set(key, group);
+      order.push(key);
+    }
+    if (isLive(call)) group.live = call;
+    else group.finished = call;
+  }
+  return order
+    .flatMap((key) => {
+      const group = groups.get(key)!;
+      if (group.live) return [group.live];
+      if (group.finished?.events.some((event) => event.type === "artifact")) return [group.finished];
+      return [];
+    })
+    .sort((left, right) => calls.indexOf(left) - calls.indexOf(right));
+}
+
 /** Keeps history in the event store while limiting the conversation to actionable UI. */
 export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: ReadonlySet<string> = new Set()): PluginUiCall[] {
   const prepared = calls.map((call) => ({
@@ -1126,18 +1236,28 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
     ? latest.callId
     : undefined;
   return prepared.filter((call, index) => {
-    const hasArtifact = call.events.some((event) => event.type === "artifact");
+    const artifactEvents = call.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
+    // A call that only handed over setup files (templates, checklists) carries
+    // no real deliverable. Keeping it on screen after it terminates adds a card
+    // the user cannot act on. Deliverable artifacts — the workbook, the report
+    // — still stay because those are what the engagement produced.
+    const hasDeliverableArtifact = artifactEvents.some((event) => event.artifact.role !== "setup");
+    const hasArtifact = artifactEvents.length > 0;
     const hasError = call.events.some((event) => event.type === "error");
+    const terminal = call.events.some((event) => event.type === "result" || event.type === "error");
     const recoveredByLaterRetry = hasError && prepared.slice(index + 1).some((candidate) => (
       candidate.pluginId === call.pluginId
       && candidate.capabilityId === call.capabilityId
       && candidate.conversationId === call.conversationId
       && candidate.events.some((event) => event.type === "result")
     ));
-    if (hasArtifact) return true;
+    if (hasDeliverableArtifact) return true;
+    // A setup-only call that finished (result or dismissed) is history:
+    // the templates were handed over and the card has nothing left to offer.
+    if (hasArtifact && terminal) return false;
+    if (hasArtifact && !terminal) return true;
     if (hasError) return !recoveredByLaterRetry;
-    if (!call.events.some((event) => event.type === "result" || event.type === "error")
-      && call.events.some((event) => event.type === "interaction")) return true;
+    if (!terminal && call.events.some((event) => event.type === "interaction")) return true;
     return call.callId === latestActive && call.events.some((event) => event.type !== "result");
   });
 }

@@ -259,12 +259,25 @@ export const PluginTaskSchema = z.object({
 });
 export type PluginTask = z.infer<typeof PluginTaskSchema>;
 
+/**
+ * What a plugin's file is for, so the Host can label and place it correctly.
+ *
+ * `setup` is something handed over before the work happens — an intake
+ * checklist, a survey template, a workbook the user fills in on site. Calling
+ * those "deliverables" reads as the engagement being finished when nothing has
+ * been produced yet. Anything a plugin does not classify keeps the old meaning,
+ * which is what every artifact was before this field existed.
+ */
+export const PluginArtifactRoleSchema = z.enum(["setup", "deliverable"]);
+export type PluginArtifactRole = z.infer<typeof PluginArtifactRoleSchema>;
+
 export const PluginArtifactRefSchema = z.object({
   id: z.string().trim().min(1),
   name: z.string().trim().min(1),
   mediaType: z.string().trim().min(1),
   uri: z.string().trim().min(1),
-  downloadUri: z.string().trim().min(1).optional()
+  downloadUri: z.string().trim().min(1).optional(),
+  role: PluginArtifactRoleSchema.optional()
 });
 export type PluginArtifactRef = z.infer<typeof PluginArtifactRefSchema>;
 

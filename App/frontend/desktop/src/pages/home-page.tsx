@@ -2636,7 +2636,28 @@ export function HomePage() {
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
     const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
-    if (pluginInvocation?.contribution.agentSkillId) return false;
+    // A command with agentSkillId goes to the Agent too, so it is NOT intercepted
+    // here as a terminal action. But if it also declares a capabilityId the card
+    // should open immediately — we fire the invoke side-effect and then return
+    // false so the caller still sends the agent message.
+    if (pluginInvocation?.contribution.agentSkillId) {
+      if (pluginInvocation.contribution.capabilityId && clients && pendingAttachments.length === 0) {
+        const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
+        const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+        void clients.plugins.invoke(plugin.id, contribution.capabilityId, {
+          conversationId,
+          input: { command: contribution.command, arguments: commandArguments, context: { ...(draftTarget.kind === "project" ? { projectId: draftTarget.projectId } : {}), references: contextChips } },
+          origin: "user"
+        }).catch((error) => {
+          dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+            source: "send",
+            message: error instanceof Error ? error.message : "network_unavailable",
+            scopeKey: chatScopeKey
+          })));
+        });
+      }
+      return false;
+    }
     if (pluginInvocation && pendingAttachments.length > 0) return false;
     if (pluginInvocation && clients) {
       const { plugin, contribution, arguments: commandArguments } = pluginInvocation;

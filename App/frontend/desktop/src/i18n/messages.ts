@@ -130,7 +130,16 @@ export const zhCNMessages = {
   "recording.summaryPrompt": "请总结这段录音，提炼主要内容、关键结论和待办事项。",
   "plugin.ui.download": "下载",
   "plugin.ui.downloadFailed": "下载失败，请重试",
+  /*
+   * Two labels, because a plugin hands over two different kinds of file.
+   * Templates and checklists are what the user takes away before doing the
+   * work; the deliverable is what the work produced. Calling both "交付文件"
+   * made a card full of blank templates look like a finished engagement.
+   */
   "plugin.ui.artifactCollection": "{count} 个交付文件",
+  "plugin.ui.setupCollection": "{count} 份调研模板",
+  "plugin.ui.artifactsSummary": "{count} 个文件",
+  "plugin.ui.showFileList": "查看文件",
   "plugin.ui.expand": "展开",
   "plugin.ui.collapse": "收起",
   "plugin.ui.artifactPreview": "产物预览",
@@ -1935,6 +1944,9 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "plugin.ui.download": "Download",
   "plugin.ui.downloadFailed": "Download failed. Try again.",
   "plugin.ui.artifactCollection": "{count} delivery files",
+  "plugin.ui.setupCollection": "{count} setup templates",
+  "plugin.ui.artifactsSummary": "{count} files",
+  "plugin.ui.showFileList": "Files",
   "plugin.ui.expand": "Expand",
   "plugin.ui.collapse": "Collapse",
   "plugin.ui.artifactPreview": "Artifact preview",
