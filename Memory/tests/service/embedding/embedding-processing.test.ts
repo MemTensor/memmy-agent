@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { get_encoding } from "tiktoken";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
@@ -46,6 +47,18 @@ describe("MemoryService / embedding / processing", () => {
 
   it("keeps legacy Skill memories searchable through their invocation guide", () => {
     expect(embeddingTextForMemory(skillMemory())).toContain("PROCEDURE_ONLY_SENTINEL");
+  });
+
+  it("truncates every oversized Skill retrieval document before embedding", () => {
+    const prefix = "Legacy Skill instructions\n";
+    const text = embeddingTextForMemory(skillMemory(undefined, {
+      content: `${prefix}${" procedure".repeat(8_000)}\nTAIL_SENTINEL`
+    }));
+    const encoder = get_encoding("cl100k_base");
+
+    expect(text).toContain(prefix);
+    expect(text).not.toContain("TAIL_SENTINEL");
+    expect(encoder.encode(text).length).toBeLessThanOrEqual(6_000);
   });
 
   it("marks a replacement Skill vector with its retrieval document version and source hash", () => {
