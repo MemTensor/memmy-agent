@@ -71,6 +71,14 @@ export function sourceTurnFailureReason(messages: readonly { rawMeta: Readonly<R
 }
 
 /**
+ * Cancelled turns are terminal and must not hold back the source watermark.
+ * Incomplete or conflicting items stay retryable, so they still block it.
+ */
+export function sourceTurnSkipBlocksWatermark(reason: string): boolean {
+  return reason !== "turn_cancelled";
+}
+
+/**
  * A reader that stages native turns marks every message with its turn state, so the
  * scan can tell an unfinished native turn apart from a source that has no native
  * reader at all and still needs the legacy add-memory path.

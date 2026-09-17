@@ -4,6 +4,7 @@ import {
   readCursorSourceTurn,
   readOpenclawSourceTurn,
   readOpencodeSourceTurn,
+  sourceTurnSkipBlocksWatermark,
   type CursorVscdbSource,
   type OpenclawTranscriptSource,
   type OpencodeSource,
@@ -13,6 +14,13 @@ import {
 const t = "2099-01-01T10:00:00.000Z";
 
 describe("review regressions for native source turns", () => {
+  it("lets cancelled skips commit a watermark and keeps incomplete skips retryable", () => {
+    expect(sourceTurnSkipBlocksWatermark("turn_cancelled")).toBe(false);
+    expect(sourceTurnSkipBlocksWatermark("turn_incomplete")).toBe(true);
+    expect(sourceTurnSkipBlocksWatermark("turn_content_incomplete")).toBe(true);
+    expect(sourceTurnSkipBlocksWatermark("source_turn_content_conflict")).toBe(true);
+  });
+
   it("uses the disk profile for both hook and scan requests", () => {
     const turn: SourceTurn = {
       source: "opencode",

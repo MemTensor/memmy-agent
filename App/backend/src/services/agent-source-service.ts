@@ -48,6 +48,7 @@ import {
   orderedTurns,
   sourceTurnFromMessages,
   sourceTurnFailureReason,
+  sourceTurnSkipBlocksWatermark,
   buildSourceTurnRequest,
   renderTurnClipped,
   stableTurnIdentity,
@@ -838,6 +839,21 @@ async function ingestPersistentSource(
   let activeConversationId: string | null = null;
   let activeConversationFailed = false;
   let hasUncommittedSkips = false;
+  let processed = 0;
+  const noteUncommittedSkip = (reason: string) => {
+    if (!sourceTurnSkipBlocksWatermark(reason)) return;
+    activeConversationFailed = true;
+    hasUncommittedSkips = true;
+  };
+  const emitAddProgress = (message: string) => {
+    emitProgress(scanOptions, {
+      sourceId,
+      phase: "add",
+      current: processed,
+      total: store.count(sourceId),
+      message
+    });
+  };
   const commitConversation = () => {
     if (!activeConversationId || activeConversationFailed) return;
     const meta = store.getConversationMeta(sourceId, activeConversationId);
@@ -869,25 +885,35 @@ async function ingestPersistentSource(
       activeConversationFailed = false;
     }
     const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
-    if (conversationMeta?.selected === false) continue;
+    if (conversationMeta?.selected === false) {
+      processed += turn.messages.length;
+      emitAddProgress("Capturing conversation turns");
+      continue;
+    }
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
-    if (selectedTurn && !selectedTurn.selected) continue;
+    if (selectedTurn && !selectedTurn.selected) {
+      processed += turn.messages.length;
+      emitAddProgress("Capturing conversation turns");
+      continue;
+    }
     if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) {
-          skipPersistentTurn(store, sourceId, turn.conversationId, sourceTurnFailureReason(turn.messages));
-          activeConversationFailed = true;
-          hasUncommittedSkips = true;
-          emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+          const reason = sourceTurnFailureReason(turn.messages);
+          skipPersistentTurn(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
+          processed += turn.messages.length;
+          emitAddProgress("Capturing conversation turns");
           continue;
         }
         const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
         if (result.status === "pending" || result.status === "conflict") {
-          skipPersistentTurn(store, sourceId, turn.conversationId, result.reason ?? result.status);
-          activeConversationFailed = true;
-          hasUncommittedSkips = true;
-          emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+          const reason = result.reason ?? result.status;
+          skipPersistentTurn(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
+          processed += turn.messages.length;
+          emitAddProgress("Capturing conversation turns");
           continue;
         }
         const ids = result.result?.l1MemoryIds ?? [];
@@ -901,11 +927,12 @@ async function ingestPersistentSource(
         if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
         for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
       } catch (error) {
-        skipPersistentTurn(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
-        activeConversationFailed = true;
-        hasUncommittedSkips = true;
+        const reason = error instanceof Error ? error.message : "native turn ingestion failed";
+        skipPersistentTurn(store, sourceId, turn.conversationId, reason);
+        noteUncommittedSkip(reason);
       }
-      emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+      processed += turn.messages.length;
+      emitAddProgress("Capturing conversation turns");
       continue;
     }
     let turnSucceeded = true;
@@ -948,7 +975,8 @@ async function ingestPersistentSource(
       skipPersistentTurn(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "Agent source ingestion failed");
     }
     if (!turnSucceeded) activeConversationFailed = true;
-    emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIds.length + deduped, total: store.count(sourceId), message: "Adding raw memories" });
+    processed += turn.messages.length;
+    emitAddProgress("Adding raw memories");
   }
   if (pendingIds.length > 0) {
     const failures = await processPendingImportSummaries(options, pendingIds, { ...scanOptions, progressSourceId: sourceId });

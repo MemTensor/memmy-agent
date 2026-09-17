@@ -37,6 +37,7 @@ import {
   orderedTurns,
   sourceTurnFromMessages,
   sourceTurnFailureReason,
+  sourceTurnSkipBlocksWatermark,
   buildSourceTurnRequest,
   renderTurnClipped,
   stableTurnIdentity,
@@ -741,6 +742,11 @@ async function ingestStagedMessages(
   let hasUncommittedSkips = false;
   let activeConversationId: string | null = null;
   let activeConversationFailed = false;
+  const noteUncommittedSkip = (reason: string) => {
+    if (!sourceTurnSkipBlocksWatermark(reason)) return;
+    activeConversationFailed = true;
+    hasUncommittedSkips = true;
+  };
   const commitConversation = () => {
     if (!activeConversationId || activeConversationFailed) return;
     const meta = store.getConversationMeta(sourceId, activeConversationId);
@@ -783,25 +789,33 @@ async function ingestStagedMessages(
       activeConversationFailed = false;
     }
     const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
-    if (conversationMeta?.selected === false) continue;
+    if (conversationMeta?.selected === false) {
+      processed += turn.messages.length;
+      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
-    if (selectedTurn && !selectedTurn.selected) continue;
+    if (selectedTurn && !selectedTurn.selected) {
+      processed += turn.messages.length;
+      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
     if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) {
-          recordScanItemSkip(store, sourceId, turn.conversationId, sourceTurnFailureReason(turn.messages));
-          activeConversationFailed = true;
-          hasUncommittedSkips = true;
+          const reason = sourceTurnFailureReason(turn.messages);
+          recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
           processed += turn.messages.length;
           onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
           continue;
         }
         const result = service.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
         if (result.status === "pending" || result.status === "conflict") {
-          recordScanItemSkip(store, sourceId, turn.conversationId, result.reason ?? result.status);
-          activeConversationFailed = true;
-          hasUncommittedSkips = true;
+          const reason = result.reason ?? result.status;
+          recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
           processed += turn.messages.length;
           onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
           continue;
@@ -813,9 +827,9 @@ async function ingestStagedMessages(
         messageCount += turn.messages.length;
         if (result.status === "stored") scheduleWorker?.();
       } catch (error) {
-        recordScanItemSkip(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
-        activeConversationFailed = true;
-        hasUncommittedSkips = true;
+        const reason = error instanceof Error ? error.message : "native turn ingestion failed";
+        recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+        noteUncommittedSkip(reason);
       }
       processed += turn.messages.length;
       onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
