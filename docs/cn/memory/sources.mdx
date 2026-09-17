@@ -120,7 +120,7 @@ flowchart LR
 
 - **自动召回**：Claude Code、Codex、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索相关记忆并注入上下文。
 - **自动采集**：Hook 或插件会在回合结束时提交用户请求、Agent 回答和成功/失败状态，不需要 Agent 手动执行 `memmy-memory add`。
-- **任务接续**：输入 `/memmy-resume <query>` 会搜索最多 5 个候选 L1 episode；继续输入 `1`–`5` 可读取完整 episode 并注入接续上下文。
+- **任务接续**：输入 `/memmy-resume <query>` 会搜索最多 5 个候选 L1 episode；继续输入 `1`–`5` 可读取完整 episode 并注入接续上下文。Claude Code、OpenCode、OpenClaw 和 Hermes 使用原生命令入口；Cursor、Codex 及 Skill 型接入会安装显式 `memmy-resume` Skill。
 - **按需查询**：随接入安装的 Skill 保留 `memmy-memory search` 和 `memmy-memory get`，只在自动上下文不足时使用。
 - **来源标记**：采集结果会记录 `cursor`、`claude_code`、`codex`、`opencode`、`openclaw` 或 `hermes`，便于过滤和追踪来源。
 
@@ -149,6 +149,7 @@ Memmy 会在 `~/.cursor/hooks.json` 中追加自己的 Hook 条目，不会覆�
 - `~/.cursor/hooks/memmy-resume-hook.mjs`
 - `~/.cursor/hooks/memmy-memory-config.json`
 - `~/.cursor/skills/memmy-memory/SKILL.md`
+- `~/.cursor/skills/memmy-resume/SKILL.md`
 
 ### Claude Code：`UserPromptSubmit` 与 `Stop`
 
@@ -180,6 +181,7 @@ Memmy 会在 `~/.cursor/hooks.json` 中追加自己的 Hook 条目，不会覆�
 - `~/.codex/hooks/memmy-memory-config.json`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/memmy-memory/SKILL.md`
+- `~/.codex/skills/memmy-resume/SKILL.md`
 
 ### OpenCode：原生插件
 

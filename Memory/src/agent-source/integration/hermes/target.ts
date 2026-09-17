@@ -453,30 +453,37 @@ def _load_runtime() -> Dict[str, Any]:
 
 
 def _read_storage_config(path: Path) -> Dict[str, str]:
-    storages: List[Dict[str, str]] = []
-    storage: Optional[Dict[str, str]] = None
-    storage_indent = 0
+    storage = _read_yaml_mapping_at_path(path, ["memmyMemory", "storage"])
+    memory = _read_yaml_mapping_at_path(path, ["memmyMemory"])
+    legacy = _read_yaml_mapping_at_path(path, ["storage"])
+    return {
+        "endpoint": storage.get("endpoint") or memory.get("endpoint") or legacy.get("endpoint", ""),
+        "token": storage.get("token") or memory.get("token") or legacy.get("token", ""),
+    }
+
+
+def _read_yaml_mapping_at_path(path: Path, target_path: List[str]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    parents: List[Dict[str, Any]] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" \t"))
-        if line.strip() == "storage:":
-            storage = {}
-            storage_indent = indent
-            storages.append(storage)
+        match = re.match(r"^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$", line)
+        if not match:
             continue
-        if storage is not None and indent <= storage_indent:
-            storage = None
-        if storage is None:
+        while parents and int(parents[-1]["indent"]) >= indent:
+            parents.pop()
+        key = match.group(1)
+        value = match.group(2)
+        current_path = [str(parent["key"]) for parent in parents] + [key]
+        if not value:
+            parents.append({"indent": indent, "key": key})
             continue
-        key, separator, value = line.strip().partition(":")
-        if separator:
-            storage[key] = _parse_yaml_scalar(value)
-    for item in storages:
-        if item.get("endpoint"):
-            return item
-    return storages[0] if storages else {}
+        if len(current_path) == len(target_path) + 1 and current_path[:-1] == target_path:
+            result[key] = _parse_yaml_scalar(value)
+    return result
 
 
 def _parse_yaml_scalar(value: str) -> str:
@@ -515,9 +522,9 @@ def _memmy_post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             message = (((data or {}).get("error") or {}).get("message") or text)
         except Exception:
             message = text
-        raise RuntimeError(message or ("Memmy HTTP " + str(exc.code))) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + (message or ("HTTP " + str(exc.code)))) from exc
     except URLError as exc:
-        raise RuntimeError("Memmy is unavailable: " + str(exc.reason)) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + str(exc.reason)) from exc
 
 
 def _memmy_get(path: str) -> Dict[str, Any]:
@@ -540,9 +547,9 @@ def _memmy_get(path: str) -> Dict[str, Any]:
             message = (((data or {}).get("error") or {}).get("message") or text)
         except Exception:
             message = text
-        raise RuntimeError(message or ("Memmy HTTP " + str(exc.code))) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + (message or ("HTTP " + str(exc.code)))) from exc
     except URLError as exc:
-        raise RuntimeError("Memmy is unavailable: " + str(exc.reason)) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + str(exc.reason)) from exc
 
 
 def _build_episode_candidates(query: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1328,30 +1335,37 @@ def _load_runtime() -> Dict[str, str]:
 
 
 def _read_storage_config(path: Path) -> Dict[str, str]:
-    storages: List[Dict[str, str]] = []
-    storage: Optional[Dict[str, str]] = None
-    storage_indent = 0
+    storage = _read_yaml_mapping_at_path(path, ["memmyMemory", "storage"])
+    memory = _read_yaml_mapping_at_path(path, ["memmyMemory"])
+    legacy = _read_yaml_mapping_at_path(path, ["storage"])
+    return {
+        "endpoint": storage.get("endpoint") or memory.get("endpoint") or legacy.get("endpoint", ""),
+        "token": storage.get("token") or memory.get("token") or legacy.get("token", ""),
+    }
+
+
+def _read_yaml_mapping_at_path(path: Path, target_path: List[str]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    parents: List[Dict[str, Any]] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" \t"))
-        if line.strip() == "storage:":
-            storage = {}
-            storage_indent = indent
-            storages.append(storage)
+        match = re.match(r"^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$", line)
+        if not match:
             continue
-        if storage is not None and indent <= storage_indent:
-            storage = None
-        if storage is None:
+        while parents and int(parents[-1]["indent"]) >= indent:
+            parents.pop()
+        key = match.group(1)
+        value = match.group(2)
+        current_path = [str(parent["key"]) for parent in parents] + [key]
+        if not value:
+            parents.append({"indent": indent, "key": key})
             continue
-        key, separator, value = line.strip().partition(":")
-        if separator:
-            storage[key] = _parse_yaml_scalar(value)
-    for item in storages:
-        if item.get("endpoint"):
-            return item
-    return storages[0] if storages else {}
+        if len(current_path) == len(target_path) + 1 and current_path[:-1] == target_path:
+            result[key] = _parse_yaml_scalar(value)
+    return result
 
 
 def _parse_yaml_scalar(value: str) -> str:
@@ -1390,9 +1404,9 @@ def _memmy_post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             message = (((data or {}).get("error") or {}).get("message") or text)
         except Exception:
             message = text
-        raise RuntimeError(message or ("Memmy HTTP " + str(exc.code))) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + (message or ("HTTP " + str(exc.code)))) from exc
     except URLError as exc:
-        raise RuntimeError("Memmy is unavailable: " + str(exc.reason)) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + str(exc.reason)) from exc
 
 
 def _memmy_get(path: str, *, query: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -1417,9 +1431,9 @@ def _memmy_get(path: str, *, query: Optional[Dict[str, str]] = None, headers: Op
             message = (((data or {}).get("error") or {}).get("message") or text)
         except Exception:
             message = text
-        raise RuntimeError(message or ("Memmy HTTP " + str(exc.code))) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + (message or ("HTTP " + str(exc.code)))) from exc
     except URLError as exc:
-        raise RuntimeError("Memmy is unavailable: " + str(exc.reason)) from exc
+        raise RuntimeError("Memmy request to " + request.full_url + " failed: " + str(exc.reason)) from exc
 
 
 def _runtime_envelope(runtime: Dict[str, Any], session_key: str, project_id: Optional[str]) -> Dict[str, Any]:

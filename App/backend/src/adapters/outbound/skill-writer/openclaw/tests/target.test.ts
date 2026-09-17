@@ -232,6 +232,7 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("}, MEMMY_RECALL_TIMEOUT_MS);");
     expect(pluginIndex).toContain("async function fetchWithTimeout");
     expect(pluginIndex).toContain("new AbortController()");
+    expect(pluginIndex).toContain('"Memmy request to " + url + " failed: " + formatErrorWithCause(error)');
     expect(pluginIndex).toContain("toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined");
     expect(pluginIndex).toContain("toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined");
     expect(pluginIndex).toContain("episodeId: payload.episodeId || undefined");
@@ -339,7 +340,21 @@ describe("openclaw skill target", () => {
 
   it("uses only the resume query for the OpenClaw slash command search", async () => {
     const { rootDirectory } = createFixture();
-    const target = createOpenclawSkillTarget({ rootDirectory });
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const target = createOpenclawSkillTarget({ rootDirectory, memmyConfigPath });
     await target.installPlugin?.("openclaw");
 
     const pluginPath = join(rootDirectory, "extensions", "memmy-memory", "index.mjs");
@@ -358,9 +373,11 @@ describe("openclaw skill target", () => {
     let commandHandler: CommandHandler | undefined;
     const handlers = new Map<string, HookHandler>();
     const requestBodies: Record<string, unknown>[] = [];
+    const requestOrigins: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
+      requestOrigins.push(targetUrl.origin);
       if (typeof init?.body === "string") {
         requestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
       }
@@ -375,7 +392,7 @@ describe("openclaw skill target", () => {
       pluginModule.default.register({
         pluginConfig: {
           endpoint: "http://memmy.test",
-          memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+          memmyConfigPath
         },
         logger: { warn: vi.fn(), info: vi.fn() },
         registerTool: vi.fn(),
@@ -404,6 +421,7 @@ describe("openclaw skill target", () => {
       expect(requestBodies[0]?.layers).toEqual(["L1"]);
       expect(requestBodies[0]?.limit).toBe(20);
       expect(requestBodies[0]?.verbose).toBe(true);
+      expect(requestOrigins[0]).toBe("http://127.0.0.1:18960");
 
       const beforePromptBuild = handlers.get("before_prompt_build");
       expect(beforePromptBuild).toBeDefined();
