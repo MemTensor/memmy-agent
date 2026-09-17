@@ -155,7 +155,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         }
         const results = outcomes.map((outcome) => outcome.result);
         const failures = await this.processImportSummaries(outcomes.flatMap((outcome) => outcome.importSummaryMemoryIds), { ...scanOptions, progressSourceId: "all" });
-        appendProcessingFailuresToResults(results, failures);
+        logProcessingFailures("all", failures);
         return results;
       }
       return scanPersistent(options, "all", scanOptions, now);
@@ -193,7 +193,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         const collected = await this.collectOne(sourceId, scanOptions);
         const { result, importSummaryMemoryIds } = await ingestCollectedSource(options, collected, scanOptions, now);
         const failures = await processPendingImportSummaries(options, importSummaryMemoryIds, { ...scanOptions, progressSourceId: sourceId });
-        appendProcessingFailures(result, failures);
+        logProcessingFailures(sourceId, failures);
         return result;
       }
       const results = await scanPersistent(options, sourceId, scanOptions, now);
@@ -250,10 +250,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       const processingFailures = await processPendingImportSummaries(options, stats.memoryIds, {
         progressSourceId: sourceId
       });
-      stats.errors.push(...processingFailures.map((failure) => ({
-        conversationId: failure.memoryId,
-        reason: failure.reason
-      })));
+      logProcessingFailures(sourceId, processingFailures);
 
       const existingWatermark = options.agentSourceRepository.getScanWatermark(sourceId);
       const syncBoundaryAt = input.mode === "initial_subset"
@@ -664,9 +661,7 @@ async function stagePersistentSource(
       scanOptions.signal?.throwIfAborted();
       const messageBytes = Buffer.byteLength(JSON.stringify(message));
       if (messageBytes > 64 * 1024 * 1024) {
-        scanErrorCount += 1;
-        if (errors.length < 1000) errors.push({ conversationId: message.conversationId, reason: "scan record exceeds 64 MiB limit" });
-        store.saveResult({ sourceId, conversationId: message.conversationId, error: "scan record exceeds 64 MiB limit" });
+        recordScanItemSkip(store, sourceId, message.conversationId, "scan record exceeds 64 MiB limit");
         continue;
       }
       if (batch.length > 0 && (batch.length >= 500 || bytes + messageBytes > 8 * 1024 * 1024)) {
@@ -725,7 +720,9 @@ async function ingestPersistentStagedSource(
   const scannedAt = now();
   options.agentSourceRepository.setLastScannedAt(sourceId, scannedAt);
   const skillResult = await ingestSourceSkills(options, sourceId, scanOptions, store);
-  if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0) updatePersistentWatermark(options, sourceId, mode, ingestion.latestSeenAt, scannedAt, since);
+  if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0 && !ingestion.hasUncommittedSkips) {
+    updatePersistentWatermark(options, sourceId, mode, ingestion.latestSeenAt, scannedAt, since);
+  }
   const allErrors = [...stage.errors, ...ingestion.errors, ...skillResult.errors];
   const errorCount = stage.scanErrorCount + ingestion.errorCount + skillResult.errorCount;
   const memoryIdCount = ingestion.memoryIdCount + skillResult.memoryIdCount;
@@ -830,7 +827,7 @@ async function ingestPersistentSource(
   sourceId: string,
   scanOptions: AgentSourceScanOptions,
   initialErrors: readonly { conversationId: string; reason: string }[]
-): Promise<{ memoryIds: string[]; memoryIdCount: number; deduped: number; errorCount: number; errors: Array<{ conversationId: string; reason: string }>; latestSeenAt: string | null }> {
+): Promise<{ memoryIds: string[]; memoryIdCount: number; deduped: number; errorCount: number; errors: Array<{ conversationId: string; reason: string }>; latestSeenAt: string | null; hasUncommittedSkips: boolean }> {
   const memoryIds: string[] = [];
   let memoryIdCount = 0;
   const pendingIds: string[] = [];
@@ -840,6 +837,7 @@ async function ingestPersistentSource(
   let latestSeenAt: string | null = null;
   let activeConversationId: string | null = null;
   let activeConversationFailed = false;
+  let hasUncommittedSkips = false;
   const commitConversation = () => {
     if (!activeConversationId || activeConversationFailed) return;
     const meta = store.getConversationMeta(sourceId, activeConversationId);
@@ -877,9 +875,21 @@ async function ingestPersistentSource(
     if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
-        if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
+        if (!sourceTurn) {
+          skipPersistentTurn(store, sourceId, turn.conversationId, sourceTurnFailureReason(turn.messages));
+          activeConversationFailed = true;
+          hasUncommittedSkips = true;
+          emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
         const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
-        if (result.status === "pending" || result.status === "conflict") throw new Error(result.reason ?? result.status);
+        if (result.status === "pending" || result.status === "conflict") {
+          skipPersistentTurn(store, sourceId, turn.conversationId, result.reason ?? result.status);
+          activeConversationFailed = true;
+          hasUncommittedSkips = true;
+          emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
         const ids = result.result?.l1MemoryIds ?? [];
         if (result.status === "stored") {
           memoryIdCount += ids.length;
@@ -891,11 +901,9 @@ async function ingestPersistentSource(
         if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
         for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
       } catch (error) {
+        skipPersistentTurn(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
         activeConversationFailed = true;
-        const reason = error instanceof Error ? error.message : "native turn ingestion failed";
-        errorCount += 1;
-        if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
-        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+        hasUncommittedSkips = true;
       }
       emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
       continue;
@@ -925,35 +933,33 @@ async function ingestPersistentSource(
         if (pendingIds.length >= IMPORT_PROCESSING_COHORT_SIZE) {
           const cohort = pendingIds.splice(0, pendingIds.length);
           const failures = await processPendingImportSummaries(options, cohort, { ...scanOptions, progressSourceId: sourceId });
-          if (failures.length > 0) activeConversationFailed = true;
-          const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
-          errorCount += mapped.length;
-          errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
-          for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
+          if (failures.length > 0) {
+            activeConversationFailed = true;
+            hasUncommittedSkips = true;
+          }
+          for (const failure of failures) recordScanItemSkip(store, sourceId, failure.memoryId, failure.reason);
         }
       }
       store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
     } catch (error) {
       turnSucceeded = false;
       activeConversationFailed = true;
-      const reason = error instanceof Error ? error.message : "Agent source ingestion failed";
-      errorCount += 1;
-      if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
-      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      hasUncommittedSkips = true;
+      skipPersistentTurn(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "Agent source ingestion failed");
     }
     if (!turnSucceeded) activeConversationFailed = true;
     emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIds.length + deduped, total: store.count(sourceId), message: "Adding raw memories" });
   }
   if (pendingIds.length > 0) {
     const failures = await processPendingImportSummaries(options, pendingIds, { ...scanOptions, progressSourceId: sourceId });
-    if (failures.length > 0) activeConversationFailed = true;
-    const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
-    errorCount += mapped.length;
-    errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
-    for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
+    if (failures.length > 0) {
+      activeConversationFailed = true;
+      hasUncommittedSkips = true;
+    }
+    for (const failure of failures) recordScanItemSkip(store, sourceId, failure.memoryId, failure.reason);
   }
   commitConversation();
-  return { memoryIds, memoryIdCount, deduped, errorCount, errors, latestSeenAt };
+  return { memoryIds, memoryIdCount, deduped, errorCount, errors, latestSeenAt, hasUncommittedSkips };
 }
 
 function readScanPage(store: AppAgentSourceScanStore, sourceId: string, cursor?: { conversationId: string; createdAt: string; messageId: string; ordinal: number }): ConversationMessage[] {
@@ -1194,12 +1200,9 @@ async function ingestSourceSkills(
   try {
     skills = await options.skillDistributionService.listSkills(sourceId);
   } catch (error) {
-    const detail = {
-      conversationId: "skills",
-      reason: error instanceof Error ? error.message : "Agent Skill scan failed"
-    };
-    store?.saveResult({ sourceId, conversationId: detail.conversationId, error: detail.reason });
-    return { errors: [detail], errorCount: 1, memoryIdCount: 0 };
+    const reason = error instanceof Error ? error.message : "Agent Skill scan failed";
+    recordScanItemSkip(store, sourceId, "skills", reason);
+    return { errors: [], errorCount: 0, memoryIdCount: 0 };
   }
 
   for (const skill of skills) {
@@ -1224,13 +1227,12 @@ async function ingestSourceSkills(
       memoryIdCount += 1;
       store?.saveResult({ sourceId, conversationId: `skill:${skill.sourceSkillId}`, memoryId: added.id });
     } catch (error) {
-      errorCount += 1;
-      const detail = {
-        conversationId: `skill:${skill.sourceSkillId}`,
-        reason: error instanceof Error ? error.message : "Agent Skill import failed"
-      };
-      store?.saveResult({ sourceId, conversationId: detail.conversationId, error: detail.reason });
-      if (errors.length < 1000) errors.push(detail);
+      recordScanItemSkip(
+        store,
+        sourceId,
+        `skill:${skill.sourceSkillId}`,
+        error instanceof Error ? error.message : "Agent Skill import failed"
+      );
     }
   }
   return { errors, errorCount, memoryIdCount };
@@ -1643,25 +1645,33 @@ async function reconcileImportProcessing(
   }
 }
 
-function appendProcessingFailures(result: ScanResult, failures: readonly ProcessingFailure[]): void {
-  result.errors.push(...failures.map((failure) => ({
-    conversationId: failure.memoryId,
-    reason: failure.reason
-  })));
+function logProcessingFailures(sourceId: string, failures: readonly ProcessingFailure[]): void {
+  for (const failure of failures) {
+    logScanItemSkip(sourceId, failure.memoryId, failure.reason);
+  }
 }
 
-function appendProcessingFailuresToResults(
-  results: readonly ScanResult[],
-  failures: readonly ProcessingFailure[]
+function skipPersistentTurn(
+  store: AppAgentSourceScanStore,
+  sourceId: string,
+  conversationId: string,
+  reason: string
 ): void {
-  const resultByMemoryId = new Map<string, ScanResult>();
-  for (const result of results) {
-    for (const memoryId of result.memoryIds ?? []) resultByMemoryId.set(memoryId, result);
-  }
-  for (const failure of failures) {
-    const result = resultByMemoryId.get(failure.memoryId);
-    if (result) appendProcessingFailures(result, [failure]);
-  }
+  recordScanItemSkip(store, sourceId, conversationId, reason);
+}
+
+function recordScanItemSkip(
+  store: AppAgentSourceScanStore | undefined,
+  sourceId: string,
+  conversationId: string,
+  reason: string
+): void {
+  logScanItemSkip(sourceId, conversationId, reason);
+  store?.saveResult({ sourceId, conversationId, error: reason });
+}
+
+function logScanItemSkip(sourceId: string, conversationId: string, reason: string): void {
+  console.warn(`[agent-source] scan.item_skipped ${JSON.stringify({ sourceId, conversationId, reason })}`);
 }
 
 

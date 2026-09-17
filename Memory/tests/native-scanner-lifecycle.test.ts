@@ -66,7 +66,7 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
         detect: async () => true, async *scan() { for await (const message of readCodexRollout(path)) yield { ...message, sourceId: "codex", workspacePath: null, gitRoot: null }; } }]) });
     try {
       await executor.startScan({ sourceId: "codex", mode: "incremental" }); await wait(executor);
-      expect(executor.scanStatus().error).toContain("turn_incomplete");
+      expect(executor.scanStatus().error).toBeNull();
       expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.latestSeenAt).toBeNull();
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns").get()).toEqual({ n: 0 });
       write(true);

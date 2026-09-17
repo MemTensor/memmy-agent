@@ -38,7 +38,7 @@ describe("persistent Codex scan", () => {
       skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
       scanStoreDirectory: join(root, "scans") });
     const failed = await service.scanOne("codex", { scanJobId: "same-job", mode: "incremental" });
-    expect(failed.errors[0]?.reason).toBe("response lost");
+    expect(failed.errors).toEqual([]);
     expect(repository.getConversationCheckpoint("codex", "source-session")).toBeNull();
     expect(repository.getScanWatermark("codex")).toBeNull();
     const retried = await service.scanOne("codex", { scanJobId: "same-job", mode: "incremental" });
@@ -48,6 +48,46 @@ describe("persistent Codex scan", () => {
     expect(complete.mock.calls[0]?.[0].toolCalls).toEqual([expect.objectContaining({ id: "call-1", input: "npm test", output: "passed ".repeat(4000) })]);
     expect(repository.getConversationCheckpoint("codex", "source-session")).not.toBeNull();
     expect(addMemory).not.toHaveBeenCalled(); expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("skips an incomplete staged turn without failing the source while ingesting a complete sibling", async () => {
+    const root = mkdtempSync(join(tmpdir(), "native-backend-scan-")); roots.push(root);
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") }); stores.push(store);
+    const repository = store.repositories.agentSources;
+    const at = "2099-09-09T10:00:00.000Z";
+    const event = (type: string, payload: Record<string, unknown>, timestamp = at) => ({ type, timestamp, payload });
+    const complete = [
+      event("session_meta", { id: "complete-session" }),
+      event("event_msg", { type: "task_started", turn_id: "complete-turn" }),
+      event("response_item", { type: "message", role: "user", content: [{ text: "Finish the complete turn." }] }),
+      event("response_item", { type: "message", role: "assistant", content: [{ text: "Done." }] }),
+      event("event_msg", { type: "task_complete", turn_id: "complete-turn" })
+    ];
+    const incomplete = [
+      event("session_meta", { id: "incomplete-session" }),
+      event("event_msg", { type: "task_started", turn_id: "incomplete-turn" }),
+      event("response_item", { type: "message", role: "user", content: [{ text: "Still waiting for the answer." }] })
+    ];
+    writeFileSync(join(root, "rollout-complete.jsonl"), complete.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    writeFileSync(join(root, "rollout-incomplete.jsonl"), incomplete.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const client = createMockMemoryClient();
+    const completeSourceTurn = vi.spyOn(client, "completeSourceTurn");
+    const service = createAgentSourceService({
+      sourceRegistry: createSourceRegistry([createCodexSourceAdapter({ sessionsRoot: root })]),
+      memoryClient: client,
+      agentSourceRepository: repository,
+      ingestionService: createIngestionService({ memoryClient: client, agentSourceRepository: repository }),
+      skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
+      scanStoreDirectory: join(root, "scans")
+    });
+    const result = await service.scanOne("codex", { scanJobId: "sibling-job", mode: "full" });
+    expect(result.errors).toEqual([]);
+    expect(completeSourceTurn).toHaveBeenCalledOnce();
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTurn: expect.objectContaining({ conversationId: "complete-session", turnId: "complete-turn" })
+    }));
+    expect(repository.getConversationCheckpoint("codex", "complete-session")).not.toBeNull();
+    expect(repository.getConversationCheckpoint("codex", "incomplete-session")).toBeNull();
   });
 });
 

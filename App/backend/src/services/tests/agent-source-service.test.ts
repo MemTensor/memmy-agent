@@ -882,7 +882,7 @@ describe("agent source service", () => {
             completedConversationIds: ["conversation-complete"],
             incompleteConversationIds: ["conversation-incomplete"],
             failedConversationIds: ["conversation-failed"],
-            errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+            errors: []
           };
         }
       }
@@ -904,7 +904,7 @@ describe("agent source service", () => {
 
     expect(result).toMatchObject({
       memoryIds: ["memory-complete"],
-      errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+      errors: []
     });
     expect(repository.getConversationCheckpoint("cursor", "conversation-complete")).toMatchObject({
       lastMessageId: "complete-1"

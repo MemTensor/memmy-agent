@@ -69,6 +69,12 @@ export interface IngestionStats {
   errors: Array<{ conversationId: string; reason: string }>;
 }
 
+export interface IngestionItemSkip {
+  sourceId: string;
+  conversationId: string;
+  reason: string;
+}
+
 /** Contract for create ingestion service options. */
 export interface CreateIngestionServiceOptions {
   memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn">;
@@ -78,6 +84,7 @@ export interface CreateIngestionServiceOptions {
     "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
   >;
   warn?: (warning: IngestionWarning) => void;
+  onItemSkip?: (skip: IngestionItemSkip) => void;
 }
 
 /** Implementation of ingestion assertion error. */
@@ -267,10 +274,7 @@ async function processConversation(
       failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
-      stats.errors.push({
-        conversationId: turn.conversationId,
-        reason: error instanceof Error ? error.message : "ingestion failed"
-      });
+      reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "ingestion failed");
       options.memoryAddAnalytics?.trackAddFailed({
         ...addAnalyticsBase,
         durationMs: Date.now() - addStartedAt,
@@ -294,17 +298,34 @@ async function processNativeConversation(
   stats: IngestionStats
 ): Promise<void> {
   let failed = false;
+  let incomplete = false;
   const values = (async function* () { yield* messages; })();
   for await (const turn of orderedTurns(values)) {
     ctx.signal?.throwIfAborted();
-    try {
-      const sourceTurn = sourceTurnFromMessages(turn.messages);
-      if (!sourceTurn) {
-        throw new Error(sourceTurnFailureReason(turn.messages));
+    const sourceTurn = sourceTurnFromMessages(turn.messages);
+    if (!sourceTurn) {
+      const reason = sourceTurnFailureReason(turn.messages);
+      reportItemSkip(options, ctx, turn.conversationId, reason);
+      if (isIncompleteSourceTurnReason(reason)) {
+        incomplete = true;
+        stats.deduped += turn.messages.length;
+      } else {
+        failed = true;
+        stats.failed += turn.messages.length;
+        stats.failedMemories += 1;
       }
+      emitIngestionProgress(ctx, stats);
+      continue;
+    }
+    try {
       const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
       if (result.status === "pending" || result.status === "conflict") {
-        throw new Error(result.reason ?? result.status);
+        failed = true;
+        stats.failed += turn.messages.length;
+        stats.failedMemories += 1;
+        reportItemSkip(options, ctx, turn.conversationId, result.reason ?? result.status);
+        emitIngestionProgress(ctx, stats);
+        continue;
       }
       if (result.status === "stored") {
         const ids = result.result?.l1MemoryIds ?? [];
@@ -322,15 +343,38 @@ async function processNativeConversation(
       failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
-      stats.errors.push({ conversationId: turn.conversationId, reason: error instanceof Error ? error.message : "native turn ingestion failed" });
+      reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
     }
     emitIngestionProgress(ctx, stats);
   }
   const conversationId = messages[0]?.conversationId;
   if (conversationId) {
     if (failed) stats.failedConversationIds.push(conversationId);
+    else if (incomplete) stats.incompleteConversationIds.push(conversationId);
     else stats.completedConversationIds.push(conversationId);
   }
+}
+
+function reportItemSkip(
+  options: CreateIngestionServiceOptions,
+  ctx: IngestionContext,
+  conversationId: string,
+  reason: string
+): void {
+  const skip = { sourceId: ctx.sourceId, conversationId, reason };
+  (options.onItemSkip ?? logItemSkip)(skip);
+}
+
+function logItemSkip(skip: IngestionItemSkip): void {
+  console.warn(`[agent-source] scan.item_skipped ${JSON.stringify(skip)}`);
+}
+
+function isIncompleteSourceTurnReason(reason: string): boolean {
+  return reason === "turn_incomplete"
+    || reason === "turn_content_incomplete"
+    || reason === "turn_cancelled"
+    || reason === "timestamp_unresolved"
+    || reason === "source_turn_incomplete";
 }
 
 function emitIngestionProgress(ctx: IngestionContext, stats: IngestionStats): void {
