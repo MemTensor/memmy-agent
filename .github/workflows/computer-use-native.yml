@@ -9,7 +9,11 @@ on:
       - "App/shell/desktop/electron-builder*.yml"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "scripts/internal/linux/**"
-      - "scripts/internal/mac/build-dmg.sh"
+      - "scripts/internal/mac/**"
+      - "scripts/vendor/open-computer-use/**"
+      - "tests/ocu-native-reconnect.test.mjs"
+      - "tests/ocu-native-source.test.mjs"
+      - "tests/ocu-dev-install.test.mjs"
       - "scripts/internal/win/build-nsis.sh"
   workflow_dispatch:
 
@@ -61,6 +65,17 @@ jobs:
       - name: Check Windows MCP and desktop backend
         if: runner.os == 'Windows'
         run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" --list-apps | tee ocu-native-result.json
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: runner.os == 'macOS'
+        with:
+          xcode-version: latest-stable
+      - name: Build and test the patched macOS runtime
+        if: runner.os == 'macOS'
+        run: |
+          node --test tests/ocu-native-source.test.mjs
+          MEMMY_OCU_RUN_TESTS=1 node scripts/internal/mac/build-computer-use.mjs "$RUNNER_TEMP/ocu-native/node_modules/open-computer-use"
+          OCU_TEST_BINARY="$OCU_BINARY" node --test tests/ocu-native-reconnect.test.mjs
+          node --test tests/ocu-dev-install.test.mjs
       - name: Check macOS MCP discovery
         if: runner.os == 'macOS'
         run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" | tee ocu-native-result.json

@@ -51,6 +51,9 @@ try {
   for (const name of ["list_apps", "get_app_state", "click", "type_text", "press_key", "scroll"]) {
     if (!names.includes(name)) throw new Error(`OCU is missing tool: ${name}`);
   }
+  if (process.platform === "darwin" && !names.includes("get_screen_state")) {
+    throw new Error("Patched macOS OCU is missing passive get_screen_state");
+  }
   if (process.argv.includes("--list-apps")) {
     const apps = await request("tools/call", { name: "list_apps", arguments: {} });
     if (apps.isError) throw new Error(`OCU desktop backend failed: ${JSON.stringify(apps.content)}`);

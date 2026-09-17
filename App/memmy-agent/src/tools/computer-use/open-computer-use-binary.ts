@@ -33,7 +33,7 @@ export function openComputerUseEnvironment(
 /** Resolve only the default command; explicit user commands remain authoritative. */
 export function resolveOpenComputerUseCommand(
   command: string,
-  options: { platform?: string; arch?: string; packageRoot?: string } = {},
+  options: { platform?: string; arch?: string; packageRoot?: string; environment?: NodeJS.ProcessEnv } = {},
 ): string {
   if (command !== "open-computer-use") return command;
   const platform = options.platform ?? process.platform;
@@ -48,8 +48,25 @@ export function resolveOpenComputerUseCommand(
         ? ["dist", "windows", cpu, "open-computer-use.exe"]
         : null;
   if (!relative) return command;
+  let root: string;
   try {
-    const root = options.packageRoot ?? path.dirname(require.resolve("open-computer-use/package.json"));
+    root = options.packageRoot ?? path.dirname(require.resolve("open-computer-use/package.json"));
+  } catch {
+    return command;
+  }
+  const devBinary = (options.environment ?? process.env).MEMMY_DEV_COMPUTER_USE_BINARY;
+  if (platform === "darwin" && devBinary && !/([\\/])app\.asar(?:\.unpacked)?([\\/])/.test(root)) {
+    // dev-start installs the helper outside temporary worktrees so macOS can
+    // resolve its permission identity. Never silently use the broken temp copy.
+    if (!path.isAbsolute(devBinary)) throw new Error("MEMMY_DEV_COMPUTER_USE_BINARY must be an absolute path");
+    try {
+      accessSync(devBinary, constants.X_OK);
+    } catch {
+      throw new Error(`Development Computer Use helper is missing: ${devBinary}. Run scripts/dev-start.sh again.`);
+    }
+    return devBinary;
+  }
+  try {
     // child_process.spawn needs an actual disk path, including in Electron's Node mode.
     const binary = path.join(root, ...relative).replace(/([\\/])app\.asar([\\/])/g, "$1app.asar.unpacked$2");
     accessSync(binary, platform === "win32" ? constants.F_OK : constants.X_OK);

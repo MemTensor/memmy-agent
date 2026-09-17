@@ -20,9 +20,10 @@ export function defineModelInputCapabilities(
 }
 
 export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
-  // Memmy. Reviewed 2026-08-13.
+  // Memmy. Reviewed 2026-09-17.
   // Source: App/backend/src/infrastructure/memmy-config/index.ts
-  ["agent_chat", TEXT],
+  // The default account route accepts images, including Computer Use screenshots.
+  ["agent_chat", TEXT_IMAGE],
 
   // OpenAI / Codex. Reviewed 2026-08-13.
   // Source: https://developers.openai.com/api/docs/models

@@ -68,4 +68,8 @@ export class MacPermissionPreflight {
   deny(context: RequestContext | null, permission: MacPermission): void {
     this.turns.set(this.key(context), Promise.resolve({ state: "missing", permission }));
   }
+
+  block(context: RequestContext | null): void {
+    this.turns.set(this.key(context), Promise.resolve({ state: "unknown" }));
+  }
 }

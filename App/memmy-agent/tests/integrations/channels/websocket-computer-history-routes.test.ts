@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
-const history = vi.hoisted(() => ({ snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn() }));
+const history = vi.hoisted(() => ({ snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn(), applicationIcon: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -15,14 +15,11 @@ vi.mock("../../../src/tools/computer-history/mac/computer-history-api.js", async
   getComputerHistoryDemoService: () => history,
 }));
 
+// Existing route behavior is the macOS contract, independent of the CI host.
+beforeEach(() => { vi.spyOn(process, "platform", "get").mockReturnValue("darwin"); });
 afterEach(() => {
-  history.snapshot.mockReset();
-  history.setLlmRuntime.mockReset();
-  history.clearHistories.mockReset();
-  history.pinSegment.mockReset();
-  history.checkPermissions.mockReset();
-  history.openPermission.mockReset();
-  history.startObservationWithPermissions.mockReset();
+  for (const method of Object.values(history)) method.mockReset();
+  vi.unstubAllEnvs();
 });
 
 describe("Computer History pin HTTP boundary", () => {
@@ -93,6 +90,37 @@ function snapshot(): ComputerHistorySnapshot {
     privacy: { screenshots: false, audio: false, rawRetentionHours: 48, markdownDirectory: "/tmp/stub-histories", eventStreamDirectory: "/tmp/stub-segments" },
   };
 }
+
+describe.each(["win32", "linux"] as const)("Computer History unsupported platform %s", (platform) => {
+  it.each([undefined, "1"])("blocks all HTTP entry points even with MEMMY_COMPUTER_HISTORY=%s", async (enabled) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", enabled);
+    const instance = channel();
+    instance.modelSelectionResolver = vi.fn();
+    const routes = [
+      ["GET", "/api/computer-history"],
+      ["GET", "/api/computer-history/app-icon?bundle_id=com.example.app"],
+      ...["permissions/check", "permissions/open", "model", "delete", "clear", "pin", "import",
+        "observation/start", "observation/pause", "observation/resume", "observation/stop", "workflows/create"]
+        .map((suffix) => ["POST", `/api/computer-history/${suffix}`]),
+    ];
+
+    for (const [method, route] of routes) {
+      const response = await instance.dispatchHttp({}, request({ method, path: route, body: "{}" }));
+      expect(response?.status, route).toBe(400);
+      expect(String(response?.body), route).toContain("available only on macOS");
+    }
+    for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
+    expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
+  });
+
+  it("still checks authentication before the platform restriction", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    const response = await channel().dispatchHttp({}, request({ headers: {} }));
+    expect(response?.status).toBe(401);
+    for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
+  });
+});
 
 describe("Computer History clear HTTP route", () => {
   it.each([{}, { Authorization: "Bearer invalid-token" }])("requires a valid API token before clearing", async (headers) => {

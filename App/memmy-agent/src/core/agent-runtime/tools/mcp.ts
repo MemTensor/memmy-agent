@@ -457,11 +457,10 @@ export class MCPToolWrapper extends Tool {
     if (this.permissionPreflight) {
       const status = await this.permissionPreflight.check(this.requestContext.get());
       if (status.state !== "granted") {
-        if (status.state === "missing") {
-          await macPermissionSettingsGuide.show("computer-use", status.permission);
-        }
+        // doctor owns native onboarding. Opening Settings here as well races
+        // its Allow/drag flow and leaves multiple permission windows visible.
         return status.state === "missing"
-          ? `Computer Use is waiting for macOS ${status.permission} permission. The requested application operation was not executed. Explain the permission setup to the user and end this turn. Wait for a NEW user message after authorization; do not retry in this turn or use browser/exec/AppleScript as a fallback.`
+          ? `Computer Use is waiting for macOS ${status.permission} permission. The requested application operation was not executed. Ask the user to complete the Computer Use permission window. Only the helper may need restarting; Memmy stays open. End this turn. Wait for a NEW user message after authorization; do not retry in this turn or use browser/exec/AppleScript as a fallback.`
           : "Computer Use could not verify its native macOS permissions. The requested application operation was not executed. Explain that the permission check failed and end this turn. Do not use another executor as a fallback; wait for a new user message before retrying.";
       }
     }
@@ -485,6 +484,11 @@ export class MCPToolWrapper extends Tool {
         }
         return convertMcpToolContent(result, "auto");
       } catch (error) {
+        if (this.serverName === "open_computer_use" && (error as any)?.code === -32000
+          && String((error as Error)?.message).includes("Computer Use connection changed.")) {
+          this.permissionPreflight?.block(this.requestContext.get());
+          return "Computer Use restarted or disconnected during the operation. Its result is unknown and it was not replayed. End this turn and wait for a NEW user message. Do not retry using this or another executor.";
+        }
         if ((error as Error).message === "timeout") return `(MCP tool call timed out after ${this.toolTimeout}s)`;
         if ((error as Error).name === "CancelledError") return "(MCP tool call was cancelled)";
         if (isTransient(error) && attempt === 0) continue;
