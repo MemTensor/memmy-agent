@@ -1211,3 +1211,11 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(result.toolCalls[0].arguments).toEqual({ path: "notes.md", content: "line\n" });
   });
 });
+
+describe("MiniMax M3 thinking", () => {
+  it.each(["minimax", "minimax_cn"])("maps thinking modes for %s", (name) => {
+    expect(buildKwargsFor(name, "MiniMax-M3", "medium").extra_body).toEqual({ thinking: { type: "adaptive" } });
+    expect(buildKwargsFor(name, "MiniMax-M3", "none").extra_body).toEqual({ thinking: { type: "disabled" } });
+    expect(buildKwargsFor(name, "MiniMax-M3", "minimal").extra_body).toEqual({ thinking: { type: "disabled" } });
+  });
+});
