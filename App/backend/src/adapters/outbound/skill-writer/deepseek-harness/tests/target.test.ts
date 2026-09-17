@@ -125,12 +125,10 @@ describe("DeepSeek Harness skill target", () => {
 
     let definition: Record<string, any> | undefined;
     const client = handoff?.factory();
-    expect(client?.inject).toEqual([]);
+    expect(client?.inject).toEqual(["uiConversation"]);
     client?.apply({
-      get(name: string) {
-        return name === "conversationEvents"
-          ? { register: (value: Record<string, any>) => { definition = value; } }
-          : undefined;
+      uiConversation: {
+        events: { register: (value: Record<string, any>) => { definition = value; } }
       }
     });
     const message = {
@@ -197,6 +195,30 @@ describe("DeepSeek Harness skill target", () => {
 
     expect(modernRegistrations).toBe(1);
     expect(legacyRegistrations).toBe(0);
+  });
+
+  it("falls back to conversationEvents when uiConversation is absent", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    let definition: Record<string, any> | undefined;
+    const client = handoff?.factory();
+    expect(client?.inject).toEqual(["uiConversation"]);
+    client?.apply({
+      get(name: string) {
+        return name === "conversationEvents"
+          ? { register: (value: Record<string, any>) => { definition = value; } }
+          : undefined;
+      }
+    });
+
+    expect(definition?.kind).toBe("memmy-optimistic-user");
   });
 
   it("fails clearly when neither conversation event API is available", async () => {

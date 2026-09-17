@@ -520,12 +520,13 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = [];
+    const inject = ["uiConversation"];
 
     function resolveConversationEventRegistry(ctx) {
-      const uiConversation = ctx.get("uiConversation");
+      const uiConversation = ctx.uiConversation
+        || (typeof ctx.get === "function" ? ctx.get("uiConversation") : undefined);
       if (uiConversation && uiConversation.events) return uiConversation.events;
-      const conversationEvents = ctx.get("conversationEvents");
+      const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
       throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
     }
