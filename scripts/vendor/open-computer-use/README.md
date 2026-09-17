@@ -67,6 +67,9 @@ or npm: the compiled helper is included in the application.
 
 ## Validation
 
+The Swift regression sources live in `tests/open-computer-use/` at the repository
+root. Source preparation copies them into the temporary build directory.
+
 Run the following from the repository root:
 
 ```sh
