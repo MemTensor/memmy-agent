@@ -1,3 +1,4 @@
+import { get_encoding } from "tiktoken";
 import type { MemoryRow } from "../../types.js";
 import { attachMemoryVector } from "../../storage/memory-vector-state.js";
 import type {
@@ -19,6 +20,9 @@ import { clip } from "../../utils/text.js";
 const EMBEDDING_RETRY_BASE_BACKOFF_MS = 60_000;
 const EMBEDDING_RETRY_MAX_BACKOFF_MS = 60 * 60_000;
 const NEGATIVE_POLICY_EMBEDDING_TOKEN_LIMIT = 2_048;
+const SKILL_EMBEDDING_TOKEN_LIMIT = 6_000;
+
+let embeddingEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface EmbeddingRetryRunItem {
   id: string;
@@ -51,13 +55,24 @@ export function embeddingTextForMemory(memory: MemoryRow): string {
   }
   const skill = skillMetaFromMemory(memory);
   if (skill) {
-    return retrievalDocumentForMemory(memory);
+    return truncateEmbeddingText(
+      retrievalDocumentForMemory(memory),
+      SKILL_EMBEDDING_TOKEN_LIMIT
+    );
   }
   const world = worldModelMetaFromMemory(memory);
   if (world) {
     return retrievalDocumentForMemory(memory);
   }
   return memory.memoryValue;
+}
+
+function truncateEmbeddingText(value: string, tokenLimit: number): string {
+  embeddingEncoder ??= get_encoding("cl100k_base");
+  const tokens = embeddingEncoder.encode(value, [], []);
+  if (tokens.length <= tokenLimit) return value;
+  const bytes = embeddingEncoder.decode(tokens.slice(0, tokenLimit));
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes, { stream: true });
 }
 
 function exceedsMixedLanguageTokenLimit(value: string, limit: number): boolean {
