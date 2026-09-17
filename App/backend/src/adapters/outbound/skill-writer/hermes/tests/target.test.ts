@@ -130,6 +130,7 @@ describe("hermes skill target", () => {
     expect(commandPluginInit).toContain('"layers": ["L1"]');
     expect(commandPluginInit).toContain('"limit": SEARCH_LIMIT');
     expect(commandPluginInit).toContain('"verbose": True');
+    expect(commandPluginInit).toContain('"Memmy request to " + request.full_url + " failed: "');
     expect(commandPluginInit).toContain('ctx.register_hook("pre_llm_call", _on_pre_llm_call)');
     expect(commandPluginInit).toContain('ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)');
     expect(commandPluginInit).toContain("def _episode_score");
@@ -254,8 +255,22 @@ describe("hermes skill target", () => {
 
   it("uses only the resume query for the Hermes slash command search", async () => {
     const { rootDirectory } = createFixture();
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
     writeFileSync(join(rootDirectory, "config.yaml"), "memory:\n  provider: mem0\n", "utf8");
-    const target = createHermesSkillTarget({ rootDirectory });
+    const target = createHermesSkillTarget({ rootDirectory, memmyConfigPath });
 
     await target.installPlugin?.("hermes");
 
@@ -280,6 +295,7 @@ sys.modules["agent.memory_provider"] = memory_provider_module
 spec = importlib.util.spec_from_file_location("memmy_memory_plugin", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+runtime = module._load_runtime()
 
 calls = []
 
@@ -359,7 +375,7 @@ module._memmy_post = fake_memmy_post
 module._memmy_get = fake_memmy_get
 text = module._handle_memmy_resume_command("测试query")
 selection = module._on_pre_llm_call("2")
-print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_ascii=False))
+print(json.dumps({"calls": calls, "runtime": runtime, "text": text, "selection": selection}, ensure_ascii=False))
 `;
     const result = spawnSync("python3", ["-", pluginInit], {
       input: script,
@@ -371,9 +387,11 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     }
     const output = JSON.parse(result.stdout) as {
       calls: Array<{ path: string; body: { query?: string; layers?: string[]; limit?: number; verbose?: boolean } }>;
+      runtime: { baseUrl?: string };
       selection?: { context?: string };
       text: string;
     };
+    expect(output.runtime.baseUrl).toBe("http://127.0.0.1:18960");
     expect(output.text).toContain("测试query");
     expect(output.text).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');
     expect(output.text).not.toContain(". score ");

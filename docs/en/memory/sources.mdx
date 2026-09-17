@@ -120,7 +120,7 @@ Common results after installation:
 
 - **Automatic recall:** Claude Code, Codex, OpenCode, OpenClaw, and Hermes retrieve and inject relevant memory before normal requests run.
 - **Automatic capture:** the Hook or plugin submits the user request, Agent answer, and success/failure status at the end of a turn. The Agent does not need to run `memmy-memory add` manually.
-- **Task resumption:** `/memmy-resume <query>` returns up to five L1 episode candidates. Enter `1`–`5` to load the complete episode and inject continuation context.
+- **Task resumption:** `/memmy-resume <query>` returns up to five L1 episode candidates. Enter `1`–`5` to load the complete episode and inject continuation context. Claude Code, OpenCode, OpenClaw, and Hermes use native command entry points; Cursor, Codex, and Skill-only integrations install an explicit `memmy-resume` Skill.
 - **On-demand lookup:** the bundled Skill keeps `memmy-memory search` and `memmy-memory get` for cases where automatic context is insufficient.
 - **Source attribution:** captured turns carry `cursor`, `claude_code`, `codex`, `opencode`, `openclaw`, or `hermes`, so you can filter and trace their origin.
 
@@ -149,6 +149,7 @@ Written or updated by default:
 - `~/.cursor/hooks/memmy-resume-hook.mjs`
 - `~/.cursor/hooks/memmy-memory-config.json`
 - `~/.cursor/skills/memmy-memory/SKILL.md`
+- `~/.cursor/skills/memmy-resume/SKILL.md`
 
 ### Claude Code: `UserPromptSubmit` and `Stop`
 
@@ -180,6 +181,7 @@ Written or updated by default:
 - `~/.codex/hooks/memmy-memory-config.json`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/memmy-memory/SKILL.md`
+- `~/.codex/skills/memmy-resume/SKILL.md`
 
 ### OpenCode: native plugin
 

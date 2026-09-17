@@ -38,6 +38,7 @@ describe("DeepSeek Harness skill target", () => {
     const clientPath = join(pluginDirectory, "client.js");
     const packagePath = join(pluginDirectory, "package.json");
     const skillPath = join(rootDirectory, "skills", "memmy-memory", "SKILL.md");
+    const resumeSkillPath = join(rootDirectory, "skills", "memmy-resume", "SKILL.md");
     const patch = readFileSync(patchPath, "utf8");
     expect(existsSync(pluginPath)).toBe(true);
     const packageManifest = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
@@ -52,12 +53,16 @@ describe("DeepSeek Harness skill target", () => {
     });
     expect(packageManifest).not.toHaveProperty("version");
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
+    expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source deepseek_harness");
     expect(patch).toContain("id: user-plugin");
     expect(patch).toContain("# memmy-memory plugin:start");
     expect(patch).not.toContain("plugin:start v=");
     expect(patch).toContain("name: '@memmy/memmy-memory'");
     expect(patch).toContain(memmyConfigPath);
     expect(YAML.parse(patch)).toHaveLength(2);
+    expect(readFileSync(pluginPath, "utf8")).toContain(
+      '"Memmy request to " + url + " failed: " + formatErrorWithCause(error)'
+    );
     expect(spawnSync(process.execPath, ["--check", pluginPath], { encoding: "utf8" })).toMatchObject({ status: 0 });
     expect(spawnSync(process.execPath, ["--check", clientPath], { encoding: "utf8" })).toMatchObject({ status: 0 });
     await expect(target.isInstalled("deepseek_harness")).resolves.toBe(true);
@@ -66,6 +71,7 @@ describe("DeepSeek Harness skill target", () => {
 
     expect(existsSync(pluginDirectory)).toBe(false);
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
     expect(readFileSync(patchPath, "utf8")).toBe(
       ["# user patch", "- insert:", "    - id: user-plugin", "      name: '@example/user-plugin'", ""].join("\n")
     );
@@ -266,9 +272,23 @@ describe("DeepSeek Harness skill target", () => {
   it("injects memory after the query and captures reasoning with annotated tool traces", async () => {
     const rootDirectory = createRoot();
     installDshPackageStubs(rootDirectory);
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
     const target = createDeepseekHarnessSkillTarget({
       rootDirectory,
-      memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+      memmyConfigPath
     });
     await target.installPlugin?.("deepseek_harness");
     const pluginPath = join(installedPluginDirectory(rootDirectory), "index.mjs");
@@ -302,12 +322,12 @@ describe("DeepSeek Harness skill target", () => {
       }
     };
     try {
-    plugin.apply(ctx);
-    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+      plugin.apply(ctx, { memmyConfigPath });
+      const requests: Array<{ origin: string; path: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-      requests.push({ path: targetUrl.pathname, body });
+      requests.push({ origin: targetUrl.origin, path: targetUrl.pathname, body });
       if (targetUrl.pathname === "/api/v1/sessions/open") return jsonResponse({ sessionId: "memmy-session-1" });
       if (targetUrl.pathname === "/api/v1/turns/start") {
         return jsonResponse({
@@ -407,6 +427,9 @@ describe("DeepSeek Harness skill target", () => {
       query: "检查 README",
       source: "deepseek_harness"
     });
+    expect(requests.find((request) => request.path === "/api/v1/turns/start")?.origin).toBe(
+      "http://127.0.0.1:18960"
+    );
     expect(requests.find((request) => request.path === "/api/v1/source-turns/complete")?.body).toMatchObject({
       sessionId: "memmy-session-1",
       query: "检查 README",
