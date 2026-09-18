@@ -37,15 +37,14 @@ describe("macOS permission guidance", () => {
     expect(computerUsePermissionError("open_computer_use", { ...denied(), isError: false })).toBeNull();
     expect(computerUsePermissionError("open_computer_use", { isError: true, content: [{ type: "text", text: "Computer Use is not allowed to use the app 'test' for safety reasons." }] })).toBeNull();
   });
-  it("opens Settings from a real MCP error without repeating the action", async () => {
+  it("preserves custom MCP permission errors without opening a second settings guide", async () => {
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
     const callTool = vi.fn().mockResolvedValue(denied());
     const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" });
     const result = await tool.execute({ app: "Notes", element_index: 1 });
     expect(callTool).toHaveBeenCalledTimes(1);
-    expect(show).toHaveBeenCalledWith("computer-use", "accessibility");
+    expect(show).not.toHaveBeenCalled();
     expect(JSON.stringify(result)).toContain(text);
-    expect(JSON.stringify(result)).toContain("Do not claim permission was granted");
   });
   it("preserves ordinary tool results without showing Settings", async () => {
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);

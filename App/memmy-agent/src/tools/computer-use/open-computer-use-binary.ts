@@ -1,4 +1,4 @@
-import { constants, accessSync } from "node:fs";
+import { constants, accessSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -75,4 +75,19 @@ export function resolveOpenComputerUseCommand(
     // Source/CLI installs may still provide the command through PATH.
     return command;
   }
+}
+
+/** Only the managed preset may assume the upstream CLI and permission contract. */
+export function isManagedOcuConfig(name: string, cfg: any, platform = process.platform): boolean {
+  const env = cfg.env ?? {};
+  return platform === 'darwin' && name === 'open_computer_use'
+    && (!cfg.type || cfg.type === 'stdio') && (!cfg.transport || cfg.transport === 'stdio')
+    && cfg.command === 'open-computer-use' && JSON.stringify(cfg.args) === '["mcp"]'
+    && !('OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE' in env)
+    && !('OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY' in env);
+}
+export function managedOcuEnvironment(binary: string, env: Record<string, string> | null): Record<string, string> {
+  if (!path.isAbsolute(binary)) throw new Error('Bundled Open Computer Use is missing; reinstall its pinned npm package');
+  const app = path.dirname(path.dirname(path.dirname(realpathSync(binary))));
+  return { ...env, OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE: `memmy:${app}`, OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY: '0' };
 }

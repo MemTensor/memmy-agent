@@ -54,3 +54,13 @@ it.each([
     expect(existsSync(join(`${archive}.unpacked`, prefix, relative)), relative).toBe(expected);
   }
 });
+
+it.each(['electron-builder.yml', 'electron-builder.unsigned.yml'])('%s preserves only the official OCU signature', filename => {
+  const config = parse(readFileSync(new URL(`../App/shell/desktop/${filename}`, import.meta.url), 'utf8'));
+  const ignored = file => config.mac.signIgnore.some(pattern => new RegExp(pattern).test(file));
+  const app = '/Applications/Memmy.app/Contents/Resources/app.asar.unpacked/dist/runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app';
+  expect(ignored(app)).toBe(true);
+  expect(ignored(`${app}/Contents/MacOS/OpenComputerUse`)).toBe(true);
+  expect(ignored('/Applications/Memmy.app/Contents/MacOS/Memmy')).toBe(false);
+  expect(ignored(`${app}-other/Contents/MacOS/helper`)).toBe(false);
+});

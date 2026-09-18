@@ -9,6 +9,8 @@ export type ToolExecutionContext = {
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;
+  /** Stop this run without asking the model to select another executor. */
+  stopTurn?: (message: string) => void;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
 };
 

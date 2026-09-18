@@ -19,9 +19,11 @@ import { RequestContext, RequestContextStore } from "./context.js";
 import { MacPermissionPreflight, nativePermissionDoctor } from "../../../tools/computer-use/mac-permission-preflight.js";
 import { ToolRegistry } from "./registry.js";
 import { storeToolImageArtifact } from "../../../utils/artifacts.js";
-import { openComputerUseEnvironment, resolveOpenComputerUseCommand } from "../../../tools/computer-use/open-computer-use-binary.js";
+import { isManagedOcuConfig, managedOcuEnvironment, openComputerUseEnvironment, resolveOpenComputerUseCommand } from "../../../tools/computer-use/open-computer-use-binary.js";
 
-import { computerUsePermissionError, macPermissionSettingsGuide } from "../../../tools/computer-use/mac-permission-settings.js";
+import { computerUsePermissionError } from "../../../tools/computer-use/mac-permission-settings.js";
+
+import { ManagedOcuSession, OcuBlocked, OcuUncertain } from "../../../tools/computer-use/managed-ocu-session.js";
 
 const TRANSIENT_EXC_NAMES = new Set([
   "ClosedResourceError",
@@ -79,8 +81,12 @@ class SdkClientSession {
     await this.client.close();
   }
 
+  async ping(): Promise<any> {
+    return this.client.ping({ timeout: 3000 });
+  }
+
   async listTools(): Promise<any> {
-    return this.client.listTools();
+    return this.client.listTools({}, { timeout: 15_000 });
   }
 
   async callTool(name: string, args: Record<string, any>, timeout: number): Promise<any> {
@@ -414,6 +420,12 @@ export async function connectInMemoryMcpServer(server: any): Promise<InMemoryMcp
   };
 }
 
+function ocuPermissionMessage(status: { state: string; permission?: string; missingPermissions?: string[] }): string {
+  if (status.state !== 'missing') return '无法确认 Open Computer Use 的系统权限或连接状态，本次应用操作未执行。请检查辅助程序后重新发送消息。';
+  const permission = (status.missingPermissions ?? [status.permission]).map(p => p === 'screenRecording' ? '屏幕录制' : '辅助功能').join('、');
+  return `Open Computer Use 缺少 macOS「${permission}」权限，本次应用操作未执行。请在 Open Computer Use 授权窗口完成授权；按系统提示重启辅助程序即可，Memmy 无需退出。完成后请重新发送消息。`;
+}
+
 export class MCPToolWrapper extends Tool {
   static pluginDiscoverable = false;
   private session: any;
@@ -425,7 +437,7 @@ export class MCPToolWrapper extends Tool {
   private toolParameters: Record<string, any>;
   private toolTimeout: number;
 
-  constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30, private readonly permissionPreflight?: MacPermissionPreflight) {
+  constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30, private readonly permissionPreflight?: MacPermissionPreflight, private readonly managed?: ManagedOcuSession) {
     super();
     this.session = session;
     this.serverName = serverName;
@@ -435,6 +447,8 @@ export class MCPToolWrapper extends Tool {
     this.toolParameters = normalizeSchemaForOpenAI(toolDef.inputSchema ?? { type: "object", properties: {} });
     this.toolTimeout = toolTimeout;
   }
+
+  get exclusive(): boolean { return Boolean(this.managed || this.permissionPreflight); }
 
   get name(): string {
     return this.toolName;
@@ -454,9 +468,30 @@ export class MCPToolWrapper extends Tool {
 
   async execute(params: Record<string, any> = {}, context?: ToolExecutionContext): Promise<string | Array<Record<string, any>>> {
     if (context?.abortSignal?.aborted) return "(MCP tool call was cancelled)";
-    if (this.permissionPreflight) {
+    if (this.managed) {
+      try {
+        const result = await this.managed.invoke(this.originalName, params, this.toolTimeout, this.requestContext.get(), context?.abortSignal);
+        const permission = computerUsePermissionError(this.serverName, result);
+        if (permission) {
+          context?.stopTurn?.(ocuPermissionMessage({ state: 'missing', permission }));
+        }
+        return convertMcpToolContent(result, 'auto');
+      } catch (error) {
+        if (error instanceof OcuUncertain) {
+          const message = 'Open Computer Use 在操作过程中断开，无法确认执行结果，操作未被重复执行。请检查当前界面，再发送新消息。';
+          context?.stopTurn?.(message);
+          return error.message;
+        }
+        const status = error instanceof OcuBlocked ? error.status : { state: 'unknown' as const };
+        const message = ocuPermissionMessage(status);
+        context?.stopTurn?.(message);
+        return message;
+      }
+    }
+    if (this.permissionPreflight && this.originalName !== 'list_apps') {
       const status = await this.permissionPreflight.check(this.requestContext.get());
       if (status.state !== "granted") {
+        context?.stopTurn?.(ocuPermissionMessage(status));
         // doctor owns native onboarding. Opening Settings here as well races
         // its Allow/drag flow and leaves multiple permission windows visible.
         return status.state === "missing"
@@ -474,20 +509,13 @@ export class MCPToolWrapper extends Tool {
         );
         const permission = computerUsePermissionError(this.serverName, result);
         if (permission) this.permissionPreflight?.deny(this.requestContext.get(), permission);
-        if (permission && await macPermissionSettingsGuide.show("computer-use", permission)) {
-          // Keep the failed result intact. Opening Settings does not grant access
-          // and must never replay a click or text input automatically.
-          result.content = [...(result.content ?? []), {
-            type: "text",
-            text: "macOS System Settings was opened for this permission. Ask the user to enable access for Open Computer Use, then send a NEW message. End this turn without retrying or using another executor. Do not claim permission was granted or the requested action succeeded.",
-          }];
-        }
+        if (permission && this.permissionPreflight) context?.stopTurn?.(ocuPermissionMessage({ state: 'missing', permission }));
         return convertMcpToolContent(result, "auto");
       } catch (error) {
-        if (this.serverName === "open_computer_use" && (error as any)?.code === -32000
-          && String((error as Error)?.message).includes("Computer Use connection changed.")) {
-          this.permissionPreflight?.block(this.requestContext.get());
-          return "Computer Use restarted or disconnected during the operation. Its result is unknown and it was not replayed. End this turn and wait for a NEW user message. Do not retry using this or another executor.";
+        if (this.permissionPreflight) {
+          this.permissionPreflight.block(this.requestContext.get());
+          context?.stopTurn?.('Open Computer Use 在操作过程中断开，无法确认执行结果，操作未被重复执行。请发送新消息后再试。');
+          return 'Computer Use restarted or disconnected during the operation. Its result is unknown and it was not replayed.';
         }
         if ((error as Error).message === "timeout") return `(MCP tool call timed out after ${this.toolTimeout}s)`;
         if ((error as Error).name === "CancelledError") return "(MCP tool call was cancelled)";
@@ -681,26 +709,41 @@ export async function connectMcpServers(
       if (!transport) transport = command ? "stdio" : url?.replace(/\/+$/g, "").endsWith("/sse") ? "sse" : "streamableHttp";
       let read: any;
       let write: any;
-      let permissionPreflight: MacPermissionPreflight | undefined;
+      let managed: ManagedOcuSession | undefined;
       if (transport === "stdio") {
-        const [normalizedCommand, args, env] = normalizeWindowsStdioCommand(
+        const [normalizedCommand, args, configuredEnv] = normalizeWindowsStdioCommand(
           resolveOpenComputerUseCommand(command),
           cfgValue(cfg, "args") ?? [],
           openComputerUseEnvironment(command, cfgValue(cfg, "env") ?? null),
           cfgValue(cfg, "platform"),
         );
+        const managedConfig = isManagedOcuConfig(name, cfg);
+        const env = managedConfig ? managedOcuEnvironment(normalizedCommand, configuredEnv) : configuredEnv;
         const params = new runtime.StdioServerParameters({
           command: normalizedCommand,
           args,
           env,
           cwd: cfgValue(cfg, "cwd") ?? null,
         });
-        if (process.platform === "darwin" && name === "open_computer_use") {
-          permissionPreflight = new MacPermissionPreflight(nativePermissionDoctor({
-            command: normalizedCommand, args, env, cwd: cfgValue(cfg, "cwd") ?? null,
-          }));
+        if (managedConfig) {
+          managed = new ManagedOcuSession(async () => {
+            const owned: Array<() => Promise<void>> = [];
+            try {
+              const [input, output] = await enterMaybe(runtime.stdioClient(params), owned);
+              const candidate = new runtime.ClientSession(input, output);
+              const live = typeof candidate.enter === 'function' ? await enterMaybe(candidate, owned) : candidate;
+              const close = async () => { for (const fn of owned.splice(0).reverse()) await fn().catch(() => undefined); };
+              await timeoutPromise(live.initialize(), 15, 'Computer Use initialization timed out');
+              return { session: live, close };
+            } catch (error) {
+              for (const fn of owned.reverse()) await fn().catch(() => undefined);
+              throw error;
+            }
+          }, nativePermissionDoctor({ command: normalizedCommand, args, env, cwd: cfgValue(cfg, 'cwd') ?? null }));
+          closers.push(() => managed!.close());
+        } else {
+          [read, write] = await enterMaybe(runtime.stdioClient(params), closers);
         }
-        [read, write] = await enterMaybe(runtime.stdioClient(params), closers);
       } else if (transport === "sse" || transport === "streamableHttp") {
         if (!url || !(await probeHttpUrl(url))) continue;
         if (transport === "sse") {
@@ -713,7 +756,7 @@ export async function connectMcpServers(
         continue;
       }
 
-      const session = new runtime.ClientSession(read, write);
+      const session = managed ?? new runtime.ClientSession(read, write);
       const liveSession = typeof session.enter === "function" ? await enterMaybe(session, closers) : session;
       const discovered = await timeoutPromise((async () => {
         await liveSession.initialize?.();
@@ -741,12 +784,13 @@ export async function connectMcpServers(
       for (const toolDef of tools?.tools ?? []) {
         const wrapped = sanitizeName(`mcp_${name}_${toolDef.name}`);
         if (!allowAll && !enabledTools.has(toolDef.name) && !enabledTools.has(wrapped)) continue;
-        registry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30, permissionPreflight));
+        registry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30, undefined, managed));
         if (enabledTools.has(toolDef.name)) matched.add(toolDef.name);
         if (enabledTools.has(wrapped)) matched.add(wrapped);
       }
       if (enabledTools.size && !allowAll) {
-        const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry));
+        const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry)
+          && !(managed && ["get_screen_state", "mcp_open_computer_use_get_screen_state"].includes(entry)));
         if (unknown.length) {
           console.warn(
             `MCP server '${name}': enabledTools entries not found: ${unknown.join(", ")}. ` +

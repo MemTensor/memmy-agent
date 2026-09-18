@@ -692,7 +692,8 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
   node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" \
+    --expected-app "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app"
   require_packaged_runtime_file "$packaged_embedding_model/config.json"
   require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
   require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"
@@ -873,8 +874,6 @@ package_step_start "Install memmy-agent runtime production dependencies"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
-package_step_start "Build Memmy Computer Use permission runtime"
-node "$ROOT_DIR/scripts/internal/mac/build-computer-use.mjs" "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use" "$TARGET_CPU"
 package_step_start "Stage memmy-agent workspace runtime packages"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"

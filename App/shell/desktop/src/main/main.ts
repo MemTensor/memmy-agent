@@ -1,3 +1,4 @@
+import { createDesktopScreenCapture } from './desktop-screen-capture.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
@@ -14,7 +15,7 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
@@ -338,6 +339,13 @@ async function boot(): Promise<void> {
     }
     const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
     runtimeServices = await startManagedRuntimeServices({
+      ...(process.platform === 'darwin' ? { captureScreen: createDesktopScreenCapture({
+        getStatus: () => systemPreferences.getMediaAccessStatus('screen'),
+        getSources: options => desktopCapturer.getSources(options),
+        getDisplays: () => screen.getAllDisplays(),
+        getPrimaryDisplay: () => screen.getPrimaryDisplay(),
+        openSettings: () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'),
+      }) } : {}),
       appPath: app.getAppPath(),
       appDatabaseFile,
       resourcesPath: process.resourcesPath,

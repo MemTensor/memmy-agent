@@ -380,7 +380,7 @@ describe("connectMcpServers enabled tools", () => {
 
     expect(registry.toolNames).toEqual(["mcp_good_demo"]);
     expect(Object.keys(stacks)).toEqual(["good"]);
-    expect(error.mock.calls[0][0]).toContain("stdio protocol pollution");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("stdio protocol pollution"));
   });
 
   it("passes Windows-wrapped stdio launchers and cwd", async () => {

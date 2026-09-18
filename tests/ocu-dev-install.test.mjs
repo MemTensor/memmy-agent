@@ -30,7 +30,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(source, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>cn.memtensor.memmy.computeruse</string>
+<key>CFBundleIdentifier</key><string>com.ifuryst.opencomputeruse</string>
 <key>CFBundleName</key><string>Open Computer Use</string>
 <key>CFBundleDisplayName</key><string>Open Computer Use</string>
 <key>CFBundleExecutable</key><string>OpenComputerUse</string>
@@ -43,19 +43,19 @@ function fixture(t) {
   const destination = path.join(destinationRoot, 'Open Computer Use.app');
   const registrations = [];
   const messages = [];
-  const install = () => installDevComputerUse({ packageRoot, destinationRoot, register: (app) => registrations.push(app), log: (message) => messages.push(message) });
+  const install = (overrides = {}) => installDevComputerUse({ packageRoot, destinationRoot, running: () => false, register: (app) => registrations.push(app), log: (message) => messages.push(message), ...overrides });
   return { root, source, destination, install, registrations, messages };
 }
 
-test('dev installation keeps the display name and gives only the copy a dev identity', macOnly, (t) => {
+test('dev installation preserves the original display name, identity and signature', macOnly, (t) => {
   const { source, destination, install, registrations } = fixture(t);
   const sourceHash = hash(path.join(source, 'Contents/MacOS/OpenComputerUse'));
   assert.equal(install(), path.join(destination, 'Contents/MacOS/OpenComputerUse'));
-  assert.equal(plist(destination, 'CFBundleIdentifier'), 'cn.memtensor.memmy.computeruse.dev');
+  assert.equal(plist(destination, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
   assert.equal(plist(destination, 'CFBundleDisplayName'), 'Open Computer Use');
   assert.equal(plist(destination, 'CFBundleName'), 'Open Computer Use');
-  assert.match(signingDetails(destination), /^Identifier=cn\.memtensor\.memmy\.computeruse\.dev$/m);
-  assert.equal(plist(source, 'CFBundleIdentifier'), 'cn.memtensor.memmy.computeruse');
+  assert.match(signingDetails(destination), /^Identifier=com\.ifuryst\.opencomputeruse$/m);
+  assert.equal(plist(source, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
   assert.equal(hash(path.join(source, 'Contents/MacOS/OpenComputerUse')), sourceHash);
   assert.deepEqual(registrations, [destination]);
   verify(destination);
@@ -100,52 +100,23 @@ test('a valid but changed destination bundle does not pass the marker cache', ma
   verify(destination);
 });
 
-test('source updates replace the installed bundle and record its new signed state', macOnly, (t) => {
+test('source updates preserve the published identity and signed contents', macOnly, (t) => {
   const { source, destination, install, messages } = fixture(t);
-  const executable = install();
-  assert.doesNotMatch(messages.join('\n'), /tccutil reset/, 'First installation should not suggest resetting an old grant');
-  messages.length = 0;
-  const before = hash(executable);
+  install();
   fs.writeFileSync(path.join(source, 'Contents/Resources/fixture.txt'), 'second version');
-  run('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleVersion 2', path.join(source, 'Contents/Info.plist')]);
   sign(source);
   install();
-  assert.equal(fs.readFileSync(path.join(destination, 'Contents/Resources/fixture.txt'), 'utf8'), 'second version');
-  assert.equal(plist(destination, 'CFBundleVersion'), '2');
-  assert.notEqual(hash(executable), before);
-  const guidance = messages.join('\n');
-  assert.match(guidance, /旧 macOS 开发版授权可能失效/);
-  const commands = guidance.split('\n').filter((line) => line.startsWith('tccutil '));
-  assert.deepEqual(commands, [
-    'tccutil reset Accessibility cn.memtensor.memmy.computeruse.dev',
-    'tccutil reset ScreenCapture cn.memtensor.memmy.computeruse.dev',
-  ]);
-  assert.match(guidance, /手动开启两项权限/);
-  assert.match(guidance, /不会自动执行/);
-  const updated = hash(executable);
-  const inode = fs.statSync(executable).ino;
-  messages.length = 0;
-  install();
-  assert.deepEqual(messages, [], 'An unchanged cached build must not repeat signature-change guidance');
-  assert.equal(hash(executable), updated);
-  assert.equal(fs.statSync(executable).ino, inode);
+  assert.equal(hash(path.join(source, 'Contents/MacOS/OpenComputerUse')), hash(path.join(destination, 'Contents/MacOS/OpenComputerUse')));
+  assert.equal(plist(destination, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
+  assert.doesNotMatch(messages.join('\n'), /tccutil|reset/);
   verify(destination);
 });
 
-test('a source change that preserves the installed designated requirement does not suggest resetting permissions', macOnly, (t) => {
-  const { source, destination, install, messages } = fixture(t);
-  const executable = install();
-  const before = hash(executable);
-  const beforeSigning = signingDetails(destination);
-  // The installer replaces the source ID with the same .dev ID, so this source
-  // update leaves the final signed permission identity unchanged.
-  run('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIdentifier cn.memtensor.memmy.computertwo', path.join(source, 'Contents/Info.plist')]);
+test('refuses a patched source identity instead of silently resigning it', macOnly, (t) => {
+  const { source, install } = fixture(t);
+  run('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIdentifier cn.memtensor.memmy.computeruse.dev', path.join(source, 'Contents/Info.plist')]);
   sign(source);
-  messages.length = 0;
-  install();
-  assert.equal(hash(executable), before);
-  assert.equal(signingDetails(destination), beforeSigning);
-  assert.doesNotMatch(messages.join('\n'), /tccutil reset/);
+  assert.throws(install, /official/);
 });
 
 test('an unsigned source change fails without replacing the previous helper', macOnly, (t) => {
@@ -155,4 +126,24 @@ test('an unsigned source change fails without replacing the previous helper', ma
   fs.writeFileSync(path.join(source, 'Contents/Resources/fixture.txt'), 'unsigned change');
   assert.throws(install);
   assert.equal(hash(executable), before);
+});
+
+test('never replaces a running development helper', macOnly, (t) => {
+  const { source, destination, install } = fixture(t);
+  install();
+  fs.writeFileSync(path.join(source, 'Contents/Resources/fixture.txt'), 'new published version');
+  sign(source);
+  assert.throws(() => install({ running: () => true }), /running/);
+  assert.equal(fs.readFileSync(path.join(destination, 'Contents/Resources/fixture.txt'), 'utf8'), 'first version');
+  install();
+  assert.equal(fs.readFileSync(path.join(destination, 'Contents/Resources/fixture.txt'), 'utf8'), 'new published version');
+});
+
+test('rejects a concurrent installation without removing its lock', macOnly, (t) => {
+  const { destination, install } = fixture(t);
+  install();
+  const lock = path.join(path.dirname(destination), '.ocu-install.lock');
+  fs.writeFileSync(lock, String(process.pid));
+  assert.throws(install, /installation is in progress/);
+  assert.equal(fs.readFileSync(lock, 'utf8'), String(process.pid));
 });
