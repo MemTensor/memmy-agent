@@ -65,6 +65,12 @@ describe("permission preflight before opening the target app", () => {
     await gate.check(turn("same-id", "one")); await gate.check(turn("same-id", "two"));
     expect(read).toHaveBeenCalledTimes(2);
   });
+  it("does not prompt for background continuations using the original user channel", async () => {
+    const read = vi.fn().mockResolvedValue({ state: "granted" });
+    const gate = new MacPermissionPreflight(read);
+    expect(await gate.check(new RequestContext({ channel: "websocket", messageId: "continuation", metadata: { computerUseInteractive: false } }))).toEqual({ state: "unknown" });
+    expect(read).not.toHaveBeenCalled();
+  });
   it("blocks same-turn retries after a native restart with an uncertain action result", async () => {
     const read = vi.fn().mockResolvedValue({ state: "granted" });
     const gate = new MacPermissionPreflight(read);
@@ -86,8 +92,8 @@ describe("permission preflight before opening the target app", () => {
 describe("native doctor", () => {
   it.each([
     ["Permissions: accessibility=granted, screenRecording=granted\n", { state: "granted" }],
-    ["Permissions: accessibility=missing, screenRecording=missing\n", { state: "missing", permission: "accessibility" }],
-    ["Permissions: accessibility=granted, screenRecording=missing\n", { state: "missing", permission: "screenRecording" }],
+    ["Permissions: accessibility=missing, screenRecording=missing\n", { state: "missing", permission: "accessibility", missingPermissions: ["accessibility", "screenRecording"] }],
+    ["Permissions: accessibility=granted, screenRecording=missing\n", { state: "missing", permission: "screenRecording", missingPermissions: ["screenRecording"] }],
     ["malformed", { state: "unknown" }],
   ])("parses %s", (text, expected) => { expect(parsePermissionDoctor(text)).toEqual(expected); });
   it("preserves the launcher, prefix arguments, cwd and native environment", async () => {
@@ -108,6 +114,7 @@ it("does not execute the target if the user cancels during the permission check"
   const gate = new MacPermissionPreflight(async () => { controller.abort(); return {state: "granted"}; });
   const callTool = vi.fn();
   const tool = new MCPToolWrapper({callTool}, "open_computer_use", {name: "get_app_state"}, 30, gate);
+  tool.setContext(turn("cancelled"));
   expect(await tool.execute({app: "WeChat"}, {abortSignal: controller.signal})).toContain("cancelled");
   expect(callTool).not.toHaveBeenCalled();
 });

@@ -1,3 +1,4 @@
+import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1129,6 +1130,7 @@ export class AgentLoop {
   }
 
   async initializeRuntimeTools(): Promise<void> {
+    await initializeDesktopScreenCapture();
     await this.connectMcp();
     await this.browserSessionManager.initialize();
     if (!this.browserRegistryInitialized) {
@@ -3916,6 +3918,7 @@ export class AgentLoop {
       ctx.session!,
       compactionOptions,
     );
+    await initializeDesktopScreenCapture();
     ctx.tools = this.createToolRegistry("turn", sessionWorkspace, {
       includeConnectedMcp: true,
       messageSendCallback: ctx.messageSendCallback,
@@ -4054,7 +4057,7 @@ export class AgentLoop {
       channel: ctx.msg.channel,
       chatId: ctx.msg.chatId,
       messageId: ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId,
-      metadata: ctx.msg.metadata,
+      metadata: { ...ctx.msg.metadata, ...(ctx.msg.internal ? { computerUseInteractive: false } : {}) },
       sessionKey: ctx.sessionKey,
       pendingQueue: ctx.pendingQueue,
       abortSignal: ctx.abortSignal,
@@ -4440,7 +4443,7 @@ export class AgentLoop {
       channel,
       chatId,
       messageId: msg.metadata?.message_id ?? msg.metadata?.messageId ?? null,
-      metadata: msg.metadata,
+      metadata: { ...msg.metadata, computerUseInteractive: false },
       sessionKey: key,
       pendingQueue,
       abortSignal,

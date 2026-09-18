@@ -56,6 +56,9 @@ extraResources:
     filter:
       - "**/*"
 mac:
+  # Preserve the published native helper and its macOS permission identity.
+  signIgnore:
+    - "/node_modules/open-computer-use/dist/Open Computer Use[.]app(/|$)"
   icon: build/icon.icns
   category: public.app-category.productivity
   extendInfo:

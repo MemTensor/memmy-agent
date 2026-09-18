@@ -242,3 +242,20 @@ describe("AgentRunner tool execution", () => {
     expect(result.event).toMatchObject({ name: "abort_aware", status: "error" });
   });
 });
+
+it('a permission stop prevents later tools in the same batch, including another executor', async () => {
+  const executed: string[] = [];
+  const spec = new AgentRunSpec({ concurrentTools: true, tools: {
+    get: () => ({ exclusive: true }),
+    execute: async (name: string, _args: any, context: ToolExecutionContext) => {
+      executed.push(name);
+      if (name === 'computer_use') context.stopTurn?.('Complete system permission and send a new message.');
+      return 'not executed';
+    },
+  } as any });
+  const results = await new AgentRunner().executeTools(spec, ['computer_use', 'exec', 'browser'].map((name, i) => new ToolCallRequest({ id: String(i), name, arguments: {} })));
+  expect(executed).toEqual(['computer_use']);
+  expect(results).toHaveLength(3);
+  expect(results[0].stopTurn).toContain('permission');
+  expect(results.slice(1).every(r => r.result.startsWith('Not executed:'))).toBe(true);
+});

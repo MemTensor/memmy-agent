@@ -612,7 +612,6 @@ run_main() {
 
   log "building memmy-agent from current source"
   ensure_memmy_agent_dependencies
-  node "$ROOT_DIR/scripts/internal/mac/build-computer-use.mjs" "$MEMMY_AGENT_DIR/node_modules/open-computer-use"
   if [[ "$(uname -s)" == "Darwin" ]]; then
     MEMMY_DEV_COMPUTER_USE_BINARY="$(node "$ROOT_DIR/scripts/internal/mac/install-dev-computer-use.mjs" "$MEMMY_AGENT_DIR/node_modules/open-computer-use")"
     export MEMMY_DEV_COMPUTER_USE_BINARY
