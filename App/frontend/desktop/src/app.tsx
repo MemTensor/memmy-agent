@@ -1,4 +1,5 @@
 import { useComputerHistoryModelSync } from "./app/computer-history-model-sync.js";
+import { isComputerHistorySupported } from "./app/computer-history-platform.js";
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -201,7 +202,7 @@ function RuntimeApp() {
         const initialPath = resolveLaunchInitialView({
           defaultPath: defaultInitialPath,
           currentRoute,
-          launchRouteOverride: launchRouteOverride ?? (readHistoryPermissionSetup() && launchModeOverride !== "pet" ? "/memory" : null),
+          launchRouteOverride: launchRouteOverride ?? (isComputerHistorySupported() && readHistoryPermissionSetup() && launchModeOverride !== "pet" ? "/memory" : null),
           launchModeOverride,
           petIntent
         });

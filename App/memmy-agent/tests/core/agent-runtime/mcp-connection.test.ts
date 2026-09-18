@@ -147,7 +147,7 @@ describe("MCP connection helpers", () => {
     try {
       expect(await registry.execute("mcp_open_computer_use_get_app_state", {app: "WeChat"})).toContain("operation was not executed");
       expect(call).not.toHaveBeenCalled();
-      expect(show).toHaveBeenCalledWith("computer-use", "accessibility");
+      expect(show).not.toHaveBeenCalled();
     } finally {
       await stacks.open_computer_use.aclose();
       call.mockRestore(); show.mockRestore();

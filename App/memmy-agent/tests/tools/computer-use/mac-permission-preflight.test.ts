@@ -20,7 +20,7 @@ describe("permission preflight before opening the target app", () => {
     const click = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" }, 30, gate);
     snapshot.setContext(turn("first")); click.setContext(turn("first"));
     expect(await snapshot.execute({ app: "WeChat" })).toContain("operation was not executed");
-    expect(show).toHaveBeenCalledWith("computer-use", "accessibility");
+    expect(show).not.toHaveBeenCalled(); // Native doctor already owns onboarding.
     // read would now return granted, but the current turn must remain blocked.
     await click.execute({ app: "WeChat" });
     expect(read).toHaveBeenCalledTimes(1);
@@ -63,6 +63,22 @@ describe("permission preflight before opening the target app", () => {
     const read = vi.fn().mockResolvedValue({ state: "granted" });
     const gate = new MacPermissionPreflight(read);
     await gate.check(turn("same-id", "one")); await gate.check(turn("same-id", "two"));
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+  it("blocks same-turn retries after a native restart with an uncertain action result", async () => {
+    const read = vi.fn().mockResolvedValue({ state: "granted" });
+    const gate = new MacPermissionPreflight(read);
+    const callTool = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("MCP error -32000: Computer Use connection changed."), { code: -32000 }))
+      .mockResolvedValue({ content: [] });
+    const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" }, 30, gate);
+    tool.setContext(turn("before-restart"));
+    expect(await tool.execute({ app: "WeChat" })).toContain("result is unknown");
+    expect(await tool.execute({ app: "WeChat" })).toContain("operation was not executed");
+    expect(callTool).toHaveBeenCalledTimes(1);
+    tool.setContext(turn("new-user-message"));
+    await tool.execute({ app: "WeChat" });
+    expect(callTool).toHaveBeenCalledTimes(2);
     expect(read).toHaveBeenCalledTimes(2);
   });
 });

@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useComputerHistoryModelSync } from "./computer-history-model-sync.js";
+import { useComputerHistoryModelSync } from "../computer-history-model-sync.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
@@ -13,12 +13,13 @@ function Harness(props: Parameters<typeof useComputerHistoryModelSync>[0]) {
 }
 beforeEach(() => {
   vi.useFakeTimers();
+  Object.defineProperty(window, "memmy", { configurable: true, value: { platform: "darwin" } });
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { act(() => root.unmount()); host.remove(); delete window.memmy; vi.useRealTimers(); vi.restoreAllMocks(); });
 
 it("syncs default and explicit models, refreshes settings changes and stops on unmount", async () => {
   const client = { setComputerHistoryModel: vi.fn().mockResolvedValue({}) };
@@ -71,4 +72,14 @@ it("does not let an inactive window overwrite the selected model", async () => {
   vi.mocked(document.hasFocus).mockReturnValue(true);
   await act(async () => window.dispatchEvent(new Event("focus")));
   expect(client.setComputerHistoryModel).toHaveBeenCalledOnce();
+});
+
+it.each(["win32", "linux", undefined])("never syncs or retries History on an unsupported/unknown host: %s", async (platform) => {
+  Object.defineProperty(window, "memmy", { configurable: true, value: platform ? { platform } : undefined });
+  const client = { setComputerHistoryModel: vi.fn().mockRejectedValue(new Error("unsupported")) };
+  await act(async () => root.render(<Harness client={client} enabled preset="custom" revision="v1"/>));
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await act(async () => root.render(<Harness client={client} enabled preset="another" revision="v2"/>));
+  expect(client.setComputerHistoryModel).not.toHaveBeenCalled();
 });

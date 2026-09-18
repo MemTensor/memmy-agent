@@ -3,9 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import which from "which";
 import YAML from "yaml";
+import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 
 export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
 export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
+
+function isBuiltinComputerHistoryUnavailable(name: string): boolean {
+  return name === "computer-history" && !isComputerHistorySupported();
+}
 
 export type SkillEntry = { name: string; path: string; source: string };
 
@@ -54,13 +59,17 @@ export class SkillsLoader {
     if (this.builtinSkills && fs.existsSync(this.builtinSkills)) {
       skills.push(...this.skillEntriesFromDir(this.builtinSkills, "builtin", workspaceNames));
     }
-    let filtered = this.disabledSkills.size ? skills.filter((skill) => !this.disabledSkills.has(skill.name)) : skills;
+    let filtered = skills.filter((skill) => {
+      if (skill.source === "builtin" && isBuiltinComputerHistoryUnavailable(skill.name)) return false;
+      return !this.disabledSkills.has(skill.name);
+    });
     if (filterUnavailable) filtered = filtered.filter((skill) => this.checkRequirements(this.getSkillMeta(skill.name)));
     return filtered.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   loadSkill(name: string): string | null {
     for (const root of this.roots) {
+      if (root === this.builtinSkills && isBuiltinComputerHistoryUnavailable(name)) continue;
       const skillFile = path.join(root, name, "SKILL.md");
       if (fs.existsSync(skillFile)) return fs.readFileSync(skillFile, "utf8");
     }

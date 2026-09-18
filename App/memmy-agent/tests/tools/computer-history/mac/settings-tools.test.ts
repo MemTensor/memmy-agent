@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as historyPlatform from "../../../../src/tools/computer-history/platform.js";
 import { ObservationSettingsStore } from "../../../../src/tools/computer-history/mac/settings-store.js";
 import {
   ComputerHistoryGetSettingsTool,
@@ -38,6 +39,7 @@ const snapshot = (state: string) => ({
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   while (temporaryDirectories.length) {
     fs.rmSync(temporaryDirectories.pop()!, { recursive: true, force: true });
   }
@@ -45,6 +47,8 @@ afterEach(() => {
 
 describe("Computer History settings tools", () => {
   it("registers all three tools alongside retrieval", () => {
+    vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", undefined);
     const registry = new ToolLoader({
       testClasses: [
         ComputerHistoryStatusTool,
