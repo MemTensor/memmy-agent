@@ -3404,21 +3404,24 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 
 .agent-message-content__table-scroll,
 .agent-message-content__code-scroll,
-.agent-message-content__pre {
+.agent-message-content__pre,
+.composer-media-preview-strip {
   scrollbar-width: thin;
   scrollbar-color: var(--codex-scrollbar-thumb) transparent;
 }
 
 .agent-message-content__table-scroll::-webkit-scrollbar,
 .agent-message-content__code-scroll::-webkit-scrollbar,
-.agent-message-content__pre::-webkit-scrollbar {
+.agent-message-content__pre::-webkit-scrollbar,
+.composer-media-preview-strip::-webkit-scrollbar {
   display: block;
   height: var(--codex-scrollbar-size);
 }
 
 .agent-message-content__table-scroll::-webkit-scrollbar-thumb,
 .agent-message-content__code-scroll::-webkit-scrollbar-thumb,
-.agent-message-content__pre::-webkit-scrollbar-thumb {
+.agent-message-content__pre::-webkit-scrollbar-thumb,
+.composer-media-preview-strip::-webkit-scrollbar-thumb {
   background: var(--codex-scrollbar-thumb);
 }
 
@@ -3533,11 +3536,16 @@ button {
 
 .composer-media-preview-strip {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: flex-start;
   gap: 10px;
-  overflow-y: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 12px 16px 4px;
+}
+
+.composer-media-preview-strip > .agent-attachment-card {
+  flex-shrink: 0;
 }
 
 /* Expanded composers keep controls in a footer so text can use the full row. */

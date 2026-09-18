@@ -1,5 +1,5 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -101,7 +101,6 @@ export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, P
 
 const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
-const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
 
@@ -386,7 +385,7 @@ export function ComposerMediaPreviewStrip(props: {
 
   return (
     <>
-      <div className="composer-media-preview-strip" style={COMPOSER_MEDIA_STRIP_STYLE} aria-label={props.selectedLabel ?? "Selected media"}>
+      <div className="composer-media-preview-strip" aria-label={props.selectedLabel ?? "Selected media"}>
         {props.items.map((item) => (
           item.kind === "image" ? (
             <ComposerImageAttachmentChip
