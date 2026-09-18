@@ -2547,6 +2547,26 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain('img src="/Users/yuan/deck.pptx"');
   });
 
+  it("prefers in-app workspace preview before opening with the system default", async () => {
+    const previewArtifact = vi.fn(async () => true);
+    const openArtifact = vi.fn(async () => undefined);
+    const revealArtifact = vi.fn(async () => undefined);
+    const resolveArtifact = vi.fn(async () => ({
+      ...fileArtifact("/Users/yuan/project/outputs/review.pdf"),
+      relative_path: "outputs/review.pdf"
+    }));
+
+    await expect(runAttachmentAction({
+      path: "/Users/yuan/project/outputs/review.pdf",
+      label: "review.pdf",
+      artifactClient: { resolveArtifact, openArtifact, revealArtifact, previewArtifact }
+    })).resolves.toBe("opened");
+
+    expect(previewArtifact).toHaveBeenCalledWith("/Users/yuan/project/outputs/review.pdf");
+    expect(openArtifact).not.toHaveBeenCalled();
+    expect(revealArtifact).not.toHaveBeenCalled();
+  });
+
   it("runs file attachment actions as open, reveal, download, then final failure", async () => {
     const events: string[] = [];
     const openOutcomes = [true, false, false, false];

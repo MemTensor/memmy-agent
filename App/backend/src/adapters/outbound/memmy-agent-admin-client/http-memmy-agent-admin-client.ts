@@ -36,6 +36,12 @@ const McpReloadResponseSchema = z.object({
   requires_restart: z.boolean()
 });
 
+const WorkspaceEnvironmentResponseSchema = z.object({
+  snapshot: z.object({
+    cwd: z.string()
+  })
+});
+
 export interface CreateHttpMemmyAgentAdminClientOptions {
   /** Memmy-agent WebUI HTTP base URL. */
   baseUrl?: string;
@@ -69,6 +75,15 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
 
   async getChannelConnections() {
     return this.request("/api/channels/status", ChannelConnectionsResponseSchema);
+  }
+
+  async getSessionWorkspace(sessionKey: string): Promise<string | null> {
+    const normalizedSessionKey = normalizeGuiSessionKey(sessionKey);
+    const environment = await this.request(
+      `/api/sessions/${encodeURIComponent(normalizedSessionKey)}/environment`,
+      WorkspaceEnvironmentResponseSchema
+    );
+    return environment.snapshot.cwd.trim() || null;
   }
 
   async configureChannel(runtimeChannel: string) {
@@ -138,6 +153,13 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
     this.token = parsed.token;
     return parsed.token;
   }
+}
+
+function normalizeGuiSessionKey(value: string): string {
+  const sessionKey = value.trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(sessionKey)
+    ? `websocket:${sessionKey}`
+    : sessionKey;
 }
 
 function normalizeBaseUrl(value: string): string {

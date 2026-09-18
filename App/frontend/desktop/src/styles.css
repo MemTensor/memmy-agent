@@ -12656,58 +12656,15 @@ input[type="checkbox"].check-sky:checked::after {
   outline-offset: -2px;
 }
 
-.workspace-artifact-breadcrumb-bar {
-  display: flex;
-  height: 30px;
-  min-height: 30px;
-  align-items: center;
-  gap: 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 34%, transparent);
-  background: var(--color-background-paper);
+.workspace-artifact-preview-main > .workspace-artifact-preview-crumb {
+  flex: none;
+  padding: 14px 16px 0;
 }
 
-.workspace-artifact-breadcrumbs {
-  display: flex;
+.workspace-artifact-preview-main > :not(.workspace-artifact-preview-crumb) {
+  flex: 1 1 auto;
   min-width: 0;
-  flex: 1;
-  align-items: center;
-  padding-left: 10px;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.workspace-artifact-breadcrumb {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-}
-
-.workspace-artifact-breadcrumbs button,
-.workspace-artifact-breadcrumbs strong {
-  min-width: 0;
-  padding: 2px 3px;
-  overflow: hidden;
-  border-radius: 4px;
-  color: inherit;
-  font-size: inherit;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-artifact-breadcrumbs button:hover {
-  background: color-mix(in srgb, var(--color-canvas-oat) 62%, transparent);
-  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
-}
-
-.workspace-artifact-breadcrumb-bar > .workspace-artifact-file-browser__toggle {
-  margin-right: 6px;
-}
-
-.agent-workspace-layout--preview-open > .workspace-artifact-preview-pane--workspace .workspace-artifact-preview-toolbar {
-  padding-right: 208px;
+  min-height: 0;
 }
 
 .workspace-artifact-preview-pane--plugin .workspace-artifact-preview-toolbar {
@@ -12791,9 +12748,9 @@ input[type="checkbox"].check-sky:checked::after {
   display: flex;
   flex: none;
   flex-direction: column;
-  width: 180px;
+  width: 200px;
   min-height: 0;
-  border-left: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
   background: color-mix(in srgb, var(--color-canvas-oat) 12%, var(--color-background-paper));
 }
 
@@ -12822,7 +12779,7 @@ input[type="checkbox"].check-sky:checked::after {
   flex: 1;
   width: auto;
   min-height: 0;
-  padding: 3px 5px 6px;
+  padding: 8px;
   overflow-y: auto;
 }
 
@@ -12874,11 +12831,11 @@ input[type="checkbox"].check-sky:checked::after {
 .workspace-artifact-file-folder__toggle {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 6px;
   width: 100%;
-  min-height: 24px;
-  padding: 2px 4px;
-  border-radius: 4px;
+  min-height: 36px;
+  padding: 7px 6px;
+  border-radius: var(--radius-btn);
   color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
   cursor: pointer;
 }
@@ -12890,8 +12847,8 @@ input[type="checkbox"].check-sky:checked::after {
 .workspace-artifact-file-folder__toggle strong {
   min-width: 0;
   overflow: hidden;
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -12899,18 +12856,18 @@ input[type="checkbox"].check-sky:checked::after {
 .workspace-artifact-file-folder__children {
   display: flex;
   flex-direction: column;
-  margin-left: 8px;
+  margin-left: 14px;
 }
 
 .workspace-artifact-file-item {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
-  min-height: 24px;
-  padding: 2px 4px;
-  border-radius: 4px;
-  font-size: 11px;
+  min-height: 36px;
+  padding: 7px 8px;
+  border-radius: var(--radius-btn);
+  font-size: 12px;
   color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
   text-align: left;
   cursor: pointer;
@@ -12921,7 +12878,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .workspace-artifact-file-item--active {
-  background: color-mix(in srgb, var(--color-accent-neon-mint) 9%, transparent);
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 14%, transparent);
   color: var(--color-action-sky-hover);
   font-weight: 500;
 }
@@ -12932,6 +12889,40 @@ input[type="checkbox"].check-sky:checked::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-file-context-menu {
+  position: fixed;
+  z-index: 10020;
+  min-width: 170px;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 58%, transparent);
+  border-radius: 9px;
+  background: var(--color-background-paper);
+  box-shadow: 0 8px 24px rgba(17, 29, 28, 0.12);
+  -webkit-app-region: no-drag;
+}
+
+.composer-file-context-menu > button {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 9px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-file-context-menu > button:hover,
+.composer-file-context-menu > button:focus-visible {
+  background: color-mix(in srgb, var(--color-canvas-oat) 72%, transparent);
+  color: var(--color-text-ink);
+  outline: none;
 }
 
 .workspace-artifact-preview-document {
@@ -13062,7 +13053,7 @@ input[type="checkbox"].check-sky:checked::after {
   }
 
   .workspace-artifact-file-browser {
-    width: min(140px, 42vw) !important;
+    width: min(200px, 42vw) !important;
     min-width: 0;
   }
 
@@ -13610,7 +13601,6 @@ input[type="checkbox"].check-sky:checked::after {
   min-height: 0;
   padding: 18px 20px 44px;
   overflow: auto;
-  scroll-behavior: smooth;
 }
 
 .pdf-preview__page-shell {

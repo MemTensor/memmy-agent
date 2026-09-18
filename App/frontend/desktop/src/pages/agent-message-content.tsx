@@ -16,6 +16,11 @@ export type AgentArtifactClient = {
   resolveArtifact(path: string): ReturnType<MemmyAgentClient["resolveArtifact"]>;
   revealArtifact(path: string): Promise<void>;
   openArtifact(path: string): Promise<void>;
+  /**
+   * Prefer in-app workspace preview when the path belongs to the active
+   * workspace. Returns true when the preview panel handled the open.
+   */
+  previewArtifact?: (path: string) => Promise<boolean>;
 };
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
@@ -489,6 +494,16 @@ export async function runAttachmentAction(input: {
       actionName = fresh.name ?? actionName;
     } catch {
       // Keep the original values and continue through the existing fallbacks.
+    }
+  }
+
+  if (actionPath && input.artifactClient?.previewArtifact) {
+    try {
+      if (await input.artifactClient.previewArtifact(actionPath)) {
+        return "opened";
+      }
+    } catch {
+      // Continue to system open / reveal / download fallbacks.
     }
   }
 

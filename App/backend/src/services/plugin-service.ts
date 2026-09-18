@@ -11,6 +11,7 @@ import {
   type UpdatePluginConfigInput
 } from "@memmy/local-api-contracts";
 import { Ajv } from "ajv";
+import { fileURLToPath } from "node:url";
 import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
 import type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/index.js";
@@ -327,6 +328,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const startedAt = Date.now();
       let outcome: "success" | "error" | "interrupted" = "interrupted";
       let errorCode: string | null = null;
+      const publishedPaths = new Map<string, string>();
       try {
         for await (const event of options.runtimeHost.invoke(call)) {
           if (event.type === "result") outcome = "success";
@@ -334,8 +336,19 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             outcome = "error";
             errorCode = event.code;
           }
-          yield event.type === "artifact"
-            ? { ...event, artifact: await localArtifacts.host(plugin, event.artifact) }
+          if (event.type === "artifact") {
+            const sourcePath = localArtifactPath(event.artifact.uri);
+            const artifact = await localArtifacts.host(plugin, event.artifact, {
+              conversationId: call.conversationId,
+              taskId: capabilityTaskId(call.input),
+              callId: call.callId
+            });
+            if (sourcePath && artifact.path) publishedPaths.set(sourcePath, artifact.path);
+            yield { ...event, artifact };
+            continue;
+          }
+          yield event.type === "result" && publishedPaths.size
+            ? { ...event, output: replacePublishedPaths(event.output, publishedPaths) }
             : event;
         }
       } catch (error) {
@@ -390,6 +403,31 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         .map((plugin) => deactivateContributions(plugin.id)));
     }
   };
+}
+
+function capabilityTaskId(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const taskId = (input as Record<string, unknown>).taskId;
+  return typeof taskId === "string" && taskId.trim() ? taskId.trim() : undefined;
+}
+
+function localArtifactPath(uri: string): string | null {
+  try {
+    const url = new URL(uri);
+    return url.protocol === "file:" ? fileURLToPath(url) : null;
+  } catch {
+    return null;
+  }
+}
+
+function replacePublishedPaths(value: unknown, paths: ReadonlyMap<string, string>): unknown {
+  if (typeof value === "string") return paths.get(value) ?? value;
+  if (Array.isArray(value)) return value.map((item) => replacePublishedPaths(item, paths));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    replacePublishedPaths(item, paths)
+  ]));
 }
 
 function publicPlugin(plugin: PluginRecord): InstalledPlugin {

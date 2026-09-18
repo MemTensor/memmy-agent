@@ -16,6 +16,7 @@ import {
   AGENT_MEDIA_ACCEPT,
   ComposerCommandChip,
   addCapabilityBlockToDraft,
+  appendPluginArtifact,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
@@ -87,6 +88,16 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("adds the published workspace path for a hosted plugin artifact", () => {
+    expect(appendPluginArtifact("Inspect", {
+      id: "review",
+      name: "review.pdf",
+      mediaType: "application/pdf",
+      uri: "/api/v1/plugins/literature-review/artifacts/token/preview",
+      path: "/workspace/outputs/literature-review/review-1/review.pdf"
+    })).toBe("Inspect\nreview.pdf: /workspace/outputs/literature-review/review-1/review.pdf");
+  });
+
   it("registers only active non-reserved plugin commands and parses their arguments", () => {
     const plugin = InstalledPluginSchema.parse({
       id: "com.example.review",
@@ -596,6 +607,8 @@ describe("HomePage", () => {
     expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
+    expect(source).toContain("focusExternalFile={previewFocusExternalFile}");
+    expect(source).toContain("if (mediaUrl)");
     // The recording page shares the panel, so the panel stays mounted when the
     // file preview is closed but a recording is open.
     expect(source).toContain("hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recordingSession !== null}");

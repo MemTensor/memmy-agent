@@ -1224,7 +1224,13 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(resolvedFile.status).toBe(200);
-    expect(await resolvedFile.json()).toMatchObject({ ok: true, path: resolvedNotePath, name: "result.md", kind: "file" });
+    expect(await resolvedFile.json()).toMatchObject({
+      ok: true,
+      path: resolvedNotePath,
+      name: "result.md",
+      kind: "file",
+      relative_path: "result.md"
+    });
 
     const resolvedImage = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
@@ -1232,7 +1238,13 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: "diagram.png", sessionKey }),
     });
     expect(resolvedImage.status).toBe(200);
-    expect(await resolvedImage.json()).toMatchObject({ ok: true, name: "diagram.png", kind: "image", media_url: expect.stringMatching(/^\/api\/media\//) });
+    expect(await resolvedImage.json()).toMatchObject({
+      ok: true,
+      name: "diagram.png",
+      kind: "image",
+      relative_path: "diagram.png",
+      media_url: expect.stringMatching(/^\/api\/media\//)
+    });
 
     const stagedOutside = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
@@ -1240,7 +1252,9 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: outside, sessionKey }),
     });
     expect(stagedOutside.status).toBe(200);
-    expect(await stagedOutside.json()).toMatchObject({ ok: true, name: "outside.md", kind: "file", media_url: expect.stringMatching(/^\/api\/media\//) });
+    const stagedOutsideBody = await stagedOutside.json();
+    expect(stagedOutsideBody).toMatchObject({ ok: true, name: "outside.md", kind: "file", media_url: expect.stringMatching(/^\/api\/media\//) });
+    expect(stagedOutsideBody.relative_path).toBeUndefined();
 
     const resolvedDirectory = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",

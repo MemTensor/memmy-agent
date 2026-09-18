@@ -188,6 +188,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginFileInputRoots })
     }
   ]);
+  const memmyAgentAdminClient =
+    options.memmyAgentAdminClient ??
+    createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
@@ -211,7 +214,15 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
     localArtifactService: createPluginLocalArtifactService({
-      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
+      resolveWorkspace: async (conversationId) => {
+        try {
+          return await memmyAgentAdminClient.getSessionWorkspace?.(conversationId) ?? null;
+        } catch {
+          // Non-WebUI invocations do not have a conversation workspace to publish into.
+          return null;
+        }
+      }
     }),
     isEntitlementGranted
   });
@@ -226,9 +237,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     createSkillDistributionService({
       targetRegistry: skillTargetRegistry
     });
-  const memmyAgentAdminClient =
-    options.memmyAgentAdminClient ??
-    createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
     if (!session.authenticated) return null;
