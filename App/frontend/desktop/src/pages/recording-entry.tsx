@@ -124,7 +124,14 @@ export function useRecordingEntry(
   const [deliverables, setDeliverables] = useState<UploadedAgentMedia[]>([]);
   const [error, setError] = useState<string | null>(null);
   const recorder = useAsrRecorder(asrClient, {
-    live: { onLine: (line) => setLines((current) => mergeLiveLines(current, line)) }
+    live: {
+      onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
+      // Same reasoning as the plugin's recording card: a failed live segment
+      // or a streaming connection that never opens must not look like nothing
+      // happened. Only the first message is kept, so a doomed fallback that
+      // keeps retrying every few seconds does not overwrite it with a repeat.
+      onError: (liveError) => setError((current) => current ?? liveError.message)
+    }
   });
 
   useEffect(() => {

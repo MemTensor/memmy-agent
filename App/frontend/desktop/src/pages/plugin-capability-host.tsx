@@ -1,11 +1,13 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
   type ChangeEvent,
-  type ReactNode
+  type ReactNode,
+  type WheelEvent as ReactWheelEvent
 } from "react";
 import {
   AlertCircle,
@@ -76,10 +78,56 @@ interface PluginCapabilityHostProps {
   region?: PluginCardRegion;
   /** Opens the side panel that a recording interaction transcribes into. */
   onRecordingSession?: (session: RecordingPanelSession | null) => void;
+  /**
+   * Calls the page has already closed, which must not come back as an error.
+   *
+   * A pinned button toggles: the second press cancels the call, and a cancelled
+   * call ends with the plugin reporting that cancellation. Left alone that
+   * report would take the place of the card the user just dismissed, so the
+   * page names the calls it closed and the host drops them instead.
+   */
+  dismissedCallIds?: ReadonlySet<string>;
+  /**
+   * Moves the conversation when a gesture runs past the end of a card.
+   *
+   * The region is capped in height and scrolls on its own, but it is a sibling
+   * of the transcript, not a child of it, so the browser has no scroll ancestor
+   * to chain to: a wheel gesture that reaches the bottom of a card would stop
+   * dead and read as the conversation being stuck. The page owns the scroller,
+   * so it is handed the leftover delta.
+   */
+  onRegionWheelOverflow?: (deltaY: number) => void;
+  /**
+   * Reports that the user closed a card, so the page that owns the layout knows.
+   *
+   * A card can be the reason its region is on screen — the recorder brings the
+   * column with it — so the region cannot outlive the card. The page owns that
+   * decision, which means it has to hear about the close.
+   */
+  onCallDismissed?: (callId: string) => void;
+  /**
+   * Interactions already answered, shared across the regions.
+   *
+   * A call can move between regions as it progresses — the recorder is answered
+   * in the side column and its upload step then appears over the composer — and
+   * an answered interaction must not render again in the region it moved to.
+   * The answer is a fact about the call, so the page keeps it and every host
+   * reads the same set.
+   */
+  answeredInteractions?: ReadonlySet<string>;
+  /** Records an answered interaction for every region rendering this call. */
+  onInteractionAnswered?: (key: string) => void;
 }
 
-/** Where a plugin card is rendered. */
-export type PluginCardRegion = "flow" | "pinned";
+/**
+ * Where a plugin card is rendered.
+ *
+ * `panel` is the column beside the conversation: the interview recorder lives
+ * there, directly above the transcript it is producing. A recording runs for an
+ * hour while the chat keeps moving, so the recorder needs a place of its own
+ * rather than a bar parked over the conversation.
+ */
+export type PluginCardRegion = "flow" | "pinned" | "panel";
 
 export interface PluginRendererInteractionState {
   interactionId: string;
@@ -93,26 +141,56 @@ export interface PluginRendererInteractionState {
 
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
-  const [answeredInteractions, setAnsweredInteractions] = useState<Set<string>>(() => new Set());
+  const [localAnsweredInteractions, setLocalAnsweredInteractions] = useState<Set<string>>(() => new Set());
   const [dismissedCalls, setDismissedCalls] = useState<Set<string>>(() => new Set());
+  // The page owns this set once there is more than one region, because a call
+  // can move between them mid-flight and the region it lands in has to know
+  // what was already answered. Standing alone, the host keeps its own.
+  const answeredInteractions = props.answeredInteractions ?? localAnsweredInteractions;
+  const reportAnswered = props.onInteractionAnswered;
+  const rememberAnswered = useCallback((key: string) => {
+    setLocalAnsweredInteractions((current) => new Set(current).add(key));
+    reportAnswered?.(key);
+  }, [reportAnswered]);
+  // Read through a ref so the wheel listener is not rebuilt on every render:
+  // a pinned card re-renders on every timer tick while it is recording.
+  const wheelOverflowRef = useRef(props.onRegionWheelOverflow);
+  wheelOverflowRef.current = props.onRegionWheelOverflow;
+  const forwardWheelOverflow = useCallback((event: ReactWheelEvent<HTMLElement>) => {
+    const handler = wheelOverflowRef.current;
+    if (!handler) return;
+    // Only the part of the gesture the card could not use travels on, so the
+    // transcript picks up exactly where the card left off.
+    const element = event.currentTarget;
+    const atTop = element.scrollTop <= 0;
+    const atBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 1;
+    if ((event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) handler(event.deltaY);
+  }, []);
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
   const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
   const region = props.region ?? "flow";
   const calls = useMemo(
     () => selectRegionPluginCalls(
       occludeUserRaisedCalls(
-        selectVisiblePluginCalls(props.calls, answeredInteractions)
-          .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
+        selectCurrentPluginCalls(
+          selectVisiblePluginCalls(props.calls, answeredInteractions)
+            .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
+            .filter((call) => !props.dismissedCallIds?.has(call.callId))
+        )
       ),
       region
     ),
-    [answeredInteractions, dismissedCalls, props.calls, region]
+    [answeredInteractions, dismissedCalls, props.calls, props.dismissedCallIds, region]
   );
   const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
   if (calls.length === 0) return null;
 
   return (
-    <section className="space-y-3" aria-label={t("plugin.ui.regionLabel")}>
+    <section
+      className={region === "pinned" ? "space-y-3 plugin-capability-region plugin-capability-region--pinned" : "space-y-3 plugin-capability-region"}
+      aria-label={t("plugin.ui.regionLabel")}
+      onWheel={region === "pinned" ? forwardWheelOverflow : undefined}
+    >
       {orderedCalls.map((call) => {
         const plugin = plugins.get(call.pluginId);
         const renderer = plugin?.manifest.ui?.renderer;
@@ -129,11 +207,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
           // A refresh is an intermediate action in a multi-step card. Keep the
           // renderer mounted until its next authoritative interaction arrives.
           if (asRecord(response).action === "refresh") return;
-          setAnsweredInteractions((current) => {
-            const next = new Set(current);
-            next.add(interactionKey(call, interactionId));
-            return next;
-          });
+          rememberAnswered(interactionKey(call, interactionId));
         };
         const cancel = () => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
@@ -145,6 +219,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         // asked for it to go away, not to be told it went away.
         const dismiss = async () => {
           setDismissedCalls((current) => new Set(current).add(`${call.pluginId}:${call.callId}`));
+          props.onCallDismissed?.(call.callId);
           await cancel().catch(() => undefined);
         };
         const dismissable = call.origin === "user"
@@ -226,6 +301,13 @@ function GenericPluginCards(props: {
 }) {
   const terminal = props.events.some((event) => event.type === "result" || event.type === "error");
   const artifactEvents = props.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
+  // Setup files (templates, checklists) and deliverables are both files, but
+  // they answer different questions — "what do I take with me" and "what did
+  // this produce" — so they are listed apart and named differently. A single
+  // list called 交付文件 made a card full of blank templates read as a finished
+  // engagement.
+  const setupEvents = artifactEvents.filter((event) => event.artifact.role === "setup");
+  const deliverableEvents = artifactEvents.filter((event) => event.artifact.role !== "setup");
   return (
     <div className="space-y-2">
       {props.events.filter((event) => event.type !== "artifact").map((event) => {
@@ -239,15 +321,24 @@ function GenericPluginCards(props: {
         }
         return null;
       })}
-      {artifactEvents.length > 1 ? (
-        <ArtifactCollection
-          events={artifactEvents}
+      {setupEvents.length > 0 ? (
+        <ArtifactGroup
+          events={setupEvents}
+          labelKey="plugin.ui.setupCollection"
           onAddToChat={props.onAddArtifact}
           onOpen={props.onOpenArtifact}
           onRead={props.onReadArtifact}
         />
-      ) : artifactEvents[0] ? (
-        <ArtifactCard event={artifactEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
+      ) : null}
+      {deliverableEvents.length > 1 ? (
+        <ArtifactCollection
+          events={deliverableEvents}
+          onAddToChat={props.onAddArtifact}
+          onOpen={props.onOpenArtifact}
+          onRead={props.onReadArtifact}
+        />
+      ) : deliverableEvents[0] ? (
+        <ArtifactCard event={deliverableEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
       ) : null}
     </div>
   );
@@ -470,10 +561,17 @@ function AudioRecordCard(props: {
   const [lines, setLines] = useState<AsrLiveLine[]>([]);
   const [transcript, setTranscript] = useState<RecordingPanelTranscript | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  // Live transcription (streaming, or its segmented-HTTP fallback) can fail
+  // without the recording itself failing — the diarized pass at the end still
+  // has its own shot. Silently dropping that failure left the card looking
+  // idle with no lines and no explanation; this is the only place its message
+  // reaches the user.
+  const [liveError, setLiveError] = useState<string | null>(null);
   const recorder = useAsrRecorder(props.asrClient, {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
-      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS))
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS)),
+      onError: (liveErr) => setLiveError((current) => current ?? liveErr.message)
     }
   });
   const answered = props.status === "answered";
@@ -538,6 +636,7 @@ function AudioRecordCard(props: {
     setLines([]);
     setLevels([]);
     setTranscript(null);
+    setLiveError(null);
     void recorder.start().catch(() => undefined);
   };
 
@@ -552,6 +651,12 @@ function AudioRecordCard(props: {
         : "done";
   const panelOpen = recorder.isRecording || recorder.isTranscribing || transcript !== null;
   const publish = props.onRecordingSession;
+  // A finished transcript is the recording's deliverable and the design keeps
+  // it on screen next to the upload card that follows, so it outlives this
+  // card. Read through a ref because the unmount below sees only the first
+  // render's closure.
+  const finishedRef = useRef(false);
+  finishedRef.current = transcript !== null;
   useEffect(() => {
     if (!publish) return;
     if (!panelOpen) {
@@ -571,15 +676,23 @@ function AudioRecordCard(props: {
       onClose: () => publish(null)
     });
   }, [publish, panelOpen, panelStatus, elapsedMs, lines, transcript, audioUrl, props.title]);
-  useEffect(() => () => publish?.(null), [publish]);
+  useEffect(() => () => {
+    // Retracting a half-finished recording is right — there is nothing to show
+    // and the microphone should not be left open. A finished one stays until
+    // the user closes the pane.
+    if (finishedRef.current) return;
+    publish?.(null);
+  }, [publish]);
 
   const error = !props.asrClient
     ? t("plugin.ui.audio.unavailable")
     : recorder.error && !answered
       ? recorder.error.message
-      : props.status === "error"
-        ? t("plugin.ui.responseFailed")
-        : null;
+      : liveError && !answered
+        ? liveError
+        : props.status === "error"
+          ? t("plugin.ui.responseFailed")
+          : null;
 
   return (
     <div className={`recording-bar${recorder.isRecording ? " recording-bar--live" : ""}`}>
@@ -986,6 +1099,57 @@ function ArtifactCard(props: {
   );
 }
 
+/**
+ * Lists one group of files, named for what they are.
+ *
+ * Two files go straight on screen: a card that hides the two things it was
+ * opened to hand over is a card that made the user click twice for nothing.
+ * Past that the rows collapse behind a count, because the card is not the
+ * place to read a long file list — the preview panel is.
+ *
+ * @param props Files, the label naming the group, and the row actions.
+ * @returns The group as one block.
+ */
+function ArtifactGroup(props: {
+  events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
+  labelKey: MessageKey;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const rows = props.events.length <= 2 || expanded
+    ? props.events.map((event) => (
+      <ArtifactCard
+        key={`artifact:${event.artifact.id}`}
+        event={event}
+        onAddToChat={props.onAddToChat}
+        onOpen={props.onOpen}
+        onRead={props.onRead}
+      />
+    ))
+    : null;
+  return (
+    <>
+      {props.events.length > 2 ? (
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 rounded-card border border-border-stone/30 bg-canvas-oat/30 px-3 py-2 text-left text-xs text-text-ink/60 transition-colors hover:bg-canvas-oat/60"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <FileOutput size={15} className="shrink-0 text-action-sky" aria-hidden="true" />
+          <span className="font-medium">{t(props.labelKey, { count: props.events.length })}</span>
+          <span className="ml-auto text-text-ink/40">{expanded ? t("plugin.ui.collapse") : t("plugin.ui.expand")}</span>
+          <ChevronRight size={14} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
+        </button>
+      ) : null}
+      {rows}
+    </>
+  );
+}
+
 function ArtifactCollection(props: {
   events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
   onAddToChat?: (artifact: PluginArtifactRef) => void;
@@ -1028,6 +1192,47 @@ function interactionKey(call: Pick<PluginUiCall, "pluginId" | "callId">, interac
   return `${call.pluginId}:${call.callId}:${interactionId}`;
 }
 
+/**
+ * Reduces the calls of one capability to the ones worth a card.
+ *
+ * The conversation is not a log of everything the plugin did — it is where the
+ * work is happening. So for each capability only two things survive: the run
+ * that is still going, and the most recent run that produced something. An
+ * earlier attempt that failed, a run the user started again, a cancelled one:
+ * those are history, and rendering each as its own card buries the one card the
+ * user is supposed to act on.
+ *
+ * A newer live run supersedes an older one for the same reason the plugin can
+ * only serve one at a time — only the newest is still answering.
+ *
+ * @param calls Calls the region is considering, oldest first.
+ * @returns The calls that deserve a card, oldest first.
+ */
+export function selectCurrentPluginCalls(calls: readonly PluginUiCall[]): PluginUiCall[] {
+  const isLive = (call: PluginUiCall) => !call.events.some((event) => event.type === "result" || event.type === "error");
+  const groups = new Map<string, { live?: PluginUiCall; finished?: PluginUiCall }>();
+  const order: string[] = [];
+  for (const call of calls) {
+    const key = `${call.pluginId}:${call.capabilityId}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {};
+      groups.set(key, group);
+      order.push(key);
+    }
+    if (isLive(call)) group.live = call;
+    else group.finished = call;
+  }
+  return order
+    .flatMap((key) => {
+      const group = groups.get(key)!;
+      if (group.live) return [group.live];
+      if (group.finished?.events.some((event) => event.type === "artifact")) return [group.finished];
+      return [];
+    })
+    .sort((left, right) => calls.indexOf(left) - calls.indexOf(right));
+}
+
 /** Keeps history in the event store while limiting the conversation to actionable UI. */
 export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: ReadonlySet<string> = new Set()): PluginUiCall[] {
   const prepared = calls.map((call) => ({
@@ -1041,18 +1246,28 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
     ? latest.callId
     : undefined;
   return prepared.filter((call, index) => {
-    const hasArtifact = call.events.some((event) => event.type === "artifact");
+    const artifactEvents = call.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
+    // A call that only handed over setup files (templates, checklists) carries
+    // no real deliverable. Keeping it on screen after it terminates adds a card
+    // the user cannot act on. Deliverable artifacts — the workbook, the report
+    // — still stay because those are what the engagement produced.
+    const hasDeliverableArtifact = artifactEvents.some((event) => event.artifact.role !== "setup");
+    const hasArtifact = artifactEvents.length > 0;
     const hasError = call.events.some((event) => event.type === "error");
+    const terminal = call.events.some((event) => event.type === "result" || event.type === "error");
     const recoveredByLaterRetry = hasError && prepared.slice(index + 1).some((candidate) => (
       candidate.pluginId === call.pluginId
       && candidate.capabilityId === call.capabilityId
       && candidate.conversationId === call.conversationId
       && candidate.events.some((event) => event.type === "result")
     ));
-    if (hasArtifact) return true;
+    if (hasDeliverableArtifact) return true;
+    // A setup-only call that finished (result or dismissed) is history:
+    // the templates were handed over and the card has nothing left to offer.
+    if (hasArtifact && terminal) return false;
+    if (hasArtifact && !terminal) return true;
     if (hasError) return !recoveredByLaterRetry;
-    if (!call.events.some((event) => event.type === "result" || event.type === "error")
-      && call.events.some((event) => event.type === "interaction")) return true;
+    if (!terminal && call.events.some((event) => event.type === "interaction")) return true;
     return call.callId === latestActive && call.events.some((event) => event.type !== "result");
   });
 }
@@ -1076,7 +1291,15 @@ export function occludeUserRaisedCalls(calls: PluginUiCall[]): PluginUiCall[] {
     && !call.events.some((event) => event.type === "result" || event.type === "error")
   ));
   if (!agentIsWaiting) return calls;
-  return calls.filter((call) => call.origin !== "user" || !call.events.some((event) => event.type === "interaction"));
+  // The recorder is never occluded: hiding it unmounts the card that owns the
+  // microphone, and a recording in progress cannot be taken again. It is also
+  // not competing for the same answer — one takes a recording, the other a
+  // reply — so leaving it up costs the Agent's card nothing.
+  return calls.filter((call) => (
+    call.origin !== "user"
+    || isBarePresentation(call)
+    || !call.events.some((event) => event.type === "interaction")
+  ));
 }
 
 /**
@@ -1092,12 +1315,17 @@ export function isBarePresentation(call: PluginUiCall): boolean {
 }
 
 /**
- * Splits calls between the pinned region and the transcript.
+ * Splits calls between the side panel, the pinned region and the transcript.
  *
- * A call the user raised stays above the composer for as long as it is live; a
- * call the model raised belongs in the transcript. Once a user-raised call has
- * delivered its result it moves to the transcript too, so the pinned region
- * holds only what is still actionable and the deliverables stay in the history.
+ * A call the user raised stays beside the conversation for as long as it is
+ * live; a call the model raised belongs in the transcript. Once a user-raised
+ * call has delivered its result it moves to the transcript too, so the pinned
+ * region holds only what is still actionable and the deliverables stay in the
+ * history.
+ *
+ * The interview recorder is the exception. It draws its own bar, stays open for
+ * as long as the interview lasts, and its transcript grows in the column beside
+ * it, so it belongs in that column rather than over the conversation.
  *
  * @param calls Visible calls.
  * @param region The region being rendered.
@@ -1108,7 +1336,12 @@ export function selectRegionPluginCalls(calls: PluginUiCall[], region: PluginCar
     call.origin === "user"
     && !call.events.some((event) => event.type === "result" || event.type === "error")
   );
-  return calls.filter((call) => (region === "pinned" ? isLiveUserCall(call) : !isLiveUserCall(call)));
+  return calls.filter((call) => {
+    const live = isLiveUserCall(call);
+    if (region === "panel") return live && isBarePresentation(call);
+    if (region === "pinned") return live && !isBarePresentation(call);
+    return !live;
+  });
 }
 
 /** Keep active work closest to the current Agent turn and completed deliveries at the bottom. */
@@ -1390,7 +1623,12 @@ function readOptions(value: unknown): Array<{ label: string; value: unknown }> {
  * had already delivered stays on screen; only this notice is dropped.
  */
 export function isCancellation(code: string): boolean {
-  return code === "cancelled" || code === "interaction_cancelled" || code === "plugin_call_cancelled";
+  return code === "cancelled"
+    || code === "interaction_cancelled"
+    || code === "plugin_call_cancelled"
+    // What the runtime reports when `cancel` was called on a live call, which
+    // is exactly how a second press on a pinned button closes its card.
+    || code === "plugin_cancelled";
 }
 
 export interface PluginQuestionField {

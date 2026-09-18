@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, CircleHelp, Loader2 } from "lucide-react";
+import { Check, Loader2, PenLine, ChevronRight } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
 
 export type AgentQuestionOption = {
@@ -243,94 +243,130 @@ export function AgentQuestionCard(props: {
   };
 
   return (
-    <section className="rounded-[18px] border border-border-stone/55 bg-background-paper p-4 shadow-sm" aria-label={props.card.title ?? t("home.question.title")}>
-      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-text-ink">
-        <CircleHelp size={17} className="text-action-sky" aria-hidden="true" />
-        <span>{props.card.title ?? t("home.question.title")}</span>
+    <section className="overflow-hidden rounded-card border border-border-stone/50 bg-background-paper shadow-sm" aria-label={props.card.title ?? t("home.question.title")}>
+      <div className="flex items-center justify-between gap-3 border-b border-border-stone/40 px-4 py-2.5">
+        <span className="text-sm font-semibold text-text-ink">{props.card.title ?? t("home.question.title")}</span>
+        <span className="shrink-0 text-xs text-text-ink/40">
+          {t("home.question.count", { count: props.card.questions.length })}
+        </span>
       </div>
-      <div className="space-y-4">
-        {props.card.questions.map((question) => {
+      <div className="flex flex-col">
+        {props.card.questions.map((question, questionIndex) => {
           const draftAnswer = draft[question.id]!;
           const savedAnswer = completedResponse?.answers.find((answer) => answer.questionId === question.id);
+          // The rule between questions is drawn by index rather than with
+          // `last:border-b-0`: the precompiled utility bundle carries no such
+          // variant, so a class that reads as valid would do nothing and leave
+          // a stray line above the footer.
+          const separators = questionIndex > 0 ? " border-t border-border-stone/40" : "";
           return (
-            <fieldset key={question.id} className="space-y-2" disabled={answered || submitting}>
-              <legend className="mb-2 text-sm leading-relaxed text-text-ink">{question.prompt}</legend>
+            <div
+              key={question.id}
+              role="group"
+              aria-label={question.prompt}
+              className={`pb-3 pt-3${separators}`}
+            >
+              {/*
+                Plain elements rather than a `fieldset`/`legend`: a legend is
+                lifted into the fieldset's border box, which notches the rule
+                above the question where the two meet.
+              */}
+              <div className="px-4 text-sm font-medium leading-relaxed text-text-ink">{question.prompt}</div>
               {answered ? (
-                <div className="flex items-center gap-2 rounded-xl bg-action-sky/8 px-3 py-2 text-sm text-text-ink">
+                <div className="flex items-center gap-2 px-4 py-3 text-sm text-text-ink">
                   <Check size={15} className="shrink-0 text-action-sky" aria-hidden="true" />
                   <span>{responseLabel(question, savedAnswer)}</span>
                 </div>
               ) : (
-                <>
-                  <div className="flex flex-wrap gap-2">
-                    {question.options.map((option) => {
-                      const selected = draftAnswer.selectedOptionIds.includes(option.id);
-                      return (
-                        <button
-                          key={option.id}
-                          type="button"
-                          aria-pressed={selected}
-                          title={option.description}
-                          onClick={() => toggleOption(question, option.id)}
-                          className={`rounded-xl border px-3 py-2 text-left text-sm transition-colors ${
-                            selected
-                              ? "border-action-sky bg-action-sky/10 text-text-ink"
-                              : "border-border-stone/55 bg-canvas-oat/45 text-text-ink/75 hover:border-action-sky/45 hover:bg-action-sky/5"
-                          }`}
-                        >
-                          <span className="font-medium">{option.label}</span>
-                          {option.description ? <span className="mt-0.5 block text-xs text-text-ink/50">{option.description}</span> : null}
-                        </button>
-                      );
-                    })}
-                    {question.allowOther ? (
+                // The list is inset past the prompt, so the option hairlines
+                // stop short of the card edge the way the design draws them.
+                <div className="mt-2 flex flex-col px-3">
+                  {/*
+                    Every option is a full-width row rather than a chip: the
+                    design reads as a list the user scans top to bottom, and a
+                    long label keeps its own line instead of wrapping a chip
+                    into a ragged block.
+                  */}
+                  {question.options.map((option, index) => {
+                    const selected = draftAnswer.selectedOptionIds.includes(option.id);
+                    return (
                       <button
+                        key={option.id}
                         type="button"
-                        aria-pressed={draftAnswer.otherSelected}
-                        onClick={() => toggleOther(question)}
-                        className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
-                          draftAnswer.otherSelected
-                            ? "border-action-sky bg-action-sky/10 text-text-ink"
-                            : "border-border-stone/55 bg-canvas-oat/45 text-text-ink/75 hover:border-action-sky/45 hover:bg-action-sky/5"
+                        disabled={submitting}
+                        aria-pressed={selected}
+                        title={option.description}
+                        onClick={() => toggleOption(question, option.id)}
+                        className={`flex w-full items-center gap-2.5 border-b border-border-stone/30 px-2 py-2.5 text-left transition-colors disabled:cursor-not-allowed ${
+                          selected ? "bg-action-sky/15 text-text-ink" : "text-text-ink/80 hover:bg-canvas-oat/50"
                         }`}
                       >
-                        {t("home.question.other")}
+                        <span
+                          aria-hidden="true"
+                          className={`agent-question-card__index ${
+                            selected ? "bg-action-sky text-white" : "bg-canvas-oat text-text-ink/60"
+                          }`}
+                        >
+                          {selected ? <Check size={12} aria-hidden="true" /> : index + 1}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm">{option.label}</span>
+                          {option.description ? <span className="mt-0.5 block text-xs text-text-ink/50">{option.description}</span> : null}
+                        </span>
+                        <ChevronRight size={15} className="shrink-0 text-text-ink/40" aria-hidden="true" />
                       </button>
-                    ) : null}
-                  </div>
-                  {draftAnswer.otherSelected ? (
-                    <textarea
-                      value={draftAnswer.otherText}
-                      onChange={(event) => setDraft((current) => ({
-                        ...current,
-                        [question.id]: { ...current[question.id]!, otherText: event.target.value },
-                      }))}
-                      placeholder={t("home.question.otherPlaceholder")}
-                      rows={2}
-                      className="w-full resize-y rounded-xl border border-border-stone/55 bg-background-paper px-3 py-2 text-sm text-text-ink outline-none transition focus:border-action-sky focus:ring-2 focus:ring-action-sky/15"
-                    />
+                    );
+                  })}
+                  {question.allowOther ? (
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      aria-pressed={draftAnswer.otherSelected}
+                      onClick={() => toggleOther(question)}
+                      className={`flex w-full items-center gap-2.5 px-2 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed ${
+                        draftAnswer.otherSelected ? "bg-action-sky/8 text-text-ink" : "text-text-ink/40 hover:bg-canvas-oat/50"
+                      }`}
+                    >
+                      <PenLine size={15} className="shrink-0" aria-hidden="true" />
+                      <span className="min-w-0 flex-1">{t("home.question.other")}</span>
+                    </button>
                   ) : null}
-                </>
+                  {draftAnswer.otherSelected ? (
+                    <div className="px-2 pb-1">
+                      <textarea
+                        value={draftAnswer.otherText}
+                        disabled={submitting}
+                        onChange={(event) => setDraft((current) => ({
+                          ...current,
+                          [question.id]: { ...current[question.id]!, otherText: event.target.value },
+                        }))}
+                        placeholder={t("home.question.otherPlaceholder")}
+                        rows={2}
+                        className="w-full resize-none rounded-input border border-border-stone/50 bg-background-paper px-3 py-2 text-sm text-text-ink outline-none transition focus:border-action-sky focus:ring-2 focus:ring-action-sky/20"
+                      />
+                    </div>
+                  ) : null}
+                </div>
               )}
-            </fieldset>
+            </div>
           );
         })}
       </div>
       {!answered ? (
-        <div className="mt-4 flex items-center justify-end gap-3">
-          {submitFailed ? <span className="text-xs text-red-600">{t("home.question.submitFailed")}</span> : null}
+        <div className="flex items-center justify-end gap-3 border-t border-border-stone/40 px-4 py-2.5">
+          {submitFailed ? <span className="text-xs text-status-error">{t("home.question.submitFailed")}</span> : null}
           <button
             type="button"
             disabled={!canSubmit || !props.onSubmit || submitting}
             onClick={() => void submit()}
-            className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl bg-action-sky px-4 py-2 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-45"
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-btn bg-action-sky px-4 text-sm font-semibold text-white transition-colors hover:bg-action-sky-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : null}
             {submitting ? t("home.question.submitting") : t("home.question.submit")}
           </button>
         </div>
       ) : (
-        <div className="mt-3 text-xs text-text-ink/45">
+        <div className="border-t border-border-stone/40 px-4 py-3 text-xs text-text-ink/45">
           {persistedResponse ? t("home.question.answered") : t("home.question.submitted")}
         </div>
       )}

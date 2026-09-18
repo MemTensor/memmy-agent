@@ -163,7 +163,55 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus);
   });
 
+  // The live ASR stream is a WebSocket, which Fastify's router never sees: an
+  // Upgrade request bypasses routing and lands on the raw HTTP server. The
+  // handshake is authenticated with the same runtime token the SSE channel
+  // takes as a query parameter, for the same reason — a browser WebSocket
+  // cannot carry custom headers. Origin is checked with the HTTP rules so a
+  // page that could not fetch the API cannot open a socket to it either.
+  app.server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (url.pathname !== ASR_STREAM_PATH) {
+      socket.destroy();
+      return;
+    }
+    const origin = getSingleHeaderValue(request.headers.origin);
+    if (origin && !isAllowedOrigin(origin, options.allowedOrigins)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
+    const token = url.searchParams.get("token");
+    void (async () => {
+      if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+      const relay = options.services.asrStream;
+      if (!relay) {
+        // Same partial-services allowance as the close hook: a test server
+        // without the relay answers 404 instead of throwing on a live socket.
+        rejectUpgrade(socket, 404);
+        return;
+      }
+      relay.handleUpgrade(request, socket, head);
+    })();
+  });
+  app.addHook("onClose", async () => {
+    // Route tests build a partial services object; the relay is only there in
+    // the real wiring, so its absence must not fail teardown.
+    await options.services.asrStream?.close();
+  });
+
   return app;
+}
+
+const ASR_STREAM_PATH = "/api/asr/stream";
+
+/** Answers a rejected upgrade with a bare HTTP status before the socket is dropped. */
+function rejectUpgrade(socket: import("node:stream").Duplex, status: 401 | 403 | 404): void {
+  const text = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Not Found";
+  socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
 }
 
 function createRuntimeTokenPreHandler(permissionManager: PermissionManager) {

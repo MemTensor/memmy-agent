@@ -110,6 +110,7 @@ export const zhCNMessages = {
   "plugin.ui.audio.recording": "正在录音",
   "plugin.ui.audio.paused": "已暂停",
   "plugin.ui.audio.transcript": "转写",
+  "recording.pane.idle": "点击「开始录音」开始访谈记录，转写会实时出现在这里。",
   "plugin.ui.audio.seek": "拖动进度",
   "recording.button": "访谈录音",
   "recording.page.title": "访谈录音",
@@ -129,7 +130,16 @@ export const zhCNMessages = {
   "recording.summaryPrompt": "请总结这段录音，提炼主要内容、关键结论和待办事项。",
   "plugin.ui.download": "下载",
   "plugin.ui.downloadFailed": "下载失败，请重试",
+  /*
+   * Two labels, because a plugin hands over two different kinds of file.
+   * Templates and checklists are what the user takes away before doing the
+   * work; the deliverable is what the work produced. Calling both "交付文件"
+   * made a card full of blank templates look like a finished engagement.
+   */
   "plugin.ui.artifactCollection": "{count} 个交付文件",
+  "plugin.ui.setupCollection": "{count} 份调研模板",
+  "plugin.ui.artifactsSummary": "{count} 个文件",
+  "plugin.ui.showFileList": "查看文件",
   "plugin.ui.expand": "展开",
   "plugin.ui.collapse": "收起",
   "plugin.ui.artifactPreview": "产物预览",
@@ -751,7 +761,8 @@ export const zhCNMessages = {
   "home.agent.restartFailed": "Agent 重启失败",
   "home.agent.platformApiFallback": "抱歉，刚刚没有拿到有效回复，请稍后再试一次。",
   "home.question.title": "需要你的选择",
-  "home.question.other": "其他",
+  "home.question.count": "{count} 个问题",
+  "home.question.other": "补充其他情况",
   "home.question.otherPlaceholder": "请输入你的回答",
   "home.question.submit": "提交回答",
   "home.question.submitting": "正在提交",
@@ -1905,6 +1916,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "plugin.ui.audio.recording": "Recording",
   "plugin.ui.audio.paused": "Paused",
   "plugin.ui.audio.transcript": "Transcript",
+  "recording.pane.idle": "Start the recording to capture the interview. The transcript appears here as it comes in.",
   "plugin.ui.audio.seek": "Seek",
   "recording.button": "Interview recording",
   "recording.page.title": "Interview recording",
@@ -1931,6 +1943,9 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "plugin.ui.download": "Download",
   "plugin.ui.downloadFailed": "Download failed. Try again.",
   "plugin.ui.artifactCollection": "{count} delivery files",
+  "plugin.ui.setupCollection": "{count} setup templates",
+  "plugin.ui.artifactsSummary": "{count} files",
+  "plugin.ui.showFileList": "Files",
   "plugin.ui.expand": "Expand",
   "plugin.ui.collapse": "Collapse",
   "plugin.ui.artifactPreview": "Artifact preview",
@@ -2552,7 +2567,8 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "home.agent.restartFailed": "Agent restart failed",
   "home.agent.platformApiFallback": "Sorry, I couldn't get a valid response. Please try again in a moment.",
   "home.question.title": "Your input is needed",
-  "home.question.other": "Other",
+  "home.question.count": "{count} questions",
+  "home.question.other": "Something else",
   "home.question.otherPlaceholder": "Enter your answer",
   "home.question.submit": "Submit answer",
   "home.question.submitting": "Submitting",

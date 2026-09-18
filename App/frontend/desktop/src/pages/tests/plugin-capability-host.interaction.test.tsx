@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, isBarePresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
+import { buildRendererDocument, isBarePresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, selectCurrentPluginCalls, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -990,6 +990,7 @@ describe("PluginCapabilityHost", () => {
     );
   });
 });
+
 describe("plugin UI event reduction", () => {
   it("marks an interaction stale when a newer task artifact is observed", () => {
     const calls: PluginUiCall[] = [
@@ -1144,6 +1145,18 @@ describe("plugin UI event reduction", () => {
     expect(occludeUserRaisedCalls([pinned, asked]).map((call) => call.callId)).toEqual(["asked"]);
   });
 
+  it("never hides the recorder while the Agent waits for its own answer", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const recorder = { ...base, callId: "recorder", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "rec", type: "audio-record" as const, payload: {} } }] };
+    const guide = { ...base, callId: "guide", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "g", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Hiding the recorder would unmount the card holding the microphone, and a
+    // recording in progress cannot be taken again. It also is not competing for
+    // the same answer, so the Agent's card loses nothing by leaving it up.
+    expect(occludeUserRaisedCalls([recorder, guide, asked]).map((call) => call.callId)).toEqual(["recorder", "asked"]);
+  });
+
   it("brings the user's card back once the Agent's card is no longer waiting", () => {
     const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
     const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
@@ -1191,7 +1204,43 @@ describe("plugin UI event reduction", () => {
     expect(document).toContain("default-src 'none'");
     expect(document).toContain("form-action 'none'");
   });
+
+  it("labels the templates as templates and the products as deliverables", async () => {
+    const guideContainer = document.createElement("div");
+    document.body.append(guideContainer);
+    const guideRoot = createRoot(guideContainer);
+    const guide: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "guide",
+      callId: "guide",
+      conversationId: "chat-1",
+      origin: "user",
+      events: [
+        { type: "artifact", artifact: { id: "a", name: "调研前准备清单.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/a", role: "setup" } },
+        { type: "artifact", artifact: { id: "b", name: "诊断表.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/b", role: "setup" } },
+        { type: "artifact", artifact: { id: "c", name: "诊断报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "https://example.test/c", role: "deliverable" } },
+        { type: "result", output: {} }
+      ]
+    };
+
+    await act(async () => guideRoot.render(
+      <I18nProvider language="zh-CN">
+        <PluginCapabilityHost calls={[guide]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    // Two blank templates are not this session's delivery files, and a card
+    // that hides the files it was opened to hand over wastes the click that
+    // opened it.
+    expect(guideContainer.textContent).not.toContain("2 个交付文件");
+    expect(guideContainer.textContent).toContain("调研前准备清单.xlsx");
+    expect(guideContainer.textContent).toContain("诊断表.xlsx");
+    expect(guideContainer.textContent).toContain("诊断报告.docx");
+    await act(async () => guideRoot.unmount());
+    guideContainer.remove();
+  });
 });
+
 describe("readQuestions", () => {
   it("drops entries that cannot be asked or answered, and keeps the rest in order", () => {
     expect(readQuestions([
@@ -1275,4 +1324,72 @@ describe("selectRegionPluginCalls", () => {
     expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
     expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
   });
+
+  it("sends the interview recorder to the side column, not over the conversation", () => {
+    const recorder: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } }
+    ];
+    const calls = [
+      call("user", "recorder", recorder),
+      call("user", "guide", live),
+      call("agent", "asked", live)
+    ];
+
+    // The recorder draws its own bar and runs for as long as the interview, so
+    // it belongs in the column beside the transcript it feeds.
+    expect(selectRegionPluginCalls(calls, "panel").map((item) => item.callId)).toEqual(["recorder"]);
+    // Everything else the user raised keeps its place over the composer, and
+    // the recorder does not appear in both regions at once.
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["guide"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["asked"]);
+  });
+
+  it("leaves a finished recorder in the transcript with its deliverables", () => {
+    const delivered: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } },
+      { type: "result", output: {} }
+    ];
+    const calls = [call("user", "done-recorder", delivered)];
+
+    // Once the recording is answered there is nothing left to record, so the
+    // column closes and the files it produced stay in the history.
+    expect(selectRegionPluginCalls(calls, "panel")).toEqual([]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-recorder"]);
+  });
+
+  it("keeps one card per capability instead of one per press", () => {
+    // Four presses of the guidance button used to leave four near-identical
+    // cards in the transcript, each listing the same two templates.
+    const presses: PluginUiCall[] = [1, 2, 3, 4].map((index) => ({
+      pluginId: plugin.id,
+      capabilityId: "guide",
+      callId: `press-${index}`,
+      conversationId: "chat-1",
+      origin: "user",
+      events: [
+        { type: "artifact", artifact: { id: `checklist-${index}`, name: "checklist.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/a", role: "setup" } },
+        { type: "artifact", artifact: { id: `table-${index}`, name: "table.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/b", role: "setup" } },
+        { type: "result", output: {} }
+      ]
+    }));
+
+    expect(selectCurrentPluginCalls(presses).map((item) => item.callId)).toEqual(["press-4"]);
+  });
+
+  it("keeps the run still going and the last run that produced something, per capability", () => {
+    const calls: PluginUiCall[] = [
+      { pluginId: plugin.id, capabilityId: "assess", callId: "old", conversationId: "chat-1", origin: "agent", events: [{ type: "result", output: {} }] },
+      { pluginId: plugin.id, capabilityId: "assess", callId: "delivered", conversationId: "chat-1", origin: "agent", events: [
+        { type: "artifact", artifact: { id: "wb", name: "workbook.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/wb", role: "deliverable" } },
+        { type: "result", output: {} }
+      ] },
+      { pluginId: plugin.id, capabilityId: "assess", callId: "again", conversationId: "chat-1", origin: "agent", events: [{ type: "progress", current: 1, total: 3 }] },
+      { pluginId: plugin.id, capabilityId: "judge", callId: "failed", conversationId: "chat-1", origin: "agent", events: [{ type: "error", code: "model_inference_failed", message: "HTTP 504", retryable: true }] }
+    ];
+
+    // A retry that is under way replaces the file list; a run that failed
+    // before producing anything leaves nothing behind to scroll past.
+    expect(selectCurrentPluginCalls(calls).map((item) => item.callId)).toEqual(["again"]);
+  });
+
 });

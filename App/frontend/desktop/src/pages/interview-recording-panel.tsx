@@ -40,7 +40,19 @@ export interface RecordingPanelSession {
 }
 
 export interface InterviewRecordingPanelProps {
-  session: RecordingPanelSession;
+  /**
+   * The live recording, once one has started.
+   *
+   * Absent while the recorder is only open and idle: the pane still has the
+   * compact recorder in it, there is just nothing transcribed yet.
+   */
+  session: RecordingPanelSession | null;
+  /** The compact recorder, shown above the transcript it is feeding. */
+  bar?: ReactNode;
+  /** Shown in the pane's header; falls back to the session's own title. */
+  title?: string;
+  /** Closes the pane, whether or not a recording is running. */
+  onClose?: () => void;
   onWidthChange?: (width: number) => void;
   toolbarEnd?: ReactNode;
   /** Measured inline size of the row this pane shares with the chat. */
@@ -58,10 +70,12 @@ export interface InterviewRecordingPanelProps {
 export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): ReactNode {
   const { t } = useTranslation();
   const session = props.session;
-  const recording = session.status === "recording" || session.status === "paused";
+  const recording = session !== null && (session.status === "recording" || session.status === "paused");
+  const heading = props.title ?? session?.title ?? t("recording.page.title");
+  const close = props.onClose ?? session?.onClose;
   const resize = useResizableSidebar({
     storageKey: RECORDING_PANEL_WIDTH_STORAGE_KEY,
-    defaultWidth: 520,
+    defaultWidth: 480,
     minWidth: 360,
     maxWidth: 760,
     resizeDirection: -1,
@@ -87,7 +101,7 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
       <aside
         className="workspace-artifact-preview-pane workspace-artifact-preview-pane--lifted"
         style={resize.sidebarStyle}
-        aria-label={session.title}
+        aria-label={heading}
       >
       <header className="workspace-artifact-preview-toolbar">
         <button
@@ -95,13 +109,13 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
           className="workspace-artifact-file-browser__toggle"
           aria-label={t("common.close")}
           title={t("common.close")}
-          onClick={session.onClose}
+          onClick={close}
         >
           <ChevronLeft size={16} aria-hidden="true" />
         </button>
-        <p className="recording-panel__heading">{session.title}</p>
+        <p className="recording-panel__heading">{heading}</p>
         <div className="workspace-artifact-preview-toolbar__actions">
-          {recording ? (
+          {recording && session ? (
             <>
               <button type="button" className="recording-panel__action" onClick={() => (session.status === "paused" ? session.onResume() : session.onPause())}>
                 {session.status === "paused" ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
@@ -117,6 +131,14 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
         </div>
       </header>
 
+      {/*
+        The recorder sits at the top of this column, directly above the words it
+        is producing, so starting a recording and watching it work happen in one
+        place. It stays put while the transcript scrolls under it, which is what
+        an interview running for an hour needs.
+      */}
+      {props.bar ? <div className="recording-panel__bar-slot">{props.bar}</div> : null}
+
       <div className="recording-panel__body">
         {recording ? (
           <div className="recording-panel__status" role="status">
@@ -126,15 +148,17 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
           </div>
         ) : null}
 
-        {session.audioUrl ? <RecordingPlayer src={session.audioUrl} /> : null}
+        {session?.audioUrl ? <RecordingPlayer src={session.audioUrl} /> : null}
 
-        {session.transcript ? (
+        {session?.transcript ? (
           <>
             <p className="recording-panel__section">{t("plugin.ui.audio.transcript")}</p>
             <TranscriptTurns transcript={session.transcript} />
           </>
-        ) : (
+        ) : session ? (
           <LiveLines lines={session.lines} pending={session.status === "transcribing"} pendingLabel={t("plugin.ui.audio.transcribing")} />
+        ) : (
+          <p className="recording-panel__empty">{t("recording.pane.idle")}</p>
         )}
       </div>
       </aside>

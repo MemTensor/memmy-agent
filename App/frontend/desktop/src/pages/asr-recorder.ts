@@ -7,6 +7,7 @@ import {
   type AsrLiveLine,
   type AsrLiveTranscriber
 } from "../lib/asr-live-transcription.js";
+import { createStreamLiveTranscriber } from "../lib/asr-stream-transcription.js";
 import { createPcmTap, PCM_TAP_SAMPLE_RATE, type PcmTap } from "../lib/audio-pcm-tap.js";
 
 /**
@@ -192,16 +193,33 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       pausedRef.current = false;
       const live = liveOptionsRef.current;
       if (live) {
-        const transcriber = createChunkedLiveTranscriber(asrClient, {
+        // The streaming relay is the path that shows words while they are
+        // still being spoken. It is only reachable in account mode; when the
+        // relay refuses the connection the segmented HTTP path takes over for
+        // this recording so the panel is never simply blank.
+        const streamed = createStreamLiveTranscriber(() => asrClient.openStream(), {
           sampleRate: PCM_TAP_SAMPLE_RATE,
           onLine: (line) => liveOptionsRef.current?.onLine(line),
-          onError: (liveError) => liveOptionsRef.current?.onError?.(liveError)
+          onError: (liveError) => {
+            liveOptionsRef.current?.onError?.(liveError);
+            if (liveRef.current !== streamed) return;
+            const fallback = createChunkedLiveTranscriber(asrClient, {
+              sampleRate: PCM_TAP_SAMPLE_RATE,
+              onLine: (line) => liveOptionsRef.current?.onLine(line),
+              onError: (segmentError) => liveOptionsRef.current?.onError?.(segmentError)
+            });
+            liveRef.current = fallback;
+          }
         });
+        const transcriber = streamed;
         liveRef.current = transcriber;
         tapRef.current = createPcmTap(stream, {
           sampleRate: PCM_TAP_SAMPLE_RATE,
+          // Read through the ref, not the captured binding: when the stream
+          // falls back to segmented HTTP mid-recording the ref is swapped, and
+          // the audio has to follow it or the fallback never hears anything.
           onSamples: (samples) => {
-            if (!pausedRef.current) transcriber.push(samples);
+            if (!pausedRef.current) liveRef.current?.push(samples);
           },
           onLevel: (level) => {
             if (!pausedRef.current) liveOptionsRef.current?.onLevel?.(level);

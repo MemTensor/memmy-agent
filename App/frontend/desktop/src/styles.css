@@ -642,7 +642,7 @@ body.memmy-window-fullscreen {
 }
 
 .home-workspace-context__trigger:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-brand-primary) 55%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
   outline-offset: 2px;
 }
 
@@ -3228,6 +3228,18 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 .agent-conversation-composer > * {
   position: relative;
   z-index: 1;
+  /*
+   * The overlay is a sibling of the scroll container, not a child of it, so
+   * anything it captures the transcript never sees — including the wheel. A
+   * card raised here can be tall enough to cover most of the pane, which left
+   * the conversation above it unscrollable. Only the controls inside the
+   * overlay take the pointer; the backdrop they sit on does not.
+   */
+  pointer-events: none;
+}
+
+/* The real controls inside the overlay keep the pointer. */
+.agent-conversation-composer > * > * {
   pointer-events: auto;
 }
 
@@ -3246,6 +3258,20 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   max-height: min(432px, calc(100dvh - var(--agent-composer-overlay-height, 120px) + 16px));
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/*
+ * Cards the user raised themselves sit just above the composer and can be
+ * arbitrarily tall — a template list, a folder of scans, a live transcript.
+ * Past a certain height the overlay would reach the top of the pane and hide
+ * the whole conversation behind its own backdrop, with nothing left to scroll
+ * against, so the card scrolls inside itself instead of growing without bound.
+ * Scrolling chains to the conversation once the card reaches its end, so a
+ * wheel gesture keeps moving the transcript rather than stopping dead.
+ */
+.plugin-capability-region--pinned {
+  max-height: min(42vh, 380px);
+  overflow-y: auto;
 }
 
 .agent-queue-panel {
@@ -13696,33 +13722,43 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 
-/* Pinned plugin command buttons, sitting between the cards and the composer. */
+/*
+ * Pinned plugin command buttons, sitting between the cards and the composer.
+ *
+ * The design draws these as quiet, borderless labels: a filled rounded rect
+ * that tints and takes the action green once its card is open. An outline
+ * would make two low-emphasis shortcuts the darkest thing on the page.
+ */
 .pinned-command-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px;
   margin: 0 2px 8px;
 }
 
 .pinned-command-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
-  border-radius: 999px;
-  background: var(--color-background-paper);
-  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+  gap: 5px;
+  padding: 6px 11px;
+  border: 0;
+  border-radius: var(--radius-btn, 8px);
+  background: color-mix(in srgb, var(--color-action-sky) 4%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-text-ink) 66%, transparent);
   font-size: 12px;
   line-height: 18px;
   cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .pinned-command-chip:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
-  background: color-mix(in srgb, var(--color-brand-primary) 6%, var(--color-background-paper));
-  color: var(--color-brand-primary);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, var(--color-background-paper));
+  color: var(--color-action-sky-hover);
+}
+
+.pinned-command-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-action-sky) 38%, transparent);
 }
 
 .pinned-command-chip:disabled {
@@ -13730,11 +13766,10 @@ input[type="checkbox"].check-sky:checked::after {
   cursor: default;
 }
 
-/* Filled while this button's card is open, so the two read as one action. */
+/* Tinted while this button's card is open, so the two read as one action. */
 .pinned-command-chip[data-open="true"] {
-  border-color: color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
-  background: color-mix(in srgb, var(--color-brand-primary) 12%, var(--color-background-paper));
-  color: var(--color-brand-primary);
+  background: color-mix(in srgb, var(--color-action-sky) 14%, var(--color-background-paper));
+  color: var(--color-action-sky-hover);
 }
 
 /* A tab in the preview strip that is a page rather than a file. */
@@ -13967,8 +14002,8 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .recording-page__list-action:hover {
-  background: color-mix(in srgb, var(--color-brand-primary) 10%, transparent);
-  color: var(--color-brand-primary);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky-hover);
 }
 
 /* Recording bar above the composer, and the panel it transcribes into. */
@@ -13977,7 +14012,7 @@ input[type="checkbox"].check-sky:checked::after {
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
-  padding: 8px 10px 8px 12px;
+  padding: 8px 8px 8px 10px;
   /* Idle carries the brand tint, so the bar reads as an offered action; the
      live state below switches to the recording colour. */
   border: 1px solid color-mix(in srgb, var(--color-action-sky) 35%, transparent);
@@ -14145,6 +14180,24 @@ input[type="checkbox"].check-sky:checked::after {
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
+}
+
+/* The recorder, pinned to the top of the column above the words it produces. */
+.recording-panel__bar-slot {
+  flex: none;
+  padding: 12px 12px 0;
+  margin-bottom: 10px;
+}
+
+.recording-panel__bar-slot .recording-bar {
+  margin-bottom: 0;
+}
+
+.recording-panel__empty {
+  padding: 4px 2px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
 }
 
 .recording-panel__status {
@@ -14380,4 +14433,24 @@ input[type="checkbox"].check-sky:checked::after {
 
 .home-scenario-card:hover .home-scenario-card__cta {
   background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
+}
+
+/*
+ * The numbered badge on an agent question option.
+ *
+ * Sized here rather than with `h-5 w-5`: the precompiled utility bundle in
+ * `prototype-utilities.css` carries `h-5` but not `w-5`, so a `w-5` next to it
+ * reads like a Tailwind class while doing nothing — the badge collapses to a
+ * narrow oval. The design draws it as a 20px circle.
+ */
+.agent-question-card__index {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
