@@ -380,6 +380,8 @@ describe("connectMcpServers enabled tools", () => {
 
     expect(registry.toolNames).toEqual(["mcp_good_demo"]);
     expect(Object.keys(stacks)).toEqual(["good"]);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toContain("MCP server 'polluted'");
     expect(error.mock.calls[0][0]).toContain("stdio protocol pollution");
   });
 

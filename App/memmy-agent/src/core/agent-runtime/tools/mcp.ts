@@ -770,7 +770,6 @@ export async function connectMcpServers(
         },
       };
     } catch (error) {
-      console.error(`MCP server '${name}': failed to connect: ${String((error as Error).message ?? error)}`);
       const text = String((error as Error).message ?? error).toLowerCase();
       const protocolPollution = ["parse error", "invalid json", "unexpected token", "jsonrpc", "content-length"]
         .some((marker) => text.includes(marker));
