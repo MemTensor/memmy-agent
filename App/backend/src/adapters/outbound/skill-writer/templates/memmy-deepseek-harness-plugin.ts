@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
-  completeRuntimeTurn,
+  completeSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
+  readDeepseekHookSourceTurn,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
@@ -63,7 +64,7 @@ export function apply(ctx, config = {}) {
         "deepseek-turn-" + hashText([sessionId, query, String(payload.turn)].join("\u0000")),
         query
       );
-      pendingStarts.set(turnKey(payload.agent.id, payload.turn), {
+      pendingStarts.set(turnKey(payload.agent.session.id, payload.turn), {
         sessionId,
         turnId: cleanText(started.turnId),
         episodeId: cleanText(started.episodeId),
@@ -147,14 +148,12 @@ export function apply(ctx, config = {}) {
     pendingStarts.delete(key);
     if (event.data.reason && event.data.reason.kind === "aborted") return;
     const previous = captureJobs.get(sessionKey) || Promise.resolve();
-    const capture = previous.then(() => completeTurn(
-      memmyConfigPath,
-      memorySessionIds,
-      session,
-      state,
-      event.data.reason,
-      pending
-    )).catch((error) => {
+    const capture = previous.then(async () => {
+      if (ctx.sessions && typeof ctx.sessions.flush === "function") {
+        await ctx.sessions.flush(session);
+      }
+      await completeTurn(memorySessionIds, session, event.data.turn, pending);
+    }).catch((error) => {
       ctx.logger.warn("memmy-memory: turn capture failed: " + errorText(error));
     });
     captureJobs.set(sessionKey, capture);
@@ -163,7 +162,6 @@ export function apply(ctx, config = {}) {
     });
   });
 
-  ctx.on("session/flush", (session) => captureJobs.get(String(session.id)));
   ctx.effect(() => () => Promise.allSettled([...captureJobs.values()]), "memmy-memory.captureDrain()");
 }
 
@@ -256,27 +254,22 @@ function createTurnState(turn) {
   };
 }
 
-async function completeTurn(memmyConfigPath, memorySessionIds, session, state, reason, pending) {
-  const query = cleanText(pending && pending.query) || state.queries.join("\n\n").trim();
-  if (!query) return;
+async function completeTurn(memorySessionIds, session, turn, pending) {
+  const conversationId = String(session.id);
+  const parsed = await readDeepseekHookSourceTurn({
+    conversationId,
+    turn: typeof turn === "number" ? turn : undefined,
+    cwd: session.header && session.header.cwd
+  });
+  if (!parsed.turn) return;
   const runtimeSession = await ensureSession(null, memorySessionIds, session);
-  const sessionId = cleanText(pending && pending.sessionId) || runtimeSession.sessionId;
-  let started = pending;
-  if (!started || !cleanText(started.turnId)) {
-    started = await startRuntimeTurn(runtimeSession, "deepseek-fallback-" + hashText([sessionId, query].join("\u0000")), query);
-  }
-  const answer = state.answers.join("\n\n").trim() || failureAnswer(reason);
-  if (!answer) return;
-  await completeRuntimeTurn(runtimeSession, {
-    turnId: cleanText(started.turnId),
-    episodeId: cleanText(started.episodeId) || undefined,
-    query,
-    answer,
-    status: reason && (reason.kind === "error" || reason.kind === "blocked") ? "failed" : "succeeded",
-    sourceMemoryIds: Array.isArray(started.sourceMemoryIds) ? started.sourceMemoryIds : undefined,
-    reasoningSummary: state.reasoning.join("\n\n").trim() || undefined,
-    toolCalls: state.toolCalls.length ? state.toolCalls : undefined,
-    toolResults: state.toolResults.length ? state.toolResults : undefined
+  await completeSourceTurn({
+    configUrl: CONFIG_URL,
+    turn: parsed.turn,
+    sessionId: cleanText(pending && pending.sessionId) || runtimeSession.sessionId,
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
+    profileId: parsed.turn.profileId || session.header && session.header.agentPreset || "main",
+    adapterId: "memmy-deepseek-harness-plugin"
   });
 }
 
@@ -289,7 +282,7 @@ async function ensureSession(client, cache, session) {
     source: SOURCE,
     adapterId: "memmy-deepseek-harness-plugin",
     profileId: session.header.agentPreset || "main",
-    sessionKey: "deepseek-harness-" + externalId,
+    sessionKey: "deepseek_harness-memory-" + externalId,
     workspaceRoot: session.header.cwd || null,
     transition: "allow_legacy_rollover"
   });
@@ -527,12 +520,13 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = [];
+    const inject = ["uiConversation"];
 
     function resolveConversationEventRegistry(ctx) {
-      const uiConversation = ctx.get("uiConversation");
+      const uiConversation = ctx.uiConversation
+        || (typeof ctx.get === "function" ? ctx.get("uiConversation") : undefined);
       if (uiConversation && uiConversation.events) return uiConversation.events;
-      const conversationEvents = ctx.get("conversationEvents");
+      const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
       throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
     }

@@ -465,6 +465,7 @@ const sessionCache = new Map();
 const runtimeSessionCache = new Map();
 const l3InjectOnce = new Map();
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
+const BRIDGE_URL = new URL("./memmy-workspace-bridge.mjs", import.meta.url);
 const completedTurns = new Set();
 const MEMMY_FETCH_TIMEOUT_MS = 45000;
 const MEMMY_RECALL_TIMEOUT_MS = 45000;
@@ -706,10 +707,6 @@ export default {
     });
 
     api.on("agent_end", (event, ctx) => {
-      const messages = Array.isArray(event && event.messages) ? event.messages : [];
-      const turnText = latestTurnText(messages);
-      const toolTrace = extractTurnToolTrace(messages, turnText.userIndex);
-      const query = turnText.query;
       const externalSessionId = resolveExternalSessionId(ctx);
       const sessionId = sessionCache.get(externalSessionId) || externalSessionId;
       const key = turnKey(ctx, sessionId, event);
@@ -720,34 +717,26 @@ export default {
         pendingTurns.delete(externalKey);
         return;
       }
-      const status = event && event.success === false ? "failed" : "succeeded";
-      const answer = turnText.answer ||
-        normalizeOptionalText(event && event.error) ||
-        (status === "failed" ? "Agent generation failed before producing a final response." : "");
-      const resolvedQuery = normalizeOptionalText(pending && pending.query) || query;
-      if (!resolvedQuery || !answer) {
-        pendingTurns.delete(key);
-        pendingTurns.delete(externalKey);
+      // The run id is the durable turn identity: it is on disk, so the offline scan
+      // recomputes the same one. A run without it stays unwritten for the scan to fill.
+      const resolvedTurnId = resolveRunId(ctx, event);
+      if (!resolvedTurnId) {
+        api.logger.warn("memmy-memory: turn capture failed: identity_unresolved");
         return;
       }
-      const resolvedTurnId = normalizeOptionalText(pending && pending.turnId) || fallbackTurnId(ctx, sessionId, query, answer, event);
       const captureKey = key + "\\u0000" + resolvedTurnId;
       if (completedTurns.has(captureKey)) {
         return;
       }
 
       const result = completeTurnSynchronously(cfg, {
-        externalSessionId,
-        sessionId: normalizeOptionalText(pending && pending.sessionId) || sessionId,
-        turnId: resolvedTurnId,
-        episodeId: normalizeOptionalText(pending && pending.episodeId) || undefined,
-        query: resolvedQuery,
-        answer,
-        status,
+        runId: resolvedTurnId,
+        windowId: normalizeOptionalText(ctx && ctx.sessionId),
+        sessionKey: normalizeOptionalText(ctx && ctx.sessionKey),
+        agentId: normalizeOptionalText(ctx && ctx.agentId),
+        sessionId: normalizeOptionalText(pending && pending.sessionId) || undefined,
         workspacePath: normalizeOptionalText(ctx && ctx.workspaceDir),
         profileId: normalizeOptionalText(ctx && ctx.agentId) || "main",
-        toolCalls: toolTrace.toolCalls.length ? toolTrace.toolCalls : undefined,
-        toolResults: toolTrace.toolResults.length ? toolTrace.toolResults : undefined,
         sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
       });
 
@@ -897,37 +886,18 @@ const SYNC_COMPLETE_SCRIPT = [
   "let input = '';",
   "for await (const chunk of process.stdin) input += chunk;",
   "const payload = JSON.parse(input || '{}');",
-  "const headers = { 'content-type': 'application/json' };",
-  "if (payload.token) headers.authorization = 'Bearer ' + payload.token;",
-  "async function post(path, body) {",
-  "  const requestBody = { ...(body && typeof body === 'object' && !Array.isArray(body) ? body : {}), source: 'openclaw' };",
-  "  const response = await fetch(new URL(path, payload.baseUrl), { method: 'POST', headers, body: JSON.stringify(requestBody) });",
-  "  const text = await response.text();",
-  "  let data = {};",
-  "  if (text) { try { data = JSON.parse(text); } catch { data = { raw: text }; } }",
-  "  if (!response.ok) {",
-  "    const message = data && data.error && data.error.message ? data.error.message : response.statusText;",
-  "    throw new Error(message || 'Memmy request failed');",
-  "  }",
-  "  return data;",
-  "}",
-  "function hashText(value) {",
-  "  let hash = 2166136261;",
-  "  for (let index = 0; index < value.length; index += 1) {",
-  "    hash ^= value.charCodeAt(index);",
-  "    hash = Math.imul(hash, 16777619);",
-  "  }",
-  "  return (hash >>> 0).toString(36);",
-  "}",
-  "let sessionId = payload.sessionId || payload.externalSessionId;",
-  "let turnId = payload.turnId || '';",
-  "if (!sessionId || !turnId) {",
-  "  const opened = await post('/api/v1/sessions/open', { sessionId: payload.externalSessionId || sessionId, source: 'openclaw', profileId: payload.profileId || 'main', workspacePath: payload.workspacePath || undefined });",
-  "  sessionId = opened.sessionId || sessionId;",
-  "  turnId = turnId || 'openclaw-fallback-' + hashText([sessionId || '', payload.query || '', payload.answer || ''].join('\\\\u0000'));",
-  "}",
-  "const result = await post('/api/v1/turns/' + encodeURIComponent(turnId) + '/complete', { sessionId, episodeId: payload.episodeId || undefined, source: 'openclaw', query: payload.query, answer: payload.answer, status: payload.status || 'succeeded', toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined, toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined });",
-  "console.log(JSON.stringify({ ok: true, mode: 'turn_complete', result }));"
+  // agent_end is synchronous, so the child process does the disk read and the submit. It
+  // reuses the bridge's shared reader instead of trusting the in-memory message list.
+  "const bridge = await import(payload.bridgeUrl);",
+  "const parsed = await bridge.readOpenclawHookSourceTurn({ runId: payload.runId, sessionId: payload.windowId || undefined, sessionKey: payload.sessionKey || undefined, agentId: payload.agentId || undefined });",
+  "if (!parsed.turn) {",
+  "  console.log(JSON.stringify({ ok: false, error: parsed.reason || 'identity_unresolved' }));",
+  "} else {",
+  "  const result = await bridge.completeSourceTurn({ configUrl: new URL(payload.configUrl), turn: parsed.turn, sessionId: payload.sessionId || undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined, profileId: payload.profileId || 'main', adapterId: 'memmy-openclaw-plugin' });",
+  "  const status = result && typeof result.status === 'string' ? result.status : '';",
+  "  const accepted = status === 'stored' || status === 'existing' || status === 'rejected';",
+  "  console.log(JSON.stringify(accepted ? { ok: true, mode: 'source_turn_complete', status } : { ok: false, error: (result && result.reason) || status || 'unexpected_response' }));",
+  "}"
 ].join("\n");
 
 function completeTurnSynchronously(cfg, input) {
@@ -937,7 +907,12 @@ function completeTurnSynchronously(cfg, input) {
   }
 
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", SYNC_COMPLETE_SCRIPT], {
-    input: JSON.stringify({ ...input, ...runtime }),
+    input: JSON.stringify({
+      ...input,
+      ...runtime,
+      bridgeUrl: BRIDGE_URL.href,
+      configUrl: CONFIG_URL.href
+    }),
     encoding: "utf8",
     timeout: 60000,
     windowsHide: true
@@ -1069,113 +1044,8 @@ function turnKey(ctx, sessionId, event) {
   return resolveRunId(ctx, event) || sessionId;
 }
 
-function fallbackTurnId(ctx, sessionId, query, answer, event) {
-  const runId = resolveRunId(ctx, event);
-  if (runId) {
-    return runId;
-  }
-  return "openclaw-fallback-" + hashText([sessionId, query, answer].join("\\u0000"));
-}
-
 function resolveRunId(ctx, event) {
   return normalizeOptionalText(ctx && ctx.runId) || normalizeOptionalText(event && event.runId);
-}
-
-function hashText(value) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function extractTurnToolTrace(messages, userIndex) {
-  const toolCalls = [];
-  const toolResults = [];
-  const startIndex = Number.isInteger(userIndex) && userIndex >= 0 ? userIndex + 1 : 0;
-
-  for (let index = startIndex; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message || typeof message !== "object") {
-      continue;
-    }
-
-    appendToolCalls(message.toolCalls, toolCalls);
-    appendToolCalls(message.tool_calls, toolCalls);
-
-    if (message.role === "tool" || message.role === "toolResult") {
-      const result = normalizeToolResultMessage(message);
-      if (result) {
-        toolResults.push(result);
-      }
-      continue;
-    }
-
-    for (const block of contentBlocks(message.content)) {
-      const call = normalizeToolCallBlock(block);
-      if (call) {
-        toolCalls.push(call);
-        continue;
-      }
-
-      const result = normalizeToolResultBlock(block);
-      if (result) {
-        toolResults.push(result);
-      }
-    }
-  }
-
-  return { toolCalls, toolResults };
-}
-
-function appendToolCalls(value, toolCalls) {
-  for (const item of contentBlocks(value)) {
-    const call = normalizeToolCallBlock(item);
-    if (call) {
-      toolCalls.push(call);
-    }
-  }
-}
-
-function normalizeToolCallBlock(value) {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const type = normalizeOptionalText(value.type);
-  const fn = value.function && typeof value.function === "object" && !Array.isArray(value.function) ? value.function : {};
-  const name = normalizeOptionalText(value.name) || normalizeOptionalText(value.toolName) || normalizeOptionalText(fn.name);
-  const isToolCall = type === "toolCall" || type === "tool_call" || type === "tool_use" || Boolean(fn.name);
-  if (!isToolCall || !name) {
-    return null;
-  }
-
-  const call = { name };
-  const id = normalizeOptionalText(value.id) ||
-    normalizeOptionalText(value.call_id) ||
-    normalizeOptionalText(value.tool_call_id) ||
-    normalizeOptionalText(value.toolCallId);
-  const args = firstPresent(value.arguments, value.args, value.input, fn.arguments);
-  if (id) {
-    call.id = id;
-  }
-  if (args !== undefined) {
-    call.arguments = args;
-  }
-  return call;
-}
-
-function normalizeToolResultMessage(message) {
-  return normalizeToolResultBlock({
-    type: "tool_result",
-    tool_call_id: firstPresent(message.tool_call_id, message.toolCallId, message.id),
-    content: message.content,
-    details: message.details,
-    output: message.output,
-    result: message.result,
-    error: message.error,
-    isError: message.isError
-  });
 }
 
 function normalizeToolResultBlock(value) {

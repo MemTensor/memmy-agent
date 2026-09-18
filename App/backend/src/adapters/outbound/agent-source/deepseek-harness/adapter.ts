@@ -83,11 +83,13 @@ function toConversationMessage(
   message: RawDeepseekHarnessMessage,
   gitRoot: string | null
 ): ConversationMessage {
+  const workspacePath = typeof message.rawMeta.workspacePath === "string" ? message.rawMeta.workspacePath : null;
   return {
     ...message,
     sourceId: SOURCE_ID,
     content: redactSecrets(message.content),
-    gitRoot
+    workspacePath,
+    gitRoot: gitRoot ?? workspacePath
   };
 }
 

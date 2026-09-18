@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, type ConversationMessage } from "./index.js";
+import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, type ConversationMessage } from "../index.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const path of dirs.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -120,6 +120,83 @@ describe("Codex native source turns", () => {
     expect(sourceTurnFromMessages(messages)).not.toBeNull();
     expect(messages.every(message => message.rawMeta.sourceTurnState === "complete")).toBe(true);
     expect(await read([prefix[0], message("system", "startup only")])).toEqual([]);
+  });
+
+  it("drops a turn Codex ran through its own auto-review model", async () => {
+    const records = [
+      event("session_meta", { id: "file-artifact", session_id: "conversation", cwd: "/project" }),
+      event("event_msg", { type: "task_started", turn_id: "turn-review" }),
+      event("turn_context", { turn_id: "turn-review", model: "codex-auto-review", cwd: "/project" }),
+      message("user", "The following is the Codex agent history whose request action you are assessing."),
+      message("assistant", "{\"risk_level\":\"low\",\"outcome\":\"allow\"}"),
+      event("event_msg", { type: "task_complete", turn_id: "turn-review" })
+    ];
+    expect(await read(records)).toEqual([]);
+
+    const reviewed = fixture(records);
+    expect((await readCodexSourceTurn(reviewed, { turnId: "turn-review", conversationId: "conversation" })).turn).toBeNull();
+  });
+
+  it("keeps a turn a real model ran, and does not let the review model leak into it", async () => {
+    const messages = await read([
+      prefix[0],
+      event("event_msg", { type: "task_started", turn_id: "turn-1" }),
+      event("turn_context", { turn_id: "turn-1", model: "gpt-6-astra", cwd: "/project" }),
+      prefix[2],
+      ...end
+    ]);
+    expect(sourceTurnFromMessages(messages)).toMatchObject({ turnId: "turn-1", query: "Fix the issue", answer: "Done" });
+  });
+
+  it("keeps only the person's own text when Codex packs injected context into a user message", async () => {
+    const injected = event("response_item", {
+      type: "message",
+      role: "user",
+      content: [
+        { text: "# AGENTS.md instructions for /project" },
+        { text: "<environment_context><cwd>/project</cwd></environment_context>" },
+        { text: "Fix the issue" },
+        { text: "<recommended_plugins> Airtable" }
+      ],
+      internal_chat_message_metadata_passthrough: {
+        content_item_kinds: ["agents_md.instructions", "environments.environment_context", "user.text", "plugins.recommendations"]
+      }
+    });
+    const messages = await read([prefix[0], prefix[1], injected, ...end]);
+    expect(sourceTurnFromMessages(messages)?.query).toBe("Fix the issue");
+  });
+
+  it("drops a user message that carries no text of the person's own", async () => {
+    const onlyInjected = event("response_item", {
+      type: "message",
+      role: "user",
+      content: [{ text: "<recommended_plugins> Airtable" }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ["plugins.recommendations"] }
+    });
+    const messages = await read([prefix[0], prefix[1], onlyInjected, ...end]);
+    expect(sourceTurnFromMessages(messages)).toBeNull();
+    expect(messages.at(-1)?.rawMeta.sourceTurnReason).toBe("turn_content_incomplete");
+  });
+
+  it("keeps every content item when the rollout predates the per-item labels", async () => {
+    const unlabelled = event("response_item", {
+      type: "message",
+      role: "user",
+      content: [{ text: "First part" }, { text: "Second part" }]
+    });
+    const messages = await read([prefix[0], prefix[1], unlabelled, ...end]);
+    expect(sourceTurnFromMessages(messages)?.query).toBe("First part\nSecond part");
+  });
+
+  it("does not apply the user content filter to assistant messages", async () => {
+    const labelled = event("response_item", {
+      type: "message",
+      role: "assistant",
+      content: [{ text: "Done" }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ["unknown"] }
+    });
+    const messages = await read([...prefix, labelled, event("event_msg", { type: "task_complete", turn_id: "turn-1" })]);
+    expect(sourceTurnFromMessages(messages)?.answer).toBe("Done");
   });
 
   it("reports pending evidence before content conflicts and distinguishes conflicts from missing identity", async () => {

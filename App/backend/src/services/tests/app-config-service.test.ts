@@ -40,6 +40,45 @@ describe("AppConfigService", () => {
     });
   });
 
+  it("reloads Memory after publishing the interface language", async () => {
+    const calls: unknown[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings(patch) {
+          calls.push({ settings: patch });
+          return appSettings(patch);
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return { changed: false, memoryConfigAffected: false };
+        },
+        async writeMemoryLanguage(language) {
+          calls.push({ language });
+        },
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
+        }
+      },
+      memoryClient: {
+        async reloadConfig(input) {
+          calls.push({ reload: input });
+        }
+      }
+    });
+
+    await expect(service.updateSettings({ language: "system" })).resolves.toMatchObject({ language: "system" });
+    expect(calls).toEqual([
+      { language: "system" },
+      { reload: { reason: "app_language_saved" } },
+      { settings: { language: "system" } }
+    ]);
+  });
+
   it("updates scan preferences through the bootstrap repository", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({

@@ -292,8 +292,12 @@ export function createBatchReflectionLlm(calls: Array<{
     isConfigured() {
       return true;
     },
-    async complete() {
-      return "unused";
+    async complete(_messages, options) {
+      // Episode titling runs for every captured turn, and a job that keeps failing
+      // would hold the top priority cohort and starve the rest of the queue.
+      return options.operation.startsWith("episode_title")
+        ? JSON.stringify({ title: "测试任务标题", summary: "测试任务摘要。" })
+        : "unused";
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,

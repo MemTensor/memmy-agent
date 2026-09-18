@@ -1282,7 +1282,10 @@ export class SessionTurnService {
       if (completedAtMs <= Date.parse(activation)) {
         return { status: "rejected", reason: "legacy_before_activation" };
       }
-      if (!normalized.query.trim() || !normalized.answer.trim() || normalized.status === "cancelled") {
+      const hasTools = normalizeCompleteTurnToolCalls(normalized).length > 0
+        || normalizeCompleteTurnToolResults(normalized).length > 0;
+      if (!normalized.query.trim() || normalized.status === "cancelled"
+        || (!normalized.answer.trim() && !hasTools)) {
         return { status: "pending", reason: "source_turn_incomplete" };
       }
       if (!this.deps.memoryAddEnabled()) {
@@ -1384,7 +1387,7 @@ export class SessionTurnService {
       candidate.userId === namespace.userId && candidate.source === identity.source && candidate.profileId === identity.profileId &&
       (!candidate.conversationId || candidate.conversationId === identity.conversationId) &&
       (candidate.hostSessionKey === identity.conversationId || candidate.conversationId === identity.conversationId ||
-        (identity.source === "codex" && candidate.hostSessionKey === `codex-memory-${identity.conversationId}`)) &&
+        candidate.hostSessionKey === `${identity.source}-memory-${identity.conversationId}`) &&
       (!namespace.projectId || candidate.projectId === namespace.projectId) &&
       (!namespace.workspaceId || candidate.workspaceId === namespace.workspaceId) &&
       (candidate.meta.source_namespace_key === undefined || candidate.meta.source_namespace_key === scope.namespaceKey) &&
@@ -1434,7 +1437,9 @@ export class SessionTurnService {
     if (request.status === "cancelled") {
       throw new MemoryServiceError("invalid_argument", "cancelled turns are not persisted");
     }
-    if (!request.query.trim() || !request.answer.trim()) {
+    const hasTools = normalizeCompleteTurnToolCalls(request).length > 0
+      || normalizeCompleteTurnToolResults(request).length > 0;
+    if (!request.query.trim() || (!request.answer.trim() && !hasTools)) {
       throw new MemoryServiceError(
         "invalid_argument",
         "turn.complete requires a non-empty user query and assistant result"
@@ -2048,6 +2053,19 @@ export class SessionTurnService {
           },
           createdAt: at
         }));
+        // Give the still-open episode a provisional title so the task panel does
+        // not fall back to rendering the first user message. An episode closed by
+        // this same turn is skipped: finalizeClosedEpisode queues the final pass.
+        if (!episode.title?.trim()) {
+          jobs.push(this.deps.enqueueJob({
+            jobType: "episode_title",
+            userId: session.userId,
+            sessionId: session.id,
+            episodeId: episode.id,
+            payload: { stage: "provisional" },
+            createdAt: at
+          }));
+        }
       }
       const uniqueClosedEpisodeIds = uniq(closedEpisodeIds);
       const responseChangeSeq = this.deps.repos.runtime.latestChangeSeq(session.userId, this.deps.namespaceIdFromSession(session));

@@ -69,10 +69,12 @@ function RuntimeApp() {
   const { t } = useTranslation();
   const translationRef = useRef(t);
   const agentStateRef = useRef(state.agent);
+  const isScanningRef = useRef(false);
   const rendererReadyReportedRef = useRef(false);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
   agentStateRef.current = state.agent;
+  isScanningRef.current = state.agentSources.isScanning;
   const taskStateCoordinator = useMemo(() => (
     clients?.memmyAgent
       ? createAgentTaskStateCoordinator(
@@ -153,7 +155,7 @@ function RuntimeApp() {
         }
         dispatch(appActions.agentSourceScanCompleted());
       } catch {
-        // The next heartbeat or reconnect will reconcile again.
+        // The next scanning heartbeat or reconnect will reconcile again.
       }
     }
 
@@ -252,7 +254,12 @@ function RuntimeApp() {
           dispatch(appActions.eventStatusChanged("connected"));
           void reconcileAgentSourceScanStatus(clients.agentSources);
         });
-        events.addEventListener("app.heartbeat", () => dispatch(appActions.eventStatusChanged("heartbeat")));
+        events.addEventListener("app.heartbeat", () => {
+          dispatch(appActions.eventStatusChanged("heartbeat"));
+          if (isScanningRef.current) {
+            void reconcileAgentSourceScanStatus(clients.agentSources);
+          }
+        });
         events.addEventListener("agent_source.scan_progress", (event) => {
           const parsed = parseSseEvent(event);
           if (parsed?.type === "agent_source.scan_progress") {

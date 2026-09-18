@@ -54,16 +54,23 @@ describe("native Codex ingestion", () => {
     expect(markSeen).not.toHaveBeenCalled(); expect(addMemory).not.toHaveBeenCalled();
     expect(stats.completedConversationIds).toEqual([]);
     expect(stats.failedConversationIds).toEqual(["native-conversation"]);
-    expect(stats.errors[0]?.reason).toContain("episode_unresolved");
+    expect(stats.errors).toEqual([]);
   });
 
   it("does not submit incomplete evidence, and retries after completion arrives on the same message IDs", async () => {
     const completeSourceTurn = vi.fn().mockResolvedValue({ status: "existing", result: { l1MemoryIds: ["same-l1"] } });
     const addMemory = vi.fn(); const markSeen = vi.fn();
-    const service = createService({ addMemory, completeSourceTurn }, { markSeen });
+    const skipped: Array<{ conversationId: string; reason: string }> = [];
+    const service = createIngestionService({
+      memoryClient: { ...createMockMemoryClient({ now }), addMemory, completeSourceTurn },
+      agentSourceRepository: { ...createRepository(), markSeen, hasSeen: () => false },
+      onItemSkip: (skip) => skipped.push(skip)
+    });
     const pending = await service.ingest(toAsyncIterable(nativeMessages(false)), { sourceId: "codex" });
     expect(completeSourceTurn).not.toHaveBeenCalled(); expect(markSeen).not.toHaveBeenCalled();
-    expect(pending.errors[0]?.reason).toContain("turn_incomplete");
+    expect(pending.errors).toEqual([]);
+    expect(pending.incompleteConversationIds).toEqual(["native-conversation"]);
+    expect(skipped).toEqual([{ sourceId: "codex", conversationId: "native-conversation", reason: "turn_incomplete" }]);
     const recovered = await service.ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
     expect(completeSourceTurn).toHaveBeenCalledOnce(); expect(markSeen).toHaveBeenCalledTimes(2);
     expect(recovered.dedupedMemories).toBe(1); expect(recovered.writtenMemories).toBe(0);
@@ -146,6 +153,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
+      importSummaryMemoryIds: ["memory-1", "memory-2"],
       conversations: 2,
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: ["conv-a"],
@@ -332,7 +340,7 @@ describe("ingestion service", () => {
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: [],
       failedConversationIds: ["conv-a"],
-      errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
+      errors: []
     });
   });
 
@@ -395,6 +403,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1"],
+      importSummaryMemoryIds: ["memory-1"],
       conversations: 2,
       completedConversationIds: ["conv-a", "conv-b"],
       incompleteConversationIds: [],
@@ -435,6 +444,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -507,6 +517,7 @@ describe("ingestion service", () => {
       dedupedMemories: 1,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -557,7 +568,8 @@ describe("ingestion service", () => {
       deduped: 2,
       writtenMemories: 0,
       dedupedMemories: 1,
-      memoryIds: []
+      memoryIds: [],
+      importSummaryMemoryIds: []
     });
     expect(succeeded).toEqual([
       expect.objectContaining({ storedCount: 0 })

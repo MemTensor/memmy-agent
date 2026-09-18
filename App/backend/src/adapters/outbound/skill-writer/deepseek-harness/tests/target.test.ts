@@ -125,12 +125,10 @@ describe("DeepSeek Harness skill target", () => {
 
     let definition: Record<string, any> | undefined;
     const client = handoff?.factory();
-    expect(client?.inject).toEqual([]);
+    expect(client?.inject).toEqual(["uiConversation"]);
     client?.apply({
-      get(name: string) {
-        return name === "conversationEvents"
-          ? { register: (value: Record<string, any>) => { definition = value; } }
-          : undefined;
+      uiConversation: {
+        events: { register: (value: Record<string, any>) => { definition = value; } }
       }
     });
     const message = {
@@ -199,6 +197,30 @@ describe("DeepSeek Harness skill target", () => {
     expect(legacyRegistrations).toBe(0);
   });
 
+  it("falls back to conversationEvents when uiConversation is absent", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    let definition: Record<string, any> | undefined;
+    const client = handoff?.factory();
+    expect(client?.inject).toEqual(["uiConversation"]);
+    client?.apply({
+      get(name: string) {
+        return name === "conversationEvents"
+          ? { register: (value: Record<string, any>) => { definition = value; } }
+          : undefined;
+      }
+    });
+
+    expect(definition?.kind).toBe("memmy-optimistic-user");
+  });
+
   it("fails clearly when neither conversation event API is available", async () => {
     const rootDirectory = createRoot();
     const target = createDeepseekHarnessSkillTarget({ rootDirectory });
@@ -253,21 +275,33 @@ describe("DeepSeek Harness skill target", () => {
     const plugin = await import(pathToFileURL(pluginPath).href + "?test=" + crypto.randomUUID()) as {
       apply(ctx: Record<string, unknown>, config?: Record<string, unknown>): void;
     };
+    const previousDshHome = process.env.DSH_HOME;
+    process.env.DSH_HOME = rootDirectory;
     const listeners = new Map<string, (...args: any[]) => any>();
     const registeredTools: Array<Record<string, any>> = [];
+    let drainCaptures: () => Promise<unknown> = async () => undefined;
     const ctx = {
       logger: { warn: vi.fn() },
       systemPrompt: { section: vi.fn() },
       tools: { register: (tool: Record<string, any>) => registeredTools.push(tool) },
+      sessions: {
+        flush: async (flushed: { id: string; header: { cwd: string; agentPreset?: string } }) => {
+          writeDeepseekSessionFile(rootDirectory, flushed.id, flushed.header.cwd, flushed.header.agentPreset);
+          await Promise.allSettled([listeners.get("session/flush")?.(flushed)]);
+          return true;
+        }
+      },
       on: (event: string, listener: (...args: any[]) => any) => {
         listeners.set(event, listener);
         return () => listeners.delete(event);
       },
       effect: (register: () => unknown) => {
-        register();
+        const dispose = register();
+        if (typeof dispose === "function") drainCaptures = dispose as () => Promise<unknown>;
         return () => undefined;
       }
     };
+    try {
     plugin.apply(ctx);
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -282,7 +316,7 @@ describe("DeepSeek Harness skill target", () => {
           injectedContext: { markdown: "User prefers concise answers." }
         });
       }
-      if (targetUrl.pathname === "/api/v1/turns/memmy-turn-1/complete") return jsonResponse({ ok: true });
+      if (targetUrl.pathname === "/api/v1/source-turns/complete") return jsonResponse({ status: "stored" });
       return jsonResponse({}, 404);
     }));
     const session = { id: "dsh-session-1", header: { cwd: "/project", agentPreset: "web" } };
@@ -359,34 +393,155 @@ describe("DeepSeek Harness skill target", () => {
       type: "turn/end",
       data: { turn: 1, reason: { kind: "completed" } }
     });
-    await listeners.get("session/flush")?.(session);
+    await drainCaptures();
 
     expect(registeredTools.map((tool) => tool.name)).toEqual([
       "memmy_memory_search",
       "memmy_memory_get",
       "memmy_memory_add"
     ]);
+    expect(requests.find((request) => request.path === "/api/v1/sessions/open")?.body).toMatchObject({
+      sessionId: "deepseek_harness-memory-dsh-session-1"
+    });
     expect(requests.find((request) => request.path === "/api/v1/turns/start")?.body).toMatchObject({
       query: "检查 README",
       source: "deepseek_harness"
     });
-    expect(requests.find((request) => request.path.endsWith("/complete"))?.body).toMatchObject({
+    expect(requests.find((request) => request.path === "/api/v1/source-turns/complete")?.body).toMatchObject({
       sessionId: "memmy-session-1",
       query: "检查 README",
       answer: "我先读取 README。\n\n检查完成",
-      reasoningSummary: "先分析 README 的内容。\n\nREADME 已读取，可以给出结论。",
       status: "succeeded",
       source: "deepseek_harness",
-      toolCalls: [{
+      adapterId: "memmy-deepseek-harness-plugin",
+      sourceTurn: {
+        source: "deepseek_harness",
+        profileId: "web",
+        conversationId: "dsh-session-1",
+        turnId: "dsh-session-1:1",
+        completionEvidence: "turn_end:dsh-session-1:1:completed"
+      },
+      toolCalls: [expect.objectContaining({
         id: "call-1",
-        name: "read",
-        arguments: { filePath: "README.md" },
-        thinkingBefore: "先分析 README 的内容。",
-        assistantTextBefore: "我先读取 README。"
-      }],
-      toolResults: [{ tool_call_id: "call-1", output: "README contents" }],
+        name: "read"
+      })],
+      toolResults: [expect.objectContaining({
+        id: "call-1",
+        output: "README contents"
+      })],
       sourceMemoryIds: ["memory-1"]
     });
+    } finally {
+      if (previousDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previousDshHome;
+    }
+  });
+
+  it("does not deadlock when persist flush dispatches session/flush", async () => {
+    const rootDirectory = createRoot();
+    installDshPackageStubs(rootDirectory);
+    const target = createDeepseekHarnessSkillTarget({
+      rootDirectory,
+      memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+    });
+    await target.installPlugin?.("deepseek_harness");
+    const pluginPath = join(installedPluginDirectory(rootDirectory), "index.mjs");
+    const plugin = await import(pathToFileURL(pluginPath).href + "?deadlock=" + crypto.randomUUID()) as {
+      apply(ctx: Record<string, unknown>, config?: Record<string, unknown>): void;
+    };
+    const listeners = new Map<string, (...args: any[]) => any>();
+    let drainCaptures: () => Promise<unknown> = async () => undefined;
+    plugin.apply({
+      logger: { warn: vi.fn() },
+      systemPrompt: { section: vi.fn() },
+      tools: { register: vi.fn() },
+      sessions: {
+        flush: async (session: { id: string; header: { cwd: string } }) => {
+          writeDeepseekSessionFile(rootDirectory, session.id, session.header.cwd);
+          await Promise.allSettled([listeners.get("session/flush")?.(session)]);
+        }
+      },
+      on: (event: string, listener: (...args: any[]) => any) => {
+        listeners.set(event, listener);
+      },
+      effect: (register: () => unknown) => {
+        const dispose = register();
+        if (typeof dispose === "function") drainCaptures = dispose as () => Promise<unknown>;
+      }
+    });
+    const session = { id: "dsh-deadlock", header: { cwd: "/project" } };
+    listeners.get("session/event")?.(session, { type: "turn/start", data: { turn: 1 } });
+    listeners.get("session/event")?.(session, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+    await expect(Promise.race([
+      drainCaptures().then(() => "drained"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 1000))
+    ])).resolves.toBe("drained");
+  });
+
+  it("flushes again before capturing a second turn in the same session", async () => {
+    const rootDirectory = createRoot();
+    installDshPackageStubs(rootDirectory);
+    const previousDshHome = process.env.DSH_HOME;
+    process.env.DSH_HOME = rootDirectory;
+    try {
+      const target = createDeepseekHarnessSkillTarget({
+        rootDirectory,
+        memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+      });
+      await target.installPlugin?.("deepseek_harness");
+      const pluginPath = join(installedPluginDirectory(rootDirectory), "index.mjs");
+      const plugin = await import(pathToFileURL(pluginPath).href + "?two-turns=" + crypto.randomUUID()) as {
+        apply(ctx: Record<string, unknown>, config?: Record<string, unknown>): void;
+      };
+      const listeners = new Map<string, (...args: any[]) => any>();
+      let drainCaptures: () => Promise<unknown> = async () => undefined;
+      let flushedTurns = 0;
+      plugin.apply({
+        logger: { warn: vi.fn() },
+        systemPrompt: { section: vi.fn() },
+        tools: { register: vi.fn() },
+        sessions: {
+          flush: async (session: { id: string; header: { cwd: string } }) => {
+            flushedTurns += 1;
+            writeDeepseekSessionFile(rootDirectory, session.id, session.header.cwd, undefined, flushedTurns);
+            await Promise.allSettled([listeners.get("session/flush")?.(session)]);
+          }
+        },
+        on: (event: string, listener: (...args: any[]) => any) => {
+          listeners.set(event, listener);
+        },
+        effect: (register: () => unknown) => {
+          const dispose = register();
+          if (typeof dispose === "function") drainCaptures = dispose as () => Promise<unknown>;
+        }
+      });
+      const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+        requests.push({ path: targetUrl.pathname, body });
+        if (targetUrl.pathname === "/api/v1/sessions/open") return jsonResponse({ sessionId: "memmy-session-1" });
+        if (targetUrl.pathname === "/api/v1/source-turns/complete") return jsonResponse({ status: "stored" });
+        return jsonResponse({}, 404);
+      }));
+      const session = { id: "dsh-two-turns", header: { cwd: "/project" } };
+      listeners.get("session/event")?.(session, { type: "turn/start", data: { turn: 1 } });
+      listeners.get("session/event")?.(session, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+      await drainCaptures();
+      listeners.get("session/event")?.(session, { type: "turn/start", data: { turn: 2 } });
+      listeners.get("session/event")?.(session, { type: "turn/end", data: { turn: 2, reason: { kind: "completed" } } });
+      await drainCaptures();
+      const completes = requests.filter((request) => request.path === "/api/v1/source-turns/complete");
+      expect(flushedTurns).toBe(2);
+      expect(completes).toHaveLength(2);
+      expect(completes.map((request) => (request.body.sourceTurn as { turnId?: string } | undefined)?.turnId)).toEqual([
+        "dsh-two-turns:1",
+        "dsh-two-turns:2"
+      ]);
+    } finally {
+      if (previousDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previousDshHome;
+    }
   });
 });
 
@@ -399,6 +554,107 @@ function createRoot(): string {
 
 function installedPluginDirectory(rootDirectory: string): string {
   return join(rootDirectory, "profiles", "node_modules", "@memmy", "memmy-memory");
+}
+
+function writeDeepseekSessionFile(rootDirectory: string, sessionId: string, cwd: string, agentPreset?: string, turnCount = 1): void {
+  const sessionDirectory = join(rootDirectory, "sessions", "--project--", sessionId);
+  mkdirSync(sessionDirectory, { recursive: true });
+  const rows: Array<Record<string, unknown>> = [
+    { type: "session", id: sessionId, cwd, agentPreset },
+    { type: "turn/start", seq: 0, time: 1_780_404_000_000, data: { turn: 1 } },
+    {
+      type: "user/message",
+      seq: 1,
+      time: 1_780_404_001_000,
+      data: {
+        id: "user-1",
+        role: "user",
+        source: { kind: "user" },
+        content: [{ type: "text", text: "检查 README" }]
+      }
+    },
+    {
+      type: "assistant/message",
+      seq: 2,
+      time: 1_780_404_002_000,
+      data: {
+        turn: 1,
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [{ type: "text", text: "我先读取 README。" }]
+        }
+      }
+    },
+    {
+      type: "tool/call",
+      seq: 3,
+      time: 1_780_404_002_100,
+      data: { turn: 1, callId: "call-1", name: "read", arguments: { filePath: "README.md" } }
+    },
+    {
+      type: "tool/result",
+      seq: 4,
+      time: 1_780_404_002_200,
+      data: {
+        turn: 1,
+        message: {
+          source: { kind: "tool", callId: "call-1" },
+          content: [{ type: "tool-result", toolCallId: "call-1", content: [{ type: "text", text: "README contents" }] }]
+        }
+      }
+    },
+    {
+      type: "assistant/message",
+      seq: 5,
+      time: 1_780_404_003_000,
+      data: {
+        turn: 1,
+        message: {
+          id: "assistant-2",
+          role: "assistant",
+          content: [{ type: "text", text: "检查完成" }]
+        }
+      }
+    },
+    {
+      type: "turn/end",
+      seq: 6,
+      time: 1_780_404_004_000,
+      data: { turn: 1, reason: { kind: "completed" } }
+    }
+  ];
+  if (turnCount > 1) {
+    rows.push(
+      { type: "turn/start", seq: 7, time: 1_780_404_005_000, data: { turn: 2 } },
+      {
+        type: "user/message",
+        seq: 8,
+        time: 1_780_404_006_000,
+        data: {
+          id: "user-2",
+          role: "user",
+          source: { kind: "user" },
+          content: [{ type: "text", text: "继续检查 LICENSE" }]
+        }
+      },
+      {
+        type: "assistant/message",
+        seq: 9,
+        time: 1_780_404_007_000,
+        data: {
+          turn: 2,
+          message: {
+            id: "assistant-3",
+            role: "assistant",
+            content: [{ type: "text", text: "第二轮完成" }]
+          }
+        }
+      },
+      { type: "turn/end", seq: 10, time: 1_780_404_008_000, data: { turn: 2, reason: { kind: "completed" } } }
+    );
+  }
+  writeFileSync(join(sessionDirectory, "session.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
 }
 
 function installDshPackageStubs(rootDirectory: string): void {

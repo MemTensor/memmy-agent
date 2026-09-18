@@ -1,78 +1,36 @@
 import { basename } from "node:path";
 import { readJsonlObjects } from "./jsonl-lines.js";
+import {
+  compact,
+  isRecord,
+  iso,
+  pairSourceToolCalls,
+  redactCall,
+  redactResult,
+  renderTool,
+  selectSourceTurn,
+  stageSourceTurnMessages,
+  text,
+  toolSuccess,
+  type RawSourceMessage,
+  type SourceToolCall,
+  type SourceToolResult,
+  type SourceTurn
+} from "./source-turn.js";
 import { redactSecrets } from "./secret-redactor.js";
 
-export interface SourceToolResult {
-  id?: string;
-  output?: unknown;
-  status?: string;
-  success?: boolean;
-  error?: unknown;
-}
-export interface SourceToolCall extends SourceToolResult {
-  name: string;
-  input?: unknown;
-}
-export interface SourceTurn {
-  source: "codex";
-  conversationId: string;
-  turnId: string;
-  startedAt: string;
-  completedAt: string;
-  sequence: number;
-  completionEvidence: string;
-  query: string;
-  answer: string;
-  status: "succeeded" | "failed";
-  toolCalls: SourceToolCall[];
-  toolResults: SourceToolResult[];
-  workspacePath?: string;
-}
-export interface RawCodexMessage {
-  messageId: string;
-  conversationId: string;
-  role: "user" | "assistant" | "tool" | "system";
-  content: string;
-  createdAt: string;
-  ordinal: number;
-  rawMeta: Readonly<Record<string, unknown>>;
-}
+export type RawCodexMessage = RawSourceMessage;
 
-/** Canonical turn is stored once, on the final staged message, including its native completion evidence. */
-export function sourceTurnFromMessages(messages: readonly { rawMeta: Readonly<Record<string, unknown>> }[]): SourceTurn | null {
-  if (messages.some(message => message.rawMeta.sourceTurnState && message.rawMeta.sourceTurnState !== "complete")) return null;
-  const turns = messages.map(message => message.rawMeta.sourceTurn).filter(isRecord);
-  if (turns.length === 0) return null;
-  if (turns.some(turn => canonicalTurnContent(turn) !== canonicalTurnContent(turns[0]!))) return null;
-  const turn = turns[0]!;
-  if (turn.source !== "codex" || !text(turn.conversationId) || !text(turn.turnId) || !text(turn.completionEvidence)) return null;
-  return turn as unknown as SourceTurn;
-}
+/**
+ * Codex runs its own auxiliary prompts through dedicated models and records them
+ * as ordinary user/assistant messages. Those turns are Codex talking to itself,
+ * not a conversation the user had, so they are dropped before staging.
+ * A new auxiliary model has to be added here; an unknown model is kept.
+ */
+const INTERNAL_CODEX_MODELS = new Set(["codex-auto-review"]);
 
-/** Preserve the reason a staged native turn cannot be submitted, including conflicting complete evidence. */
-export function sourceTurnFailureReason(messages: readonly { rawMeta: Readonly<Record<string, unknown>> }[]): string {
-  for (const message of messages) {
-    const state = text(message.rawMeta.sourceTurnState);
-    if (state && state !== "complete") return text(message.rawMeta.sourceTurnReason) || state;
-  }
-  const turns = messages.map(message => message.rawMeta.sourceTurn).filter(isRecord);
-  if (turns.length > 1 && turns.some(turn => canonicalTurnContent(turn) !== canonicalTurnContent(turns[0]!))) {
-    return "source_turn_content_conflict";
-  }
-  return "identity_unresolved";
-}
-
-export function buildSourceTurnRequest(turn: SourceTurn, channel: "hook" | "agent_source_scan", profileId = "default") {
-  return {
-    sourceTurn: {
-      source: turn.source, profileId, conversationId: turn.conversationId, turnId: turn.turnId,
-      startedAt: turn.startedAt, completedAt: turn.completedAt, sequence: turn.sequence, completionEvidence: turn.completionEvidence
-    },
-    source: turn.source, profileId, channel, query: turn.query, answer: turn.answer,
-    status: turn.status, toolCalls: turn.toolCalls, toolResults: turn.toolResults,
-    workspacePath: turn.workspacePath
-  };
-}
+/** The one content kind that carries what the person actually typed. */
+const USER_CONTENT_ITEM_KIND = "user.text";
 
 /** Read one native turn at a time; neither assistant text alone nor EOF proves completion. */
 export async function* readCodexRollout(
@@ -89,12 +47,19 @@ export async function* readCodexRollout(
   let sequence = 0;
   let lineNumber = 0;
   let invalidReason = "";
+  let turnModel = "";
   let toolCalls: SourceToolCall[] = [];
   let toolResults: SourceToolResult[] = [];
   const toolNames = new Map<string, string>();
 
+  function discard(): RawCodexMessage[] {
+    current = []; toolCalls = []; toolResults = []; toolNames.clear(); invalidReason = "";
+    return [];
+  }
+
   function finish(completedAt = "", completionId = "", status: "succeeded" | "failed" = "succeeded", completionKind = "task_complete"): RawCodexMessage[] {
     if (current.length === 0) return [];
+    if (INTERNAL_CODEX_MODELS.has(turnModel)) return discard();
     if (current.every(message => message.role === "system")) {
       current = []; invalidReason = "";
       return [];
@@ -118,31 +83,12 @@ export async function* readCodexRollout(
         rawMeta: { sourceFile: filePath, sourceTurnId: turnId || undefined, sourceTurnSequence: sequence, sourceTurnStartedAt: startedAt || undefined }
       });
     }
-    const output = current.map(message => ({ ...message, rawMeta: { ...message.rawMeta, sourceTurnId: turnId || undefined, sourceTurnState: reason || "complete", sourceTurnReason: reason || undefined } }));
-    if (!reason) {
-      const resultsById = new Map<string, SourceToolResult>();
-      const duplicateIds = new Set<string>();
-      for (const result of toolResults) {
-        if (!result.id) continue;
-        if (resultsById.has(result.id)) duplicateIds.add(result.id);
-        else resultsById.set(result.id, result);
-      }
-      const callCounts = new Map<string, number>();
-      for (const call of toolCalls) {
-        if (call.id) callCounts.set(call.id, (callCounts.get(call.id) ?? 0) + 1);
-      }
-      const paired = toolCalls.map(call => {
-        const result = call.id && callCounts.get(call.id) === 1 && !duplicateIds.has(call.id) ? resultsById.get(call.id) : undefined;
-        return result ? { ...call, ...result, name: call.name, input: call.input } : call;
-      });
-      const turn: SourceTurn = {
-        source: "codex", conversationId, turnId, startedAt, completedAt: canonicalCompletedAt, sequence,
-        completionEvidence, query: redactSecrets(query), answer: redactSecrets(answer), status,
-        toolCalls: paired.map(redactCall), toolResults: toolResults.map(redactResult), workspacePath
-      };
-      const last = output[output.length - 1]!;
-      last.rawMeta = { ...last.rawMeta, sourceTurn: turn } as typeof last.rawMeta;
-    }
+    const turn: SourceTurn | undefined = reason ? undefined : {
+      source: "codex", conversationId, turnId, startedAt, completedAt: canonicalCompletedAt, sequence,
+      completionEvidence, query: redactSecrets(query), answer: redactSecrets(answer), status,
+      toolCalls: pairSourceToolCalls(toolCalls, toolResults).map(redactCall), toolResults: toolResults.map(redactResult), workspacePath
+    };
+    const output = stageSourceTurnMessages(current, { turnId, reason, turn });
     current = []; toolCalls = []; toolResults = []; toolNames.clear(); invalidReason = "";
     return output;
   }
@@ -166,9 +112,11 @@ export async function* readCodexRollout(
       if (nextId && nextId !== turnId) {
         if (turnId || current.some(message => message.role === "assistant" || message.role === "tool")) yield* finish();
         turnId = nextId;
+        turnModel = "";
         startedAt = current.find(message => message.role === "user")?.createdAt || timestamp;
         sequence = lineNumber;
       }
+      turnModel = text(payload.model) || turnModel;
       workspacePath = text(payload.cwd) || workspacePath;
       continue;
     }
@@ -190,7 +138,16 @@ export async function* readCodexRollout(
       const rawRole = payload.role;
       if (rawRole !== "user" && rawRole !== "assistant" && rawRole !== "developer" && rawRole !== "system") continue;
       role = rawRole === "developer" ? "system" : rawRole;
-      content = Array.isArray(payload.content) ? payload.content.map(item => isRecord(item) ? text(item.text) : "").filter(Boolean).join("\n") : "";
+      // A user message also carries injected context - AGENTS.md, environment,
+      // plugin lists - which Codex labels per content item. Only the person's own
+      // text belongs in the turn; an unlabelled item is kept for older rollouts.
+      const kinds = rawRole === "user" ? contentItemKinds(payload) : undefined;
+      content = Array.isArray(payload.content)
+        ? payload.content
+            .map((item, index) => isRecord(item) && keepsUserContentItem(kinds, index) ? text(item.text) : "")
+            .filter(Boolean)
+            .join("\n")
+        : "";
     } else {
       role = "tool";
       const id = text(payload.call_id) || text(payload.id) || undefined;
@@ -225,60 +182,23 @@ export async function* readCodexRollout(
 
 /** Hook uses the exact same streaming parser as the scan adapter. */
 export async function readCodexSourceTurn(filePath: string, expected: { conversationId?: string; turnId?: string; stop?: boolean } = {}): Promise<{ turn: SourceTurn | null; reason?: string }> {
-  let latest: SourceTurn | null = null;
-  let observed: SourceTurn | null = null;
-  let conflict = false;
-  let unresolved = false;
-  let reason = "identity_unresolved";
-  let latestTurnId: unknown;
   const stopEvidence = expected.stop && expected.turnId
     ? { conversationId: expected.conversationId, turnId: expected.turnId }
     : undefined;
-  for await (const message of readCodexRollout(filePath, undefined, stopEvidence)) {
-    if (expected.conversationId && message.conversationId !== expected.conversationId) return { turn: null, reason: "identity_conflict" };
-    if (expected.turnId && message.rawMeta.sourceTurnId !== expected.turnId) continue;
-    if (message.rawMeta.sourceTurnId !== latestTurnId) {
-      latest = null; observed = null; conflict = false; unresolved = false;
-    }
-    latestTurnId = message.rawMeta.sourceTurnId;
-    reason = text(message.rawMeta.sourceTurnReason) || "turn_incomplete";
-    if (message.rawMeta.sourceTurnState !== "complete") { latest = null; unresolved = true; }
-    const turn = sourceTurnFromMessages([message]);
-    if (turn) {
-      if (observed && canonicalTurnContent(observed) !== canonicalTurnContent(turn)) conflict = true;
-      observed = turn;
-      latest = turn;
-    }
-  }
-  if (conflict) return { turn: null, reason: "source_turn_content_conflict" };
-  if (unresolved) return { turn: null, reason };
-  return latest ? { turn: latest } : { turn: null, reason };
+  return selectSourceTurn(readCodexRollout(filePath, undefined, stopEvidence), expected);
 }
 
-function canonicalTurnContent(turn: Record<string, unknown> | SourceTurn): string {
-  const { sequence: _sequence, ...content } = turn;
-  return JSON.stringify(content);
+/** Codex labels every content item it packs into a message; absent on older rollouts. */
+function contentItemKinds(payload: Record<string, unknown>): string[] | undefined {
+  const meta = payload.internal_chat_message_metadata_passthrough;
+  if (!isRecord(meta) || !Array.isArray(meta.content_item_kinds)) return undefined;
+  return meta.content_item_kinds.map(kind => text(kind));
 }
 
-function redactCall(call: SourceToolCall): SourceToolCall { return { ...call, name: redactSecrets(call.name), ...redactResult(call), ...(call.input !== undefined ? { input: redactValue(call.input) } : {}) }; }
-function redactResult(result: SourceToolResult): SourceToolResult { return { ...result, ...(result.output !== undefined ? { output: redactValue(result.output) } : {}), ...(result.error !== undefined ? { error: redactValue(result.error) } : {}) }; }
-function redactValue(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactValue);
-  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactValue(entry)]));
-  return value;
+function keepsUserContentItem(kinds: string[] | undefined, index: number): boolean {
+  if (!kinds) return true;
+  const kind = kinds[index];
+  return kind === undefined || kind === "" || kind === USER_CONTENT_ITEM_KIND;
 }
-function toolSuccess(payload: Record<string, unknown>): boolean | undefined {
-  if (typeof payload.success === "boolean") return payload.success;
-  if (typeof payload.is_error === "boolean") return !payload.is_error;
-  if ((payload.error !== undefined && payload.error !== null) || payload.status === "failed" || payload.status === "cancelled") return false;
-  if (payload.status === "completed" || payload.status === "succeeded") return true;
-  return undefined;
-}
-function renderTool(tool: SourceToolCall): string { return [`Tool: ${tool.name}`, tool.id ? `Call ID: ${tool.id}` : undefined, tool.status ? `Status: ${tool.status}` : undefined, tool.input !== undefined ? `Input:\n${format(tool.input)}` : undefined, tool.output !== undefined ? `Output:\n${format(tool.output)}` : undefined].filter(Boolean).join("\n\n"); }
-function format(value: unknown): string { return typeof value === "string" ? value.trim() : JSON.stringify(value, null, 2); }
-function compact(value: Record<string, unknown>): Record<string, unknown> { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)); }
-function text(value: unknown): string { return typeof value === "string" ? value : ""; }
-function iso(value: unknown): string { const parsed = typeof value === "string" ? Date.parse(value) : NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : ""; }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
 function rolloutFileId(path: string): string { const name = basename(path).replace(/\.jsonl$/u, ""); return name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu)?.[0] ?? name; }
