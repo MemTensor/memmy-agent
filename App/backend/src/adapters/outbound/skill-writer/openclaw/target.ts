@@ -808,7 +808,7 @@ function normalizeConfig(value) {
 
 async function createMemmyClient(cfg) {
   const resolved = await readMemmyConfig(cfg.memmyConfigPath).catch(() => ({}));
-  const baseUrl = normalizeText(resolved.endpoint || cfg.endpoint).replace(/\/+$/u, "");
+  const baseUrl = normalizeText(resolved.endpoint || cfg.endpoint || "http://127.0.0.1:18960").replace(/\/+$/u, "");
   const token = normalizeOptionalText(resolved.token) || normalizeOptionalText(cfg.token);
   if (!baseUrl) {
     throw new Error("Invalid Memmy config at " + cfg.memmyConfigPath);
@@ -854,19 +854,36 @@ async function fetchWithTimeout(url, init, timeoutMs) {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw new Error("Memmy request timed out after " + timeoutMs + "ms");
+      throw new Error("Memmy request to " + url + " timed out after " + timeoutMs + "ms");
     }
-    throw error;
+    throw new Error("Memmy request to " + url + " failed: " + formatErrorWithCause(error));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function formatErrorWithCause(error) {
+  const messages = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = current && typeof current === "object" && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) {
+      messages.push(detail);
+    }
+    current = current && typeof current === "object" ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 
 async function readMemmyConfig(configPath) {
   const content = await readFile(configPath, "utf8");
   const storage = parseStorageBlock(content);
   return {
-    endpoint: normalizeOptionalText(storage.endpoint) || "http://127.0.0.1:18960",
+    endpoint: normalizeOptionalText(storage.endpoint),
     token: normalizeOptionalText(storage.token)
   };
 }
@@ -875,7 +892,7 @@ function readMemmyConfigSync(configPath) {
   const content = readFileSync(configPath, "utf8");
   const storage = parseStorageBlock(content);
   return {
-    endpoint: normalizeOptionalText(storage.endpoint) || "http://127.0.0.1:18960",
+    endpoint: normalizeOptionalText(storage.endpoint),
     token: normalizeOptionalText(storage.token)
   };
 }
@@ -888,7 +905,7 @@ function resolveSyncRuntimeConfig(cfg) {
     resolved = {};
   }
   return {
-    baseUrl: normalizeText(resolved.endpoint || cfg.endpoint).replace(/\/+$/u, ""),
+    baseUrl: normalizeText(resolved.endpoint || cfg.endpoint || "http://127.0.0.1:18960").replace(/\/+$/u, ""),
     token: normalizeOptionalText(resolved.token) || normalizeOptionalText(cfg.token)
   };
 }
@@ -967,33 +984,44 @@ function completeTurnSynchronously(cfg, input) {
 }
 
 function parseStorageBlock(content) {
-  const storages = [];
-  let activeStorage = null;
-  let storageIndent = 0;
+  const storage = parseYamlObjectAtPath(content, ["memmyMemory", "storage"]) || {};
+  const memory = parseYamlObjectAtPath(content, ["memmyMemory"]) || {};
+  const legacy = parseYamlObjectAtPath(content, ["storage"]) || {};
+  return {
+    endpoint: storage.endpoint || memory.endpoint || legacy.endpoint,
+    token: storage.token || memory.token || legacy.token
+  };
+}
+
+function parseYamlObjectAtPath(content, targetPath) {
+  const result = {};
+  const parents = [];
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.replace(/#.*$/u, "").replace(/\s+$/u, "");
     if (!line.trim()) {
       continue;
     }
     const indent = line.match(/^\s*/u)[0].length;
-    if (/^\s*storage:\s*$/u.test(line)) {
-      activeStorage = {};
-      storageIndent = indent;
-      storages.push(activeStorage);
+    const match = line.match(/^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
+    if (!match) {
       continue;
     }
-    if (activeStorage && indent <= storageIndent) {
-      activeStorage = null;
+    while (parents.length && parents[parents.length - 1].indent >= indent) {
+      parents.pop();
     }
-    if (!activeStorage) {
+    const key = match[1];
+    const value = match[2];
+    const path = [...parents.map(parent => parent.key), key];
+    if (!value) {
+      parents.push({ indent, key });
       continue;
     }
-    const match = line.match(/^\s+([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
-    if (match) {
-      activeStorage[match[1]] = parseYamlScalar(match[2]);
+    if (path.length === targetPath.length + 1 &&
+      targetPath.every((segment, index) => path[index] === segment)) {
+      result[key] = parseYamlScalar(value);
     }
   }
-  return storages.find((storage) => storage.endpoint) || storages[0] || {};
+  return Object.keys(result).length ? result : null;
 }
 
 function parseYamlScalar(value) {

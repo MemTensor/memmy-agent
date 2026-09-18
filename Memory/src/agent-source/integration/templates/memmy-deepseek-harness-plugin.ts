@@ -299,7 +299,12 @@ async function ensureSession(client, cache, session) {
 }
 
 async function createClient(configPath) {
-  const config = await readMemmyConfig(configPath);
+  const localConfig = await readLocalConfig();
+  const resolved = await readMemmyConfig(configPath).catch(() => ({}));
+  const config = {
+    baseUrl: (cleanText(resolved.baseUrl) || cleanText(localConfig.endpoint) || "http://127.0.0.1:18960").replace(/\/+$/u, ""),
+    token: cleanText(resolved.token) || cleanText(localConfig.token)
+  };
   return {
     get(path, signal) {
       return request(config, path, { method: "GET", signal });
@@ -315,21 +320,36 @@ async function createClient(configPath) {
   };
 }
 
+async function readLocalConfig() {
+  try {
+    const parsed = JSON.parse(await readFile(CONFIG_URL, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 async function request(config, path, init) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error("Memmy request timed out")), HTTP_TIMEOUT_MS);
   const abort = () => controller.abort(init.signal.reason);
   if (init.signal) init.signal.addEventListener("abort", abort, { once: true });
+  const url = new URL(path, config.baseUrl);
   try {
     const headers = { ...(init.headers || {}) };
     if (config.token) headers.authorization = "Bearer " + config.token;
-    const response = await fetch(new URL(path, config.baseUrl), { ...init, headers, signal: controller.signal });
+    const response = await fetch(url, { ...init, headers, signal: controller.signal });
     const text = await response.text();
     const data = text ? JSON.parse(text) : {};
     if (!response.ok) {
       throw new Error(cleanText(data && data.error && data.error.message) || response.statusText || "Memmy request failed");
     }
     return data;
+  } catch (error) {
+    if (controller.signal.aborted && !(init.signal && init.signal.aborted)) {
+      throw new Error("Memmy request to " + url + " timed out after " + HTTP_TIMEOUT_MS + "ms");
+    }
+    throw new Error("Memmy request to " + url + " failed: " + formatErrorWithCause(error));
   } finally {
     clearTimeout(timeout);
     if (init.signal) init.signal.removeEventListener("abort", abort);
@@ -345,32 +365,48 @@ async function readMemmyConfig(path) {
   }
   const storage = parseStorageBlock(content);
   return {
-    baseUrl: (cleanText(storage.endpoint) || "http://127.0.0.1:18960").replace(/\/+$/u, ""),
+    baseUrl: cleanText(storage.endpoint).replace(/\/+$/u, ""),
     token: cleanText(storage.token)
   };
 }
 
 function parseStorageBlock(content) {
-  const storages = [];
-  let current;
-  let storageIndent = 0;
+  const storage = parseYamlObjectAtPath(content, ["memmyMemory", "storage"]) || {};
+  const memory = parseYamlObjectAtPath(content, ["memmyMemory"]) || {};
+  const legacy = parseYamlObjectAtPath(content, ["storage"]) || {};
+  return {
+    endpoint: storage.endpoint || memory.endpoint || legacy.endpoint,
+    token: storage.token || memory.token || legacy.token
+  };
+}
+
+function parseYamlObjectAtPath(content, targetPath) {
+  const result = {};
+  const parents = [];
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.split("#", 1)[0].replace(/[ \t]+$/u, "");
     if (!line.trim()) continue;
     const indent = line.length - line.trimStart().length;
-    if (line.trim() === "storage:") {
-      current = {};
-      storageIndent = indent;
-      storages.push(current);
+    const match = line.match(/^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
+    if (!match) {
       continue;
     }
-    if (current && indent <= storageIndent) current = undefined;
-    if (!current) continue;
-    const separator = line.trim().indexOf(":");
-    if (separator < 0) continue;
-    current[line.trim().slice(0, separator)] = yamlScalar(line.trim().slice(separator + 1));
+    while (parents.length && parents[parents.length - 1].indent >= indent) {
+      parents.pop();
+    }
+    const key = match[1];
+    const value = match[2];
+    const path = [...parents.map(parent => parent.key), key];
+    if (!value) {
+      parents.push({ indent, key });
+      continue;
+    }
+    if (path.length === targetPath.length + 1 &&
+      targetPath.every((segment, index) => path[index] === segment)) {
+      result[key] = yamlScalar(value);
+    }
   }
-  return storages.find((item) => cleanText(item.endpoint)) || storages[0] || {};
+  return Object.keys(result).length ? result : null;
 }
 
 function yamlScalar(value) {
@@ -517,6 +553,21 @@ function cleanText(value) {
 
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatErrorWithCause(error) {
+  const messages = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = current && typeof current === "object" && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) messages.push(detail);
+    current = current && typeof current === "object" ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 `;
 

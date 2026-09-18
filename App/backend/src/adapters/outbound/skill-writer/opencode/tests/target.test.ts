@@ -104,6 +104,7 @@ describe("opencode skill target", () => {
     expect(pluginSource).toContain('event: async ({ event }) =>');
     expect(pluginSource).toContain("dispose: async () =>");
     expect(pluginSource).toContain("memmy_memory_search: tool");
+    expect(pluginSource).toContain('"Memmy request to " + url + " failed: " + formatErrorWithCause(error)');
     expect(commandSource).toContain("MEMMY_RESUME_COMMAND_ARGUMENTS:");
     expect(commandSource).toContain("$ARGUMENTS");
     expect(skillSource).toContain("# Memmy Memory");
@@ -209,18 +210,32 @@ describe("opencode skill target", () => {
 
   it("handles the OpenCode resume command and injects the selected episode", async () => {
     const { rootDirectory } = createFixture();
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
     const target = createOpencodeSkillTarget({
       rootDirectory,
-      memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+      memmyConfigPath
     });
     await target.installPlugin?.("opencode");
     const hooks = await loadPluginHooks(rootDirectory);
-    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const requests: Array<{ origin: string; path: string; body: Record<string, unknown> }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-      requests.push({ path: targetUrl.pathname, body });
+      requests.push({ origin: targetUrl.origin, path: targetUrl.pathname, body });
       if (targetUrl.pathname === "/api/v1/memory/search") {
         return jsonResponse({ debug: { hits: [{ id: "trace-1", score: 0.95 }] } });
       }
@@ -273,6 +288,9 @@ describe("opencode skill target", () => {
       expect(commandParts[0]?.text).toContain('Memmy resume candidates for "测试 query"');
       expect(commandParts[0]?.text).toContain("1. episode-1");
       expect(requests.find((request) => request.path === "/api/v1/memory/search")?.body.query).toBe("测试 query");
+      expect(requests.find((request) => request.path === "/api/v1/memory/search")?.origin).toBe(
+        "http://127.0.0.1:18960"
+      );
 
       const selectionParts: PluginPart[] = [{
         id: "selection-part",
