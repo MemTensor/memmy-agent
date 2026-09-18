@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
-    "typecheck": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build -w @memmy/desktop-interface && vitest run"
+    "build": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
+    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && vitest run"
   },
   "dependencies": {
     "@memmy/desktop-interface": "0.0.0",
@@ -27,7 +27,8 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "vite": "^8.0.14",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@memmy/knowledge": "0.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.15",

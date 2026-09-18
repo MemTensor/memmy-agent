@@ -451,6 +451,128 @@ describe("standalone Agent source executor", () => {
     executor.dispose();
   });
 
+  it("emits memory_desktop add analytics for standalone scan writes", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const root = tempRoot();
+    const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
+    const executor = createAgentSourceExecutor({
+      service: {
+        addMemory,
+        enqueuePendingImportSummaries: vi.fn()
+      } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root)]),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await executor.startScan({ sourceId: "fixture-agent", mode: "initial_subset" });
+    await waitForScan(executor);
+    expect(executor.scanStatus().error).toBeNull();
+
+    expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:fixture-agent",
+      conversationId: "conversation-1",
+      scanMode: "initial_subset"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:fixture-agent",
+      conversationId: "conversation-1",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+    expect(typeof events[0]?.payload.turnId).toBe("string");
+    expect(typeof events[1]?.payload.durationMs).toBe("number");
+    await executor.dispose();
+  });
+
+  it("emits add_failed analytics when a standalone scan write throws", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const root = tempRoot();
+    const executor = createAgentSourceExecutor({
+      service: {
+        addMemory: vi.fn(() => {
+          throw new Error("write failed");
+        }),
+        enqueuePendingImportSummaries: vi.fn()
+      } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root)]),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+    await waitForScan(executor);
+
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:fixture-agent",
+      conversationId: "conversation-1",
+      scanMode: "incremental"
+    });
+    expect(events[1]?.payload.error).toBeInstanceOf(Error);
+    await executor.dispose();
+  });
+
+  it("does not emit add analytics when a standalone scan write is a duplicate", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const root = tempRoot();
+    const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
+    const executor = createAgentSourceExecutor({
+      service: {
+        addMemory,
+        enqueuePendingImportSummaries: vi.fn()
+      } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root)]),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
+    await waitForScan(executor);
+
+    expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+    await executor.dispose();
+  });
+
+  it("does not emit add analytics for unselected older standalone scan turns", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const root = tempRoot();
+    const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
+    const executor = createAgentSourceExecutor({
+      service: {
+        addMemory,
+        enqueuePendingImportSummaries: vi.fn()
+      } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root, [
+        completeTurn("conversation-old", "2026-08-28T01:00:00.000Z"),
+        completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
+      ])]),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+    await waitForScan(executor);
+    expect(events.filter((event) => event.name === "started")).toHaveLength(2);
+    events.length = 0;
+
+    await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+    await waitForScan(executor);
+
+    expect(events.map((event) => event.payload.conversationId)).toEqual([
+      "conversation-new",
+      "conversation-new"
+    ]);
+    await executor.dispose();
+  });
+
   it("imports skills from a discovered Agent into the same Memory service", async () => {
     const root = tempRoot();
     const codexRoot = join(root, ".codex");
@@ -538,6 +660,70 @@ async function waitForProgress(executor: ReturnType<typeof createAgentSourceExec
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("scan did not report progress");
+}
+
+function createAddAnalyticsRecorder(
+  events: Array<{ name: string; payload: Record<string, unknown> }>
+) {
+  return {
+    trackAddStarted(input: Record<string, unknown>) {
+      events.push({ name: "started", payload: input });
+    },
+    trackAddSucceeded(input: Record<string, unknown>) {
+      events.push({ name: "succeeded", payload: input });
+    },
+    trackAddFailed(input: Record<string, unknown>) {
+      events.push({ name: "failed", payload: input });
+    }
+  };
+}
+
+function completeTurn(conversationId: string, createdAt: string) {
+  const assistantAt = new Date(Date.parse(createdAt) + 60_000).toISOString();
+  return [
+    {
+      messageId: `${conversationId}-user`,
+      sourceId: "fixture-agent",
+      conversationId,
+      role: "user" as const,
+      content: "Remember this",
+      createdAt,
+      workspacePath: null,
+      gitRoot: null,
+      rawMeta: {}
+    },
+    {
+      messageId: `${conversationId}-assistant`,
+      sourceId: "fixture-agent",
+      conversationId,
+      role: "assistant" as const,
+      content: "Done",
+      createdAt: assistantAt,
+      workspacePath: null,
+      gitRoot: null,
+      rawMeta: {}
+    }
+  ];
+}
+
+function createFixtureAdapter(
+  root: string,
+  turns: Array<ReturnType<typeof completeTurn>> = [completeTurn("conversation-1", "2026-08-28T01:00:00.000Z")]
+): SourceAdapter {
+  return {
+    descriptor: {
+      sourceId: "fixture-agent",
+      displayName: "Fixture Agent",
+      builtin: true,
+      dataPath: join(root, "history")
+    },
+    detect: async () => true,
+    async *scan() {
+      for (const turn of turns) {
+        yield* turn;
+      }
+    }
+  };
 }
 
 function fixtureMessage(

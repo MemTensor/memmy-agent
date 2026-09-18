@@ -232,7 +232,6 @@ async function processConversation(
       turnId: request.turnId,
       ...(ctx.scanMode ? { scanMode: ctx.scanMode } : {})
     };
-    options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
     const addStartedAt = Date.now();
 
     try {
@@ -244,12 +243,13 @@ async function processConversation(
         stats.written += turn.messages.length;
         stats.writtenMemories += 1;
         stats.memoryIds.push(added.id);
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
       }
-      options.memoryAddAnalytics?.trackAddSucceeded({
-        ...addAnalyticsBase,
-        durationMs: Date.now() - addStartedAt,
-        storedCount: added.duplicate ? 0 : 1
-      });
 
       for (const dedupKey of dedupKeys) {
         options.agentSourceRepository.markSeen(dedupKey, ctx.sourceId);
@@ -263,6 +263,7 @@ async function processConversation(
         conversationId: turn.conversationId,
         reason: error instanceof Error ? error.message : "ingestion failed"
       });
+      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
       options.memoryAddAnalytics?.trackAddFailed({
         ...addAnalyticsBase,
         durationMs: Date.now() - addStartedAt,

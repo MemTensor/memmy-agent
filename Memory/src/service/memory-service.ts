@@ -122,6 +122,7 @@ import {
   titleFromImportTrace,
   toolCallsFromUnknown
 } from "./import/memory-import-pipeline.js";
+import { EpisodeTitleService } from "./episode-title/episode-title-service.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
 import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import {
@@ -242,6 +243,7 @@ export class MemoryService {
   private readonly feedbackExperience: FeedbackExperienceService;
   private readonly skillTrials: SkillTrialResolver;
   private readonly episodeReadModel: EpisodeReadModel;
+  private readonly episodeTitle: EpisodeTitleService;
   private readonly importJobs: ImportJobProcessor;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
@@ -286,6 +288,14 @@ export class MemoryService {
       repos: this.repos,
       get llm() { return projectEnvironmentOwner.skillLlm; }
     });
+    const episodeTitleOwner = this;
+    this.episodeTitle = new EpisodeTitleService({
+      repos: this.repos,
+      get llm() { return episodeTitleOwner.llm; },
+      get language() { return episodeTitleOwner.config.language; },
+      nowIso,
+      namespaceIdFromSession
+    });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -308,6 +318,8 @@ export class MemoryService {
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
           updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
+          assignSkillCluster: (job) => this.evolutionJobs.assignSkillCluster(job),
+          evolveSkillCluster: (job) => this.evolutionJobs.evolveSkillCluster(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
@@ -323,6 +335,9 @@ export class MemoryService {
         },
         workMemory: {
           extract: (job) => this.workMemory.extract(job)
+        },
+        episodeTitle: {
+          generate: (job) => this.episodeTitle.generate(job)
         }
       }
     });
@@ -345,7 +360,8 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
+      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff,
+      queryVector: this.queryVector.bind(this)
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -1187,6 +1203,7 @@ export class MemoryService {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     decayHalfLifeDays: number;
     domain: "" | "research";
     readOnlyInjectionProfile: "all" | "experience" | "skill" | "skill_experience";

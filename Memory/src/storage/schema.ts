@@ -400,6 +400,38 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_skill_trials_raw_status
     ON skill_trials (raw_turn_id, status, created_at DESC)`,
 
+  `CREATE TABLE IF NOT EXISTS skill_clusters (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    tools_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tools_json)),
+    artifacts_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(artifacts_json)),
+    tool_bigrams_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tool_bigrams_json)),
+    centroid_json TEXT,
+    skill_memory_id TEXT,
+    meta_skill_md TEXT NOT NULL DEFAULT '',
+    processed_episode_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(processed_episode_ids_json)),
+    member_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_clusters_scope
+    ON skill_clusters (user_id, project_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_clusters_skill
+    ON skill_clusters (skill_memory_id)`,
+
+  `CREATE TABLE IF NOT EXISTS skill_cluster_members (
+    cluster_id TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'unknown'
+      CHECK (outcome IN ('success', 'failure', 'unknown')),
+    r_task REAL,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (cluster_id, episode_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_cluster_members_episode
+    ON skill_cluster_members (episode_id, assigned_at DESC)`,
+
   `CREATE TABLE IF NOT EXISTS recall_events (
     id TEXT PRIMARY KEY,
     namespace_id TEXT,

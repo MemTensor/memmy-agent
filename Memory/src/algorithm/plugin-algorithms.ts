@@ -1607,6 +1607,7 @@ export interface RetrievalTuningConfig {
   multiChannelBypass?: boolean;
   skillInjectionMode?: "summary" | "full";
   skillSummaryChars?: number;
+  skillFullMaxChars?: number;
   decayHalfLifeDays?: number;
   domain?: "" | "research";
   readOnlyInjectionProfile?: ReadOnlyInjectionProfile;
@@ -3149,6 +3150,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   multiChannelBypass: true,
   skillInjectionMode: "summary",
   skillSummaryChars: 200,
+  skillFullMaxChars: 16_384,
   decayHalfLifeDays: 30,
   domain: "",
   readOnlyInjectionProfile: "all"
@@ -5561,6 +5563,7 @@ function retrievalTuning(input: RetrievalTuningConfig | undefined): Required<Ret
     multiChannelBypass: input?.multiChannelBypass ?? DEFAULT_RETRIEVAL_TUNING.multiChannelBypass,
     skillInjectionMode: input?.skillInjectionMode ?? DEFAULT_RETRIEVAL_TUNING.skillInjectionMode,
     skillSummaryChars: Math.max(80, Math.floor(finiteOr(input?.skillSummaryChars, DEFAULT_RETRIEVAL_TUNING.skillSummaryChars))),
+    skillFullMaxChars: Math.max(1000, Math.floor(finiteOr(input?.skillFullMaxChars, DEFAULT_RETRIEVAL_TUNING.skillFullMaxChars))),
     decayHalfLifeDays: Math.max(1, finiteOr(input?.decayHalfLifeDays, DEFAULT_RETRIEVAL_TUNING.decayHalfLifeDays)),
     domain: input?.domain === "research" ? "research" : "",
     readOnlyInjectionProfile: readOnlyInjectionProfileOrDefault(input?.readOnlyInjectionProfile)

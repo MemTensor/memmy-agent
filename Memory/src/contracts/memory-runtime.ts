@@ -42,6 +42,7 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
   "episode_idle_close",
+  "episode_title",
   "trace_summary",
   "user_memory_embedding",
   "import_summary",
@@ -55,6 +56,8 @@ export const JobTypeSchema = z.enum([
   "l3_world_model_update",
   "project_environment_profile",
   "skill_crystallization",
+  "skill_cluster_assign",
+  "skill_batch_evolve",
   "skill_trial_resolve",
   "decision_repair",
   "work_memory_extract"

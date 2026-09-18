@@ -47,9 +47,13 @@ export function loadCloudServiceEnv(options: LoadCloudServiceEnvOptions = {}): s
     if (!existsSync(options.manifestPath)) {
       throw new Error("Packaged desktop runtime manifest is missing");
     }
-    env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
+    const manifestService = cloudServiceFromDesktopRuntimeManifest(
       readFileSync(options.manifestPath, "utf8"),
     );
+    if (!manifestService.startsWith("https://")) {
+      throw new Error("Packaged desktop runtime manifest cloud service must use HTTPS");
+    }
+    env.MEMMY_CLOUD_SERVICE = manifestService;
     return options.manifestPath;
   }
 

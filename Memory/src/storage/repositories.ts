@@ -171,6 +171,30 @@ export interface EpisodeRecord {
   updatedAt: string;
 }
 
+export interface SkillClusterRecord {
+  id: string;
+  userId: string;
+  projectId?: string;
+  tools: string[];
+  artifacts: string[];
+  toolBigrams: string[];
+  centroid: number[] | null;
+  skillMemoryId?: string;
+  metaSkillMd: string;
+  processedEpisodeIds: string[];
+  memberCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillClusterMemberRecord {
+  clusterId: string;
+  episodeId: string;
+  outcome: "success" | "failure" | "unknown";
+  rTask?: number;
+  assignedAt: string;
+}
+
 export interface RawTurnRecord {
   id: string;
   sessionId: string;
@@ -2236,6 +2260,33 @@ export class RuntimeRepository {
     };
   }
 
+  updateEpisodeTitle(
+    episodeId: string,
+    input: { title: string; summary: string; meta?: Record<string, unknown> },
+    at = nowIso()
+  ): EpisodeRecord | undefined {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) return undefined;
+    const meta = input.meta ? { ...episode.meta, ...input.meta } : episode.meta;
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET title = ?,
+             summary = ?,
+             meta_json = ?,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(input.title, input.summary, toJson(meta), at, episodeId);
+    return {
+      ...episode,
+      title: input.title,
+      summary: input.summary,
+      meta,
+      updatedAt: at
+    };
+  }
+
   latestEpisodeForSession(sessionId: string): EpisodeRecord | undefined {
     const row = this.db
       .prepare(
@@ -2519,11 +2570,183 @@ export class RuntimeRepository {
         `SELECT *
          FROM raw_turns
          WHERE episode_id = ?
-         ORDER BY created_at ASC
+         ORDER BY created_at ASC, id ASC
          LIMIT ?`
       )
       .all(episodeId, limit) as SqlRawTurnRow[];
     return rows.map(rawTurnFromSql);
+  }
+
+  countRawTurnsByEpisode(episodeId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM raw_turns WHERE episode_id = ?`)
+      .get(episodeId) as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * Newest-first turns, so callers can read an episode's tail without paging the
+   * head.  The ordering mirrors listRawTurnsByEpisode exactly, which keeps a
+   * head window and a tail window from overlapping or skipping a turn.
+   */
+  listLatestRawTurnsByEpisode(episodeId: string, limit = 100): RawTurnRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM raw_turns
+         WHERE episode_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(episodeId, limit) as SqlRawTurnRow[];
+    return rows.map(rawTurnFromSql);
+  }
+
+  insertSkillCluster(cluster: SkillClusterRecord): SkillClusterRecord {
+    this.db
+      .prepare(
+        `INSERT INTO skill_clusters (
+          id, user_id, project_id, tools_json, artifacts_json, tool_bigrams_json,
+          centroid_json, skill_memory_id, meta_skill_md, processed_episode_ids_json,
+          member_count, created_at, updated_at
+        ) VALUES (
+          @id, @userId, @projectId, @toolsJson, @artifactsJson, @toolBigramsJson,
+          @centroidJson, @skillMemoryId, @metaSkillMd, @processedEpisodeIdsJson,
+          @memberCount, @createdAt, @updatedAt
+        )`
+      )
+      .run({
+        id: cluster.id,
+        userId: cluster.userId,
+        projectId: cluster.projectId ?? null,
+        toolsJson: toJson(cluster.tools),
+        artifactsJson: toJson(cluster.artifacts),
+        toolBigramsJson: toJson(cluster.toolBigrams),
+        centroidJson: cluster.centroid ? toJson(cluster.centroid) : null,
+        skillMemoryId: cluster.skillMemoryId ?? null,
+        metaSkillMd: cluster.metaSkillMd,
+        processedEpisodeIdsJson: toJson(cluster.processedEpisodeIds),
+        memberCount: cluster.memberCount,
+        createdAt: cluster.createdAt,
+        updatedAt: cluster.updatedAt
+      });
+    return cluster;
+  }
+
+  updateSkillCluster(cluster: SkillClusterRecord): SkillClusterRecord {
+    this.db
+      .prepare(
+        `UPDATE skill_clusters
+         SET project_id = @projectId,
+             tools_json = @toolsJson,
+             artifacts_json = @artifactsJson,
+             tool_bigrams_json = @toolBigramsJson,
+             centroid_json = @centroidJson,
+             skill_memory_id = @skillMemoryId,
+             meta_skill_md = @metaSkillMd,
+             processed_episode_ids_json = @processedEpisodeIdsJson,
+             member_count = @memberCount,
+             updated_at = @updatedAt
+         WHERE id = @id`
+      )
+      .run({
+        id: cluster.id,
+        projectId: cluster.projectId ?? null,
+        toolsJson: toJson(cluster.tools),
+        artifactsJson: toJson(cluster.artifacts),
+        toolBigramsJson: toJson(cluster.toolBigrams),
+        centroidJson: cluster.centroid ? toJson(cluster.centroid) : null,
+        skillMemoryId: cluster.skillMemoryId ?? null,
+        metaSkillMd: cluster.metaSkillMd,
+        processedEpisodeIdsJson: toJson(cluster.processedEpisodeIds),
+        memberCount: cluster.memberCount,
+        updatedAt: cluster.updatedAt
+      });
+    return cluster;
+  }
+
+  getSkillCluster(id: string): SkillClusterRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM skill_clusters WHERE id = ?`)
+      .get(id) as SqlSkillClusterRow | undefined;
+    return row ? skillClusterFromSql(row) : undefined;
+  }
+
+  getSkillClusterForEpisode(episodeId: string): SkillClusterRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT c.*
+         FROM skill_cluster_members m
+         JOIN skill_clusters c ON c.id = m.cluster_id
+         WHERE m.episode_id = ?
+         ORDER BY m.assigned_at DESC
+         LIMIT 1`
+      )
+      .get(episodeId) as SqlSkillClusterRow | undefined;
+    return row ? skillClusterFromSql(row) : undefined;
+  }
+
+  listSkillClustersByScope(input: {
+    userId: string;
+    projectId?: string;
+    limit?: number;
+  }): SkillClusterRecord[] {
+    const rows = input.projectId
+      ? this.db
+          .prepare(
+            `SELECT *
+             FROM skill_clusters
+             WHERE user_id = ?
+               AND (project_id = ? OR project_id IS NULL)
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(input.userId, input.projectId, input.limit ?? 200) as SqlSkillClusterRow[]
+      : this.db
+          .prepare(
+            `SELECT *
+             FROM skill_clusters
+             WHERE user_id = ?
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(input.userId, input.limit ?? 200) as SqlSkillClusterRow[];
+    return rows.map(skillClusterFromSql);
+  }
+
+  upsertSkillClusterMember(member: SkillClusterMemberRecord): SkillClusterMemberRecord {
+    this.db
+      .prepare(
+        `INSERT INTO skill_cluster_members (
+          cluster_id, episode_id, outcome, r_task, assigned_at
+        ) VALUES (
+          @clusterId, @episodeId, @outcome, @rTask, @assignedAt
+        )
+        ON CONFLICT(cluster_id, episode_id) DO UPDATE SET
+          outcome = excluded.outcome,
+          r_task = excluded.r_task,
+          assigned_at = excluded.assigned_at`
+      )
+      .run({
+        clusterId: member.clusterId,
+        episodeId: member.episodeId,
+        outcome: member.outcome,
+        rTask: member.rTask ?? null,
+        assignedAt: member.assignedAt
+      });
+    return member;
+  }
+
+  listSkillClusterMembers(clusterId: string): SkillClusterMemberRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM skill_cluster_members
+         WHERE cluster_id = ?
+         ORDER BY assigned_at DESC`
+      )
+      .all(clusterId) as SqlSkillClusterMemberRow[];
+    return rows.map(skillClusterMemberFromSql);
   }
 
   insertFeedback(feedback: FeedbackRecord): FeedbackRecord {
@@ -6532,6 +6755,59 @@ function episodeFromSql(row: SqlEpisodeRow): EpisodeRecord {
   };
 }
 
+interface SqlSkillClusterRow {
+  id: string;
+  user_id: string;
+  project_id: string | null;
+  tools_json: string;
+  artifacts_json: string;
+  tool_bigrams_json: string;
+  centroid_json: string | null;
+  skill_memory_id: string | null;
+  meta_skill_md: string;
+  processed_episode_ids_json: string;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function skillClusterFromSql(row: SqlSkillClusterRow): SkillClusterRecord {
+  const centroid = parseJson<number[] | null>(row.centroid_json, null);
+  return {
+    id: row.id,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    tools: asStringArray(parseJson(row.tools_json, [])),
+    artifacts: asStringArray(parseJson(row.artifacts_json, [])),
+    toolBigrams: asStringArray(parseJson(row.tool_bigrams_json, [])),
+    centroid: Array.isArray(centroid) ? centroid.filter((item): item is number => typeof item === "number") : null,
+    skillMemoryId: row.skill_memory_id ?? undefined,
+    metaSkillMd: row.meta_skill_md ?? "",
+    processedEpisodeIds: asStringArray(parseJson(row.processed_episode_ids_json, [])),
+    memberCount: row.member_count ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+interface SqlSkillClusterMemberRow {
+  cluster_id: string;
+  episode_id: string;
+  outcome: "success" | "failure" | "unknown";
+  r_task: number | null;
+  assigned_at: string;
+}
+
+function skillClusterMemberFromSql(row: SqlSkillClusterMemberRow): SkillClusterMemberRecord {
+  return {
+    clusterId: row.cluster_id,
+    episodeId: row.episode_id,
+    outcome: row.outcome,
+    rTask: typeof row.r_task === "number" ? row.r_task : undefined,
+    assignedAt: row.assigned_at
+  };
+}
+
 interface SqlRawTurnRow {
   id: string;
   session_id: string;
@@ -7344,6 +7620,7 @@ function evolutionJobPrioritySql(): string {
                OR (job_type = 'embedding' AND ${importedTarget}) THEN 2
              WHEN job_type = 'embedding' THEN 3
              WHEN job_type = 'episode_idle_close' THEN 10
+             WHEN job_type = 'episode_title' THEN 15
              WHEN job_type = 'reflection' THEN 20
              WHEN job_type = 'decision_repair' THEN 25
              WHEN job_type = 'reward' THEN 30
@@ -7353,6 +7630,8 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'project_environment_profile' THEN 55
              WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
+             WHEN job_type = 'skill_cluster_assign' THEN 72
+             WHEN job_type = 'skill_batch_evolve' THEN 73
              WHEN job_type = 'skill_trial_resolve' THEN 80
              ELSE 100
            END`;

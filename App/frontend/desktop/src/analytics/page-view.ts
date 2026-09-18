@@ -15,12 +15,14 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/pet": "Pet",
   "/tools": "Tools",
   "/memory": "Memory",
+  "/knowledge": "Knowledge",
   "/memory-sources": "Memory Sources",
   "/settings": "Settings"
 };
 
 const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
   overview: "Overview",
+  "computer-history": "Computer History",
   memories: "Memories",
   "user-memories": "User Memories",
   tasks: "Tasks",

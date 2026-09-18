@@ -122,6 +122,7 @@ import { SubagentManager } from "./subagent.js";
 import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
 import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
+import { createKnowledgeHook } from "../../knowledge/register.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -803,6 +804,7 @@ export class AgentLoop {
     this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
+    this.extraHooks.unshift(createKnowledgeHook());
     this.memmyMemoryIntegration = installMemmyMemory(this.config, {
       workspace: this.workspace,
       hooks: this.extraHooks,

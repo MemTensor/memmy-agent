@@ -38,6 +38,17 @@ export interface RawCodexMessage {
   rawMeta: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * Codex runs its own auxiliary prompts through dedicated models and records them
+ * as ordinary user/assistant messages. Those turns are Codex talking to itself,
+ * not a conversation the user had, so they are dropped before staging.
+ * A new auxiliary model has to be added here; an unknown model is kept.
+ */
+const INTERNAL_CODEX_MODELS = new Set(["codex-auto-review"]);
+
+/** The one content kind that carries what the person actually typed. */
+const USER_CONTENT_ITEM_KIND = "user.text";
+
 /** Canonical turn is stored once, on the final staged message, including its native completion evidence. */
 export function sourceTurnFromMessages(messages: readonly { rawMeta: Readonly<Record<string, unknown>> }[]): SourceTurn | null {
   if (messages.some(message => message.rawMeta.sourceTurnState && message.rawMeta.sourceTurnState !== "complete")) return null;
@@ -89,12 +100,19 @@ export async function* readCodexRollout(
   let sequence = 0;
   let lineNumber = 0;
   let invalidReason = "";
+  let turnModel = "";
   let toolCalls: SourceToolCall[] = [];
   let toolResults: SourceToolResult[] = [];
   const toolNames = new Map<string, string>();
 
+  function discard(): RawCodexMessage[] {
+    current = []; toolCalls = []; toolResults = []; toolNames.clear(); invalidReason = "";
+    return [];
+  }
+
   function finish(completedAt = "", completionId = "", status: "succeeded" | "failed" = "succeeded", completionKind = "task_complete"): RawCodexMessage[] {
     if (current.length === 0) return [];
+    if (INTERNAL_CODEX_MODELS.has(turnModel)) return discard();
     if (current.every(message => message.role === "system")) {
       current = []; invalidReason = "";
       return [];
@@ -166,9 +184,11 @@ export async function* readCodexRollout(
       if (nextId && nextId !== turnId) {
         if (turnId || current.some(message => message.role === "assistant" || message.role === "tool")) yield* finish();
         turnId = nextId;
+        turnModel = "";
         startedAt = current.find(message => message.role === "user")?.createdAt || timestamp;
         sequence = lineNumber;
       }
+      turnModel = text(payload.model) || turnModel;
       workspacePath = text(payload.cwd) || workspacePath;
       continue;
     }
@@ -190,7 +210,16 @@ export async function* readCodexRollout(
       const rawRole = payload.role;
       if (rawRole !== "user" && rawRole !== "assistant" && rawRole !== "developer" && rawRole !== "system") continue;
       role = rawRole === "developer" ? "system" : rawRole;
-      content = Array.isArray(payload.content) ? payload.content.map(item => isRecord(item) ? text(item.text) : "").filter(Boolean).join("\n") : "";
+      // A user message also carries injected context - AGENTS.md, environment,
+      // plugin lists - which Codex labels per content item. Only the person's own
+      // text belongs in the turn; an unlabelled item is kept for older rollouts.
+      const kinds = rawRole === "user" ? contentItemKinds(payload) : undefined;
+      content = Array.isArray(payload.content)
+        ? payload.content
+            .map((item, index) => isRecord(item) && keepsUserContentItem(kinds, index) ? text(item.text) : "")
+            .filter(Boolean)
+            .join("\n")
+        : "";
     } else {
       role = "tool";
       const id = text(payload.call_id) || text(payload.id) || undefined;
@@ -253,6 +282,19 @@ export async function readCodexSourceTurn(filePath: string, expected: { conversa
   if (conflict) return { turn: null, reason: "source_turn_content_conflict" };
   if (unresolved) return { turn: null, reason };
   return latest ? { turn: latest } : { turn: null, reason };
+}
+
+/** Codex labels every content item it packs into a message; absent on older rollouts. */
+function contentItemKinds(payload: Record<string, unknown>): string[] | undefined {
+  const meta = payload.internal_chat_message_metadata_passthrough;
+  if (!isRecord(meta) || !Array.isArray(meta.content_item_kinds)) return undefined;
+  return meta.content_item_kinds.map(kind => text(kind));
+}
+
+function keepsUserContentItem(kinds: string[] | undefined, index: number): boolean {
+  if (!kinds) return true;
+  const kind = kinds[index];
+  return kind === undefined || kind === "" || kind === USER_CONTENT_ITEM_KIND;
 }
 
 function canonicalTurnContent(turn: Record<string, unknown> | SourceTurn): string {

@@ -21,7 +21,7 @@ export function evolutionJobLogFields(job: EvolutionJobRecord): Record<string, u
 
 export function logEvolutionDecision(
   job: EvolutionJobRecord,
-  stage: "l2_induction" | "l3_abstraction" | "l3_world_model_update" | "skill_crystallization",
+  stage: "l2_induction" | "l3_abstraction" | "l3_world_model_update" | "skill_crystallization" | "skill_cluster_assign" | "skill_batch_evolve",
   reason: string,
   fields: Record<string, unknown> = {}
 ): void {

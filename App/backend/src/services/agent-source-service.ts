@@ -39,6 +39,10 @@ import {
   type AgentSourceInstallType,
   type AgentSourceLifecycleAnalytics,
 } from "../analytics/agent-source-analytics.js";
+import type {
+  MemoryDesktopAddAnalytics,
+  MemoryDesktopAddScanMode
+} from "../analytics/memory-add-analytics.js";
 import { errorCodeFromUnknown } from "../analytics/analytics-transport.js";
 import {
   extractManagedAgentHistory,
@@ -120,6 +124,10 @@ export interface CreateAgentSourceServiceOptions {
   memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   getScanPermission?: () => Promise<ScanPermission>;
   now?: () => string;
   createId?: () => string;
@@ -862,6 +870,7 @@ async function ingestPersistentSource(
     if (conversationMeta?.selected === false) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
+    const scanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanOptions.mode);
     if (sourceId === "codex") {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
@@ -889,6 +898,13 @@ async function ingestPersistentSource(
       continue;
     }
     let turnSucceeded = true;
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: turn.conversationId,
+      turnId: legacyTurnId(turn),
+      ...(scanMode ? { scanMode } : {})
+    };
+    const addStartedAt = Date.now();
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
@@ -901,10 +917,18 @@ async function ingestPersistentSource(
         title: firstTurnLine(turn.messages) ?? `${sourceId} conversation`,
         tags: ["agent-source", sourceId],
         source: sourceId,
-        turnId: legacyTurnId(turn),
+        turnId: addAnalyticsBase.turnId,
         createdAt: turn.messages[0]!.createdAt,
         deferProcessing: true
       });
+      if (!added.duplicate) {
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       if (added.duplicate) deduped += turn.messages.length;
       else {
         memoryIdCount += 1;
@@ -928,6 +952,12 @@ async function ingestPersistentSource(
       errorCount += 1;
       if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
       store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      options.memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
     if (!turnSucceeded) activeConversationFailed = true;
     emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIds.length + deduped, total: store.count(sourceId), message: "Adding raw memories" });
@@ -953,6 +983,10 @@ function readScanPage(store: AppAgentSourceScanStore, sourceId: string, cursor?:
     if (page.length >= 500 || bytes >= 8 * 1024 * 1024) break;
   }
   return page;
+}
+
+function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode | undefined {
+  return value === "initial_subset" || value === "incremental" || value === "full" ? value : undefined;
 }
 
 function firstTurnLine(messages: readonly ConversationMessage[]): string | undefined {

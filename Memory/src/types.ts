@@ -67,6 +67,7 @@ export interface MemoryProcessingRecord {
 }
 export type JobType =
   | "episode_idle_close"
+  | "episode_title"
   | "trace_summary"
   | "user_memory_embedding"
   | "import_summary"
@@ -82,6 +83,8 @@ export type JobType =
   | "l3_world_model_update"
   | "project_environment_profile"
   | "skill_crystallization"
+  | "skill_cluster_assign"
+  | "skill_batch_evolve"
   | "skill_trial_resolve"
   | "work_memory_extract";
 

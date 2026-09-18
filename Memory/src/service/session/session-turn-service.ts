@@ -2048,6 +2048,19 @@ export class SessionTurnService {
           },
           createdAt: at
         }));
+        // Give the still-open episode a provisional title so the task panel does
+        // not fall back to rendering the first user message. An episode closed by
+        // this same turn is skipped: finalizeClosedEpisode queues the final pass.
+        if (!episode.title?.trim()) {
+          jobs.push(this.deps.enqueueJob({
+            jobType: "episode_title",
+            userId: session.userId,
+            sessionId: session.id,
+            episodeId: episode.id,
+            payload: { stage: "provisional" },
+            createdAt: at
+          }));
+        }
       }
       const uniqueClosedEpisodeIds = uniq(closedEpisodeIds);
       const responseChangeSeq = this.deps.repos.runtime.latestChangeSeq(session.userId, this.deps.namespaceIdFromSession(session));

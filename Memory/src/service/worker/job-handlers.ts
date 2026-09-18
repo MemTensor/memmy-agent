@@ -21,6 +21,7 @@ import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
+import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
@@ -65,6 +66,8 @@ export interface WorkerJobProcessors {
     updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
     updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
+    assignSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
+    evolveSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
     splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
   };
@@ -80,6 +83,9 @@ export interface WorkerJobProcessors {
   };
   workMemory: {
     extract(job: EvolutionJobRecord): MaybePromise<void>;
+  };
+  episodeTitle: {
+    generate(job: EvolutionJobRecord): MaybePromise<void>;
   };
 }
 
@@ -259,6 +265,12 @@ export async function processJob(
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
       return;
+    case "skill_cluster_assign":
+      await deps.processors.evolution.assignSkillCluster(job);
+      return;
+    case "skill_batch_evolve":
+      await deps.processors.evolution.evolveSkillCluster(job);
+      return;
     case "reward":
       await deps.processors.feedback.applyReward(job);
       return;
@@ -285,6 +297,9 @@ export async function processJob(
       return;
     case "work_memory_extract":
       await deps.processors.workMemory.extract(job);
+      return;
+    case "episode_title":
+      await deps.processors.episodeTitle.generate(job);
       return;
     default:
       throw new Error(`unsupported job type: ${job.jobType}`);
@@ -350,11 +365,37 @@ export function finalizeClosedEpisode(
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
   if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
   if (episodeHasPendingCaptureDecision(deps, current)) return [];
-  if (episodeRewardWasSkipped(current)) return [];
+  // Titling is independent of reward and reflection, so it must be queued before
+  // the mutually exclusive branches below can return.
+  const titleJobs = enqueueEpisodeTitle(deps, current, at, "final");
+  if (episodeRewardWasSkipped(current)) return titleJobs;
   const reflectionJobs = enqueueEpisodeReflection(deps, current, at, trigger);
-  if (reflectionJobs.length > 0) return reflectionJobs;
-  if (episodeHasRewardForReflection(deps, current)) return [];
-  return enqueueEpisodeRewardAfterReflection(deps, current, at, trigger);
+  if (reflectionJobs.length > 0) return [...titleJobs, ...reflectionJobs];
+  if (episodeHasRewardForReflection(deps, current)) return titleJobs;
+  return [...titleJobs, ...enqueueEpisodeRewardAfterReflection(deps, current, at, trigger)];
+}
+
+/**
+ * Queue one title/summary generation pass for an episode.  Several triggers call
+ * finalizeClosedEpisode for the same closed episode, so an already current title
+ * is skipped here rather than left to job dedupe, which does not match rows that
+ * already succeeded.
+ */
+export function enqueueEpisodeTitle(
+  deps: WorkerJobHandlerDeps,
+  episode: EpisodeRecord,
+  at: string,
+  stage: "provisional" | "final"
+): EvolutionJobRecord[] {
+  if (episodeTitleIsCurrent(episode, deps.repos.runtime.countRawTurnsByEpisode(episode.id))) return [];
+  return [enqueueJob(deps, {
+    jobType: "episode_title",
+    userId: episode.userId,
+    sessionId: episode.sessionId,
+    episodeId: episode.id,
+    payload: { stage },
+    createdAt: at
+  })];
 }
 
 export function enqueueEpisodeRewardAfterReflection(
@@ -581,6 +622,10 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId
         ? `episode_idle_close:${input.episodeId}:${payloadString("triggerRawTurnId") ?? "turn"}`
         : undefined;
+    case "episode_title":
+      return input.episodeId
+        ? `episode_title:${input.episodeId}:${payloadString("stage") ?? "provisional"}`
+        : undefined;
     case "embedding":
       return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "user_memory_embedding":
@@ -628,6 +673,12 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "skill_crystallization": {
       const seed = payloadString("skillId") ?? target ?? payloadString("policyId");
       return seed ? `skill_crystallization:${seed}` : input.episodeId ? `skill_crystallization:${input.episodeId}` : undefined;
+    }
+    case "skill_cluster_assign":
+      return input.episodeId ? `skill_cluster_assign:${input.episodeId}` : undefined;
+    case "skill_batch_evolve": {
+      const clusterId = payloadString("clusterId");
+      return clusterId ? `skill_batch_evolve:${clusterId}` : input.episodeId ? `skill_batch_evolve:${input.episodeId}` : undefined;
     }
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;

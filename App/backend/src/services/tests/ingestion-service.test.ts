@@ -559,9 +559,7 @@ describe("ingestion service", () => {
       dedupedMemories: 1,
       memoryIds: []
     });
-    expect(succeeded).toEqual([
-      expect.objectContaining({ storedCount: 0 })
-    ]);
+    expect(succeeded).toEqual([]);
   });
 
   it("does not import user-only or assistant-only turns as memories", async () => {

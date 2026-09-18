@@ -40,9 +40,13 @@ describe("document skill CLIs", () => {
     expect(missingXlsx.stdout).toContain('"ok":false');
   });
 
-  it("builds the new skills into dist with their static resources", () => {
+  it("preserves Office source CLIs without distributing their skills by default", () => {
+    const skills = ["docx", "pptx", "xlsx"];
+    const sources = skills.map((skill) => fs.readFileSync(path.join(root, "src/skills", skill, "SKILL.md"), "utf8"));
     execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "--ignore-scripts", "build"], { cwd: root, env: buildEnv, stdio: "pipe" });
-    expect(fs.existsSync(path.join(root, "dist/skills/pptx/schemas/SCHEMA-MANIFEST.json"))).toBe(true);
-    expect(fs.existsSync(path.join(root, "dist/skills/xlsx/SKILL.md"))).toBe(true);
+    for (const [index, skill] of skills.entries()) {
+      expect(fs.existsSync(path.join(root, "dist/skills", skill))).toBe(false);
+      expect(fs.readFileSync(path.join(root, "src/skills", skill, "SKILL.md"), "utf8")).toBe(sources[index]);
+    }
   }, 60_000);
 });

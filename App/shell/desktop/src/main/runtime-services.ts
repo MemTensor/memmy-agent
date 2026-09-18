@@ -351,6 +351,18 @@ export async function preparePackagedRuntimeConfig(
   const secretFactory = options.secretFactory ?? createPersistentSecret;
   const defaultWorkspace = join(memmyHome, "workspace");
   const applyRuntimeDefaults = (config: ConfigRecord): ConfigRecord => {
+    // Existing configs are handled once by the runtime-config migration.
+    if (!existsSync(configPath)) {
+      config.tools = {
+        mcpServers: {
+          open_computer_use: {
+            type: "stdio",
+            command: "open-computer-use",
+            args: ["mcp"]
+          }
+        }
+      };
+    }
     const memmyMemory = ensureRecord(config, "memmyMemory");
     const storage = ensureRecord(memmyMemory, "storage");
     const channels = ensureRecord(config, "channels");
