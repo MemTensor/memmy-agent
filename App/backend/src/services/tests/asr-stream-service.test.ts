@@ -23,7 +23,7 @@ interface CloudStub {
 
 async function startCloudStub(): Promise<CloudStub> {
   const server = createServer();
-  const wss = new WebSocketServer({ server, path: "/agentAsr/stream" });
+  const wss = new WebSocketServer({ server, path: "/api/agentAsr/stream" });
   const connections: CloudStub["connections"] = [];
   wss.on("connection", (socket, request) => {
     const entry: CloudStub["connections"][number] = { headers: request.headers, frames: [], socket };
@@ -73,13 +73,16 @@ afterEach(async () => {
 });
 
 describe("toCloudStreamUrl", () => {
-  it("maps the Cloud HTTPS base to its wss stream endpoint", () => {
-    expect(toCloudStreamUrl("https://test-api.memmy.cn/api")).toBe("wss://test-api.memmy.cn/api/agentAsr/stream");
-    expect(toCloudStreamUrl("https://test-api.memmy.cn/api/")).toBe("wss://test-api.memmy.cn/api/agentAsr/stream");
+  it("maps the Cloud HTTPS base to its wss stream endpoint behind the /api gateway prefix", () => {
+    // cloudBaseUrl never carries /api itself (resolveCloudServiceBaseUrl
+    // returns the bare origin) — every Cloud call adds the prefix per-path,
+    // same as /api/agentAsr/transcriptions and /api/agentUser/login do.
+    expect(toCloudStreamUrl("https://test-api.memmy.cn")).toBe("wss://test-api.memmy.cn/api/agentAsr/stream");
+    expect(toCloudStreamUrl("https://test-api.memmy.cn/")).toBe("wss://test-api.memmy.cn/api/agentAsr/stream");
   });
 
   it("keeps plain ws for a loopback stub", () => {
-    expect(toCloudStreamUrl("http://127.0.0.1:8080")).toBe("ws://127.0.0.1:8080/agentAsr/stream");
+    expect(toCloudStreamUrl("http://127.0.0.1:8080")).toBe("ws://127.0.0.1:8080/api/agentAsr/stream");
   });
 });
 

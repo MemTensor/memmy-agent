@@ -37,13 +37,21 @@ export interface AsrStreamService {
 export interface CreateAsrStreamServiceOptions {
   bootstrapRepository: Pick<BootstrapRepository, "getAppSettings"> | { getAppSettings(): Pick<AppSettingsDto, "userMode"> };
   accountSessionRepository: Pick<AccountSessionRepository, "getCloudUuid">;
-  /** Cloud API base URL, e.g. `https://test-api.memmy.cn/api`. */
+  /** Cloud API base URL, e.g. `https://test-api.memmy.cn` (no `/api` suffix). */
   cloudBaseUrl: string;
   /** Overrides the upstream socket constructor; tests use it. */
   connectUpstream?: (url: string, headers: Record<string, string>) => WebSocket;
 }
 
-const CLOUD_STREAM_PATH = "/agentAsr/stream";
+/**
+ * Every existing Cloud call goes through `/api/...` (see
+ * `http-cloud-client.ts`'s `/api/agentAsr/transcriptions`,
+ * `/api/agentUser/login`, etc.) — an external gateway in front of the Java
+ * service adds that prefix; the service's own Spring mapping is the bare
+ * `/agentAsr/...`. This constant is the public path, so it needs the prefix
+ * even though `AgentAsrWebSocketConfig.STREAM_PATH` on the Java side does not.
+ */
+const CLOUD_STREAM_PATH = "/api/agentAsr/stream";
 const CLOSE_NORMAL = 1000;
 const CLOSE_POLICY = 1008;
 const CLOSE_UPSTREAM_GONE = 1011;
