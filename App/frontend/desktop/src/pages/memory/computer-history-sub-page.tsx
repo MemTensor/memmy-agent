@@ -478,43 +478,50 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
                       <div className="ch-entry__title-row">
                         <h3>{entry.title}</h3>
                         <div className="ch-entry__row-actions">
-                          <button
-                            type="button"
-                            className="ch-entry__action"
-                            title={t("computerHistory.openMarkdown")}
-                            aria-label={t("computerHistory.openMarkdownLabel", { title: entry.title })}
-                            onClick={() => void openMarkdown(entry)}
-                          >
-                            <FileText size={14} aria-hidden />
-                          </button>
+                          <Tooltip content={t("computerHistory.openMarkdown")}>
+                            <button
+                              type="button"
+                              className="ch-entry__action"
+                              aria-label={t("computerHistory.openMarkdownLabel", { title: entry.title })}
+                              onClick={() => void openMarkdown(entry)}
+                            >
+                              <FileText size={14} aria-hidden />
+                            </button>
+                          </Tooltip>
                           {/* A six-hour summary has no raw events of its own to keep. */}
                           {entry.summaryWindow === "6h" ? null : (
-                          <button
-                            type="button"
-                            className={entry.pinned ? "ch-entry__action ch-entry__action--on" : "ch-entry__action"}
-                            disabled={busy || !props.client}
-                            title={entry.pinned ? t("computerHistory.unpin") : t("computerHistory.pin")}
-                            aria-pressed={entry.pinned}
-                            aria-label={t(entry.pinned ? "computerHistory.unpinLabel" : "computerHistory.pinLabel", { title: entry.title })}
-                            onClick={() => void runAction((client) => client.pinComputerHistory(entry.id, !entry.pinned))}
-                          >
-                            {entry.pinned ? "★" : "☆"}
-                          </button>
+                            <Tooltip content={entry.pinned ? t("computerHistory.unpin") : t("computerHistory.pin")}>
+                              <span className="inline-flex">
+                                <button
+                                  type="button"
+                                  className={entry.pinned ? "ch-entry__action ch-entry__action--on" : "ch-entry__action"}
+                                  disabled={busy || !props.client}
+                                  aria-pressed={entry.pinned}
+                                  aria-label={t(entry.pinned ? "computerHistory.unpinLabel" : "computerHistory.pinLabel", { title: entry.title })}
+                                  onClick={() => void runAction((client) => client.pinComputerHistory(entry.id, !entry.pinned))}
+                                >
+                                  {entry.pinned ? "★" : "☆"}
+                                </button>
+                              </span>
+                            </Tooltip>
                           )}
-                          <button
-                            type="button"
-                            className={pendingDeleteId === entry.id
-                              ? "ch-entry__action ch-entry__action--delete ch-entry__action--confirm"
-                              : "ch-entry__action ch-entry__action--delete"}
-                            disabled={busy || !props.client || entry.id === openEntryId}
-                            title={t(entry.id === openEntryId
-                              ? "computerHistory.deleteRecording"
-                              : pendingDeleteId === entry.id ? "computerHistory.deleteAgain" : "computerHistory.delete")}
-                            aria-label={t(pendingDeleteId === entry.id ? "computerHistory.confirmDeleteLabel" : "computerHistory.deleteLabel", { title: entry.title })}
-                            onClick={() => void deleteHistory(entry.id)}
-                          >
-                            {pendingDeleteId === entry.id ? t("computerHistory.confirm") : <Trash2 size={14} />}
-                          </button>
+                          <Tooltip content={t(entry.id === openEntryId
+                            ? "computerHistory.deleteRecording"
+                            : pendingDeleteId === entry.id ? "computerHistory.deleteAgain" : "computerHistory.delete")}>
+                            <span className="inline-flex">
+                              <button
+                                type="button"
+                                className={pendingDeleteId === entry.id
+                                  ? "ch-entry__action ch-entry__action--delete ch-entry__action--confirm"
+                                  : "ch-entry__action ch-entry__action--delete"}
+                                disabled={busy || !props.client || entry.id === openEntryId}
+                                aria-label={t(pendingDeleteId === entry.id ? "computerHistory.confirmDeleteLabel" : "computerHistory.deleteLabel", { title: entry.title })}
+                                onClick={() => void deleteHistory(entry.id)}
+                              >
+                                {pendingDeleteId === entry.id ? t("computerHistory.confirm") : <Trash2 size={14} />}
+                              </button>
+                            </span>
+                          </Tooltip>
                         </div>
                       </div>
                       {entry.description ? (
