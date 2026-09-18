@@ -48,6 +48,16 @@ describe("MemoryService / embedding / processing", () => {
     expect(embeddingTextForMemory(skillMemory())).toContain("PROCEDURE_ONLY_SENTINEL");
   });
 
+  it("keeps oversized Skill retrieval documents intact for provider-aware chunking", () => {
+    const prefix = "Legacy Skill instructions\n";
+    const text = embeddingTextForMemory(skillMemory(undefined, {
+      content: `${prefix}${" procedure".repeat(8_000)}\nTAIL_SENTINEL`
+    }));
+
+    expect(text).toContain(prefix);
+    expect(text).toContain("TAIL_SENTINEL");
+  });
+
   it("marks a replacement Skill vector with its retrieval document version and source hash", () => {
     const memory = skillMemory({
       retrievalBlurb: "Use for safe SQLite schema migrations.",
