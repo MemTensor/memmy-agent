@@ -1,4 +1,5 @@
 import { bindScreenCaptureIpc, type ScreenCaptureHandler } from './desktop-screen-capture.js';
+import { bindComputerUseOnboardingIpc, type ComputerUseOnboarding } from './computer-use-onboarding.js';
 import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -57,6 +58,7 @@ export interface StartPackagedRuntimeServicesOptions {
 
 export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntimeServicesOptions {
   captureScreen?: ScreenCaptureHandler;
+  computerUseOnboarding?: ComputerUseOnboarding;
   runtimeEntries?: RuntimeEntryPaths;
   runtimeExecutable?: string;
   platform?: NodeJS.Platform;
@@ -1616,6 +1618,10 @@ export class AgentGatewaySupervisor {
   }
 
   private bindOwnedChild(child: ManagedChild, generation: number): void {
+    bindComputerUseOnboardingIpc(child.process,
+      () => !this.stopping && this.ownedChild === child && this.childGeneration === generation
+        && this.pendingRestartNotice?.childGeneration !== generation,
+      this.options.computerUseOnboarding);
     bindScreenCaptureIpc(child.process,
       () => !this.stopping && this.ownedChild === child && this.childGeneration === generation
         && this.pendingRestartNotice?.childGeneration !== generation,

@@ -5,7 +5,7 @@ import type { RequestContext } from "../../core/agent-runtime/tools/context.js";
 import type { MacPermission } from "./mac-permission-settings.js";
 
 const execFileAsync = promisify(execFile);
-export type PermissionPreflight = { state: "granted" } | { state: "missing"; permission: MacPermission; missingPermissions?: MacPermission[] } | { state: "unknown" };
+export type PermissionPreflight = { state: "granted" } | { state: "missing"; permission: MacPermission; missingPermissions?: MacPermission[] } | { state: "unknown"; reason?: 'desktopUnavailable' | 'probeFailed' | 'screenCaptureUnavailable' | 'helperPauseFailed' };
 
 export function parsePermissionDoctor(stdout: string): PermissionPreflight {
   const match = stdout.match(/^Permissions: accessibility=(granted|missing), screenRecording=(granted|missing)\s*$/m);
@@ -49,7 +49,7 @@ export class MacPermissionPreflight {
   private readonly turns = new Map<string | object, Promise<PermissionPreflight>>();
   private inFlight: Promise<PermissionPreflight> | null = null;
   private readonly denied = new Map<string, Promise<PermissionPreflight>>();
-  constructor(private readonly read: () => Promise<PermissionPreflight>) {}
+  constructor(private readonly read: (signal?: AbortSignal | null) => Promise<PermissionPreflight>) {}
 
   private key(context: RequestContext | null): string | null {
     if (!context || context.metadata.computerUseInteractive === false) return null;
@@ -61,7 +61,7 @@ export class MacPermissionPreflight {
     const key = this.key(context);
     return key ? this.denied.get(key) : Promise.resolve({ state: 'unknown' });
   }
-  check(context: RequestContext | null, generation = 0): Promise<PermissionPreflight> {
+  check(context: RequestContext | null, generation = 0, signal?: AbortSignal | null): Promise<PermissionPreflight> {
     const key = this.key(context);
     if (!key) return Promise.resolve({ state: 'unknown' });
     const denied = this.denied.get(key);
@@ -70,7 +70,7 @@ export class MacPermissionPreflight {
     const previous = this.turns.get(cacheKey);
     if (previous) return previous;
     if (!this.inFlight) {
-      this.inFlight = Promise.resolve().then(() => this.read()).catch(() => ({ state: 'unknown' } as const))
+      this.inFlight = Promise.resolve().then(() => this.read(signal)).catch(() => ({ state: 'unknown' } as const))
         .finally(() => { this.inFlight = null; });
     }
     const pending = this.inFlight.then(status => {
@@ -97,6 +97,14 @@ export class MacPermissionPreflight {
   deny(context: RequestContext | null, permission: MacPermission): void {
     const key = this.key(context);
     if (key) this.rememberDenied(key, { state: 'missing', permission });
+  }
+  /** Only called after the user explicitly continues in the host panel and a
+   * fresh native self-probe succeeds. This releases this one waiting message. */
+  approve(context: RequestContext | null, generation: number): void {
+    const key = this.key(context);
+    if (!key) return;
+    this.denied.delete(key);
+    this.remember(context, { state: 'granted' }, generation);
   }
   block(context: RequestContext | null): void {
     const key = this.key(context);

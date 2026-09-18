@@ -1556,3 +1556,4 @@ export const TokenQuotaEligibilitySchema = z.object({
 });
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
+export * from './computer-use-onboarding.js';

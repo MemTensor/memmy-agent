@@ -16,7 +16,9 @@ import { loadConfig, resolveConfigEnvVars } from "../../../config/loader.js";
 import { VERSION } from "../../../version.js";
 import { Tool, type ToolExecutionContext } from "./base.js";
 import { RequestContext, RequestContextStore } from "./context.js";
-import { MacPermissionPreflight, nativePermissionDoctor } from "../../../tools/computer-use/mac-permission-preflight.js";
+import { MacPermissionPreflight, nativePermissionDoctor, type PermissionPreflight } from "../../../tools/computer-use/mac-permission-preflight.js";
+import { probeNativePermissions, guideNativePermissions } from "../../../tools/computer-use/native-permission-probe.js";
+import { stopOwnedNativeAgent } from "../../../tools/computer-use/native-agent-lifecycle.js";
 import { ToolRegistry } from "./registry.js";
 import { storeToolImageArtifact } from "../../../utils/artifacts.js";
 import { isManagedOcuConfig, managedOcuEnvironment, openComputerUseEnvironment, resolveOpenComputerUseCommand } from "../../../tools/computer-use/open-computer-use-binary.js";
@@ -420,12 +422,18 @@ export async function connectInMemoryMcpServer(server: any): Promise<InMemoryMcp
   };
 }
 
-function ocuPermissionMessage(status: { state: string; permission?: string; missingPermissions?: string[] }): string {
+function ocuPermissionMessage(status: PermissionPreflight): string {
+  if (status.state === 'unknown' && status.reason === 'helperPauseFailed') return '未能安全暂停当前 Open Computer Use 辅助程序，本次操作未执行，未打开授权设置。请关闭正在使用它的其他任务后重新发送消息。';
+  if (status.state === 'unknown' && status.reason === 'desktopUnavailable') return '请返回 Memmy 的可见聊天窗口后重新发送消息，以便检查 Open Computer Use 的权限。本次应用操作未执行。';
+  if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' && (status.state === 'missing' || (status.state === 'unknown' && status.reason === 'screenCaptureUnavailable'))) return '电脑操作已暂停，尚未完成权限设置。你可以重新发送消息，在授权面板中完成设置后点击“继续任务”。';
+  if (status.state === 'unknown' && status.reason === 'screenCaptureUnavailable') return 'Open Computer Use 已能读取 Memmy 界面，但未取得截图，本次应用操作未执行。辅助程序已暂停，请在 Memmy 的引导框点击“打开系统设置”，检查 Open Computer Use 的屏幕录制权限。完成后重新发送消息，Memmy 会启动当前辅助程序并重新检查。';
   if (status.state !== 'missing') return '无法确认 Open Computer Use 的系统权限或连接状态，本次应用操作未执行。请检查辅助程序后重新发送消息。';
   const permissions = status.missingPermissions ?? [status.permission];
   const labels = permissions.map(p => p === 'screenRecording' ? '屏幕录制' : p === 'inputMonitoring' ? '输入监控' : '辅助功能');
   const settings = labels.map(label => `系统设置 → 隐私与安全性 → ${label === '屏幕录制' ? '屏幕与系统音频录制（屏幕录制）' : label}`).join('\n');
-  return `Open Computer Use 缺少 macOS「${labels.join('、')}」权限，本次应用操作未执行。\n\n请在 Open Computer Use 授权窗口完成授权。若找不到窗口，请打开：\n${settings}\n开启其中的 Open Computer Use。\n\n若系统提示「退出并重新打开」，请重启 Open Computer Use 辅助程序；Memmy 无需退出。完成后重新发送消息，我会重新检查权限。`;
+  const guide = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' ? '请在 Memmy 的引导框点击“打开系统设置”。' : '请在 Open Computer Use 授权窗口完成授权。';
+  const restart = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' ? '辅助程序已暂停。完成后重新发送消息，Memmy 会启动当前辅助程序并重新检查；本次操作不会自动继续。' : '若系统提示「退出并重新打开」，请重启 Open Computer Use 辅助程序；Memmy 无需退出。完成后重新发送消息，我会重新检查权限。';
+  return `Open Computer Use 缺少 macOS「${labels.join('、')}」权限，本次应用操作未执行。\n\n${guide}若找不到窗口，请打开：\n${settings}\n开启其中的 Open Computer Use。\n\n${restart}`;
 }
 
 export class MCPToolWrapper extends Tool {
@@ -731,6 +739,8 @@ export async function connectMcpServers(
           cwd: cfgValue(cfg, "cwd") ?? null,
         });
         if (managedConfig) {
+          const desktop = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1';
+          const helperApp = path.dirname(path.dirname(path.dirname(normalizedCommand)));
           managed = new ManagedOcuSession(async () => {
             const owned: Array<() => Promise<void>> = [];
             try {
@@ -744,7 +754,9 @@ export async function connectMcpServers(
               for (const fn of owned.reverse()) await fn().catch(() => undefined);
               throw error;
             }
-          }, nativePermissionDoctor({ command: normalizedCommand, args, env, cwd: cfgValue(cfg, 'cwd') ?? null }));
+          }, desktop ? probeNativePermissions : nativePermissionDoctor({ command: normalizedCommand, args, env, cwd: cfgValue(cfg, 'cwd') ?? null }),
+          desktop ? (status, signal, check, canContinue) => guideNativePermissions(status, helperApp, signal, check, canContinue) : undefined,
+          desktop ? () => stopOwnedNativeAgent(normalizedCommand, env!.OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE) : undefined);
           closers.push(() => managed!.close());
         } else {
           [read, write] = await enterMaybe(runtime.stdioClient(params), closers);

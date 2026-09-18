@@ -18,11 +18,20 @@ export class ManagedOcuSession {
   private needsReconnect = false;
   private schemas: Array<[string, unknown]> | null = null;
   private generation = 0;
+  private cachedTools: any = null;
+  private permissionsPaused = false;
+  private readonly lifetime = new AbortController();
   private cohort: { pending: number; checked?: { generation: number; status: PermissionPreflight } } | null = null;
   readonly preflight: MacPermissionPreflight;
 
-  constructor(private readonly connect: () => Promise<OcuConnection>, doctor: () => Promise<PermissionPreflight>) {
-    this.preflight = new MacPermissionPreflight(doctor);
+  constructor(
+    private readonly connect: () => Promise<OcuConnection>,
+    private readonly probe: (session: any, signal?: AbortSignal | null) => Promise<PermissionPreflight>,
+    private readonly guide?: (status: PermissionPreflight, signal?: AbortSignal | null,
+      check?: () => Promise<PermissionPreflight>, canContinue?: boolean) => Promise<boolean | void>,
+    private readonly stopHelperForPermissions?: () => Promise<void>,
+  ) {
+    this.preflight = new MacPermissionPreflight(signal => probe(this.connection!.session, signal));
   }
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
     const pending = this.queue.then(work, work);
@@ -44,6 +53,7 @@ export class ManagedOcuSession {
       if (this.schemas && !isDeepStrictEqual(schemas, this.schemas)) throw new Error('Computer Use tool schema changed; reload the MCP configuration');
       if (this.closed) throw new Error('Computer Use connection was removed');
       this.schemas = schemas;
+      this.cachedTools = result;
       this.connection = connection;
       this.generation++;
     } catch (error) { await connection.close(); throw error; }
@@ -56,11 +66,61 @@ export class ManagedOcuSession {
     this.needsReconnect = false;
   }
   async initialize(): Promise<void> { await this.exclusive(() => this.open()); }
-  async listTools(): Promise<any> { return this.exclusive(async () => { await this.open(); return this.connection!.session.listTools(); }); }
+  async listTools(): Promise<any> { return this.exclusive(async () => { if (this.permissionsPaused && this.cachedTools) return this.cachedTools; await this.open(); return this.connection!.session.listTools(); }); }
   async listResources(): Promise<any> { return { resources: [] }; }
   async listPrompts(): Promise<any> { return { prompts: [] }; }
 
+  private async pauseForPermissions(): Promise<void> {
+    this.permissionsPaused = true;
+    this.needsReconnect = true;
+    const connection = this.connection;
+    this.connection = null;
+    await connection?.close();
+    await this.stopHelperForPermissions?.();
+  }
+
+  private async recheckForGuide(signal?: AbortSignal | null): Promise<PermissionPreflight> {
+    if (signal?.aborted || this.closed) return { state: 'unknown' };
+    let status: PermissionPreflight;
+    try {
+      await this.replace();
+      status = await this.probe(this.connection!.session, signal);
+    } catch { status = { state: 'unknown', reason: 'probeFailed' }; }
+    // Even a successful check stops the helper again, so changing a switch in
+    // Settings cannot ask macOS to relaunch an arbitrary same-name installation.
+    try { await this.pauseForPermissions(); }
+    catch { return { state: 'unknown', reason: 'helperPauseFailed' }; }
+    return status;
+  }
+
+  private async showGuide(status: PermissionPreflight, signal?: AbortSignal | null, canContinue = false): Promise<PermissionPreflight> {
+    const actionable = status.state === 'missing' || (status.state === 'unknown' && status.reason === 'screenCaptureUnavailable');
+    if (!actionable || !this.guide || signal?.aborted || this.closed) return status;
+    if (this.stopHelperForPermissions) {
+      try {
+        await this.pauseForPermissions();
+      } catch {
+        return { state: 'unknown', reason: 'helperPauseFailed' };
+      }
+    }
+    const approved = !signal?.aborted && !this.closed
+      && await this.guide(status, signal, () => this.recheckForGuide(signal), canContinue).catch(() => false);
+    // Never resume based on UI state alone, or replay an already dispatched action.
+    if (approved === true && canContinue && !signal?.aborted && !this.closed) {
+      await this.replace();
+      const fresh = await this.probe(this.connection!.session, signal);
+      if (fresh.state === 'granted' && !signal?.aborted && !this.closed) {
+        this.permissionsPaused = false;
+        return fresh;
+      }
+      await this.pauseForPermissions();
+      return signal?.aborted ? { state: 'unknown' } : fresh;
+    }
+    return status;
+  }
+
   async invoke(name: string, args: Record<string, any>, timeout: number, context: RequestContext | null, signal?: AbortSignal | null): Promise<any> {
+    signal = AbortSignal.any([this.lifetime.signal, ...(signal ? [signal] : [])]);
     const cohort = this.cohort ??= { pending: 0 };
     cohort.pending++;
     return this.exclusive(async () => {
@@ -69,19 +129,25 @@ export class ManagedOcuSession {
       const protectedTool = name !== 'list_apps';
       // A failed user message remains blocked across connection generations.
       const blocked = this.preflight.blocked(context);
-      if (protectedTool && blocked) throw new OcuBlocked(await blocked);
-      if (protectedTool && cohort.checked?.status.state !== 'granted' && cohort.checked) {
+      if ((protectedTool || this.permissionsPaused) && blocked) throw new OcuBlocked(await blocked);
+      if ((protectedTool || this.permissionsPaused) && cohort.checked?.status.state !== 'granted' && cohort.checked) {
         this.preflight.remember(context, cohort.checked.status, this.generation);
         throw new OcuBlocked(cohort.checked.status);
       }
       const check = async () => {
-        const status = cohort.checked?.generation === this.generation ? cohort.checked.status : await this.preflight.check(context, this.generation);
+        let status = cohort.checked?.generation === this.generation ? cohort.checked.status : await this.preflight.check(context, this.generation, signal);
+        if (status.state !== 'granted') {
+          status = await this.showGuide(status, signal, true);
+          if (status.state === 'granted') this.preflight.approve(context, this.generation);
+        }
         cohort.checked = { generation: this.generation, status };
         this.preflight.remember(context, status, this.generation);
         return status;
       };
       let rebuilt = false;
       try {
+        // Only a new interactive message may restart a helper paused for setup.
+        this.permissionsPaused = false;
         if (this.needsReconnect) { await this.replace(); rebuilt = true; }
         else await this.open();
         try { await this.connection!.session.ping(); }
@@ -111,10 +177,14 @@ export class ManagedOcuSession {
         const permission = computerUsePermissionError('open_computer_use', result);
         if (permission) {
           this.permissionDenied(context, permission);
-          cohort.checked = { generation: this.generation, status: { state: 'missing', permission } };
+          const status = await this.showGuide({ state: 'missing', permission }, signal);
+          cohort.checked = { generation: this.generation, status };
+          this.preflight.remember(context, status, this.generation);
+          if (status.state === 'unknown' && status.reason === 'helperPauseFailed') throw new OcuBlocked(status);
         }
         return result;
-      } catch {
+      } catch (error) {
+        if (error instanceof OcuBlocked) throw error;
         this.needsReconnect = true;
         this.preflight.block(context);
         cohort.checked = { generation: this.generation, status: { state: 'unknown' } };
@@ -128,6 +198,7 @@ export class ManagedOcuSession {
   }
   async close(): Promise<void> {
     this.closed = true;
+    this.lifetime.abort();
     const connection = this.connection;
     this.connection = null;
     await connection?.close();
