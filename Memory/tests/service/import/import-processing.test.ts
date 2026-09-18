@@ -239,6 +239,57 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
+  it("uses the semantic user query instead of XML metadata as an import title", () => {
+    const { db, service } = createTestService();
+    const added = service.addMemory({
+      adapterId: "agent-source:cursor",
+      requestId: "cursor-wrapped-turn",
+      layer: "L1",
+      source: "cursor",
+      tags: ["agent-source", "cursor"],
+      title: "<timestamp>Thursday, Sep 17, 2026, 7:00 PM (UTC+8)</timestamp>",
+      turnId: "cursor:wrapped-turn",
+      content: [
+        "## user",
+        "",
+        "<timestamp>Thursday, Sep 17, 2026, 7:00 PM (UTC+8)</timestamp>",
+        "<system_reminder>Workspace metadata.</system_reminder>",
+        "<user_query>",
+        "修复 Cursor 记忆标题。",
+        "</user_query>",
+        "",
+        "## assistant",
+        "",
+        "已修复。"
+      ].join("\n")
+    });
+
+    expect(added.title).toBe("修复 Cursor 记忆标题。");
+
+    const notification = service.addMemory({
+      adapterId: "agent-source:cursor",
+      requestId: "cursor-notification-only",
+      layer: "L1",
+      source: "cursor",
+      tags: ["agent-source", "cursor"],
+      title: "<timestamp>Thursday, Sep 17, 2026, 7:01 PM (UTC+8)</timestamp>",
+      turnId: "cursor:notification-only",
+      content: [
+        "## user",
+        "",
+        "<timestamp>Thursday, Sep 17, 2026, 7:01 PM (UTC+8)</timestamp>",
+        "<system_notification>Task completed.</system_notification>",
+        "",
+        "## assistant",
+        "",
+        "Done."
+      ].join("\n")
+    });
+
+    expect(notification.title).toBe("cursor conversation");
+    db.close();
+  });
+
   it("uses the standard summary prompt for account summaries", async () => {
     const root = createTestRoot("mindock-memory-account-summary-");
     const db = new MemoryDb({

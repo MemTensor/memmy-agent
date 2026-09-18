@@ -163,8 +163,12 @@ export class ImportJobProcessor {
     if (readOnlySkill && !sourceAgentId) {
       throw d.createError("invalid_argument", "memory.add Skill requires sourceAgentId or source");
     }
-    const importTitle = importTrace && d.isAgentSourceImportMemoryAdd(request) ? d.titleFromImportTrace(importTrace) : undefined;
-    const title = importTitle ?? (request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
+    const agentSourceImport = Boolean(importTrace && d.isAgentSourceImportMemoryAdd(request));
+    const importTitle = agentSourceImport && importTrace ? d.titleFromImportTrace(importTrace) : undefined;
+    const title = importTitle
+      ?? (agentSourceImport
+        ? `${request.source?.trim() || "Agent"} conversation`
+        : request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
     const importSummary = importTrace ? stringFromRecord(importTrace, "summary") || IMPORT_SUMMARY_QUEUED_TAG : undefined;
     const tags = d.memoryAddTags(request, importTrace !== null, importTrace ? stringArray(importTrace.tags) : []);
     const memoryKey = d.memoryAddKey(request, layer, title);
