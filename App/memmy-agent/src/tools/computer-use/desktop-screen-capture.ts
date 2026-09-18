@@ -76,12 +76,11 @@ export function screenCaptureEnabled(config: any, platform = process.platform, a
   return enabled.some((name: string) => ['*', 'get_screen_state', 'mcp_open_computer_use_get_screen_state'].includes(name));
 }
 export class DesktopScreenCaptureTool extends Tool {
-  static pluginDiscoverable = false;
   static enabled(ctx: any): boolean { return screenCaptureEnabled(ctx.runtimeState ? { mcpServers: ctx.runtimeState.mcpServers } : ctx.config); }
   static create(ctx: any): DesktopScreenCaptureTool { return new DesktopScreenCaptureTool(() => screenCaptureEnabled(ctx.runtimeState ? { mcpServers: ctx.runtimeState.mcpServers } : ctx.config)); }
   constructor(private readonly enabledNow: () => boolean = () => false, private readonly client = desktopScreenClient) { super(); }
   get name(): string { return 'get_screen_state'; }
-  get description(): string { return 'Observe the currently visible main screen, or a specified display_id, without opening, focusing or restoring any application. Provided by Memmy Desktop; requires Memmy screen recording permission, not Open Computer Use accessibility. Never use Finder/get_app_state as a substitute.'; }
+  get description(): string { return 'Observe the currently visible main screen, or a specified display_id, without opening, focusing or restoring any application. Call this tool for requests to see the current screen, including when permission has not been granted: it checks Memmy screen-recording permission and presents authorization guidance if needed. Do not infer permission from tool availability or prior messages. Never use Finder/get_app_state as a substitute.'; }
   get parameters() { return { type: 'object', properties: { display_id: { type: 'integer', minimum: 1 } }, additionalProperties: false }; }
   get exclusive(): boolean { return true; }
   async execute(params: { display_id?: number } = {}, context?: ToolExecutionContext): Promise<any> {

@@ -22,7 +22,14 @@ describe('passive desktop capture', () => {
   });
   it('opens Settings once per denied period, without requesting AX access', async () => {
     const { capture, deps } = fixture(); deps.getStatus.mockReturnValue('denied');
-    await capture(); await capture(); expect(deps.openSettings).toHaveBeenCalledOnce(); expect(deps.getSources).not.toHaveBeenCalled();
+    const result = await capture();
+    expect(result).toMatchObject({ ok: false, code: 'permission_required' });
+    if (!result.ok) {
+      expect(result.message).toContain('系统设置 → 隐私与安全性');
+      expect(result.message).toContain('Memmy'); expect(result.message).toContain('Electron');
+      expect(result.message).toContain('退出并重新打开'); expect(result.message).toContain('重新发送');
+    }
+    await capture(); expect(deps.openSettings).toHaveBeenCalledOnce(); expect(deps.getSources).not.toHaveBeenCalled();
     deps.getStatus.mockReturnValue('granted'); await capture(); deps.getStatus.mockReturnValue('denied'); await capture(); expect(deps.openSettings).toHaveBeenCalledTimes(2);
   });
   it.each(['unknown', 'restricted'])('blocks %s permission without a screenshot or prompt', async status => {

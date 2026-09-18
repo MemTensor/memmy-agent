@@ -25,7 +25,11 @@ export function createDesktopScreenCapture(deps: {
           if (status === 'not-determined') await deps.getSources(options).catch(() => undefined);
           else await deps.openSettings();
         }
-        return { ok: false, code: 'permission_required', message: '查看当前屏幕需要 Memmy 的屏幕录制权限。请在系统设置 → 隐私与安全性 → 屏幕录制中允许当前 Memmy/Electron 应用；按系统要求重启后，重新发送消息。此次未返回屏幕图片。' };
+        return { ok: false, code: 'permission_required', message: [
+          '目前还没有获得 Memmy 的屏幕录制权限，暂时无法查看屏幕内容。',
+          '请在弹出的系统授权提示或系统设置中开启：\n**系统设置 → 隐私与安全性 → 屏幕与系统音频录制（屏幕录制）**\n找到 **Memmy** 并打开开关；开发版可能显示为 **Electron**。',
+          '这次需要授权的是 Memmy 本身，不是 Open Computer Use。如果系统提示「退出并重新打开」，请按提示重启 Memmy，然后重新发送“帮我看下屏幕内容”。此次没有向模型返回屏幕图片。',
+        ].join('\n\n') };
       }
       if (status !== 'granted') return failed('unavailable', '无法确认 Memmy 的屏幕录制权限，或权限受系统限制。此次未截图。');
       guidanceShown = false;

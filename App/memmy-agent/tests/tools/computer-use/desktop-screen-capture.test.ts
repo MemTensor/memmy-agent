@@ -1,7 +1,22 @@
 import { EventEmitter } from 'node:events';
 import { expect, it, vi } from 'vitest';
-import { DesktopScreenClient, DesktopScreenCaptureTool, screenCaptureEnabled } from '../../../src/tools/computer-use/desktop-screen-capture.js';
+import { DesktopScreenClient, DesktopScreenCaptureTool, desktopScreenClient, screenCaptureEnabled } from '../../../src/tools/computer-use/desktop-screen-capture.js';
 import { isManagedOcuConfig, managedOcuEnvironment } from '../../../src/tools/computer-use/open-computer-use-binary.js';
+import { ToolLoader } from '../../../src/core/agent-runtime/tools/loader.js';
+import { Config } from '../../../src/config/schema.js';
+
+it.skipIf(process.platform !== 'darwin')('registers passive capture through the real builtin loader after desktop handshake', () => {
+  const available = desktopScreenClient.available;
+  const ctx = { config: new Config().tools, runtimeState: { mcpServers: { open_computer_use: { command: 'open-computer-use', args: ['mcp'] } } } };
+  try {
+    desktopScreenClient.available = true;
+    const registry = new ToolLoader({ ctx: ctx as any }).loadRegistry();
+    expect(registry.get('get_screen_state')).toBeInstanceOf(DesktopScreenCaptureTool);
+    expect(registry.getDefinitions().some(tool => tool.function.name === 'get_screen_state')).toBe(true);
+    desktopScreenClient.available = false;
+    expect(new ToolLoader({ ctx: ctx as any }).loadRegistry().get('get_screen_state')).toBeUndefined();
+  } finally { desktopScreenClient.available = available; }
+});
 
 it('exposes passive capture only to supported, enabled desktop presets', () => {
   const cfg = { command: 'open-computer-use', args: ['mcp'] };
