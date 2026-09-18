@@ -561,10 +561,17 @@ function AudioRecordCard(props: {
   const [lines, setLines] = useState<AsrLiveLine[]>([]);
   const [transcript, setTranscript] = useState<RecordingPanelTranscript | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  // Live transcription (streaming, or its segmented-HTTP fallback) can fail
+  // without the recording itself failing — the diarized pass at the end still
+  // has its own shot. Silently dropping that failure left the card looking
+  // idle with no lines and no explanation; this is the only place its message
+  // reaches the user.
+  const [liveError, setLiveError] = useState<string | null>(null);
   const recorder = useAsrRecorder(props.asrClient, {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
-      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS))
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS)),
+      onError: (liveErr) => setLiveError((current) => current ?? liveErr.message)
     }
   });
   const answered = props.status === "answered";
@@ -629,6 +636,7 @@ function AudioRecordCard(props: {
     setLines([]);
     setLevels([]);
     setTranscript(null);
+    setLiveError(null);
     void recorder.start().catch(() => undefined);
   };
 
@@ -680,9 +688,11 @@ function AudioRecordCard(props: {
     ? t("plugin.ui.audio.unavailable")
     : recorder.error && !answered
       ? recorder.error.message
-      : props.status === "error"
-        ? t("plugin.ui.responseFailed")
-        : null;
+      : liveError && !answered
+        ? liveError
+        : props.status === "error"
+          ? t("plugin.ui.responseFailed")
+          : null;
 
   return (
     <div className={`recording-bar${recorder.isRecording ? " recording-bar--live" : ""}`}>
