@@ -3,6 +3,21 @@ export function nextPdfMatchIndex(current: number, direction: -1 | 1, count: num
   return (current + direction + count) % count;
 }
 
+/** Computes the rendered scale for manual zoom or fit-to-width mode. */
+export function computePdfDisplayScale(input: {
+  pageWidth: number;
+  pageHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  fit: "width" | null;
+  scale: number;
+}): number {
+  if (input.fit === "width") {
+    return Math.max(0.1, input.viewportWidth / input.pageWidth);
+  }
+  return input.scale;
+}
+
 export function highlightPdfTextLayer(
   container: HTMLDivElement | null,
   rawQuery: string,

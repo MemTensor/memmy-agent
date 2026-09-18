@@ -9,6 +9,7 @@ import {
   type PluginArtifactManager,
   type PluginRuntimeHost
 } from "../plugin-service.js";
+import type { PluginLocalArtifactService } from "../plugin-local-artifact-service.js";
 
 let root: string | undefined;
 let store: AppStateStore | undefined;
@@ -48,7 +49,10 @@ const release = {
   }
 };
 
-function createContext(releases: PluginRelease[] = [release]) {
+function createContext(
+  releases: PluginRelease[] = [release],
+  localArtifactService?: PluginLocalArtifactService
+) {
   root = mkdtempSync(join(tmpdir(), "memmy-plugin-service-"));
   store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
   const runtimeHost: PluginRuntimeHost = {
@@ -83,7 +87,8 @@ function createContext(releases: PluginRelease[] = [release]) {
       registry: createInMemoryPluginRegistry(releases),
       runtimeHost,
       artifactManager,
-      skillManager
+      skillManager,
+      localArtifactService
     })
   };
 }
@@ -236,6 +241,55 @@ describe("PluginService", () => {
     expect(() => service.configure(release.manifest.id, {
       config: { database: "pubmed" }
     })).toThrow(/Disable plugin/);
+  });
+
+  it("rewrites result paths to the copies published in the conversation workspace", async () => {
+    const sourcePath = "/plugin-data/review-1/outputs/review.md";
+    const publishedPath = "/workspace/outputs/com.example.review/review-1/review.md";
+    const localArtifactService: PluginLocalArtifactService = {
+      host: vi.fn(async (_plugin, artifact) => ({ ...artifact, path: publishedPath })),
+      open: vi.fn(async () => ({ path: sourcePath, name: "review.md", mediaType: "text/markdown" })),
+      revokePlugin: vi.fn()
+    };
+    const { service, runtimeHost } = createContext([release], localArtifactService);
+    runtimeHost.invoke = async function* () {
+      yield {
+        type: "artifact",
+        artifact: {
+          id: "review",
+          name: "review.md",
+          mediaType: "text/markdown",
+          uri: "file:///plugin-data/review-1/outputs/review.md"
+        }
+      };
+      yield { type: "result", output: { data: { outputs: [{ path: sourcePath }] } } };
+    };
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+
+    const events = [];
+    for await (const event of service.invoke({
+      callId: "call-1",
+      pluginId: release.manifest.id,
+      capabilityId: "run",
+      conversationId: "websocket:chat-1",
+      input: { taskId: "review-1" }
+    })) events.push(event);
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: "artifact", artifact: expect.objectContaining({ path: publishedPath }) }),
+      { type: "result", output: { data: { outputs: [{ path: publishedPath }] } } }
+    ]);
+    expect(localArtifactService.host).toHaveBeenCalledWith(
+      expect.objectContaining({ id: release.manifest.id }),
+      expect.objectContaining({ id: "review" }),
+      { conversationId: "websocket:chat-1", taskId: "review-1", callId: "call-1" }
+    );
   });
 
   it("updates an active plugin and reactivates it atomically", async () => {

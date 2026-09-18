@@ -2275,11 +2275,16 @@ export class WebSocketChannel extends BaseChannel {
     if (!workspace) return httpError(404, "session not found");
     const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
     if (!resolved) return httpError(404, "artifact not found");
+    const workspaceRoot = realpathIfExists(workspace);
+    const relativePath = resolved.kind !== "directory" && isPathInside(resolved.path, workspaceRoot)
+      ? path.relative(workspaceRoot, resolved.path).split(path.sep).join("/")
+      : null;
     return httpJsonResponse({
       ok: true,
       path: resolved.path,
       name: path.basename(expandHomePath(artifactRequest.path)) || path.basename(resolved.path),
       kind: resolved.kind,
+      ...(relativePath ? { relative_path: relativePath } : {}),
       ...(resolved.mediaUrl ? { media_url: resolved.mediaUrl } : {}),
     });
   }

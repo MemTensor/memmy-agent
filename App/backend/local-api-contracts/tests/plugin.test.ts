@@ -149,12 +149,25 @@ describe("CapabilityEventSchema", () => {
   });
 
   it("wraps generic plugin events with call routing context", () => {
-    expect(PluginCapabilityEventPayloadSchema.parse({
+    const parsed = PluginCapabilityEventPayloadSchema.parse({
       pluginId: manifest.id,
       capabilityId: "review",
       callId: "call-1",
       conversationId: "conversation-1",
-      event: { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "file:///report.md" } }
-    }).event.type).toBe("artifact");
+      event: {
+        type: "artifact",
+        artifact: {
+          id: "report",
+          name: "report.md",
+          mediaType: "text/markdown",
+          uri: "/api/v1/plugins/review/artifacts/token/preview",
+          path: "/workspace/outputs/review/task-1/report.md"
+        }
+      }
+    });
+    expect(parsed.event.type).toBe("artifact");
+    if (parsed.event.type === "artifact") {
+      expect(parsed.event.artifact.path).toBe("/workspace/outputs/review/task-1/report.md");
+    }
   });
 });

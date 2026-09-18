@@ -418,7 +418,8 @@ const ResolvedArtifactSchema = z.object({
   path: z.string(),
   name: z.string(),
   kind: z.union([z.literal("image"), z.literal("video"), z.literal("file"), z.literal("directory")]),
-  media_url: z.string().optional()
+  media_url: z.string().optional(),
+  relative_path: z.string().optional()
 });
 
 const RevealArtifactResponseSchema = z.object({

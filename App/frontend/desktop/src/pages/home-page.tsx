@@ -38,6 +38,7 @@ import {
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import { toWorkspaceRelativePath } from "../lib/workspace-relative-path.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import {
   composerFolderReferenceFromFiles,
@@ -448,7 +449,8 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
 
 export function appendPluginArtifact(draft: string, artifact: PluginArtifactRef): string {
   const separator = draft && !draft.endsWith("\n") ? "\n" : "";
-  return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${artifact.uri.replace(/[\r\n]/g, "")}`;
+  const reference = artifact.path ?? artifact.uri;
+  return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${reference.replace(/[\r\n]/g, "")}`;
 }
 
 export interface PluginCommandTarget {
@@ -1220,6 +1222,15 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [previewFocusFile, setPreviewFocusFile] = useState<{ path: string; nonce: number } | null>(null);
+  const [previewFocusExternalFile, setPreviewFocusExternalFile] = useState<{
+    id: string;
+    name: string;
+    nonce: number;
+    load: (signal?: AbortSignal) => Promise<Blob>;
+    open?: () => Promise<void>;
+    reveal?: () => Promise<void>;
+  } | null>(null);
   const [pluginArtifactPreview, setPluginArtifactPreview] = useState<PluginArtifactRef | null>(null);
   const [recordingSession, setRecordingSession] = useState<RecordingPanelSession | null>(null);
   // Calls the user closed from their own button or pane. Their cancellation is
@@ -1395,6 +1406,11 @@ export function HomePage() {
     ?? selectedDraftProject?.name
     ?? activeTask?.title
     ?? t("workspaceArtifact.taskFolder");
+  const previewWorkspaceRoot = activeSession?.cwd
+    ?? activeTask?.cwd
+    ?? activeProject?.rootPath
+    ?? selectedDraftProject?.rootPath
+    ?? null;
   const previewScope: WorkspaceFilesScope | null = previewSessionKey
     ? { kind: "session", key: previewSessionKey }
     : selectedDraftProject
@@ -1445,6 +1461,8 @@ export function HomePage() {
     if (!previewScope) {
       setPreviewPanelOpen(false);
       setPluginArtifactPreview(null);
+      setPreviewFocusFile(null);
+      setPreviewFocusExternalFile(null);
     }
   }, [previewScope?.kind, previewScope?.key]);
 
@@ -1470,9 +1488,62 @@ export function HomePage() {
     return {
       resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
       revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+      openArtifact: (path: string) => client.openArtifact(path, sessionKey),
+      previewArtifact: async (path: string) => {
+        if (!previewScope) return false;
+        let relativePath: string | null = null;
+        let mediaUrl: string | null = null;
+        let artifactName = path.replace(/\\/g, "/").split("/").pop() || path;
+        let artifactPath = path;
+        try {
+          const resolved = await client.resolveArtifact(path, sessionKey);
+          if (resolved.kind === "directory") return false;
+          artifactName = resolved.name || artifactName;
+          artifactPath = resolved.path;
+          mediaUrl = resolved.media_url ?? null;
+          relativePath = resolved.relative_path?.replace(/\\/g, "/")
+            ?? toWorkspaceRelativePath(resolved.path, previewWorkspaceRoot)
+            ?? toWorkspaceRelativePath(path, previewWorkspaceRoot);
+        } catch {
+          relativePath = toWorkspaceRelativePath(path, previewWorkspaceRoot);
+        }
+        if (recordingEntry.open) recordingEntry.close();
+        setPluginArtifactPreview(null);
+        setPreviewPanelOpen(true);
+        if (relativePath) {
+          setPreviewFocusExternalFile(null);
+          setPreviewFocusFile({ path: relativePath, nonce: Date.now() });
+          return true;
+        }
+        if (mediaUrl) {
+          const loadUrl = mediaUrl;
+          setPreviewFocusFile(null);
+          setPreviewFocusExternalFile({
+            id: artifactPath,
+            name: artifactName,
+            nonce: Date.now(),
+            load: async (signal) => {
+              const response = await fetch(loadUrl, { signal });
+              if (!response.ok) throw new Error("media_fetch_failed");
+              return response.blob();
+            },
+            open: () => client.openArtifact(artifactPath, sessionKey),
+            reveal: () => client.revealArtifact(artifactPath, sessionKey)
+          });
+          return true;
+        }
+        return false;
+      }
     };
-  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  }, [
+    clients?.memmyAgent,
+    previewScope?.kind,
+    previewScope?.key,
+    previewWorkspaceRoot,
+    recordingEntry.close,
+    recordingEntry.open,
+    state.agent.currentSessionKey
+  ]);
   const loadPreviewDirectory = useCallback((scope: WorkspaceFilesScope, relativePath: string) => {
     const client = clients?.memmyAgent;
     if (!client) return Promise.reject(new Error("agent_client_unavailable"));
@@ -3651,6 +3722,8 @@ export function HomePage() {
       revealFile={revealWorkspaceFile}
       onAddToChat={addComposerContextChip}
       refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
+      focusFile={previewFocusFile}
+      focusExternalFile={previewFocusExternalFile}
       onWidthChange={setPreviewPanelWidth}
       sharedRowWidth={workspaceLayoutWidth}
       sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
@@ -4030,6 +4103,14 @@ export function HomePage() {
                 asrClient={clients?.asr}
                 onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
                 onOpenArtifact={(artifact) => {
+                  if (artifact.path && sessionArtifactClient) {
+                    void sessionArtifactClient.previewArtifact(artifact.path).then((opened) => {
+                      if (opened) return;
+                      setPreviewPanelOpen(false);
+                      setPluginArtifactPreview(artifact);
+                    });
+                    return;
+                  }
                   setPreviewPanelOpen(false);
                   setPluginArtifactPreview(artifact);
                 }}

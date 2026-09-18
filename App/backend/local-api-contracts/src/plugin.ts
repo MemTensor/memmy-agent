@@ -277,6 +277,8 @@ export const PluginArtifactRefSchema = z.object({
   mediaType: z.string().trim().min(1),
   uri: z.string().trim().min(1),
   downloadUri: z.string().trim().min(1).optional(),
+  /** Absolute Host-published path when the artifact also belongs to the conversation workspace. */
+  path: z.string().trim().min(1).optional(),
   role: PluginArtifactRoleSchema.optional()
 });
 export type PluginArtifactRef = z.infer<typeof PluginArtifactRefSchema>;

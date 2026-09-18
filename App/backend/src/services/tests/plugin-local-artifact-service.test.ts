@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -59,6 +59,40 @@ describe("PluginLocalArtifactService", () => {
       uri: expect.stringContaining("/preview"),
       downloadUri: expect.stringContaining("/download")
     });
+  });
+
+  it("publishes final artifacts into the bound conversation workspace", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-publish-"));
+    const pluginDataRoot = join(root, "plugin-data");
+    const workspace = join(root, "workspace");
+    const output = join(pluginDataRoot, "literature-review", "tasks", "review-1", "outputs", "review.md");
+    mkdirSync(join(pluginDataRoot, "literature-review", "tasks", "review-1", "outputs"), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(output, "# Published review");
+    const service = createPluginLocalArtifactService({
+      pluginDataRoot,
+      resolveWorkspace: async (conversationId) => conversationId === "websocket:chat-1" ? workspace : null
+    });
+
+    const hosted = await service.host({
+      id: "literature-review",
+      approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
+      config: {}
+    }, {
+      id: "review",
+      name: "review.md",
+      mediaType: "text/markdown",
+      uri: pathToFileURL(output).href
+    }, {
+      conversationId: "websocket:chat-1",
+      taskId: "review-1",
+      callId: "call-1"
+    });
+
+    const published = join(workspace, "outputs", "literature-review", "review-1", "review.md");
+    expect(hosted.path).toBe(realpathSync(published));
+    expect(readFileSync(published, "utf8")).toBe("# Published review");
+    expect(readFileSync(output, "utf8")).toBe("# Published review");
   });
 
   it("does not treat a plugin-configured taskRoot as a Host-approved path", async () => {
