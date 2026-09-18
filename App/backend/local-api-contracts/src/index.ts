@@ -1128,6 +1128,36 @@ export const AsrTranscriptionResponseSchema = z.object({
 });
 export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSchema>;
 
+/**
+ * Events on the live ASR stream (`/api/asr/stream`).
+ *
+ * The renderer pushes raw 16 kHz mono PCM as binary frames and receives these
+ * JSON text frames back. `partial` is a provisional reading of the sentence
+ * being spoken; a later frame with the same `sentenceId` replaces it, and
+ * `sentence` is the final text for that id. Speaker attribution is never
+ * present here: the realtime model does not separate speakers, so labels come
+ * only from the diarized pass over the finished recording.
+ */
+export const AsrStreamEventSchema = z.discriminatedUnion("type", [
+    z.object({
+        type: z.enum(["partial", "sentence"]),
+        sentenceId: z.number().int().nonnegative(),
+        text: z.string(),
+        beginMs: z.number().int().nonnegative(),
+        endMs: z.number().int().nonnegative().optional()
+    }),
+    z.object({ type: z.literal("finished") }),
+    z.object({ type: z.literal("error"), message: z.string() })
+]);
+export type AsrStreamEvent = z.infer<typeof AsrStreamEventSchema>;
+
+/** Control frames the renderer sends on the live ASR stream. */
+export const AsrStreamControlSchema = z.discriminatedUnion("type", [
+    z.object({ type: z.literal("start"), sampleRate: z.number().int().positive().optional() }),
+    z.object({ type: z.literal("finish") })
+]);
+export type AsrStreamControl = z.infer<typeof AsrStreamControlSchema>;
+
 export const AccountChannelSchema = z.enum(["email", "phone"]);
 export type AccountChannel = z.infer<typeof AccountChannelSchema>;
 

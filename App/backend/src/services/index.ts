@@ -1,6 +1,7 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { resolveCloudClientConfig } from "../config/service-urls.js";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
@@ -40,6 +41,7 @@ import { createBuiltinSkillTargetRegistry } from "./builtin-skill-target-registr
 import { createAppConfigService, type AppConfigService } from "./app-config-service.js";
 import { createAccountService, type AccountService } from "./account-service.js";
 import { createAsrService, type AsrService } from "./asr-service.js";
+import { createAsrStreamService, type AsrStreamService } from "./asr-stream-service.js";
 import { createTokenQuotaService, type TokenQuotaService } from "./token-quota-service.js";
 import {
   createByokTokenUsageService,
@@ -101,6 +103,8 @@ export interface BackendServices {
   byokTokenUsage: ByokTokenUsageService;
   /** Asr. */
   asr: AsrService;
+  /** Live ASR stream relay to the Cloud. */
+  asrStream: AsrStreamService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
   /** Third-party plugins. */
@@ -167,6 +171,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     accountSessionRepository: options.appStateStore.repositories.accountSession,
     memmyConfigWriter,
     cloudClient: options.cloudClient
+  });
+  const asrStreamService = createAsrStreamService({
+    bootstrapRepository: options.appStateStore.repositories.bootstrap,
+    accountSessionRepository: options.appStateStore.repositories.accountSession,
+    cloudBaseUrl: resolveCloudClientConfig(process.env).baseUrl
   });
   const pluginFileInputRoots = [join(resolveAgentDataRoot(process.env), "media")];
   const pluginModelInference = createPluginModelInferenceService({
@@ -357,6 +366,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       repository: options.appStateStore.repositories.byokTokenUsage
     }),
     asr: asrService,
+    asrStream: asrStreamService,
     tokenQuota: createTokenQuotaService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
