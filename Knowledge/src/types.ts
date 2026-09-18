@@ -39,6 +39,9 @@ export interface KnowledgeEvidence {
   url?: string;
 }
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const FILES_PAGE_SIZE = 20;
+/** Sidebar labels stay readable; 20 CJK chars also fits bilingual titles. */
+export const MAX_BASE_NAME_LENGTH = 20;
 export class KnowledgeError extends Error {
   constructor(
     message: string,

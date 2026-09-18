@@ -15,7 +15,7 @@ export function KnowledgePage() {
         {clients && (
           <KnowledgeManagement
             key={state.account.userId ?? "signed-out"}
-            onSignIn={() => dispatch(appActions.navigate("/login"))}
+            onSignIn={() => dispatch(appActions.navigate("/welcome"))}
             connection={clients.runtimeConfig}
             language={language}
           />

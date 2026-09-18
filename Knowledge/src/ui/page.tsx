@@ -5,12 +5,21 @@ import {
   type KnowledgeFolder,
   type KnowledgeMember,
   type KnowledgeSettings,
+  FILES_PAGE_SIZE,
+  MAX_BASE_NAME_LENGTH,
 } from "../types.js";
 
+import { visiblePages } from "./pagination.js";
 import {
   DOCUMENT_EXTENSIONS,
+  fileRelativePath,
+  filesFromDrop,
+  folderSegments,
+  isAbortError,
+  isJunkUpload,
+  resolveFolderId,
+  summarizeUploads,
   uploadDocuments,
-  type UploadResult,
 } from "./upload.js";
 
 export interface KnowledgePageProps {
@@ -41,8 +50,6 @@ const IC = {
   plus: "M12 5v14M5 12h14",
   search: "M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM21 21l-4.8-4.8",
   dots: "M5 12h.01M12 12h.01M19 12h.01",
-  recall:
-    "M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83",
   upload:
     "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
@@ -86,9 +93,37 @@ function fileExtension(name: string) {
   return (ext || "file").toUpperCase().slice(0, 4);
 }
 
+function NameField({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <span className="mk-name-field">
+      <input
+        value={value}
+        onChange={(event) =>
+          onChange(event.target.value.slice(0, MAX_BASE_NAME_LENGTH))
+        }
+        maxLength={MAX_BASE_NAME_LENGTH}
+        required
+        autoFocus
+        placeholder={placeholder}
+      />
+      <span className="mk-name-count" aria-hidden="true">
+        {value.length}/{MAX_BASE_NAME_LENGTH}
+      </span>
+    </span>
+  );
+}
+
 function fileStatus(status: string, zh: boolean) {
   if (/available|可用|success|completed|done/i.test(status))
-    return { cls: "mk-dot-ok", label: zh ? "可召回" : "Ready" };
+    return { cls: "mk-dot-ok", label: zh ? "可用" : "Available" };
   if (/处理中|上传中|pending|running|processing|uploading/i.test(status))
     return { cls: "mk-dot-busy", label: zh ? "处理中" : "Processing" };
   if (/fail|error|失败|无效/i.test(status))
@@ -163,15 +198,42 @@ export function KnowledgePage({
   const [moveDest, setMoveDest] = useState("");
   const [folderDeleteTarget, setFolderDeleteTarget] = useState<KnowledgeFolder | null>(null);
   const [folderDeleteMode, setFolderDeleteMode] = useState<"out" | "all">("out");
+  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [uploadNotice, setUploadNotice] = useState<{ baseId: string; message: string } | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<
+    | {
+        baseId: string;
+        kind: "progress";
+        current: number;
+        total: number;
+        name: string;
+      }
+    | {
+        baseId: string;
+        kind: "done";
+        succeeded: number;
+        failed: number;
+        format: number;
+        size: number;
+        other: number;
+        stopped: boolean;
+      }
+    | null
+  >(null);
   const [refresh, setRefresh] = useState(0);
   const uploadInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
-  const [uploadResults, setUploadResults] = useState<UploadResult[]>([]);
+  const uploadAbort = useRef<AbortController | null>(null);
+  const uploadingRef = useRef(false);
+  const folderIdRef = useRef(folderId);
+  folderIdRef.current = folderId;
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const [shareUserId, setShareUserId] = useState("");
   const [members, setMembers] = useState<KnowledgeMember[]>([]);
   const api = useMemo(
@@ -207,14 +269,19 @@ export function KnowledgePage({
       },
     [connection.baseUrl, connection.localToken],
   );
-  const acceptSettings = useCallback((value: KnowledgeSettings) => {
-    setSettings(value);
-    setActiveId((current) =>
-      value.bases.some((base) => base.id === current)
-        ? current
-        : (value.bases[0]?.id ?? ""),
-    );
-  }, []);
+  const acceptSettings = useCallback(
+    (value: KnowledgeSettings, fallback: "first" | "none" = "first") => {
+      setSettings(value);
+      setActiveId((current) =>
+        value.bases.some((base) => base.id === current)
+          ? current
+          : fallback === "first"
+            ? (value.bases[0]?.id ?? "")
+            : "",
+      );
+    },
+    [],
+  );
   useEffect(() => {
     const controller = new AbortController();
     void api<KnowledgeSettings>(
@@ -230,7 +297,10 @@ export function KnowledgePage({
     return () => controller.abort();
   }, [api, acceptSettings]);
   useEffect(() => {
-    setUploadResults([]);
+    uploadAbort.current?.abort();
+    uploadingRef.current = false;
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = undefined;
     setUploadNotice(null);
     setMenuOpen(false);
     setAddMenuOpen(false);
@@ -246,6 +316,8 @@ export function KnowledgePage({
     setRowMenu(null);
     setMoveTarget(null);
     setFolderDeleteTarget(null);
+    setChecked(new Set());
+    setBatchDeleteOpen(false);
   }, [activeId]);
   useEffect(() => {
     setMembers([]);
@@ -264,18 +336,24 @@ export function KnowledgePage({
       .then((value) => {
         if (!controller.signal.aborted) setFolders(value.folders ?? []);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setFolders([]);
+      .catch((error) => {
+        if (!controller.signal.aborted && !isAbortError(error)) setFolders([]);
       });
     return () => controller.abort();
   }, [activeId, api, refresh]);
   useEffect(() => {
     setListing(null);
+  }, [activeId, page, folderId]);
+  useEffect(() => {
     if (!activeId) return;
+    const filesUnavailable = zh
+      ? "知识库文件暂时无法加载，请稍后重试。"
+      : "Knowledge files are temporarily unavailable. Please try again later.";
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
-    const load = async () => {
+    const load = async (attempt = 0) => {
+      if (uploadingRef.current) return;
       try {
         const value = await api<KnowledgeFiles>(
           `/bases/${encodeURIComponent(activeId)}/files?page=${page}${folderId ? `&folderId=${encodeURIComponent(folderId)}` : ""}`,
@@ -285,18 +363,31 @@ export function KnowledgePage({
         );
         if (controller.signal.aborted) return;
         setListing(value);
+        setError((current) => (current === filesUnavailable ? "" : current));
         // Refresh processing files and freshly uploaded files without resetting the management form.
         if (
-          value.files.some((file) =>
+          !uploadingRef.current &&
+          (value.files.some((file) =>
             /处理中|上传中|pending|running|processing|uploading/i.test(
               file.status,
             ),
           ) ||
-          (refresh > 0 && polls++ < 6)
+            (refresh > 0 && polls++ < 6))
         )
           timer = setTimeout(() => void load(), 5000);
       } catch (error) {
-        if (!controller.signal.aborted) { console.error("knowledge files request failed", error); setError(zh ? "知识库文件暂时无法加载，请稍后重试。" : "Knowledge files are temporarily unavailable. Please try again later."); }
+        if (
+          controller.signal.aborted ||
+          isAbortError(error) ||
+          uploadingRef.current
+        )
+          return;
+        if (attempt < 2) {
+          timer = setTimeout(() => void load(attempt + 1), 1200);
+          return;
+        }
+        console.error("knowledge files request failed", error);
+        setError(filesUnavailable);
       }
     };
     void load();
@@ -304,7 +395,7 @@ export function KnowledgePage({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [activeId, page, folderId, api, refresh]);
+  }, [activeId, page, folderId, api, refresh, zh]);
   useEffect(() => {
     if (!menuOpen && !addMenuOpen && !rowMenu) return;
     const close = (event: MouseEvent) => {
@@ -351,45 +442,182 @@ export function KnowledgePage({
   async function save(patch: unknown) {
     acceptSettings(await api<KnowledgeSettings>("/settings", "PUT", patch));
   }
+  function confirmDeleteActive() {
+    if (!active || !settings) return;
+    const id = active.id;
+    const snapshot = settings;
+    const remaining = settings.bases.filter((base) => base.id !== id);
+    setDeleteOpen(false);
+    setPage(1);
+    acceptSettings(
+      {
+        ...settings,
+        bases: remaining,
+        enabled: remaining.some((base) => base.selected)
+          ? settings.enabled
+          : false,
+      },
+      "none",
+    );
+    void api<KnowledgeSettings>(`/bases/${encodeURIComponent(id)}`, "DELETE")
+      .then((value) => acceptSettings(value, "none"))
+      .catch((error) => {
+        acceptSettings(snapshot);
+        console.error("knowledge request failed", error);
+        const serverMessage =
+          error instanceof Error &&
+          error.message &&
+          !/failed to fetch|network ?error|load failed|abort/i.test(
+            error.message,
+          )
+            ? error.message
+            : "";
+        setError(
+          serverMessage ||
+            (zh
+              ? "知识库服务暂时不可用，请稍后重试。"
+              : "Knowledge service is temporarily unavailable. Please try again later."),
+        );
+      });
+  }
+  function flushListRefresh() {
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = undefined;
+    setRefresh((value) => value + 1);
+  }
+  function rememberUploadedFile(name: string, destFolderId: string) {
+    if (destFolderId !== folderIdRef.current) return;
+    setListing((current) => {
+      if (!current || current.files.some((file) => file.name === name))
+        return current;
+      return {
+        ...current,
+        files: [
+          ...current.files,
+          {
+            id: `local-${destFolderId}-${name}`,
+            name,
+            status: "processing",
+            message: "",
+          },
+        ],
+        total: current.total + 1,
+      };
+    });
+  }
   function startUpload(files: File[], baseId: string, targetFolderId = "") {
-    if (!files.length) return;
-    const destLabel = folderPathLabel(targetFolderId);
-    void run(async () => {
-      setUploadResults([]);
-      setUploadNotice(null);
-      const results = await uploadDocuments(
-        files,
-        (file, content) =>
-          api(`/bases/${encodeURIComponent(baseId)}/files`, "POST", {
-            name: file.name,
-            content,
-            ...(targetFolderId ? { folderId: targetFolderId } : {}),
-          }),
-        (completed, total, name) =>
-          setUploadNotice({
-            baseId,
-            message: t(
-              `正在上传 ${completed + 1}/${total}：${name}`,
-              `Uploading ${completed + 1}/${total}: ${name}`,
-            ),
-          }),
-        zh,
-      );
-      setUploadResults(results);
-      const succeeded = results.filter((result) => result.ok).length;
-      const failed = results.length - succeeded;
+    const incoming = files.filter(
+      (file) => !isJunkUpload(fileRelativePath(file)),
+    );
+    if (!incoming.length) return;
+    uploadAbort.current?.abort();
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    const cache = new Map<string, string>();
+    for (const folder of folders)
+      cache.set(`${folder.parentId}\0${folder.name}`, folder.id);
+    void (async () => {
+      uploadingRef.current = true;
+      setError("");
       setUploadNotice({
         baseId,
-        message: t(
-          `上传完成：成功 ${succeeded} 个，失败 ${failed} 个，已写入「${destLabel}」。${succeeded ? "云端处理完成后即可参与召回。" : ""}`,
-          `Upload complete: ${succeeded} succeeded, ${failed} failed. Saved to "${destLabel}".${succeeded ? " Documents become searchable after cloud processing." : ""}`,
-        ),
+        kind: "progress",
+        current: 1,
+        total: incoming.length,
+        name: incoming[0]?.name ?? "",
       });
-      if (succeeded) {
-        setPage(1);
-        setRefresh((value) => value + 1);
+      let succeeded = 0;
+      try {
+        const batch = await uploadDocuments(
+          incoming,
+          async (file, content, signal) => {
+            const dest = await resolveFolderId(
+              folderSegments(fileRelativePath(file)),
+              targetFolderId,
+              (parentId, name) => cache.get(`${parentId}\0${name}`),
+              async (parentId, name) => {
+                try {
+                  const created = await api<{ id: string }>(
+                    `/bases/${encodeURIComponent(baseId)}/folders`,
+                    "POST",
+                    {
+                      name,
+                      ...(parentId ? { parentId } : {}),
+                    },
+                    signal,
+                  );
+                  cache.set(`${parentId}\0${name}`, created.id);
+                  setFolders((current) =>
+                    current.some((folder) => folder.id === created.id)
+                      ? current
+                      : [
+                          ...current,
+                          { id: created.id, parentId, name },
+                        ],
+                  );
+                  return created.id;
+                } catch (error) {
+                  if (signal?.aborted) throw error;
+                  const latest = await api<{ folders: KnowledgeFolder[] }>(
+                    `/bases/${encodeURIComponent(baseId)}/folders`,
+                    "GET",
+                    undefined,
+                    signal,
+                  );
+                  const found = (latest.folders ?? []).find(
+                    (folder) =>
+                      folder.parentId === parentId && folder.name === name,
+                  );
+                  if (!found) throw error;
+                  cache.set(`${parentId}\0${name}`, found.id);
+                  setFolders(latest.folders ?? []);
+                  return found.id;
+                }
+              },
+            );
+            await api(
+              `/bases/${encodeURIComponent(baseId)}/files`,
+              "POST",
+              {
+                name: file.name,
+                content,
+                ...(dest ? { folderId: dest } : {}),
+              },
+              signal,
+            );
+            rememberUploadedFile(file.name, dest);
+          },
+          (completed, total, name) =>
+            setUploadNotice({
+              baseId,
+              kind: "progress",
+              current: completed + 1,
+              total,
+              name,
+            }),
+          zh,
+          controller.signal,
+        );
+        const summary = summarizeUploads(batch.results, batch.stopped);
+        succeeded = summary.succeeded;
+        setUploadNotice({ baseId, kind: "done", ...summary });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("knowledge upload failed", error);
+        setUploadNotice(null);
+        setError(
+          zh
+            ? "知识库服务暂时不可用，请稍后重试。"
+            : "Knowledge service is temporarily unavailable. Please try again later.",
+        );
+      } finally {
+        uploadingRef.current = false;
+        if (succeeded) {
+          setPage(1);
+          if (page === 1) flushListRefresh();
+        }
       }
-    });
+    })();
   }
   function toggleBaseSelected(base: KnowledgeBase, on: boolean) {
     const ids = on
@@ -447,7 +675,7 @@ export function KnowledgePage({
     }
     return path;
   }, [folderById, folderId]);
-  /** 目录的可读路径（含根），用于标注上传落点，如「内容 / folder / 新建文件夹」。 */
+  /** 目录的可读路径（含根），用于标注上传落点，如「文件 / folder / 新建文件夹」。 */
   function folderPathLabel(id: string) {
     const names: string[] = [];
     let cursor = id;
@@ -457,7 +685,7 @@ export function KnowledgePage({
       names.unshift(folder.name);
       cursor = folder.parentId;
     }
-    return [t("内容", "Documents"), ...names].join(" / ");
+    return [t("文件", "Files"), ...names].join(" / ");
   }
   /** 移动弹窗可选目录（排除被移动目录自身及其后代）。 */
   const moveOptions = useMemo(() => {
@@ -494,6 +722,58 @@ export function KnowledgePage({
   );
   const subFolderCount = (id: string) =>
     folders.filter((folder) => folder.parentId === id).length;
+  /* ---------- 批量选择与删除 ---------- */
+  const visibleRowKeys = [
+    ...visibleChildFolders.map((folder) => `folder:${folder.id}`),
+    ...visibleFiles.map((file) => `file:${file.id}`),
+  ];
+  const allRowsChecked =
+    visibleRowKeys.length > 0 && visibleRowKeys.every((key) => checked.has(key));
+  const checkedFolderCount = [...checked].filter((key) =>
+    key.startsWith("folder:"),
+  ).length;
+  const checkedFileCount = checked.size - checkedFolderCount;
+  useEffect(() => {
+    setChecked(new Set());
+  }, [folderId, page, fileQuery]);
+  function toggleChecked(key: string, on: boolean) {
+    setChecked((current) => {
+      const next = new Set(current);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+  function toggleCheckAll() {
+    setChecked(allRowsChecked ? new Set() : new Set(visibleRowKeys));
+  }
+  function commitBatchDelete() {
+    if (!active) return;
+    const baseId = active.id;
+    const folderIds = [...checked]
+      .filter((key) => key.startsWith("folder:"))
+      .map((key) => key.slice("folder:".length));
+    const fileIds = [...checked]
+      .filter((key) => key.startsWith("file:"))
+      .map((key) => key.slice("file:".length));
+    void run(async () => {
+      await Promise.all([
+        ...folderIds.map((id) =>
+          api(`/folders/${encodeURIComponent(id)}`, "DELETE", { mode: "all" }),
+        ),
+        ...fileIds.map((id) =>
+          api(
+            `/bases/${encodeURIComponent(baseId)}/files/${encodeURIComponent(id)}`,
+            "DELETE",
+            { page },
+          ),
+        ),
+      ]);
+      setBatchDeleteOpen(false);
+      setChecked(new Set());
+      setRefresh((value) => value + 1);
+    });
+  }
   function enterFolder(id: string, pushHistory = true) {
     if (pushHistory) {
       setFolderBack((stack) => [...stack, folderId]);
@@ -658,7 +938,10 @@ export function KnowledgePage({
           ) : (
             <>
               <div className="mk-group">
-                <div className="mk-group-title">{t("个人知识库", "Personal")}</div>
+                <div className="mk-group-title">
+                  {t("个人知识库", "Personal")}
+                  <span className="mk-group-count">{ownedBases.length}</span>
+                </div>
                 {visibleOwned.map(kbItem)}
                 {!visibleOwned.length && (
                   <p className="mk-group-empty">{ownedBases.length ? t("没有匹配的知识库", "No matching bases") : t("还没有知识库", "No knowledge bases yet")}</p>
@@ -666,7 +949,10 @@ export function KnowledgePage({
               </div>
               {visibleShared.length > 0 && (
                 <div className="mk-group">
-                  <div className="mk-group-title">{t("共享知识库", "Shared with me")}</div>
+                  <div className="mk-group-title">
+                    {t("共享知识库", "Shared with me")}
+                    <span className="mk-group-count">{sharedBases.length}</span>
+                  </div>
                   {visibleShared.map(kbItem)}
                 </div>
               )}
@@ -675,25 +961,9 @@ export function KnowledgePage({
         </div>
         {settings && (
           <footer className="mk-side-foot">
-            <div className="mk-recall-row">
-              <span className="mk-recall-label">
-                <I d={IC.recall} size={13} />
-                {t("知识库召回", "Knowledge recall")}
-              </span>
-              <Switch
-                on={settings.enabled}
-                disabled={!settings.serviceAvailable}
-                label={t("知识库召回总开关", "Knowledge recall master switch")}
-                onChange={(on) => void run(async () => save({ enabled: on }))}
-              />
-            </div>
-            <div className="mk-recall-hint">
-              {settings.enabled
-                ? selected.length
-                  ? t(`已选 ${selected.length} 个库 · 对话时 Agent 将检索并引用这些资料`, `${selected.length} selected · Agent will search and cite them in chats`)
-                  : t("尚未选择知识库，进入知识库后开启「参与召回」", "No base selected. Turn on “Recall” inside a base")
-                : t("开启后，Agent 将在对话中检索选中的知识库", "When on, Agent searches selected bases in chats")}
-            </div>
+            <span className="mk-quota">
+              {t(`可创建的知识库：${ownedBases.length}/${maxBases}`, `Knowledge bases: ${ownedBases.length}/${maxBases}`)}
+            </span>
           </footer>
         )}
       </aside>
@@ -739,17 +1009,21 @@ export function KnowledgePage({
               )}
             </p>
           ) : !active ? (
-            <div className="mk-empty-state">
-              <div className="mk-illust">
-                <I d={IC.book} size={44} />
+            settings.bases.length === 0 ? (
+              <div className="mk-empty-state">
+                <div className="mk-illust">
+                  <I d={IC.book} size={44} />
+                </div>
+                <h3>{t("创建你的第一个知识库", "Create your first knowledge base")}</h3>
+                <p>{t("上传资料后，Memmy 会在对话中检索并引用这些内容", "Upload documents and Memmy will search and cite them in chats")}</p>
+                <button type="button" className="mk-primary" onClick={() => setCreateOpen(true)}>
+                  <I d={IC.plus} size={13} />
+                  {t("新建知识库", "New knowledge base")}
+                </button>
               </div>
-              <h3>{t("创建你的第一个知识库", "Create your first knowledge base")}</h3>
-              <p>{t("上传资料后，Memmy 会在对话中检索并引用这些内容", "Upload documents and Memmy will search and cite them in chats")}</p>
-              <button type="button" className="mk-primary" onClick={() => setCreateOpen(true)}>
-                <I d={IC.plus} size={13} />
-                {t("新建知识库", "New knowledge base")}
-              </button>
-            </div>
+            ) : (
+              <div className="mk-empty-state mk-blank" />
+            )
           ) : (
             <>
               {/* ---------- 知识库头部 ---------- */}
@@ -767,12 +1041,6 @@ export function KnowledgePage({
                     ) : (
                       <>
                         <span>{t("个人知识库", "Personal knowledge base")}</span>
-                        <span className="mk-meta-dot" />
-                        <span>
-                          {listing
-                            ? t(`${listing.total} 个文件`, `${listing.total} files`)
-                            : t("读取中…", "Loading…")}
-                        </span>
                         {activeMembers.length > 0 && (
                           <>
                             <span className="mk-meta-dot" />
@@ -853,8 +1121,8 @@ export function KnowledgePage({
                         aria-haspopup="menu"
                         aria-expanded={addMenuOpen}
                       >
-                        <I d={IC.plus} size={13} />
-                        {t("添加内容", "Add content")}
+                        <I d={IC.upload} size={13} />
+                        {t("上传", "Upload")}
                       </button>
                       {addMenuOpen && (
                         <div className="mk-menu mk-addmenu" role="menu">
@@ -885,6 +1153,19 @@ export function KnowledgePage({
                         </div>
                       )}
                     </div>
+                  )}
+                  {!active.shared && (
+                    <button
+                      type="button"
+                      className="mk-primary"
+                      onClick={() => {
+                        setCreatingFolder(true);
+                        setNewFolderName(t("新建文件夹", "New folder"));
+                      }}
+                    >
+                      <I d={IC.plus} size={13} />
+                      {t("新建", "New")}
+                    </button>
                   )}
                 </div>
               </header>
@@ -950,8 +1231,7 @@ export function KnowledgePage({
                         }
                       }}
                     >
-                      {t("内容", "Documents")}
-                      {listing ? `(${listing.total})` : ""}
+                      {t("文件", "Files")}
                     </a>
                     {crumbPath.map((folder) => (
                       <span key={folder.id} className="mk-crumb-item">
@@ -981,14 +1261,8 @@ export function KnowledgePage({
 
               {/* ---------- 工具条 ---------- */}
               <div className="mk-toolbar">
-                <div className="mk-count">
-                  {t("内容", "Documents")}{" "}
-                  <em>{listing ? `(${listing.total})` : ""}</em>
-                </div>
+                <div className="mk-count">{t("文件", "Files")}</div>
                 <div className="mk-spacer" />
-                {uploadNotice?.baseId === active.id && (
-                  <span className="mk-uploading" role="status">{uploadNotice.message}</span>
-                )}
                 <div className="mk-fsearch">
                   <I d={IC.search} size={13} />
                   <input
@@ -1007,33 +1281,94 @@ export function KnowledgePage({
                   <I d={IC.sort} size={13} />
                   {sortByName ? t("按名称", "By name") : t("默认排序", "Default")}
                 </button>
-                {!active.shared && (
-                  <button
-                    type="button"
-                    className="mk-primary"
-                    onClick={() => {
-                      setCreatingFolder(true);
-                      setNewFolderName(t("新建文件夹", "New folder"));
-                    }}
-                  >
-                    <I d={IC.plus} size={13} />
-                    {t("新建文件夹", "New folder")}
-                  </button>
-                )}
               </div>
-              {uploadResults.some((result) => !result.ok) && (
-                <ul
-                  className="mk-upload-failures"
-                  aria-label={t("上传失败的文件", "Failed uploads")}
+              {checked.size > 0 && !active.shared && (
+                <div className="mk-batchbar" role="toolbar" aria-label={t("批量操作", "Batch actions")}>
+                  <span className="mk-batch-count">
+                    {t(`已选 ${checked.size} 项`, `${checked.size} selected`)}
+                  </span>
+                  <button type="button" className="mk-tool-btn" onClick={toggleCheckAll}>
+                    {allRowsChecked ? t("取消全选", "Deselect all") : t("全选", "Select all")}
+                  </button>
+                  <div className="mk-spacer" />
+                  <button type="button" className="mk-tool-btn" onClick={() => setChecked(new Set())}>
+                    {t("取消选择", "Clear selection")}
+                  </button>
+                  <button type="button" className="mk-danger" onClick={() => setBatchDeleteOpen(true)}>
+                    <I d={IC.trash} size={13} />
+                    {t("删除", "Delete")}
+                  </button>
+                </div>
+              )}
+              {uploadNotice?.baseId === active.id && (
+                <div
+                  className="mk-upload-banner"
+                  role="status"
                 >
-                  {uploadResults
-                    .filter((result) => !result.ok)
-                    .map((result, index) => (
-                      <li key={index}>
-                        {result.name}：{result.error}
-                      </li>
-                    ))}
-                </ul>
+                  {uploadNotice.kind === "progress" ? (
+                    <div className="mk-upload-progress">
+                      <span>
+                        {t(
+                          `正在上传 ${uploadNotice.current}/${uploadNotice.total}：${uploadNotice.name}`,
+                          `Uploading ${uploadNotice.current}/${uploadNotice.total}: ${uploadNotice.name}`,
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="mk-tool-btn"
+                        onClick={() => uploadAbort.current?.abort()}
+                      >
+                        {t("停止上传", "Stop")}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="mk-icon-btn mk-upload-close"
+                        aria-label={t("关闭", "Close")}
+                        onClick={() => setUploadNotice(null)}
+                      >
+                        <I d={IC.close} size={14} />
+                      </button>
+                      <p>
+                        {t(
+                          `上传完成：成功 ${uploadNotice.succeeded} 个，失败 ${uploadNotice.failed} 个`,
+                          `Upload complete: ${uploadNotice.succeeded} succeeded, ${uploadNotice.failed} failed`,
+                        )}
+                      </p>
+                      {uploadNotice.stopped && (
+                        <p>
+                          {t("已停止，其余文件未上传。", "Stopped. Remaining files were not uploaded.")}
+                        </p>
+                      )}
+                      {uploadNotice.format > 0 && (
+                        <p>
+                          {t(
+                            `${uploadNotice.format} 个文件格式不支持，已跳过。支持 PDF、Word、TXT、Markdown、JSON、XML`,
+                            `${uploadNotice.format} unsupported file(s) skipped. Supported: PDF, Word, TXT, Markdown, JSON, XML`,
+                          )}
+                        </p>
+                      )}
+                      {uploadNotice.size > 0 && (
+                        <p>
+                          {t(
+                            `${uploadNotice.size} 个文件超过 20 MB`,
+                            `${uploadNotice.size} file(s) exceed 20 MB`,
+                          )}
+                        </p>
+                      )}
+                      {uploadNotice.other > 0 && (
+                        <p>
+                          {t(
+                            `${uploadNotice.other} 个文件未能上传`,
+                            `${uploadNotice.other} file(s) failed to upload`,
+                          )}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
               )}
 
               {/* ---------- 文件区 ---------- */}
@@ -1049,7 +1384,9 @@ export function KnowledgePage({
                   if (active.shared) return;
                   event.preventDefault();
                   setDragOver(false);
-                  startUpload(Array.from(event.dataTransfer.files), active.id, folderId);
+                  void filesFromDrop(event).then((files) =>
+                    startUpload(files, active.id, folderId),
+                  );
                 }}
               >
                 {!listing ? (
@@ -1063,12 +1400,6 @@ export function KnowledgePage({
                       <h3>{t("这个文件夹是空的", "This folder is empty")}</h3>
                       <p>{t("上传文件到当前目录，或把其他文件移动到这里", "Upload files into this folder, or move existing files here")}</p>
                       {!active.shared && (
-                        <button type="button" className="mk-primary mk-empty-cta" onClick={() => uploadInput.current?.click()}>
-                          <I d={IC.upload} size={13} />
-                          {t("上传文件", "Upload files")}
-                        </button>
-                      )}
-                      {!active.shared && (
                         <p className="mk-empty-limit">{t(`也可以直接拖拽文件到这里，同样上传到「${folderPathLabel(folderId)}」`, `You can also drag files here; they upload to "${folderPathLabel(folderId)}"`)}</p>
                       )}
                     </div>
@@ -1079,12 +1410,6 @@ export function KnowledgePage({
                     </div>
                     <h3>{t("知识库还是空的", "This knowledge base is empty")}</h3>
                     <p>{t("添加文件后，Agent 即可在对话中检索并引用这些资料", "Add documents and Agent can search and cite them in chats")}</p>
-                    {!active.shared && (
-                      <button type="button" className="mk-primary mk-empty-cta" onClick={() => uploadInput.current?.click()}>
-                        <I d={IC.upload} size={13} />
-                        {t("上传文件", "Upload files")}
-                      </button>
-                    )}
                     <div className="mk-fmts">
                       <span>PDF</span><span>Word</span><span>Markdown</span><span>TXT</span><span>JSON</span><span>XML</span>
                     </div>
@@ -1148,6 +1473,16 @@ export function KnowledgePage({
                             setRowMenu({ x: event.clientX, y: event.clientY, kind: "folder", id: folder.id });
                           }}
                         >
+                          {!active.shared && (
+                            <input
+                              type="checkbox"
+                              className="mk-check"
+                              checked={checked.has(`folder:${folder.id}`)}
+                              aria-label={t(`选择文件夹 ${folder.name}`, `Select folder ${folder.name}`)}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) => toggleChecked(`folder:${folder.id}`, event.target.checked)}
+                            />
+                          )}
                           <span className="mk-fic mk-fic-folder" aria-hidden="true"><I d={IC.folder} size={17} /></span>
                           <div className="mk-fmeta">
                             <div className="mk-fname">{folder.name}</div>
@@ -1185,6 +1520,15 @@ export function KnowledgePage({
                             setRowMenu({ x: event.clientX, y: event.clientY, kind: "file", id: file.id });
                           }}
                         >
+                          {!active.shared && (
+                            <input
+                              type="checkbox"
+                              className="mk-check"
+                              checked={checked.has(`file:${file.id}`)}
+                              aria-label={t(`选择 ${file.name}`, `Select ${file.name}`)}
+                              onChange={(event) => toggleChecked(`file:${file.id}`, event.target.checked)}
+                            />
+                          )}
                           <span className="mk-fic" aria-hidden="true">{fileExtension(file.name)}</span>
                           <div className="mk-fmeta">
                             <div className="mk-fname">{file.name}</div>
@@ -1212,7 +1556,7 @@ export function KnowledgePage({
                     )}
                   </ul>
                 )}
-                {listing && listing.total > 20 && (
+                {listing && listing.total > FILES_PAGE_SIZE && (
                   <div className="mk-pagination">
                     <span>
                       {t(`共 ${listing.total} 个文件`, `${listing.total} files`)}
@@ -1224,10 +1568,28 @@ export function KnowledgePage({
                     >
                       {t("上一页", "Previous")}
                     </button>
-                    <span>{page}</span>
+                    {visiblePages(
+                      page,
+                      Math.ceil(listing.total / FILES_PAGE_SIZE),
+                    ).map((item, index) =>
+                      item === "gap" ? (
+                        <span key={`gap-${index}`} className="mk-page-gap">
+                          …
+                        </span>
+                      ) : (
+                        <button
+                          key={item}
+                          type="button"
+                          className={item === page ? "mk-page-on" : undefined}
+                          onClick={() => setPage(item)}
+                        >
+                          {item}
+                        </button>
+                      ),
+                    )}
                     <button
                       type="button"
-                      disabled={page * 20 >= listing.total}
+                      disabled={page * FILES_PAGE_SIZE >= listing.total}
                       onClick={() => setPage((value) => value + 1)}
                     >
                       {t("下一页", "Next")}
@@ -1241,11 +1603,11 @@ export function KnowledgePage({
       </main>
 
       {/* ============ 创建知识库（仅名称） ============ */}
-      {settings && createOpen && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-create-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setCreateOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-create-title">{t("创建个人知识库", "New knowledge base")}</h2><form onSubmit={(event) => { event.preventDefault(); const value = name.trim(); if (!value) return; void run(async () => { const before = new Set((settings?.bases ?? []).map((base) => base.id)); const next = await api<KnowledgeSettings>("/bases", "POST", { name: value }); acceptSettings(next); const created = next.bases.find((base) => !before.has(base.id)); if (created) setActiveId(created.id); setName(""); setCreateOpen(false); }); }}><label>{t("名称", "Name")}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={200} required autoFocus placeholder={t("请输入知识库名称", "Knowledge base name")} /></label><div className="mk-modal-actions"><button type="button" onClick={() => setCreateOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="submit" disabled={!name.trim() || !settings.serviceAvailable}>{t("确认创建", "Create")}</button></div></form></div></div>}
-      {settings && renameOpen && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-rename-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setRenameOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-rename-title">{t("重命名知识库", "Rename knowledge base")}</h2><p>{t("新名称会同步给所有已共享的用户，对方刷新后即可看到。", "The new name syncs to everyone this base is shared with once they refresh.")}</p><form onSubmit={(event) => { event.preventDefault(); const value = renameName.trim(); if (!value || value === active.name) { setRenameOpen(false); return; } void run(async () => { acceptSettings(await api<KnowledgeSettings>(`/bases/${encodeURIComponent(active.id)}`, "PATCH", { name: value })); setRenameName(""); setRenameOpen(false); }); }}><label>{t("名称", "Name")}<input value={renameName} onChange={(event) => setRenameName(event.target.value)} maxLength={200} required autoFocus /></label><div className="mk-modal-actions"><button type="button" onClick={() => setRenameOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="submit" disabled={!renameName.trim() || renameName.trim() === active.name}>{t("保存", "Save")}</button></div></form></div></div>}
+      {settings && createOpen && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-create-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setCreateOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-create-title">{t("创建个人知识库", "New knowledge base")}</h2><form onSubmit={(event) => { event.preventDefault(); const value = name.trim(); if (!value) return; void run(async () => { const before = new Set((settings?.bases ?? []).map((base) => base.id)); const next = await api<KnowledgeSettings>("/bases", "POST", { name: value }); acceptSettings(next); const created = next.bases.find((base) => !before.has(base.id)); if (created) setActiveId(created.id); setName(""); setCreateOpen(false); }); }}><label>{t("名称", "Name")}<NameField value={name} onChange={setName} placeholder={t("请输入知识库名称", "Knowledge base name")} /></label><div className="mk-modal-actions"><button type="button" onClick={() => setCreateOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="submit" disabled={!settings.serviceAvailable}>{t("确认创建", "Create")}</button></div></form></div></div>}
+      {settings && renameOpen && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-rename-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setRenameOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-rename-title">{t("重命名知识库", "Rename knowledge base")}</h2><p>{t("新名称会同步给所有已共享的用户，对方刷新后即可看到。", "The new name syncs to everyone this base is shared with once they refresh.")}</p><form onSubmit={(event) => { event.preventDefault(); const value = renameName.trim(); if (!value || value === active.name) { setRenameOpen(false); return; } void run(async () => { acceptSettings(await api<KnowledgeSettings>(`/bases/${encodeURIComponent(active.id)}`, "PATCH", { name: value })); setRenameName(""); setRenameOpen(false); }); }}><label>{t("名称", "Name")}<NameField value={renameName} onChange={setRenameName} /></label><div className="mk-modal-actions"><button type="button" onClick={() => setRenameOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="submit" disabled={!renameName.trim() || renameName.trim() === active.name}>{t("保存", "Save")}</button></div></form></div></div>}
       {settings && shareOpen && active && !active.shared && <div className="mk-modal-backdrop"><div className="mk-action-modal mk-share-modal" role="dialog" aria-modal="true" aria-labelledby="mk-share-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setShareOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-share-title">{t("共享管理", "Sharing")}</h2><p className="mk-share-hint">{t("输入对方的 Memmy 用户 ID 即可共享此知识库；对方可在「账户」页面复制自己的 ID。被共享的用户可以查看文档并参与召回。", "Share by entering the other person's Memmy user ID. They can copy it from the Account page. Shared users can view documents and use recall.")}</p><form className="mk-share-form" onSubmit={(event) => { event.preventDefault(); const userId = shareUserId.trim(); if (!userId) return; void run(async () => { await api(`/bases/${encodeURIComponent(active.id)}/members`, "POST", { userId }); setShareUserId(""); const value = await api<{ members: KnowledgeMember[] }>(`/bases/${encodeURIComponent(active.id)}/members`); setMembers(value.members ?? []); acceptSettings(await api<KnowledgeSettings>("/settings")); }); }}><input value={shareUserId} onChange={(event) => setShareUserId(event.target.value)} placeholder={t("输入用户 ID", "Enter user ID")} aria-label={t("Memmy 用户 ID", "Memmy user ID")} required /><button className="mk-primary" type="submit" disabled={!shareUserId.trim()}>{t("添加", "Add")}</button></form>{activeMembers.length ? (<ul className="mk-members">{activeMembers.map((member) => (<li key={member.userId}><span className="mk-member-avatar" aria-hidden="true">{(member.name || "?").trim().charAt(0).toUpperCase()}</span><div className="mk-member-meta"><strong>{member.name}</strong><small>ID {member.userId}</small></div><button className="mk-member-revoke" type="button" onClick={() => setRevokeTarget(member)}>{t("移除", "Remove")}</button></li>))}</ul>) : (<p className="mk-share-empty">{t("暂未共享给其他用户。", "Not shared with anyone yet.")}</p>)}</div></div>}
       {revokeTarget && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-revoke-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setRevokeTarget(null)}><I d={IC.close} size={14} /></button><h2 id="mk-revoke-title">{t("取消分享", "Unshare knowledge base")}</h2><p>{t(`确定取消与“${revokeTarget.name}（${revokeTarget.userId}）”的共享吗？对方刷新后将无法继续访问此知识库。`, `Unshare this knowledge base from “${revokeTarget.name} (${revokeTarget.userId})”? They will lose access after refreshing.`)}</p><div className="mk-modal-actions"><button type="button" onClick={() => setRevokeTarget(null)}>{t("取消", "Cancel")}</button><button className="mk-danger" type="button" onClick={() => { const target = revokeTarget; void run(async () => { await api(`/bases/${encodeURIComponent(active.id)}/members/${encodeURIComponent(target.userId)}`, "DELETE"); setMembers((current) => current.filter((item) => item.userId !== target.userId)); setRevokeTarget(null); acceptSettings(await api<KnowledgeSettings>("/settings")); }); }}>{t("确认取消分享", "Unshare")}</button></div></div></div>}
-      {deleteOpen && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-delete-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setDeleteOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-delete-title">{t("删除知识库", "Delete knowledge base")}</h2><p>{t("彻底删除此知识库及全部文件？删除后无法恢复。", "Permanently delete this knowledge base and all its files? This cannot be undone.")}</p><div className="mk-modal-actions"><button type="button" onClick={() => setDeleteOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-danger" type="button" onClick={() => { const id = active.id; void run(async () => { acceptSettings(await api<KnowledgeSettings>(`/bases/${encodeURIComponent(id)}`, "DELETE")); setDeleteOpen(false); setPage(1); }); }}>{t("确认删除", "Delete")}</button></div></div></div>}
+      {deleteOpen && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-delete-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setDeleteOpen(false)}><I d={IC.close} size={14} /></button><h2 id="mk-delete-title">{t("删除知识库", "Delete knowledge base")}</h2><p>{t("彻底删除此知识库及全部文件？删除后无法恢复。", "Permanently delete this knowledge base and all its files? This cannot be undone.")}</p><div className="mk-modal-actions"><button type="button" onClick={() => setDeleteOpen(false)}>{t("取消", "Cancel")}</button><button className="mk-danger" type="button" onClick={confirmDeleteActive}>{t("确认删除", "Delete")}</button></div></div></div>}
       {fileDeleteTarget && active && <div className="mk-modal-backdrop"><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-file-delete-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setFileDeleteTarget(null)}><I d={IC.close} size={14} /></button><h2 id="mk-file-delete-title">{t("删除文件", "Delete file")}</h2><p>{t(`从云端删除“${fileDeleteTarget.name}”？此操作也会影响该知识库的其他使用方。`, `Delete “${fileDeleteTarget.name}” from the cloud? This also affects other users of this knowledge base.`)}</p><div className="mk-modal-actions"><button type="button" onClick={() => setFileDeleteTarget(null)}>{t("取消", "Cancel")}</button><button className="mk-danger" type="button" onClick={() => { const target = fileDeleteTarget; void run(async () => { await api(`/bases/${encodeURIComponent(active.id)}/files/${encodeURIComponent(target.id)}`, "DELETE", { page }); setFileDeleteTarget(null); setRefresh((value) => value + 1); }); }}>{t("确认删除", "Delete")}</button></div></div></div>}
       {/* ---------- 行右键菜单 ---------- */}
       {rowMenu && (() => {
@@ -1298,13 +1660,42 @@ export function KnowledgePage({
         );
       })()}
       {/* ---------- 移动到目录 ---------- */}
-      {moveTarget && (<div className="mk-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMoveTarget(null); }}><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-move-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setMoveTarget(null)}><I d={IC.close} size={14} /></button><h2 id="mk-move-title">{t("移动到…", "Move to…")}</h2><p>{t(`将“${moveTarget.name}”移动到：`, `Move “${moveTarget.name}” to:`)}</p><div className="mk-tree"><div className={`mk-tree-item${moveDest === "" ? " mk-tree-on" : ""}`} role="button" tabIndex={0} onClick={() => setMoveDest("")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(""); } }}><I d={IC.folder} size={14} />{t("内容（根目录）", "Documents (root)")}</div>{moveOptions.map(({ folder, depth }) =><div key={folder.id} className={`mk-tree-item${moveDest === folder.id ? " mk-tree-on" : ""}`} style={{ paddingLeft: 10 + depth * 22 }} role="button" tabIndex={0} onClick={() => setMoveDest(folder.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(folder.id); } }}><I d={IC.folder} size={14} />{folder.name}</div>)}</div><div className="mk-modal-note"><I d={IC.book} size={13} /><span>{t("目录结构保存在 Memmy 本地，移动不会重新上传文件。", "Folders are stored in Memmy. Moving does not re-upload files.")}</span></div><div className="mk-modal-actions"><button type="button" onClick={() => setMoveTarget(null)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="button" onClick={commitMove}>{t("移动", "Move")}</button></div></div></div>)}
+      {moveTarget && (<div className="mk-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMoveTarget(null); }}><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-move-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setMoveTarget(null)}><I d={IC.close} size={14} /></button><h2 id="mk-move-title">{t("移动到…", "Move to…")}</h2><p>{t(`将“${moveTarget.name}”移动到：`, `Move “${moveTarget.name}” to:`)}</p><div className="mk-tree"><div className={`mk-tree-item${moveDest === "" ? " mk-tree-on" : ""}`} role="button" tabIndex={0} onClick={() => setMoveDest("")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(""); } }}><I d={IC.folder} size={14} />{t("文件（根目录）", "Files (root)")}</div>{moveOptions.map(({ folder, depth }) =><div key={folder.id} className={`mk-tree-item${moveDest === folder.id ? " mk-tree-on" : ""}`} style={{ paddingLeft: 10 + depth * 22 }} role="button" tabIndex={0} onClick={() => setMoveDest(folder.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(folder.id); } }}><I d={IC.folder} size={14} />{folder.name}</div>)}</div><div className="mk-modal-note"><I d={IC.book} size={13} /><span>{t("目录结构保存在 Memmy 本地，移动不会重新上传文件。", "Folders are stored in Memmy. Moving does not re-upload files.")}</span></div><div className="mk-modal-actions"><button type="button" onClick={() => setMoveTarget(null)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="button" onClick={commitMove}>{t("移动", "Move")}</button></div></div></div>)}
       {/* ---------- 拖拽上传落点提示 ---------- */}
       {dragOver && !active?.shared && (
         <div className="mk-drop-mask" aria-hidden="true">
           <div className="mk-drop-card">
             <h3>{t("松开鼠标上传", "Drop to upload")}</h3>
             <p>{t("上传到：", "Upload to: ")}{folderPathLabel(folderId)}</p>
+          </div>
+        </div>
+      )}
+      {/* ---------- 批量删除 ---------- */}
+      {batchDeleteOpen && active && (
+        <div className="mk-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setBatchDeleteOpen(false); }}>
+          <div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-batch-delete-title">
+            <button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setBatchDeleteOpen(false)}><I d={IC.close} size={14} /></button>
+            <h2 id="mk-batch-delete-title">{t("批量删除", "Delete selected")}</h2>
+            <p>
+              {checkedFolderCount > 0 && checkedFileCount > 0
+                ? t(
+                    `将删除选中的 ${checkedFolderCount} 个文件夹和 ${checkedFileCount} 个文件；文件夹中的内容会一并删除，且无法恢复。`,
+                    `Delete the selected ${checkedFolderCount} folder(s) and ${checkedFileCount} file(s)? Folder contents are deleted too. This cannot be undone.`,
+                  )
+                : checkedFolderCount > 0
+                  ? t(
+                      `将删除选中的 ${checkedFolderCount} 个文件夹，其中的内容会一并删除，且无法恢复。`,
+                      `Delete the selected ${checkedFolderCount} folder(s)? Their contents are deleted too. This cannot be undone.`,
+                    )
+                  : t(
+                      `将删除选中的 ${checkedFileCount} 个文件，删除后无法恢复。`,
+                      `Delete the selected ${checkedFileCount} file(s)? This cannot be undone.`,
+                    )}
+            </p>
+            <div className="mk-modal-actions">
+              <button type="button" onClick={() => setBatchDeleteOpen(false)}>{t("取消", "Cancel")}</button>
+              <button className="mk-danger" type="button" onClick={commitBatchDelete}>{t("确认删除", "Delete")}</button>
+            </div>
           </div>
         </div>
       )}
@@ -1318,14 +1709,16 @@ const styles = `
 .memmy-knowledge{--mk-accent:#2fb393;--mk-accent-hover:#25a082;--mk-accent-tint:#e6f4f0;--mk-accent-deep:#3d8570;--mk-side:#f7f9f8;--mk-line:#e9efed;--mk-line-strong:#dfe7e4;--mk-ink:#1b2a27;--mk-sub:#5f716d;--mk-ter:#9aa8a4;--mk-warn:#dfa04a;--mk-err:#e1707e;display:flex;height:100%;min-height:0;position:relative;color:var(--mk-ink);font-size:14px;width:100%;box-sizing:border-box;background:#fff}
 .memmy-knowledge fieldset{border:0;padding:0;margin:0;min-width:0;display:contents}
 .memmy-knowledge p{margin:6px 0;line-height:1.65}
-.memmy-knowledge button{border:1px solid var(--mk-line-strong);border-radius:8px;padding:7px 12px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;font-size:13px;font-family:inherit}
+.memmy-knowledge button{-webkit-appearance:none;appearance:none;border:1px solid var(--mk-line-strong);border-radius:8px;padding:7px 12px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;font-size:13px;font-family:inherit;transform:none;transition:background .15s ease,border-color .15s ease,color .15s ease}
 .memmy-knowledge button:hover{background:#f4f7f6}
+.memmy-knowledge button:active{transform:none;filter:none}
 .memmy-knowledge button:disabled,.memmy-knowledge fieldset:disabled{opacity:.55;cursor:default}
 .memmy-knowledge input{border:1px solid var(--mk-line-strong);border-radius:8px;padding:8px 12px;background:#fff;color:inherit;min-width:0;box-sizing:border-box;font-size:13px;font-family:inherit}
 .memmy-knowledge input:focus-visible{outline:none;border-color:var(--mk-accent);box-shadow:0 0 0 3px rgba(47,179,147,.14)}
 .memmy-knowledge :focus-visible{outline:2px solid var(--mk-accent);outline-offset:2px}
 .memmy-knowledge .mk-primary{display:inline-flex;align-items:center;gap:6px;background:var(--mk-accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-weight:700}
-.memmy-knowledge .mk-primary:hover:not(:disabled){background:var(--mk-accent-hover)}
+.memmy-knowledge .mk-primary:hover:not(:disabled),.memmy-knowledge .mk-primary:active:not(:disabled){background:var(--mk-accent-hover);transform:none}
+.memmy-knowledge .mk-primary:disabled{opacity:1;background:var(--mk-accent);color:#fff}
 .memmy-knowledge .mk-danger{background:#c05a55;color:#fff;border:0;border-radius:8px;padding:8px 16px}
 .memmy-knowledge .mk-danger:hover{background:#a94c47}
 .memmy-knowledge .mk-loading{padding:40px 0;text-align:center;color:var(--mk-ter);font-size:13px}
@@ -1362,6 +1755,7 @@ const styles = `
 .mk-side-loading{padding:20px 10px;font-size:12px;color:var(--mk-ter)}
 .mk-group{margin-top:6px}
 .mk-group-title{padding:6px 10px;font-size:11.5px;font-weight:700;color:var(--mk-ter)}
+.mk-group-count{margin-left:6px;font-size:10.5px;font-weight:700;color:var(--mk-ter);background:rgba(27,42,39,.06);padding:1px 6px;border-radius:999px}
 .mk-group-empty{padding:8px 10px;font-size:12px;color:var(--mk-ter)}
 .mk-kb{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:8px;cursor:pointer;transition:background .15s ease}
 .mk-kb:hover{background:rgba(27,42,39,.04)}
@@ -1371,11 +1765,8 @@ const styles = `
 .mk-kb-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mk-kb-sub{font-size:11px;color:var(--mk-ter);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mk-recall-dot{width:5px;height:5px;border-radius:50%;background:var(--mk-accent);flex-shrink:0}
-.mk-side-foot{padding:12px 16px 14px;border-top:1px solid var(--mk-line)}
-.mk-recall-row{display:flex;align-items:center;justify-content:space-between}
-.mk-recall-label{font-size:12.5px;font-weight:700;display:inline-flex;align-items:center;gap:7px;color:var(--mk-ink)}
-.mk-recall-label svg{color:var(--mk-accent-deep)}
-.mk-recall-hint{font-size:11px;color:var(--mk-ter);margin-top:5px;line-height:1.5}
+.mk-side-foot{padding:10px 16px}
+.mk-quota{font-size:11.5px;color:var(--mk-ter)}
 
 /* ---------- 主内容区 ---------- */
 .mk-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto;padding-top:var(--codex-toolbar-height,46px)}
@@ -1407,7 +1798,6 @@ const styles = `
 .mk-count{font-size:13px;font-weight:800}
 .mk-count em{font-style:normal;color:var(--mk-ter);font-weight:700;margin-left:2px}
 .mk-spacer{flex:1}
-.mk-uploading{font-size:12px;color:var(--mk-accent-deep);font-weight:600}
 .mk-fsearch{display:flex;align-items:center;gap:7px;background:#f6f8f8;border:1px solid transparent;border-radius:8px;padding:5px 11px;width:180px;color:var(--mk-ter)}
 .mk-fsearch:focus-within{background:#fff;border-color:var(--mk-accent)}
 .mk-fsearch input{border:0;background:transparent;padding:1px 0;font-size:12.5px;width:100%}
@@ -1415,7 +1805,12 @@ const styles = `
 .memmy-knowledge .mk-tool-btn{display:inline-flex;align-items:center;gap:5px;border:0;padding:6px 9px;font-size:12px;font-weight:700;color:var(--mk-sub);background:transparent}
 .memmy-knowledge .mk-tool-btn:hover{color:var(--mk-ink);background:rgba(27,42,39,.05)}
 .memmy-knowledge .mk-tool-on{color:var(--mk-accent-deep);background:var(--mk-accent-tint)}
-.mk-upload-failures{font-size:13px;color:#c05a55;overflow-wrap:anywhere;padding:0 32px 0 52px;margin:0}
+.mk-upload-banner{position:relative;margin:0 32px 12px;padding:10px 36px 10px 14px;border-radius:10px;background:#f7faf9;color:var(--mk-accent-deep);font-size:12.5px;line-height:1.65}
+.mk-upload-banner p{margin:0}
+.mk-upload-banner p+p{margin-top:4px}
+.mk-upload-progress{display:flex;align-items:center;gap:10px;padding-right:0}
+.mk-upload-progress span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.memmy-knowledge .mk-upload-close{position:absolute;right:8px;top:8px}
 
 /* ---------- 文件区 ---------- */
 .mk-body{flex:1;padding:0 32px 28px;min-height:0}
@@ -1425,6 +1820,10 @@ const styles = `
 .mk-drop-card h3{margin:0 0 6px;font-size:15px;font-weight:800;color:var(--mk-accent-deep)}
 .mk-drop-card p{margin:0;font-size:12.5px;color:var(--mk-sub)}
 .mk-flist{list-style:none;padding:0;margin:0}
+.mk-check{width:15px;height:15px;accent-color:var(--mk-accent);flex-shrink:0;cursor:pointer;margin:0}
+.mk-batchbar{display:flex;align-items:center;gap:10px;padding:0 32px 10px;font-size:12.5px}
+.mk-batch-count{font-weight:700;color:var(--mk-sub)}
+.mk-batchbar .mk-danger{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;font-size:12.5px}
 .mk-frow{display:flex;align-items:center;gap:13px;border:1px solid var(--mk-line);border-radius:10px;padding:12px 16px;margin-bottom:8px;transition:border-color .15s ease,box-shadow .15s ease}
 .mk-frow:hover{border-color:var(--mk-line-strong);box-shadow:0 6px 20px rgba(27,42,39,.06)}
 .mk-fic{width:36px;height:36px;border-radius:9px;background:#f2f5f4;color:#7d8d88;display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:800;letter-spacing:.02em;flex-shrink:0}
@@ -1441,11 +1840,16 @@ const styles = `
 .memmy-knowledge .mk-fdel{opacity:0;transition:opacity .15s ease}
 .mk-frow:hover .mk-fdel{opacity:1}
 .memmy-knowledge .mk-fdel:hover{background:#faf0ef;color:#c05a55}
-.mk-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:14px;font-size:12px;color:var(--mk-ter)}
+.mk-pagination{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:14px;font-size:12px;color:var(--mk-ter);flex-wrap:wrap}
 .mk-pagination>span:first-child{margin-right:auto}
+.memmy-knowledge .mk-pagination button{min-width:28px;padding:5px 8px;border:0;background:transparent}
+.memmy-knowledge .mk-pagination button:hover:not(:disabled){background:#f4f7f6}
+.memmy-knowledge .mk-pagination .mk-page-on{background:var(--mk-accent-tint);color:var(--mk-accent-deep);font-weight:700}
+.mk-page-gap{padding:0 4px}
 
 /* ---------- 空状态 ---------- */
 .mk-empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 32px;text-align:center}
+.mk-blank{padding:0}
 .mk-illust{width:112px;height:112px;border-radius:26px;background:var(--mk-accent-tint);color:var(--mk-accent-deep);display:flex;align-items:center;justify-content:center;margin-bottom:22px;position:relative}
 .mk-illust::after{content:"";position:absolute;inset:-11px;border-radius:34px;border:1.5px dashed rgba(47,179,147,.35)}
 .mk-empty-state h3{font-size:16px;font-weight:800;margin:0 0 8px}
@@ -1482,6 +1886,9 @@ const styles = `
 .mk-action-modal>p{font-size:12.5px;color:var(--mk-sub);margin:0 0 18px;line-height:1.65}
 .mk-action-modal form{display:grid;gap:12px}
 .mk-action-modal label{display:grid;gap:7px;font-size:12.5px;font-weight:700}
+.mk-name-field{position:relative;display:block}
+.mk-name-field input{width:100%;padding-right:52px}
+.mk-name-count{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:var(--mk-ter);pointer-events:none}
 .memmy-knowledge .mk-modal-close{position:absolute;right:14px;top:14px;border:0;padding:4px;color:var(--mk-ter);background:transparent;border-radius:7px;display:inline-flex}
 .memmy-knowledge .mk-modal-close:hover{background:#f4f7f6;color:var(--mk-ink)}
 .mk-modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
