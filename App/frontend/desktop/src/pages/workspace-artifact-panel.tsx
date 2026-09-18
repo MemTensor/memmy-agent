@@ -16,6 +16,7 @@ import {
   Folder,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   X
 } from "lucide-react";
 import type {
@@ -179,8 +180,11 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   const [listingsByDirectory, setListingsByDirectory] = useState<
     Record<string, WorkspaceFilesListing | undefined>
   >({});
+  const listingsByDirectoryRef = useRef(listingsByDirectory);
+  listingsByDirectoryRef.current = listingsByDirectory;
   const [loadingDirectories, setLoadingDirectories] = useState<Record<string, boolean>>({});
   const [treeLoadFailed, setTreeLoadFailed] = useState(false);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const [{ paths: openPreviewTabs, activePath: previewPath }, dispatchPreviewTabs] = useReducer(
     previewTabsReducer,
     { paths: [], activePath: null }
@@ -335,6 +339,32 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     }));
     dispatchPreviewTabs({ type: "select", path });
   }, [props.focusExternalFile?.id, props.focusExternalFile?.name, props.focusExternalFile?.nonce]);
+
+  function refreshFileTree() {
+    if (manualRefreshing) return;
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    setTreeLoadFailed(false);
+    setManualRefreshing(true);
+    const cachedPaths = Object.keys(listingsByDirectoryRef.current);
+    const paths = cachedPaths.length > 0 ? cachedPaths : [ROOT_DIRECTORY_KEY];
+    void (async () => {
+      try {
+        await Promise.all(paths.map((path) => (
+          requestDirectory(props.scope, path, generation).catch(() => {
+            if (path === ROOT_DIRECTORY_KEY && requestGenerationRef.current === generation) {
+              setTreeLoadFailed(true);
+            }
+            return null;
+          })
+        )));
+      } finally {
+        // Always clear — a newer refreshKey/scope generation must not leave the
+        // button stuck disabled with `manualRefreshing === true`.
+        setManualRefreshing(false);
+      }
+    })();
+  }
 
   function selectPreviewFile(path: string) {
     dispatchPreviewTabs({ type: "select", path });
@@ -586,6 +616,17 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
             })}
           </div>
           <div className="workspace-artifact-preview-toolbar__actions">
+            {!activeExtra ? (
+              <button
+                type="button"
+                aria-label={t("filePreview.refresh")}
+                title={t("filePreview.refresh")}
+                disabled={manualRefreshing}
+                onClick={refreshFileTree}
+              >
+                <RefreshCw size={15} className={manualRefreshing ? "workspace-artifact-refresh--spin" : undefined} />
+              </button>
+            ) : null}
             {props.toolbarEnd}
           </div>
         </header>

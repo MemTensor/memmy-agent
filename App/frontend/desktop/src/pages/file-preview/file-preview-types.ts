@@ -15,7 +15,7 @@ export interface FilePreviewResource {
 export interface FilePreviewViewState {
   page?: number;
   scale?: number;
-  fit?: "width" | "page" | null;
+  fit?: "width" | null;
   scrollTop?: number;
   markdownMode?: "preview" | "source";
 }

@@ -218,6 +218,23 @@ describe("WorkspaceArtifactPanel", () => {
     expect(container.querySelector(".workspace-artifact-preview-toolbar .workspace-artifact-file-browser__toggle")).not.toBeNull();
   });
 
+  it("reloads cached directories when the refresh button is pressed", async () => {
+    await expandFolder("downloads");
+    expect(loadDirectory).toHaveBeenCalledWith({ kind: "session", key: SESSION_KEY }, "downloads");
+    const before = loadDirectory.mock.calls.length;
+    const refresh = container.querySelector<HTMLButtonElement>(
+      '.workspace-artifact-preview-toolbar__actions button[title="刷新文件树"]'
+    )!;
+    await act(async () => {
+      refresh.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadDirectory.mock.calls.length).toBeGreaterThan(before);
+    expect(loadDirectory).toHaveBeenCalledWith({ kind: "session", key: SESSION_KEY }, "");
+    expect(loadDirectory).toHaveBeenCalledWith({ kind: "session", key: SESSION_KEY }, "downloads");
+  });
+
   it("opens a workspace-relative path requested from outside the panel", async () => {
     await renderPreview(0, false, { path: "outputs/综述.tex", nonce: 1 });
     await act(async () => {

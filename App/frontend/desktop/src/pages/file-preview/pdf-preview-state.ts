@@ -3,26 +3,17 @@ export function nextPdfMatchIndex(current: number, direction: -1 | 1, count: num
   return (current + direction + count) % count;
 }
 
-/** Computes the rendered scale for manual zoom or fit-to-width / fit-to-page modes. */
+/** Computes the rendered scale for manual zoom or fit-to-width mode. */
 export function computePdfDisplayScale(input: {
   pageWidth: number;
   pageHeight: number;
   viewportWidth: number;
   viewportHeight: number;
-  fit: "width" | "page" | null;
+  fit: "width" | null;
   scale: number;
 }): number {
   if (input.fit === "width") {
     return Math.max(0.1, input.viewportWidth / input.pageWidth);
-  }
-  if (input.fit === "page") {
-    return Math.max(
-      0.1,
-      Math.min(
-        input.viewportWidth / input.pageWidth,
-        input.viewportHeight / input.pageHeight
-      )
-    );
   }
   return input.scale;
 }

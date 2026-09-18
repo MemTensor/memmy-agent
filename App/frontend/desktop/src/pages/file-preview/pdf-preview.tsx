@@ -12,7 +12,6 @@ import {
   ChevronRight,
   Minus,
   Plus,
-  Scan,
   Search,
   UnfoldHorizontal,
   GalleryVertical,
@@ -63,7 +62,9 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
   const [page, setPage] = useState(props.initialState?.page ?? 1);
   const [pageDraft, setPageDraft] = useState(String(props.initialState?.page ?? 1));
   const [scale, setScale] = useState(props.initialState?.scale ?? 1);
-  const [fit, setFit] = useState<"width" | "page" | null>(props.initialState?.fit ?? "width");
+  const [fit, setFit] = useState<"width" | null>(
+    props.initialState?.fit === null ? null : "width"
+  );
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<PdfSearchMatch[]>([]);
@@ -252,7 +253,6 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
         <span className="pdf-preview__zoom-value">{Math.round(displayScale * 100)}%</span>
         <button type="button" title={t("filePreview.zoomIn")} aria-label={t("filePreview.zoomIn")} onClick={() => { setFit(null); setScale((value) => clamp((fit ? displayScale : value) + SCALE_STEP)); }}><Plus size={15} /></button>
         <button type="button" className={fit === "width" ? "is-active" : ""} title={t("filePreview.fitWidth")} aria-label={t("filePreview.fitWidth")} onClick={() => setFit("width")}><UnfoldHorizontal size={15} /></button>
-        <button type="button" className={fit === "page" ? "is-active" : ""} title={t("filePreview.fitPage")} aria-label={t("filePreview.fitPage")} onClick={() => setFit("page")}><Scan size={15} /></button>
         <span className="pdf-preview__toolbar-spacer" />
         <button type="button" className={searchOpen ? "is-active" : ""} title={t("filePreview.search")} aria-label={t("filePreview.search")} onClick={() => { setSearchOpen((open) => !open); window.setTimeout(() => searchRef.current?.focus(), 0); }}><Search size={15} /></button>
       </div>
@@ -308,7 +308,6 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
                 document={document}
                 pageNumber={number}
                 targetWidth={viewportSize.width}
-                targetHeight={viewportSize.height}
                 scale={effectiveScale}
                 fit={fit}
                 searchQuery={query}
@@ -330,9 +329,8 @@ function PdfCanvasPage(props: {
   document: PDFDocumentProxy;
   pageNumber: number;
   targetWidth: number;
-  targetHeight?: number;
   scale?: number;
-  fit?: "width" | "page" | null;
+  fit?: "width" | null;
   thumbnail?: boolean;
   searchQuery?: string;
   activeSearchOccurrence?: number | null;
@@ -376,15 +374,13 @@ function PdfCanvasPage(props: {
       ? props.targetWidth / natural.width
       : props.fit === "width"
         ? props.targetWidth / natural.width
-        : props.fit === "page"
-          ? Math.min(props.targetWidth / natural.width, (props.targetHeight ?? natural.height) / natural.height)
-          : props.scale ?? 1;
+        : props.scale ?? 1;
     return page.getViewport({
       scale: props.thumbnail || props.fit
         ? Math.max(0.1, chosenScale)
         : clamp(chosenScale)
     });
-  }, [page, props.fit, props.scale, props.targetHeight, props.targetWidth, props.thumbnail]);
+  }, [page, props.fit, props.scale, props.targetWidth, props.thumbnail]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

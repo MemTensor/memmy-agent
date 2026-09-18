@@ -17,7 +17,7 @@ describe("PDF preview navigation", () => {
     expect(nextPdfMatchIndex(-1, 1, 0)).toBe(-1);
   });
 
-  it("computes distinct fit-width and fit-page scales and keeps them in the toolbar display path", () => {
+  it("computes fit-width scale for the toolbar display path", () => {
     expect(computePdfDisplayScale({
       pageWidth: 600,
       pageHeight: 900,
@@ -26,14 +26,6 @@ describe("PDF preview navigation", () => {
       fit: "width",
       scale: 1.4
     })).toBeCloseTo(1, 5);
-    expect(computePdfDisplayScale({
-      pageWidth: 600,
-      pageHeight: 900,
-      viewportWidth: 600,
-      viewportHeight: 400,
-      fit: "page",
-      scale: 1.4
-    })).toBeCloseTo(400 / 900, 5);
     expect(computePdfDisplayScale({
       pageWidth: 600,
       pageHeight: 900,
@@ -48,8 +40,9 @@ describe("PDF preview navigation", () => {
     expect(source).toContain("Math.round(displayScale * 100)");
     expect(source).toContain("GalleryVertical");
     expect(source).toContain("UnfoldHorizontal");
-    expect(source).toContain("Scan");
     expect(source).toContain("programmaticScrollUntilRef");
+    expect(source).not.toContain("Scan");
+    expect(source).not.toContain("fitPage");
     expect(source).not.toContain("PanelLeftClose");
     expect(source).not.toContain("ChevronsUpDown");
   });
