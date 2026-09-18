@@ -125,6 +125,19 @@ export interface DecisionRepairLlmDraft {
   confidence: number;
 }
 
+export interface FailureExperienceSinkDraft {
+  title: string;
+  trigger: string;
+  procedure: string;
+  verification: string;
+  boundary: string;
+  experienceType: "failure_avoidance" | "repair_instruction";
+  prefer: string[];
+  avoid: string[];
+  supportTraceIds: string[];
+  confidence: number;
+}
+
 export interface DecisionRepairSynthesisRequest {
   trigger: string;
   contextHash: string;
@@ -254,13 +267,18 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       feedback,
       feedbackContextHash
     );
-    const repair = this.maybeCreateDecisionRepair(
-      attributedRequest,
-      feedback,
-      feedbackContextHash,
-      namespaceIdFromContext(context.namespace),
-      repairDraft
-    );
+    const isRevisionFeedback = isRecord(request.rawPayload)
+      && request.rawPayload.source === "relation_classifier"
+      && request.rawPayload.relation === "revision";
+    const repair = isRevisionFeedback && !repairDraft
+      ? undefined
+      : this.maybeCreateDecisionRepair(
+        attributedRequest,
+        feedback,
+        feedbackContextHash,
+        namespaceIdFromContext(context.namespace),
+        repairDraft
+      );
     const updatedRecallEvent = recallEvent && recallOutcome
       ? this.deps.repos.runtime.updateRecallEventOutcome(recallEvent.id, recallOutcome)
       : undefined;
@@ -362,7 +380,7 @@ feedbackContextHash(
     }).slice(0, 32);
   }
 
-async maybeSynthesizeFeedbackDecisionRepair(
+  async maybeSynthesizeFeedbackDecisionRepair(
     request: FeedbackRequest,
     feedback: FeedbackRecord,
     contextHash: string
@@ -413,6 +431,39 @@ async maybeSynthesizeFeedbackDecisionRepair(
       useLlm: this.deps.config.algorithm.feedback.useLlm,
       llm: this.deps.skillLlm
     });
+  }
+
+  async createRevisionDecisionRepair(
+    request: FeedbackRequest,
+    feedback: FeedbackRecord,
+    contextHash: string,
+    namespaceId: string
+  ): Promise<{
+    repairId?: string;
+    contextHash?: string;
+    skipped?: boolean;
+    reason?: string;
+    attachedPolicyIds?: string[];
+  }> {
+    const draft = await this.maybeSynthesizeFeedbackDecisionRepair(request, feedback, contextHash);
+    if (!draft) {
+      return {
+        contextHash,
+        skipped: true,
+        reason: "llm_draft_missing"
+      };
+    }
+    return this.maybeCreateDecisionRepair(
+      request,
+      feedback,
+      contextHash,
+      namespaceId,
+      draft
+    ) ?? {
+      contextHash,
+      skipped: true,
+      reason: "feedback_not_actionable"
+    };
   }
 
 maybeCreateDecisionRepair(
@@ -1947,14 +1998,128 @@ export function normalizeDecisionRepairLlmDraft(value: {
 }): DecisionRepairLlmDraft | undefined {
   const preference = typeof value.preference === "string" ? value.preference.trim() : "";
   const antiPattern = typeof value.anti_pattern === "string" ? value.anti_pattern.trim() : "";
-  if (!preference && !antiPattern) return undefined;
+  if (!preference || !antiPattern) return undefined;
   const confidence = typeof value.confidence === "number" && Number.isFinite(value.confidence)
     ? clampNumber(value.confidence, 0, 1)
-    : 0.5;
+    : undefined;
+  if (confidence === undefined || confidence < 0.6) return undefined;
   return {
-    preference: clip(preference || "Prefer the path that avoids the reported issue.", 360),
-    antiPattern: clip(antiPattern || "Avoid repeating the reported failing approach.", 360),
+    preference: clip(preference, 360),
+    antiPattern: clip(antiPattern, 360),
     severity: value.severity === "warn" ? "warn" : "info",
+    confidence
+  };
+}
+
+export async function synthesizeFailureExperienceSink(
+  input: {
+    feedbackText: string;
+    userRequest: string;
+    agentResponse: string;
+    episodeContext: string;
+    allowedTraceIds: string[];
+  },
+  options: {
+    llm: LlmClient;
+  }
+): Promise<FailureExperienceSinkDraft | undefined> {
+  if (!options.llm.isConfigured()) return undefined;
+  try {
+    const result = await options.llm.completeJson<{
+      title?: unknown;
+      trigger?: unknown;
+      procedure?: unknown;
+      verification?: unknown;
+      boundary?: unknown;
+      experience_type?: unknown;
+      decision_guidance?: unknown;
+      support_trace_ids?: unknown;
+      confidence?: unknown;
+    }>([
+      { role: "system", content: FAILURE_EXPERIENCE_SINK_PROMPT.system },
+      {
+        role: "user",
+        content: failureExperienceSinkUserPrompt({
+          feedbackText: input.feedbackText,
+          userRequest: input.userRequest,
+          agentResponse: input.agentResponse,
+          episodeContext: input.episodeContext,
+          allowedTraceIds: input.allowedTraceIds
+        })
+      }
+    ], {
+      operation: `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`,
+      thinkingMode: "enabled",
+      temperature: 0.2,
+      maxTokens: 900
+    });
+    const draft = normalizeFailureExperienceSinkDraft(result, input.allowedTraceIds);
+    if (!draft) {
+      pipelineLogger.warn("failure_experience.quarantined", {
+        operation: `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`,
+        pipeline: "failure.experience.sink",
+        reason: "invalid_llm_output"
+      });
+    }
+    return draft;
+  } catch (error) {
+    pipelineLogger.warn("failure_experience.quarantined", {
+      operation: `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`,
+      pipeline: "failure.experience.sink",
+      reason: "llm_error",
+      ...memoryErrorFields(error)
+    });
+    return undefined;
+  }
+}
+
+export function normalizeFailureExperienceSinkDraft(
+  value: {
+    title?: unknown;
+    trigger?: unknown;
+    procedure?: unknown;
+    verification?: unknown;
+    boundary?: unknown;
+    experience_type?: unknown;
+    decision_guidance?: unknown;
+    support_trace_ids?: unknown;
+    confidence?: unknown;
+  },
+  allowedTraceIds: string[]
+): FailureExperienceSinkDraft | undefined {
+  const text = (candidate: unknown): string => typeof candidate === "string" ? candidate.trim() : "";
+  const title = text(value.title);
+  const trigger = text(value.trigger);
+  const procedure = text(value.procedure);
+  const verification = text(value.verification);
+  const boundary = text(value.boundary);
+  const guidance = isRecord(value.decision_guidance) ? value.decision_guidance : undefined;
+  const prefer = guidance ? stringArray(guidance.prefer ?? guidance.preference) : [];
+  const avoid = guidance ? stringArray(guidance.avoid ?? guidance.anti_pattern ?? guidance.antiPattern) : [];
+  const supportTraceIds = stringArray(value.support_trace_ids);
+  const confidence = typeof value.confidence === "number" && Number.isFinite(value.confidence)
+    ? value.confidence
+    : undefined;
+  const allowed = new Set(allowedTraceIds);
+  if (
+    !title || !trigger || !procedure || !verification || !boundary ||
+    (value.experience_type !== "failure_avoidance" && value.experience_type !== "repair_instruction") ||
+    !guidance || prefer.length === 0 || avoid.length === 0 || supportTraceIds.length === 0 ||
+    supportTraceIds.some((id) => !allowed.has(id)) ||
+    confidence === undefined || confidence < 0.6 || confidence > 1
+  ) return undefined;
+  return {
+    title,
+    trigger,
+    procedure,
+    verification,
+    boundary,
+    experienceType: value.experience_type === "failure_avoidance"
+      ? "failure_avoidance"
+      : "repair_instruction",
+    prefer,
+    avoid,
+    supportTraceIds: [...new Set(supportTraceIds)],
     confidence
   };
 }
@@ -1972,6 +2137,7 @@ Goal:
 Input:
 - task_context.user_goal: task framing and requirements (may be truncated).
 - phase_chunks: recent traces (conversation + limited tool output snippets).
+- evidence_trace_ids: trace ids that may be cited in support_trace_ids.
 - episode_timeline.turns: ordered user turns with timing.
 - corrective_signals: feedback with turn_index and timing relative to turns.
 
@@ -1986,7 +2152,7 @@ Evidence:
 8) Do not put source-specific entities into title, trigger, procedure, verification, boundary, or decision_guidance unless the structured stable source is present.
 
 Guidance:
-9) prefer: habits that advance completion (may be empty).
+9) prefer: at least one habit that advances completion.
 10) avoid: habits that leave the goal unmet--outcome/behavior gaps only. Do not name tools or channels; do not use "do not use / never call" style lines.
 11) procedure and verification must be checkable from visible outcomes or judgments in the input.
 12) verification: how to tell the task is done or accepted.
@@ -2011,7 +2177,8 @@ Return JSON:
     "prefer": ["..."],
     "avoid": ["..."]
   },
-  "support_trace_ids": ["tr_..."]
+  "support_trace_ids": ["tr_..."],
+  "confidence": 0.0
 }`
 } as const;
 
@@ -2177,6 +2344,7 @@ function failureExperienceSinkUserPrompt(input: {
   userRequest: string;
   agentResponse: string;
   episodeContext: string;
+  allowedTraceIds?: string[];
 }): string {
   const timeline = input.episodeContext
     .split(/\n\s*\n/)
@@ -2198,6 +2366,7 @@ function failureExperienceSinkUserPrompt(input: {
         ].join("\n"), 2400)
       }
     ],
+    evidence_trace_ids: input.allowedTraceIds ?? [],
     episode_timeline: {
       turns: timeline
     },

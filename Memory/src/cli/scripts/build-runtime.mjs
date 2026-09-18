@@ -3,17 +3,19 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
+const require = createRequire(import.meta.url);
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const memoryRoot = resolve(scriptDir, "../../..");
 const repositoryRoot = resolve(memoryRoot, "..");
 const options = parseOptions(process.argv.slice(2));
 const manifest = JSON.parse(await readFile(join(memoryRoot, "package.json"), "utf8"));
 const version = options.version ?? manifest.version;
-const target = options.target ?? hostTarget();
+const target = options.target ?? process.env.MEMMY_MEMORY_TARGET ?? hostTarget();
 const [platform, arch] = validateTarget(target);
 const outputRoot = resolve(options.output ?? join(memoryRoot, "dist", "releases"));
 const assetName = `memmy-memory-runtime-${version}-${target}.tar.gz`;
@@ -27,23 +29,31 @@ try {
   await cp(join(memoryRoot, "dist", "viewer"), join(runtimeRoot, "dist", "viewer"), { recursive: true });
   await cp(join(memoryRoot, "adapters"), join(runtimeRoot, "adapters"), { recursive: true });
 
+  // Workspace-only packages (e.g. @memmy/agent-source-core) are not published to
+  // the public registry, so `npm ci` cannot resolve them. Keep them out of the
+  // runtime manifest and vendor their build output into node_modules instead.
+  const dependencyEntries = Object.entries(manifest.dependencies ?? {});
+  const runtimeDependencies = Object.fromEntries(dependencyEntries.filter(([name]) => !isWorkspacePackage(name)));
+  const workspaceDependencies = dependencyEntries.map(([name]) => name).filter(isWorkspacePackage);
   const runtimePackage = {
     name: "memmy-memory-runtime",
     version,
     private: true,
     type: "module",
     engines: manifest.engines,
-    dependencies: manifest.dependencies
+    dependencies: runtimeDependencies
   };
   await writeJson(join(runtimeRoot, "package.json"), runtimePackage);
-  run("npm", ["install", "--package-lock-only", "--ignore-scripts", `--os=${npmPlatform(platform)}`, `--cpu=${arch}`], runtimeRoot);
-  run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund", `--os=${npmPlatform(platform)}`, `--cpu=${arch}`], runtimeRoot);
+  const platformFlags = npmPlatformFlags(platform, arch);
+  run("npm", ["install", "--package-lock-only", "--ignore-scripts", ...platformFlags], runtimeRoot);
+  run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund", ...platformFlags], runtimeRoot);
+  await vendorWorkspacePackages(runtimeRoot, workspaceDependencies);
 
   if (process.env.MEMMY_MEMORY_SKIP_EMBEDDING_MODEL !== "1") {
     run("node", [join(repositoryRoot, "scripts", "internal", "shared", "prepare-embedding-model.mjs"), join(runtimeRoot, "embedding-models")], repositoryRoot);
     await verifyEmbeddingModel(runtimeRoot);
   }
-  await verifyRuntimeDependencies(runtimeRoot, target);
+  await verifyRuntimeDependencies(runtimeRoot, target, platform, arch, workspaceDependencies);
   await writeJson(join(runtimeRoot, "memory-runtime.json"), {
     name: "memmy-memory-runtime",
     version,
@@ -93,19 +103,56 @@ function npmPlatform(platform) {
   return platform === "windows" ? "win32" : platform;
 }
 
+// Optional native packages such as @img/sharp-linux-x64 declare a `libc` field.
+// Without `--libc` npm compares them against the build host and silently skips
+// them, which leaves the Linux bundle without a loadable sharp binary.
+function npmPlatformFlags(platform, arch) {
+  const flags = [`--os=${npmPlatform(platform)}`, `--cpu=${arch}`];
+  if (platform === "linux") flags.push("--libc=glibc");
+  return flags;
+}
+
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit", env: process.env, shell: process.platform === "win32" });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
 
-async function verifyRuntimeDependencies(root, target) {
+function isWorkspacePackage(name) {
+  return name.startsWith("@memmy/");
+}
+
+// Resolves a workspace package from the repository checkout so its compiled
+// output can be copied into the runtime bundle verbatim.
+async function vendorWorkspacePackages(root, names) {
+  for (const name of names) {
+    const source = dirname(require.resolve(join(name, "package.json"), { paths: [memoryRoot] }));
+    const workspaceManifest = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
+    const entrypoint = workspaceManifest.main ?? "index.js";
+    if (!existsSync(join(source, entrypoint))) throw new Error(`workspace package ${name} is not built: ${entrypoint}`);
+    const destination = join(root, "node_modules", name);
+    await rm(destination, { recursive: true, force: true });
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(source, destination, {
+      recursive: true,
+      filter: (path) => !path.split(sep).includes("node_modules")
+    });
+    if (!existsSync(join(destination, entrypoint))) throw new Error(`failed to vendor workspace package ${name}`);
+  }
+}
+
+async function verifyRuntimeDependencies(root, target, platform, arch, workspaceDependencies) {
   const entrypoint = join(root, "dist", "src", "server", "index.js");
   const viewer = join(root, "dist", "viewer", "index.html");
   if (!existsSync(entrypoint) || !existsSync(viewer)) throw new Error("compiled Memory service or Viewer is missing");
+  for (const name of workspaceDependencies) {
+    if (!existsSync(join(root, "node_modules", name, "package.json"))) throw new Error(`workspace package is missing from the runtime bundle: ${name}`);
+  }
   const nativeFiles = await findFiles(join(root, "node_modules", "better-sqlite3"), (name) => name === "better_sqlite3.node");
   if (nativeFiles.length === 0) throw new Error(`better-sqlite3 native module is missing for ${target}`);
   const sqliteVecPackage = join(root, "node_modules", `sqlite-vec-${target}`);
   if (!existsSync(sqliteVecPackage)) throw new Error(`sqlite-vec native package is missing for ${target}`);
+  const sharpPackage = join(root, "node_modules", "@img", `sharp-${npmPlatform(platform)}-${arch}`);
+  if (!existsSync(sharpPackage)) throw new Error(`sharp native package is missing for ${target}`);
 }
 
 async function verifyEmbeddingModel(root) {

@@ -11,6 +11,7 @@ import type {
   InvitationResult,
   OkResponse,
   PromotionFlags,
+  SocialLoginProvider,
   TokenUsageDto
 } from "@memmy/local-api-contracts";
 
@@ -64,6 +65,32 @@ export interface CloudLoginResult {
   /** One-time invitation result; never persisted as account profile state. */
   invitationResult: InvitationResult;
 }
+
+export interface CloudStartSocialLoginInput {
+  provider: SocialLoginProvider;
+  locale: "zh" | "en";
+  loginSource: "Memmy";
+  invitationCode?: string;
+}
+
+export interface CloudStartSocialLoginResult {
+  flowId: string;
+  pollToken: string;
+  authorizationUrl: string;
+  expiresInSec: number;
+  pollIntervalSec: number;
+}
+
+export interface CloudSocialLoginCredentials {
+  flowId: string;
+  pollToken: string;
+}
+
+export type CloudSocialLoginStatus =
+  | { status: "pending" }
+  | { status: "completed"; result: CloudLoginResult }
+  | { status: "failed"; code?: string; message: string }
+  | { status: "expired" };
 
 export interface EnsureInvitationCodeInput {
   uuid: string;
@@ -204,6 +231,8 @@ export interface CloudClient {
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;
   login(input: CloudLoginInput): Promise<CloudLoginResult>;
+  startSocialLogin(input: CloudStartSocialLoginInput): Promise<CloudStartSocialLoginResult>;
+  getSocialLoginStatus(input: CloudSocialLoginCredentials): Promise<CloudSocialLoginStatus>;
   ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView>;
   logout(input: CloudLogoutInput): Promise<void>;
   getAccountInfo(input: GetAccountInfoInput): Promise<CloudAccountProfile>;

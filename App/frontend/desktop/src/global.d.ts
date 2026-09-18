@@ -36,6 +36,9 @@ declare global {
       onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
       openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
       openExternal(url: string): Promise<void>;
+      getComputerHistoryPermissionSessionId?(): Promise<string>;
+      restartForComputerHistoryPermissions?(): Promise<void>;
+      openComputerHistoryMarkdown(filePath: string): Promise<void>;
       openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
       openMailto(mailtoUrl: string): Promise<void>;
       copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;

@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
+import { renderMemmyResumeHookScript as renderCliHook } from "../../../../../../../../Memory/src/agent-source/integration/templates/memmy-resume-hook.js";
 
 describe("memmy resume hook stop capture", () => {
   let tempDir = "";
@@ -21,6 +22,107 @@ describe("memmy resume hook stop capture", () => {
       tempDir = "";
     }
   });
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s Claude hook ignores inherited Cursor events without requests or state writes", async (_label, render) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-inherited-cursor-hook-"));
+    const paths: string[] = [];
+    const server = createServer((request, response) => {
+      paths.push(request.url ?? "");
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ sessionId: "unexpected-session" }));
+    });
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const script = installHookFixture(tempDir, "claude_code", "claude-code", endpoint, runtimeAsset, render);
+      const filesBefore = readDirectory(tempDir).sort();
+      // Cursor can pass through its own event names or map them to Claude names.
+      for (const event of ["sessionStart", "beforeSubmitPrompt", "afterAgentResponse", "stop", "preCompact", "sessionEnd",
+        "SessionStart", "UserPromptSubmit", "Stop", "PostCompact", "SessionEnd"]) {
+        const result = await runHook(script, {
+          hook_event_name: event, cursor_version: "3.17.19", session_id: "cursor-session",
+          conversation_id: "cursor-session", generation_id: "cursor-turn",
+          prompt: "Explain branch and worktree", text: "A worktree is a separate checkout",
+          last_assistant_message: "A worktree is a separate checkout", cwd: tempDir,
+        });
+        expect(result).toEqual({ status: 0, stdout: "", stderr: "" });
+      }
+      expect(paths).toEqual([]);
+      expect(readDirectory(tempDir).sort()).toEqual(filesBefore);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s captures a Cursor turn once when both hooks run, and still captures native Claude turns", async (_label, render) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-dual-cursor-hook-"));
+    const requests: Array<{ path: string; body: Record<string, any> }> = [];
+    const server = createServer(async (request, response) => {
+      const body = await requestBody(request);
+      requests.push({ path: request.url ?? "", body });
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+      } else if (request.url === "/api/v1/sessions/open") {
+        response.end(JSON.stringify({ sessionId: `session-${(body.namespace as { source: string }).source}` }));
+      } else if (request.url === "/api/v1/turns/start") {
+        response.end(JSON.stringify({ sessionId: body.sessionId, turnId: body.turnId, episodeId: `episode-${body.sessionId}` }));
+      } else {
+        response.end(JSON.stringify({ ok: true }));
+      }
+    });
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const scripts = ["cursor", "claude"].map(name => {
+        const directory = join(tempDir, name);
+        mkdirSync(directory);
+        return installHookFixture(directory, name === "cursor" ? "cursor" : "claude_code",
+          name === "cursor" ? "cursor" : "claude-code", endpoint, runtimeAsset, render);
+      });
+      const payload = {
+        cursor_version: "3.17.19", session_id: "cursor-conversation", conversation_id: "cursor-conversation",
+        generation_id: "cursor-turn", prompt: "Explain branch and worktree", cwd: tempDir,
+      };
+      for (const event of ["beforeSubmitPrompt", "afterAgentResponse", "stop"]) {
+        for (const script of scripts) {
+          const result = await runHook(script, { ...payload, hook_event_name: event,
+            text: "A worktree is a separate checkout", last_assistant_message: "A worktree is a separate checkout" });
+          expect(result.status).toBe(0);
+          expect(result.stderr).toBe("");
+        }
+      }
+      const completions = () => requests.filter(request => request.path.endsWith("/complete"));
+      expect(completions()).toHaveLength(1);
+      expect(completions()[0]?.body).toMatchObject({
+        namespace: { source: "cursor" }, query: payload.prompt, answer: "A worktree is a separate checkout",
+      });
+      expect(requests.filter(request => request.path === "/api/v1/turns/start")).toHaveLength(1);
+      expect(requests.some(request => request.body.namespace?.source === "claude_code")).toBe(false);
+
+      // Host detection uses event provenance, not inherited terminal environment.
+      for (const event of ["UserPromptSubmit", "Stop"]) {
+        const result = await runHook(scripts[1]!, {
+          hook_event_name: event, session_id: "native-claude-session", turn_id: "claude-turn",
+          prompt: "Explain native Claude capture", last_assistant_message: "Captured by Claude only", cwd: tempDir,
+        });
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+      }
+      expect(completions()).toHaveLength(2);
+      expect(completions()[1]?.body).toMatchObject({
+        namespace: { source: "claude_code" }, query: "Explain native Claude capture", answer: "Captured by Claude only",
+      });
+    } finally {
+      await close(server);
+    }
+  }, 30000);
 
   it("captures the user prompt instead of the last tool result when turn state is missing", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-resume-hook-stop-"));
@@ -244,9 +346,10 @@ function installHookFixture(
   mode: "claude-code" | "codex" | "cursor",
   endpoint: string,
   runtimeAsset: string,
+  render = renderMemmyResumeHookScript,
 ): string {
   const hookScriptPath = join(directory, "memmy-resume-hook.mjs");
-  writeFileSync(hookScriptPath, renderMemmyResumeHookScript({ source, mode }));
+  writeFileSync(hookScriptPath, render({ source, mode }));
   writeFileSync(join(directory, "memmy-workspace-bridge.mjs"), runtimeAsset);
   writeFileSync(join(directory, "memmy-memory-config.json"), JSON.stringify({
     memmy_config_path: join(directory, "missing-config.yaml"),

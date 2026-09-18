@@ -308,7 +308,9 @@ export class RewardPipeline {
           createdAt: at
         });
       }
-      await this.maybeCreateValueDistributionRepair(saved, at);
+      if (this.deps.config.algorithm.feedback.valueDistributionRepairEnabled) {
+        await this.maybeCreateValueDistributionRepair(saved, at);
+      }
     }
     const inductionSeed = l2Eligible[0];
     if (job.payload.downstreamScheduled !== true && inductionSeed) {

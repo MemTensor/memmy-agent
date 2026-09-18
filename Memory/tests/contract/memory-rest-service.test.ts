@@ -48,6 +48,115 @@ async function withServerClosed(
 
 describe("MemoryService / REST contract", () => {
 
+  it("deduplicates Agent source Skills by stable identity and content hash", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const endpoint = `http://127.0.0.1:${address.port}/api/v1/memory/add`;
+      const post = async (body: Record<string, unknown>) => {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        return {
+          response,
+          body: await response.json() as { id?: string; duplicate?: boolean; error?: { code?: string } }
+        };
+      };
+      const firstRequest = {
+        adapterId: "agent-source:codex",
+        requestId: "agent-source-skill:codex:.system/imagegen:content-hash-v1",
+        namespace: { source: "codex", profileId: "default" },
+        content: "Generate images from a prompt.",
+        layer: "Skill" as const,
+        title: "imagegen",
+        tags: ["agent-source", "cross-agent-skill", "codex"],
+        source: "codex",
+        turnId: "skill:.system/imagegen:version-1",
+        createdAt: "2026-09-04T02:13:03.091Z",
+        deferProcessing: true,
+        sourceAgentId: "codex",
+        sourceSkillId: ".system/imagegen",
+        sourceSkillPath: "/old-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "version-1",
+        sourceContentHash: "content-hash-v1"
+      };
+
+      const legacy = await service.idempotent(
+        "memory.add",
+        firstRequest,
+        { path: "/api/v1/memory/add", request: firstRequest },
+        () => service.addMemory(firstRequest)
+      );
+      const replayed = await post({
+        ...firstRequest,
+        title: "Image generation",
+        tags: ["agent-source", "codex", "new-metadata"],
+        turnId: "skill:.system/imagegen:parser-version-2",
+        createdAt: "2026-09-17T03:24:19.000Z",
+        deferProcessing: false,
+        sourceSkillPath: "/new-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "parser-version-2",
+        timeZone: "Asia/Shanghai"
+      });
+      expect(replayed.response.status).toBe(200);
+      expect(replayed.body.id).toBe(legacy.id);
+      expect(replayed.body.duplicate).toBeUndefined();
+
+      const duplicate = await post({
+        ...firstRequest,
+        title: "Generate an image",
+        tags: ["agent-source", "codex", "latest-metadata"],
+        turnId: "skill:.system/imagegen:parser-version-3",
+        createdAt: "2026-09-18T03:24:19.000Z",
+        sourceSkillPath: "/another-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "parser-version-3",
+        timeZone: "UTC"
+      });
+      expect(duplicate.response.status).toBe(200);
+      expect(duplicate.body).toMatchObject({ id: legacy.id, duplicate: true });
+      expect(db.db.prepare(
+        `SELECT COUNT(*) AS count FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = ?`
+      ).get(".system/imagegen")).toEqual({ count: 1 });
+
+      const nextVersion = await post({
+        ...firstRequest,
+        content: "Generate and edit images from a prompt.",
+        sourceContentHash: "content-hash-v2",
+        sourceSkillVersion: "version-1"
+      });
+      expect(nextVersion.response.status).toBe(200);
+      expect(nextVersion.body.id).toBeTypeOf("string");
+      expect(nextVersion.body.id).not.toBe(legacy.id);
+      expect(db.db.prepare("SELECT status FROM memories WHERE id = ?").get(legacy.id))
+        .toEqual({ status: "archived" });
+
+      const ordinaryFirst = await post({
+        adapterId: "rest-test",
+        requestId: "ordinary-skill",
+        content: "Ordinary Skill content.",
+        layer: "Skill",
+        title: "ordinary"
+      });
+      expect(ordinaryFirst.response.status).toBe(200);
+      const ordinaryChanged = await post({
+        adapterId: "rest-test",
+        requestId: "ordinary-skill",
+        content: "Ordinary Skill content.",
+        layer: "Skill",
+        title: "ordinary renamed"
+      });
+      expect(ordinaryChanged.response.status).toBe(409);
+      expect(ordinaryChanged.body.error?.code).toBe("conflict");
+    });
+    db.close();
+  });
+
   it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });

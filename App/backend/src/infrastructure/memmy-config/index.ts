@@ -384,6 +384,10 @@ export function mapModelProtocol(provider: ModelProvider): ModelProtocolProjecti
       return { agentProvider: "qianfan", agentApiType: "auto", memoryProvider: "openai_compatible" };
     case "doubao":
       return { agentProvider: "volcengine", agentApiType: "auto", memoryProvider: "openai_compatible" };
+    case "stepfun":
+      return { agentProvider: "stepfun", agentApiType: "auto", memoryProvider: "openai_compatible" };
+    case "xiaomi":
+      return { agentProvider: "xiaomi_mimo", agentApiType: "auto", memoryProvider: "openai_compatible" };
   }
 }
 

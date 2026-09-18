@@ -35,6 +35,13 @@ function mimeFromExtension(file: string): string | null {
   return null;
 }
 
+function formatAttachmentBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
 export function normalizeAgentResponseLanguage(value: unknown): AgentResponseLanguage | null {
   return value === "zh-CN" || value === "en-US" ? value : null;
 }
@@ -266,19 +273,37 @@ export class ContextBuilder {
 
   buildUserContent(text: string, media?: string[] | null): string | Record<string, any>[] {
     if (!media?.length) return text;
+
     const images: Record<string, any>[] = [];
+    const fileLines: string[] = [];
+
     for (const file of media) {
       if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
-      const raw = fs.readFileSync(file);
-      const mime = detectImageMime(raw) ?? mimeFromExtension(file);
-      if (!mime?.startsWith("image/")) continue;
-      images.push({
-        type: "image_url",
-        image_url: { url: `data:${mime};base64,${raw.toString("base64")}` },
-        meta: { path: file },
-      });
+      const stat = fs.statSync(file);
+      const head = fs.readFileSync(file);
+      const mime = detectImageMime(head) ?? mimeFromExtension(file);
+
+      if (mime?.startsWith("image/")) {
+        images.push({
+          type: "image_url",
+          image_url: { url: `data:${mime};base64,${head.toString("base64")}` },
+          meta: { path: file },
+        });
+        continue;
+      }
+
+      fileLines.push(
+        `- ${path.basename(file)}  (${mime ?? "application/octet-stream"}, ${formatAttachmentBytes(stat.size)})  ${file}`,
+      );
     }
-    return images.length ? [...images, { type: "text", text }] : text;
+
+    if (!images.length && !fileLines.length) return text;
+
+    const trailing = fileLines.length
+      ? `<attachments>\n${fileLines.join("\n")}\n\n请用 read_file 工具按需读取上述附件；PDF 可用 pages 参数分页读取。\n</attachments>${text ? `\n\n${text}` : ""}`
+      : text;
+
+    return [...images, { type: "text", text: trailing }];
   }
 
   build(session: Session, userContent?: string): Record<string, any>[] {

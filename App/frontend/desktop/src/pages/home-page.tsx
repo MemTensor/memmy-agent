@@ -2657,6 +2657,7 @@ export function HomePage() {
         </div>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+      windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
         {!hasActiveConversation ? (

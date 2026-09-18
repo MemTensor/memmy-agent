@@ -22,12 +22,18 @@ import type {
   RuntimeNamespace,
   SessionOpenRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
+import {
+  createMemoryDesktopAddAnalytics,
+  type MemoryDesktopAddAnalytics,
+} from "./memory-add-analytics.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
@@ -64,6 +70,7 @@ export const API_ROUTES = [
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
+  "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
@@ -92,6 +99,10 @@ export interface MemoryHttpServerOptions {
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   configPath?: string;
   viewerCli?: ViewerCliOptions;
   onRestartRequested?: () => void | Promise<void>;
@@ -135,10 +146,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
+  const memoryAddAnalytics = options.memoryAddAnalytics ?? createMemoryDesktopAddAnalytics();
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
-    scheduleWorker: autoWorker.schedule
+    scheduleWorker: autoWorker.schedule,
+    memoryAddAnalytics
   });
   const activeRequests = new Set<Promise<void>>();
   const server = createServer((request, response) => {
@@ -629,6 +642,39 @@ async function routeRequest(
     return publicStartTurnResponse(result);
   }
 
+  if (method === "POST" && path === "/api/v1/source-turns/complete") {
+    requireMemoryWrite(principal);
+    const input = asObject(body, "source-turn.complete");
+    const sourceIdentity = isRecord(input.sourceTurn) ? input.sourceTurn : {};
+    const requestedScope = isRecord(input.namespace) ? input.namespace : {};
+    const namespace = {
+      source: sourceIdentity.source,
+      profileId: sourceIdentity.profileId,
+      sessionKey: sourceIdentity.conversationId,
+      ...requestedScope
+    };
+    // Local headers may carry the generic default source; it is not a source restriction.
+    let scopedPrincipal = principal;
+    if ((principal.kind === "local" || principal.kind === "anonymous") &&
+        principal.namespace?.source === DEFAULT_NAMESPACE_SOURCE && typeof namespace.source === "string") {
+      scopedPrincipal = { ...principal, namespace: { ...principal.namespace, source: namespace.source } };
+    }
+    const request = strictEnvelopeWithPrincipal({ ...input, namespace }, scopedPrincipal) as unknown as SourceTurnCompleteRequest;
+    requireStringField(request, "query", "source-turn.complete");
+    requireStringField(request, "answer", "source-turn.complete");
+    const result = service.completeSourceTurn({
+      namespace: request.namespace, timeZone: request.timeZone, source: request.source,
+      sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      sessionId: request.sessionId, episodeId: request.episodeId,
+      query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
+      toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
+      sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
+      tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
+    });
+    if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
+    return result;
+  }
+
   const turnComplete = match(path, /^\/api\/v1\/turns\/([^/]+)\/complete$/);
   if (method === "POST" && turnComplete) {
     requireMemoryWrite(principal);
@@ -737,11 +783,12 @@ async function routeRequest(
       sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
+    const idempotency = memoryAddIdempotency(publicRequest, path);
     const result = await trackExternalToolCall(
       pluginRuntimeAnalytics,
       { ...request, toolName: "memmy_memory_add" },
       () =>
-        service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+        service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
           service.addMemory(publicRequest)
         ),
       (addResult) => ({
@@ -918,6 +965,49 @@ async function routeRequest(
   }
 
   throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
+}
+
+function memoryAddIdempotency(
+  request: MemoryAddRequest,
+  path: string
+): { request: RequestEnvelope; fingerprint: unknown } {
+  const sourceAgentId = request.sourceAgentId?.trim();
+  const sourceSkillId = request.sourceSkillId?.trim();
+  const sourceContentHash = request.sourceContentHash?.trim();
+  const isAgentSourceSkill =
+    request.layer === "Skill" &&
+    Boolean(request.requestId) &&
+    Boolean(sourceAgentId) &&
+    Boolean(sourceSkillId) &&
+    Boolean(sourceContentHash) &&
+    request.adapterId === `agent-source:${sourceAgentId}`;
+
+  if (!isAgentSourceSkill) {
+    return {
+      request,
+      fingerprint: { path, request }
+    };
+  }
+
+  const identity = {
+    namespace: request.namespace,
+    sourceAgentId,
+    sourceSkillId,
+    sourceContentHash
+  };
+  return {
+    request: {
+      adapterId: request.adapterId,
+      // Version the key so legacy full-request fingerprints cannot keep
+      // conflicting after volatile Skill metadata changes.
+      requestId: `agent-source-skill:v2:${stableHash(identity)}`,
+      namespace: request.namespace
+    },
+    fingerprint: {
+      path,
+      skill: identity
+    }
+  };
 }
 
 function publicOpenSessionResponse(result: unknown): Record<string, unknown> {

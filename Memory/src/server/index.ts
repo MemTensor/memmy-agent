@@ -16,6 +16,14 @@ import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 const logger = createMemoryLogger("server");
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
+    if (argv.includes("--version")) {
+        process.stdout.write(`${MEMORY_SERVICE_VERSION}\n`);
+        return;
+    }
+    if (argv.includes("--help") || argv.includes("-h")) {
+        process.stdout.write(SERVER_USAGE);
+        return;
+    }
     loadCloudServiceEnv();
     let shuttingDown = false;
     let stopService: (() => void) | undefined;
@@ -112,6 +120,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         });
         server = listening.server;
         const { url } = listening;
+        service.setViewerEndpoint(url);
         if (configPath) {
             await writeCurrentEndpoint(configPath, url);
         }
@@ -142,6 +151,20 @@ async function runMemoryService(argv: string[], lifecycle: {
     }
     return restartRequested;
 }
+
+const SERVER_USAGE = `Usage: memmy-memory [options]
+
+Start the local Memory HTTP service.
+
+Options:
+  --config <path>       Configuration file (default: ~/.memmy/config.yaml)
+  --db <path>           SQLite database path
+  --sqlite-path <path>  Alias for --db
+  --host <host>         Loopback listen address (default: 127.0.0.1)
+  --port <port>         Listen port (default: 18960)
+  -h, --help            Show this help message
+  --version             Show the service version
+`;
 
 export interface SqliteServerLock {
     path: string;

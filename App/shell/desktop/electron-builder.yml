@@ -9,6 +9,13 @@ directories:
 files:
   - dist/**/*
   - package.json
+  - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/docx-rendering{,/**}"
+  - "!**/node_modules/open-computer-use/dist/linux/**"
+  - "!**/node_modules/open-computer-use/dist/windows/**"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
@@ -20,6 +27,8 @@ files:
 
 asar: true
 asarUnpack:
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/native/**"
+  - "**/node_modules/open-computer-use/dist/**"
   - "**/*.node"
   - "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"
   - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
@@ -56,6 +65,7 @@ mac:
   category: public.app-category.productivity
   extendInfo:
     NSMicrophoneUsageDescription: "Memmy uses the microphone only when you start voice input."
+    NSAppleEventsUsageDescription: "Memmy asks your browser whether a window is private, so that Computer History never records private windows."
   target:
     - target: dmg
   hardenedRuntime: true

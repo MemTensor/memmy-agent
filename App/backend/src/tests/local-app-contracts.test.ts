@@ -28,6 +28,8 @@ import {
   ModelConfigTestResultSchema,
   ModelConfigViewSchema,
   MODEL_NAME_MAX_LENGTH,
+  ModelProviderSchema,
+  canonicalCatalogProviderId,
   PatchAppSettingsInputSchema,
   PatchOnboardingInputSchema,
   PatchPrivacyInputSchema,
@@ -44,6 +46,28 @@ import {
 } from "@memmy/local-api-contracts";
 
 describe("local app contracts", () => {
+  it("accepts StepFun and Xiaomi as text providers and canonicalises their catalog ids", () => {
+    expect(ModelProviderSchema.safeParse("stepfun").success).toBe(true);
+    expect(ModelProviderSchema.safeParse("xiaomi").success).toBe(true);
+
+    expect(canonicalCatalogProviderId("stepfun")).toBe("stepfun");
+    expect(canonicalCatalogProviderId("xiaomi")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("xiaomi_mimo")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("XIAOMI")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("xiaomimimo")).toBeNull();
+
+    // Neither provider is wired into image generation yet.
+    for (const provider of ["stepfun", "xiaomi"]) {
+      expect(
+        ImageGenModelConfigInputSchema.safeParse({
+          provider,
+          baseUrl: "https://example.com/v1",
+          modelId: "x"
+        }).success
+      ).toBe(false);
+    }
+  });
+
   it("limits newly saved model names without constraining normal names", () => {
     const modelInput = {
       endpointId: "primary",

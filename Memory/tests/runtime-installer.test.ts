@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -390,6 +390,76 @@ describe("standalone Memory runtime installer", () => {
     expect(shutdownRequests).toBe(1);
   });
 });
+
+describe("installer lock recovery", () => {
+  it("reclaims a lock abandoned by a crashed installer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const lockPath = join(home, "memory-service", "install.lock");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(lockPath, `${deadPid()}\n`);
+
+    const result = await installMemoryRuntime({
+      home,
+      runtimeDirectory,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(result).toMatchObject({ ok: true, version: "2.1.0" });
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("reclaims an empty lock left behind before its owner was recorded", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const lockPath = join(home, "memory-service", "install.lock");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(lockPath, "");
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, stale, stale);
+
+    const result = await installMemoryRuntime({
+      home,
+      runtimeDirectory,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(result).toMatchObject({ ok: true, version: "2.1.0" });
+  });
+
+  it("waits for a lock still held by a live installer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const lockPath = join(home, "memory-service", "install.lock");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(lockPath, `${process.pid}\n`);
+
+    await expect(installMemoryRuntime({
+      home,
+      runtimeDirectory,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    })).rejects.toThrow(/timed out waiting for installer lock/);
+
+    expect(existsSync(lockPath)).toBe(true);
+  }, 20_000);
+});
+
+function deadPid(): number {
+  for (let candidate = 999_999; candidate > 100_000; candidate -= 7) {
+    try {
+      process.kill(candidate, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return candidate;
+    }
+  }
+  throw new Error("could not find an unused pid for the test");
+}
 
 function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "memmy-runtime-installer-"));

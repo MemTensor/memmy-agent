@@ -5,6 +5,8 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   SendCodeResponseSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginResponseSchema,
   type AccountChannel,
   type AccountInvitationView,
   type AccountLoginResultView,
@@ -12,10 +14,14 @@ import {
   type AccountSessionView,
   type SendCodeInput,
   type SendCodeResponse,
+  type SocialLoginStatusInput,
+  type SocialLoginStatusResponse,
+  type StartSocialLoginInput,
+  type StartSocialLoginResponse,
   type UpdateAccountProfileInput,
   type VerifyCodeInput
 } from "@memmy/local-api-contracts";
-import type { CloudAccountProfile, CloudClient } from "../adapters/outbound/cloud-client/index.js";
+import type { CloudAccountProfile, CloudClient, CloudLoginResult } from "../adapters/outbound/cloud-client/index.js";
 import type {
   AccountSessionProfileInput,
   AccountSessionRepository
@@ -30,6 +36,8 @@ const RESEND_WINDOW_MS = 60_000;
 export interface AccountService {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
   verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
+  getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
@@ -94,34 +102,25 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         loginSource: input.loginSource,
         ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
       });
+      return finalizeCloudLogin(loginResult, input.channel, options);
+    },
 
-      if (options.memmyConfigWriter) {
-        const projection = await options.memmyConfigWriter.writeAccountModelProjection({
-          cloudUuid: loginResult.uuid,
-          userId: loginResult.profile.userId
-        });
-        await reloadMemoryConfigIfNeeded(projection, options);
-      }
-
-      const session = AccountSessionViewSchema.parse(
-        options.accountSessionRepository.upsert({
-          profile: toSessionProfileInput(loginResult.profile),
-          uuid: loginResult.accountUuid,
-          cloudUuid: loginResult.uuid,
-          isNewUser: loginResult.isNewUser,
-          authChannel: input.channel
-        })
+    async startSocialLogin(input) {
+      assertSocialLoginSupported(options.accountChannel);
+      return StartSocialLoginResponseSchema.parse(
+        await options.cloudClient.startSocialLogin(input)
       );
+    },
 
-      const refreshedSession = await refreshCloudGuideState({
-        cloudClient: options.cloudClient,
-        accountSessionRepository: options.accountSessionRepository,
-        session,
-        cloudUuid: loginResult.uuid
-      });
-      return AccountLoginResultViewSchema.parse({
-        session: refreshedSession,
-        invitationResult: loginResult.invitationResult ?? { status: "not_provided" }
+    async getSocialLoginStatus(input) {
+      assertSocialLoginSupported(options.accountChannel);
+      const status = await options.cloudClient.getSocialLoginStatus(input);
+      if (status.status !== "completed") {
+        return SocialLoginStatusResponseSchema.parse(status);
+      }
+      return SocialLoginStatusResponseSchema.parse({
+        status: "completed",
+        result: await finalizeCloudLogin(status.result, "email", options)
       });
     },
 
@@ -222,6 +221,48 @@ function assertExpectedAccountChannel(
   if (!expectedChannel || actualChannel === expectedChannel) return;
   throw Object.assign(new Error(`Account channel ${actualChannel} is not supported by this desktop package`), {
     code: "invalid_argument" as const
+  });
+}
+
+function assertSocialLoginSupported(accountChannel: AccountChannel | undefined): void {
+  if (accountChannel === "email") return;
+  throw Object.assign(new Error("Social login is not supported by this desktop package"), {
+    code: "invalid_argument" as const
+  });
+}
+
+async function finalizeCloudLogin(
+  loginResult: CloudLoginResult,
+  authChannel: AccountChannel,
+  options: CreateAccountServiceOptions
+): Promise<AccountLoginResultView> {
+  if (options.memmyConfigWriter) {
+    const projection = await options.memmyConfigWriter.writeAccountModelProjection({
+      cloudUuid: loginResult.uuid,
+      userId: loginResult.profile.userId
+    });
+    await reloadMemoryConfigIfNeeded(projection, options);
+  }
+
+  const session = AccountSessionViewSchema.parse(
+    options.accountSessionRepository.upsert({
+      profile: toSessionProfileInput(loginResult.profile),
+      uuid: loginResult.accountUuid,
+      cloudUuid: loginResult.uuid,
+      isNewUser: loginResult.isNewUser,
+      authChannel
+    })
+  );
+
+  const refreshedSession = await refreshCloudGuideState({
+    cloudClient: options.cloudClient,
+    accountSessionRepository: options.accountSessionRepository,
+    session,
+    cloudUuid: loginResult.uuid
+  });
+  return AccountLoginResultViewSchema.parse({
+    session: refreshedSession,
+    invitationResult: loginResult.invitationResult ?? { status: "not_provided" }
   });
 }
 
