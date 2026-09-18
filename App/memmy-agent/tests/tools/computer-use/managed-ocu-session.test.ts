@@ -102,3 +102,33 @@ it('rechecks permissions after a helper restart during doctor, before sending th
   expect(connect).toHaveBeenCalledTimes(2); expect(doctor).toHaveBeenCalledTimes(2);
   expect(sessions[0].session.callTool).not.toHaveBeenCalled(); expect(sessions[1].session.callTool).toHaveBeenCalledOnce(); await owner.close();
 });
+
+it.each([false, true])('compares schema content across restarts instead of JSON key order (changed=%s)', async changed => {
+  const { owner, connect, sessions, doctor } = fixture();
+  const originalConnect = connect.getMockImplementation()!;
+  let generation = 0;
+  connect.mockImplementation(async () => {
+    const connection = await originalConnect();
+    const schema = generation++ === 0
+      ? { type: 'object', properties: { app: { type: 'string', description: 'Target app' } }, required: ['app'] }
+      : { required: ['app'], properties: { app: { description: 'Target app', type: changed ? 'integer' : 'string' } }, type: 'object' };
+    connection.session.listTools.mockResolvedValue({ tools: [...OCU_TOOLS].map(name => ({ name, inputSchema: schema })) });
+    return connection;
+  });
+  try {
+    await owner.initialize();
+    sessions[0].session.ping.mockRejectedValue(new Error('helper restarted after authorization'));
+    const action = owner.invoke('get_app_state', { app: 'Notes' }, 30, turn('after-restart'));
+    if (changed) {
+      await expect(action).rejects.toBeInstanceOf(OcuBlocked);
+      expect(sessions[1].close).toHaveBeenCalledOnce();
+      expect(sessions[1].session.callTool).not.toHaveBeenCalled();
+      expect(doctor).not.toHaveBeenCalled();
+    } else {
+      await expect(action).resolves.toEqual({ content: [] });
+      expect(doctor).toHaveBeenCalledOnce();
+      expect(sessions[1].session.callTool).toHaveBeenCalledExactlyOnceWith('get_app_state', { app: 'Notes' }, 30);
+    }
+    expect(sessions[0].session.callTool).not.toHaveBeenCalled();
+  } finally { await owner.close(); }
+});

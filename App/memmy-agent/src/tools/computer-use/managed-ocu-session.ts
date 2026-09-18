@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { RequestContext } from '../../core/agent-runtime/tools/context.js';
 import { MacPermissionPreflight, type PermissionPreflight } from './mac-permission-preflight.js';
 import { computerUsePermissionError } from './mac-permission-settings.js';
@@ -15,7 +16,7 @@ export class ManagedOcuSession {
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
   private needsReconnect = false;
-  private schemas = '';
+  private schemas: Array<[string, unknown]> | null = null;
   private generation = 0;
   private cohort: { pending: number; checked?: { generation: number; status: PermissionPreflight } } | null = null;
   readonly preflight: MacPermissionPreflight;
@@ -37,8 +38,10 @@ export class ManagedOcuSession {
       const result = await connection.session.listTools();
       const tools = [...(result.tools ?? [])].sort((a, b) => a.name.localeCompare(b.name));
       if (tools.length !== OCU_TOOLS.size || new Set(tools.map(t => t.name)).size !== OCU_TOOLS.size || tools.some(t => !OCU_TOOLS.has(t.name))) throw new Error('Expected the unmodified Open Computer Use 0.3.5 tool set');
-      const schemas = JSON.stringify(tools.map(t => [t.name, t.inputSchema]));
-      if (this.schemas && schemas !== this.schemas) throw new Error('Computer Use tool schema changed; reload the MCP configuration');
+      const schemas = tools.map(t => [t.name, t.inputSchema] as [string, unknown]);
+      // The native helper can serialize Swift dictionary keys in a different
+      // order after restarting. Compare JSON values, not their serialized order.
+      if (this.schemas && !isDeepStrictEqual(schemas, this.schemas)) throw new Error('Computer Use tool schema changed; reload the MCP configuration');
       if (this.closed) throw new Error('Computer Use connection was removed');
       this.schemas = schemas;
       this.connection = connection;

@@ -422,8 +422,10 @@ export async function connectInMemoryMcpServer(server: any): Promise<InMemoryMcp
 
 function ocuPermissionMessage(status: { state: string; permission?: string; missingPermissions?: string[] }): string {
   if (status.state !== 'missing') return '无法确认 Open Computer Use 的系统权限或连接状态，本次应用操作未执行。请检查辅助程序后重新发送消息。';
-  const permission = (status.missingPermissions ?? [status.permission]).map(p => p === 'screenRecording' ? '屏幕录制' : '辅助功能').join('、');
-  return `Open Computer Use 缺少 macOS「${permission}」权限，本次应用操作未执行。请在 Open Computer Use 授权窗口完成授权；按系统提示重启辅助程序即可，Memmy 无需退出。完成后请重新发送消息。`;
+  const permissions = status.missingPermissions ?? [status.permission];
+  const labels = permissions.map(p => p === 'screenRecording' ? '屏幕录制' : p === 'inputMonitoring' ? '输入监控' : '辅助功能');
+  const settings = labels.map(label => `系统设置 → 隐私与安全性 → ${label === '屏幕录制' ? '屏幕与系统音频录制（屏幕录制）' : label}`).join('\n');
+  return `Open Computer Use 缺少 macOS「${labels.join('、')}」权限，本次应用操作未执行。\n\n请在 Open Computer Use 授权窗口完成授权。若找不到窗口，请打开：\n${settings}\n开启其中的 Open Computer Use。\n\n若系统提示「退出并重新打开」，请重启 Open Computer Use 辅助程序；Memmy 无需退出。完成后重新发送消息，我会重新检查权限。`;
 }
 
 export class MCPToolWrapper extends Tool {
@@ -455,6 +457,9 @@ export class MCPToolWrapper extends Tool {
   }
 
   get description(): string {
+    if (this.managed && this.originalName !== 'list_apps') {
+      return `${this.toolDescription}\nFor a new user request, call this tool even after an earlier permission or connection failure. Memmy rechecks permissions and reconnects before executing; never infer current permission from previous messages. If this attempt is blocked, end this turn and wait for a new user message.`;
+    }
     return this.toolDescription;
   }
 
