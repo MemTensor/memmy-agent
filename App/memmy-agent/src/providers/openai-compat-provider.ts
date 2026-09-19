@@ -51,7 +51,7 @@ const THINKING_STYLE_MAP: Record<string, (on: boolean) => Record<string, any>> =
 const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<string, any>> = {
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
 };
-const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0;
+const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 300.0;
 
 export const RESPONSES_FAILURE_THRESHOLD = 3;
 export const RESPONSES_PROBE_INTERVAL_S = 300;
