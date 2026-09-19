@@ -1,4 +1,4 @@
-import { MAX_UPLOAD_BYTES } from "../types.js";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "../types.js";
 
 export const DOCUMENT_EXTENSIONS =
   ".pdf,.docx,.doc,.txt,.json,.md,.xml";
@@ -8,6 +8,7 @@ export interface UploadResult {
   ok: boolean;
   error?: string;
   reason?: UploadFailureReason;
+  bytes?: number;
 }
 export interface UploadBatch {
   results: UploadResult[];
@@ -124,11 +125,7 @@ async function collectEntry(
 /** Process one file at a time so a batch keeps the same per-file request/memory limit. */
 export async function uploadDocuments(
   files: readonly File[],
-  upload: (
-    file: File,
-    content: string,
-    signal?: AbortSignal,
-  ) => Promise<unknown>,
+  upload: (file: File, signal?: AbortSignal) => Promise<unknown>,
   onProgress: (completed: number, total: number, name: string) => void,
   zh = true,
   signal?: AbortSignal,
@@ -141,12 +138,20 @@ export async function uploadDocuments(
     try {
       if (!file.size)
         throw Object.assign(
-          new Error(zh ? "文件为空或超过 20 MB" : "File is empty or exceeds 20 MB"),
+          new Error(
+            zh
+              ? `文件为空或超过 ${MAX_UPLOAD_MB} MB`
+              : `File is empty or exceeds ${MAX_UPLOAD_MB} MB`,
+          ),
           { reason: "size" as const },
         );
       if (file.size > MAX_UPLOAD_BYTES)
         throw Object.assign(
-          new Error(zh ? "文件为空或超过 20 MB" : "File is empty or exceeds 20 MB"),
+          new Error(
+            zh
+              ? `文件为空或超过 ${MAX_UPLOAD_MB} MB`
+              : `File is empty or exceeds ${MAX_UPLOAD_MB} MB`,
+          ),
           { reason: "size" as const },
         );
       if (!/\.(pdf|docx|doc|txt|json|md|xml)$/i.test(file.name))
@@ -158,9 +163,8 @@ export async function uploadDocuments(
           ),
           { reason: "format" as const },
         );
-      const content = await readFileContent(file, zh, signal);
-      await upload(file, content, signal);
-      const result = { name: file.name, ok: true };
+      await upload(file, signal);
+      const result = { name: file.name, ok: true, bytes: file.size };
       results.push(result);
       onSettled?.(result);
     } catch (error) {
@@ -176,6 +180,7 @@ export async function uploadDocuments(
               ? "上传失败"
               : "Upload failed",
         reason: uploadReason(error),
+        bytes: file.size,
       };
       results.push(result);
       onSettled?.(result);
@@ -196,7 +201,7 @@ function uploadReason(error: unknown): UploadFailureReason {
     return error.reason;
   const message = error instanceof Error ? error.message : "";
   if (/不支持的文档格式|unsupported file type/i.test(message)) return "format";
-  if (/超过 20 mb|exceeds 20 mb|文件为空/i.test(message)) return "size";
+  if (/超过 \d+ mb|exceeds \d+ mb|文件为空/i.test(message)) return "size";
   return "other";
 }
 
@@ -207,34 +212,3 @@ export function isAbortError(error: unknown): boolean {
   );
 }
 
-function readFileContent(
-  file: File,
-  zh: boolean,
-  signal?: AbortSignal,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    const onAbort = () => {
-      reader.abort();
-      reject(new DOMException("Aborted", "AbortError"));
-    };
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    reader.onload = () => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve(String(reader.result).split(",")[1] ?? "");
-    };
-    reader.onerror = reader.onabort = () => {
-      signal?.removeEventListener("abort", onAbort);
-      reject(
-        signal?.aborted
-          ? new DOMException("Aborted", "AbortError")
-          : new Error(zh ? "读取文件失败" : "Could not read file"),
-      );
-    };
-    reader.readAsDataURL(file);
-  });
-}
