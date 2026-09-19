@@ -32,6 +32,11 @@ const evidence = [
 ];
 const reply = (data: unknown) =>
   new Response(JSON.stringify({ code: 0, data }));
+const uploadForm = (bytes: string, name: string) => {
+  const form = new FormData();
+  form.append("file", new Blob([bytes]), name);
+  return form;
+};
 const messages = () => [
   { role: "system", content: "Host instructions" },
   { role: "user", content: "问题" },
@@ -307,7 +312,112 @@ it("local routes require auth, reject credential overrides and have no reveal en
     });
     expect(response.json()).toEqual(settings);
     expect(response.headers["cache-control"]).toBe("no-store");
+    fetcher.mockImplementation(async () =>
+      reply({ files: [], total: 0, page: 1 }),
+    );
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/bases/owned/files?page=1&recursive=true",
+      headers,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(fetcher.mock.calls.at(-1)?.[0]).toBe(
+      "https://cloud.example/api/knowledge/bases/owned/files?page=1&recursive=true",
+    );
+    const rejected = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/bases/owned/files?page=1&recursive=all",
+      headers,
+    });
+    expect(rejected.statusCode).toBe(400);
+    fetcher.mockImplementation(async () => reply({ ok: true }));
+    const jsonUpload = await app.inject({
+      method: "POST",
+      url: "/api/knowledge/bases/owned/files",
+      headers,
+      payload: { name: "a.txt", content: "eA==" },
+    });
+    expect(jsonUpload.statusCode).toBe(400);
+    const boundary = "----testboundary";
+    const uploaded = await app.inject({
+      method: "POST",
+      url: "/api/knowledge/bases/owned/files",
+      headers: {
+        ...headers,
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="file"; filename="a.txt"',
+        "Content-Type: text/plain",
+        "",
+        "hello",
+        `--${boundary}--`,
+        "",
+      ].join("\r\n"),
+    });
+    expect(uploaded.statusCode).toBe(200);
+    const [uploadUrl, uploadInit] = fetcher.mock.calls.at(-1) as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(uploadUrl).toBe(
+      "https://cloud.example/api/knowledge/bases/owned/files",
+    );
+    expect(uploadInit.headers).toMatchObject({
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    });
+    expect(uploadInit.body).toBeInstanceOf(Uint8Array);
   } finally {
     await app.close();
   }
+});
+it("logs cloud HTTP failures without credentials or file content", async () => {
+  const dumped: string[] = [];
+  const spy = vi.spyOn(console, "error").mockImplementation((...args) => {
+    dumped.push(JSON.stringify(args));
+  });
+  const client = new ManagedKnowledgeClient({
+    baseUrl: "https://cloud.example",
+    getSession: () => session,
+    fetcher: async () =>
+      new Response(
+        JSON.stringify({
+          code: 413,
+          message: "Knowledge request is too large or has no content length",
+        }),
+        { status: 413 },
+      ),
+  });
+  await expect(
+    client.request("/bases/owned/files", "POST", uploadForm("user-jwt-canary-file-bytes", "doc.pdf")),
+  ).rejects.toThrow("[HTTP 413]");
+  expect(dumped.join("\n")).toContain("413");
+  expect(dumped.join("\n")).not.toContain("user-jwt-canary");
+  expect(dumped.join("\n")).not.toContain("file-bytes");
+  spy.mockRestore();
+});
+it("distinguishes a timed-out cloud request from a user abort", async () => {
+  const client = new ManagedKnowledgeClient({
+    baseUrl: "https://cloud.example",
+    getSession: () => session,
+    fetcher: async () => {
+      throw Object.assign(new Error("The operation was aborted."), {
+        name: "AbortError",
+      });
+    },
+  });
+  await expect(
+    client.request("/bases/owned/files", "POST", uploadForm("x", "a.pdf")),
+  ).rejects.toThrow("知识库服务请求超时");
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    client.request(
+      "/bases/owned/files",
+      "POST",
+      uploadForm("x", "a.pdf"),
+      controller.signal,
+    ),
+  ).rejects.toThrow(/abort/i);
 });

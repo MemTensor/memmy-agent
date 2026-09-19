@@ -1,5 +1,7 @@
+import { isAbortLike, knowledgeLog } from "./log.js";
 import {
   KnowledgeError,
+  UPLOAD_TIMEOUT_MS,
   record,
   text,
   type KnowledgeEvidence,
@@ -56,13 +58,16 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
         ))
     )
       throw new KnowledgeError("知识库服务配置无效", 503);
-    const timeout = AbortSignal.timeout(
+    const timeoutMs =
       path === "/recall"
         ? 15_000
         : method === "POST" && path.endsWith("/files")
-          ? 70_000
-          : 20_000,
-    );
+          ? UPLOAD_TIMEOUT_MS
+          : 20_000;
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const encoded = encodeKnowledgeBody(body);
+    const bodyBytes = encoded.bodyBytes;
+    const started = Date.now();
     let response: Response;
     try {
       response = await (this.options.fetcher ?? fetch)(
@@ -73,16 +78,30 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
           signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
           headers: {
             Authorization: `Bearer ${session.credential}`,
-            ...(body === undefined
-              ? {}
-              : { "Content-Type": "application/json" }),
+            ...encoded.headers,
           },
-          body: body === undefined ? undefined : JSON.stringify(body),
+          body: encoded.payload,
         },
       );
-    } catch {
-      throw new KnowledgeError("知识库服务连接失败或请求超时", 503);
+    } catch (error) {
+      const ms = Date.now() - started;
+      if (signal?.aborted) throw error;
+      const timedOut = isAbortLike(error);
+      knowledgeLog({
+        hop: "cloud",
+        action: "request",
+        kind: timedOut ? "timeout" : "network",
+        method,
+        path,
+        bodyBytes,
+        ms,
+      });
+      throw new KnowledgeError(
+        timedOut ? "知识库服务请求超时" : "知识库服务连接失败或请求超时",
+        503,
+      );
     }
+    const ms = Date.now() - started;
     const current = this.options.getSession();
     if (
       !current ||
@@ -92,18 +111,38 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
       throw new KnowledgeError("登录状态已改变，请重试", 401);
     if (!response.ok) {
       let serverMessage = "";
+      let serverCode: string | number | undefined;
       try {
         const errorPayload = record(await response.clone().json());
         serverMessage = text(errorPayload.message) || text(errorPayload.error);
+        serverCode =
+          typeof errorPayload.code === "number" ||
+          typeof errorPayload.code === "string"
+            ? errorPayload.code
+            : undefined;
       } catch {
         // Keep the stable fallback below when the server response is not JSON.
       }
+      const fallback =
+        response.status === 404
+          ? "知识库不存在或服务尚未就绪"
+          : "知识库操作未完成，请稍后重试";
+      knowledgeLog({
+        hop: "cloud",
+        action: "request",
+        kind: "http",
+        method,
+        path,
+        status: response.status,
+        code: serverCode,
+        message: serverMessage || fallback,
+        bodyBytes,
+        ms,
+      });
       throw new KnowledgeError(
         response.status === 401 || response.status === 403
           ? "请重新登录 Memmy"
-          : serverMessage || (response.status === 404
-            ? "知识库不存在或服务尚未就绪"
-            : "知识库操作未完成，请稍后重试"),
+          : `[HTTP ${response.status}] ${serverMessage || fallback}`,
         response.status === 401 || response.status === 403
           ? 401
           : response.status === 404
@@ -111,17 +150,59 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
             : 502,
       );
     }
-    let payload: Record<string, unknown>;
+    let parsed: Record<string, unknown>;
     try {
-      payload = record(await response.json());
+      parsed = record(await response.json());
     } catch {
+      knowledgeLog({
+        hop: "cloud",
+        action: "request",
+        kind: "invalid-json",
+        method,
+        path,
+        status: response.status,
+        bodyBytes,
+        ms,
+      });
       throw new KnowledgeError("知识库服务返回格式无效", 502);
     }
-    if (payload.code !== 0 || !("data" in payload))
-      throw new KnowledgeError("知识库操作未完成，请稍后重试", 502);
+    if (parsed.code !== 0 || !("data" in parsed)) {
+      knowledgeLog({
+        hop: "cloud",
+        action: "request",
+        kind: "business",
+        method,
+        path,
+        status: response.status,
+        code:
+          typeof parsed.code === "number" || typeof parsed.code === "string"
+            ? parsed.code
+            : undefined,
+        bodyBytes,
+        ms,
+      });
+      throw new KnowledgeError(
+        `知识库操作未完成，请稍后重试（code=${String(parsed.code ?? "missing")}）`,
+        502,
+      );
+    }
+    if (method === "POST" && path.endsWith("/files"))
+      knowledgeLog(
+        {
+          hop: "cloud",
+          action: "request",
+          kind: "ok",
+          method,
+          path,
+          status: response.status,
+          bodyBytes,
+          ms,
+        },
+        "info",
+      );
     if (!this.sameSession(session))
       throw new KnowledgeError("登录状态已改变，请重试", 401);
-    return payload.data;
+    return parsed.data;
   }
   private sameSession(session: KnowledgeSession | null): boolean {
     const current = this.options.getSession();
@@ -215,4 +296,51 @@ export function parseEvidence(input: unknown): KnowledgeEvidence[] {
       };
     })
     .filter((item) => item.content.trim());
+}
+
+export type KnowledgeMultipartForward = {
+  raw: Uint8Array;
+  contentType: string;
+};
+
+function isMultipartForward(body: unknown): body is KnowledgeMultipartForward {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    "raw" in body &&
+    "contentType" in body &&
+    (body as KnowledgeMultipartForward).raw instanceof Uint8Array &&
+    typeof (body as KnowledgeMultipartForward).contentType === "string" &&
+    (body as KnowledgeMultipartForward).contentType
+      .toLowerCase()
+      .startsWith("multipart/form-data")
+  );
+}
+
+function encodeKnowledgeBody(body: unknown): {
+  payload?: BodyInit;
+  headers: Record<string, string>;
+  bodyBytes: number;
+} {
+  if (body === undefined) return { headers: {}, bodyBytes: 0 };
+  if (isMultipartForward(body))
+    return {
+      payload: body.raw as BodyInit,
+      headers: { "Content-Type": body.contentType },
+      bodyBytes: body.raw.byteLength,
+    };
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    const file = body.get("file");
+    return {
+      payload: body,
+      headers: {},
+      bodyBytes: file instanceof Blob ? file.size : 0,
+    };
+  }
+  const payload = JSON.stringify(body);
+  return {
+    payload,
+    headers: { "Content-Type": "application/json" },
+    bodyBytes: payload.length,
+  };
 }

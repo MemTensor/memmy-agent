@@ -19,10 +19,10 @@ it("uploads every selected file sequentially and continues after an individual f
   ];
   let active = 0;
   let peak = 0;
-  const upload = vi.fn(async (file: File, content: string) => {
+  const upload = vi.fn(async (file: File) => {
     active++;
     peak = Math.max(peak, active);
-    expect(atob(content)).toBe(file.name.split(".")[0]);
+    expect(file.size).toBeGreaterThan(0);
     await Promise.resolve();
     active--;
     if (file.name === "second.md") throw new Error("服务暂时不可用");
@@ -35,14 +35,15 @@ it("uploads every selected file sequentially and continues after an individual f
   );
   expect(peak).toBe(1);
   expect(results).toEqual([
-    { name: "first.txt", ok: true },
+    { name: "first.txt", ok: true, bytes: 5 },
     {
       name: "second.md",
       ok: false,
       error: "服务暂时不可用",
       reason: "other",
+      bytes: 6,
     },
-    { name: "third.pdf", ok: true },
+    { name: "third.pdf", ok: true, bytes: 5 },
   ]);
   expect(progress.mock.calls).toEqual([
     [0, 3, "first.txt"],
@@ -72,7 +73,7 @@ it("checks size and format for each file without blocking valid files in the bat
     false,
     true,
   ]);
-  expect(results[1]!.error).toContain("20 MB");
+  expect(results[1]!.error).toContain("100 MB");
   expect(summarizeUploads(results)).toMatchObject({
     succeeded: 1,
     failed: 3,
@@ -109,7 +110,7 @@ it("stops the remaining files when the batch is aborted", async () => {
     controller.signal,
   );
   expect(stopped).toBe(true);
-  expect(results).toEqual([{ name: "first.txt", ok: true }]);
+  expect(results).toEqual([{ name: "first.txt", ok: true, bytes: 5 }]);
   expect(upload).toHaveBeenCalledTimes(1);
 });
 
