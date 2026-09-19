@@ -919,8 +919,12 @@ describe("memmy-agent client", () => {
     expect(sockets[0]?.closeCalls[0]).toEqual({ code: 1011, reason: "ready timeout" });
     sockets[0]?.emitClose(1011);
     await rejection;
-    expect(sockets).toHaveLength(1);
-    expect(events).toEqual([]);
+    // The first attempt did fail, but a connection that never reached ready is
+    // still a dropped connection: it is now reported the same way as a
+    // post-ready drop and falls through to the reconnect scheduling below,
+    // instead of leaving the transport down until an outer caller retries.
+    // (The reconnect itself is covered by the post-ready reconnect test above.)
+    expect(events.map((event) => event.event)).toEqual(["connection_attempt_failed", "connection_closed"]);
   });
 
   it("newChat resolves server assigned chat id", async () => {

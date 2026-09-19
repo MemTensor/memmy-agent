@@ -1,6 +1,7 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app.js";
+import { ErrorBoundary } from "./app/error-boundary.js";
 import { AppProviders } from "./app/providers.js";
 import { initGtag } from "./analytics/gtag-init.js";
 import { NicknameModal } from "./components/nickname-modal.js";
@@ -15,6 +16,22 @@ import "./styles.css";
 
 if (typeof window !== "undefined" && window.memmy) {
   Object.assign(console, rendererLog.functions);
+}
+
+/*
+ * Errors that never reach React — a rejected promise in an effect callback, a
+ * throw inside a socket handler — used to disappear into the devtools console
+ * while the window sat there looking fine. Routing them through `console`
+ * puts them in the electron-log file alongside everything else, so a report of
+ * "it went blank" has something to read.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (event) => {
+    console.error("Uncaught renderer error:", event.error ?? event.message);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    console.error("Unhandled renderer rejection:", event.reason);
+  });
 }
 
 applyWindowPlatformClass(window.memmy?.platform);
@@ -83,20 +100,26 @@ const previewMode = readDevPreviewMode();
 
 createRoot(root).render(
   <StrictMode>
-    {previewMode === "startup" ? (
-      <I18nProvider language="zh-CN">
-        <StartupScreen />
-      </I18nProvider>
-    ) : previewMode === "nickname" ? (
-      <I18nProvider language="zh-CN">
-        <NicknameModalPreview />
-      </I18nProvider>
-    ) : previewMode === "memory-plugin-conflict" ? (
-      <MemoryPluginConflictModalPreview />
-    ) : previewMode === "memory-skills" ? (
-      <MemorySkillsPreview />
-    ) : (
-      <App />
-    )}
+    {/*
+      The boundary wraps the preview routes too: each mounts its own providers,
+      so a failure in any of them would blank the window the same way.
+    */}
+    <ErrorBoundary>
+      {previewMode === "startup" ? (
+        <I18nProvider language="zh-CN">
+          <StartupScreen />
+        </I18nProvider>
+      ) : previewMode === "nickname" ? (
+        <I18nProvider language="zh-CN">
+          <NicknameModalPreview />
+        </I18nProvider>
+      ) : previewMode === "memory-plugin-conflict" ? (
+        <MemoryPluginConflictModalPreview />
+      ) : previewMode === "memory-skills" ? (
+        <MemorySkillsPreview />
+      ) : (
+        <App />
+      )}
+    </ErrorBoundary>
   </StrictMode>
 );

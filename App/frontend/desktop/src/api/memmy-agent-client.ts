@@ -2299,9 +2299,20 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     if (!this.hasReachedReady) {
+      // A socket that dies during the first connect is still a dropped
+      // connection, and it used to be handled as a one-shot failure: the
+      // initial-ready promise was rejected and the method returned without
+      // scheduling anything, so the transport stayed down until some outer
+      // caller happened to retry. Reporting it the same way as a post-ready
+      // drop and falling through to the reconnect below means a gateway that
+      // is slow to come up recovers on its own.
       this.lastOrdinarySendChatId = null;
       this.rejectInitialReady(new Error("Agent gateway closed before ready"));
-      return;
+      this.emitEvent({
+        event: "connection_attempt_failed",
+        detail: "Agent gateway closed before ready",
+        connection_generation: generation
+      });
     }
     if (event?.code === 1009) {
       this.emitEvent({

@@ -999,7 +999,20 @@ function QuestionFields(props: {
       <div className="flex max-h-72 flex-col gap-2 overflow-y-auto pr-1">
         {props.questions.map((question) => (
           <label key={question.id} className="flex flex-col gap-1">
-            <span className="text-xs text-text-ink/65">{question.required ? `${question.label} *` : question.label}</span>
+            {/*
+              The badge, not a lone asterisk, is what tells the two kinds apart:
+              a required field blocks submit, an optional one does not, and the
+              difference used to be a single character at the end of a long
+              sentence that the reader scrolled past.
+            */}
+            <span className="flex items-baseline gap-2 text-xs text-text-ink/65">
+              <span className="min-w-0 flex-1">{question.label}</span>
+              <span
+                className={question.required ? "shrink-0 font-medium text-status-error" : "shrink-0 text-text-ink/40"}
+              >
+                {question.required ? t("plugin.ui.fieldRequired") : t("plugin.ui.fieldOptional")}
+              </span>
+            </span>
             {question.options.length > 0 ? (
               <select
                 value={answers[question.id] ?? ""}
@@ -1007,7 +1020,7 @@ function QuestionFields(props: {
                 disabled={props.disabled}
                 className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
               >
-                <option value="">{t("plugin.ui.optionalPlaceholder")}</option>
+                <option value="">{question.required ? t("plugin.ui.requiredPlaceholder") : t("plugin.ui.optionalPlaceholder")}</option>
                 {question.options.map((option, index) => (
                   <option key={`${index}:${option}`} value={option}>{option}</option>
                 ))}
@@ -1017,7 +1030,7 @@ function QuestionFields(props: {
                 value={answers[question.id] ?? ""}
                 onChange={(event) => set(question.id, event.target.value)}
                 disabled={props.disabled}
-                placeholder={question.required ? t("plugin.ui.responsePlaceholder") : t("plugin.ui.optionalPlaceholder")}
+                placeholder={question.required ? t("plugin.ui.requiredPlaceholder") : t("plugin.ui.optionalPlaceholder")}
                 className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
               />
             )}

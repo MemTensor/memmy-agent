@@ -403,7 +403,11 @@ describe("PluginCapabilityHost", () => {
       </I18nProvider>
     ));
 
-    expect(container.textContent).toContain("Headcount *");
+    // A lone asterisk was the old cue and nobody read it; the badge is what
+    // says, in words, that this one blocks submit.
+    expect(container.textContent).toContain("Headcount");
+    expect(container.textContent).toContain("Required");
+    expect(container.textContent).not.toContain("Headcount *");
     const submit = container.querySelector<HTMLButtonElement>("form button");
     expect(submit?.disabled).toBe(true);
     await act(() => {

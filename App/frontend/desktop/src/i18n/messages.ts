@@ -51,6 +51,19 @@ export const zhCNMessages = {
   "common.unpin": "取消置顶",
   "common.rename": "重命名",
   "common.refresh": "刷新",
+  /*
+   * The crash screen. These are read by a renderer-level error boundary that
+   * sits above the i18n provider, so it resolves them through
+   * `messageCatalogs` directly instead of `useTranslation`.
+   */
+  "app.crash.title": "界面出错了",
+  "app.crash.description": "这一屏没能渲染出来。你的会话内容仍在本地，重试通常就能恢复。",
+  "app.crash.retry": "重试",
+  "app.crash.reload": "重新加载",
+  "app.crash.details": "错误详情",
+  // Label of the language toggle, in the language it switches *to*: shown
+  // while the screen is Chinese, so it is written in English.
+  "app.crash.switchLanguage": "English",
   "common.preview": "预览",
   "plugin.ui.regionLabel": "插件交互",
   "plugin.ui.progress": "插件正在处理",
@@ -152,6 +165,14 @@ export const zhCNMessages = {
   "plugin.ui.responseFailed": "提交失败，请重试",
   "plugin.ui.responsePlaceholder": "输入回答…",
   "plugin.ui.optionalPlaceholder": "可留空",
+  /*
+   * Which fields the submit button enforces. The label used to carry a bare `*`
+   * and the placeholder read the same either way, so a required field looked
+   * exactly like an optional one until submission refused.
+   */
+  "plugin.ui.fieldRequired": "必填",
+  "plugin.ui.fieldOptional": "可选",
+  "plugin.ui.requiredPlaceholder": "必填，请输入…",
   "plugin.ui.answerCount": "已填 {filled}/{total}",
   "plugin.ui.open": "打开",
   "plugin.ui.renderer": "自定义界面",
@@ -1869,6 +1890,12 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "common.unpin": "Unpin",
   "common.rename": "Rename",
   "common.refresh": "Refresh",
+  "app.crash.title": "Something went wrong",
+  "app.crash.description": "This screen could not render. Your conversations are still on disk — retrying usually recovers.",
+  "app.crash.retry": "Try again",
+  "app.crash.reload": "Reload",
+  "app.crash.details": "Error details",
+  "app.crash.switchLanguage": "中文",
   "common.preview": "Preview",
   "plugin.ui.regionLabel": "Plugin interactions",
   "plugin.ui.progress": "Plugin is working",
@@ -1958,6 +1985,9 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "plugin.ui.responseFailed": "Submission failed. Try again.",
   "plugin.ui.responsePlaceholder": "Enter a response…",
   "plugin.ui.optionalPlaceholder": "Optional",
+  "plugin.ui.fieldRequired": "Required",
+  "plugin.ui.fieldOptional": "Optional",
+  "plugin.ui.requiredPlaceholder": "Required — type your answer…",
   "plugin.ui.answerCount": "{filled} of {total} answered",
   "plugin.ui.open": "Open",
   "plugin.ui.renderer": "custom interface",
