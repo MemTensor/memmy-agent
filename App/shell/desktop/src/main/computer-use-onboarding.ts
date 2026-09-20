@@ -59,7 +59,7 @@ export function createComputerUseOnboarding(deps: {
               ? '辅助程序未能暂停，请稍后重试。'
               : state.permissions.failure ? '暂时无法检测，请返回此窗口后重试。'
               : ready(state.permissions) ? (controls.canContinue ? '权限已就绪，可以继续任务。' : '权限已就绪。')
-              : '尚未确认的权限可先去开启，再返回检测。';
+              : '开启权限后，点击“重新检测”。';
             update();
             if (continueAfter && ready(state.permissions)) finish(true);
           };
@@ -68,7 +68,11 @@ export function createComputerUseOnboarding(deps: {
             if (action === 'later') { finish(); return; }
             if (state.busy) return;
             if (action === 'copyPath') { deps.copyPath(helperApp); return; }
-            if (action === 'returned' || action === 'recheck') { void check(); return; }
+            // Memmy's probe of the native helper takes a screenshot. That can
+            // request access, so focus changes must never
+            // trigger it: returning from a system prompt otherwise opens another.
+            if (action === 'returned') return;
+            if (action === 'recheck') { void check(); return; }
             if (action === 'continue') { if (ready(state.permissions)) void check(true); return; }
             if (!['accessibility', 'screenRecording'].includes(action) || state.permissions.failure === 'helperPauseFailed') return;
             const pane = action === 'accessibility' ? 'Privacy_Accessibility' : 'Privacy_ScreenCapture';

@@ -30,13 +30,25 @@ it('presents both permissions together and keeps one panel open across both Sett
   f.action('copyPath'); expect(f.deps.copyPath).toHaveBeenCalledExactlyOnceWith(helper);
   f.action('later'); expect(await pending).toBe(false);
 });
-it('updates automatically on return but requires explicit Continue and a fresh check before resolving', async () => {
+it('never captures on focus return and requires an explicit check and Continue before resolving', async () => {
   const f = fixture(); let settled = false;
   const pending = f.guide.guide('screenCaptureUnavailable', helper, f.controls).then(result => { settled = true; return result; });
   f.action('continue'); expect(f.controls.check).not.toHaveBeenCalled();
-  f.action('returned'); await vi.waitFor(() => expect(f.state().busy).toBe(false));
+  f.action('returned'); f.action('returned'); f.action('returned');
+  expect(f.controls.check).not.toHaveBeenCalled();
+  expect(f.state().permissions.screenRecording).toBe('unknown');
+  f.action('recheck'); await vi.waitFor(() => expect(f.state().busy).toBe(false));
   expect(f.state().permissions).toEqual(granted); expect(settled).toBe(false);
   f.action('continue'); expect(await pending).toBe(true); expect(f.controls.check).toHaveBeenCalledTimes(2);
+});
+it('opens recording settings repeatedly without capturing, requesting access, or closing the guide', async () => {
+  const f = fixture(); const pending = f.guide.guide('accessibility', helper, f.controls);
+  for (let n = 0; n < 3; n++) { f.action('returned'); f.action('screenRecording'); }
+  expect(f.controls.check).not.toHaveBeenCalled();
+  expect(f.deps.openSettings).toHaveBeenCalledTimes(3);
+  expect(f.deps.openSettings).toHaveBeenLastCalledWith('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  expect(f.panel.close).not.toHaveBeenCalled();
+  f.action('later'); expect(await pending).toBe(false);
 });
 it('never treats unknown status or a revoked permission as approved', async () => {
   const f = fixture(); const pending = f.guide.guide('accessibility', helper, f.controls);
@@ -68,7 +80,8 @@ it('exchanges real client/host check messages and releases the pending task only
   const nativeCheck = vi.fn().mockResolvedValue(granted);
   const waiting = client.guide('accessibility', helper, null, nativeCheck, true);
   await vi.waitFor(() => expect(f.deps.showPanel).toHaveBeenCalledOnce());
-  f.action('returned'); await vi.waitFor(() => expect(f.state().permissions).toEqual(granted));
+  f.action('returned'); expect(nativeCheck).not.toHaveBeenCalled();
+  f.action('recheck'); await vi.waitFor(() => expect(f.state().permissions).toEqual(granted));
   f.action('continue'); expect(await waiting).toBe(true); expect(nativeCheck).toHaveBeenCalledTimes(2);
   dispose(); expect(ipc.listenerCount('message')).toBe(0); expect(child.listenerCount('message')).toBe(0);
 });
