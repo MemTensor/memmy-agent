@@ -922,6 +922,25 @@ describe("canonical model workspace adapter", () => {
     });
   });
 
+  it("历史会话可继续使用目录中仍有效但已从当前候选移除的已提交模型", () => {
+    const workspace = createModelWorkspace(catalog());
+    workspace.catalog.modelAssignments.account.agent = {
+      candidates: ["account-agent"],
+      default: "account-agent"
+    };
+
+    expect(resolveModelSelection(workspace, "account", "byok-agent", {
+      allowUnassignedSelected: true
+    })).toMatchObject({
+      candidate: { id: "byok-agent", model: "gpt-4o", available: true },
+      candidateId: "byok-agent",
+      unavailable: false,
+      reason: "committed"
+    });
+    expect(resolveModelSelection(workspace, "account", "byok-agent"))
+      .toMatchObject({ candidate: null, unavailable: true, reason: "unavailable" });
+  });
+
   it("引导只 patch 自己的 endpoint/preset/assignment 并保留既有目录项", () => {
     let workspace = createModelWorkspace(catalog());
     const summary = upsertByokPreset(workspace, {

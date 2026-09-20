@@ -265,7 +265,8 @@ async function hydrateAccountRuntimeConfig(
   }
   const projection = await writeAccountModelProjectionToMemmyConfig({
     cloudUuid: state.cloudUuid,
-    userId: session.profile.userId
+    userId: session.profile.userId,
+    preserveAccountByokSelection: true
   }, options.memmyConfigPath);
   appStateStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
   return {

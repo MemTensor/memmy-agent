@@ -125,6 +125,47 @@ describe("syncRuntimeConfigWithAppState", () => {
     expect(saved.app.accountByokLocalSelectionBaseline).toBeUndefined();
   });
 
+  it("keeps an account-only custom Agent candidate across a normal restart", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    context.writeConfig(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "cloud-token-a",
+      userId: "owner-a"
+    }, context.memmyConfigPath);
+    const configured = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    configured.app.userMode = "account";
+    configured.modelPresets.accountOnly = {
+      provider: "openai",
+      endpoint: "chat",
+      model: "qwen3.8-flash",
+      source: "byok",
+      capabilities: ["agent"]
+    };
+    configured.modelAssignments.account.agent.candidates.push("accountOnly");
+    configured.modelAssignments.account.agent.default = "accountOnly";
+    context.writeConfig(configured);
+
+    await syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email"
+    });
+
+    const restarted = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(restarted.modelAssignments.account.agent).toEqual({
+      candidates: [
+        expect.stringMatching(/^memmy-account-.+-agent$/),
+        "agent",
+        "accountOnly"
+      ],
+      default: "accountOnly"
+    });
+    expect(restarted.modelAssignments.byok.agent).toEqual({
+      candidates: ["agent"],
+      default: "agent"
+    });
+  });
+
   it("keeps an unmarked legacy email session when the INTL package starts", async () => {
     const context = createContext();
     context.store.repositories.accountSession.upsert({
