@@ -481,6 +481,9 @@ export function upsertModelConnection(
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
+  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
+  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
+  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
