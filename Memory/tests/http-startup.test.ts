@@ -118,9 +118,103 @@ describe("Memory HTTP startup", () => {
     expect(timerObservedBeforeSecondRun).toBe(true);
     expect(limits).toEqual([4, 4]);
   });
+
+  it("does not start the worker when budget reconcile settles before drain", async () => {
+    let reconciliations = 0;
+    const service = stubService(() => {
+      reconciliations += 1;
+    });
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 80,
+      workerPostHealthDelayMs: 80
+    });
+    servers.push(server);
+
+    service.settleBudgetReconcile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    const baseUrl = await listen(server);
+    service.settleBudgetReconcile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    const response = await fetch(`${baseUrl}/api/v1/health`);
+    expect(response.status).toBe(200);
+    service.settleBudgetReconcile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    await waitFor(() => reconciliations === 1);
+  });
+
+  it("reschedules an already started idle worker when budget reconcile settles", async () => {
+    let runs = 0;
+    const service = stubService(() => undefined);
+    service.nextWorkerRunAt = () => undefined;
+    service.runWorkerOnce = async () => {
+      runs += 1;
+      return workerResult(0);
+    };
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      workerPostHealthDelayMs: 0
+    });
+    servers.push(server);
+    await listen(server);
+    await waitFor(() => runs === 1);
+
+    service.nextWorkerRunAt = () => Date.now() + 10;
+    service.settleBudgetReconcile();
+    await waitFor(() => runs === 2);
+  });
+
+  it("replaces a later midnight wake with the earlier budget retry", async () => {
+    let runs = 0;
+    const laterWakeAt = Date.now() + 60_000;
+    const service = stubService(() => undefined);
+    service.nextWorkerRunAt = () => laterWakeAt;
+    service.runWorkerOnce = async () => {
+      runs += 1;
+      return workerResult(0);
+    };
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      workerPostHealthDelayMs: 0
+    });
+    servers.push(server);
+    await listen(server);
+    await waitFor(() => runs === 1);
+
+    service.nextWorkerRunAt = () => Date.now() + 10;
+    service.settleBudgetReconcile();
+    await waitFor(() => runs === 2, 500);
+  });
+
+  it("does not start the worker after dispose when budget reconcile settles", async () => {
+    let reconciliations = 0;
+    const service = stubService(() => {
+      reconciliations += 1;
+    });
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      workerPostHealthDelayMs: 0
+    });
+    await listen(server);
+    await waitFor(() => reconciliations === 1);
+    await closeMemoryHttpServer(server);
+    service.settleBudgetReconcile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(1);
+  });
 });
 
-function stubService(reconcile: () => void): MemoryService {
+function stubService(reconcile: () => void): StartupServiceStub {
+  let listener: (() => void) | undefined;
   return {
     health() {
       return { ok: true };
@@ -131,9 +225,19 @@ function stubService(reconcile: () => void): MemoryService {
     },
     nextWorkerRunAt() {
       return undefined;
+    },
+    setAppBudgetReconcileListener(next?: () => void) {
+      listener = next;
+    },
+    settleBudgetReconcile() {
+      listener?.();
     }
-  } as unknown as MemoryService;
+  } as unknown as StartupServiceStub;
 }
+
+type StartupServiceStub = MemoryService & {
+  settleBudgetReconcile(): void;
+};
 
 function workerResult(leased: number): Awaited<ReturnType<MemoryService["runWorkerOnce"]>> {
   return {

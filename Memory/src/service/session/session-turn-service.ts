@@ -2358,7 +2358,10 @@ export class SessionTurnService {
       };
     }
 
-    const llmDraft = await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
+    const deferDecisionRepair = this.deps.shouldDeferBudgetedEvolutionLlm?.() === true;
+    const llmDraft = deferDecisionRepair
+      ? undefined
+      : await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
     const preference = llmDraft?.preference ?? failureBurstPreference(burst, reason, evidence.highValueMemories[0]);
     const antiPattern = llmDraft?.antiPattern ?? failureBurstAntiPattern(burst, reason);
     const repair = this.deps.repos.runtime.insertDecisionRepair({
@@ -2429,6 +2432,21 @@ export class SessionTurnService {
       },
       createdAt: at
     });
+    if (deferDecisionRepair) {
+      this.deps.enqueueJob({
+        jobType: "decision_repair",
+        userId: session.userId,
+        sessionId: session.id,
+        episodeId: episode.id,
+        dedupeKey: `decision_repair:${repair.id}`,
+        payload: {
+          repairId: repair.id,
+          trigger: "failure-burst",
+          feedbackText: `${burst.toolId}: ${reason}`
+        },
+        createdAt: at
+      });
+    }
     return {
       repairId: repair.id,
       contextHash: burst.contextHash,

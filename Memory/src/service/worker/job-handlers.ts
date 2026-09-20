@@ -76,6 +76,8 @@ export interface WorkerJobProcessors {
     reflectTrace(job: EvolutionJobRecord): MaybePromise<void>;
     resolveSkillTrial(job: EvolutionJobRecord): MaybePromise<void>;
     createDecisionRepair(job: EvolutionJobRecord): MaybePromise<void>;
+    synthesizeDecisionRepair(job: EvolutionJobRecord): MaybePromise<void>;
+    refineFeedbackExperience(job: EvolutionJobRecord): MaybePromise<void>;
   };
   embedding: {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
@@ -290,7 +292,11 @@ export async function processJob(
       await deps.processors.feedback.resolveSkillTrial(job);
       return;
     case "decision_repair":
-      await deps.processors.feedback.createDecisionRepair(job);
+      if (typeof job.payload.repairId === "string" && job.payload.repairId.trim()) {
+        await deps.processors.feedback.synthesizeDecisionRepair(job);
+      } else {
+        await deps.processors.feedback.createDecisionRepair(job);
+      }
       return;
     case "l2_association":
       await deps.processors.evolution.associateL2(job);
@@ -300,6 +306,9 @@ export async function processJob(
       return;
     case "episode_title":
       await deps.processors.episodeTitle.generate(job);
+      return;
+    case "feedback_experience":
+      await deps.processors.feedback.refineFeedbackExperience(job);
       return;
     default:
       throw new Error(`unsupported job type: ${job.jobType}`);
@@ -650,6 +659,8 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
           : undefined;
     }
     case "decision_repair": {
+      const repairId = payloadString("repairId");
+      if (repairId) return `decision_repair:${repairId}`;
       const feedbackId = payloadString("feedbackId");
       return feedbackId
         ? `decision_repair:${feedbackId}`
@@ -687,6 +698,10 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "work_memory_extract": {
       const trajectoryHash = payloadString("trajectoryHash");
       return trajectoryHash ? `work_memory_extract:${trajectoryHash}` : undefined;
+    }
+    case "feedback_experience": {
+      const feedbackId = payloadString("feedbackId");
+      return feedbackId ? `feedback_experience:${feedbackId}` : undefined;
     }
   }
 }

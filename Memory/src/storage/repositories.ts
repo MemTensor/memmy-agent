@@ -3150,7 +3150,18 @@ export class RuntimeRepository {
     return counts;
   }
 
-  nextWorkerRunAt(): number | undefined {
+  nextWorkerRunAt(options?: {
+    jobType?: string;
+    jobTypes?: readonly string[];
+    includeEmbeddingRetries?: boolean;
+  }): number | undefined {
+    const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
+    const jobTypeFilter = jobTypes
+      ? jobTypes.length === 0
+        ? "AND 1=0"
+        : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
+      : "";
+    const jobTypeParams = jobTypes && jobTypes.length > 0 ? jobTypes : [];
     const queuedJob = this.db
       .prepare(
         `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
@@ -3158,10 +3169,11 @@ export class RuntimeRepository {
          WHERE status = 'queued'
            AND attempts < max_attempts
            AND json_type(payload_json, '$.runAfter') = 'text'
+           ${jobTypeFilter}
          ORDER BY run_after ASC
          LIMIT 1`
       )
-      .get() as { run_after: string } | undefined;
+      .get(...jobTypeParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(
         `SELECT leased_until
@@ -3169,29 +3181,35 @@ export class RuntimeRepository {
          WHERE status = 'leased'
            AND attempts < max_attempts
            AND leased_until IS NOT NULL
+           ${jobTypeFilter}
          ORDER BY leased_until ASC
          LIMIT 1`
       )
-      .get() as { leased_until: string } | undefined;
-    const pendingEmbedding = this.db
-      .prepare(
-        `SELECT next_attempt_at
-         FROM embedding_retry_queue
-         WHERE status = 'pending'
-         ORDER BY next_attempt_at ASC
-         LIMIT 1`
-      )
-      .get() as { next_attempt_at: number } | undefined;
-    const inProgressEmbedding = this.db
-      .prepare(
-        `SELECT MAX(next_attempt_at, lease_until) AS run_at
-         FROM embedding_retry_queue
-         WHERE status = 'in_progress'
-           AND lease_until IS NOT NULL
-         ORDER BY run_at ASC
-         LIMIT 1`
-      )
-      .get() as { run_at: number } | undefined;
+      .get(...jobTypeParams) as { leased_until: string } | undefined;
+    const includeEmbeddingRetries = options?.includeEmbeddingRetries !== false;
+    const pendingEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT next_attempt_at
+           FROM embedding_retry_queue
+           WHERE status = 'pending'
+           ORDER BY next_attempt_at ASC
+           LIMIT 1`
+        )
+        .get() as { next_attempt_at: number } | undefined
+      : undefined;
+    const inProgressEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+           FROM embedding_retry_queue
+           WHERE status = 'in_progress'
+             AND lease_until IS NOT NULL
+           ORDER BY run_at ASC
+           LIMIT 1`
+        )
+        .get() as { run_at: number } | undefined
+      : undefined;
     const times = [
       queuedJob ? Date.parse(queuedJob.run_after) : Number.NaN,
       leasedJob ? Date.parse(leasedJob.leased_until) : Number.NaN,
@@ -3281,9 +3299,10 @@ export class RuntimeRepository {
     limit = 10,
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
-    priorityCohortOnly = false
+    priorityCohortOnly = false,
+    allowedJobTypes?: readonly string[]
   ): EvolutionJobRecord[] {
-    if (targetMemoryIds?.length === 0) {
+    if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
     }
     const at = nowIso();
@@ -3351,11 +3370,12 @@ export class RuntimeRepository {
                  )
                )
              )
+             ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, ...(allowedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -3462,6 +3482,79 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}`
         )
         .all() as SqlJobRow[];
+
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE evolution_jobs
+             SET status = 'queued',
+                 attempts = MAX(0, attempts - 1),
+                 leased_until = NULL,
+                 updated_at = ?
+             WHERE id = ?`
+          )
+          .run(at, row.id);
+      }
+
+      return rows.map((row) => ({
+        before: jobFromSql(row),
+        after: jobFromSql({
+          ...row,
+          status: "queued",
+          attempts: Math.max(0, row.attempts - 1),
+          leased_until: null,
+          updated_at: at
+        })
+      }));
+    });
+    return transaction();
+  }
+
+  requeueUnstartedLeasedJobs(
+    ids: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased' AND id IN (${ids.map(() => "?").join(", ")})`,
+      [...ids],
+      at
+    );
+  }
+
+  requeueExpiredLeasedJobsExcept(
+    excludedJobTypes: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const excludeFilter = excludedJobTypes.length > 0
+      ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})`
+      : "";
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased'
+         AND leased_until IS NOT NULL
+         AND leased_until <= ?
+         ${excludeFilter}`,
+      [at, ...excludedJobTypes],
+      at
+    );
+  }
+
+  private requeueLeasedJobsWhere(
+    whereSql: string,
+    params: readonly unknown[],
+    at: string
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT *
+           FROM evolution_jobs
+           WHERE ${whereSql}
+           ORDER BY ${evolutionJobOrderSql()}`
+        )
+        .all(...params) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -4079,6 +4172,38 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM decision_repairs WHERE id = ?`)
       .get(id) as SqlDecisionRepairRow | undefined;
     return row ? decisionRepairFromSql(row) : undefined;
+  }
+
+  updateDecisionRepair(id: string, patch: {
+    suggestion?: string;
+    preference?: string;
+    antiPattern?: string;
+    source?: unknown;
+    meta?: Record<string, unknown>;
+  }): DecisionRepairRecord | undefined {
+    const current = this.getDecisionRepair(id);
+    if (!current) {
+      return undefined;
+    }
+    this.db
+      .prepare(
+        `UPDATE decision_repairs
+         SET suggestion = ?,
+             preference = ?,
+             anti_pattern = ?,
+             source_json = ?,
+             meta_json = ?
+         WHERE id = ?`
+      )
+      .run(
+        patch.suggestion ?? current.suggestion,
+        patch.preference ?? current.preference ?? null,
+        patch.antiPattern ?? current.antiPattern ?? null,
+        toJson(patch.source ?? current.source ?? {}),
+        toJson(patch.meta ?? current.meta ?? {}),
+        id
+      );
+    return this.getDecisionRepair(id);
   }
 
   upsertCandidatePoolTrace(input: {

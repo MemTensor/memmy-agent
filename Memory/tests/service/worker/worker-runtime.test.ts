@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { localCalendarDate } from "@memmy/agent-source-core";
+import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
+import { MEMORY_BYOK_BUDGET_KV_KEY } from "../../../src/service/memory-token-budget-ledger.js";
+import { evolutionJobDedupeKey } from "../../../src/service/worker/job-handlers.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { accountRuntimeConfig, byokRuntimeConfig, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup: cleanupMemoryServiceFixture,
@@ -12,6 +16,17 @@ afterEach(() => {
 });
 
 describe("MemoryService / worker / runtime", () => {
+  it.each([
+    [{ repairId: "repair-1" }, "episode-1", "decision_repair:repair-1"],
+    [{ feedbackId: "feedback-1" }, "episode-1", "decision_repair:feedback-1"],
+    [{ repairId: "repair-1", feedbackId: "feedback-1" }, "episode-1", "decision_repair:repair-1"],
+    [{ repairId: " ", feedbackId: "feedback-1" }, "episode-1", "decision_repair:feedback-1"],
+    [{}, "episode-1", "decision_repair:episode-1"],
+    [{}, undefined, undefined]
+  ] as const)("deduplicates decision repair payload %j", (payload, episodeId, expected) => {
+    expect(evolutionJobDedupeKey({ jobType: "decision_repair", payload, episodeId })).toBe(expected);
+  });
+
   it("leases L3 World Model updates FIFO per field while allowing different fields in parallel", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
@@ -276,6 +291,225 @@ describe("MemoryService / worker / runtime", () => {
        ORDER BY seq ASC`
     ).all(jobId) as Array<{ op: string }>;
     expect(ops.map((change) => change.op)).toEqual(["leased", "dead_letter"]);
+
+    db.close();
+  });
+
+  it("leases idle close while a memory token budget pause holds budgeted jobs", async () => {
+    const { db, service } = createTestService({
+      config: byokRuntimeConfig({
+        tokenBudget: { dailyLimitM: 1, totalLimitM: 500 }
+      })
+    });
+    const repos = new Repositories(db.db);
+    const at = new Date().toISOString();
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
+    });
+    expect(service.memoryTokenBudgetSnapshot()).toMatchObject({ paused: true, trigger: "daily" });
+    repos.runtime.enqueueJob({
+      id: "job-paused-reflection",
+      jobType: "reflection",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: "job-paused-idle-close",
+      jobType: "episode_idle_close",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+
+    const run = await service.runWorkerOnce(10);
+    expect(run.jobs.map((job) => job.jobId)).toEqual(["job-paused-idle-close"]);
+    expect(repos.runtime.getJob("job-paused-reflection")).toMatchObject({
+      status: "queued",
+      attempts: 0
+    });
+
+    db.close();
+  });
+
+  it("does not wake for expired budgeted jobs while paused", () => {
+    const { db, service } = createTestService({
+      config: byokRuntimeConfig({
+        tokenBudget: { dailyLimitM: 1, totalLimitM: 500 }
+      })
+    });
+    const repos = new Repositories(db.db);
+    const now = Date.now();
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
+    });
+    repos.runtime.enqueueJob({
+      id: "job-expired-reward",
+      jobType: "reward",
+      status: "queued",
+      userId: "budget-user",
+      payload: { runAfter: new Date(now - 5_000).toISOString() },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString()
+    });
+    const idleAt = now + 8_000;
+    repos.runtime.enqueueJob({
+      id: "job-idle-close-later",
+      jobType: "episode_idle_close",
+      status: "queued",
+      userId: "budget-user",
+      payload: { runAfter: new Date(idleAt).toISOString() },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString()
+    });
+
+    expect(service.nextWorkerRunAt()).toBe(idleAt);
+
+    db.close();
+  });
+
+  it("keeps platform and local embedding jobs runnable after a BYOK pause", async () => {
+    const { db, service } = createTestService({
+      config: {
+        ...accountRuntimeConfig(),
+        tokenBudget: { dailyLimitM: 1, totalLimitM: 500 },
+        embedding: {
+          ...DEFAULT_MEMMY_CONFIG.embedding,
+          mode: "local"
+        }
+      }
+    });
+    const repos = new Repositories(db.db);
+    const at = new Date().toISOString();
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
+    });
+    repos.runtime.enqueueJob({
+      id: "job-platform-reflection",
+      jobType: "reflection",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: "job-local-embedding",
+      jobType: "embedding",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+
+    const run = await service.runWorkerOnce(10);
+    expect(run.jobs.map((job) => job.jobId).sort()).toEqual([
+      "job-local-embedding",
+      "job-platform-reflection"
+    ]);
+
+    db.close();
+  });
+
+  it("holds only BYOK roles in a mixed model configuration", async () => {
+    const { db, service } = createTestService({
+      config: byokRuntimeConfig({
+        tokenBudget: { dailyLimitM: 1, totalLimitM: 500 },
+        evolution: accountRuntimeConfig().evolution,
+        embedding: DEFAULT_MEMMY_CONFIG.embedding
+      })
+    });
+    const repos = new Repositories(db.db);
+    const at = new Date().toISOString();
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
+    });
+    repos.runtime.enqueueJob({
+      id: "job-mixed-title",
+      jobType: "episode_title",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: "job-mixed-reflection",
+      jobType: "reflection",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: "job-mixed-embedding",
+      jobType: "embedding",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: "job-mixed-work-memory",
+      jobType: "work_memory_extract",
+      status: "queued",
+      userId: "budget-user",
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+
+    const run = await service.runWorkerOnce(10);
+    expect(run.jobs.map((job) => job.jobId)).toEqual([
+      "job-mixed-embedding"
+    ]);
+    expect(repos.runtime.getJob("job-mixed-title")).toMatchObject({
+      status: "queued",
+      attempts: 0
+    });
+    expect(repos.runtime.getJob("job-mixed-reflection")).toMatchObject({
+      status: "queued",
+      attempts: 0
+    });
+    expect(repos.runtime.getJob("job-mixed-work-memory")).toMatchObject({
+      status: "queued",
+      attempts: 0
+    });
 
     db.close();
   });

@@ -11,7 +11,11 @@ import {
   aggregateOpenAiEmbeddingVectors,
   planOpenAiEmbeddingInputs
 } from "./openai-embedding-inputs.js";
-import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
+import {
+  HttpByokTokenUsageRecorder,
+  extractModelTokenUsage,
+  type MemoryModelUsageEvent
+} from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
 const logger = createMemoryLogger("embedding");
@@ -54,17 +58,25 @@ const EMBEDDED_EMBEDDING_MODEL_ROOT = "embedding-models";
 let localExtractorPromise: Promise<FeatureExtractor> | null = null;
 let localExtractorModel: string | null = null;
 
-export function createEmbedder(config: EmbeddingConfig): Embedder {
-  return new HttpEmbedder(config);
+export interface CreateEmbedderOptions {
+  onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
+}
+
+export function createEmbedder(config: EmbeddingConfig, options: CreateEmbedderOptions = {}): Embedder {
+  return new HttpEmbedder(config, options);
 }
 
 class HttpEmbedder implements Embedder {
   private readonly cache = new Map<string, number[]>();
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder = new HttpByokTokenUsageRecorder();
+  private readonly usageRecorder: HttpByokTokenUsageRecorder;
 
-  constructor(readonly config: EmbeddingConfig) {}
+  constructor(readonly config: EmbeddingConfig, options: CreateEmbedderOptions = {}) {
+    this.usageRecorder = new HttpByokTokenUsageRecorder({
+      onBudgetedUsage: options.onBudgetedUsage
+    });
+  }
 
   isRemote(): boolean {
     return this.config.provider !== "local";

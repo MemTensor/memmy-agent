@@ -6,7 +6,8 @@ import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
-  type MemoryLlmModelRole
+  type MemoryLlmModelRole,
+  type MemoryModelUsageEvent
 } from "./token-usage.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
@@ -80,6 +81,7 @@ let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
+  onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -89,9 +91,13 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 class HttpLlmClient implements LlmClient {
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder = new HttpByokTokenUsageRecorder();
+  private readonly usageRecorder: HttpByokTokenUsageRecorder;
 
-  constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {}
+  constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {
+    this.usageRecorder = new HttpByokTokenUsageRecorder({
+      onBudgetedUsage: options.onBudgetedUsage
+    });
+  }
 
   isConfigured(): boolean {
     if (!this.config.provider || this.config.provider === "local_only") {

@@ -38,10 +38,12 @@ export interface HttpByokTokenUsageRecorderOptions {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   env?: Record<string, string | undefined>;
+  onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const EVENT_PATH = "/api/app/byok-token-usage/events";
+const MEMORY_PIPELINE_USAGE_PATH = "/api/app/byok-token-usage/memory-pipeline-usage";
 const RUNTIME_TOKEN_HEADER = "x-memmy-local-token";
 
 export function resolveDefaultRuntimeConfigPath(): string {
@@ -128,6 +130,7 @@ export class HttpByokTokenUsageRecorder {
   private readonly runtimeConfigPath: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
 
   constructor(options: HttpByokTokenUsageRecorderOptions = {}) {
     const env = options.env ?? process.env;
@@ -135,6 +138,7 @@ export class HttpByokTokenUsageRecorder {
     this.runtimeConfigPath = options.runtimeConfigPath ?? env.MEMMY_RUNTIME_CONFIG_PATH ?? resolveDefaultRuntimeConfigPath();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.onBudgetedUsage = options.onBudgetedUsage;
   }
 
   record(event: MemoryModelUsageEvent): void {
@@ -142,6 +146,8 @@ export class HttpByokTokenUsageRecorder {
     if (!context || context.source !== "byok" || context.capability !== event.kind || isEmptyUsage(event.usage)) {
       return;
     }
+
+    this.onBudgetedUsage?.(event);
 
     const runtime = this.runtimeConfig ?? readRuntimeConfig(this.runtimeConfigPath);
     if (!runtime) {
@@ -193,6 +199,41 @@ function toByokTokenUsageEvent(event: MemoryModelUsageEvent): Record<string, unk
     rawUsage: event.usage.rawUsage,
     createdAt: new Date().toISOString()
   };
+}
+
+export async function fetchAppMemoryBudget(
+  options: HttpByokTokenUsageRecorderOptions = {}
+): Promise<{ dailyUsed: number; lifetimeUsed: number } | null> {
+  const env = options.env ?? process.env;
+  const runtime = options.runtimeConfig
+    ?? readRuntimeConfig(options.runtimeConfigPath ?? env.MEMMY_RUNTIME_CONFIG_PATH ?? resolveDefaultRuntimeConfigPath());
+  if (!runtime) {
+    return null;
+  }
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  try {
+    const response = await fetchImpl(new URL(MEMORY_PIPELINE_USAGE_PATH, runtime.baseUrl), {
+      method: "GET",
+      headers: {
+        [RUNTIME_TOKEN_HEADER]: runtime.localToken
+      },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const payload = asRecord(await response.json());
+    if (!Number.isFinite(Number(payload.dailyUsed)) || !Number.isFinite(Number(payload.lifetimeUsed))) {
+      return null;
+    }
+    return {
+      dailyUsed: Math.max(0, Math.trunc(Number(payload.dailyUsed))),
+      lifetimeUsed: Math.max(0, Math.trunc(Number(payload.lifetimeUsed)))
+    };
+  } catch {
+    return null;
+  }
 }
 
 function readRuntimeConfig(filePath: string): RuntimeConfig | null {

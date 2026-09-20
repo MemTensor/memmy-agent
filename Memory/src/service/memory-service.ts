@@ -27,7 +27,12 @@ import {
   MemoryModelTaskRouter,
   type MemoryModelTaskContext
 } from "../model/task-routing.js";
-import type { MemoryLlmModelRole } from "../model/token-usage.js";
+import {
+  jobTypeConsumesMemoryBudget,
+  type MemoryBudgetModelSources
+} from "@memmy/agent-source-core";
+import { fetchAppMemoryBudget, type MemoryLlmModelRole, type MemoryModelUsageEvent } from "../model/token-usage.js";
+import { MemoryTokenBudgetLedger } from "./memory-token-budget-ledger.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
   sqliteBackendCapabilities,
@@ -178,13 +183,6 @@ const serviceLogger = createMemoryLogger("memory-service");
 export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
 
-function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
-  return createLlmClient(
-    modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
-    { modelRole }
-  );
-}
-
 export interface MemoryServiceOptions {
   db?: MemoryDb;
   backend?: StorageBackend;
@@ -200,6 +198,7 @@ export interface MemoryServiceOptions {
   embedder?: Embedder;
   /** Actual HTTP endpoint used by the current server instance. */
   viewerEndpoint?: string;
+  fetchAppMemoryBudget?: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
 }
 
 export type CompleteTurnResponse = TurnCompletionResult;
@@ -263,6 +262,19 @@ export class MemoryService {
   private skillLlm: LlmClient;
   private embedder: Embedder;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
+  private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
+  private readonly fetchAppMemoryBudgetFn: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  private appBudgetReconcile: {
+    succeeded: boolean;
+    inFlight?: Promise<boolean>;
+    nextAttemptAtMs: number;
+    backoffMs: number;
+    settledListener?: () => void;
+  } = {
+    succeeded: false,
+    nextAttemptAtMs: 0,
+    backoffMs: 1_000
+  };
   private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
@@ -271,6 +283,13 @@ export class MemoryService {
     this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
+    this.tokenBudgetLedger = new MemoryTokenBudgetLedger(
+      this.repos.runtime,
+      () => new Date(),
+      this.config.tokenBudget
+    );
+    this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget ?? fetchAppMemoryBudget;
+    void this.reconcileMemoryTokenBudgetFromApp();
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
@@ -327,7 +346,9 @@ export class MemoryService {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
           reflectTrace: (job) => this.evolutionJobs.reflectTrace(job),
           resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job),
-          createDecisionRepair: (job) => this.createRevisionDecisionRepairFromJob(job)
+          createDecisionRepair: (job) => this.createRevisionDecisionRepairFromJob(job),
+          synthesizeDecisionRepair: (job) => this.feedbackExperience.processDecisionRepairJob(job),
+          refineFeedbackExperience: (job) => this.feedbackExperience.processFeedbackExperienceJob(job)
         },
         embedding: {
           embedMemory: this.embedMemory.bind(this),
@@ -396,7 +417,8 @@ export class MemoryService {
       readOnlyCursor: this.readOnlyCursor.bind(this),
       findExistingSkillForPolicy: this.evolutionJobs.findExistingSkillForPolicy.bind(this.evolutionJobs),
       upsertEvolutionMemory: this.evolutionJobs.upsertEvolutionMemory.bind(this.evolutionJobs),
-      pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials)
+      pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
+      shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm()
     });
     const importJobOwner = this;
     this.importJobs = new ImportJobProcessor({
@@ -455,6 +477,11 @@ export class MemoryService {
       get capture() { return workerRunnerOwner.config.algorithm.capture; },
       embeddingRetryWorkerId: this.embeddingRetryWorkerId,
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
+      memoryBudgetPaused: () => this.tokenBudgetLedger.snapshot().paused,
+      memoryBudgetJobConsumes: (jobType) => this.memoryBudgetJobConsumes(jobType),
+      memoryBudgetModelSources: () => this.budgetModelSources(),
+      memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
+      memoryBudgetNextReconcileAtMs: () => this.nextAppBudgetReconcileAtMs(),
       nowIso,
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       namespaceIdFromMemory,
@@ -603,6 +630,7 @@ export class MemoryService {
         useLlm: this.config.algorithm.feedback.useLlm,
         llm: this.skillLlm
       }),
+      shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm(),
       firstLine,
       memoryLayersForIntent,
       namespaceIdFromContext,
@@ -621,6 +649,105 @@ export class MemoryService {
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
   }
 
+  private createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
+    return createLlmClient(
+      modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
+      {
+        modelRole,
+        onBudgetedUsage: (event) => this.recordBudgetedUsage(event)
+      }
+    );
+  }
+
+  private recordBudgetedUsage(event: MemoryModelUsageEvent): void {
+    this.tokenBudgetLedger.addIfBudgeted({
+      kind: event.kind,
+      operation: event.operation,
+      totalTokens: event.usage.totalTokens
+    });
+  }
+
+  private budgetModelSources(): MemoryBudgetModelSources {
+    return {
+      memory_summary: {
+        source: this.config.summary.actualModelContext?.source
+      },
+      memory_evolution: {
+        source: resolveEvolutionConfig(this.config).actualModelContext?.source
+      },
+      embedding: {
+        source: this.config.embedding.actualModelContext?.source,
+        mode: this.config.embedding.mode
+      }
+    };
+  }
+
+  private memoryBudgetJobConsumes(jobType: string): boolean {
+    return jobTypeConsumesMemoryBudget(jobType, this.budgetModelSources());
+  }
+
+  private shouldDeferBudgetedEvolutionLlm(): boolean {
+    return this.tokenBudgetLedger.snapshot().paused && this.memoryBudgetJobConsumes("decision_repair");
+  }
+
+  private async reconcileMemoryTokenBudgetFromApp(): Promise<boolean> {
+    if (this.appBudgetReconcile.inFlight) {
+      return this.appBudgetReconcile.inFlight;
+    }
+    this.appBudgetReconcile.inFlight = this.performAppBudgetReconcile().finally(() => {
+      this.appBudgetReconcile.inFlight = undefined;
+    });
+    return this.appBudgetReconcile.inFlight;
+  }
+
+  private async performAppBudgetReconcile(): Promise<boolean> {
+    try {
+      const remote = await this.fetchAppMemoryBudgetFn();
+      if (!remote) {
+        this.appBudgetReconcile.nextAttemptAtMs = Date.now() + this.appBudgetReconcile.backoffMs;
+        this.appBudgetReconcile.backoffMs = Math.min(this.appBudgetReconcile.backoffMs * 2, 30_000);
+        return false;
+      }
+      this.tokenBudgetLedger.reconcile(remote);
+      this.appBudgetReconcile.succeeded = true;
+      this.appBudgetReconcile.backoffMs = 1_000;
+      return true;
+    } finally {
+      this.appBudgetReconcile.settledListener?.();
+    }
+  }
+
+  setAppBudgetReconcileListener(listener?: () => void): void {
+    this.appBudgetReconcile.settledListener = listener;
+  }
+
+  private nextAppBudgetReconcileAtMs(): number | undefined {
+    if (this.appBudgetReconcile.succeeded || this.appBudgetReconcile.nextAttemptAtMs <= 0) {
+      return undefined;
+    }
+    return this.appBudgetReconcile.nextAttemptAtMs;
+  }
+
+  private async ensureAppBudgetReconciled(waitMs = 1_500): Promise<void> {
+    if (this.appBudgetReconcile.succeeded) {
+      return;
+    }
+    if (this.appBudgetReconcile.inFlight) {
+      await Promise.race([
+        this.appBudgetReconcile.inFlight,
+        new Promise((resolve) => setTimeout(resolve, waitMs))
+      ]);
+      return;
+    }
+    if (Date.now() < this.appBudgetReconcile.nextAttemptAtMs) {
+      return;
+    }
+    await Promise.race([
+      this.reconcileMemoryTokenBudgetFromApp(),
+      new Promise((resolve) => setTimeout(resolve, waitMs))
+    ]);
+  }
+
   private resolveModelTaskContext(): MemoryModelTaskContext {
     const taskConfig = cloneMemmyConfig(
       this.options.configPath || this.options.configLoader
@@ -628,10 +755,12 @@ export class MemoryService {
         : this.config
     );
     const summary = this.options.llm
-      ?? createConfiguredMemoryLlm(taskConfig, "memory_summary");
+      ?? this.createConfiguredMemoryLlm(taskConfig, "memory_summary");
     const evolution = this.options.skillLlm
-      ?? createConfiguredMemoryLlm(taskConfig, "memory_evolution");
-    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding);
+      ?? this.createConfiguredMemoryLlm(taskConfig, "memory_evolution");
+    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding, {
+      onBudgetedUsage: (event) => this.recordBudgetedUsage(event)
+    });
     freezeModelSelectionConfig(taskConfig);
     return {
       config: taskConfig,
@@ -773,6 +902,10 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
+    this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
+    this.appBudgetReconcile.succeeded = false;
+    this.appBudgetReconcile.nextAttemptAtMs = 0;
+    void this.reconcileMemoryTokenBudgetFromApp();
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
@@ -1344,7 +1477,13 @@ export class MemoryService {
     if (!feedbackId || !contextHash) return;
     const feedback = this.repos.runtime.getFeedback(feedbackId);
     const session = job.sessionId ? this.repos.runtime.getSession(job.sessionId) : undefined;
-    if (!feedback || !session) return;
+    const queuedNamespace = isRecord(job.payload.namespace) ? job.payload.namespace : undefined;
+    const namespace = session
+      ? namespaceForSession(session)
+      : queuedNamespace && typeof queuedNamespace.source === "string" && typeof queuedNamespace.profileId === "string"
+        ? { ...queuedNamespace, source: queuedNamespace.source, profileId: queuedNamespace.profileId }
+        : undefined;
+    if (!feedback || !namespace) return;
     const request: FeedbackRequest = {
       sessionId: feedback.sessionId,
       episodeId: feedback.episodeId,
@@ -1355,13 +1494,13 @@ export class MemoryService {
       magnitude: feedback.magnitude,
       rationale: feedback.rationale,
       rawPayload: feedback.rawPayload,
-      namespace: namespaceForSession(session)
+      namespace
     };
     await this.feedbackExperience.createRevisionDecisionRepair(
       request,
       feedback,
       contextHash,
-      namespaceIdFromContext(namespaceForSession(session))
+      namespaceIdFromContext(namespace)
     );
   }
 
@@ -2194,17 +2333,30 @@ export class MemoryService {
     return this.workerRunner.nextWorkerRunAt();
   }
 
+  memoryTokenBudgetSnapshot() {
+    return this.tokenBudgetLedger.snapshot();
+  }
+
+  memoryTokenBudget() {
+    const snapshot = this.tokenBudgetLedger.snapshot();
+    return {
+      ...snapshot,
+      nextLocalMidnightAt: new Date(this.tokenBudgetLedger.nextWakeAtMs()).toISOString()
+    };
+  }
+
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
     return this.workerRunner.reconcileWorkerStartup(limit);
   }
 
-  runWorkerOnce(
+  async runWorkerOnce(
     limit = 100,
     request: RequestEnvelope & {
       targetMemoryIds?: string[];
       priorityCohortOnly?: boolean;
     } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
+    await this.ensureAppBudgetReconciled();
     return this.workerRunner.runWorkerOnce(limit, request);
   }
 

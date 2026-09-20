@@ -9,6 +9,7 @@ export * from "./deepseek-source-turn.js";
 export * from "./deepseek-session-files.js";
 export * from "./secret-redactor.js";
 export * from "./jsonl-lines.js";
+export * from "./memory-token-budget.js";
 import { createHash } from "node:crypto";
 import { hasStagedSourceTurn } from "./source-turn.js";
 

@@ -13,6 +13,107 @@
   letter-spacing: 0;
 }
 
+.budgetCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 52%, transparent);
+  border-radius: var(--radius-card-lg);
+  background: color-mix(in srgb, var(--color-canvas-oat) 40%, transparent);
+}
+
+.budgetTitle {
+  margin: 0;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-weight: 600;
+  color: var(--usage-ink);
+}
+
+.budgetRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+.budgetLabel {
+  margin: 0;
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-sm);
+  color: var(--usage-ink);
+}
+
+.budgetNote {
+  margin: 2px 0 0;
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+  color: var(--usage-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.budgetMeter {
+  width: 100%;
+  max-width: 280px;
+  height: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--usage-track);
+}
+
+.budgetMeterFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--duration-normal) ease, background-color var(--duration-normal) ease;
+}
+
+.budgetMeterFillGreen {
+  background: var(--color-status-success);
+}
+
+.budgetMeterFillYellow {
+  background: var(--color-status-warning);
+}
+
+.budgetMeterFillRed {
+  background: var(--color-status-error);
+}
+
+.budgetControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.budgetInput {
+  width: 88px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  background: var(--color-background-paper);
+  color: var(--usage-ink);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.budgetUnit {
+  font-size: var(--codex-text-xs);
+  color: var(--usage-muted);
+}
+
+.budgetHint {
+  margin: 0;
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+  color: var(--usage-muted);
+}
+
 .invitationCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

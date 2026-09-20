@@ -293,6 +293,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).toContain("自定义 API Key 消耗");
+    expect(html).toContain("记忆任务限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
@@ -671,6 +672,8 @@ describe("SettingsPageView", () => {
     expect(compactStyles).toContain("grid-column: 2");
     expect(compactStyles).toContain("flex-wrap: wrap");
     expect(source).toContain("byokTokenUsageClient.getSummary");
+    expect(source).toContain("byokTokenUsageClient.getMemoryBudget");
+    expect(source).toContain("function MemoryTokenBudgetCard");
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
     expect(source).toContain("function UsageDetails");
@@ -1055,6 +1058,7 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
     expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
     expect(source).toContain('window.addEventListener("focus"');
+    expect(source).toContain("Pending requests refresh on window focus instead of fixed-interval polling.");
     expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
   });

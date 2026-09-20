@@ -1,6 +1,8 @@
 import {
   ByokTokenUsageEventSchema,
-  ByokTokenUsageSummarySchema
+  ByokTokenUsageSummarySchema,
+  MemoryPipelineUsageDtoSchema,
+  MemoryTokenBudgetDtoSchema
 } from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ByokTokenUsageService } from "../../../../services/byok-token-usage-service.js";
@@ -30,6 +32,24 @@ export function registerByokTokenUsageRoutes(
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (_request, reply) => {
       const response = ByokTokenUsageSummarySchema.parse(await options.byokTokenUsage.getSummary());
+      return reply.send(response);
+    })
+  );
+
+  app.get(
+    "/api/app/byok-token-usage/memory-pipeline-usage",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = MemoryPipelineUsageDtoSchema.parse(await options.byokTokenUsage.getMemoryPipelineUsage());
+      return reply.send(response);
+    })
+  );
+
+  app.get(
+    "/api/app/byok-token-usage/memory-budget",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = MemoryTokenBudgetDtoSchema.parse(await options.byokTokenUsage.getMemoryBudget());
       return reply.send(response);
     })
   );

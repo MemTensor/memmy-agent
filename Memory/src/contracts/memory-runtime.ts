@@ -60,7 +60,8 @@ export const JobTypeSchema = z.enum([
   "skill_batch_evolve",
   "skill_trial_resolve",
   "decision_repair",
-  "work_memory_extract"
+  "work_memory_extract",
+  "feedback_experience"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 

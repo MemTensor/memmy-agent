@@ -7259,6 +7259,22 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   color: var(--color-status-error);
 }
 
+.memory-token-budget-banner {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.memory-token-budget-banner .banner {
+  margin: 0;
+  border-radius: 0;
+}
+
 .badge,
 .status-pill {
   display: inline-flex;

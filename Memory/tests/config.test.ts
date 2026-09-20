@@ -81,6 +81,10 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.domain).toBe("");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.readOnlyInjectionProfile).toBe("all");
+    expect(loadMemmyConfig(configPath).config.tokenBudget).toEqual({
+      dailyLimitM: 10,
+      totalLimitM: 500
+    });
   });
 
   it("keeps summary thinking off and defaults evolution thinking on", () => {
