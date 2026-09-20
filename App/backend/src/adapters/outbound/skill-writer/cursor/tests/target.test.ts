@@ -102,7 +102,7 @@ describe("cursor skill target", () => {
     }
   });
 
-  it("installs a beforeSubmitPrompt hook that blocks resume commands with top L1 candidates", async () => {
+  it("installs a resume Skill and reads the current memmyMemory storage instead of legacy storage", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
     let authorization = "";
@@ -121,7 +121,17 @@ describe("cursor skill target", () => {
     const address = server.address() as AddressInfo;
     writeFileSync(
       memmyConfigPath,
-      ["storage:", `  endpoint: "http://127.0.0.1:${address.port}"`, '  token: "test-token"', ""].join("\n"),
+      [
+        "memosMemory:",
+        "  storage:",
+        '    endpoint: "http://127.0.0.1:18799"',
+        '    token: "legacy-token"',
+        "memmyMemory:",
+        "  storage:",
+        `    endpoint: "http://127.0.0.1:${address.port}"`,
+        '    token: "test-token"',
+        ""
+      ].join("\n"),
       "utf8"
     );
     const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
@@ -182,6 +192,31 @@ describe("cursor skill target", () => {
       expect(skillFile).toContain("A Memmy Memory Hook or plugin is installed for this agent.");
       expect(skillFile).toContain('memmy-memory search "query text" --source cursor');
       expect(skillFile).not.toContain("memmy-memory add");
+      const resumeSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+      expect(resumeSkillFile).toContain("name: memmy-resume");
+      expect(resumeSkillFile).toContain("disable-model-invocation: true");
+      expect(resumeSkillFile).toContain("memmy-memory search");
+
+      const selectionRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "1" })
+      );
+      const selectionOutput = JSON.parse(selectionRun.stdout) as { continue: boolean; user_message: string };
+      expect(selectionOutput.continue).toBe(false);
+      expect(selectionOutput.user_message).toContain("Episode id: episode_1");
+      expect(selectionOutput.user_message).toContain("Full episode body 1");
+
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume another query" })
+      );
+      const cancelRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume cancel" })
+      );
+      const cancelOutput = JSON.parse(cancelRun.stdout) as { continue: boolean; user_message: string };
+      expect(cancelOutput.continue).toBe(false);
+      expect(cancelOutput.user_message).toBe("Memmy resume selection cancelled.");
 
       await target.uninstallPlugin?.("cursor");
       expect(existsSync(hookScriptPath)).toBe(false);
@@ -192,6 +227,74 @@ describe("cursor skill target", () => {
       expect(hooksAfter.hooks?.afterAgentResponse).toBeUndefined();
       expect(hooksAfter.hooks?.stop).toBeUndefined();
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
+    } finally {
+      await close(server);
+    }
+  });
+
+  it("includes the request URL and underlying network cause when resume search cannot connect", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const server = createServer();
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    await close(server);
+    writeFileSync(
+      memmyConfigPath,
+      ["memmyMemory:", "  storage:", `    endpoint: "http://127.0.0.1:${address.port}"`, ""].join("\n"),
+      "utf8"
+    );
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+
+    await target.installPlugin?.("cursor");
+    const hookScriptPath = join(rootDirectory, "hooks", "memmy-resume-hook.mjs");
+    const run = await runNodeHook(
+      hookScriptPath,
+      JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume unreachable" })
+    );
+    const output = JSON.parse(run.stdout) as { continue: boolean; user_message: string };
+
+    expect(output.continue).toBe(false);
+    expect(output.user_message).toContain(
+      `Memmy request to http://127.0.0.1:${address.port}/api/v1/memory/search failed:`
+    );
+    expect(output.user_message).toContain("ECONNREFUSED");
+  });
+
+  it("falls back to the installed endpoint snapshot when runtime YAML has no endpoint", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    let searchRequested = false;
+    const server = createServer((request, response) => {
+      if (request.method === "POST" && request.url === "/api/v1/memory/search") {
+        searchRequested = true;
+        writeJsonResponse(response, 200, { hits: [] });
+        return;
+      }
+      writeJsonResponse(response, 404, {});
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    writeFileSync(memmyConfigPath, "memmyMemory:\n  enabled: true\n", "utf8");
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+
+    try {
+      await target.installPlugin?.("cursor");
+      writeFileSync(
+        join(rootDirectory, "hooks", "memmy-memory-config.json"),
+        JSON.stringify({
+          memmy_config_path: memmyConfigPath,
+          endpoint: `http://127.0.0.1:${address.port}`
+        }),
+        "utf8"
+      );
+      const run = await runNodeHook(
+        join(rootDirectory, "hooks", "memmy-resume-hook.mjs"),
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume snapshot" })
+      );
+      const output = JSON.parse(run.stdout) as { user_message: string };
+
+      expect(searchRequested).toBe(true);
+      expect(output.user_message).toBe('No L1 Memmy memories found for: "snapshot"');
     } finally {
       await close(server);
     }

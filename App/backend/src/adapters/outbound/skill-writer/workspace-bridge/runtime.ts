@@ -486,7 +486,12 @@ class RuntimeHttpClient {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
-    const response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+    } catch (error) {
+      throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
+    }
     const textValue = await response.text();
     const parsed = textValue.trim() ? JSON.parse(textValue) : null;
     if (!response.ok) {
@@ -500,6 +505,21 @@ class RuntimeHttpClient {
     }
     return parsed;
   }
+}
+
+function formatErrorWithCause(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = typeof current === "object" && "code" in current && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) messages.push(detail);
+    current = typeof current === "object" && "cause" in current ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 
 class RuntimeHttpError extends Error {

@@ -220,6 +220,27 @@ describe("claude code skill target", () => {
         verbose: true,
         source: "claude_code"
       });
+      const selectionRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume select 2" })
+      );
+      const selectionOutput = JSON.parse(selectionRun.stdout) as {
+        hookSpecificOutput?: { additionalContext?: string };
+      };
+      expect(selectionOutput.hookSpecificOutput?.additionalContext).toContain("Episode id: episode_2");
+      expect(selectionOutput.hookSpecificOutput?.additionalContext).toContain("Full episode body 2");
+
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume another query" })
+      );
+      const cancelRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume cancel" })
+      );
+      const cancelOutput = JSON.parse(cancelRun.stdout) as { decision: string; reason: string };
+      expect(cancelOutput.decision).toBe("block");
+      expect(cancelOutput.reason).toBe("Memmy resume selection cancelled.");
       expect(authorization).toBe("Bearer test-token");
       expect(readTargetFile(rootDirectory)).toContain(
         "The `memmy-memory` skill is installed at `skills/memmy-memory/SKILL.md`."
