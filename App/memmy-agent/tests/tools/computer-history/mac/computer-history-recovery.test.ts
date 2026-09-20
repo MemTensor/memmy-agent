@@ -53,7 +53,7 @@ describe("interrupted segment recovery", () => {
   it("recovers raw-only evidence before the first live summary and does not repeat it", async () => {
     const segment = rawSegment();
     const service = makeService();
-    const chat = vi.fn(async (..._args: unknown[]) => ({ content: JSON.stringify(answer) }));
+    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
     expect(await service.backfillUnwrittenSummaries()).toBeGreaterThan(0);
     expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.markdown).toContain("LATE_DECISION_RELEASE_218");
@@ -70,7 +70,7 @@ describe("interrupted segment recovery", () => {
       title: "First minute", description: "Opened Notes", body: "## Memory summary\n\nOpened Notes.",
     }));
     const service = makeService();
-    const chat = vi.fn(async (..._args: unknown[]) => ({ content: JSON.stringify(answer) }));
+    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
     await service.backfillUnwrittenSummaries();
     const history = service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)!;
@@ -83,7 +83,7 @@ describe("interrupted segment recovery", () => {
   it("recovers input appended after the last completed account", async () => {
     const segment = rawSegment();
     const service = makeService();
-    const chat = vi.fn(async (..._args: unknown[]) => ({ content: JSON.stringify(answer) }));
+    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
     await service.backfillUnwrittenSummaries();
     const count = chat.mock.calls.length;
@@ -104,7 +104,7 @@ describe("interrupted segment recovery", () => {
       title: "First session only", description: "Opened Notes", body: "## Memory summary\n\nOpened Notes.",
     }));
     const service = makeService();
-    const chat = vi.fn(async (..._args: unknown[]) => ({ content: JSON.stringify(answer) }));
+    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
     await service.backfillUnwrittenSummaries();
     expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
@@ -119,7 +119,7 @@ describe("interrupted segment recovery", () => {
     service.snapshot();
     expect(fs.existsSync(segment.eventsFile)).toBe(false);
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("LATE_DECISION_RELEASE_218");
-    const chat = vi.fn(async (..._args: unknown[]) => ({ content: JSON.stringify(answer) }));
+    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
     await service.backfillUnwrittenSummaries();
     expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");

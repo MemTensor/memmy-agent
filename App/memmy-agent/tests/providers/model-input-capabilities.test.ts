@@ -28,6 +28,7 @@ describe("model input capabilities", () => {
   });
 
   it("uses exact full model IDs without normalization or family inheritance", () => {
+    expect(getModelInputModalities("agent_chat")).toEqual(["text", "image"]);
     expect(getModelInputModalities("gpt-5.6")).toEqual(["text", "image"]);
     expect(getModelInputModalities("gemini-3.7-flash")).toEqual(["text", "image", "video"]);
     expect(getModelInputModalities("qwen3.8-max")).toEqual(["text", "image"]);

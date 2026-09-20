@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import which from "which";
 import YAML from "yaml";
+import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 
 export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
 export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
@@ -10,6 +11,10 @@ export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 // default packaged/runtime skill surface. A workspace skill with the same name
 // is intentionally not filtered so users can opt in explicitly.
 export const DEFAULT_DISABLED_BUILTIN_SKILLS = new Set(["docx", "pptx", "xlsx"]);
+
+function isBuiltinComputerHistoryUnavailable(name: string): boolean {
+  return name === "computer-history" && !isComputerHistorySupported();
+}
 
 export type SkillEntry = { name: string; path: string; source: string };
 
@@ -60,6 +65,7 @@ export class SkillsLoader {
     }
     let filtered = skills.filter((skill) => {
       if (skill.source === "builtin" && DEFAULT_DISABLED_BUILTIN_SKILLS.has(skill.name)) return false;
+      if (skill.source === "builtin" && isBuiltinComputerHistoryUnavailable(skill.name)) return false;
       return !this.disabledSkills.has(skill.name);
     });
     if (filterUnavailable) filtered = filtered.filter((skill) => this.checkRequirements(this.getSkillMeta(skill.name)));
@@ -69,6 +75,7 @@ export class SkillsLoader {
   loadSkill(name: string): string | null {
     for (const root of this.roots) {
       if (root === this.builtinSkills && DEFAULT_DISABLED_BUILTIN_SKILLS.has(name)) continue;
+      if (root === this.builtinSkills && isBuiltinComputerHistoryUnavailable(name)) continue;
       const skillFile = path.join(root, name, "SKILL.md");
       if (fs.existsSync(skillFile)) return fs.readFileSync(skillFile, "utf8");
     }

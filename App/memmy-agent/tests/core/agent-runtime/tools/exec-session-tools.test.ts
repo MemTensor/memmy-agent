@@ -281,7 +281,8 @@ describe("exec session tools", () => {
     if (result.includes("session_id:")) {
       result += `\n${await stdin.execute({
         session_id: sessionId(result),
-        yield_time_ms: 100,
+        wait_for: EXEC_LIFECYCLE_ERROR,
+        wait_timeout_ms: 5000,
       })}`;
     }
     const pid = Number(result.match(/descendant_pid=(\d+)/)?.[1]);

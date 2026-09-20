@@ -701,7 +701,8 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
   node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" \
+    --expected-app "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app"
   require_packaged_runtime_file "$packaged_embedding_model/config.json"
   require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
   require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"

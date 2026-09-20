@@ -1,17 +1,30 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { realpathSync } from 'node:fs';
+import { bundleManifest, verifyOfficialBundle } from '../mac/install-dev-computer-use.mjs';
 import { createInterface } from "node:readline";
 
 const binary = resolve(process.argv[2] ?? "");
 if (!process.argv[2]) throw new Error("Usage: check-open-computer-use.mjs BINARY [--list-apps]");
+if (process.platform === 'darwin') {
+  const app = dirname(dirname(dirname(binary)));
+  verifyOfficialBundle(app);
+  const expectedIndex = process.argv.indexOf('--expected-app');
+  if (expectedIndex !== -1) {
+    const expected = process.argv[expectedIndex + 1];
+    if (!expected || JSON.stringify(bundleManifest(app)) !== JSON.stringify(bundleManifest(expected))) {
+      throw new Error('Packaged Open Computer Use was modified or re-signed');
+    }
+  }
+}
 const env = { ...process.env };
 // Match the packaged launch path without a system Node/npm/global OCU.
 for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
 env.PATH = process.platform === "win32"
   ? `${process.env.SystemRoot || "C:\\Windows"}\\System32;${process.env.SystemRoot || "C:\\Windows"};${process.env.SystemRoot || "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0`
   : "/usr/bin:/bin:/usr/sbin:/sbin";
-env.OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE = `memmy-packaging-${process.pid}`;
+env.OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE = `memmy:${dirname(dirname(dirname(realpathSync(binary))))}`;
 const version = spawnSync(binary, ["--version"], { env, encoding: "utf8", timeout: 10_000 });
 if (version.status !== 0) throw new Error(`OCU version check failed: ${version.error?.message ?? version.stderr}`);
 
@@ -48,7 +61,7 @@ try {
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
   const result = await request("tools/list");
   const names = result.tools?.map((tool) => tool.name) ?? [];
-  for (const name of ["list_apps", "get_app_state", "click", "type_text", "press_key", "scroll"]) {
+  for (const name of ["list_apps", "get_app_state", "click", "drag", "perform_secondary_action", "type_text", "set_value", "press_key", "scroll"]) {
     if (!names.includes(name)) throw new Error(`OCU is missing tool: ${name}`);
   }
   if (process.argv.includes("--list-apps")) {

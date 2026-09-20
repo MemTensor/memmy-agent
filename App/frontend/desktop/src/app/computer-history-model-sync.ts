@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { MemmyAgentClient } from "../api/memmy-agent-client.js";
+import { isComputerHistorySupported } from "./computer-history-platform.js";
 
 /** Keep background summaries on the selected task model, even outside History. */
 export function useComputerHistoryModelSync(input: {
@@ -11,7 +12,8 @@ export function useComputerHistoryModelSync(input: {
   // Serialize across selection changes so a slower old request cannot become
   // the final selection. Intermediate selections that never started are skipped.
   const queue = useRef(Promise.resolve());
-  const { client, enabled, preset, revision } = input;
+  const { client, preset, revision } = input;
+  const enabled = input.enabled && isComputerHistorySupported();
   useEffect(() => {
     if (!client || !enabled) return;
     let disposed = false;

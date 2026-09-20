@@ -10,6 +10,7 @@ import { appendTranscriptObject, webuiTranscriptPath } from "../../../src/entryp
 import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import { loadConfig } from "../../../src/config/loader.js";
 import { INBOUND_META_RUNTIME_CONTROL, RUNTIME_CONTROL_ACK, RUNTIME_CONTROL_MCP_RELOAD } from "../../../src/core/runtime-messages/events.js";
+import * as historyPlatform from "../../../src/tools/computer-history/platform.js";
 
 const routeMocks = vi.hoisted(() => ({
   mcpPresetsSettingsAction: vi.fn(),
@@ -592,6 +593,7 @@ describe("WebSocket HTTP route helpers", () => {
   });
 
   it("passes the requested bundle id through to the application icon reader", async () => {
+    vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
     const channel = makeChannel({ sessionManager: seedSession(tmpRoot()) });
     const port = await startChannel(channel);
     const headers = await authHeaders(port);

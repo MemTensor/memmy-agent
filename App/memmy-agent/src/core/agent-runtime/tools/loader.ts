@@ -1,3 +1,4 @@
+import { DesktopScreenCaptureTool } from '../../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -45,6 +46,7 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 };
 
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
+  DesktopScreenCaptureTool,
   AgentSourceTool,
   ApplyPatchTool,
   ComputerHistoryTool,

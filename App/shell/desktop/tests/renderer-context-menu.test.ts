@@ -85,7 +85,11 @@ describe("desktop renderer context menu", () => {
   it("wires the native renderer context menu into both desktop windows", () => {
     const source = readFileSync(mainSourcePath, "utf8");
 
-    expect(source).toContain("clipboard, dialog, ipcMain, Menu");
+    const electronImport = source.match(/import \{[^}]+\} from "electron";/su)?.[0] ?? "";
+    expect(electronImport).toContain("clipboard");
+    expect(electronImport).toContain("dialog");
+    expect(electronImport).toContain("ipcMain");
+    expect(electronImport).toContain("Menu");
     expect(source).toContain('import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelWidth, type RendererContextMenuCommand } from "./renderer-context-menu.js";');
     expect(source).toContain("attachRendererContextMenu(targetMainWindow);");
     expect(source).toContain("attachRendererContextMenu(petWindow);");

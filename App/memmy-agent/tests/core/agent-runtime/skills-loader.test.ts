@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SkillsLoader } from "../../../src/core/agent-runtime/skills.js";
 
 const roots: string[] = [];
@@ -261,8 +261,55 @@ describe("SkillsLoader listSkills", () => {
   });
 });
 
+describe("SkillsLoader Computer History platform availability", () => {
+  it.each(["win32", "linux"] as const)("hides builtin Computer History from all skill entry points on %s", (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "computer-history", { metadataJson: { always: true }, body: "# Computer History" });
+    writeSkill(builtin, "browser-helper", { body: "# Browser Helper" });
+    writeSkill(builtin, "general-helper", { body: "# General Helper" });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.listSkills(false).map((skill) => skill.name)).toEqual(["browser-helper", "general-helper"]);
+    expect(loader.listSkills(true).map((skill) => skill.name)).toEqual(["browser-helper", "general-helper"]);
+    expect(loader.loadSkill("computer-history")).toBeNull();
+    expect(loader.getAlwaysSkills()).not.toContain("computer-history");
+    expect(loader.findExplicitSkillNames("please use $computer-history")).toEqual([]);
+    expect(loader.buildSkillsSummary()).not.toContain("computer-history");
+    expect(loader.loadSkillsForContext(["computer-history"])).not.toContain("# Computer History");
+    expect(loader.loadSkill("general-helper")).toContain("# General Helper");
+  });
+
+  it("retains all builtin Computer History entry points on macOS", () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    const { workspace, builtin } = makeWorkspace();
+    const skillPath = writeSkill(builtin, "computer-history", { metadataJson: { always: true }, body: "# Computer History" });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.listSkills(true)).toEqual([{ name: "computer-history", path: skillPath, source: "builtin" }]);
+    expect(loader.loadSkill("computer-history")).toContain("# Computer History");
+    expect(loader.getAlwaysSkills()).toContain("computer-history");
+    expect(loader.findExplicitSkillNames("please use $computer-history")).toEqual(["computer-history"]);
+    expect(loader.buildSkillsSummary()).toContain("computer-history");
+    expect(loader.loadSkillsForContext(["computer-history"])).toContain("# Computer History");
+  });
+
+  it.each(["win32", "linux", "darwin"] as const)("preserves same-named workspace skills on %s", (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "computer-history", { body: "# Builtin Computer History" });
+    const skillPath = writeSkill(path.join(workspace, "skills"), "computer-history", { body: "# Custom Workspace Helper" });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.listSkills(true)).toEqual([{ name: "computer-history", path: skillPath, source: "workspace" }]);
+    expect(loader.loadSkill("computer-history")).toContain("# Custom Workspace Helper");
+    expect(loader.loadSkillsForContext(["computer-history"])).not.toContain("# Builtin Computer History");
+  });
+});
+
 describe("SkillsLoader disabled skills", () => {
   it("hides Office skills from the builtin surface but keeps same-named workspace skills", () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     const { workspace, builtin } = makeWorkspace();
     for (const name of ["docx", "pptx", "xlsx"]) {
       writeSkill(builtin, name, { metadataJson: { always: true }, body: `# builtin ${name}` });

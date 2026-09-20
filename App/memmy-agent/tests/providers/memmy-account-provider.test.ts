@@ -112,6 +112,46 @@ describe("Memmy Account quota errors", () => {
 });
 
 describe("Memmy Account image-to-text fallback", () => {
+  it.each(["chat", "chatStream"] as const)("preserves Computer Use screenshots in the agent_chat %s request", async (method) => {
+    const create = vi.fn(async () => method === "chat"
+      ? { choices: [{ message: { content: "screen described" }, finish_reason: "stop" }] }
+      : (async function* () {
+        yield { choices: [{ delta: { content: "screen described" }, finish_reason: null }] };
+        yield { choices: [{ delta: {}, finish_reason: "stop" }] };
+      })());
+    const responsesCreate = vi.fn();
+    const provider = new OpenAICompatProvider({
+      apiKey: "account-token",
+      apiBase: "https://account.example.test/v1",
+      defaultModel: "agent_chat",
+      spec: findByName("memmy_account"),
+    });
+    provider.client = { chat: { completions: { create } }, responses: { create: responsesCreate } };
+    const image = { type: "image_url", image_url: { url: "data:image/png;base64,screenshot" } };
+    const messages = [
+      { role: "user", content: "What is on my screen?" },
+      { role: "assistant", content: "", tool_calls: [{ id: "screen-1", type: "function", function: {
+        name: "mcp_open_computer_use_get_app_state", arguments: "{}",
+      } }] },
+      { role: "tool", tool_call_id: "screen-1", content: [{ type: "text", text: "Screen captured" }, image] },
+    ];
+
+    const response = await provider[method]({ messages });
+
+    expect(response.content).toBe("screen described");
+    expect(create).toHaveBeenCalledOnce();
+    expect(responsesCreate).not.toHaveBeenCalled();
+    const [body] = create.mock.calls[0] as unknown as [Record<string, any>];
+    expect(body.model).toBe("agent_chat");
+    expect(body.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "tool", tool_call_id: "screen-1", content: expect.stringContaining("Screen captured") }),
+      expect.objectContaining({ role: "user", content: expect.arrayContaining([image]) }),
+    ]));
+    // The transport moves tool images to a supported user content block without
+    // mutating the stored conversation or substituting an image2text description.
+    expect(messages[2].content).toEqual([{ type: "text", text: "Screen captured" }, image]);
+  });
+
   it("is enabled only for the account provider", () => {
     const account = new OpenAICompatProvider({
       apiKey: "account-token",

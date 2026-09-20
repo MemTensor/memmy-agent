@@ -110,6 +110,7 @@ import {
   clientSnapshot,
 } from "../../tools/computer-history/mac/computer-history-api.js";
 import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
+import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
@@ -2884,6 +2885,7 @@ export class WebSocketChannel extends BaseChannel {
    */
   async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     // The router carries the path, query and all, on `request.path`; there is
     // no `request.url` here, and reading one silently loses every parameter.
@@ -2902,6 +2904,7 @@ export class WebSocketChannel extends BaseChannel {
     action: "snapshot" | "model-select" | "permissions-check" | "permissions-open" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
     const method = (request.method ?? "GET").toUpperCase();
     if (action === "snapshot") {
       return method === "GET"
