@@ -94,6 +94,7 @@ import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
   resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
   type StartupSplashLanguage
 } from "./startup-splash.js";
 import {
@@ -4885,7 +4886,8 @@ app.on("activate", () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  // Ignore the startup splash timing out before the main window exists (see shouldQuitWhenAllWindowsClosed).
+  if (shouldQuitWhenAllWindowsClosed({ platform: process.platform, isBootReady })) {
     app.quit();
   }
 });

@@ -7,6 +7,7 @@ import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
   resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
   type StartupSplashLanguage
 } from "../src/main/startup-splash.js";
 
@@ -60,6 +61,26 @@ describe("startup splash localization", () => {
     expect(englishHtml).not.toContain("1.0.8<script>");
     expect(chineseHtml).toContain("正在完成 Memmy 更新");
     expect(chineseHtml).toContain("安装完成后会自动打开新版。");
+  });
+});
+
+describe("window-all-closed during boot", () => {
+  it("keeps the app alive when the startup splash times out before boot has finished", () => {
+    // The splash is a BrowserWindow: when its 15 s auto-close fires while the runtime services are
+    // still starting, it is the only window, so window-all-closed fires. Quitting there turns a
+    // slow boot into a silent exit code 0 ("Memmy is starting…" appears, then everything vanishes).
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "win32", isBootReady: false })).toBe(false);
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "linux", isBootReady: false })).toBe(false);
+  });
+
+  it("quits on Windows and Linux once boot is complete and the last window closes", () => {
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "win32", isBootReady: true })).toBe(true);
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "linux", isBootReady: true })).toBe(true);
+  });
+
+  it("never quits on macOS, matching the platform convention", () => {
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "darwin", isBootReady: true })).toBe(false);
+    expect(shouldQuitWhenAllWindowsClosed({ platform: "darwin", isBootReady: false })).toBe(false);
   });
 });
 

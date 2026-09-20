@@ -67,3 +67,21 @@ function escapeSplashText(value: string): string {
     .replace(/>/gu, "&gt;")
     .replace(/"/gu, "&quot;");
 }
+
+/**
+ * Decides whether `window-all-closed` should quit the app.
+ *
+ * The startup splash is itself a BrowserWindow with an auto-close timer. When runtime services take
+ * longer to start than that timer (cold Memory start, slow dev rebuilds), the splash closes while the
+ * main window does not exist yet, so `window-all-closed` fires mid-boot. Quitting there turns a slow
+ * boot into a silent exit code 0. Boot failures quit explicitly, so mid-boot closes are ignored.
+ *
+ * @param options The current platform and whether boot has created the main window.
+ * @returns True when the app should quit.
+ */
+export function shouldQuitWhenAllWindowsClosed(options: { platform: NodeJS.Platform; isBootReady: boolean }): boolean {
+  if (options.platform === "darwin") {
+    return false;
+  }
+  return options.isBootReady;
+}
