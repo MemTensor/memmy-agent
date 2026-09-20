@@ -1,6 +1,7 @@
 import { get_encoding } from "tiktoken";
 
 const OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET = 7_500;
+const OPAQUE_EMBEDDING_INPUT_TOKEN_BUDGET = 4_000;
 const OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET = 290_000;
 
 export interface OpenAiEmbeddingChunk {
@@ -15,20 +16,24 @@ export interface OpenAiEmbeddingPlan {
   originalCount: number;
 }
 
-let encoder: ReturnType<typeof get_encoding> | undefined;
+let openAiEncoder: ReturnType<typeof get_encoding> | undefined;
+let opaqueModelEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export function planOpenAiEmbeddingInputs(
   texts: string[],
   model?: string,
   configuredMaxInputTokens?: number
 ): OpenAiEmbeddingPlan | null {
+  const knownOpenAiModel = isKnownOpenAiEmbeddingModel(model);
   const inputTokenBudget = resolveInputTokenBudget(model, configuredMaxInputTokens);
-  // Explicit budgets retain the historical token-id request shape for
-  // deployments that opt into it; opaque aliases use text chunks so their
-  // model-specific tokenizer is still applied by the provider.
-  const useTokenIds = isKnownOpenAiEmbeddingModel(model) || configuredMaxInputTokens !== undefined;
-  encoder ??= get_encoding("cl100k_base");
-  const encoded = texts.map((text) => Array.from(encoder!.encode(text, [], [])));
+  // Only known OpenAI embedding models receive token IDs. Opaque aliases may
+  // use a different tokenizer (for example BGE-M3), so keep their chunks as
+  // text and let the provider apply its native tokenizer.
+  const useTokenIds = knownOpenAiModel;
+  const encoder = knownOpenAiModel
+    ? (openAiEncoder ??= get_encoding("cl100k_base"))
+    : (opaqueModelEncoder ??= get_encoding("o200k_base"));
+  const encoded = texts.map((text) => Array.from(encoder.encode(text, [], [])));
   const totalTokens = encoded.reduce((sum, tokens) => sum + tokens.length, 0);
   if (totalTokens <= OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET &&
     encoded.every((tokens) => tokens.length <= inputTokenBudget)) return null;
@@ -37,7 +42,7 @@ export function planOpenAiEmbeddingInputs(
     if (tokens.length === 0) return [{ originalIndex, tokens, input: useTokenIds ? tokens : "" }];
     const tokenBytes = useTokenIds
       ? undefined
-      : tokens.map((token) => encoder!.decode_single_token_bytes(token));
+      : tokens.map((token) => encoder.decode_single_token_bytes(token));
     const items: OpenAiEmbeddingChunk[] = [];
     for (let offset = 0; offset < tokens.length;) {
       let end = Math.min(tokens.length, offset + inputTokenBudget);
@@ -91,16 +96,14 @@ function isKnownOpenAiEmbeddingModel(model?: string): boolean {
   return /(?:^|[/.:])text-embedding-(?:3-(?:small|large)|ada-002)(?:$|[/.:])/i.test(model?.trim() ?? "");
 }
 
-function resolveInputTokenBudget(_model?: string, configured?: number): number {
+function resolveInputTokenBudget(model?: string, configured?: number): number {
   const explicit = typeof configured === "number" && Number.isFinite(configured) && configured > 0
     ? Math.floor(configured)
     : undefined;
-  // OpenAI-compatible deployments frequently expose an opaque deployment
-  // alias instead of the upstream model id.  We cannot safely assume that
-  // alias has a larger context window, so apply the same conservative budget
-  // used for known OpenAI embedding models unless the caller opts into a
-  // smaller budget explicitly.
-  return Math.min(explicit ?? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET, OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET);
+  const defaultBudget = isKnownOpenAiEmbeddingModel(model)
+    ? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET
+    : OPAQUE_EMBEDDING_INPUT_TOKEN_BUDGET;
+  return Math.min(explicit ?? defaultBudget, defaultBudget);
 }
 
 function decodeTokenBytes(tokenBytes: Uint8Array[]): string {
