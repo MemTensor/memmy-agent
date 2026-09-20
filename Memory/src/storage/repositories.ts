@@ -38,6 +38,7 @@ import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { firstSemanticUserLine } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
 import {
   attachMemoryVectors,
@@ -5939,22 +5940,25 @@ function firstReadableMemoryValueLine(value: string): string | undefined {
 
 function firstUserMemoryValueLine(value: string): string | undefined {
   let inUserSection = false;
+  const userLines: string[] = [];
   for (const line of value.split(/\r?\n/)) {
     const role = memoryValueRoleMarker(line);
     if (role) {
+      if (inUserSection && role !== "user") {
+        break;
+      }
       inUserSection = role === "user";
       continue;
     }
     if (!inUserSection) {
       continue;
     }
-
-    const cleaned = cleanMemoryValueLine(line);
-    if (cleaned && !isPlaceholderMemorySummary(cleaned) && !isWorldSectionHeading(cleaned) && !isInternalMemoryKey(cleaned)) {
-      return cleaned;
-    }
+    userLines.push(line);
   }
-  return undefined;
+  const title = firstSemanticUserLine(userLines.join("\n"));
+  return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
+    ? title
+    : undefined;
 }
 
 function isPlaceholderMemorySummary(value: string | undefined): boolean {
