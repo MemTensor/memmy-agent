@@ -7,7 +7,8 @@ import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
   type MemoryLlmModelRole,
-  type MemoryModelUsageEvent
+  type MemoryModelUsageEvent,
+  type MemoryTokenUsageSink
 } from "./token-usage.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
@@ -82,6 +83,7 @@ let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
   onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
+  usageRecorder?: MemoryTokenUsageSink;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -91,10 +93,10 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 class HttpLlmClient implements LlmClient {
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder: HttpByokTokenUsageRecorder;
+  private readonly usageRecorder: MemoryTokenUsageSink;
 
   constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {
-    this.usageRecorder = new HttpByokTokenUsageRecorder({
+    this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
       onBudgetedUsage: options.onBudgetedUsage
     });
   }

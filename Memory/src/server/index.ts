@@ -75,6 +75,7 @@ async function runMemoryService(argv: string[], lifecycle: {
     const serviceLock = acquireUserServiceLock({ serviceHome, host, port });
     let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
+    let service: MemoryService | undefined;
     let server: Server | undefined;
     let requestShutdown!: () => void;
     let restartRequested = false;
@@ -94,7 +95,7 @@ async function runMemoryService(argv: string[], lifecycle: {
             endpoint: config.storage.endpoint,
             token: config.storage.token
         });
-        const service = new MemoryService({
+        service = new MemoryService({
             backend,
             mode: config.storage.mode,
             configPath,
@@ -144,6 +145,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         if (server) {
             await closeMemoryHttpServer(server);
         }
+        service?.stopTokenUsageDelivery();
         backend?.close();
         removeRuntimeState(serviceHome);
         sqliteLock?.release();

@@ -32,6 +32,7 @@ export function createMemoryServiceFixture(): {
 } {
   const roots: string[] = [];
   const databases: MemoryDb[] = [];
+  const services: MemoryService[] = [];
 
   function createTestRoot(prefix = "mindock-memory-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -42,12 +43,17 @@ export function createMemoryServiceFixture(): {
   function createTestMemoryService(
     options: ConstructorParameters<typeof MemoryService>[0]
   ): MemoryService {
-    return new MemoryService({
+    if (options.db) {
+      databases.push(options.db);
+    }
+    const service = new MemoryService({
       ...options,
       fetchAppMemoryBudget: options.fetchAppMemoryBudget ?? (async () => null),
       skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
     });
+    services.push(service);
+    return service;
   }
 
   function createTestService(options: {
@@ -67,7 +73,6 @@ export function createMemoryServiceFixture(): {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    databases.push(db);
     return {
       root,
       db,
@@ -85,6 +90,9 @@ export function createMemoryServiceFixture(): {
   }
 
   function cleanup(): void {
+    for (const service of services.splice(0)) {
+      service.stopTokenUsageDelivery();
+    }
     for (const database of databases.splice(0)) {
       if (database.db.open) {
         database.close();

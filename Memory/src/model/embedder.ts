@@ -14,7 +14,8 @@ import {
 import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
-  type MemoryModelUsageEvent
+  type MemoryModelUsageEvent,
+  type MemoryTokenUsageSink
 } from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
@@ -60,6 +61,7 @@ let localExtractorModel: string | null = null;
 
 export interface CreateEmbedderOptions {
   onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
+  usageRecorder?: MemoryTokenUsageSink;
 }
 
 export function createEmbedder(config: EmbeddingConfig, options: CreateEmbedderOptions = {}): Embedder {
@@ -70,10 +72,10 @@ class HttpEmbedder implements Embedder {
   private readonly cache = new Map<string, number[]>();
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder: HttpByokTokenUsageRecorder;
+  private readonly usageRecorder: MemoryTokenUsageSink;
 
   constructor(readonly config: EmbeddingConfig, options: CreateEmbedderOptions = {}) {
-    this.usageRecorder = new HttpByokTokenUsageRecorder({
+    this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
       onBudgetedUsage: options.onBudgetedUsage
     });
   }

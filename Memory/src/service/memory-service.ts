@@ -31,7 +31,14 @@ import {
   jobTypeConsumesMemoryBudget,
   type MemoryBudgetModelSources
 } from "@memmy/agent-source-core";
-import { fetchAppMemoryBudget, type MemoryLlmModelRole, type MemoryModelUsageEvent } from "../model/token-usage.js";
+import {
+  fetchAppMemoryBudget,
+  HttpByokTokenUsageRecorder,
+  type HttpByokTokenUsageRecorderOptions,
+  type MemoryLlmModelRole,
+  type MemoryModelUsageEvent
+} from "../model/token-usage.js";
+import { TokenUsageOutbox } from "../storage/token-usage-outbox.js";
 import { MemoryTokenBudgetLedger } from "./memory-token-budget-ledger.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
@@ -199,6 +206,10 @@ export interface MemoryServiceOptions {
   /** Actual HTTP endpoint used by the current server instance. */
   viewerEndpoint?: string;
   fetchAppMemoryBudget?: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  tokenUsage?: Pick<
+    HttpByokTokenUsageRecorderOptions,
+    "fetchImpl" | "runtimeConfig" | "runtimeConfigPath" | "timeoutMs" | "retryDelaysMs" | "continueDelayMs"
+  >;
 }
 
 export type CompleteTurnResponse = TurnCompletionResult;
@@ -263,6 +274,7 @@ export class MemoryService {
   private embedder: Embedder;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
+  private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
   private readonly fetchAppMemoryBudgetFn: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
   private appBudgetReconcile: {
     succeeded: boolean;
@@ -275,6 +287,7 @@ export class MemoryService {
     nextAttemptAtMs: 0,
     backoffMs: 1_000
   };
+  private persistRecoveredListener?: () => void;
   private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
@@ -288,6 +301,14 @@ export class MemoryService {
       () => new Date(),
       this.config.tokenBudget
     );
+    this.tokenUsageRecorder = new HttpByokTokenUsageRecorder({
+      ...options.tokenUsage,
+      outbox: new TokenUsageOutbox(this.repos.db),
+      transaction: (fn) => this.repos.transaction(fn),
+      onBudgetedUsage: (event) => this.recordBudgetedUsage(event),
+      touchBudget: () => this.tokenBudgetLedger.touch(),
+      onPersistRecovered: () => this.persistRecoveredListener?.()
+    });
     this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget ?? fetchAppMemoryBudget;
     void this.reconcileMemoryTokenBudgetFromApp();
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
@@ -477,7 +498,7 @@ export class MemoryService {
       get capture() { return workerRunnerOwner.config.algorithm.capture; },
       embeddingRetryWorkerId: this.embeddingRetryWorkerId,
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
-      memoryBudgetPaused: () => this.tokenBudgetLedger.snapshot().paused,
+      memoryBudgetPaused: () => this.isMemoryBudgetPaused(),
       memoryBudgetJobConsumes: (jobType) => this.memoryBudgetJobConsumes(jobType),
       memoryBudgetModelSources: () => this.budgetModelSources(),
       memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
@@ -647,6 +668,11 @@ export class MemoryService {
       withDuplicateFlag
     });
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
+    this.tokenUsageRecorder.start();
+  }
+
+  stopTokenUsageDelivery(): void {
+    this.tokenUsageRecorder.stop();
   }
 
   private createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
@@ -654,7 +680,7 @@ export class MemoryService {
       modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
       {
         modelRole,
-        onBudgetedUsage: (event) => this.recordBudgetedUsage(event)
+        usageRecorder: this.tokenUsageRecorder
       }
     );
   }
@@ -687,7 +713,11 @@ export class MemoryService {
   }
 
   private shouldDeferBudgetedEvolutionLlm(): boolean {
-    return this.tokenBudgetLedger.snapshot().paused && this.memoryBudgetJobConsumes("decision_repair");
+    return this.isMemoryBudgetPaused() && this.memoryBudgetJobConsumes("decision_repair");
+  }
+
+  isMemoryBudgetPaused(): boolean {
+    return this.tokenBudgetLedger.snapshot().paused || this.tokenUsageRecorder.isPersistUnreliable();
   }
 
   private async reconcileMemoryTokenBudgetFromApp(): Promise<boolean> {
@@ -719,6 +749,10 @@ export class MemoryService {
 
   setAppBudgetReconcileListener(listener?: () => void): void {
     this.appBudgetReconcile.settledListener = listener;
+  }
+
+  setPersistRecoveredListener(listener?: () => void): void {
+    this.persistRecoveredListener = listener;
   }
 
   private nextAppBudgetReconcileAtMs(): number | undefined {
@@ -759,7 +793,7 @@ export class MemoryService {
     const evolution = this.options.skillLlm
       ?? this.createConfiguredMemoryLlm(taskConfig, "memory_evolution");
     const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding, {
-      onBudgetedUsage: (event) => this.recordBudgetedUsage(event)
+      usageRecorder: this.tokenUsageRecorder
     });
     freezeModelSelectionConfig(taskConfig);
     return {

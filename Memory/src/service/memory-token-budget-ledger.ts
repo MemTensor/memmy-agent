@@ -57,6 +57,10 @@ export class MemoryTokenBudgetLedger {
     });
   }
 
+  touch(): MemoryTokenBudgetSnapshot {
+    return this.writeUsage(this.readUsage());
+  }
+
   addIfBudgeted(input: { kind?: string | null; operation?: string | null; totalTokens?: number }): MemoryTokenBudgetSnapshot {
     if (!isBudgetedMemoryUsage(input)) {
       return this.snapshot();

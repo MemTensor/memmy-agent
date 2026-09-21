@@ -93,7 +93,8 @@ describe("repository sqlite schema contract", () => {
         "memory_processing_state",
         "artifacts",
         "audit_logs",
-        "memory_vector_entries"
+        "memory_vector_entries",
+        "token_usage_outbox"
       ]));
       expect(tables.map((table) => table.name)).not.toEqual(expect.arrayContaining([
         "memory_embeddings",

@@ -194,6 +194,75 @@ describe("Memory HTTP startup", () => {
     await waitFor(() => runs === 2, 500);
   });
 
+  it("does not start the worker when persist recovers before drain", async () => {
+    let reconciliations = 0;
+    const service = stubService(() => {
+      reconciliations += 1;
+    });
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 80,
+      workerPostHealthDelayMs: 80
+    });
+    servers.push(server);
+
+    service.settlePersistRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    const baseUrl = await listen(server);
+    service.settlePersistRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    const response = await fetch(`${baseUrl}/api/v1/health`);
+    expect(response.status).toBe(200);
+    service.settlePersistRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(0);
+
+    await waitFor(() => reconciliations === 1);
+  });
+
+  it("drains an already started idle worker when persist recovers without a timed job", async () => {
+    let runs = 0;
+    const service = stubService(() => undefined);
+    service.nextWorkerRunAt = () => undefined;
+    service.runWorkerOnce = async () => {
+      runs += 1;
+      return workerResult(0);
+    };
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      workerPostHealthDelayMs: 0
+    });
+    servers.push(server);
+    await listen(server);
+    await waitFor(() => runs === 1);
+
+    service.settlePersistRecovered();
+    await waitFor(() => runs === 2);
+  });
+
+  it("does not start the worker after dispose when persist recovers", async () => {
+    let reconciliations = 0;
+    const service = stubService(() => {
+      reconciliations += 1;
+    });
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      workerPostHealthDelayMs: 0
+    });
+    await listen(server);
+    await waitFor(() => reconciliations === 1);
+    await closeMemoryHttpServer(server);
+    service.settlePersistRecovered();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reconciliations).toBe(1);
+  });
+
   it("does not start the worker after dispose when budget reconcile settles", async () => {
     let reconciliations = 0;
     const service = stubService(() => {
@@ -215,6 +284,7 @@ describe("Memory HTTP startup", () => {
 
 function stubService(reconcile: () => void): StartupServiceStub {
   let listener: (() => void) | undefined;
+  let persistListener: (() => void) | undefined;
   return {
     health() {
       return { ok: true };
@@ -229,14 +299,21 @@ function stubService(reconcile: () => void): StartupServiceStub {
     setAppBudgetReconcileListener(next?: () => void) {
       listener = next;
     },
+    setPersistRecoveredListener(next?: () => void) {
+      persistListener = next;
+    },
     settleBudgetReconcile() {
       listener?.();
+    },
+    settlePersistRecovered() {
+      persistListener?.();
     }
   } as unknown as StartupServiceStub;
 }
 
 type StartupServiceStub = MemoryService & {
   settleBudgetReconcile(): void;
+  settlePersistRecovered(): void;
 };
 
 function workerResult(leased: number): Awaited<ReturnType<MemoryService["runWorkerOnce"]>> {

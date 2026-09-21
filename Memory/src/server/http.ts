@@ -452,6 +452,13 @@ function createAutoWorkerDrain(
     scheduleNextDueJob();
   });
 
+  service.setPersistRecoveredListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    schedule();
+  });
+
   return {
     start(): void {
       if (disposed || startupReleased || startupTimer) {
@@ -479,6 +486,7 @@ function createAutoWorkerDrain(
     async dispose(): Promise<void> {
       disposed = true;
       service.setAppBudgetReconcileListener(undefined);
+      service.setPersistRecoveredListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
