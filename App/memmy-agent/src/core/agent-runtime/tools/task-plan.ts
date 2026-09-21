@@ -57,10 +57,12 @@ export class CreateTaskPlanTool extends TaskPlanTool {
   get description(): string {
     return (
       "Create the fixed, user-visible execution checklist for the current task. "
-      + "Use it immediately before starting a confirmed, non-routine task with at least three "
-      + "substantive execution stages and no expected near-term user decision. Do not use it for "
-      + "explanations, routine or short tasks, tentative plans awaiting approval, or a Goal's "
-      + "long-term objective. Keep items outcome-oriented, ordered, independently verifiable, "
+      + "Use it only when the user explicitly asks for a visible checklist or a currently loaded "
+      + "Skill explicitly instructs you to create one. Complexity, duration, multiple execution "
+      + "stages, and plugin usage do not authorize this tool by themselves. When a plugin already "
+      + "shows interaction, progress, or artifact cards, default to not creating a task plan unless "
+      + "its Skill explicitly requires one. Do not use it for tentative plans awaiting approval or "
+      + "a Goal's long-term objective. Keep items outcome-oriented, ordered, independently verifiable, "
       + "and detailed enough that progress remains meaningful after a restart."
     );
   }
