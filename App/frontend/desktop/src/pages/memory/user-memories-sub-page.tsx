@@ -114,15 +114,15 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                 onClick={() => setSelected(item)}
                 className={`memory-card w-full text-left${selected?.id === item.id ? " memory-card--selected" : ""}`}
               >
-                <span className="memory-card__body">
-                  <span className="memory-card__title">{item.title}</span>
-                  <span className="memory-card__meta">
+                <div className="memory-card__body">
+                  <div className="memory-card__title">{item.title}</div>
+                  <div className="memory-card__meta">
                     <span className="memory-pill memory-pill--kind">{userMemoryTypeLabel(item, t)}</span>
                     <UserMemoryStatusPill status={item.status} />
                     <span>{formatUserDateTime(item.updatedAt)}</span>
-                  </span>
-                </span>
-                <span className="memory-card__tail"><ChevronRight size={16} /></span>
+                  </div>
+                </div>
+                <div className="memory-card__tail"><ChevronRight size={16} /></div>
               </button>
             ))}
           </div>
@@ -170,7 +170,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
             <div className="memory-drawer__body">
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.userMemories.content")}</h5>
-                <p className="whitespace-pre-wrap break-words">{selected.summary}</p>
+                <div className="memory-detail-text">{selected.summary}</div>
               </section>
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.memories.meta")}</h5>
