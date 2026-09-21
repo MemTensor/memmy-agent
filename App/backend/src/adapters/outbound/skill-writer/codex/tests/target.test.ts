@@ -127,6 +127,21 @@ describe("codex skill target", () => {
     }
   });
 
+  it("caps the SessionEnd hook timeout at the Codex limit and keeps the other hooks at the default", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
+
+    await target.installPlugin?.("codex");
+
+    const config = JSON.parse(readFileSync(join(rootDirectory, "hooks.json"), "utf8")) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>>;
+    };
+    expect(config.hooks.SessionEnd?.[0]?.hooks[0]).toMatchObject({ type: "command", timeout: 3 });
+    expect(config.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("memmy-resume-hook.mjs");
+    expect(config.hooks.SessionStart?.[0]?.hooks[0]).toMatchObject({ timeout: 60 });
+    expect(config.hooks.PostCompact?.[0]?.hooks[0]).toMatchObject({ timeout: 60 });
+  });
+
   it("persists trust for the installed user-level hooks before installation completes", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let trustOptions: TrustMemmyCodexHooksOptions | undefined;
