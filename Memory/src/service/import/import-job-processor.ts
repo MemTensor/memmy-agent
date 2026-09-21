@@ -410,7 +410,7 @@ export class ImportJobProcessor {
       if (!failed.stage || failed.retryAction === "none") continue;
       const memory = d.memories.get(failed.memoryId);
       if (!memory) continue;
-      if (d.memories.hasVector(memory.id, "vec_summary")) {
+      if (d.memories.hasVector(memory.id, "vec_summary") && !memoryHasPlaceholderSummary(memory)) {
         d.processing.update(memory.id, {
           state: "ready",
           stage: null,
@@ -474,8 +474,17 @@ export function memoryHasImportPipeline(memory: MemoryRow): boolean {
 
 export function memoryNeedsImportSummary(memory: MemoryRow): boolean {
   if (memory.memoryLayer !== "L1" || !memoryHasImportPipeline(memory)) return false;
-  const summary = firstSummary(stringFromRecord(memory.info, "summary") ?? stringFromRecord(memory.properties.internal_info, "summary") ?? traceMetaFromMemory(memory)?.summary);
-  return isImportSummaryPlaceholder(summary);
+  return memoryHasPlaceholderSummary(memory);
+}
+
+export function memoryHasPlaceholderSummary(memory: MemoryRow): boolean {
+  return isImportSummaryPlaceholder(
+    firstSummary(
+      stringFromRecord(memory.info, "summary"),
+      stringFromRecord(memory.properties.internal_info, "summary"),
+      traceMetaFromMemory(memory)?.summary
+    )
+  );
 }
 
 export function isImportSummaryPlaceholder(value: string | undefined): boolean {
