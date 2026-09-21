@@ -1625,7 +1625,10 @@ describe("MemoryService / import / processing", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const llmCalls: Array<{ options: { operation: string } }> = [];
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1666,7 +1669,10 @@ describe("MemoryService / import / processing", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const llmCalls: Array<{ options: { operation: string } }> = [];
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1701,7 +1707,10 @@ describe("MemoryService / import / processing", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const llmCalls: Array<{ options: { operation: string } }> = [];
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
