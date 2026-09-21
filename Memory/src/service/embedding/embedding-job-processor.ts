@@ -641,11 +641,12 @@ export function updateTraceSummary(memory: MemoryRow, input: { summary: string; 
   if (!trace) return memory;
   const internalTrace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : {};
   const nextTrace = { ...internalTrace, summary: input.summary, summary_at: input.updatedAt };
-  return { ...memory, memoryValue: renderTraceMemoryValue({
+  const memoryValue = renderTraceMemoryValue({
     summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"),
     userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls,
     reflection: { text: trace.reflection, alpha: trace.alpha }, value: trace.value, priority: trace.priority
-  }), info: { ...memory.info, summary: input.summary }, properties: {
+  });
+  return { ...memory, memoryValue, contentHash: stableHash(memoryValue), info: { ...memory.info, summary: input.summary }, properties: {
     ...memory.properties, info: { ...(memory.properties.info ?? {}), summary: input.summary },
     internal_info: { ...memory.properties.internal_info, summary: input.summary, trace: nextTrace }
   }, updatedAt: input.updatedAt };

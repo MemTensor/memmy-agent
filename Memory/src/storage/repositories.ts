@@ -875,6 +875,34 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
+  listImportMemoriesNeedingSummary(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND LOWER(TRIM(COALESCE(
+             json_extract(properties_json, '$.internal_info.trace.summary'),
+             json_extract(info_json, '$.summary'),
+             json_extract(properties_json, '$.internal_info.summary'),
+             ''
+           ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
   listUnindexedL1Imports(limit = 10000): MemoryRow[] {
     const rows = this.db
       .prepare(
@@ -5966,7 +5994,7 @@ function isPlaceholderMemorySummary(value: string | undefined): boolean {
     ?.split(/\r?\n/)
     .map(cleanMemoryValueLine)
     .find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
 }
 
 function memoryValueRoleMarker(value: string): string | undefined {
