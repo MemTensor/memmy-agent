@@ -44,5 +44,14 @@ describe("prompt templates", () => {
     expect(text).toContain("/workspace/skills/{skill-name}/SKILL.md");
     expect(text).toContain("untrusted external data");
     expect(text).toContain("Format Hint");
+    expect(text).toContain(
+      "only when the user explicitly asks for a visible checklist or a currently loaded Skill explicitly instructs you",
+    );
+    expect(text).toContain(
+      "Never infer authorization merely because work is complex, long-running, multi-step, or uses a plugin.",
+    );
+    expect(text).not.toContain(
+      "When a confirmed, non-routine task has at least three substantive execution stages",
+    );
   });
 });

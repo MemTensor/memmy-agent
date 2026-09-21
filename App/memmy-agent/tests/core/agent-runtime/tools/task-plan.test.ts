@@ -38,6 +38,22 @@ function makeTools() {
 }
 
 describe("Task Plan model tools", () => {
+  it("limits creation to explicit user or Skill authorization", () => {
+    const { create } = makeTools();
+    expect(create.description).toContain(
+      "only when the user explicitly asks for a visible checklist or a currently loaded Skill explicitly instructs you",
+    );
+    expect(create.description).toContain(
+      "Complexity, duration, multiple execution stages, and plugin usage do not authorize this tool by themselves.",
+    );
+    expect(create.description).toContain(
+      "default to not creating a task plan",
+    );
+    expect(create.description).not.toContain(
+      "confirmed, non-routine task with at least three",
+    );
+  });
+
   it("creates, queries, and completes the persisted checklist", async () => {
     const { create, get, update } = makeTools();
     expect(await create.execute({
