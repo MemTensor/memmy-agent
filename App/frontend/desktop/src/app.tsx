@@ -1,7 +1,8 @@
 import { useComputerHistoryModelSync } from "./app/computer-history-model-sync.js";
 import { isComputerHistorySupported } from "./app/computer-history-platform.js";
 /** App module. */
-import { SseEventSchema, type AccountSessionView, type MemoryTokenBudgetDto, type SseEvent } from "@memmy/local-api-contracts";
+import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
+import { rememberPublishedMemoryBudget } from "./components/memory-token-budget-banner.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAnalyticsUserId, setAnalyticsUserMode } from "./analytics/analytics-context.js";
 import { trackCloudAnalyticsEvent } from "./analytics/cloud-analytics.js";
@@ -21,8 +22,6 @@ import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
-import { MemoryTokenBudgetBanner } from "./components/memory-token-budget-banner.js";
-import { writeSettingsTabHash } from "./pages/settings-nav.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -88,7 +87,6 @@ function RuntimeApp() {
   const isScanningRef = useRef(false);
   const rendererReadyReportedRef = useRef(false);
   const [bootKey, setBootKey] = useState(0);
-  const [memoryBudget, setMemoryBudget] = useState<MemoryTokenBudgetDto | null>(null);
   translationRef.current = t;
   agentStateRef.current = state.agent;
   isScanningRef.current = state.agentSources.isScanning;
@@ -134,7 +132,7 @@ function RuntimeApp() {
     const refresh = () => {
       void clients.byokTokenUsage.getMemoryBudget().then((budget) => {
         if (!cancelled) {
-          setMemoryBudget(budget);
+          rememberPublishedMemoryBudget(budget);
           window.dispatchEvent(new CustomEvent("memmy:memory-token-budget-updated", { detail: budget }));
         }
       }).catch(() => undefined);
@@ -361,15 +359,6 @@ function RuntimeApp() {
     <UpdateCoordinatorProvider>
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <NotificationCenterProvider>
-          {memoryBudget?.paused && state.startup.status === "ready" && state.navigation.currentPath !== "/pet" ? (
-            <MemoryTokenBudgetBanner
-              budget={memoryBudget}
-              onOpenSettings={() => {
-                writeSettingsTabHash("tokens");
-                dispatch(appActions.navigate("/settings"));
-              }}
-            />
-          ) : null}
           <AppRouter onRetry={retry} />
           <CampaignPromptHost />
           <TokenCreditToastHost />

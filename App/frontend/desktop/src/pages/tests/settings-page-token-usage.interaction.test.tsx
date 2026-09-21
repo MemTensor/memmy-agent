@@ -8,6 +8,7 @@ import type { ByokTokenUsageSummary, MemoryTokenBudgetDto, ModelConfigView, Toke
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import { commitMemoryByokLimitDraft, memoryBudgetUsageFill, MemoryTokenBudgetRow, SettingsPageView, UsageDetails } from "../settings-page.js";
+import { scrollSettingsSectionIntoView, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "../settings-nav.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -610,7 +611,7 @@ describe("memory token budget limit inputs", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("今日已用 1.0M");
+    expect(container.textContent).toContain("今日已用 1.0M / 10M");
     const dailyInput = container.querySelectorAll<HTMLInputElement>('input[type="number"]')[0];
     expect(dailyInput).toBeTruthy();
     act(() => {
@@ -638,8 +639,9 @@ describe("memory token budget limit inputs", () => {
       root.render(
         <I18nProvider language="zh-CN">
           <MemoryTokenBudgetRow
-            label="总计限额"
-            note="累计已用 8.1M / 限额 10M"
+            label="累计限额"
+            noteLabel="累计已用"
+            note="8.1M/10M"
             draft="10"
             savedValue={10}
             usedTokens={8_100_000}
@@ -652,6 +654,9 @@ describe("memory token budget limit inputs", () => {
     });
 
     const bar = container.querySelector<HTMLElement>('[role="progressbar"]');
+    expect(container.querySelector("strong")?.textContent).toBe("8.1M/10M");
+    expect([...container.querySelectorAll("strong")].some((node) => node.textContent === "M")).toBe(true);
+    expect([...container.querySelectorAll("em")].some((node) => node.textContent === "Token")).toBe(true);
     expect(bar?.getAttribute("data-tone")).toBe("red");
     expect(bar?.getAttribute("aria-valuenow")).toBe("81");
     expect(bar?.querySelector("span")?.getAttribute("style")).toContain("width: 81%");
@@ -660,7 +665,53 @@ describe("memory token budget limit inputs", () => {
       root.render(
         <I18nProvider language="zh-CN">
           <MemoryTokenBudgetRow
-            label="总计限额"
+            label="每日限额"
+            noteLabel="今日已用"
+            note="1.4M/2M"
+            draft="2"
+            savedValue={2}
+            usedTokens={1_400_000}
+            limitM={2}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+    const dailyBar = container.querySelector<HTMLElement>('[role="progressbar"]');
+    expect(dailyBar?.getAttribute("data-tone")).toBe("yellow");
+    expect(dailyBar?.getAttribute("aria-valuenow")).toBe("70");
+    expect(dailyBar?.querySelector("span")?.getAttribute("style")).toContain("width: 70%");
+    expect(container.querySelector('[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]')).toBeNull();
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="每日限额"
+            noteLabel="今日已用"
+            note="1.5M/1M"
+            draft="1"
+            savedValue={1}
+            usedTokens={1_500_000}
+            limitM={1}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+    const pausedMark = container.querySelector<HTMLElement>(
+      '[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]'
+    );
+    expect(pausedMark).toBeTruthy();
+    expect(pausedMark?.tagName).toBe("BUTTON");
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="累计限额"
             note="不限制"
             draft="0"
             savedValue={0}
@@ -673,6 +724,111 @@ describe("memory token budget limit inputs", () => {
       );
     });
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it("opens Token usage from any tab and briefly highlights the memory budget card", async () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+
+    function Harness() {
+      const [tab, setTab] = useState<SettingsTabId>("account");
+      return (
+        <SettingsPageView
+          state={createInitialAppState()}
+          dispatch={vi.fn()}
+          activeTab={tab}
+          onActiveTabChange={setTab}
+          byokTokenUsageClient={{
+            getSummary: vi.fn(async () => ({
+              inputTokens: 1,
+              outputTokens: 1,
+              totalTokens: 2,
+              cachedInputTokens: 0,
+              cacheCreationInputTokens: 0,
+              updatedAt: "2026-08-11T12:00:00.000Z",
+              byKind: [],
+              byProvider: [],
+              byModel: []
+            })),
+            getMemoryBudget: vi.fn(async () => memoryBudgetFixture())
+          }}
+          update={{
+            appVersion: "1.0.4",
+            phase: "idle",
+            preparedUpdatePath: null,
+            downloadProgress: null,
+            feedback: null,
+            requestInlineAction: vi.fn(async () => undefined),
+            requestPrimaryAction: vi.fn(async () => undefined)
+          }}
+        />
+      );
+    }
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <Harness />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(true);
+
+    await act(async () => {
+      writeSettingsMemoryBudgetFocus();
+      await Promise.resolve();
+    });
+
+    const card = container.querySelector("#memory-token-budget");
+    expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(false);
+    expect(card).not.toBeNull();
+    expect(card?.className).toMatch(/budgetCardFlash/);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+  });
+
+  it("keeps settings section scroll inside the settings pane below the titlebar", () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    document.documentElement.style.setProperty("--codex-toolbar-height", "46px");
+
+    const outer = document.createElement("div");
+    outer.style.overflowY = "hidden";
+    Object.defineProperty(outer, "scrollTop", { writable: true, value: 120 });
+
+    const scroller = document.createElement("div");
+    scroller.className = "settings-page";
+    scroller.style.overflowY = "auto";
+    Object.defineProperty(scroller, "clientHeight", { value: 400 });
+    Object.defineProperty(scroller, "scrollHeight", { value: 1200 });
+    Object.defineProperty(scroller, "scrollTop", { writable: true, value: 0 });
+    const scrollTo = vi.fn<[ScrollToOptions | number], void>();
+    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
+
+    const card = document.createElement("section");
+    card.id = "memory-token-budget";
+    scroller.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, left: 0, right: 720, bottom: 400, width: 720, height: 400, toJSON() { return {}; }
+    });
+    card.getBoundingClientRect = () => ({
+      x: 0, y: 520, top: 520, left: 0, right: 720, bottom: 760, width: 720, height: 240, toJSON() { return {}; }
+    });
+
+    outer.append(scroller);
+    scroller.append(card);
+    document.body.append(outer);
+
+    scrollSettingsSectionIntoView(card);
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(outer.scrollTop).toBe(0);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 462, behavior: "auto" });
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    outer.remove();
   });
 });
 

@@ -31,17 +31,22 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
+  MEMORY_TOKEN_BUDGET_SECTION_ID,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
+  SETTINGS_MEMORY_BUDGET_EVENT,
   readInitialSettingsTab,
   readSettingsAddModelReturnRoute,
   resolveSettingsTabFromHash,
+  resetSettingsOuterScroll,
+  scrollSettingsSectionIntoView,
+  shouldFocusMemoryBudgetFromHash,
   writeSettingsTabHash,
   type SettingsTabId
 } from "./settings-nav.js";
 import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 
-export { resolveSettingsTabFromHash, type SettingsTabId } from "./settings-nav.js";
+export { resolveSettingsTabFromHash, shouldFocusMemoryBudgetFromHash, type SettingsTabId } from "./settings-nav.js";
 import {
   OptionalModelMissingWarningModal,
   resolveOptionalModelMissingWarning,
@@ -87,6 +92,7 @@ import {
 } from "./model-config.js";
 import { ValidationMessage } from "./api-key-form-fields.js";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
+import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 
 type LogLevel = "error" | "warn" | "info" | "debug";
@@ -254,6 +260,7 @@ export function SettingsPage() {
         update={update}
         track={track}
         activeTab={activeTab}
+        onActiveTabChange={selectSettingsTab}
       />
     </AppFrame>
   );
@@ -371,6 +378,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
+  const [memoryBudgetFocusNonce, setMemoryBudgetFocusNonce] = useState(0);
   const activeTab = activeTabProp ?? activeTabState;
 
   function setActiveTab(tab: SettingsTabId) {
@@ -769,6 +777,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       }
     }
 
+    const settingsPage = document.querySelector(".settings-page");
+    if (settingsPage instanceof HTMLElement) {
+      resetSettingsOuterScroll(settingsPage);
+    }
+
     if (window.location.hash !== "#pet-avatar") {
       return;
     }
@@ -778,6 +791,62 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }, 0);
     // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const requestMemoryBudgetFocus = () => {
+      setActiveTab("tokens");
+      setMemoryBudgetFocusNonce((current) => current + 1);
+    };
+
+    if (shouldFocusMemoryBudgetFromHash(window.location.hash)) {
+      requestMemoryBudgetFocus();
+    }
+    window.addEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+    return () => window.removeEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+  }, []);
+
+  useEffect(() => {
+    if (memoryBudgetFocusNonce === 0 || activeTab !== "tokens" || typeof document === "undefined") {
+      return undefined;
+    }
+
+    const card = document.getElementById(MEMORY_TOKEN_BUDGET_SECTION_ID);
+    const flashClass = usageStyles.budgetCardFlash;
+    if (!card || !flashClass) {
+      return undefined;
+    }
+
+    const alignCard = () => {
+      scrollSettingsSectionIntoView(card);
+    };
+
+    card.classList.add(flashClass);
+    const frame = window.requestAnimationFrame(() => {
+      alignCard();
+      window.requestAnimationFrame(alignCard);
+    });
+    const panel = document.getElementById("settings-panel-tokens");
+    const observer = typeof ResizeObserver !== "undefined" && panel
+      ? new ResizeObserver(alignCard)
+      : null;
+    if (observer && panel) {
+      observer.observe(panel);
+    }
+    const timer = window.setTimeout(() => {
+      observer?.disconnect();
+      card.classList.remove(flashClass);
+    }, 1600);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      card.classList.remove(flashClass);
+    };
+  }, [memoryBudgetFocusNonce, activeTab]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
@@ -1983,13 +2052,14 @@ function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
   const lifetimeUsed = props.budget?.lifetimeUsed ?? 0;
 
   return (
-    <section className={usageStyles.budgetCard}>
+    <section id={MEMORY_TOKEN_BUDGET_SECTION_ID} className={`${usageStyles.detailContent} ${usageStyles.budgetCard}`}>
       <h3 className={usageStyles.budgetTitle}>{t("settings.token.memoryBudget")}</h3>
       <MemoryTokenBudgetRow
         label={t("settings.token.memoryBudgetDaily")}
+        noteLabel={dailyLimitM === 0 ? undefined : t("settings.token.memoryBudgetDailyUsedLabel")}
         note={dailyLimitM === 0
           ? t("settings.token.memoryBudgetUnlimited")
-          : t("settings.token.memoryBudgetDailyUsed", {
+          : t("settings.token.memoryBudgetUsed", {
             used: formatBudgetUsedM(dailyUsed),
             limit: String(dailyLimitM)
           })}
@@ -2002,9 +2072,10 @@ function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
       />
       <MemoryTokenBudgetRow
         label={t("settings.token.memoryBudgetTotal")}
+        noteLabel={totalLimitM === 0 ? undefined : t("settings.token.memoryBudgetTotalUsedLabel")}
         note={totalLimitM === 0
           ? t("settings.token.memoryBudgetUnlimited")
-          : t("settings.token.memoryBudgetTotalUsed", {
+          : t("settings.token.memoryBudgetUsed", {
             used: formatBudgetUsedM(lifetimeUsed),
             limit: String(totalLimitM)
           })}
@@ -2016,12 +2087,16 @@ function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
         onCommit={props.onCommitTotal}
       />
       {props.budget?.stale ? (
-        <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetStale")}</p>
+        <div className={usageStyles.compactScene}>
+          <p>{t("settings.token.memoryBudgetStale")}</p>
+        </div>
       ) : null}
       {props.saveError ? (
         <p className={usageStyles.statusError} role="alert">{props.saveError}</p>
       ) : null}
-      <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetHint")}</p>
+      <div className={usageStyles.compactScene}>
+        <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetHint")}</p>
+      </div>
     </section>
   );
 }
@@ -2058,6 +2133,7 @@ export function commitMemoryByokLimitDraft(
 
 export function MemoryTokenBudgetRow(props: {
   label: string;
+  noteLabel?: string;
   note: string;
   draft: string;
   savedValue: number;
@@ -2070,6 +2146,9 @@ export function MemoryTokenBudgetRow(props: {
   const fill = props.usedTokens !== undefined && props.limitM !== undefined
     ? memoryBudgetUsageFill(props.usedTokens, props.limitM)
     : null;
+  const pausedTip = t("settings.token.memoryBudgetPausedTip");
+  const limitReached = fill !== null && fill.percent >= 100;
+  const noteText = props.noteLabel ? `${props.noteLabel} ${props.note}` : props.note;
 
   function commitDraft(event?: { currentTarget: { value: string } }) {
     const next = commitMemoryByokLimitDraft(event?.currentTarget.value ?? props.draft, props.savedValue);
@@ -2081,25 +2160,20 @@ export function MemoryTokenBudgetRow(props: {
 
   return (
     <div className={usageStyles.budgetRow}>
-      <div>
-        <p className={usageStyles.budgetLabel}>{props.label}</p>
-        <p className={usageStyles.budgetNote}>{props.note}</p>
-        {fill ? (
-          <div
-            className={usageStyles.budgetMeter}
-            role="progressbar"
-            aria-label={props.note}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(fill.percent)}
-            data-tone={fill.tone}
-          >
-            <span
-              className={`${usageStyles.budgetMeterFill} ${budgetMeterFillClass(fill.tone)}`}
-              style={{ width: `${fill.percent}%` }}
-            />
-          </div>
-        ) : null}
+      <div className={usageStyles.compactScene}>
+        <h3>{props.label}</h3>
+        <p className={usageStyles.byokBreakdown}>
+          <span>
+            {props.noteLabel ? <>{props.noteLabel} <strong>{props.note}</strong></> : props.note}
+          </span>
+          {limitReached ? (
+            <Tooltip content={pausedTip}>
+              <button type="button" className={usageStyles.budgetPausedMark} aria-label={pausedTip}>
+                <AlertTriangle size={14} aria-hidden="true" />
+              </button>
+            </Tooltip>
+          ) : null}
+        </p>
       </div>
       <label className={usageStyles.budgetControl}>
         <input
@@ -2117,8 +2191,27 @@ export function MemoryTokenBudgetRow(props: {
             }
           }}
         />
-        <span className={usageStyles.budgetUnit}>{t("settings.token.memoryBudgetUnit")}</span>
+        <span className={usageStyles.byokUsageValue}>
+          <strong>{t("settings.token.memoryBudgetScale")}</strong>
+          <em>{t("settings.token.memoryBudgetUnit")}</em>
+        </span>
       </label>
+      {fill ? (
+        <div
+          className={usageStyles.budgetMeter}
+          role="progressbar"
+          aria-label={noteText}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(fill.percent)}
+          data-tone={fill.tone}
+        >
+          <span
+            className={`${usageStyles.budgetMeterFill} ${budgetMeterFillClass(fill.tone)}`}
+            style={{ width: `${fill.percent}%` }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

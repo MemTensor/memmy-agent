@@ -20,6 +20,7 @@ import {
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
   resolveSettingsTabFromHash,
+  shouldFocusMemoryBudgetFromHash,
   readLogLevel,
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
@@ -250,8 +251,16 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
+    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
+  });
+});
+
+describe("shouldFocusMemoryBudgetFromHash", () => {
+  it("只把记忆限额深链当作需要定位的 Token 卡片", () => {
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage-memory-budget")).toBe(true);
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage")).toBe(false);
   });
 });
 
@@ -293,7 +302,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).toContain("自定义 API Key 消耗");
-    expect(html).toContain("记忆任务限额");
+    expect(html).toContain("记忆进化 Token 限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');

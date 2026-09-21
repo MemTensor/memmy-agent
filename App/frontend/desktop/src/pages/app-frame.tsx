@@ -61,7 +61,8 @@ import {
   User,
   Wand2
 } from "./memory/memory-prototype-icons.js";
-import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
+import { AppContentTopbar } from "./app-content-topbar.js";
+import { SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
 import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
@@ -73,6 +74,7 @@ export interface AppFrameProps {
   title: string;
   reserveTopBar?: boolean;
   topBar?: ReactNode;
+  topBarEnd?: ReactNode;
   topBarBorder?: boolean;
   windowsTitlebarSafe?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
@@ -1513,9 +1515,15 @@ export function AppFrame(props: AppFrameProps) {
 
       <main className={`app-frame-main relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}${props.windowsTitlebarSafe ? " app-frame-main--windows-titlebar-safe" : ""}`} aria-label={props.title}>
         {props.reserveTopBar !== false && (
-          <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
-            {props.topBar}
-          </header>
+          <AppContentTopbar
+            bordered={props.topBarBorder}
+            start={props.topBar}
+            end={props.topBarEnd}
+            onOpenMemoryBudgetSettings={() => {
+              writeSettingsMemoryBudgetFocus();
+              dispatch(appActions.navigate("/settings"));
+            }}
+          />
         )}
         <div
           data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}

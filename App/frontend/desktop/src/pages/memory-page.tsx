@@ -14,7 +14,8 @@ import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
-import { writeSettingsTabHash } from "./settings-nav.js";
+import { AppContentTopbar } from "./app-content-topbar.js";
+import { writeSettingsMemoryBudgetFocus, writeSettingsTabHash } from "./settings-nav.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
 import { readHistoryPermissionSetup } from "./memory/computer-history-permission-state.js";
@@ -221,6 +222,7 @@ export function MemoryPage(props: MemoryPageProps) {
       activePage={activePage}
       onActivePageChange={handleSubPageChange}
       onBack={() => dispatch(appActions.navigate("/main"))}
+      onOpenMemoryBudgetSettings={() => dispatch(appActions.navigate("/settings"))}
       childByPage={childByPage}
     />
   );
@@ -269,6 +271,7 @@ export interface MemoryPageViewProps {
   activePage: MemorySubPageId;
   onActivePageChange: (page: MemorySubPageId) => void;
   onBack?: () => void;
+  onOpenMemoryBudgetSettings?: () => void;
   childByPage?: Record<MemorySubPageId, ReactNode>;
 }
 
@@ -371,7 +374,12 @@ export function MemoryPageView(props: MemoryPageViewProps) {
           sidebarHidden ? " memory-page-main--sidebar-hidden" : ""
         }`}
       >
-        <header className="app-frame-content-topbar" />
+        <AppContentTopbar
+          onOpenMemoryBudgetSettings={() => {
+            writeSettingsMemoryBudgetFocus();
+            props.onOpenMemoryBudgetSettings?.();
+          }}
+        />
         <div className="app-frame-page-content min-h-0 flex-1 overflow-y-auto py-6">{childByPage[activePage]}</div>
       </div>
     </div>

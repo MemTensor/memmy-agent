@@ -19,9 +19,32 @@
   gap: 12px;
   margin-top: 16px;
   padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 52%, transparent);
+  border: 1px solid var(--border-content-panel);
   border-radius: var(--radius-card-lg);
-  background: color-mix(in srgb, var(--color-canvas-oat) 40%, transparent);
+  background: var(--color-background-paper);
+}
+
+.budgetCardFlash {
+  animation: budget-card-flash 1.6s ease;
+}
+
+@keyframes budget-card-flash {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+
+  30% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-error) 40%, transparent);
+    background: color-mix(in srgb, var(--color-status-error-soft) 64%, var(--color-canvas-oat));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .budgetCardFlash {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-error) 40%, transparent);
+  }
 }
 
 .budgetTitle {
@@ -39,29 +62,44 @@
   align-items: center;
 }
 
-.budgetLabel {
-  margin: 0;
-  font-size: var(--codex-text-sm);
-  line-height: var(--codex-leading-sm);
-  color: var(--usage-ink);
+.budgetRow .byokBreakdown {
+  align-items: center;
 }
 
-.budgetNote {
-  margin: 2px 0 0;
-  font-size: var(--codex-text-xs);
-  line-height: var(--codex-leading-xs);
-  color: var(--usage-muted);
-  font-variant-numeric: tabular-nums;
+.budgetPausedMark {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-status-error) 14%, var(--color-background-paper));
+  color: var(--color-status-error);
+  line-height: 0;
+  font-size: 0;
+  cursor: help;
+}
+
+.budgetPausedMark svg {
+  display: block;
+  width: 14px;
+  height: 14px;
 }
 
 .budgetMeter {
+  grid-column: 1 / -1;
+  box-sizing: border-box;
   width: 100%;
-  max-width: 280px;
-  height: 6px;
-  margin-top: 8px;
+  height: 8px;
   overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 78%, var(--usage-ink) 8%);
   border-radius: var(--radius-pill);
-  background: var(--usage-track);
+  background: color-mix(in srgb, var(--color-canvas-oat) 72%, white);
 }
 
 .budgetMeterFill {
@@ -76,7 +114,7 @@
 }
 
 .budgetMeterFillYellow {
-  background: var(--color-status-warning);
+  background: var(--color-status-warning, #e4b44a);
 }
 
 .budgetMeterFillRed {
@@ -93,25 +131,17 @@
   width: 88px;
   height: 32px;
   padding: 0 8px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 44%, transparent);
   border-radius: var(--radius-btn, 8px);
-  background: var(--color-background-paper);
+  background: color-mix(in srgb, var(--color-canvas-oat) 30%, transparent);
   color: var(--usage-ink);
   font-family: var(--font-sans);
   font-size: var(--codex-text-sm);
   font-variant-numeric: tabular-nums;
 }
 
-.budgetUnit {
-  font-size: var(--codex-text-xs);
-  color: var(--usage-muted);
-}
-
 .budgetHint {
-  margin: 0;
-  font-size: var(--codex-text-xs);
-  line-height: var(--codex-leading-xs);
-  color: var(--usage-muted);
+  white-space: pre-line;
 }
 
 .invitationCard {

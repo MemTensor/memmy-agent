@@ -1434,6 +1434,10 @@ body:has(.memory-drawer) .window-drag-region {
   width: 120px;
 }
 
+.window-drag-exclusion--memory-budget-capsule {
+  z-index: 10002;
+}
+
 .sidebar-window-toolbar {
   position: relative;
   flex: 0 0 var(--codex-toolbar-height);
@@ -1496,8 +1500,27 @@ body:has(.memory-drawer) .window-drag-region {
   z-index: 10000;
 }
 
-.app-frame-main--sidebar-hidden .app-frame-content-topbar {
+.app-frame-main--sidebar-hidden .app-frame-content-topbar,
+.memory-page-main--sidebar-hidden .app-frame-content-topbar {
   padding-left: var(--codex-sidebar-hidden-topbar-padding);
+}
+
+.app-frame-main--sidebar-hidden .app-frame-content-topbar:has(.memory-token-budget-capsule),
+.memory-page-main--sidebar-hidden .app-frame-content-topbar:has(.memory-token-budget-capsule) {
+  --app-frame-topbar-sidebar-safe: calc(var(--codex-sidebar-hidden-topbar-padding) - var(--codex-content-padding-x));
+  padding-left: var(--codex-content-padding-x);
+  grid-template-columns:
+    minmax(var(--app-frame-topbar-sidebar-safe), 1fr)
+    minmax(0, max-content)
+    minmax(var(--app-frame-topbar-sidebar-safe), 1fr);
+}
+
+.app-frame-main--sidebar-hidden .app-frame-content-topbar:has(.memory-token-budget-capsule) .app-frame-content-topbar__start,
+.memory-page-main--sidebar-hidden .app-frame-content-topbar:has(.memory-token-budget-capsule) .app-frame-content-topbar__start {
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: var(--app-frame-topbar-sidebar-safe);
 }
 
 .app-frame-content-body--sidebar-hidden .app-frame-page-content,
@@ -1623,8 +1646,10 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   top: 0;
   left: 0;
   right: 0;
-  z-index: 10;
-  display: flex;
+  z-index: 10000;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content) max-content;
+  column-gap: 12px;
   min-height: var(--codex-toolbar-height);
   align-items: center;
   overflow: hidden;
@@ -1636,9 +1661,32 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   -webkit-user-select: none;
 }
 
-.app-frame-content-topbar :is(button, input, textarea, select, a) {
+.app-frame-content-topbar:has(.memory-token-budget-capsule) {
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content) minmax(max-content, 1fr);
+}
+
+.app-frame-content-topbar__start,
+.app-frame-content-topbar__center,
+.app-frame-content-topbar__end {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.app-frame-content-topbar__center {
+  justify-content: center;
+  overflow-x: hidden;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+.app-frame-content-topbar__end {
+  justify-content: flex-end;
+}
+
+.app-frame-content-topbar :is(button, input, textarea, select, a, .memory-token-budget-capsule) {
   position: relative;
-  z-index: 10000;
+  z-index: 10001;
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -1676,14 +1724,6 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 .agent-conversation-title > .im-channel-title-icon {
   --im-channel-title-icon-size: var(--codex-leading-base);
   margin-left: 6px;
-}
-
-.agent-conversation-topbar {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
 }
 
 .agent-environment-toggle,
@@ -7259,20 +7299,97 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   color: var(--color-status-error);
 }
 
-.memory-token-budget-banner {
+.memory-token-budget-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  height: auto;
+  margin: 0;
+  padding: 2px 0;
+  border: 1px solid color-mix(in srgb, var(--color-status-error) 22%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-status-error-soft) 48%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-status-error) 86%, var(--color-text-ink));
+  line-height: 0;
+  position: relative;
+  z-index: 10001;
+  pointer-events: auto;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.memory-token-budget-capsule__open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  height: auto;
+  margin: 0;
+  padding: 4px 6px 4px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 0;
+  text-align: center;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.memory-token-budget-capsule__open svg,
+.memory-token-budget-capsule__close svg {
   display: block;
-  width: 100%;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.memory-token-budget-capsule__title {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--codex-text-xs);
+  font-weight: 500;
+  line-height: 14px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.memory-token-budget-capsule__close {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
   margin: 0;
   padding: 0;
   border: 0;
+  border-radius: var(--radius-pill);
   background: transparent;
-  text-align: left;
+  color: inherit;
+  line-height: 0;
+  font-size: 0;
   cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
-.memory-token-budget-banner .banner {
-  margin: 0;
-  border-radius: 0;
+.memory-token-budget-capsule__close:hover {
+  background: color-mix(in srgb, var(--color-status-error) 10%, transparent);
 }
 
 .badge,
@@ -11053,6 +11170,10 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
 /* Settings page shell styles. */
 .settings-page-shell {
   color: var(--color-text-ink);
+}
+
+.settings-page {
+  scroll-padding-top: calc(var(--codex-toolbar-height) + 12px);
 }
 
 .settings-page > .app-frame-page-content {
