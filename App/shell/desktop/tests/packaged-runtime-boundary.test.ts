@@ -36,6 +36,7 @@ const createMemoryRuntimeManifestPath = fileURLToPath(
 );
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
+const winStandardUpgradeCheckPath = fileURLToPath(new URL("../build/MemmyWindowsStandardUpgradeCheck.ps1", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
 const winDataMigrationScriptPath = fileURLToPath(new URL("../build/MemmyWindowsDataMigration.ps1", import.meta.url));
@@ -862,6 +863,25 @@ describe("desktop packaged runtime boundaries", () => {
     expect(customInstallIndex).toBeGreaterThan(customInitIndex);
   });
 
+  it("explains the existing Windows install directory and requires manual relocation", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const standardUpgradeCheckSource = readFileSync(winStandardUpgradeCheckPath, "utf8");
+    const noticeCall = includeSource.indexOf("Call MemmyShowPreviousInstallDirectoryNotice");
+    const noticeFunction = includeSource.indexOf("Function MemmyShowPreviousInstallDirectoryNotice");
+    const validationFunction = includeSource.indexOf("Function MemmyValidateSelectedDirectories");
+    const validationProbe = includeSource.indexOf("Call MemmyProbeWritableDirectory", validationFunction);
+    const previousDirectoryGuard = includeSource.indexOf("memmy_validate_previous_directory_failed", validationFunction);
+
+    expect(noticeCall).toBeGreaterThan(-1);
+    expect(noticeFunction).toBeGreaterThan(noticeCall);
+    expect(includeSource).toContain("$MemmyPreviousInstallDir");
+    expect(includeSource).toContain("If you want to move Memmy, manually migrate your files");
+    expect(includeSource).toContain("如果要更换目录，请先手动迁移 Memmy 文件");
+    expect(previousDirectoryGuard).toBeGreaterThan(validationFunction);
+    expect(previousDirectoryGuard).toBeLessThan(validationProbe);
+    expect(standardUpgradeCheckSource).toContain("manually migrate files before choosing a new directory");
+  });
+
   it("adds packaged Windows CLI launchers to the user PATH", () => {
     const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
@@ -955,7 +975,6 @@ describe("desktop packaged runtime boundaries", () => {
       includeSource.indexOf('RMDir /r "$LOCALAPPDATA\\Memmy\\launcher"')
     );
     expect(includeSource).not.toContain("MsgBox");
-    expect(includeSource).not.toContain("MessageBox MB_OK|MB_ICONINFORMATION");
     expect(includeSource).not.toContain("Memmy 将安装到当前用户目录");
     expect(updatePromptSource).toContain("function Resolve-MemmyPromptLanguage");
     expect(updatePromptSource).toContain("function Test-MemmyUpdatePromptDone");
