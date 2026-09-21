@@ -13,13 +13,9 @@ import {
   AlertCircle,
   Check,
   ChevronRight,
-  Circle,
-  CircleDot,
   Download,
   FileOutput,
   HelpCircle,
-  ListChecks,
-  LoaderCircle,
   MessageSquarePlus,
   Mic,
   Paperclip,
@@ -35,7 +31,7 @@ import type {
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import { asrRecordingTimeRemainingMs, useAsrRecorder } from "./asr-recorder.js";
+import { asrRecordingTimeRemainingMs, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
 import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -167,6 +163,15 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
     if ((event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) handler(event.deltaY);
   }, []);
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
+  // A capability can be raised by the Agent through a skill and still have a
+  // persistent button above the composer. The command contribution is the
+  // source of truth for that relationship; keeping it here avoids a second
+  // transcript card for the same interaction.
+  const pinnedCapabilities = useMemo(() => new Set(
+    props.plugins.flatMap((plugin) => (plugin.manifest.commands ?? [])
+      .filter((command) => command.pinned === true)
+      .map((command) => `${plugin.id}:${command.capabilityId}`))
+  ), [props.plugins]);
   const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
   const region = props.region ?? "flow";
   const calls = useMemo(
@@ -178,9 +183,10 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             .filter((call) => !props.dismissedCallIds?.has(call.callId))
         )
       ),
-      region
+      region,
+      pinnedCapabilities
     ),
-    [answeredInteractions, dismissedCalls, props.calls, props.dismissedCallIds, region]
+    [answeredInteractions, dismissedCalls, pinnedCapabilities, props.calls, props.dismissedCallIds, region]
   );
   const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
   if (calls.length === 0) return null;
@@ -222,7 +228,8 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
           props.onCallDismissed?.(call.callId);
           await cancel().catch(() => undefined);
         };
-        const dismissable = call.origin === "user"
+        const autoPinned = pinnedCapabilities.has(`${call.pluginId}:${call.capabilityId}`);
+        const dismissable = (call.origin === "user" || (region === "pinned" && autoPinned))
           && call.events.some((event) => event.type === "interaction")
           && !call.events.some((event) => event.type === "result" || event.type === "error");
         const cards = (
@@ -245,7 +252,10 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         // The recording bar is a single line with its own controls and close
         // button, so wrapping it in card chrome would double the height of the
         // one card that has to stay out of the way for hours.
-        if (isBarePresentation(call)) return <div key={call.callId}>{cards}</div>;
+        // Progress and task-list events are status updates, not user-facing
+        // cards. Keep them in the chat flow as text so a job cannot take over
+        // the conversation with a second progress panel.
+        if (isBarePresentation(call) || isStatusOnlyPresentation(call)) return <div key={call.callId}>{cards}</div>;
         return (
           <div key={call.callId} className="rounded-card border border-border-stone/30 bg-background-paper p-3 shadow-sm">
             <div className="mb-2 flex items-start justify-between gap-2">
@@ -311,8 +321,8 @@ function GenericPluginCards(props: {
   return (
     <div className="space-y-2">
       {props.events.filter((event) => event.type !== "artifact").map((event) => {
-        if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
-        if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
+        if (event.type === "progress") return terminal ? null : <ProgressText key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
+        if (event.type === "task-list") return terminal ? null : <TaskText key="tasks" event={event} />;
         if (event.type === "interaction") {
           return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} onDismiss={props.onDismiss} onRecordingSession={props.onRecordingSession} asrClient={props.asrClient} />;
         }
@@ -344,7 +354,7 @@ function GenericPluginCards(props: {
   );
 }
 
-function ProgressCard(props: {
+function ProgressText(props: {
   event: Extract<CapabilityEvent, { type: "progress" }>;
   canCancel: boolean;
   onCancel(): Promise<void>;
@@ -363,50 +373,37 @@ function ProgressCard(props: {
     }
   };
   return (
-    <div className="rounded-card bg-canvas-oat/50 px-3 py-2.5" role="status" aria-live="polite">
-      <div className="flex items-center gap-2 text-sm text-text-ink/75">
-        {completed
-          ? <Check size={15} className="text-status-success" aria-hidden="true" />
-          : <LoaderCircle size={15} className="animate-spin text-action-sky" aria-hidden="true" />}
-        <span>{props.event.message || t("plugin.ui.progress")}</span>
-        {value !== undefined ? <span className="ml-auto text-xs text-text-ink/45">{value}%</span> : null}
+    <div className="plugin-status-text" role="status" aria-live="polite">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={completed ? "text-status-success" : "text-action-sky"} aria-hidden="true">{completed ? "✓" : "·"}</span>
+        <span className="min-w-0 break-words">{props.event.message || t("plugin.ui.progress")}</span>
+        {value !== undefined ? <span className="shrink-0 text-xs text-text-ink/45">（{value}%）</span> : null}
         {props.canCancel && cancelState !== "done" ? (
-          <button type="button" disabled={cancelState === "pending"} className="ml-1 text-xs text-text-ink/55 hover:text-status-error disabled:opacity-50" onClick={() => void cancel()}>
+          <button type="button" disabled={cancelState === "pending"} className="ml-auto shrink-0 text-xs text-text-ink/55 hover:text-status-error disabled:opacity-50" onClick={() => void cancel()}>
             {t("plugin.ui.cancel")}
           </button>
         ) : null}
-        {cancelState === "done" ? <span className="ml-1 text-xs text-text-ink/45">{t("plugin.ui.cancelled")}</span> : null}
+        {cancelState === "done" ? <span className="ml-auto shrink-0 text-xs text-text-ink/45">{t("plugin.ui.cancelled")}</span> : null}
       </div>
-      {value !== undefined ? (
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border-stone/30" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}>
-          <div className="h-full rounded-full bg-action-sky transition-[width]" style={{ width: `${value}%` }} />
-        </div>
-      ) : null}
-      {cancelState === "error" ? <p className="mt-1 text-xs text-status-error" role="alert">{t("plugin.ui.cancelFailed")}</p> : null}
+      {cancelState === "error" ? <span className="mt-1 block text-xs text-status-error" role="alert">{t("plugin.ui.cancelFailed")}</span> : null}
     </div>
   );
 }
 
-function TaskCard(props: { event: Extract<CapabilityEvent, { type: "task-list" }> }) {
+function TaskText(props: { event: Extract<CapabilityEvent, { type: "task-list" }> }) {
   const { t } = useTranslation();
   return (
-    <div className="rounded-card border border-border-stone/30 px-3 py-2.5">
-      <div className="mb-2 flex items-center gap-2 text-sm font-medium text-text-ink/75">
-        <ListChecks size={15} className="text-action-sky" aria-hidden="true" />
-        {t("plugin.ui.tasks")}
-      </div>
-      <ul className="space-y-1.5">
+    <div className="plugin-status-text" role="status" aria-live="polite">
+      <span className="sr-only">{t("plugin.ui.tasks")}: </span>
+      <div className="flex flex-wrap gap-x-3 gap-y-1">
         {props.event.tasks.map((task) => {
-          const Icon = task.status === "completed" ? Check : task.status === "failed" ? X : task.status === "running" ? CircleDot : Circle;
           return (
-            <li key={task.id} className="flex items-center gap-2 text-sm text-text-ink/65">
-              <Icon size={14} className={task.status === "failed" ? "text-status-error" : task.status === "completed" ? "text-status-success" : "text-action-sky"} aria-hidden="true" />
-              <span className="min-w-0 flex-1 break-words">{task.title}</span>
-              <span className="text-[11px] text-text-ink/40">{t(TASK_STATUS_KEYS[task.status])}</span>
-            </li>
+            <span key={task.id} className="text-sm text-text-ink/65">
+              {task.title}（{t(TASK_STATUS_KEYS[task.status])}）
+            </span>
           );
         })}
-      </ul>
+      </div>
     </div>
   );
 }
@@ -571,7 +568,7 @@ function AudioRecordCard(props: {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
       onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS)),
-      onError: (liveErr) => setLiveError((current) => current ?? liveErr.message)
+      onError: (liveErr) => setLiveError((current) => current ?? (isLiveAsrTimeout(liveErr) ? t("plugin.ui.audio.liveTimeout") : liveErr.message))
     }
   });
   const answered = props.status === "answered";
@@ -843,7 +840,7 @@ function FileInputCard(props: {
     setFiles(next);
     if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
-    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, minFiles, t));
   };
   const remove = (index: number) => {
     const next = files.filter((_file, candidateIndex) => candidateIndex !== index);
@@ -853,10 +850,10 @@ function FileInputCard(props: {
       else fileDrafts.delete(fileDraftKey);
     }
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
-    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, minFiles, t));
   };
   const upload = async () => {
-    const error = validateReadyFileCount(readyFiles, maxFiles, t);
+    const error = validateReadyFileCount(readyFiles, maxFiles, minFiles, t);
     if (error || !props.onUploadFiles) {
       setValidationError(error ?? t("plugin.ui.responseFailed"));
       return;
@@ -1328,13 +1325,25 @@ export function isBarePresentation(call: PluginUiCall): boolean {
 }
 
 /**
+ * Progress is part of the transcript flow. It only needs a small text status
+ * line, so it must not inherit the generic plugin card chrome.
+ */
+export function isStatusOnlyPresentation(call: PluginUiCall): boolean {
+  if (call.events.some((event) => event.type === "artifact" || event.type === "interaction" || event.type === "result" || event.type === "error")) {
+    return false;
+  }
+  return call.events.length > 0 && call.events.every((event) => event.type === "progress" || event.type === "task-list");
+}
+
+/**
  * Splits calls between the side panel, the pinned region and the transcript.
  *
  * A call the user raised stays beside the conversation for as long as it is
- * live; a call the model raised belongs in the transcript. Once a user-raised
- * call has delivered its result it moves to the transcript too, so the pinned
- * region holds only what is still actionable and the deliverables stay in the
- * history.
+ * live. A model-raised call whose capability has a pinned command follows the
+ * same route, so a skill invocation cannot create a duplicate transcript card.
+ * Once a call has delivered its result it moves to the transcript too, so the
+ * pinned region holds only what is still actionable and deliverables stay in
+ * the history.
  *
  * The interview recorder is the exception. It draws its own bar, stays open for
  * as long as the interview lasts, and its transcript grows in the column beside
@@ -1342,11 +1351,16 @@ export function isBarePresentation(call: PluginUiCall): boolean {
  *
  * @param calls Visible calls.
  * @param region The region being rendered.
+ * @param pinnedCapabilities Capability keys represented by a pinned command.
  * @returns The calls that belong to that region.
  */
-export function selectRegionPluginCalls(calls: PluginUiCall[], region: PluginCardRegion): PluginUiCall[] {
+export function selectRegionPluginCalls(
+  calls: PluginUiCall[],
+  region: PluginCardRegion,
+  pinnedCapabilities: ReadonlySet<string> = new Set()
+): PluginUiCall[] {
   const isLiveUserCall = (call: PluginUiCall) => (
-    call.origin === "user"
+    (call.origin === "user" || pinnedCapabilities.has(`${call.pluginId}:${call.capabilityId}`))
     && !call.events.some((event) => event.type === "result" || event.type === "error")
   );
   return calls.filter((call) => {
@@ -1722,7 +1736,8 @@ function classifyPluginInputFile(
   return { file, status: "ready", code: null, message: null };
 }
 
-function validateReadyFileCount(files: File[], maxFiles: number | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
+function validateReadyFileCount(files: File[], maxFiles: number | null, minFiles: number, t: ReturnType<typeof useTranslation>["t"]): string | null {
+  if (files.length < minFiles) return t("plugin.ui.fileCountBelowMinimum", { count: minFiles });
   if (maxFiles && files.length > maxFiles) return t("plugin.ui.fileCountExceeded");
   return null;
 }

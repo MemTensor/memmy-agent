@@ -231,6 +231,13 @@ describe("HomePage", () => {
     // An Agent's question is not this button's to close, even under the same
     // plugin and capability: the Agent is still waiting on the answer.
     expect(selectPinnedDismissal([call("asked", "agent", live)], "com.example.review", "run")).toBeNull();
+    expect(selectPinnedDismissal(
+      [call("asked", "agent", live)],
+      "com.example.review",
+      "run",
+      undefined,
+      new Set(["com.example.review:run"])
+    )).toBe("asked");
     // A card that already delivered has nothing left to close, so its button
     // goes back to opening a new one.
     expect(selectPinnedDismissal([call("done", "user", finished)], "com.example.review", "run")).toBeNull();
@@ -271,6 +278,8 @@ describe("HomePage", () => {
     // it to stop looking pressed: the card is already gone from the screen.
     expect(selectOpenPinnedCapabilities([openCall("live")])).toEqual(new Set(["com.example.review:run"]));
     expect(selectOpenPinnedCapabilities([openCall("live")], new Set(["live"]))).toEqual(new Set());
+    const agentCall = { ...openCall("agent"), origin: "agent" as const };
+    expect(selectOpenPinnedCapabilities([agentCall], undefined, new Set(["com.example.review:run"]))).toEqual(new Set(["com.example.review:run"]));
   });
 
   it("keeps the conversation reachable when a pinned card is on screen", () => {
@@ -692,7 +701,7 @@ describe("HomePage", () => {
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
     expect(source).toContain('className="agent-conversation-composer"');
-    expect(source).toContain("{environmentScope ? (");
+    expect(source).toContain("{environmentScope && !recordingEntry.open ? (");
     expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
@@ -1050,7 +1059,7 @@ describe("HomePage", () => {
     expect(styles).toMatch(/\.workspace-artifact-file-tabs\s*{[^}]*-webkit-app-region:\s*drag;/s);
     expect(styles).toMatch(/\.workspace-artifact-file-tab\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
     expect(styles).toMatch(/\.workspace-artifact-file-tab__close\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
-    expect(styles).toContain("right: calc(44px - var(--codex-content-padding-x));");
+    expect(styles).toContain("right: calc(76px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 

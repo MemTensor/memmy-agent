@@ -77,6 +77,11 @@ export interface AsrRecorderOptions {
   };
 }
 
+/** The live stream is best-effort; a timeout must not read like a lost recording. */
+export function isLiveAsrTimeout(error: Error): boolean {
+  return /\btime(?:out|d out)\b/i.test(error.message);
+}
+
 export interface MicrophoneAccessBridge {
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;

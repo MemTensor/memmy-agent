@@ -23,7 +23,7 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
 import type { RecordingPanelTranscript } from "./interview-recording-panel.js";
 import { formatClock, groupSpeakerTurns } from "./interview-recording-panel.js";
-import { blobToAudioBase64, useAsrRecorder } from "./asr-recorder.js";
+import { blobToAudioBase64, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
 import { persistRecording } from "../lib/recording-deliverables.js";
 
 /**
@@ -54,7 +54,7 @@ export interface RecordingArchiveEntry {
 export interface RecordingEntrySession {
   /** Which of the page's three views is showing. */
   view: "list" | "live" | "transcript";
-  status: "idle" | "recording" | "paused" | "transcribing";
+  status: "idle" | "starting" | "recording" | "paused" | "transcribing";
   elapsedMs: number;
   lines: AsrLiveLine[];
   /** The recording captured in this page, once it has been transcribed. */
@@ -72,6 +72,8 @@ export interface RecordingEntrySession {
   finish(): void;
   /** Returns from the live or transcript view to 录音列表. */
   back(): void;
+  /** Reopens the in-progress recorder after returning to the list. */
+  showLive(): void;
   /** Opens one archive row for reading. */
   open(entry: RecordingArchiveEntry): void;
   /** Transcribes an audio file the user already has. */
@@ -130,7 +132,7 @@ export function useRecordingEntry(
       // or a streaming connection that never opens must not look like nothing
       // happened. Only the first message is kept, so a doomed fallback that
       // keeps retrying every few seconds does not overwrite it with a repeat.
-      onError: (liveError) => setError((current) => current ?? liveError.message)
+      onError: (liveError) => setError((current) => current ?? (isLiveAsrTimeout(liveError) ? t("plugin.ui.audio.liveTimeout") : liveError.message))
     }
   });
 
@@ -246,6 +248,8 @@ export function useRecordingEntry(
     ? "recording"
     : recorder.status === "paused"
       ? "paused"
+      : recorder.isStarting
+        ? "starting"
       : recorder.isTranscribing
         ? "transcribing"
         : "idle";
@@ -267,6 +271,10 @@ export function useRecordingEntry(
     back: () => {
       setOpened(null);
       setView("list");
+    },
+    showLive: () => {
+      setOpened(null);
+      setView("live");
     },
     open: (entry) => {
       setOpened(entry);
@@ -341,9 +349,31 @@ export function RecordingEntryPage(props: { session: RecordingEntrySession }): R
         }}
       />
       {session.error ? <p className="recording-page__error" role="alert">{session.error}</p> : null}
-      {session.recordings.length === 0 ? (
+      {session.status !== "idle" ? (
+        <ul className="recording-page__list" aria-label={t("recording.page.title")}>
+          <li className="recording-page__list-row recording-page__list-row--active">
+            <button type="button" className="recording-page__list-open" onClick={session.showLive}>
+              <span className="recording-page__list-icon" aria-hidden="true"><Mic size={15} /></span>
+              <span className="recording-page__list-body">
+                <span className="recording-page__list-title">{t("recording.page.title")}</span>
+                <span className="recording-page__list-meta">
+                  <span>{session.status === "paused" ? t("plugin.ui.audio.paused") : session.status === "transcribing" ? t("plugin.ui.audio.transcribing") : t("plugin.ui.audio.recording")}</span>
+                  <span>{t("recording.page.duration", { time: formatClock(session.elapsedMs) })}</span>
+                </span>
+              </span>
+            </button>
+            <div className="recording-page__list-actions">
+              <button type="button" className="recording-page__list-action" onClick={session.showLive}>
+                <Play size={13} aria-hidden="true" />
+                <span>{t("plugin.ui.audio.resume")}</span>
+              </button>
+            </div>
+          </li>
+        </ul>
+      ) : null}
+      {session.status === "idle" && session.recordings.length === 0 ? (
         <p className="recording-page__hint">{t("recording.page.hint")}</p>
-      ) : (
+      ) : session.recordings.length > 0 ? (
         <ul className="recording-page__list">
           {session.recordings.map((row) => (
             <li key={row.id} className="recording-page__list-row">
@@ -372,7 +402,7 @@ export function RecordingEntryPage(props: { session: RecordingEntrySession }): R
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }

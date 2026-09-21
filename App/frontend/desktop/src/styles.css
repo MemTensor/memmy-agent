@@ -1981,7 +1981,8 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  isolation: isolate;
   margin-left: auto;
   margin-right: calc(8px - var(--codex-content-padding-x));
 }
@@ -1990,6 +1991,8 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   position: absolute;
   top: 50%;
   right: calc(var(--agent-preview-panel-width, 520px) + 8px - var(--codex-content-padding-x));
+  z-index: 95;
+  padding: 0 2px;
   margin: 0;
   transform: translateY(-50%);
 }
@@ -2138,7 +2141,10 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   }
 
   .agent-conversation-topbar--preview-open .agent-conversation-topbar__actions {
-    right: calc(44px - var(--codex-content-padding-x));
+    /* The preview toolbar may show refresh and the panel toggle together.
+       Keep the title-bar actions to their left so the recording and
+       environment buttons never sit on top of the preview controls. */
+    right: calc(76px - var(--codex-content-padding-x));
   }
 }
 
@@ -12664,6 +12670,7 @@ input[type="checkbox"].check-sky:checked::after {
   transform: translateY(-50%);
   -webkit-app-region: no-drag;
   pointer-events: auto;
+  isolation: isolate;
 }
 
 .workspace-artifact-preview-toolbar__actions > button {
@@ -12694,6 +12701,15 @@ input[type="checkbox"].check-sky:checked::after {
   opacity: 0.55;
   cursor: progress;
   box-shadow: none;
+}
+
+/* Job progress belongs to the conversation stream. Keep it readable without
+   turning each update into a second panel or a progress-bar card. */
+.plugin-status-text {
+  padding: 2px 4px;
+  color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 @keyframes workspace-artifact-refresh-spin {
@@ -12735,7 +12751,8 @@ input[type="checkbox"].check-sky:checked::after {
   align-items: center;
   gap: 2px;
   flex: none;
-  max-width: 190px;
+  min-width: 0;
+  max-width: min(190px, 100%);
   height: 100%;
   padding: 0 2px 0 8px;
   border-bottom: 2px solid transparent;
@@ -12744,6 +12761,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .workspace-artifact-file-tab > button[role="tab"] {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: inherit;
@@ -13930,6 +13948,11 @@ input[type="checkbox"].check-sky:checked::after {
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
   border-radius: var(--radius-card, 12px);
   background: var(--color-background-paper);
+}
+
+.recording-page__list-row--active {
+  border-color: color-mix(in srgb, var(--color-action-sky) 45%, var(--color-border-stone));
+  background: color-mix(in srgb, var(--color-action-sky) 5%, var(--color-background-paper));
 }
 
 .recording-page__list-open {

@@ -59,8 +59,8 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
-/** Uploading and transcribing even a short clip outruns the default timeout. */
-const CLOUD_ASR_TIMEOUT_MS = 120_000;
+/** fun-asr uses the same asynchronous file job for chat clips and long recordings. */
+const CLOUD_ASR_TIMEOUT_MS = 600_000;
 /**
  * Speaker separation runs as an upstream batch job the cloud polls on our
  * behalf, so the desktop stays blocked for the whole job. Measured at roughly

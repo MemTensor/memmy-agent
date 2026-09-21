@@ -576,16 +576,18 @@ function PinnedPluginCommandBar(props: {
 /**
  * Which pinned buttons currently have a card on screen.
  *
- * A pinned call is the user's own, and it holds the screen until it finishes or
- * they close it, so its button is highlighted for exactly that long.
+ * A pinned call is either the user's own or a skill invocation of a capability
+ * represented by a pinned command. It holds the screen until it finishes or is
+ * closed, so its button is highlighted for exactly that long.
  */
 export function selectOpenPinnedCapabilities(
   calls: readonly PluginUiCall[],
-  dismissedCallIds?: ReadonlySet<string>
+  dismissedCallIds?: ReadonlySet<string>,
+  pinnedCapabilities: ReadonlySet<string> = new Set()
 ): Set<string> {
   const open = new Set<string>();
   for (const call of calls) {
-    if (call.origin !== "user") continue;
+    if (call.origin !== "user" && !pinnedCapabilities.has(`${call.pluginId}:${call.capabilityId}`)) continue;
     // A card the user just closed is gone before its cancellation has made it
     // back from the plugin, so the button has to stop reading as open now
     // rather than a round trip later.
@@ -599,21 +601,22 @@ export function selectOpenPinnedCapabilities(
 /**
  * Finds the card a pinned button opened, so a second press can close it.
  *
- * Only a card the user raised themselves is a candidate: pressing a button
- * again has to close what this button opened, never a question the Agent is
- * waiting on. A card that already finished has nothing left to close, so its
- * button goes back to opening a new one.
+ * A user-raised card is a candidate, as is a skill-raised card whose capability
+ * is represented by this pinned command. Pressing a button again closes the
+ * card shown by that button. A card that already finished has nothing left to
+ * close, so its button goes back to opening a new one.
  */
 export function selectPinnedDismissal(
   calls: readonly PluginUiCall[],
   pluginId: string,
   capabilityId: string,
-  dismissedCallIds?: ReadonlySet<string>
+  dismissedCallIds?: ReadonlySet<string>,
+  pinnedCapabilities: ReadonlySet<string> = new Set()
 ): string | null {
   for (let index = calls.length - 1; index >= 0; index -= 1) {
     const call = calls[index]!;
     if (call.pluginId !== pluginId || call.capabilityId !== capabilityId) continue;
-    if (call.origin !== "user") continue;
+    if (call.origin !== "user" && !pinnedCapabilities.has(`${call.pluginId}:${call.capabilityId}`)) continue;
     // A card already closed is not something a press can close again. Its
     // cancellation is still in flight, and treating it as the open card would
     // make the button a no-op until the plugin answers.
@@ -1332,9 +1335,15 @@ export function HomePage() {
     || call.conversationId === state.agent.currentSessionKey
     || call.conversationId === chatScopeKey
   )), [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
+  const pinnedPluginCapabilities = useMemo(
+    () => new Set(installedPlugins.flatMap((plugin) => (plugin.manifest.commands ?? [])
+      .filter((command) => command.pinned === true)
+      .map((command) => `${plugin.id}:${command.capabilityId}`))),
+    [installedPlugins]
+  );
   const openPinnedCapabilities = useMemo(
-    () => selectOpenPinnedCapabilities(visiblePluginCalls, dismissedPluginCalls),
-    [dismissedPluginCalls, visiblePluginCalls]
+    () => selectOpenPinnedCapabilities(visiblePluginCalls, dismissedPluginCalls, pinnedPluginCapabilities),
+    [dismissedPluginCalls, pinnedPluginCapabilities, visiblePluginCalls]
   );
   // The recorder is the one card that lives in the side column rather than in
   // the pinned bar, so the page needs to know whether it is there and what to
@@ -2129,8 +2138,8 @@ export function HomePage() {
   // that asked for a place there gets one.
   const topbarPluginCommand = selectTopbarPluginCommand(pluginCommandTargets);
   // A pinned button is a shortcut for typing the command, so it invokes the
-  // same capability the same way. `origin: "user"` is what tells the card it
-  // may be closed outright instead of having to answer the model.
+  // same capability the same way. User-raised calls can be closed outright;
+  // skill-raised calls are promoted to this same surface by the Host.
   const invokePinnedPluginCommand = (target: PluginCommandTarget) => {
     if (!clients) return;
     // A second press closes what the first one opened. The card is the user's
@@ -2140,7 +2149,8 @@ export function HomePage() {
       visiblePluginCalls,
       target.plugin.id,
       target.command.capabilityId,
-      dismissedPluginCalls
+      dismissedPluginCalls,
+      pinnedPluginCapabilities
     );
     if (openCallId) {
       setDismissedPluginCalls((current) => new Set(current).add(openCallId));
@@ -3793,7 +3803,7 @@ export function HomePage() {
             {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
           </h1>
           <div className="agent-conversation-topbar__actions">
-            {environmentScope ? (
+            {environmentScope && !recordingEntry.open ? (
               <button
                 type="button"
                 className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${sidePreviewOpen ? " agent-environment-toggle--with-preview" : ""}`}
@@ -3806,28 +3816,26 @@ export function HomePage() {
                 <SlidersHorizontal size={15} aria-hidden="true" />
               </button>
             ) : null}
-            {/*
-              The recording entry sits with the preview controls: it is the
-              other panel the conversation can show, and a second click on it —
-              or opening the file preview — swaps which one is in view.
-            */}
-            {topbarPluginCommand ? (
+            {/* The recording entry sits with the preview controls. Its tab owns
+                the close action while open; this title-bar button is rendered
+                only while the panel is closed so two audio controls cannot
+                overlap while the pane width is settling. */}
+            {topbarPluginCommand && !recordingEntry.open ? (
               <button
                 type="button"
-                className={`agent-preview-toggle${recordingEntry.open ? " agent-preview-toggle--active" : ""}`}
+                className="agent-preview-toggle"
                 aria-label={topbarPluginCommand.command.name}
-                aria-pressed={recordingEntry.open}
+                aria-pressed={false}
                 title={topbarPluginCommand.command.name}
                 data-recording-toggle
                 onClick={() => {
                   // One panel at a time: the recording page and the file
                   // preview share the side panel, so opening one closes the
                   // other.
-                  if (!recordingEntry.open) {
-                    setPluginArtifactPreview(null);
-                    setPreviewPanelOpen(false);
-                    putRecorderCardAside();
-                  }
+                  setPluginArtifactPreview(null);
+                  setPreviewPanelOpen(false);
+                  setEnvironmentPanelOpen(false);
+                  putRecorderCardAside();
                   recordingEntry.toggle();
                 }}
               >

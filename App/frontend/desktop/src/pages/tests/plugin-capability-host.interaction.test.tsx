@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, isBarePresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, selectCurrentPluginCalls, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
+import { buildRendererDocument, isBarePresentation, isStatusOnlyPresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, selectCurrentPluginCalls, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -324,6 +324,31 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-1", "q-1", "Broad");
     expect(container.textContent).not.toContain("Scope");
     expect(container.textContent).toContain("report.md");
+  });
+
+  it("keeps job progress in the chat as text instead of a progress card", async () => {
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "status-only",
+      conversationId: "chat-1",
+      events: [
+        { type: "task-list", tasks: [{ id: "collect", title: "Collect materials", status: "running" }] },
+        { type: "progress", current: 1, total: 4, message: "Reading materials" }
+      ]
+    };
+
+    expect(isStatusOnlyPresentation(call)).toBe(true);
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent).toContain("Collect materials");
+    expect(container.textContent).toContain("Reading materials");
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+    expect(container.querySelector(".rounded-card")).toBeNull();
   });
 
   it("asks every question on one card and reports only the ones answered", async () => {
@@ -1327,6 +1352,13 @@ describe("selectRegionPluginCalls", () => {
     ];
     expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
     expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
+  });
+
+  it("promotes a live Agent call when its capability has a pinned command", () => {
+    const calls = [call("agent", "diagnosis", live)];
+    const pinned = new Set(["demo:run"]);
+    expect(selectRegionPluginCalls(calls, "pinned", pinned).map((item) => item.callId)).toEqual(["diagnosis"]);
+    expect(selectRegionPluginCalls(calls, "flow", pinned)).toEqual([]);
   });
 
   it("sends the interview recorder to the side column, not over the conversation", () => {

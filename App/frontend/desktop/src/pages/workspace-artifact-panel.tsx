@@ -550,6 +550,11 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
       : undefined
   );
   const activeExtra = previewPath ? extraFor(previewPath) : undefined;
+  // The extra recording tab is selected in an effect. During that one render
+  // the path may still point at a file, but the extra tab is already visible;
+  // reserve the compact toolbar for it immediately so the file-tree toggle or
+  // refresh button cannot be painted underneath the recording controls.
+  const extraTabOpen = Boolean(activeExtra) || openPreviewTabs.some((path) => Boolean(extraFor(path)));
 
   return (
     <>
@@ -563,8 +568,8 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
         onResizeBy={previewResize.resizeBy}
       />
       <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--workspace workspace-artifact-preview-pane--lifted" style={previewResize.sidebarStyle}>
-        <header className="workspace-artifact-preview-toolbar">
-          {hasEntries && !activeExtra ? (
+        <header className={`workspace-artifact-preview-toolbar${extraTabOpen ? " workspace-artifact-preview-toolbar--extra-active" : ""}`}>
+          {hasEntries && !extraTabOpen ? (
             <button
               type="button"
               className="workspace-artifact-file-browser__toggle"
@@ -587,7 +592,11 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
                     type="button"
                     role="tab"
                     aria-selected={active}
-                    title={label}
+                    aria-label={label}
+                    // The active recording tab already has its label visible;
+                    // a native title tooltip obscures the adjacent toolbar
+                    // icons in the narrow preview pane.
+                    title={active && extra ? undefined : label}
                     onClick={() => dispatchPreviewTabs({ type: "activate", path })}
                   >
                     {extra ? <span className="workspace-artifact-file-tab__icon">{extra.icon}</span> : null}
@@ -616,7 +625,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
             })}
           </div>
           <div className="workspace-artifact-preview-toolbar__actions">
-            {!activeExtra ? (
+            {!extraTabOpen ? (
               <button
                 type="button"
                 aria-label={t("filePreview.refresh")}
