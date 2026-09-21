@@ -3300,18 +3300,6 @@ export class SessionTurnService {
       confidence: classification.confidence,
       classifierPolarity: classification.polarity
     };
-    const feedbackRequest: FeedbackRequest = {
-      sessionId: session.id,
-      episodeId: episode.id,
-      l1MemoryId: target.id,
-      rawTurnId,
-      channel: "implicit",
-      polarity,
-      magnitude: classification.magnitude,
-      rationale: classification.rationale,
-      rawPayload,
-      namespace: namespaceForSession(session)
-    };
     const feedback = this.deps.repos.runtime.insertFeedback({
       id: newId("feedback"),
       userId: session.userId,
@@ -3330,7 +3318,18 @@ export class SessionTurnService {
       createdAt: at
     });
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
-    this.deps.maybeCreateDecisionRepair(feedbackRequest, feedback, contextHash, this.deps.namespaceIdFromSession(session));
+    this.deps.enqueueJob({
+      jobType: "decision_repair",
+      userId: session.userId,
+      sessionId: session.id,
+      episodeId: episode.id,
+      payload: {
+        feedbackId: feedback.id,
+        contextHash,
+        namespaceId: this.deps.namespaceIdFromSession(session)
+      },
+      createdAt: at
+    });
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",
@@ -3390,18 +3389,6 @@ export class SessionTurnService {
       source: "relation_classifier",
       relation: "revision"
     };
-    const feedbackRequest: FeedbackRequest = {
-      sessionId: session.id,
-      episodeId: episode.id,
-      l1MemoryId: target.id,
-      rawTurnId,
-      channel: "explicit",
-      polarity: "negative",
-      magnitude: 1,
-      rationale: userText,
-      rawPayload,
-      namespace: namespaceForSession(session)
-    };
     const feedback = this.deps.repos.runtime.insertFeedback({
       id: newId("feedback"),
       userId: session.userId,
@@ -3420,7 +3407,18 @@ export class SessionTurnService {
       createdAt: at
     });
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
-    this.deps.maybeCreateDecisionRepair(feedbackRequest, feedback, contextHash, this.deps.namespaceIdFromSession(session));
+    this.deps.enqueueJob({
+      jobType: "decision_repair",
+      userId: session.userId,
+      sessionId: session.id,
+      episodeId: episode.id,
+      payload: {
+        feedbackId: feedback.id,
+        contextHash,
+        namespaceId: this.deps.namespaceIdFromSession(session)
+      },
+      createdAt: at
+    });
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",

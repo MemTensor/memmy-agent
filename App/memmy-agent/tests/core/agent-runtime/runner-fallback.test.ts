@@ -547,7 +547,7 @@ describe("FallbackProvider failover", () => {
     const factory = vi.fn(() => new FakeProvider("fallback", makeResponse("must not run")));
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("agent_chat")],
+      fallbackPresets: [fallback("deepseek-v4-pro")],
       providerFactory: factory,
     });
 
@@ -560,19 +560,19 @@ describe("FallbackProvider failover", () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
-  it("skips incompatible candidates and calls the first image-capable fallback", async () => {
+  it.each(["agent_chat", "gpt-4.1"])("skips incompatible candidates and calls image-capable fallback %s", async (model) => {
     const primary = new FakeProvider(
       "primary",
       makeResponse("primary timeout", "error", { errorKind: "timeout" }),
     );
     const imageFallback = new FakeProvider("image-fallback", makeResponse("fallback ok"));
     const factory = vi.fn((preset: { model: string }) => {
-      expect(preset.model).toBe("gpt-4.1");
+      expect(preset.model).toBe(model);
       return imageFallback;
     });
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("agent_chat"), fallback("gpt-4.1")],
+      fallbackPresets: [fallback("deepseek-v4-pro"), fallback(model)],
       providerFactory: factory,
     });
 
@@ -584,7 +584,7 @@ describe("FallbackProvider failover", () => {
     expect(result.content).toBe("fallback ok");
     expect(factory).toHaveBeenCalledTimes(1);
     expect(imageFallback.chatCalls).toHaveLength(1);
-    expect(imageFallback.chatCalls[0].model).toBe("gpt-4.1");
+    expect(imageFallback.chatCalls[0].model).toBe(model);
   });
 
   it("keeps the circuit-open error when every image fallback is incompatible", async () => {
@@ -592,7 +592,7 @@ describe("FallbackProvider failover", () => {
     const factory = vi.fn();
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("agent_chat")],
+      fallbackPresets: [fallback("deepseek-v4-pro")],
       providerFactory: factory,
     });
     provider.primaryFailures = 3;

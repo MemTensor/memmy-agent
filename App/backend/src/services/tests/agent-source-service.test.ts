@@ -1495,6 +1495,102 @@ describe("agent source service", () => {
       },
     });
   });
+
+  it("emits memory_desktop add analytics for persistent scan writes", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-analytics", mode: "initial_subset" });
+
+    expect(result.errors).toEqual([]);
+    expect(result.memoryIdCount).toBe(1);
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "initial_subset"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+    expect(typeof events[0]?.payload.turnId).toBe("string");
+    expect(typeof events[1]?.payload.durationMs).toBe("number");
+  });
+
+  it("emits add_failed analytics when a persistent scan write throws", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-add-failed-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: {
+        ...createReadyMemoryClient(),
+        async addMemory() {
+          throw new Error("write failed");
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-failed", mode: "incremental" });
+
+    expect(result.errors[0]?.reason).toBe("write failed");
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "incremental"
+    });
+    expect(events[1]?.payload.error).toBeInstanceOf(Error);
+  });
+
+  it("does not emit add analytics when a persistent scan write is a duplicate", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-dup-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: {
+        ...createReadyMemoryClient(),
+        async addMemory() {
+          return { id: "memory-dup", duplicate: true };
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-dup", mode: "full" });
+
+    expect(result.memoryIdCount).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  it("does not emit add analytics for already checkpointed persistent scan turns", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-skip-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await service.scanOne("cursor", { scanJobId: "job-skip-first", mode: "incremental" });
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    events.length = 0;
+    await service.scanOne("cursor", { scanJobId: "job-skip-second", mode: "incremental" });
+
+    expect(events).toEqual([]);
+  });
 });
 
 function createService(
@@ -1505,6 +1601,12 @@ function createService(
     skillDistributionService?: SkillDistributionService;
     memoryClient?: MemoryClient;
     agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+    memoryAddAnalytics?: {
+      trackAddStarted: (input: Record<string, unknown>) => void;
+      trackAddSucceeded: (input: Record<string, unknown>) => void;
+      trackAddFailed: (input: Record<string, unknown>) => void;
+    };
+    scanStoreDirectory?: string;
     getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
   } = {}
 ): AgentSourceService {
@@ -1514,6 +1616,8 @@ function createService(
     ingestionService: options.ingestionService ?? createFakeIngestionService(),
     memoryClient: options.memoryClient ?? createMockMemoryClient(),
     agentSourceAnalytics: options.agentSourceAnalytics,
+    memoryAddAnalytics: options.memoryAddAnalytics as never,
+    scanStoreDirectory: options.scanStoreDirectory,
     getScanPermission: options.getScanPermission,
     skillDistributionService:
       options.skillDistributionService ??
@@ -1614,6 +1718,52 @@ function createFakeAdapter(
     },
     scan(options) {
       return scanImpl ? scanImpl(options) : toAsyncIterable(messages);
+    }
+  };
+}
+
+function createAddAnalyticsRecorder(events: Array<{ name: string; payload: Record<string, unknown> }>) {
+  return {
+    trackAddStarted(input: Record<string, unknown>) {
+      events.push({ name: "started", payload: { ...input } });
+    },
+    trackAddSucceeded(input: Record<string, unknown>) {
+      events.push({ name: "succeeded", payload: { ...input } });
+    },
+    trackAddFailed(input: Record<string, unknown>) {
+      events.push({ name: "failed", payload: { ...input } });
+    }
+  };
+}
+
+function createReadyMemoryClient(): MemoryClient {
+  const base = createMockMemoryClient();
+  return {
+    ...base,
+    async enqueueImportSummaries(memoryIds) {
+      return {
+        enqueued: memoryIds?.length ?? 0,
+        memoryIds: memoryIds ?? [],
+        serverTime: "2026-05-28T10:00:00.000Z"
+      };
+    },
+    async getMemoryProcessingStatus(memoryIds) {
+      return {
+        items: memoryIds.map((memoryId) => ({
+          memoryId,
+          state: "ready" as const,
+          stage: null,
+          activeJobId: null,
+          attemptCount: 1,
+          manualRetryCount: 0,
+          retryAction: "retry" as const,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: "2026-05-28T10:00:00.000Z"
+        })),
+        serverTime: "2026-05-28T10:00:00.000Z"
+      };
     }
   };
 }

@@ -69,6 +69,15 @@ describe("memmy memory config", () => {
       failureRTaskThreshold: -0.15,
       implicitConfidenceCap: 0.65
     });
+    expect(loadMemmyConfig(configPath).config.algorithm.feedback.valueDistributionRepairEnabled).toBe(false);
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        algorithm: {
+          feedback: { valueDistributionRepairEnabled: true }
+        }
+      }
+    }));
+    expect(loadMemmyConfig(configPath).config.algorithm.feedback.valueDistributionRepairEnabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.domain).toBe("");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.readOnlyInjectionProfile).toBe("all");

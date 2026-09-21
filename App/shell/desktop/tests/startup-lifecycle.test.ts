@@ -93,6 +93,7 @@ function setup(options: { delay?: number; error?: Error; apiError?: Error; clean
     resolveCurrentDesktopEdition: () => "cn", initLogger: noop, forceLightWindowChrome: noop,
     installPreparedRequiredUpdateBeforeBoot: async () => false,
     registerIpcHandlers: noop, installBundledCliIfNeeded: async () => {}, startPackagedRendererServerIfNeeded: async () => {},
+    createDesktopScreenCapture: noop, createComputerUseOnboarding: noop,
     windowsDataLayout: null,
     startManagedRuntimeServices: async () => {
       if (options.delay) await new Promise(resolve => setTimeout(resolve, options.delay));

@@ -57,7 +57,7 @@ describe("AppFrame", () => {
     expect(html).toContain('data-icon="search"');
     expect(html).not.toContain('data-icon="minimize-2"');
     expect(html).not.toContain("桌宠");
-    expect(html).toContain('data-icon="message-circle"');
+    expect(html).not.toContain('data-icon="message-circle"');
     expect(html).toContain('data-icon="user"');
     expect(html).toContain('data-icon="settings-2"');
     expect(html).not.toContain('data-icon="settings"');
@@ -839,30 +839,12 @@ describe("AppFrame", () => {
     expect(source).not.toContain("window.confirm");
   });
 
-  it("renders the community WeChat QR as a static image instead of a link", () => {
-    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
-    const communityLinksSource = readFileSync(resolve(__dirname, "..", "..", "community", "community-links.ts"), "utf8");
-    const githubIndex = source.indexOf('CommunityLink href={communityLinks.githubUrl}');
-    const discordIndex = source.indexOf('CommunityLink href={communityLinks.discordUrl}');
-
-    expect(source).toContain('className="community-popover-wechat"');
-    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
-    expect(source).toContain('className="community-link flex flex-col rounded-lg');
-    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
-    expect(source).toContain('detail="MemTensor/memmy-agent"');
-    expect(githubIndex).toBeGreaterThan(-1);
-    expect(githubIndex).toBeLessThan(discordIndex);
-    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
-  });
-
-  it("closes the community popover on outside click and disables sidebar resizing while open", () => {
+  it("加入社区入口已移出主侧边栏，改由设置页承接", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain("const communityMenuRef = useRef<HTMLDivElement | null>(null);");
-    expect(source).toContain('document.addEventListener("pointerdown", closeOnOutsidePointerDown);');
-    expect(source).toContain("menu.contains(event.target)");
-    expect(source).toContain("setShowCommunity(false);");
-    expect(source).toContain("isDisabled={sidebarHidden || showCommunity}");
+    expect(source).not.toContain("welcome.joinCommunity");
+    expect(source).not.toContain("community-popover");
+    expect(source).not.toContain("CommunityLink");
   });
 
   it("renders archive as an inline confirmation instead of a modal-style action", () => {

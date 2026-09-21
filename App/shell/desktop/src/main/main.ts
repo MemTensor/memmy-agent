@@ -1,3 +1,6 @@
+import { createDesktopScreenCapture } from './desktop-screen-capture.js';
+import { createComputerUseOnboarding } from './computer-use-onboarding.js';
+import { isComputerUsePermissionPanelFocused, showComputerUsePermissionPanel } from './computer-use-permission-panel.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
@@ -14,8 +17,9 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
-import { spawn } from "node:child_process";
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -116,6 +120,7 @@ import {
   setWindowsLaunchAtLogin,
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
+import { resolveComputerHistoryMarkdownPath } from "./computer-history-markdown.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -352,6 +357,29 @@ async function boot(): Promise<void> {
     bootStage = "runtime-services";
     const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
     runtimeServices = await startManagedRuntimeServices({
+      ...(process.platform === 'darwin' ? { captureScreen: createDesktopScreenCapture({
+        getStatus: () => systemPreferences.getMediaAccessStatus('screen'),
+        getSources: options => desktopCapturer.getSources(options),
+        getDisplays: () => screen.getAllDisplays(),
+        getPrimaryDisplay: () => screen.getPrimaryDisplay(),
+        openSettings: () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'),
+      }), computerUseOnboarding: createComputerUseOnboarding({
+        target: () => {
+          if (!isComputerUsePermissionPanelFocused() && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused())) return null;
+          try {
+            const plist = join(dirname(dirname(app.getPath('exe'))), 'Info.plist');
+            const appId = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', plist], { encoding: 'utf8', timeout: 2000 }).trim();
+            return { app: appId, pid: process.pid };
+          } catch { return null; }
+        },
+        showPanel: (state, act) => {
+          if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Memmy window unavailable');
+          return showComputerUsePermissionPanel(mainWindow, state, act);
+        },
+        openSettings: url => shell.openExternal(url),
+        copyPath: value => clipboard.writeText(value),
+        reportError: error => console.warn('[computer-use] Permission guide failed:', error),
+      }) } : {}),
       appPath: app.getAppPath(),
       appDatabaseFile,
       resourcesPath: process.resourcesPath,
@@ -923,6 +951,19 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("memmy:openExternal", async (_event, url: string) => {
     await openExternalUrl(url);
+  });
+
+  ipcMain.handle("memmy:get-computer-history-permission-session", () => computerHistoryPermissionSessionId);
+
+  ipcMain.handle("memmy:restart-for-computer-history-permissions", () => {
+    if (process.platform !== "darwin") throw new Error("Computer History permissions require macOS");
+    shouldRelaunchAfterQuitCleanup = true;
+    // Let IPC finish, then reuse the normal recording/service shutdown path.
+    setImmediate(() => app.quit());
+  });
+
+  ipcMain.handle("memmy:open-computer-history-markdown", async (_event, filePath: string) => {
+    await openComputerHistoryMarkdown(filePath);
   });
 
   ipcMain.handle("memmy:openAgentTool", async (_event, sourceId: string, prompt: string) => openAgentTool(sourceId, prompt));
@@ -4860,6 +4901,7 @@ let hasSingleInstanceLock = app.requestSingleInstanceLock();
 let lastSecondInstanceActivateAt = 0;
 let didWaitForSingleInstanceLock = false;
 let hasIgnoredStaleReopenQuit = false;
+const computerHistoryPermissionSessionId = randomUUID();
 let shouldRelaunchAfterQuitCleanup = false;
 const appProcessStartedAt = Date.now();
 
@@ -5102,6 +5144,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");
   ipcMain.removeHandler("memmy:openExternal");
+  ipcMain.removeHandler("memmy:open-computer-history-markdown");
+  ipcMain.removeHandler("memmy:restart-for-computer-history-permissions");
+  ipcMain.removeHandler("memmy:get-computer-history-permission-session");
   ipcMain.removeHandler("memmy:openAgentTool");
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
@@ -5545,6 +5590,15 @@ async function openLogsDirectory(): Promise<void> {
   if (openError) {
     throw new Error(openError);
   }
+}
+
+/** Opens a stored Computer History summary in the user's default Markdown application. */
+async function openComputerHistoryMarkdown(rawPath: string): Promise<void> {
+  const filePath = resolveComputerHistoryMarkdownPath(rawPath);
+  const info = await lstat(filePath);
+  if (!info.isFile()) throw new Error("Computer History Markdown is not a regular file");
+  const openError = await shell.openPath(filePath);
+  if (openError) throw new Error(openError);
 }
 
 /**

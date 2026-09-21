@@ -89,7 +89,7 @@ describe("auth flow pages", () => {
     ["welcome-page.tsx"],
     ["token-detail-page.tsx"],
     ["login-page.tsx"]
-  ])("%s 只在国际版邮箱通道展示 Google/GitHub 登录", (fileName) => {
+  ])("%s 只在国际版邮箱通道接入 Google/GitHub 登录组件", (fileName) => {
     const source = readSource(fileName);
 
     expect(source).toContain("useSocialLogin");

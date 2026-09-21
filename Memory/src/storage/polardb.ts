@@ -244,6 +244,36 @@ export function polardbMigrationSql(): string[] {
       ON skill_trials (l1_memory_id, status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_skill_trials_raw_status
       ON skill_trials (raw_turn_id, status, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS skill_clusters (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      project_id TEXT,
+      tools_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      artifacts_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tool_bigrams_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      centroid_json JSONB,
+      skill_memory_id TEXT,
+      meta_skill_md TEXT NOT NULL DEFAULT '',
+      processed_episode_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      member_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_clusters_scope
+      ON skill_clusters (user_id, project_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_clusters_skill
+      ON skill_clusters (skill_memory_id)`,
+    `CREATE TABLE IF NOT EXISTS skill_cluster_members (
+      cluster_id TEXT NOT NULL,
+      episode_id TEXT NOT NULL,
+      outcome TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (outcome IN ('success', 'failure', 'unknown')),
+      r_task DOUBLE PRECISION,
+      assigned_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (cluster_id, episode_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_cluster_members_episode
+      ON skill_cluster_members (episode_id, assigned_at DESC)`,
     `CREATE TABLE IF NOT EXISTS recall_events (
       id TEXT PRIMARY KEY,
       namespace_id TEXT,

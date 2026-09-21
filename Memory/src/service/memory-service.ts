@@ -318,13 +318,16 @@ export class MemoryService {
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
           updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
+          assignSkillCluster: (job) => this.evolutionJobs.assignSkillCluster(job),
+          evolveSkillCluster: (job) => this.evolutionJobs.evolveSkillCluster(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
         feedback: {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
           reflectTrace: (job) => this.evolutionJobs.reflectTrace(job),
-          resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job)
+          resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job),
+          createDecisionRepair: (job) => this.createRevisionDecisionRepairFromJob(job)
         },
         embedding: {
           embedMemory: this.embedMemory.bind(this),
@@ -357,7 +360,8 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
+      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff,
+      queryVector: this.queryVector.bind(this)
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -1199,6 +1203,7 @@ export class MemoryService {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     decayHalfLifeDays: number;
     domain: "" | "research";
     readOnlyInjectionProfile: "all" | "experience" | "skill" | "skill_experience";
@@ -1331,6 +1336,33 @@ export class MemoryService {
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
+  }
+
+  private async createRevisionDecisionRepairFromJob(job: EvolutionJobRecord): Promise<void> {
+    const feedbackId = typeof job.payload.feedbackId === "string" ? job.payload.feedbackId : undefined;
+    const contextHash = typeof job.payload.contextHash === "string" ? job.payload.contextHash : undefined;
+    if (!feedbackId || !contextHash) return;
+    const feedback = this.repos.runtime.getFeedback(feedbackId);
+    const session = job.sessionId ? this.repos.runtime.getSession(job.sessionId) : undefined;
+    if (!feedback || !session) return;
+    const request: FeedbackRequest = {
+      sessionId: feedback.sessionId,
+      episodeId: feedback.episodeId,
+      l1MemoryId: feedback.l1MemoryId,
+      rawTurnId: feedback.rawTurnId,
+      channel: feedback.channel,
+      polarity: feedback.polarity,
+      magnitude: feedback.magnitude,
+      rationale: feedback.rationale,
+      rawPayload: feedback.rawPayload,
+      namespace: namespaceForSession(session)
+    };
+    await this.feedbackExperience.createRevisionDecisionRepair(
+      request,
+      feedback,
+      contextHash,
+      namespaceIdFromContext(namespaceForSession(session))
+    );
   }
 
   exportBundle(request: MemoryExportRequest = {}): {

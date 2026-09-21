@@ -1,6 +1,7 @@
 /** Settings page tests. */
 import { renderToString } from "react-dom/server";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ModelConfigView } from "@memmy/local-api-contracts";
@@ -374,6 +375,28 @@ describe("SettingsPageView", () => {
     expect(source).toContain('openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))');
     expect(source).not.toContain('appActions.navigate("/terms")');
     expect(source).not.toContain('<LinkButton label={t("settings.about.terms")} href="#" />');
+  });
+
+  it("关于区承接加入社区入口，微信群二维码为静态图片且外链顺序不变", () => {
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    const communityLinksSource = readFileSync(resolve(settingsPageSourcePath, "..", "..", "community", "community-links.ts"), "utf8");
+    const githubIndex = source.indexOf('SettingsCommunityLink href={communityLinks.githubUrl}');
+    const discordIndex = source.indexOf('SettingsCommunityLink href={communityLinks.discordUrl}');
+
+    expect(source).toContain('t("settings.about.community")');
+    expect(source).toContain('className="community-popover-wechat"');
+    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
+    expect(source).toContain('className="community-link flex flex-col rounded-lg');
+    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
+    expect(source).toContain('detail="MemTensor/memmy-agent"');
+    expect(githubIndex).toBeGreaterThan(-1);
+    expect(githubIndex).toBeLessThan(discordIndex);
+    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
+
+    const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
+    expect(html).toContain('id="settings-panel-about"');
+    expect(html).toContain("community-popover-wechat");
+    expect(html).toContain("community-link");
   });
 
   it("关于区只消费应用级更新状态，下载和弹窗不随页面卸载", () => {

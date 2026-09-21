@@ -3,6 +3,10 @@ import type { SocialLoginProvider } from "@memmy/local-api-contracts";
 import type { ReactNode } from "react";
 import { useTranslation } from "../i18n/use-translation.js";
 
+// Keep the integration code available, but do not render social login until the
+// production providers are ready to be exposed again.
+const SOCIAL_LOGIN_BUTTONS_ENABLED = false;
+
 export interface SocialLoginButtonsProps {
   pendingProvider: SocialLoginProvider | null;
   disabled?: boolean;
@@ -12,6 +16,7 @@ export interface SocialLoginButtonsProps {
 
 export function SocialLoginButtons(props: SocialLoginButtonsProps) {
   const { t } = useTranslation();
+  if (!SOCIAL_LOGIN_BUTTONS_ENABLED) return null;
 
   return (
     <div className="mt-4 space-y-2.5">

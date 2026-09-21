@@ -39,6 +39,10 @@ import {
   type AgentSourceInstallType,
   type AgentSourceLifecycleAnalytics,
 } from "../analytics/agent-source-analytics.js";
+import type {
+  MemoryDesktopAddAnalytics,
+  MemoryDesktopAddScanMode
+} from "../analytics/memory-add-analytics.js";
 import { errorCodeFromUnknown } from "../analytics/analytics-transport.js";
 import {
   extractManagedAgentHistory,
@@ -128,6 +132,10 @@ export interface CreateAgentSourceServiceOptions {
   memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   getScanPermission?: () => Promise<ScanPermission>;
   now?: () => string;
   createId?: () => string;
@@ -896,7 +904,8 @@ async function ingestPersistentSource(
       emitAddProgress("Capturing conversation turns");
       continue;
     }
-    if (hasStagedSourceTurn(turn.messages[0])) {
+    const scanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanOptions.mode);
+    if (hasStagedSourceTurn(turn.messages[0]) || sourceId === "codex") {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) {
@@ -936,6 +945,13 @@ async function ingestPersistentSource(
       continue;
     }
     let turnSucceeded = true;
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: turn.conversationId,
+      turnId: legacyTurnId(turn),
+      ...(scanMode ? { scanMode } : {})
+    };
+    const addStartedAt = Date.now();
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
@@ -948,10 +964,18 @@ async function ingestPersistentSource(
         title: firstTurnLine(turn.messages) ?? `${sourceId} conversation`,
         tags: ["agent-source", sourceId],
         source: sourceId,
-        turnId: legacyTurnId(turn),
+        turnId: addAnalyticsBase.turnId,
         createdAt: turn.messages[0]!.createdAt,
         deferProcessing: true
       });
+      if (!added.duplicate) {
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       if (added.duplicate) deduped += turn.messages.length;
       else {
         memoryIdCount += 1;
@@ -971,8 +995,18 @@ async function ingestPersistentSource(
     } catch (error) {
       turnSucceeded = false;
       activeConversationFailed = true;
+      const reason = error instanceof Error ? error.message : "Agent source ingestion failed";
+      errorCount += 1;
+      if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
+      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
       hasUncommittedSkips = true;
-      skipPersistentTurn(store, sourceId, turn.conversationId, error instanceof Error ? error.message : "Agent source ingestion failed");
+      skipPersistentTurn(store, sourceId, turn.conversationId, reason);
+      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      options.memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
     if (!turnSucceeded) activeConversationFailed = true;
     processed += turn.messages.length;
@@ -999,6 +1033,10 @@ function readScanPage(store: AppAgentSourceScanStore, sourceId: string, cursor?:
     if (page.length >= 500 || bytes >= 8 * 1024 * 1024) break;
   }
   return page;
+}
+
+function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode | undefined {
+  return value === "initial_subset" || value === "incremental" || value === "full" ? value : undefined;
 }
 
 function firstTurnLine(messages: readonly ConversationMessage[]): string | undefined {

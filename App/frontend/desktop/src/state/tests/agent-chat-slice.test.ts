@@ -2757,6 +2757,7 @@ describe("agent chat slice", () => {
     expect(state.connectionStatus).toBe("connected");
     expect(state.isSending).toBe(false);
     expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendUnsupported");
   });
 
   it("does not remove a canonical user message for a rejection without a matching optimistic send", () => {

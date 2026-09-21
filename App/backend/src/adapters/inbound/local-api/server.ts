@@ -2,6 +2,8 @@
 import { SseEventSchema, type SseEvent } from "@memmy/local-api-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
+import type { ManagedKnowledgeOptions } from "@memmy/knowledge";
+import { registerKnowledgeRoutes } from "@memmy/knowledge/routes";
 import type { PermissionManager } from "../../../permission/index.js";
 import type { BackendServices } from "../../../services/index.js";
 import { registerAccountRoutes } from "./routes/account.js";
@@ -27,6 +29,7 @@ const OPAQUE_ORIGIN = "null";
 const FILE_ORIGIN = "file://";
 
 export interface CreateLocalApiServerOptions {
+  knowledge?: ManagedKnowledgeOptions;
   permissionManager: PermissionManager;
   services: BackendServices;
   /** Configured agent timezone. Renderer headers are used only when absent. */
@@ -51,6 +54,10 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   const app = Fastify({ logger: false });
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const authenticateRuntimeToken = createRuntimeTokenPreHandler(options.permissionManager);
+
+  if (options.knowledge) {
+    registerKnowledgeRoutes(app, { ...options.knowledge, authenticate: authenticateRuntimeToken });
+  }
 
   app.addHook("onRequest", async (request, reply) => {
     // The desktop renderer process may run under Vite or file://, so handle CORS and preflight uniformly at the entry layer.

@@ -100,6 +100,14 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
       calls.push(options.operation);
+      if (options.operation === "decision.repair.v1") {
+        return {
+          preference: "Use the requested secure endpoint and verify the certificate before reporting completion.",
+          anti_pattern: "Report completion while the secure endpoint is unverified.",
+          severity: "warn",
+          confidence: 0.85
+        } as unknown as T;
+      }
       if (options.operation === "relation.classify.v1") {
         return {
           relation: "follow_up",
@@ -1066,7 +1074,8 @@ describe("MemoryService / session / episode relation", () => {
   });
 
   it("records revision feedback immediately but defers reward backprop until episode close", async () => {
-    const { db, service } = createTestService();
+    const repairCalls: string[] = [];
+    const { db, service } = createTestService({ skillLlm: createFollowUpRelationClassifierLlm(repairCalls) });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -1116,6 +1125,10 @@ describe("MemoryService / session / episode relation", () => {
       source: "relation_classifier",
       relation: "revision"
     });
+
+    expect(db.db.prepare("SELECT id FROM decision_repairs WHERE feedback_id = ?").get(feedback.id)).toBeUndefined();
+    await service.runWorkerOnce(50);
+    expect(repairCalls).toContain("decision.repair.v1");
 
     const episodeFeedback = db.db.prepare(
       `SELECT feedback_ids_json, decision_repair_ids_json
