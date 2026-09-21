@@ -164,7 +164,7 @@ describe("SubagentManager", () => {
     expect(sm.getRunningCountBySession("cli:direct")).toBe(0);
   });
 
-  it("uses inherited account model context when a subagent read_file result contains an image", async () => {
+  it("uses inherited account model context for image fallback on a text-only model", async () => {
     const workspace = tmpDir();
     const imagePath = path.join(workspace, "input.png");
     fs.writeFileSync(imagePath, Buffer.concat([
@@ -177,7 +177,7 @@ describe("SubagentManager", () => {
       imageCalls: any[] = [];
 
       getDefaultModel(): string {
-        return "agent_chat";
+        return "deepseek-v4-pro";
       }
 
       supportsAccountImageTextFallback(): boolean {
@@ -207,20 +207,20 @@ describe("SubagentManager", () => {
     }
 
     const provider = new AccountProvider();
-    const sm = manager({ provider, workspace, model: "agent_chat", maxIterations: 3 });
+    const sm = manager({ provider, workspace, model: "deepseek-v4-pro", maxIterations: 3 });
     sm.announceResult = vi.fn(async () => undefined) as any;
 
     await sm.spawn({
       task: `Read and describe ${imagePath}`,
       workspace,
       provider,
-      model: "agent_chat",
+      model: "deepseek-v4-pro",
       actualModelContext: {
         presetId: "account-default",
         provider: "memmy_account",
         endpointId: "platform",
         protocol: "openai-chat-completions",
-        model: "agent_chat",
+        model: "deepseek-v4-pro",
         source: "account",
         ownerAccountId: "account-1",
         capability: "agent",

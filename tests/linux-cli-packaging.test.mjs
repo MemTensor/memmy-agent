@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -61,6 +62,8 @@ function makeInstallerFixture(root) {
     "Xenova",
     "all-MiniLM-L6-v2",
   );
+  mkdirSync(path.join(payload, "scripts/internal/linux"), { recursive: true });
+  copyFileSync(path.join(repoRoot, "scripts/internal/linux/install-computer-use-deps.sh"), path.join(payload, "scripts/internal/linux/install-computer-use-deps.sh"));
   const archive = path.join(release, "memmy-agent-linux-cli.tar.gz");
   mkdirSync(path.join(agent, "dist"), { recursive: true });
   mkdirSync(path.join(backend, "dist", "src", "services"), { recursive: true });
@@ -155,6 +158,10 @@ function makeInstallerFixture(root) {
   writeFileSync(path.join(model, "tokenizer.json"), "{}\n");
   writeFileSync(path.join(model, "tokenizer_config.json"), "{}\n");
   writeFileSync(path.join(model, "onnx", "model_quantized.onnx"), "fixture\n");
+  const ocu = path.join(agent, "node_modules", "open-computer-use", "dist", "linux", "amd64", "open-computer-use");
+  mkdirSync(path.dirname(ocu), { recursive: true });
+  writeFileSync(ocu, "#!/bin/sh\necho 0.3.5\n");
+  chmodSync(ocu, 0o755);
   const tar = spawnSync("tar", ["-czf", archive, "-C", payload, "."], { encoding: "utf8" });
   expect(tar.status, tar.stderr).toBe(0);
   writeFileSync(`${archive}.sha256`, `${sha256(archive)}  ${path.basename(archive)}\n`);
@@ -215,6 +222,7 @@ function runInstaller(home, release, tools, overrides = {}) {
     env: cleanNpmLifecycleEnv({
       HOME: home,
       MEMMY_VERSION: "9.9.9",
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "0",
       MEMMY_RELEASE_BASE_URL: pathToFileURL(release).href.replace(/\/$/, ""),
       MEMMY_FIXTURE_MAIN_PID: String(process.pid),
       PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -263,20 +271,10 @@ describe("Linux CLI package boundary", () => {
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
   });
 
-  it("keeps the Office rendering payload required unless a build opts out", () => {
+  it("omits the Office rendering payload from the candidate archive", () => {
     const builder = readFileSync(builderPath, "utf8");
-    const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
-
-    expect(builder).toContain('ALLOW_MISSING_OFFICE_PAYLOAD="${MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD:-0}"');
-    expect(builder).toContain("Missing Office rendering binary");
-    expect(builder).toContain("Office rendering binary is not executable");
-    // The opt-out never covers a manifest that names hashes: those describe a
-    // real payload and stay verified.
-    expect(builder).toContain("Office rendering hash mismatch");
-    // Release publishes and manual uploads keep the payload mandatory.
-    expect(linuxWorkflow).toContain(
-      "MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}",
-    );
+    expect(builder).not.toContain("office-rendering");
+    expect(builder).not.toContain("ALLOW_MISSING_OFFICE_PAYLOAD");
   });
 
   it("installs standalone Agent dependencies before Linux archive contract tests", () => {
@@ -303,17 +301,16 @@ describe("Linux CLI package boundary", () => {
       encoding: "utf8",
       env: cleanNpmLifecycleEnv({
         MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)),
-        // Release packaging provisions the Office rendering executables, so a
-        // contract run builds the archive without them.
-        MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: "1",
       }),
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const archive = path.join(output, "memmy-agent-linux-cli.tar.gz");
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("scripts/internal/linux/install-computer-use-deps.sh");
+    expect(listing.stdout).toMatch(/App\/memmy-agent\/vendor\/open-computer-use-[^/]+-linux\.tgz/);
     expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
@@ -323,6 +320,7 @@ describe("Linux CLI package boundary", () => {
     expect(listing.stdout).toContain("App/backend/dist/src/adapters/outbound/skill-writer/templates/memmy-opencode-plugin.js");
     expect(listing.stdout).toContain("resources/embedding-models/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx");
     expect(listing.stdout).toContain("Migrations/dist/index.js");
+    expect(listing.stdout).toContain("Knowledge/dist/index.js");
     expect(listing.stdout).toContain("App/backend/local-api-contracts/dist/index.js");
     expect(listing.stdout).not.toMatch(/electron|\.dmg|\.exe|App\/frontend|App\/shell/i);
     expect(listing.stdout).not.toMatch(/node_modules|App\/memmy-agent\/src\/|Memory\/src\/(?!server|cli)/);
@@ -507,6 +505,15 @@ describe("Linux one-line installer transaction", () => {
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");
+    const configBeforeDependencies = readFileSync(configPath, "utf8");
+    const dependenciesFailed = runInstaller(home, release, tools, {
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "invalid",
+    });
+    expect(dependenciesFailed.status).not.toBe(0);
+    expect(dependenciesFailed.stderr).toContain("Computer Use dependency setup failed");
+    expect(readlinkSync(current)).toBe(beforeFailure);
+    expect(readFileSync(configPath, "utf8")).toBe(configBeforeDependencies);
+
     const configBeforeSystemdFailure = "sentinel: preserve-on-rollback\n";
     writeFileSync(configPath, configBeforeSystemdFailure);
     const systemdFailed = runInstaller(home, release, tools, {

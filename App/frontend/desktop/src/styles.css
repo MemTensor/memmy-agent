@@ -10525,6 +10525,23 @@ input[type="checkbox"].check-sky:checked::after {
   display: none;
 }
 
+.app-tooltip--description {
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 12px 14px;
+  border-color: var(--border-content-panel);
+  border-radius: 10px;
+  background: var(--color-background-paper);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-text-ink) 8%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 78%, transparent);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.app-tooltip--description::after {
+  background: var(--color-background-paper);
+  border-color: var(--border-content-panel);
+}
+
 .app-tooltip--top {
   animation: app-tooltip-in-top var(--duration-fast) ease-out;
   transform: translate(-50%, -100%);
@@ -11725,4 +11742,496 @@ input[type="checkbox"].check-sky:checked::after {
     text-overflow: ellipsis;
     transform: none;
   }
+}
+
+/* Computer History uses the shared memory header and preference switch.
+ * Timeline colours follow the product tokens; destructive actions use error. */
+.ch {
+  --ch-canvas: var(--color-background-paper);
+  --ch-surface: var(--color-background-paper);
+  --ch-border: var(--border-content-panel);
+  --ch-title: var(--color-text-ink);
+  --ch-prose: color-mix(in srgb, var(--color-text-ink) 66%, transparent);
+  --ch-muted: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+  --ch-rail: color-mix(in srgb, var(--color-border-stone) 80%, white);
+  --ch-dot: color-mix(in srgb, var(--color-action-sky) 62%, var(--color-border-stone));
+  --ch-chip: var(--color-canvas-oat);
+  --ch-accent: var(--color-action-sky-hover);
+  --ch-danger: var(--color-status-error);
+
+  min-width: 0;
+  margin-bottom: 48px;
+  color: var(--ch-title);
+}
+
+.ch__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.ch__history-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.ch__info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ch-muted);
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ch__info:hover {
+  color: var(--color-text-ink);
+  background: var(--color-surface-muted);
+}
+
+.ch__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ch__history-actions {
+  gap: 12px;
+}
+
+.ch__recording-setting {
+  gap: 16px;
+  padding: 16px 24px;
+  margin-bottom: 24px;
+}
+
+.ch-recording-confirmation {
+  /* The same confirmation also opens above the feature introduction. */
+  --z-modal: 4001;
+}
+
+.ch-recording-confirmation__details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ch__recording-status {
+  min-height: 24px;
+  gap: 6px;
+  padding: 4px 9px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ch__recording-status-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ch__recording-switch:disabled,
+.ch-entry__action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ch__recording-switch:focus-visible,
+.ch__info:focus-visible,
+.ch__clear-button:focus-visible,
+.ch-entry__action:focus-visible {
+  outline: 2px solid var(--color-action-sky);
+  outline-offset: 3px;
+}
+
+.ch__clear-button {
+  gap: 6px;
+  font-weight: 400;
+}
+
+.ch__clear-button:hover:not(:disabled) {
+  color: var(--ch-danger);
+  transform: none;
+}
+
+.ch__caret {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  color: var(--ch-prose);
+  transition: transform 120ms ease;
+}
+
+.ch__caret--collapsed {
+  transform: rotate(-90deg);
+}
+
+.ch__menu {
+  position: relative;
+}
+
+.ch__menu-sheet {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 148px;
+  padding: 5px;
+  border: 1px solid var(--ch-border);
+  border-radius: 12px;
+  background: var(--ch-surface);
+  box-shadow: 0 10px 28px rgb(47 42 71 / 12%);
+}
+
+.ch__menu-sheet button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ch-title);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ch__menu-sheet button:hover {
+  background: var(--ch-chip);
+}
+
+.ch__menu-item--danger {
+  color: color-mix(in srgb, var(--ch-danger) 82%, var(--color-text-ink));
+}
+
+.ch__error {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--ch-danger) 34%, var(--ch-border));
+  border-radius: 12px;
+  background: var(--color-status-error-soft);
+  color: color-mix(in srgb, var(--ch-danger) 78%, var(--color-text-ink));
+  font-size: 13px;
+}
+
+.ch__feed {
+  overflow: hidden;
+}
+
+.ch__day-head:hover {
+  color: color-mix(in srgb, var(--ch-accent) 70%, var(--color-text-ink));
+}
+
+.ch__day + .ch__day {
+  border-top: 1px solid var(--ch-border);
+}
+
+.ch__day-head {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 24px;
+  border: 0;
+  background: transparent;
+  color: var(--ch-title);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ch__day-head:focus-visible {
+  outline: 2px solid var(--color-action-sky);
+  outline-offset: -3px;
+}
+
+.ch__empty {
+  margin: 0;
+  padding: 48px 28px;
+  color: var(--ch-muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* One entry: the time, the rail it hangs from, and the account itself. */
+.ch-entry {
+  --ch-entry-top: 12px;
+  display: grid;
+  grid-template-columns: 88px 26px minmax(0, 1fr);
+  align-items: start;
+  padding: 0 28px 0 0;
+}
+
+.ch-entry:first-of-type {
+  --ch-entry-top: 4px;
+}
+
+.ch-entry__when {
+  padding-top: calc(var(--ch-entry-top) + 4px);
+  color: var(--ch-muted);
+  font-size: 13px;
+  text-align: right;
+}
+
+/* The rail is drawn by the entry so the line runs the full height of the row;
+ * a dashed run means the machine was not being watched in between, which an
+ * unbroken line would quietly deny. */
+.ch-entry__rail {
+  position: relative;
+  align-self: stretch;
+  justify-self: center;
+  width: 1px;
+  min-height: 100%;
+  background: var(--ch-rail);
+}
+
+.ch-entry__rail--gap {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--ch-rail) 0 3px,
+    transparent 3px 7px
+  );
+}
+
+.ch-entry:first-of-type .ch-entry__rail::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: calc(var(--ch-entry-top) + 8px);
+  background: var(--ch-canvas);
+}
+
+.ch-entry:last-child .ch-entry__rail {
+  height: calc(var(--ch-entry-top) + 12px);
+  min-height: 0;
+}
+
+.ch-entry__dot {
+  position: absolute;
+  top: calc(var(--ch-entry-top) + 7px);
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ch-dot);
+  transform: translateX(-50%);
+}
+
+.ch-entry__body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: var(--ch-entry-top) 0 16px 20px;
+}
+
+.ch-entry__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ch-entry__title-row h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+/* Row actions stay out of the way until the row is under the pointer, the way
+ * the reference design keeps its own per-entry controls. */
+.ch-entry__row-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.ch-entry:hover .ch-entry__row-actions,
+.ch-entry__row-actions:focus-within {
+  opacity: 1;
+}
+
+.ch-entry__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--ch-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.ch-entry__action:hover:not(:disabled) {
+  background: var(--ch-chip);
+  color: var(--ch-title);
+}
+
+.ch-entry__action--delete:hover:not(:disabled) {
+  background: var(--color-status-error-soft);
+  color: var(--ch-danger);
+}
+
+.ch-entry__action--on {
+  opacity: 1;
+  color: var(--ch-accent);
+}
+
+.ch-entry:not(:hover) .ch-entry__action--on,
+.ch-entry:not(:hover) .ch-entry__action--confirm {
+  opacity: 1;
+}
+
+.ch-entry__action--confirm {
+  background: var(--color-status-error-soft);
+  color: color-mix(in srgb, var(--ch-danger) 78%, var(--color-text-ink));
+}
+
+.ch-entry__summary {
+  margin: 6px 0 0;
+  color: var(--ch-prose);
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.ch-entry__code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--ch-chip);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.9em;
+}
+
+.ch-entry__apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ch-app-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.ch-app-icon--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Workflows have no counterpart in the reference feed; they sit below it
+ * rather than inside it, so the timeline stays the one thing on the page. */
+.ch__workflows {
+  margin-top: 24px;
+  padding: 18px 22px 22px;
+  border: 1px solid var(--ch-border);
+  border-radius: 18px;
+  background: var(--color-canvas-oat);
+}
+
+.ch__workflows-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ch__workflows-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ch__workflows-head select {
+  max-width: 320px;
+  padding: 6px 10px;
+  border: 1px solid var(--ch-border);
+  border-radius: 10px;
+  background: var(--ch-canvas);
+  color: var(--ch-title);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .ch__recording-setting {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .ch__recording-setting .ch__head-actions {
+    margin-left: auto;
+  }
+
+  .ch-entry {
+    grid-template-columns: 56px 22px minmax(0, 1fr);
+    padding-right: 16px;
+  }
+
+  .ch__day-head {
+    padding-inline: 16px;
+  }
+}
+
+/* Share the recording confirmation's shell, type scale and footer. */
+.ch__permission-dialog:focus { outline: none; }
+.ch__permission-dialog .confirm-dialog__footer { padding-top: 12px; }
+.ch__permission-description { margin: 0; }
+.ch__permission-list { display: grid; gap: 4px; margin: 16px 0 8px; }
+.ch__permission-row { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 4px 0; }
+.ch__permission-row > span:first-child { flex: 1; color: var(--color-text-ink); }
+.ch__permission-granted { display: inline-flex; align-items: center; gap: 6px; color: var(--color-action-sky); }
+.ch__permission-dialog .ch__permission-open {
+  border: none;
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--color-action-sky) 14%, white);
+  color: var(--color-action-sky);
+}
+.ch__permission-dialog .ch__permission-open:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 22%, white);
+  color: var(--color-action-sky-hover);
+}
+
+.ch__recording-status--quota {
+  background: color-mix(in srgb, var(--color-icon-ember) 12%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-icon-ember) 75%, var(--color-text-ink));
+}
+
+.ch__quota-description {
+  margin: 0 0 12px;
+  color: var(--ch-prose);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: right;
 }

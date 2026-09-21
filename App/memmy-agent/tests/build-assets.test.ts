@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
@@ -12,6 +13,50 @@ const buildEnv = {
 };
 
 describe("build runtime assets", () => {
+  it("excludes Office skills and removes stale renderer payload without deleting source", () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-slim-assets-"));
+    const write = (relativePath: string, content: string) => {
+      const file = path.join(fixture, relativePath);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+    };
+    try {
+      for (const skill of ["docx", "pptx", "xlsx"]) {
+        write(`src/skills/${skill}/SKILL.md`, `preserved ${skill} source`);
+        write(`src/skills/${skill}/scripts/render.mjs`, "preserved script");
+        write(`dist/skills/${skill}/old-asset.bin`, "stale asset");
+      }
+      write("src/skills/pptx/schemas/SCHEMA-MANIFEST.json", "{}");
+      write("src/skills/computer-history/SKILL.md", "retained history");
+      write("src/skills/skill-creator/SKILL.md", "retained skill creator");
+      write("src/templates/agent/example.md", "retained template");
+      write("src/tools/computer-history/mac/human-recorder.swift", "retained helper");
+      write("dist/extra-dependencies/office-rendering/linux-x64/bin/soffice", "stale renderer");
+      write("dist/extra-dependencies/docx-rendering/bin/soffice", "stale legacy renderer");
+
+      execFileSync(process.execPath, [path.join(root, "scripts/copy-build-assets.mjs")], {
+        cwd: fixture, stdio: "pipe",
+      });
+
+      for (const skill of ["docx", "pptx", "xlsx"]) {
+        expect(fs.existsSync(path.join(fixture, "dist/skills", skill))).toBe(false);
+        expect(fs.readFileSync(path.join(fixture, "src/skills", skill, "SKILL.md"), "utf8"))
+          .toBe(`preserved ${skill} source`);
+        expect(fs.readFileSync(path.join(fixture, "src/skills", skill, "scripts/render.mjs"), "utf8"))
+          .toBe("preserved script");
+      }
+      for (const renderer of ["office-rendering", "docx-rendering"]) {
+        expect(fs.existsSync(path.join(fixture, "dist/extra-dependencies", renderer))).toBe(false);
+      }
+      for (const retained of [
+        "skills/computer-history/SKILL.md", "skills/skill-creator/SKILL.md",
+        "templates/agent/example.md", "tools/computer-history/mac/human-recorder.swift",
+      ]) expect(fs.existsSync(path.join(fixture, "dist", retained))).toBe(true);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("copies templates and builtin skill resources into dist", () => {
     const staleFiles = [
       "dist/skills/memory/SKILL.md",
@@ -57,15 +102,12 @@ describe("build runtime assets", () => {
     expect(fs.existsSync(path.join(root, "dist/skills/ui-craft/references"))).toBe(false);
 
     const renderingRoot = path.join(root, "dist/extra-dependencies/office-rendering");
-    for (const platform of ["darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"]) {
-      expect(fs.existsSync(path.join(renderingRoot, platform, "OFFICE-RENDERING-MANIFEST.json"))).toBe(true);
-    }
-    expect(fs.existsSync(path.join(renderingRoot, "THIRD-PARTY-NOTICES.md"))).toBe(true);
+    expect(fs.existsSync(renderingRoot)).toBe(false);
     expect(fs.existsSync(path.join(root, "dist/extra-dependencies/docx-rendering"))).toBe(false);
-    expect(fs.existsSync(path.join(root, "dist/skills/pptx/SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(root, "dist/skills/xlsx/SKILL.md"))).toBe(true);
-    const docxScripts = path.join(root, "dist/skills/docx/scripts");
-    expect(fs.readdirSync(docxScripts).filter((entry) => entry.endsWith(".py"))).toEqual([]);
+    for (const skill of ["docx", "pptx", "xlsx"]) {
+      expect(fs.existsSync(path.join(root, "dist/skills", skill))).toBe(false);
+      expect(fs.existsSync(path.join(root, "src/skills", skill, "SKILL.md"))).toBe(true);
+    }
 
     const tmuxScript = path.join(root, "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);

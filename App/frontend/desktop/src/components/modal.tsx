@@ -21,6 +21,7 @@ export interface ModalProps {
   showHeader?: boolean;
   showCloseButton?: boolean;
   closeLabel?: string;
+  closeDisabled?: boolean;
   closeContent?: ReactNode;
   className?: string;
   backdropClassName?: string;
@@ -126,6 +127,7 @@ export function Modal(props: ModalProps) {
                 size="sm"
                 type="button"
                 aria-label={props.closeLabel ?? "Close"}
+                disabled={props.closeDisabled}
                 onClick={props.onClose}
               >
                 {props.closeContent ?? props.closeLabel ?? "Close"}

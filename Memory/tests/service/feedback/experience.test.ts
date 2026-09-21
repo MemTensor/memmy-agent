@@ -42,6 +42,9 @@ function createFeedbackRefinerLlm(calls: Array<{
     ): Promise<T> {
       calls.push({ messages, options });
       if (options.operation === "failure.experience.sink.v5") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          evidence_trace_ids?: string[];
+        };
         return {
           title: "Validate SEC 13F issuer fields",
           trigger: "When the user asks to parse SEC 13F holdings or issuer/CUSIP data.",
@@ -53,7 +56,8 @@ function createFeedbackRefinerLlm(calls: Array<{
             prefer: ["Extract issuer and CUSIP values from the filing fields."],
             avoid: ["Do not use the filename as the issuer name."]
           },
-          support_trace_ids: []
+          support_trace_ids: payload.evidence_trace_ids?.slice(0, 1) ?? [],
+          confidence: 0.84
         } as unknown as T;
       }
       return {} as T;
@@ -74,6 +78,7 @@ describe("MemoryService / feedback / experience", () => {
     const embeddedTexts: string[] = [];
     const embeddingRoles: Array<"query" | "document" | undefined> = [];
     const { db, service } = createTestService({
+      skillLlm: createFeedbackRefinerLlm([]),
       embedder: createCapturingEmbedder(embeddedTexts, embeddingRoles)
     });
     const session = service.openSession({
@@ -199,12 +204,12 @@ describe("MemoryService / feedback / experience", () => {
       };
     }).internal_info.policy;
     expect(negativePolicy.status).toBe("candidate");
-    expect(negativePolicy.experience_type).toBe("failure_avoidance");
+    expect(negativePolicy.experience_type).toBe("repair_instruction");
     expect(negativePolicy.evidence_polarity).toBe("negative");
     expect(negativePolicy.skill_eligible).toBe(false);
     expect(negativePolicy.source_feedback_ids).toEqual([avoid.feedbackId]);
-    expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("validated the issuer field");
-    expect(negativePolicy.decision_guidance?.preference?.join("\n")).toContain("filename");
+    expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
+    expect(negativePolicy.decision_guidance?.preference?.join("\n")).toContain("issuer and CUSIP");
     db.close();
   });
 
@@ -266,13 +271,13 @@ describe("MemoryService / feedback / experience", () => {
       rawPayload: { source: "verifier", score: -1 }
     });
 
-    expect(calls.find((call) => call.options.operation === "failure.experience.sink.v5")).toBeUndefined();
     expect(feedbackResponse.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
     expect(feedbackResponse.jobs.map((job) => job.jobType)).not.toContain("reward");
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
+    expect(calls.find((call) => call.options.operation === "failure.experience.sink.v5")).toBeTruthy();
 
     const row = db.db.prepare(
       `SELECT properties_json
@@ -294,9 +299,9 @@ describe("MemoryService / feedback / experience", () => {
         };
       };
     }).internal_info.policy;
-    expect(policy.trigger).toContain("SEC 13F filing");
+    expect(policy.trigger).toContain("SEC 13F");
     expect(policy.procedure).toContain("filename");
-    expect(policy.verification).toContain("historical failure mode");
+    expect(policy.verification).toContain("CUSIP");
     expect(policy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
     expect(policy.policy_confidence).toBeGreaterThanOrEqual(0.6);
     expect(policy.evidence_strength).toBe(1);

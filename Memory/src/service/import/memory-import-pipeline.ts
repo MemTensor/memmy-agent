@@ -28,7 +28,7 @@ export function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, titl
     return `skill.import:${stableHash([
       request.sourceAgentId,
       request.sourceSkillId ?? request.sourceSkillPath,
-      request.sourceSkillVersion ?? request.sourceContentHash ?? stableHash(request.content)
+      request.sourceContentHash ?? request.sourceSkillVersion ?? stableHash(request.content)
     ]).slice(0, 20)}`;
   }
   if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) return `memory.add:${request.adapterId}:turn:${request.turnId}`;

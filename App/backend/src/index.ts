@@ -1,6 +1,7 @@
 /** Src module. */
 import { RuntimeConfigSchema, type AccountChannel, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { randomBytes } from "node:crypto";
+import { removeLegacyKnowledgeCredentials } from "@memmy/knowledge";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
 import { createAppStateStore } from "./infrastructure/app-state-store/index.js";
@@ -150,7 +151,17 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
+    await removeLegacyKnowledgeCredentials(memmyConfigPath);
     server = createLocalApiServer({
+      knowledge: {
+        baseUrl: cloudConfig.baseUrl,
+        getSession: () => {
+          const account = appStateStore.repositories.accountSession;
+          const session = account.get();
+          const credential = account.getCloudUuid();
+          return session.authenticated && credential ? { accountId: session.profile.userId, credential } : null;
+        }
+      },
       permissionManager,
       services,
       composioMcpToken,

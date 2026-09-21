@@ -43,13 +43,15 @@ describe("backend cloud-service env loading", () => {
     expect(env.MEMMY_CLOUD_SERVICE).toBe("https://dev.example.test");
   });
 
-  it("fails closed when a requested packaged manifest is missing or malformed", () => {
+  it("fails closed when a requested packaged manifest is missing or uses a non-HTTPS origin", () => {
     const root = fixtureRoot();
     expect(() => loadCloudServiceEnv({ env: {}, manifestPath: join(root, "missing.json") }))
       .toThrow(/manifest is missing/);
-    const manifestPath = join(root, "desktop-edition.json");
-    writeFileSync(manifestPath, JSON.stringify({ cloudService: "http://unsafe.example.test" }));
-    expect(() => loadCloudServiceEnv({ env: {}, manifestPath })).toThrow(/HTTPS/);
+    for (const cloudService of ["http://unsafe.example.test", "ftp://unsafe.example.test"]) {
+      const manifestPath = join(root, `${cloudService.slice(0, 3)}-desktop-edition.json`);
+      writeFileSync(manifestPath, JSON.stringify({ cloudService }));
+      expect(() => loadCloudServiceEnv({ env: {}, manifestPath })).toThrow(/HTTPS/);
+    }
   });
 });
 

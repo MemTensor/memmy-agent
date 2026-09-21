@@ -508,7 +508,10 @@ function normalizeAgentRegion(value: string | undefined): "cn" | "intl" {
  */
 async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
   try {
-    const value = await response.json() as Partial<CloudEnvelope>;
+    // Account IDs are BIGINT values. Parse their numeric JSON representation as
+    // strings before JSON.parse so JavaScript cannot round them past 2^53.
+    const raw = await response.text();
+    const value = JSON.parse(preserveIntegerIdentifiers(raw)) as Partial<CloudEnvelope>;
     return {
       code: typeof value.code === "number" ? value.code : response.ok ? 0 : response.status,
       message: typeof value.message === "string" ? value.message : undefined,
@@ -521,6 +524,10 @@ async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
       data: null
     };
   }
+}
+
+function preserveIntegerIdentifiers(raw: string): string {
+  return raw.replace(/("(?:id|userId|user_id|accountUuid|account_uuid)"\s*:\s*)(\d{16,})/g, '$1"$2"');
 }
 
 /**

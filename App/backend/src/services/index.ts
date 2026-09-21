@@ -145,15 +145,16 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     const session = accountSessionRepository.get();
     return session.authenticated ? session.profile.userId : "local-user";
   };
+  const memoryAddAnalytics = createMemoryDesktopAddAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
   const ingestionService =
     options.ingestionService ??
     createIngestionService({
       memoryClient: options.memoryClient,
       agentSourceRepository: options.appStateStore.repositories.agentSources,
-      memoryAddAnalytics: createMemoryDesktopAddAnalytics({
-        getUserId: resolveAnalyticsUserId,
-        getUserMode: resolveAnalyticsUserMode,
-      }),
+      memoryAddAnalytics,
     });
   const agentSources = createAgentSourceService({
     sourceRegistry,
@@ -166,6 +167,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
+    memoryAddAnalytics,
     scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({

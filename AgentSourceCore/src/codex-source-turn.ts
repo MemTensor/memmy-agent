@@ -194,6 +194,7 @@ function contentItemKinds(payload: Record<string, unknown>): string[] | undefine
   if (!isRecord(meta) || !Array.isArray(meta.content_item_kinds)) return undefined;
   return meta.content_item_kinds.map(kind => text(kind));
 }
+}
 
 function keepsUserContentItem(kinds: string[] | undefined, index: number): boolean {
   if (!kinds) return true;

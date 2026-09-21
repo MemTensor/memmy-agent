@@ -62,6 +62,10 @@ import {
 } from "./integration/target-registry.js";
 import { renderMemmyDefaultSkillManifest } from "./integration/templates/memmy-default.js";
 import { createWorkbuddySkillTarget } from "./integration/workbuddy/index.js";
+import type {
+  MemoryDesktopAddAnalytics,
+  MemoryDesktopAddScanMode
+} from "../server/memory-add-analytics.js";
 
 const logger = createMemoryLogger("agent-source");
 const INITIAL_SCAN_DELAY_MS = 5 * 60 * 1000;
@@ -130,6 +134,10 @@ export interface CreateAgentSourceExecutorOptions {
   /** Resolves the Agent root used for optional cross-Agent Skill ingestion. */
   resolveAgentSkillRoot?: (sourceId: string) => string | null;
   scanStoreDirectory?: string;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
 }
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
@@ -313,7 +321,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         store.saveSourceState({ ...(preparedState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: new Date().toISOString() }), phase: "ingest", updatedAt: new Date().toISOString() });
         const result = await ingestStagedMessages(options.service, store, sourceId, signal, (progress) => {
           if (!scanPaused) { progressBeforePause = progress; scan = { ...scan, progress }; }
-        }, options.scheduleWorker);
+        }, options.scheduleWorker, options.memoryAddAnalytics, persistentScanMode(mode));
         const skillResult = await ingestAgentSkills(
           options.service,
           sourceId,
@@ -731,7 +739,12 @@ async function ingestStagedMessages(
   sourceId: string,
   signal: AbortSignal,
   onProgress: (progress: ScanProgress) => void,
-  scheduleWorker?: () => void
+  scheduleWorker?: () => void,
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >,
+  scanMode?: MemoryDesktopAddScanMode
 ): Promise<{ written: number; messageCount: number; errors: string[]; errorCount: number; latestSeenAt: string | null; hasUncommittedSkips: boolean }> {
   let written = 0;
   let messageCount = 0;
@@ -836,6 +849,14 @@ async function ingestStagedMessages(
       continue;
     }
     let succeeded = true;
+    const resolvedScanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanMode);
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: turn.conversationId,
+      turnId: legacyTurnId(turn),
+      ...(resolvedScanMode ? { scanMode: resolvedScanMode } : {})
+    };
+    const addStartedAt = Date.now();
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
@@ -844,15 +865,33 @@ async function ingestStagedMessages(
         requestId: legacyTurnRequestId(turn), adapterId: `agent-source:${sourceId}`,
         content: renderTurnClipped(turn.messages), layer: "L1",
         title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
-        turnId: legacyTurnId(turn), createdAt: turn.messages[0]!.createdAt, deferProcessing: true
+        turnId: addAnalyticsBase.turnId, createdAt: turn.messages[0]!.createdAt, deferProcessing: true
       });
+      if (!added.duplicate) {
+        memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
       if (!added.duplicate) { memoryIds.push(added.id); written += 1; }
     } catch (error) {
       succeeded = false;
       activeConversationFailed = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      errorCount += 1;
+      if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
+      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
       hasUncommittedSkips = true;
-      recordScanItemSkip(store, sourceId, turn.conversationId, error instanceof Error ? error.message : String(error));
+      recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+      memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
     if (succeeded) {
       messageCount += turn.messages.length;
@@ -1100,6 +1139,10 @@ function frontmatterValue(content: string, key: string): string | undefined {
   return content.slice(3, end)
     .match(new RegExp(`^${key}:\\s*["']?([^\\n"']+)["']?\\s*$`, "im"))?.[1]
     ?.trim();
+}
+
+function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode | undefined {
+  return value === "initial_subset" || value === "incremental" || value === "full" ? value : undefined;
 }
 
 function titleForTurn(sourceId: string, messages: readonly ConversationMessage[]): string {
