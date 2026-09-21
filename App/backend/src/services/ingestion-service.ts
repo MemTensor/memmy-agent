@@ -274,10 +274,6 @@ async function processConversation(
       failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
-      stats.errors.push({
-        conversationId: turn.conversationId,
-        reason: error instanceof Error ? error.message : "ingestion failed"
-      });
       reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "ingestion failed");
       options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
       options.memoryAddAnalytics?.trackAddFailed({
