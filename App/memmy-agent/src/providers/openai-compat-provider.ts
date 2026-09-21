@@ -1287,7 +1287,8 @@ function isKimiImmutableTemperatureModel(modelName: string): boolean {
     slug.includes("kimi-k2.5") ||
     slug.includes("kimi-k2.6") ||
     slug.includes("k2.6-code-preview") ||
-    slug.startsWith("kimi-k2.7-code")
+    slug.startsWith("kimi-k2.7-code") ||
+    slug.startsWith("kimi-k3")
   );
 }
 
