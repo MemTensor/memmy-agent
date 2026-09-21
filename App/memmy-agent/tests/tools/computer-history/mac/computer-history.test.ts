@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as historyPlatform from "../../../../src/tools/computer-history/platform.js";
 import { ComputerHistoryTool } from "../../../../src/tools/computer-history/mac/computer-history.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 
@@ -12,8 +13,12 @@ const history = {
   filePath: "/tmp/history-iphone.md",
 };
 
+afterEach(() => { vi.unstubAllEnvs(); });
+
 describe("ComputerHistoryTool", () => {
   it("is discoverable as a core Agent tool scoped to retrieval", () => {
+    vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", undefined);
     const registry = new ToolLoader({ testClasses: [ComputerHistoryTool] }).loadRegistry();
     const tool = registry.get("computer_history");
 

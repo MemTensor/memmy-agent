@@ -26,15 +26,17 @@ it("composes with the unchanged Memory hook and keeps its query and writeback in
   );
   let enabled = true;
   const cloud = vi.fn(
-    async (_url: string | URL | Request) =>
-      new Response(
+    async (url: string | URL | Request) => {
+      void url;
+      return new Response(
         JSON.stringify({
           enabled,
           evidence: enabled
             ? [{ id: "source-1", title: "差旅制度", content: "住宿上限 500 元。" }]
             : [],
         }),
-      ),
+      );
+    },
   );
   vi.stubGlobal("fetch", cloud);
   const memoryClient = {
@@ -43,14 +45,22 @@ it("composes with the unchanged Memory hook and keeps its query and writeback in
       userId: "local-user",
       resumed: false,
     })),
-    startTurn: vi.fn(async (_id: string, _body: unknown) => ({
-      sourceMemoryIds: ["memory-1"],
-      injectedContext: { markdown: "用户偏好安静的酒店。" },
-    })),
-    completeTurn: vi.fn(async (_id: string, _body: unknown) => ({
-      rawTurnId: "raw",
-      l1MemoryId: "l1",
-    })),
+    startTurn: vi.fn(async (id: string, body: unknown) => {
+      void id;
+      void body;
+      return {
+        sourceMemoryIds: ["memory-1"],
+        injectedContext: { markdown: "用户偏好安静的酒店。" },
+      };
+    }),
+    completeTurn: vi.fn(async (id: string, body: unknown) => {
+      void id;
+      void body;
+      return {
+        rawTurnId: "raw",
+        l1MemoryId: "l1",
+      };
+    }),
     closeSession: vi.fn(async () => ({ ok: true })),
   };
   const memory = new MemmyMemoryHook(memoryClient as never, {

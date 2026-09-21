@@ -9,7 +9,8 @@ on:
       - "App/shell/desktop/electron-builder*.yml"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "scripts/internal/linux/**"
-      - "scripts/internal/mac/build-dmg.sh"
+      - "scripts/internal/mac/**"
+      - "tests/ocu-dev-install.test.mjs"
       - "scripts/internal/win/build-nsis.sh"
   workflow_dispatch:
 
@@ -61,6 +62,12 @@ jobs:
       - name: Check Windows MCP and desktop backend
         if: runner.os == 'Windows'
         run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" --list-apps | tee ocu-native-result.json
+      - name: Validate the published macOS bundle and installer
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict "$RUNNER_TEMP/ocu-native/node_modules/open-computer-use/dist/Open Computer Use.app"
+          lipo "$OCU_BINARY" -verify_arch arm64 x86_64
+          node --test tests/ocu-dev-install.test.mjs
       - name: Check macOS MCP discovery
         if: runner.os == 'macOS'
         run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" | tee ocu-native-result.json

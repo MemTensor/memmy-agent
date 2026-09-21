@@ -2,6 +2,7 @@ node_modules/
 dist/
 release/
 App/shell/desktop/release/
+Mac软件打包/
 memmy-memory-*.tgz
 .vite/
 *.log

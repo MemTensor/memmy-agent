@@ -10,6 +10,9 @@ import {
   ToolCallRequest,
 } from "../../../src/providers/base.js";
 
+// Keep fallback coverage tied to an actual text-only model; agent_chat accepts images.
+const TEXT_ONLY_ACCOUNT_MODEL = "deepseek-v4-pro";
+
 function imageMessage(url = "data:image/png;base64,one", mediaPath = "/media/one.png") {
   return {
     role: "user",
@@ -22,7 +25,7 @@ function imageMessage(url = "data:image/png;base64,one", mediaPath = "/media/one
 
 function modelContext(
   source: "account" | "byok" = "account",
-  model = "agent_chat",
+  model = TEXT_ONLY_ACCOUNT_MODEL,
   provider = "memmy_account",
 ) {
   return {
@@ -60,7 +63,7 @@ class AccountFallbackProvider extends LLMProvider {
   }
 
   getDefaultModel(): string {
-    return "agent_chat";
+    return TEXT_ONLY_ACCOUNT_MODEL;
   }
 
   supportsAccountImageTextFallback(): boolean {
@@ -125,11 +128,11 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages,
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext(),
     }));
 
-    expect(provider.events).toEqual(["image2text", "agent_chat"]);
+    expect(provider.events).toEqual(["image2text", TEXT_ONLY_ACCOUNT_MODEL]);
     expect(provider.mainCalls).toHaveLength(1);
     expect(provider.imageCalls).toHaveLength(1);
     expect(provider.imageCalls[0].messages).toHaveLength(1);
@@ -154,7 +157,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(result.usage).toEqual({ prompt_tokens: 12, completion_tokens: 6 });
   });
 
-  it("sends images directly to a model whose exact capability entry includes image", async () => {
+  it.each(["agent_chat", "gpt-4.1"])("sends images directly to image-capable account model %s", async (model) => {
     const provider = new AccountFallbackProvider(
       [new LLMResponse({ content: "native answer" })],
       [],
@@ -163,17 +166,52 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "gpt-4.1",
-      actualModelContext: modelContext("account", "gpt-4.1"),
+      model,
+      actualModelContext: modelContext("account", model),
     }));
 
     expect(result.finalContent).toBe("native answer");
-    expect(provider.events).toEqual(["gpt-4.1"]);
+    expect(provider.events).toEqual([model]);
     expect(provider.imageCalls).toHaveLength(0);
     expect(JSON.stringify(provider.mainCalls[0].messages)).toContain('"type":"image_url"');
   });
 
-  it("uses the account fallback defensively when a declared image model rejects the image", async () => {
+  it.each([1, 3])("passes a Computer Use tool screenshot directly to agent_chat with maxIterations=%i", async (maxIterations) => {
+    const provider = new AccountFallbackProvider([
+      new LLMResponse({
+        content: null,
+        toolCalls: [new ToolCallRequest({ id: "screen-1", name: "inspect", arguments: {} })],
+        finishReason: "tool_calls",
+      }),
+      new LLMResponse({ content: "The screenshot shows a window." }),
+    ], []);
+    const tools = new ToolRegistry();
+    tools.register(new ImageTool());
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [{ role: "user", content: "What is on my screen?" }],
+      provider,
+      tools,
+      model: "agent_chat",
+      actualModelContext: modelContext("account", "agent_chat"),
+      maxIterations,
+      maxIterationsFinalPrompt: "Describe the screen now.",
+    }));
+
+    expect(result.finalContent).toBe("The screenshot shows a window.");
+    expect(provider.events).toEqual(["agent_chat", "agent_chat"]);
+    expect(provider.imageCalls).toHaveLength(0);
+    expect(provider.mainCalls[1].messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "tool",
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: "image_url", image_url: { url: "data:image/png;base64,tool" } }),
+        ]),
+      }),
+    ]));
+  });
+
+  it.each(["agent_chat", "gpt-4.1"])("recovers when image-capable account model %s explicitly rejects images", async (model) => {
     const provider = new AccountFallbackProvider(
       [unsupported({ prompt_tokens: 3 }), new LLMResponse({ content: "recovered" })],
       [new LLMResponse({ content: "Image 1: a diagram", usage: { prompt_tokens: 4 } })],
@@ -182,12 +220,12 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "gpt-4.1",
-      actualModelContext: modelContext("account", "gpt-4.1"),
+      model,
+      actualModelContext: modelContext("account", model),
     }));
 
     expect(result.finalContent).toBe("recovered");
-    expect(provider.events).toEqual(["gpt-4.1", "image2text", "gpt-4.1"]);
+    expect(provider.events).toEqual([model, "image2text", model]);
     expect(provider.mainCalls).toHaveLength(2);
     expect(result.usage).toEqual({ prompt_tokens: 7 });
   });
@@ -245,7 +283,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
     }));
 
     expect(result.response.errorCategory).toBe("image_input_unsupported");
@@ -280,7 +318,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages,
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext(),
     }));
 
@@ -304,7 +342,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext("byok"),
       injectionCallback,
     }));
@@ -333,7 +371,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext(),
     }));
 
@@ -341,7 +379,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(result.response).toMatchObject({
       errorCategory: "image_analysis_failed",
       actualProvider: "memmy_account",
-      actualModel: "agent_chat",
+      actualModel: TEXT_ONLY_ACCOUNT_MODEL,
       failedProvider: "memmy_account",
       failedModel: "image2text",
     });
@@ -362,14 +400,14 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext(),
       injectionCallback,
     }));
 
     expect(result.response).toMatchObject({
       errorCategory: "quota_exhausted",
-      actualModel: "agent_chat",
+      actualModel: TEXT_ONLY_ACCOUNT_MODEL,
       failedModel: "image2text",
     });
     expect(provider.mainCalls).toHaveLength(0);
@@ -396,14 +434,14 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       tools,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       maxIterations: 3,
       actualModelContext: modelContext(),
     }));
 
     expect(result.finalContent).toBe("done");
     expect(provider.imageCalls).toHaveLength(1);
-    expect(provider.events).toEqual(["image2text", "agent_chat", "agent_chat"]);
+    expect(provider.events).toEqual(["image2text", TEXT_ONLY_ACCOUNT_MODEL, TEXT_ONLY_ACCOUNT_MODEL]);
     expect(provider.mainCalls).toHaveLength(2);
     for (const call of provider.mainCalls) {
       expect(JSON.stringify(call.messages)).toContain("Image 1: a receipt");
@@ -434,7 +472,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       tools,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       maxIterations: 3,
       actualModelContext: modelContext(),
       injectionCallback: async () => {
@@ -448,9 +486,9 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(result.finalContent).toBe("done");
     expect(provider.events).toEqual([
       "image2text",
-      "agent_chat",
+      TEXT_ONLY_ACCOUNT_MODEL,
       "image2text",
-      "agent_chat",
+      TEXT_ONLY_ACCOUNT_MODEL,
     ]);
     expect(provider.imageCalls).toHaveLength(2);
     expect(provider.imageCalls.map((call) => (
@@ -483,14 +521,14 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       tools,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       maxIterations: 1,
       maxIterationsFinalPrompt: "Give the final answer now.",
       actualModelContext: modelContext(),
     }));
 
     expect(result.finalContent).toBe("finalized");
-    expect(provider.events).toEqual(["image2text", "agent_chat", "agent_chat"]);
+    expect(provider.events).toEqual(["image2text", TEXT_ONLY_ACCOUNT_MODEL, TEXT_ONLY_ACCOUNT_MODEL]);
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).toContain("Image 1: a receipt");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).not.toContain('"type":"image_url"');
   });
@@ -514,14 +552,14 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [{ role: "user", content: "Inspect the generated image" }],
       provider,
       tools,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       maxIterations: 1,
       maxIterationsFinalPrompt: "Give the final answer now.",
       actualModelContext: modelContext(),
     }));
 
     expect(result.finalContent).toBe("finalized from tool image");
-    expect(provider.events).toEqual(["agent_chat", "image2text", "agent_chat"]);
+    expect(provider.events).toEqual([TEXT_ONLY_ACCOUNT_MODEL, "image2text", TEXT_ONLY_ACCOUNT_MODEL]);
     expect(JSON.stringify(provider.imageCalls[0].messages)).toContain("data:image/png;base64,tool");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).toContain("Image 1: a shipping label");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).not.toContain('"type":"image_url"');
@@ -585,7 +623,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "agent_chat",
+      model: TEXT_ONLY_ACCOUNT_MODEL,
       actualModelContext: modelContext(),
       abortSignal: controller.signal,
     }));

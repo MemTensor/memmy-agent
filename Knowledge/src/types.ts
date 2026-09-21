@@ -20,6 +20,7 @@ export interface KnowledgeFile {
   name: string;
   status: string;
   message: string;
+  folderId?: string;
 }
 export interface KnowledgeFolder {
   id: string;
@@ -38,7 +39,14 @@ export interface KnowledgeEvidence {
   title: string;
   url?: string;
 }
-export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+/** Matches MemOS knowledge-base documents: 100 MiB. */
+export const MAX_UPLOAD_MB = 100;
+export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+export const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_BYTES + 64 * 1024;
+export const UPLOAD_TIMEOUT_MS = 300_000;
+export const FILES_PAGE_SIZE = 20;
+/** Sidebar labels stay readable; 20 CJK chars also fits bilingual titles. */
+export const MAX_BASE_NAME_LENGTH = 20;
 export class KnowledgeError extends Error {
   constructor(
     message: string,

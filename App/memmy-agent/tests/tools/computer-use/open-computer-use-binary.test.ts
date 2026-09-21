@@ -10,6 +10,39 @@ afterEach(() => {
 });
 
 describe("bundled Open Computer Use command", () => {
+  it("uses the stable macOS development helper selected by dev-start", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-dev-ocu-"));
+    roots.push(root);
+    const binary = path.join(root, "Applications", "Open Computer Use.app", "Contents", "MacOS", "OpenComputerUse");
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, "fixture", { mode: 0o755 });
+    const environment = { MEMMY_DEV_COMPUTER_USE_BINARY: binary };
+    expect(resolveOpenComputerUseCommand("open-computer-use", { platform: "darwin", packageRoot: root, environment })).toBe(binary);
+    expect(resolveOpenComputerUseCommand("/custom/helper", { environment })).toBe("/custom/helper");
+    expect(resolveOpenComputerUseCommand("open-computer-use", { platform: "linux", packageRoot: root, environment })).toBe("open-computer-use");
+  });
+
+  it("does not apply the development helper override to a packaged app", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-packaged-ocu-"));
+    roots.push(root);
+    const packageRoot = path.join(root, "app.asar.unpacked", "node_modules", "open-computer-use");
+    const binary = path.join(packageRoot, "dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse");
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, "fixture", { mode: 0o755 });
+    expect(resolveOpenComputerUseCommand("open-computer-use", {
+      platform: "darwin", packageRoot, environment: { MEMMY_DEV_COMPUTER_USE_BINARY: "/missing/dev-helper" },
+    })).toBe(binary);
+  });
+
+  it("fails clearly when the configured development helper is unavailable", () => {
+    for (const binary of ["/missing/dev-helper", "relative/helper"]) {
+      expect(() => resolveOpenComputerUseCommand("open-computer-use", {
+        platform: "darwin", packageRoot: "/tmp/dev-package",
+        environment: { MEMMY_DEV_COMPUTER_USE_BINARY: binary },
+      })).toThrow(/Development Computer Use helper is missing|must be an absolute path/);
+    }
+  });
+
   it("passes Linux desktop session variables through MCP without leaking unrelated environment variables", () => {
     const inherited = { DISPLAY: ":1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", PRIVATE_TOKEN: "secret" };
     expect(openComputerUseEnvironment("open-computer-use", { DISPLAY: ":2" }, "linux", inherited)).toEqual({

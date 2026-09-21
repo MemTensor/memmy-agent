@@ -4,6 +4,7 @@ import {
   getComputerHistoryDemoService,
 } from "./computer-history-api.js";
 import type { ComputerHistoryDemoService } from "./computer-history-api.js";
+import { isComputerHistorySupported } from "../platform.js";
 
 const PARAMETERS = {
   type: "object",
@@ -74,7 +75,7 @@ export class ComputerHistoryTool extends Tool {
   }
 
   static enabled(): boolean {
-    return process.env.MEMMY_COMPUTER_HISTORY !== "0";
+    return isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
   }
 
   get name(): string {

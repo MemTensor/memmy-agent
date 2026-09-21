@@ -292,6 +292,8 @@ describe("ComputerHistorySubPage", () => {
     // the suite runs around midnight in UTC or in the developer's timezone.
     const now = new Date();
     now.setHours(12, 0, 0, 0);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
     const openWindow = new Date(now.getTime() - 60 * 60_000);
     const segment = new Date(now.getTime() - 30 * 60_000);
     await renderWith(snapshot({

@@ -28,7 +28,9 @@ console.log('recording written: '+file);
     let resolveNarration!: (value: { content: string }) => void;
     const pendingNarration = new Promise<{ content: string }>((resolve) => { resolveNarration = resolve; });
     const response = { content: JSON.stringify({ title: "Finished work", description: "LATE_FINISHED_ACTION", body: "## Memory summary\n\nLATE_FINISHED_ACTION" }) };
-    const chat = vi.fn(async (..._args: unknown[]) => chat.mock.calls.length === 1 ? pendingNarration : response);
+    const chat = vi.fn<(...args: unknown[]) => Promise<{ content: string }>>()
+      .mockImplementationOnce(() => pendingNarration)
+      .mockResolvedValue(response);
     service.setLlmRuntime((() => ({ model: "stub", provider: { chatWithRetry: chat } })) as unknown as Parameters<typeof service.setLlmRuntime>[0]);
     try {
       const snapshot = service.startObservation();

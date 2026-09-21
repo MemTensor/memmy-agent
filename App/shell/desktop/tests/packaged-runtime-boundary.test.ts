@@ -198,7 +198,7 @@ describe("desktop packaged runtime boundaries", () => {
     });
     for (const scriptName of ["prebuild", "pretypecheck", "pretest"]) {
       expect(agentPackage.scripts?.[scriptName]).toBe(
-        "npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
+        "npm --prefix ../../Knowledge run build && npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
       );
     }
   });
