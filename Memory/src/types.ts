@@ -251,6 +251,9 @@ export interface MemoryListItem {
   status: MemoryStatus;
   title: string;
   summary: string;
+  sourceText?: string;
+  generatedTitle?: string;
+  experienceDraft?: boolean;
   tags: string[];
   metrics?: {
     value?: number;

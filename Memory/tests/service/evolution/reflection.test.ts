@@ -67,6 +67,7 @@ function createUnusableReflectionLlm(): LlmClient {
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "Unusable reflection",
             summary: "unusable reflection summary",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
@@ -119,6 +120,7 @@ function createCapturingReflectionLlm(calls: Array<{
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "Sqlite migration reflection",
             summary: "sqlite migration reflection summary",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },

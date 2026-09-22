@@ -2,6 +2,8 @@ import {
   canonicalJson,
   type JsonValue
 } from "../../contracts/index.js";
+import { languageSteeringLine, steeredPromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import type { MemoryLanguage } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,
@@ -27,7 +29,7 @@ Choose exactly one operation:
 
 For "noop", return an empty profile and do not repeat the current profile.
 For "create" and "update", return the complete final replacement profile, not a delta or change description.
-Write in the language of the current profile. If it is absent, use the dominant human language observable in the paths; if none is observable, use English. Do not translate merely because these instructions are in English.
+Write in the language of the current profile. If it is absent, follow the interface language when one is pinned; otherwise use the dominant human language observable in the paths. Do not translate merely because these instructions are in English.
 Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
@@ -51,7 +53,7 @@ Choose exactly one operation:
 
 For "noop", return an empty profile and do not repeat the current profile.
 For "create" and "update", return the complete final replacement profile, not a delta or change description.
-Write in the language of the current profile. If it is absent, use the dominant human language observable in the paths; if none is observable, use English. Do not translate merely because these instructions are in English.
+Write in the language of the current profile. If it is absent, follow the interface language when one is pinned; otherwise use the dominant human language observable in the paths. Do not translate merely because these instructions are in English.
 Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
@@ -62,6 +64,7 @@ Return exactly one of:
 interface ProjectEnvironmentProfilePipelineDeps {
   repos: Repositories;
   llm: LlmClient;
+  language?: MemoryLanguage;
 }
 
 export class ProjectEnvironmentProfilePipeline {
@@ -78,6 +81,10 @@ export class ProjectEnvironmentProfilePipeline {
       payload.projectId
     ).projectEnvironmentProfile;
     const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
+    const language = currentProfile?.trim()
+      ? steeredPromptLanguage(undefined, [currentProfile])
+      : steeredPromptLanguage(this.deps.language, [derived.compactFileTree]);
+    const systemPrompt = `${derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT}\n\n${languageSteeringLine(language)}`;
     let output: ReturnType<typeof validateProjectEnvironmentProfileOutput>;
     try {
       output = await completeStrictJson({
@@ -85,7 +92,7 @@ export class ProjectEnvironmentProfilePipeline {
         operation: derived.projectKind === "code"
           ? "project_environment_code_profile"
           : "project_environment_folder_profile",
-        systemPrompt: derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT,
+        systemPrompt,
         dynamicInput: profileDynamicInput(derived, currentProfile),
         expectedSchema: {
           op: "noop | create | update",

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type LlmClient, type MemoryDb, type MemoryService } from "../../src/index.js";
 import {
   EpisodeTitleService,
+  episodeTitleDisplayState,
   episodeTitleMeta
 } from "../../src/service/episode-title/episode-title-service.js";
 import { Repositories, type EvolutionJobRecord } from "../../src/storage/repositories.js";
@@ -227,7 +228,7 @@ describe("episode title generation", () => {
     expect(repos.runtime.getEpisode(episodeId)!.title).toBe("单轮任务标题");
   });
 
-  it("leaves the columns untouched when no model is configured", async () => {
+  it("leaves the columns empty and marks the episode waiting when no model is configured", async () => {
     const { db, service } = createTestService();
     const { episodeId } = completeOneTurn(service);
     const unconfigured: LlmClient = {
@@ -239,8 +240,71 @@ describe("episode title generation", () => {
     await titleService.generate(titleJob(episodeId, "final"));
 
     const episode = repos.runtime.getEpisode(episodeId)!;
-    expect(episode.title).toBeUndefined();
-    expect(episode.summary).toBeUndefined();
+    expect(episode.title ?? "").toBe("");
+    expect(episode.summary ?? "").toBe("");
+    expect(episodeTitleMeta(episode)).toMatchObject({ stage: "skipped", reason: "unconfigured" });
+    expect(episodeTitleDisplayState(episode, false)).toEqual({ titleGenerated: false, titlePending: true });
+  });
+
+  it("does not replace a generated episode title when the summary model is removed", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = completeOneTurn(service, "keep-generated");
+    const unconfigured: LlmClient = {
+      ...titleLlm(async () => { throw new Error("must not be called"); }),
+      isConfigured: () => false
+    };
+    let now = "2026-09-22T01:00:00.000Z";
+    const { repos, titleService } = createTitleService(db, unconfigured, { nowIso: () => now });
+    const provisional = {
+      stage: "provisional" as const,
+      generatedAt: now,
+      model: "mock",
+      sourceTurnCount: 1,
+      sourceHash: "existing-provisional"
+    };
+    repos.runtime.updateEpisodeTitle(episodeId, {
+      title: "已生成任务标题",
+      summary: "已有摘要",
+      meta: { episodeTitle: provisional }
+    }, now);
+
+    await titleService.generate(titleJob(episodeId, "final"));
+    now = "2026-09-22T02:00:00.000Z";
+    await titleService.generate(titleJob(episodeId, "final"));
+
+    const kept = repos.runtime.getEpisode(episodeId)!;
+    expect(kept.title).toBe("已生成任务标题");
+    expect(kept.summary).toBe("已有摘要");
+    expect(episodeTitleMeta(kept)).toMatchObject(provisional);
+    expect(episodeTitleDisplayState(kept, false)).toEqual({ titleGenerated: true, titlePending: false });
+
+    const finalMeta = {
+      ...provisional,
+      stage: "final" as const,
+      sourceHash: "existing-final"
+    };
+    repos.runtime.updateEpisodeTitle(episodeId, {
+      title: "终版任务标题",
+      summary: "终版摘要",
+      meta: { episodeTitle: finalMeta }
+    }, now);
+    now = "2026-09-22T03:00:00.000Z";
+    await titleService.generate(titleJob(episodeId, "final"));
+    const finalEpisode = repos.runtime.getEpisode(episodeId)!;
+    expect(finalEpisode.title).toBe("终版任务标题");
+    expect(finalEpisode.summary).toBe("终版摘要");
+    expect(episodeTitleMeta(finalEpisode)).toMatchObject(finalMeta);
+    expect(episodeTitleDisplayState(finalEpisode, false)).toEqual({ titleGenerated: true, titlePending: false });
+
+    const bare = completeOneTurn(service, "repeat-unconfigured");
+    await titleService.generate(titleJob(bare.episodeId, "final"));
+    const skipped = episodeTitleMeta(repos.runtime.getEpisode(bare.episodeId)!);
+    now = "2026-09-22T04:00:00.000Z";
+    await titleService.generate(titleJob(bare.episodeId, "final"));
+    const repeated = repos.runtime.getEpisode(bare.episodeId)!;
+    expect(episodeTitleMeta(repeated)).toEqual(skipped);
+    expect(repeated.title ?? "").toBe("");
+    expect(episodeTitleDisplayState(repeated, false)).toEqual({ titleGenerated: false, titlePending: true });
   });
 
   it("rejects a model response that is missing a field instead of writing a partial row", async () => {
@@ -406,5 +470,19 @@ describe("episode title generation", () => {
       `SELECT COUNT(*) AS count FROM evolution_jobs WHERE job_type IN ('reflection', 'reward')`
     ).get() as { count: number };
     expect(followUps.count).toBeGreaterThan(0);
+  });
+
+  it("treats a queued title job as waiting and an old episode without meta as ready fallback", () => {
+    const oldEpisode = {
+      title: undefined,
+      summary: undefined,
+      meta: {}
+    } as Parameters<typeof episodeTitleDisplayState>[0];
+    expect(episodeTitleDisplayState(oldEpisode, false)).toEqual({ titleGenerated: false, titlePending: false });
+    expect(episodeTitleDisplayState(oldEpisode, true)).toEqual({ titleGenerated: false, titlePending: true });
+    expect(episodeTitleDisplayState({
+      ...oldEpisode,
+      meta: { episodeTitle: { stage: "final", generatedAt: "", model: "x", sourceTurnCount: 1, sourceHash: "abc" } }
+    } as Parameters<typeof episodeTitleDisplayState>[0], true)).toEqual({ titleGenerated: true, titlePending: false });
   });
 });

@@ -1,4 +1,11 @@
 import { isRecord } from "../../utils/json.js";
+
+export class SummaryModelUnconfiguredError extends Error {
+  constructor() {
+    super("summary model is not configured");
+    this.name = "SummaryModelUnconfiguredError";
+  }
+}
 import { clip,firstLine } from "../../utils/text.js";
 /**
  * Embedding and trace-summary worker domain, extracted from MemoryService.
@@ -7,6 +14,7 @@ import { clip,firstLine } from "../../utils/text.js";
  * generic job-enqueue policy; this processor owns the job-specific state
  * transitions, model calls, and change records.
  */
+import type { TraceCaptureSummary } from "../evolution/span-pipeline.js";
 import { retrievalDocumentSourceHash,traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { Embedder,LlmClient } from "../../model/types.js";
 import type { EmbeddingRetryRecord,EmbeddingRetryVectorField,EpisodeRecord,EvolutionJobRecord,Repositories } from "../../storage/repositories.js";
@@ -34,7 +42,6 @@ import {
   buildUserMemory,
   isDynamicCurrentFactQuery
 } from "../user-memory/user-memory.js";
-import { fallbackCaptureSummary } from "../evolution/capture-summary.js";
 import {
   embeddingTextForMemory,
   traceSummaryEmbeddingText,
@@ -45,6 +52,7 @@ import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js"
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type TurnCaptureDecision = {
   createL1: boolean;
+  l1Title: string;
   l1Summary: string;
   policyEligible: boolean;
   createUserMemory: boolean;
@@ -136,13 +144,14 @@ export interface EmbeddingJobProcessorDeps {
       reflectionText: string;
     },
     options?: { strict?: boolean }
-  ): Promise<string>;
+  ): Promise<TraceCaptureSummary>;
   decideTurnMemoryForCapture(input: {
     trace: TraceMeta;
     userText: string;
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
+    mustKeep?: boolean;
   }): Promise<TurnCaptureDecision>;
   finalizeClosedEpisode(episode: EpisodeRecord, at: string): EvolutionJobRecord[];
 }
@@ -312,11 +321,11 @@ export class EmbeddingJobProcessor {
     if (!processingJobMatchesMemory(job, memory)) return;
     const trace = traceMetaFromMemory(memory);
     if (!trace) throw new Error(`import trace payload is missing: ${memory.id}`);
+    if (!this.deps.llm.isConfigured()) throw new SummaryModelUnconfiguredError();
 
-    const generated = this.deps.llm.isConfigured()
-      ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true })
-      : fallbackImportSummary(trace, memory);
-    const summary = firstRealSummary(generated) ?? fallbackImportSummary(trace, memory);
+    const generated = await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true });
+    const summary = firstRealSummary(generated.summary) ?? fallbackImportSummary(trace, memory);
+    const title = generated?.title.trim() || stringFromRecord(memory.info, "title") || "";
     const at = this.deps.nowIso();
     const current = this.deps.repos.memories.get(memory.id);
     if (!current || !processingJobMatchesMemory(job, current)) return;
@@ -324,7 +333,7 @@ export class EmbeddingJobProcessor {
     this.deps.repos.transaction(() => {
       const previous = current;
       const next = updateImportPipelineStatus(updateTraceImportSummary(current, {
-        summary, alpha: IMPORT_DEFAULT_ALPHA, value: IMPORT_DEFAULT_VALUE, priority: IMPORT_DEFAULT_PRIORITY,
+        summary, title, alpha: IMPORT_DEFAULT_ALPHA, value: IMPORT_DEFAULT_VALUE, priority: IMPORT_DEFAULT_PRIORITY,
         tags: importStatusTags(memory.tags, "indexing"), updatedAt: at
       }), "indexing", at);
       const saved = this.deps.repos.memories.update(next);
@@ -350,22 +359,23 @@ export class EmbeddingJobProcessor {
     if (!processingJobMatchesMemory(job, memory)) return;
     const trace = traceMetaFromMemory(memory);
     if (!trace) throw new Error(`trace payload is missing: ${memory.id}`);
+    if (!this.deps.llm.isConfigured()) throw new SummaryModelUnconfiguredError();
 
     const decideCapture = job.payload.decideCapture === true;
+    const mustKeep = isForcedL1Capture(memory, trace);
     const proposedDecision = decideCapture
       ? await this.deps.decideTurnMemoryForCapture({
           trace,
           userText: trace.userText,
           agentText: trace.agentText,
           toolCalls: trace.toolCalls,
-          reflectionText: ""
+          reflectionText: "",
+          mustKeep
         })
       : undefined;
     const proposedSummary = proposedDecision
-      ? proposedDecision.l1Summary
-      : this.deps.llm.isConfigured()
-        ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true })
-        : trace.summary || fallbackTraceSummary(trace);
+      ? { title: proposedDecision.l1Title, summary: proposedDecision.l1Summary }
+      : await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true });
     const at = this.deps.nowIso();
     const current = this.deps.repos.memories.get(memory.id);
     if (!current || !processingJobMatchesMemory(job, current)) return;
@@ -374,7 +384,11 @@ export class EmbeddingJobProcessor {
     const decision = proposedDecision
       ? constrainTurnMemoryDecision(proposedDecision, current, currentTrace)
       : undefined;
-    const summary = decision?.l1Summary ?? proposedSummary;
+    const title = (decision?.l1Title ?? proposedSummary.title).trim();
+    const summary = decision?.l1Summary ?? proposedSummary.summary;
+    if (decision?.createL1 && (!title || !summary.trim())) {
+      throw new Error("trace summary requires non-empty title and summary");
+    }
 
     let finalizedEpisodeId: string | undefined;
     this.deps.repos.transaction(() => {
@@ -397,8 +411,9 @@ export class EmbeddingJobProcessor {
         return;
       }
       const previous = current;
-      const summarized = summary.trim() && summary.trim() !== currentTrace.summary.trim()
-        ? this.deps.repos.memories.update(updateTraceSummary(current, { summary: summary.trim(), updatedAt: at }))
+      const summarized = (summary.trim() && summary.trim() !== currentTrace.summary.trim()) ||
+        (title && title !== stringFromRecord(current.info, "title"))
+        ? this.deps.repos.memories.update(updateTraceSummary(current, { summary: summary.trim(), title, updatedAt: at }))
         : previous;
       const saved = decision
         ? this.deps.repos.memories.update(acceptTurnMemoryDecision(summarized, decision, at))
@@ -637,19 +652,25 @@ export class EmbeddingJobProcessor {
   }
 }
 
-export function updateTraceSummary(memory: MemoryRow, input: { summary: string; updatedAt: string }): MemoryRow {
+export function updateTraceSummary(memory: MemoryRow, input: { summary: string; title?: string; updatedAt: string }): MemoryRow {
   const trace = traceMetaFromMemory(memory);
   if (!trace) return memory;
   const internalTrace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : {};
-  const nextTrace = { ...internalTrace, summary: input.summary, summary_at: input.updatedAt };
+  const title = input.title?.trim();
+  const nextTrace = {
+    ...internalTrace,
+    summary: input.summary,
+    summary_at: input.updatedAt,
+    ...(title ? { title } : {})
+  };
   const memoryValue = renderTraceMemoryValue({
     summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"),
     userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls,
     reflection: { text: trace.reflection, alpha: trace.alpha }, value: trace.value, priority: trace.priority
   });
-  return { ...memory, memoryValue, contentHash: stableHash(memoryValue), info: { ...memory.info, summary: input.summary }, properties: {
-    ...memory.properties, info: { ...(memory.properties.info ?? {}), summary: input.summary },
-    internal_info: { ...memory.properties.internal_info, summary: input.summary, trace: nextTrace }
+  return { ...memory, memoryValue, contentHash: stableHash(memoryValue), info: { ...memory.info, summary: input.summary, ...(title ? { title } : {}) }, properties: {
+    ...memory.properties, info: { ...(memory.properties.info ?? {}), summary: input.summary, ...(title ? { title } : {}) },
+    internal_info: { ...memory.properties.internal_info, summary: input.summary, ...(title ? { title } : {}), trace: nextTrace }
   }, updatedAt: input.updatedAt };
 }
 
@@ -754,7 +775,7 @@ function constrainTurnMemoryDecision(
 
   const createUserMemory = !dynamicCurrent && userMemoryTypes.length > 0 &&
     decision.createUserMemory && decision.userMemoryEvidence.length > 0;
-  let createL1 = decision.createL1 && decision.l1Evidence.length > 0;
+  let createL1 = decision.createL1;
   const guards: string[] = [];
   if (decision.createUserMemory && decision.userMemoryEvidence.length === 0) {
     guards.push("user-memory-evidence-missing");
@@ -774,7 +795,8 @@ function constrainTurnMemoryDecision(
   return {
     ...decision,
     createL1,
-    l1Summary: createL1 ? decision.l1Summary.trim() || fallbackTraceSummary(trace) : "",
+    l1Title: createL1 ? decision.l1Title.trim() : "",
+    l1Summary: createL1 ? decision.l1Summary.trim() : "",
     policyEligible,
     createUserMemory,
     userMemoryTypes: createUserMemory ? userMemoryTypes : [],
@@ -801,6 +823,10 @@ function isPolicyEligibleCapture(
     if (evidence.kind !== "task_outcome") return false;
     return evidence.sourceRole === "user" || evidence.sourceRole === "tool" || verifiedToolObservation;
   });
+}
+
+export function isForcedL1Capture(memory: MemoryRow, trace: TraceMeta): boolean {
+  return hasVerifiedDurableToolObservation(memory, trace, isDynamicCurrentFactQuery(trace.userText.trim()));
 }
 
 function hasVerifiedDurableToolObservation(
@@ -839,14 +865,6 @@ function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {
   const title = stringFromRecord(memory.info, "title");
   const summary = [trace.userText, trace.agentText, title].map((value) => firstLine(value ?? "")).find((value) => value && !isImportSummaryPlaceholder(value));
   return clip(summary || "导入记忆", 200);
-}
-
-function fallbackTraceSummary(trace: TraceMeta): string {
-  return fallbackCaptureSummary({
-    userText: trace.userText,
-    agentText: trace.agentText,
-    toolCalls: trace.toolCalls
-  });
 }
 
 function renderTraceMemoryValue(step: { summary: string; rawTurnId?: string; stepIndex?: number; userText?: string; agentText?: string; toolCalls: Array<{ name: string; input?: unknown; output?: unknown; error?: string }>; reflection: { text: string | null; alpha: number }; value: number; priority: number }): string {

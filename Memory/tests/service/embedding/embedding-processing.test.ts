@@ -4,6 +4,7 @@ import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
   type Embedder,
+  type LlmClient,
   type MemoryRow
 } from "../../../src/index.js";
 import {
@@ -17,6 +18,7 @@ import {
 import { ModelHttpError } from "../../../src/model/http.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
+  addAgentSourceImport,
   createBatchReflectionLlm,
   createCapturingEmbedder,
   createMemoryServiceFixture,
@@ -491,6 +493,92 @@ describe("MemoryService / embedding / processing", () => {
       `SELECT embedding_dim FROM memory_vector_entries
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
     ).get(complete.l1MemoryId)).toEqual({ embedding_dim: 3 });
+    db.close();
+  });
+
+  it("keeps L1 waiting without a summary model, then generates a title after one is configured", async () => {
+    let configured = false;
+    const llm: LlmClient = {
+      config: {
+        ...DEFAULT_MEMMY_CONFIG.summary,
+        provider: "host",
+        endpoint: "http://127.0.0.1/summary",
+        model: "summary-test"
+      },
+      isConfigured: () => configured,
+      async complete() {
+        return "{}";
+      },
+      async completeJson<T extends Record<string, unknown>>() {
+        return { title: "生成标题", summary: "生成摘要" } as unknown as T;
+      },
+      status: () => ({
+        provider: "host",
+        model: "summary-test",
+        configured,
+        remote: true
+      })
+    };
+    const { db, service } = createTestService({ llm });
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "default", sessionKey: "unconfigured-summary" }
+    });
+    service.completeTurn("turn-unconfigured-summary", {
+      sessionId: session.sessionId,
+      query: "请修复自动扫描卡顿并运行测试",
+      answer: "已完成修复并运行测试。"
+    });
+    addAgentSourceImport(
+      service,
+      { source: "codex", profileId: "unconfigured-import", userId: "unconfigured-import" },
+      "请修复导入流程并验证结果",
+      "unconfigured-import"
+    );
+
+    const held = await service.runWorkerOnce(100);
+    const heldAgain = await service.runWorkerOnce(100);
+    const summaryJobs = (run: { jobs: Array<{ jobType: string }> }) =>
+      run.jobs.filter((job) => job.jobType === "trace_summary" || job.jobType === "import_summary");
+    expect(summaryJobs(held)).toEqual([]);
+    expect(summaryJobs(heldAgain)).toEqual([]);
+
+    const waiting = service.panelItems({ layer: "L1" }).items;
+    expect(waiting.length).toBeGreaterThanOrEqual(2);
+    expect(waiting.every((item) => item.processing?.state === "summary_pending")).toBe(true);
+    expect(waiting.map((item) => item.sourceText)).toEqual(expect.arrayContaining([
+      "请修复自动扫描卡顿并运行测试",
+      "请修复导入流程并验证结果"
+    ]));
+    expect(waiting.some((item) => item.summary === "生成摘要" || item.generatedTitle === "生成标题")).toBe(false);
+    const queued = db.db.prepare(
+      `SELECT status FROM evolution_jobs WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).all() as Array<{ status: string }>;
+    expect(queued.length).toBeGreaterThanOrEqual(2);
+    expect(queued.every((job) => job.status === "queued")).toBe(true);
+    const past = new Date(Date.now() - 5_000).toISOString();
+    db.db.prepare(
+      `UPDATE evolution_jobs
+       SET payload_json = json_set(payload_json, '$.runAfter', ?)
+       WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).run(past);
+    const summaryDue = Date.parse(past);
+    const heldWake = service.nextWorkerRunAt();
+    expect(heldWake).not.toBe(summaryDue);
+    expect(heldWake === undefined || heldWake > Date.now()).toBe(true);
+
+    configured = true;
+    expect(service.nextWorkerRunAt()).toBe(summaryDue);
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    const generated = service.panelItems({ layer: "L1" }).items;
+    expect(generated.every((item) => item.generatedTitle === "生成标题")).toBe(true);
+    expect(generated.every((item) => item.summary === "生成摘要")).toBe(true);
+    expect(generated.every((item) => item.processing?.state !== "summary_pending" && item.processing?.state !== "summarizing")).toBe(true);
+    expect(generated.every((item) => item.processing?.state !== "failed")).toBe(true);
+    const finished = db.db.prepare(
+      `SELECT status FROM evolution_jobs WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).all() as Array<{ status: string }>;
+    expect(finished.every((job) => job.status === "succeeded")).toBe(true);
     db.close();
   });
 });

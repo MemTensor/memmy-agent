@@ -3,9 +3,9 @@ import {
   SKILL_REBUILD_PROMPT,
   buildSkillDraft,
   cosine,
-  detectDominantLanguage,
   extractToolNamesFromTraces,
   languageSteeringLine,
+  steeredPromptLanguage,
   policyIsEligibleForDownstream,
   policyMetaFromMemory,
   skillEtaAfterRewardDrift,
@@ -790,9 +790,10 @@ private async enhanceSkillDraft(
         policy.procedure,
         ...evidenceTraces.flatMap((trace) => [trace.userText, trace.agentText, trace.reflection])
       ];
+      const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
       const outputLanguage = skillOutputLanguageFor(
         this.deps.config.algorithm.skill.outputLanguageMode,
-        detectDominantLanguage(languageSamples)
+        steeredLanguage
       );
       const rebuild = existingSkill ? skillRebuildPlan(policy, existingSkill, evidenceTraces) : null;
       const prompt = rebuild ? SKILL_REBUILD_PROMPT : SKILL_CRYSTALLIZE_PROMPT;
@@ -823,7 +824,7 @@ private async enhanceSkillDraft(
         },
         {
           role: "system",
-          content: languageSteeringLine(detectDominantLanguage(languageSamples))
+          content: languageSteeringLine(outputLanguage)
         },
         {
           role: "user",
@@ -1078,9 +1079,9 @@ function coerceSkillProcedureJson(result: Record<string, unknown>): Record<strin
   };
 }
 
-function skillOutputLanguageFor(mode: "follow_policy" | "zh" | "en", detected: "auto" | "zh" | "en"): "zh" | "en" {
+function skillOutputLanguageFor(mode: "follow_policy" | "zh" | "en", steered: "auto" | "zh" | "en"): "zh" | "en" {
   if (mode === "zh" || mode === "en") return mode;
-  return detected === "zh" ? "zh" : "en";
+  return steered === "zh" ? "zh" : "en";
 }
 
 function skillEvidenceEpisode(

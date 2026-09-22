@@ -302,15 +302,21 @@ describe("User Memory", () => {
   });
 
   it("does not let the summary model reject a verified durable tool observation", async () => {
-    const { db, service } = createTestService({
-      llm: captureDecisionLlm([], {
-        create_l1: false,
-        l1_summary: "",
-        create_user_memory: false,
-        user_memory_types: [],
-        reason: "incorrect model rejection"
-      })
+    const prompts: string[] = [];
+    const llm = captureDecisionLlm([], {
+      create_l1: true,
+      l1_title: "本机内存容量",
+      l1_summary: "本机内存为 16 GB。",
+      create_user_memory: false,
+      user_memory_types: [],
+      reason: "forced keep still writes title and summary"
     });
+    const completeJson = llm.completeJson.bind(llm);
+    llm.completeJson = async (messages, options) => {
+      prompts.push(messages.map((message) => message.content).join("\n"));
+      return completeJson(messages, options);
+    };
+    const { db, service } = createTestService({ llm });
     const session = open(service, "model-hardware-guard-user");
     const completed = service.completeTurn("turn-model-hardware-guard", {
       sessionId: session.sessionId,
@@ -323,14 +329,158 @@ describe("User Memory", () => {
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     expect(db.db.prepare(
-      `SELECT status, memory_key, json_extract(info_json, '$.evidence_status') AS evidence_status
+      `SELECT status, memory_key, json_extract(info_json, '$.evidence_status') AS evidence_status,
+              json_extract(info_json, '$.title') AS title,
+              json_extract(info_json, '$.summary') AS summary
        FROM memories WHERE id = ?`
     ).get(completed.l1MemoryIds[0])).toEqual({
       status: "activated",
       memory_key: "trace:environment:device:local:default:device.total_memory",
-      evidence_status: "verified"
+      evidence_status: "verified",
+      title: "本机内存容量",
+      summary: "本机内存为 16 GB。"
     });
     expect(rowCount(db, "user_memories")).toBe(0);
+    expect(prompts.some((prompt) => prompt.includes("Do not return l1: null") && prompt.includes("Do not omit user"))).toBe(true);
+    db.close();
+  });
+
+  it("keeps a forced L1 when evidence quotes do not match the source", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_title: "本机内存容量",
+        l1_summary: "本机内存为 16 GB。",
+        l1_evidence: [{ quote: "这段引文不在原文里", source_role: "user", kind: "task_outcome" }],
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "unmatched quotes still keep forced L1"
+      })
+    });
+    const session = open(service, "unmatched-evidence-user");
+    const completed = service.completeTurn("turn-unmatched-evidence", {
+      sessionId: session.sessionId,
+      query: "我的电脑内存多大？",
+      answer: "工具读取结果是 16 GB。",
+      toolCalls: [{ name: "system_info", input: { field: "memory" } }],
+      toolResults: [{ totalMemory: "16 GB" }]
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(
+      `SELECT status, json_extract(info_json, '$.title') AS title,
+              json_extract(info_json, '$.summary') AS summary,
+              json_extract(info_json, '$.policy_eligible') AS policy_eligible
+       FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryIds[0])).toEqual({
+      status: "activated",
+      title: "本机内存容量",
+      summary: "本机内存为 16 GB。",
+      policy_eligible: 0
+    });
+    db.close();
+  });
+
+  it("retries a forced capture when title or summary is empty instead of filling the first user line", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_title: "",
+        l1_summary: "",
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "empty forced capture"
+      })
+    });
+    const session = open(service, "empty-forced-title-user");
+    const completed = service.completeTurn("turn-empty-forced-title", {
+      sessionId: session.sessionId,
+      query: "我的电脑内存多大？",
+      answer: "工具读取结果是 16 GB。",
+      toolCalls: [{ name: "system_info", input: { field: "memory" } }],
+      toolResults: [{ totalMemory: "16 GB" }]
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    const memory = db.db.prepare(
+      `SELECT status, memory_value,
+              json_extract(info_json, '$.title') AS title,
+              json_extract(info_json, '$.summary') AS summary
+       FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryIds[0]) as {
+      status: string;
+      memory_value: string;
+      title: string | null;
+      summary: string | null;
+    };
+    expect(memory.status).not.toBe("deleted");
+    expect(memory.title).toBeNull();
+    expect(memory.summary ?? "").toBe("");
+    expect(memory.memory_value).not.toContain("Summary: 我的电脑内存多大");
+    const jobs = db.db.prepare(
+      `SELECT status, attempts FROM evolution_jobs WHERE job_type = 'trace_summary' AND target_memory_id = ?`
+    ).all(completed.l1MemoryIds[0]) as Array<{ status: string; attempts: number }>;
+    expect(jobs.some((job) => job.status === "succeeded")).toBe(false);
+    expect(jobs.some((job) => job.attempts >= 1)).toBe(true);
+    db.close();
+  });
+
+  it("steers capture to the pinned interface language over the turn language", async () => {
+    const messages: LlmMessage[][] = [];
+    const base = captureDecisionLlm([], {
+      create_l1: true,
+      l1_title: "Local memory size",
+      l1_summary: "This machine has 16 GB of RAM.",
+      create_user_memory: false,
+      user_memory_types: [],
+      reason: "language pin"
+    });
+    const { db, service } = createTestService({
+      config: { ...DEFAULT_MEMMY_CONFIG, language: "en-US" },
+      llm: {
+        ...base,
+        async completeJson(nextMessages, options) {
+          messages.push(nextMessages);
+          return base.completeJson(nextMessages, options);
+        }
+      }
+    });
+    const session = open(service, "capture-language-user");
+    service.completeTurn("turn-capture-language", {
+      sessionId: session.sessionId,
+      query: "请记住这台电脑的内存是 16 GB。",
+      answer: "已记下。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const steering = messages[0]?.find((message) => message.content.includes("All natural-language answers MUST"))?.content;
+    expect(steering).toContain("English");
+    expect(steering).not.toContain("Simplified Chinese");
+    db.close();
+  });
+
+  it("does not write a title when capture leaves L1 null", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: false,
+        l1_summary: "",
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "no durable L1"
+      })
+    });
+    const session = open(service, "null-l1-user");
+    const completed = service.completeTurn("turn-null-l1", {
+      sessionId: session.sessionId,
+      query: "今天天气怎么样？",
+      answer: "我没有查天气。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "deleted" });
     db.close();
   });
 
@@ -1311,6 +1461,7 @@ function rowCount(db: ReturnType<typeof createTestService>["db"], table: string)
 
 type LegacyCaptureDecision = {
   create_l1: boolean;
+  l1_title?: string;
   l1_summary: string;
   policy_eligible?: boolean;
   create_user_memory: boolean;
@@ -1396,6 +1547,7 @@ function compactCaptureDecision(decision: LegacyCaptureDecision): Record<string,
       : "create";
   return {
     l1: decision.create_l1 ? {
+      title: decision.l1_title?.trim() || clipTitle(decision.l1_summary),
       summary: decision.l1_summary,
       evidence: l1Evidence
     } : null,
@@ -1406,4 +1558,9 @@ function compactCaptureDecision(decision: LegacyCaptureDecision): Record<string,
       replacement: decision.corrected_user_memory_content ?? ""
     } : null
   };
+}
+
+function clipTitle(summary: string): string {
+  const cleaned = summary.replace(/\s+/g, " ").trim();
+  return cleaned.length <= 30 ? cleaned : `${cleaned.slice(0, 27)}...`;
 }

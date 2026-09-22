@@ -1,5 +1,6 @@
 import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { kindFromMemory } from "../../storage/repositories.js";
+import { displayFieldsForMemory } from "./display-fields.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
 import { isRecord } from "../../utils/json.js";
@@ -9,6 +10,7 @@ export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessin
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
   return { id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer, status: memory.status,
     title: detailTitleForMemory(memory), summary: detailSummaryForMemory(memory), tags: panelTagsForMemory(memory, processing),
+    ...displayFieldsForMemory(memory),
     updatedAt: memory.updatedAt, version: memory.version, processing, body: memory.memoryValue, createdAt: memory.createdAt,
     sourceMemoryIds: stringArray(sourceMemoryIds), metadata: { source: panelSourceForMemory(memory), info: memory.info, properties: memory.properties } };
 }
@@ -19,7 +21,16 @@ export function detailTitleForMemory(memory: MemoryRow): string {
     if (topic) return truncateDetailTitle(topic);
   }
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
-  const title = firstDetailDisplayString(stringFromMaybeRecord(memory.info, "title"), stringFromMaybeRecord(memory.properties.internal_info, "title"), trace?.summary, policy?.title, worldModel?.title, skill?.name, firstReadableDetailMemoryLine(memory.memoryValue), isInternalMemoryKeyForDisplay(memory.memoryKey) ? undefined : memory.memoryKey);
+  const generatedTitle = firstDetailDisplayString(stringFromMaybeRecord(memory.info, "title"), stringFromMaybeRecord(memory.properties.internal_info, "title"));
+  const title = firstDetailDisplayString(
+    generatedTitle,
+    policy?.title,
+    worldModel?.title,
+    skill?.name,
+    trace?.summary,
+    firstReadableDetailMemoryLine(memory.memoryValue),
+    isInternalMemoryKeyForDisplay(memory.memoryKey) ? undefined : memory.memoryKey
+  );
   return truncateDetailTitle(title ?? memory.id);
 }
 
@@ -28,7 +39,17 @@ export function detailSummaryForMemory(memory: MemoryRow): string {
     return stringFromMaybeRecord(memory.properties.internal_info, "requirement") ?? "";
   }
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
-  return firstDetailDisplayString(stringFromMaybeRecord(memory.info, "summary"), stringFromMaybeRecord(memory.properties.internal_info, "summary"), trace?.summary, policy?.trigger, policy?.procedure, worldModel?.body, worldModel?.title, skill?.invocationGuide, firstReadableDetailMemoryLine(memory.memoryValue), firstLine(memory.memoryValue)) ?? "";
+  return firstDetailDisplayString(
+    stringFromMaybeRecord(memory.info, "summary"),
+    stringFromMaybeRecord(memory.properties.internal_info, "summary"),
+    trace?.summary,
+    policy?.procedure,
+    worldModel?.body,
+    worldModel?.title,
+    skill?.invocationGuide,
+    firstReadableDetailMemoryLine(memory.memoryValue),
+    firstLine(memory.memoryValue)
+  ) ?? "";
 }
 
 export function firstDetailDisplayString(...values: Array<string | undefined | null>): string | undefined {

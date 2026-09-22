@@ -817,7 +817,9 @@ describe("MemoryService / evolution / policy induction", () => {
         };
       };
     };
-    expect(properties.internal_info?.policy?.title).toBe("Use focused pytest migration checks");
+    expect(properties.internal_info?.policy?.title).toBe("Use focused pytest migratio...");
+    expect(properties.internal_info?.policy?.title!.length).toBeLessThanOrEqual(30);
+    expect(properties.internal_info?.policy?.title).not.toBe(properties.internal_info?.policy?.trigger);
     expect(properties.internal_info?.policy?.trigger).toBe("pytest workflow fails around sqlite migration output");
     expect(properties.internal_info?.policy?.procedure).toContain("Run the focused pytest workflow");
     expect(properties.internal_info?.policy?.procedure).toContain("inspect migration output");
@@ -1239,6 +1241,7 @@ function createBc08SummaryLlm(): LlmClient {
       if (payload.includes("以后不要写不必要的兜底代码")) {
         return {
           l1: {
+            title: "保持代码简洁",
             summary: "用户要求代码保持简洁、避免不必要的兜底；本轮已精简并通过测试。",
             evidence: [{
               quote: "已精简代码并通过测试",
@@ -1262,6 +1265,7 @@ function createBc08SummaryLlm(): LlmClient {
       }
       return {
         l1: {
+          title: "删除不必要兜底",
           summary: "按既有反馈删除不必要兜底，并通过测试验证。",
           evidence: [{
             quote: "测试验证通过",

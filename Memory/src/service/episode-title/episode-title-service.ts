@@ -12,7 +12,7 @@
  * `raw_turns.source_memory_ids` holds the memories injected into the turn by
  * retrieval, which belong to earlier tasks.
  */
-import { languageSteeringLine, type PromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import { languageSteeringLine, steeredPromptLanguage, type PromptLanguage } from "../../algorithm/plugin-algorithms.js";
 import type { MemoryLanguage } from "../../config/index.js";
 import type { JsonValue } from "../../contracts/index.js";
 import type { LlmClient } from "../../model/types.js";
@@ -36,10 +36,8 @@ const TAIL_INPUT_TURNS = 15;
 const MAX_INPUT_TURNS = HEAD_INPUT_TURNS + TAIL_INPUT_TURNS;
 const USER_TEXT_MAX_CHARS = 800;
 const ASSISTANT_TEXT_MAX_CHARS = 800;
-/** Share of CJK among a user's letters that selects Chinese output. */
-const CHINESE_LETTER_SHARE = 0.2;
 
-export type EpisodeTitleStage = "provisional" | "final";
+export type EpisodeTitleStage = "provisional" | "final" | "skipped";
 
 export class EpisodeTitleInputChangedError extends Error {
   constructor(episodeId: string) {
@@ -102,6 +100,7 @@ export interface EpisodeTitleMeta {
   model: string;
   sourceTurnCount: number;
   sourceHash: string;
+  reason?: string;
 }
 
 interface EpisodeTitleServiceDeps {
@@ -122,8 +121,10 @@ export class EpisodeTitleService {
     if (!episodeId) throw new Error(`episode title job is missing an episode: ${job.id}`);
     const episode = this.deps.repos.runtime.getEpisode(episodeId);
     if (!episode) throw new Error(`episode title target not found: ${episodeId}`);
-    // Without a model the fallback chain in the readers keeps working unchanged.
-    if (!this.deps.llm.isConfigured()) return;
+    if (!this.deps.llm.isConfigured()) {
+      this.markUnconfigured(episode);
+      return;
+    }
     if (!shouldGenerateEpisodeTitle(episode, stage)) return;
 
     const built = this.buildInput(stage, episodeId);
@@ -193,14 +194,37 @@ export class EpisodeTitleService {
       });
     }
     const input: EpisodeTitleInput = { stage, turns, omittedTurnCount: selected.omittedTurnCount };
+    const userSamples = turns.map((turn) => turn.user).filter(Boolean) as string[];
+    const assistantSamples = turns.map((turn) => turn.assistant).filter(Boolean) as string[];
     return {
       input,
       sourceHash: stableHash(input as unknown as Record<string, unknown>),
-      // The user's own interface language wins; detection only covers hosts that
-      // do not pin one, such as a CLI agent.
-      language: promptLanguageFor(this.deps.language) ?? titleLanguage(turns),
+      language: steeredPromptLanguage(
+        this.deps.language,
+        userSamples.length > 0 ? userSamples : assistantSamples
+      ),
       totalTurnCount: selected.totalTurnCount
     };
+  }
+
+  private markUnconfigured(episode: EpisodeRecord): void {
+    const existing = episodeTitleMeta(episode);
+    if (existing?.stage === "provisional" || existing?.stage === "final") return;
+    if (existing?.stage === "skipped" && existing.reason === "unconfigured") return;
+    const at = this.deps.nowIso();
+    const meta: EpisodeTitleMeta = {
+      stage: "skipped",
+      reason: "unconfigured",
+      generatedAt: at,
+      model: "",
+      sourceTurnCount: 0,
+      sourceHash: ""
+    };
+    this.deps.repos.runtime.updateEpisodeTitle(episode.id, {
+      title: episode.title ?? "",
+      summary: episode.summary ?? "",
+      meta: { episodeTitle: meta }
+    }, at);
   }
 
   /**
@@ -239,7 +263,20 @@ export class EpisodeTitleService {
 /** A provisional title never overwrites an existing one; a final title always may. */
 export function shouldGenerateEpisodeTitle(episode: EpisodeRecord, stage: EpisodeTitleStage): boolean {
   if (stage === "final") return true;
+  if (episodeTitleMeta(episode)?.stage === "skipped") return true;
   return !episodeTitleMeta(episode) && !episode.title?.trim();
+}
+
+export function episodeTitleDisplayState(
+  episode: EpisodeRecord,
+  titleJobPending: boolean
+): { titleGenerated: boolean; titlePending: boolean } {
+  const meta = episodeTitleMeta(episode);
+  const titleGenerated = meta?.stage === "provisional" || meta?.stage === "final";
+  const titlePending = !titleGenerated && (
+    titleJobPending || (meta?.stage === "skipped" && meta.reason === "unconfigured")
+  );
+  return { titleGenerated, titlePending };
 }
 
 /**
@@ -256,44 +293,17 @@ export function episodeTitleMeta(episode: EpisodeRecord): EpisodeTitleMeta | und
   const meta = episode.meta.episodeTitle;
   if (!isRecord(meta)) return undefined;
   const stage = meta.stage;
-  const sourceHash = meta.sourceHash;
-  if (stage !== "provisional" && stage !== "final") return undefined;
-  if (typeof sourceHash !== "string") return undefined;
+  if (stage !== "provisional" && stage !== "final" && stage !== "skipped") return undefined;
+  const sourceHash = typeof meta.sourceHash === "string" ? meta.sourceHash : "";
+  if (stage !== "skipped" && !sourceHash) return undefined;
   return {
     stage,
     generatedAt: typeof meta.generatedAt === "string" ? meta.generatedAt : "",
     model: typeof meta.model === "string" ? meta.model : "",
     sourceTurnCount: typeof meta.sourceTurnCount === "number" ? meta.sourceTurnCount : 0,
-    sourceHash
+    sourceHash,
+    ...(typeof meta.reason === "string" ? { reason: meta.reason } : {})
   };
-}
-
-function promptLanguageFor(language: MemoryLanguage | undefined): PromptLanguage | undefined {
-  if (language === "zh-CN") return "zh";
-  if (language === "en-US") return "en";
-  return undefined;
-}
-
-/**
- * A task is named in the language its user writes in.  The shared detector is
- * not used here: it needs CJK to hold 70% of all letters, which a Chinese turn
- * about code rarely reaches once identifiers, paths and commands are counted.
- */
-function titleLanguage(turns: readonly EpisodeTitleInputTurn[]): PromptLanguage {
-  const samples = turns.map((turn) => turn.user).filter(Boolean) as string[];
-  const fallback = turns.map((turn) => turn.assistant).filter(Boolean) as string[];
-  let cjk = 0;
-  let latin = 0;
-  for (const sample of samples.length > 0 ? samples : fallback) {
-    for (let index = 0; index < sample.length; index += 1) {
-      const code = sample.charCodeAt(index);
-      if (code >= 0x4e00 && code <= 0x9fff) cjk += 1;
-      else if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) latin += 1;
-    }
-  }
-  const total = cjk + latin;
-  if (total === 0) return "auto";
-  return cjk / total >= CHINESE_LETTER_SHARE ? "zh" : "en";
 }
 
 function episodeTitleStageFromPayload(value: unknown): EpisodeTitleStage {

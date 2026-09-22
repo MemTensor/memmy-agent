@@ -526,19 +526,36 @@ export function importStatusTags(tags: string[], _status: "indexing" | "indexed"
   return uniq(tags.filter((tag) => !(IMPORT_STATUS_TAGS as readonly string[]).includes(tag)));
 }
 
-export function updateTraceImportSummary(memory: MemoryRow, input: { summary: string; alpha: number; value: number; priority: number; tags: string[]; updatedAt: string }): MemoryRow {
+export function updateTraceImportSummary(memory: MemoryRow, input: { summary: string; title?: string; alpha: number; value: number; priority: number; tags: string[]; updatedAt: string }): MemoryRow {
   const internalTrace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : {};
   const trace = traceMetaFromMemory(memory);
   if (!trace) return memory;
-  const nextTrace = { ...internalTrace, summary: input.summary, reflection: null, alpha: input.alpha, usable: false, reflection_source: "none", value: input.value, priority: input.priority, import_summary_at: input.updatedAt };
+  const title = input.title?.trim();
+  const nextTrace = {
+    ...internalTrace,
+    summary: input.summary,
+    reflection: null,
+    alpha: input.alpha,
+    usable: false,
+    reflection_source: "none",
+    value: input.value,
+    priority: input.priority,
+    import_summary_at: input.updatedAt,
+    ...(title ? { title } : {})
+  };
   const memoryValue = renderTraceMemoryValue({ summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"), userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflection: { text: null, alpha: input.alpha }, value: input.value, priority: input.priority });
   return {
     ...memory,
     memoryValue,
     contentHash: stableHash(memoryValue),
     tags: input.tags,
-    info: { ...memory.info, summary: input.summary, value: input.value, priority: input.priority, tags: input.tags },
-    properties: { ...memory.properties, tags: input.tags, info: { ...(memory.properties.info ?? {}), summary: input.summary, value: input.value, priority: input.priority, tags: input.tags }, internal_info: { ...memory.properties.internal_info, summary: input.summary, alpha: input.alpha, value: input.value, priority: input.priority, trace: nextTrace } },
+    info: { ...memory.info, summary: input.summary, value: input.value, priority: input.priority, tags: input.tags, ...(title ? { title } : {}) },
+    properties: {
+      ...memory.properties,
+      tags: input.tags,
+      info: { ...(memory.properties.info ?? {}), summary: input.summary, value: input.value, priority: input.priority, tags: input.tags, ...(title ? { title } : {}) },
+      internal_info: { ...memory.properties.internal_info, summary: input.summary, ...(title ? { title } : {}), alpha: input.alpha, value: input.value, priority: input.priority, trace: nextTrace }
+    },
     updatedAt: input.updatedAt
   };
 }

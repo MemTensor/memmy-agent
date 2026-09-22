@@ -22,9 +22,10 @@ import {
   type Repositories
 } from "../../storage/repositories.js";
 import type { JobRef,MemoryRow,RequestEnvelope } from "../../types.js";
-import type {
-  EmbeddingJobProcessor,
-  PreparedEmbeddingJob
+import {
+  SummaryModelUnconfiguredError,
+  type EmbeddingJobProcessor,
+  type PreparedEmbeddingJob
 } from "../embedding/embedding-job-processor.js";
 import type { PolicyEvidencePreflightReport } from "../evolution/evolution-job-processor.js";
 import {
@@ -44,6 +45,7 @@ import {
 
 export const SUMMARY_WORKER_CONCURRENCY = 4;
 export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
+const SUMMARY_JOBS_REQUIRING_MODEL: readonly string[] = ["trace_summary", "import_summary"];
 
 const workerLogger = createMemoryLogger("worker");
 
@@ -117,6 +119,7 @@ export interface WorkerRunnerDeps {
   memoryBudgetModelSources: () => Parameters<typeof allowedMemoryBudgetJobTypes>[0];
   memoryBudgetNextWakeAtMs: () => number;
   memoryBudgetNextReconcileAtMs?: () => number | undefined;
+  summaryModelConfigured: () => boolean;
   nowIso: () => string;
   nowMs?: () => number;
   encodeChangeCursor: (changeSeq: number) => string;
@@ -162,8 +165,10 @@ export class WorkerRunner {
       return undefined;
     }
     const reconcileAt = this.deps.memoryBudgetNextReconcileAtMs?.();
+    const heldSummaryJobs = this.summaryJobsHeld();
     if (this.deps.memoryBudgetPaused()) {
-      const allowed = allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources());
+      const allowed = allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources())
+        .filter((jobType) => !heldSummaryJobs?.includes(jobType));
       const allowedAt = this.deps.repos.runtime.nextWorkerRunAt({
         jobTypes: allowed,
         includeEmbeddingRetries: !this.deps.memoryBudgetJobConsumes("embedding")
@@ -172,7 +177,9 @@ export class WorkerRunner {
       const times = [allowedAt, midnight, reconcileAt].filter((time): time is number => Number.isFinite(time));
       return times.length > 0 ? Math.min(...times) : undefined;
     }
-    const scheduled = this.deps.repos.runtime.nextWorkerRunAt();
+    const scheduled = this.deps.repos.runtime.nextWorkerRunAt(
+      heldSummaryJobs ? { excludedJobTypes: heldSummaryJobs } : undefined
+    );
     const times = [scheduled, reconcileAt].filter((time): time is number => Number.isFinite(time));
     return times.length > 0 ? Math.min(...times) : undefined;
   }
@@ -410,7 +417,8 @@ export class WorkerRunner {
       60,
       targetMemoryIds,
       request.priorityCohortOnly,
-      allowedWhenPaused
+      allowedWhenPaused,
+      this.summaryJobsHeld()
     );
     const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
     const results: WorkerJobRunResult[] = [];
@@ -495,6 +503,9 @@ export class WorkerRunner {
       await this.deps.jobHandlers.processJob(job);
       return this.completeLeasedWorkerJob(job);
     } catch (error) {
+      if (error instanceof SummaryModelUnconfiguredError) {
+        return this.holdUnconfiguredSummaryJob(job);
+      }
       return this.failLeasedWorkerJob(job, error);
     }
   }
@@ -841,6 +852,30 @@ export class WorkerRunner {
       return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(updated) };
     }
     return { succeeded: 0, failed: 1, item: null };
+  }
+
+  private summaryJobsHeld(): readonly string[] | undefined {
+    return this.deps.summaryModelConfigured() ? undefined : SUMMARY_JOBS_REQUIRING_MODEL;
+  }
+
+  private holdUnconfiguredSummaryJob(job: EvolutionJobRecord): WorkerJobRunResult {
+    this.requeueUnstartedBudgetedJobs([job]);
+    if (job.targetMemoryId) {
+      this.deps.repos.processing.update(job.targetMemoryId, {
+        state: "summary_pending",
+        stage: "summary",
+        activeJobId: job.id,
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: this.deps.nowIso()
+      }, ["summary_pending", "summarizing"]);
+    }
+    return {
+      succeeded: 0,
+      failed: 0,
+      ref: { ...jobToRef(job), status: "queued" }
+    };
   }
 
   private requeueUnstartedBudgetedJobs(jobs: readonly EvolutionJobRecord[]): void {

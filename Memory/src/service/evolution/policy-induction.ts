@@ -1,13 +1,13 @@
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
-  detectDominantLanguage,
   l2CandidateIdFor,
   languageSteeringLine,
   packL2InductionTraces,
   policyMetaFromMemory,
   signatureFromTrace,
   skillMetaFromMemory,
+  steeredPromptLanguage,
   traceMetaFromMemory,
   tracePolicySimilarity
 } from "../../algorithm/plugin-algorithms.js";
@@ -18,6 +18,7 @@ import { kindFromMemory } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
+import { clip } from "../../utils/text.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
@@ -526,7 +527,7 @@ export class PolicyInductionEngine {
           },
           {
             role: "system",
-            content: languageSteeringLine(detectDominantLanguage(evidenceTraces.flatMap((trace) => [
+            content: languageSteeringLine(steeredPromptLanguage(this.deps.config.language, evidenceTraces.flatMap((trace) => [
               trace.userText,
               trace.agentText,
               trace.reflection
@@ -576,7 +577,7 @@ export class PolicyInductionEngine {
           : undefined;
         const next = {
           ...fallback,
-          title: skillText(result.title),
+          title: clip(skillText(result.title), 30),
           trigger: skillMarkdown(result.trigger),
           procedure,
           verification,
@@ -969,6 +970,9 @@ function l2InductionInvalidReason(result: unknown): string | null {
   if (!isRecord(result)) return "llm-failed: l2.induction.invalid: non-object output";
   if (!firstString(result.title)) return "llm-failed: l2.induction.invalid: missing title";
   if (!firstString(result.trigger)) return "llm-failed: l2.induction.invalid: missing trigger";
+  if (firstString(result.title) === firstString(result.trigger)) {
+    return "llm-failed: l2.induction.invalid: title matches trigger";
+  }
   if (!firstString(result.procedure, result.action)) {
     return "llm-failed: l2.induction.invalid: missing procedure";
   }

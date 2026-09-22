@@ -405,11 +405,12 @@ export function createBatchReflectionLlm(calls: Array<{
       }
       if (options.operation === "capture.summarize") {
         const decisionCall = messages[0]?.content.includes("Judge L1 and User Memory") === true;
-        if (!decisionCall) return { summary: captureSummary } as unknown as T;
+        if (!decisionCall) return { title: "测试捕获标题", summary: captureSummary } as unknown as T;
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "测试捕获标题",
             summary: captureSummary,
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },

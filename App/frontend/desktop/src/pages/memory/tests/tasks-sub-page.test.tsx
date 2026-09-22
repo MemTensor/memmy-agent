@@ -153,6 +153,74 @@ describe("TasksSubPage", () => {
     expect(html).toContain("技能沉淀失败");
   });
 
+  it("waiting 任务列表一行用户原句加 pill，详情不显示标题", () => {
+    const waiting = {
+      ...createTaskFixture(),
+      titlePending: true,
+      titleGenerated: false,
+      summary: "按照规范补齐任务列表。"
+    };
+    const listHtml = renderTasks({ status: "ready", data: tasksOutput([waiting]) });
+    expect(listHtml).toContain("请把 **记忆管理** 页面接入真实数据。");
+    expect(listHtml).toContain("摘要总结中");
+    expect(listHtml).not.toContain("memory-card__summary");
+    expect(listHtml).not.toContain("按照规范补齐任务列表。");
+
+    const drawerHtml = renderTasks({ status: "ready", data: tasksOutput([waiting]) }, waiting);
+    expect(drawerHtml).not.toContain("memory-drawer__title");
+    expect(drawerHtml).toContain("memory-drawer__eyebrow");
+    expect(drawerHtml).not.toContain("记忆摘要");
+  });
+
+  it("旧任务没有 pending 标记时仍用首条消息兜底，没有 pill", async () => {
+    const oldTask = createTaskFixture();
+    const html = renderTasks({ status: "ready", data: tasksOutput([oldTask]) });
+    expect(html).toContain("记忆管理页面接入真实数据");
+    expect(html).toContain("按照规范补齐任务列表。");
+    expect(html).toContain("memory-card__summary");
+    expect(html).not.toContain("摘要总结中");
+
+    const client = createMemoryRuntimeClientStub({
+      listPanelTasks: vi.fn(async () => panelTasksOutput([panelTaskFixture()]))
+    });
+    const data = await loadTasksData(client);
+    expect(data.tasks[0]).toMatchObject({
+      title: "记忆管理页面接入真实数据",
+      summary: "按照规范补齐任务列表。",
+      titleGenerated: false,
+      titlePending: false
+    });
+  });
+
+  it("titlePending 的任务走 waiting，已生成标题的任务显示两行", async () => {
+    const pending = panelTaskFixture();
+    pending.episode = { ...pending.episode, title: "", summary: "", titlePending: true, titleGenerated: false };
+    const generated = panelTaskFixture();
+    generated.episode = {
+      ...generated.episode,
+      id: "episode-generated",
+      titleGenerated: true,
+      titlePending: false
+    };
+    generated.id = "episode-generated";
+    const client = createMemoryRuntimeClientStub({
+      listPanelTasks: vi.fn(async () => panelTasksOutput([pending, generated]))
+    });
+    const data = await loadTasksData(client);
+    expect(data.tasks[0]).toMatchObject({
+      title: "请把 **记忆管理** 页面接入真实数据。",
+      summary: "",
+      titlePending: true,
+      titleGenerated: false
+    });
+    expect(data.tasks[1]).toMatchObject({
+      title: "记忆管理页面接入真实数据",
+      summary: "按照规范补齐任务列表。",
+      titleGenerated: true,
+      titlePending: false
+    });
+  });
+
   it("区分进行中和已完成任务状态颜色", () => {
     const css = readFileSync(new URL("../../../styles.css", import.meta.url), "utf8");
     const openRule = css.match(/\.memory-pill--task-open,[\s\S]*?\.memory-pill--task-processing\s*\{[\s\S]*?\}/)?.[0] ?? "";

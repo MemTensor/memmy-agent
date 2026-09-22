@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
+import { PanelItemsOutputSchema } from "../../../src/contracts/memory-runtime.js";
+import { detailFromMemory } from "../../../src/service/read-model/memory.js";
 import { updateTraceSummary } from "../../../src/service/embedding/embedding-job-processor.js";
 import {
   changeLogToPanelChange,
@@ -7,6 +9,7 @@ import {
 } from "../../../src/service/read-model/panel-read.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
+  addAgentSourceImport,
   createCapturingEmbedder,
   createMemoryServiceFixture
 } from "../../fixtures/memory-service-fixture.js";
@@ -234,7 +237,149 @@ describe("MemoryService / read model / panel", () => {
     }));
     const summarizedItem = service.panelItems({ namespace, layer: "L1" }).items[0];
     expect(summarizedItem?.summary).toBe("旧会话缺少工作区绑定会导致 Gateway 启动失败");
+    expect(summarizedItem?.generatedTitle).toBeUndefined();
 
+    db.close();
+  });
+
+  it("returns waiting source text and generated titles through the panel schema", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      userId: "user-panel-display-fields"
+    };
+    const session = service.openSession({ namespace });
+    const completed = service.completeTurn("turn-panel-display-fields", {
+      sessionId: session.sessionId,
+      query: "请修复自动扫描卡顿并运行测试",
+      answer: "已完成修复并运行测试。"
+    });
+    const at = new Date().toISOString();
+    const source = repos.memories.get(completed.l1MemoryId)!;
+    const longSummary = "已修复自动扫描卡顿，并验证标题与摘要显示。".repeat(6);
+    repos.memories.update(updateTraceSummary(source, { summary: longSummary, updatedAt: at }));
+    const readable = repos.memories.insert({
+      ...source,
+      id: "trace_panel_readable_fallback",
+      memoryKey: "trace:panel-display-fields:readable",
+      contentHash: "panel-display-readable",
+      memoryValue: `Summary: 导入后的可读正文\nRawTurn: raw_panel_readable`,
+      info: { summary: "导入后的可读正文" },
+      properties: {
+        ...source.properties,
+        info: { summary: "导入后的可读正文" },
+        internal_info: {
+          ...source.properties.internal_info,
+          summary: "导入后的可读正文",
+          title: undefined,
+          trace: {
+            ...(typeof source.properties.internal_info.trace === "object" && source.properties.internal_info.trace
+              ? source.properties.internal_info.trace as Record<string, unknown>
+              : {}),
+            userText: "",
+            user_text: "",
+            summary: "导入后的可读正文",
+            title: undefined
+          }
+        }
+      }
+    });
+    repos.memories.insert({
+      ...source,
+      id: "policy_panel_draft",
+      memoryKey: "policy:panel-display-fields",
+      memoryLayer: "L2",
+      contentHash: "panel-display-policy",
+      memoryValue: "Policy: pytest retry\nTrigger: pytest workflow fails",
+      info: { title: "Policy: pytest retry" },
+      properties: {
+        memory_type: "LongTermMemory",
+        status: "activated",
+        tags: [],
+        info: { title: "Policy: pytest retry" },
+        internal_info: {
+          memory_layer: "L2",
+          memory_kind: "policy",
+          schema_version: 1,
+          title: "Policy: pytest retry",
+          source_memory_ids: [completed.l1MemoryId],
+          policy: {
+            title: "Policy: pytest retry",
+            source_trace_ids: [completed.l1MemoryId]
+          }
+        }
+      }
+    });
+    void readable;
+
+    const parsed = PanelItemsOutputSchema.parse(service.panelItems({ namespace, layer: "L1" }));
+    const legacy = parsed.items.find((item) => item.id === completed.l1MemoryId);
+    const fallback = parsed.items.find((item) => item.id === "trace_panel_readable_fallback");
+    expect(legacy?.sourceText).toBe("请修复自动扫描卡顿并运行测试");
+    expect(legacy?.generatedTitle).toBeUndefined();
+    expect(legacy?.title.length).toBeLessThanOrEqual(80);
+    expect(legacy?.summary).toBe(longSummary);
+    expect(legacy?.title).not.toBe(legacy?.summary);
+    expect(fallback?.sourceText).toBe("导入后的可读正文");
+    expect(fallback?.generatedTitle).toBeUndefined();
+
+    const experiences = PanelItemsOutputSchema.parse(service.panelItems({ namespace, layer: "L2" }));
+    const draft = experiences.items.find((item) => item.id === "policy_panel_draft");
+    expect(draft?.title).toBe("Trigger: pytest workflow fails");
+    expect(draft?.generatedTitle).toBeUndefined();
+    expect(draft?.experienceDraft).toBe(true);
+    expect(draft?.sourceText).toBe("请修复自动扫描卡顿并运行测试");
+
+    repos.memories.update(updateTraceSummary(repos.memories.get(completed.l1MemoryId)!, {
+      summary: longSummary,
+      title: "扫描卡顿修复",
+      updatedAt: at
+    }));
+    const generated = PanelItemsOutputSchema.parse(service.panelItems({ namespace, layer: "L1" }))
+      .items.find((item) => item.id === completed.l1MemoryId);
+    expect(generated?.generatedTitle).toBe("扫描卡顿修复");
+    const detail = detailFromMemory(repos.memories.get(completed.l1MemoryId)!);
+    expect(detail.generatedTitle).toBe("扫描卡顿修复");
+    expect(detailFromMemory(repos.memories.get("trace_panel_readable_fallback")!).generatedTitle).toBeUndefined();
+    db.close();
+  });
+
+  it("does not treat an imported user-sentence title as a generated title", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const imported = addAgentSourceImport(
+      service,
+      { source: "codex", profileId: "import-title", userId: "user-import-title" },
+      "帮我修复 pytest 失败并检查 migration",
+      "import-title-provenance"
+    );
+    const at = new Date().toISOString();
+    const summary = "已修复 sqlite migration 导致的 pytest 失败，并通过回归验证。";
+    const current = repos.memories.get(imported.id)!;
+    expect(current.info.title).toBe("帮我修复 pytest 失败并检查 migration");
+    repos.memories.update(updateTraceSummary(current, { summary, updatedAt: at }));
+
+    const listed = PanelItemsOutputSchema.parse(service.panelItems({
+      userId: "user-import-title",
+      layer: "L1"
+    })).items.find((item) => item.id === imported.id);
+    expect(listed?.generatedTitle).toBeUndefined();
+    expect(listed?.summary).toBe(summary);
+    expect(detailFromMemory(repos.memories.get(imported.id)!).generatedTitle).toBeUndefined();
+
+    repos.memories.update(updateTraceSummary(repos.memories.get(imported.id)!, {
+      summary,
+      title: "pytest 迁移修复",
+      updatedAt: at
+    }));
+    const generated = PanelItemsOutputSchema.parse(service.panelItems({
+      userId: "user-import-title",
+      layer: "L1"
+    })).items.find((item) => item.id === imported.id);
+    expect(generated?.generatedTitle).toBe("pytest 迁移修复");
+    expect(detailFromMemory(repos.memories.get(imported.id)!).generatedTitle).toBe("pytest 迁移修复");
     db.close();
   });
 

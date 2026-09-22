@@ -384,6 +384,122 @@ describe("MemoryService / worker / runtime", () => {
     db.close();
   });
 
+  it("does not wake for due summary jobs while the summary model is unconfigured", async () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const past = new Date(Date.now() - 60_000).toISOString();
+    repos.runtime.enqueueJob({
+      id: "job-summary-past",
+      jobType: "trace_summary",
+      status: "queued",
+      userId: "wake-user",
+      payload: { runAfter: past },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: past,
+      updatedAt: past
+    });
+    repos.runtime.enqueueJob({
+      id: "job-summary-leased",
+      jobType: "import_summary",
+      status: "leased",
+      userId: "wake-user",
+      payload: {},
+      attempts: 1,
+      maxAttempts: 3,
+      leasedUntil: past,
+      createdAt: past,
+      updatedAt: past
+    });
+
+    await service.runWorkerOnce(10);
+    await service.runWorkerOnce(10);
+    await service.runWorkerOnce(10);
+    const summaryDue = Date.parse(past);
+    const heldWake = service.nextWorkerRunAt();
+    expect(heldWake).not.toBe(summaryDue);
+    expect(heldWake === undefined || heldWake > Date.now()).toBe(true);
+    expect(repos.runtime.nextWorkerRunAt({
+      excludedJobTypes: ["trace_summary", "import_summary"]
+    })).toBeUndefined();
+
+    const later = Date.now() + 60_000;
+    repos.runtime.enqueueJob({
+      id: "job-idle-later",
+      jobType: "episode_idle_close",
+      status: "queued",
+      userId: "wake-user",
+      payload: { runAfter: new Date(later).toISOString() },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: past,
+      updatedAt: past
+    });
+    expect(repos.runtime.nextWorkerRunAt({
+      excludedJobTypes: ["trace_summary", "import_summary"]
+    })).toBe(later);
+    const resumedWake = service.nextWorkerRunAt();
+    expect(resumedWake).not.toBe(summaryDue);
+    expect(resumedWake).toBeLessThanOrEqual(later);
+    db.close();
+  });
+
+  it("does not wake for summary jobs that stay budget-allowed while the summary model is unconfigured", () => {
+    const { db, service } = createTestService({
+      llm: {
+        config: DEFAULT_MEMMY_CONFIG.summary,
+        isConfigured: () => false,
+        async complete() {
+          return "{}";
+        },
+        async completeJson<T extends Record<string, unknown>>() {
+          return {} as T;
+        },
+        status: () => ({ provider: "host", model: "none", configured: false, remote: false })
+      },
+      config: {
+        ...byokRuntimeConfig({
+          tokenBudget: { dailyLimitM: 1, totalLimitM: 500 }
+        }),
+        summary: accountRuntimeConfig().summary
+      }
+    });
+    const repos = new Repositories(db.db);
+    const now = Date.now();
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
+    });
+    const past = new Date(now - 60_000).toISOString();
+    repos.runtime.enqueueJob({
+      id: "job-summary-paused",
+      jobType: "trace_summary",
+      status: "queued",
+      userId: "wake-user",
+      payload: { runAfter: past },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: past,
+      updatedAt: past
+    });
+    const idleAt = now + 8_000;
+    repos.runtime.enqueueJob({
+      id: "job-idle-while-summary-held",
+      jobType: "episode_idle_close",
+      status: "queued",
+      userId: "wake-user",
+      payload: { runAfter: new Date(idleAt).toISOString() },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: past,
+      updatedAt: past
+    });
+
+    expect(service.nextWorkerRunAt()).toBe(idleAt);
+    db.close();
+  });
+
   it("keeps platform and local embedding jobs runnable after a BYOK pause", async () => {
     const { db, service } = createTestService({
       config: {

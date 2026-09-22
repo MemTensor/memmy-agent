@@ -106,11 +106,11 @@ describe("MemoryService / import / processing", () => {
     const summaryCall = llmCalls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCall?.options.maxTokens).toBe(512);
-    expect(summaryCall?.messages[0]?.content).toContain("<= 200 characters");
+    expect(summaryCall?.messages[0]?.content).toContain("at most 30 characters");
+    expect(summaryCall?.messages[0]?.content).toContain("at most 180 characters");
     expect(summaryCall?.messages[0]?.content).toContain("future retrieval");
     expect(summaryCall?.messages[0]?.content).toContain("concrete retrieval anchors");
     expect(summaryCall?.messages[0]?.content).toContain("atomic real-world facts");
-    expect(summaryCall?.messages[0]?.content).toContain("use most of the 200-character budget");
     expect(summaryCall?.messages[0]?.content).toContain("Preserve temporal expressions as stated in the source");
     expect(summaryCall?.messages[0]?.content).toContain("Do NOT resolve, normalize, infer, or replace a relative expression");
     expect(summaryCall?.messages[0]?.content).not.toContain("MUST include the resolved absolute date/time");
@@ -119,6 +119,7 @@ describe("MemoryService / import / processing", () => {
     expect(summaryCall?.messages[0]?.content).toContain("Use future-query words");
     expect(summaryCall?.messages[0]?.content).toContain("Preserve original speaker/person names");
     expect(summaryCall?.messages[0]?.content).not.toContain("L1");
+    expect(summaryCall?.messages[0]?.content).not.toContain("<= 200 characters");
     expect(summaryCall?.messages[0]?.content).not.toContain("<= 100 characters");
 
     const summarized = db.db.prepare(
@@ -323,7 +324,7 @@ describe("MemoryService / import / processing", () => {
     await service.runWorkerOnce(100);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.messages).toHaveLength(2);
+    expect(calls[0]?.messages).toHaveLength(3);
     expect(calls[0]?.messages[0]).toMatchObject({
       role: "system",
       content: expect.stringContaining("single user/agent exchange")
@@ -334,7 +335,7 @@ describe("MemoryService / import / processing", () => {
     expect(calls[0]?.messages[0]?.content).toContain(
       "Do NOT resolve, normalize, infer, or replace a relative expression"
     );
-    expect(calls[0]?.messages[1]).toMatchObject({
+    expect(calls[0]?.messages[2]).toMatchObject({
       role: "user",
       content: expect.stringContaining("USER: memmy 在上周五发布了")
     });
@@ -997,7 +998,7 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("keeps imported L1 summaries untruncated when the model exceeds 200 characters", async () => {
+  it("clips imported L1 summaries to 180 characters", async () => {
     const root = createTestRoot("mindock-memory-import-summary-cap-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -1032,12 +1033,9 @@ describe("MemoryService / import / processing", () => {
       };
     };
     expect(calls.find((call) => call.options.operation === "capture.summarize")?.messages[0]?.content)
-      .toContain("<= 200 characters");
-    expect(calls.find((call) => call.options.operation === "capture.summarize")?.messages[0]?.content)
-      .toContain("do not hard-truncate");
-    expect(properties.internal_info.trace.summary).toHaveLength(240);
-    expect(properties.internal_info.trace.summary).toBe(longSummary);
-    expect(properties.internal_info.trace.summary).not.toMatch(/\.\.\.$/);
+      .toContain("at most 180 characters");
+    expect(properties.internal_info.trace.summary).toHaveLength(180);
+    expect(properties.internal_info.trace.summary).toBe(`${"s".repeat(177)}...`);
     db.close();
   });
 
@@ -1048,7 +1046,8 @@ describe("MemoryService / import / processing", () => {
     });
     const service = createTestMemoryService({
       db,
-      mode: "dev"
+      mode: "dev",
+      llm: createBatchReflectionLlm([])
     });
     const namespace = {
       source: "codex",
@@ -1107,7 +1106,9 @@ describe("MemoryService / import / processing", () => {
   });
 
   it("limits worker runs to the imported memories requested by a source scan", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([])
+    });
     const namespace = {
       source: "codex",
       profileId: "jiang",

@@ -4,6 +4,8 @@ import {
   sha256Hex,
   type JsonValue
 } from "../../contracts/index.js";
+import { languageSteeringLine, steeredPromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import type { MemoryLanguage } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,
@@ -36,7 +38,11 @@ export function isTerminalL3WorldModelError(error: unknown): boolean {
 }
 
 export class L3WorldModelTraceFieldPipeline {
-  constructor(private readonly deps: { repos: Repositories; skillLlm: LlmClient }) {}
+  constructor(private readonly deps: {
+    repos: Repositories;
+    skillLlm: LlmClient;
+    language?: MemoryLanguage;
+  }) {}
 
   async updateField(job: EvolutionJobRecord): Promise<void> {
     const payload = strictJobPayload(job);
@@ -94,6 +100,9 @@ export class L3WorldModelTraceFieldPipeline {
     }
 
     const prompt = promptForField(payload.targetField);
+    const language = currentField.trim()
+      ? steeredPromptLanguage(undefined, [currentField])
+      : steeredPromptLanguage(this.deps.language, userTextsFromRawTurns(evidence.rawTurns));
     const dynamicInput = dynamicInputForField(
       payload.targetField,
       currentField,
@@ -103,7 +112,7 @@ export class L3WorldModelTraceFieldPipeline {
     const output = await completeStrictJson({
       llm: this.deps.skillLlm,
       operation: `l3_world_model.${payload.targetField}`,
-      systemPrompt: prompt,
+      systemPrompt: `${prompt}\n\n${languageSteeringLine(language)}`,
       dynamicInput,
       expectedSchema: expectedSchemaForField(payload.targetField),
       validate: (value) => validateFieldOutput(value, payload.targetField, currentField)
@@ -357,7 +366,7 @@ const SHARED_OPERATION_RULES = `Choose exactly one operation:
 - "noop": the final content would not change.
 
 For "noop", return an empty content field and do not repeat the current field. For "create" and "update", return the complete merged final content, not a delta. An empty content field with "update" means clear the existing field; an empty content field with "noop" means leave it unchanged.
-Write the content in the language of the current field. If the current field is empty, use the dominant language of the user requests in the RawTurns. Do not translate the content merely because this instruction is written in English.`;
+Write the content in the language of the current field. If the current field is empty, follow the interface language when one is pinned; otherwise use the dominant language of the user requests in the RawTurns. Do not translate the content merely because this instruction is written in English.`;
 
 const GENERAL_RULES_PROMPT = `You maintain "General Rules and Safety Constraints".
 The input contains the complete current field and a chronological batch of new RawTurns.
@@ -427,3 +436,11 @@ Return exactly one of:
 {"op":"noop","domain_knowledge":""}
 {"op":"create","domain_knowledge":"complete final content"}
 {"op":"update","domain_knowledge":"complete final content"}`;
+
+function userTextsFromRawTurns(rawTurns: JsonValue[]): string[] {
+  return rawTurns.flatMap((turn) => {
+    if (!turn || typeof turn !== "object" || Array.isArray(turn)) return [];
+    const record = turn as Record<string, unknown>;
+    return typeof record.user_text === "string" ? [record.user_text] : [];
+  });
+}

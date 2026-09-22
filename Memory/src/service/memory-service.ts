@@ -333,7 +333,8 @@ export class MemoryService {
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
       repos: this.repos,
-      get llm() { return projectEnvironmentOwner.skillLlm; }
+      get llm() { return projectEnvironmentOwner.skillLlm; },
+      get language() { return projectEnvironmentOwner.config.language; }
     });
     const episodeTitleOwner = this;
     this.episodeTitle = new EpisodeTitleService({
@@ -510,6 +511,7 @@ export class MemoryService {
       memoryBudgetModelSources: () => this.budgetModelSources(),
       memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
       memoryBudgetNextReconcileAtMs: () => this.nextAppBudgetReconcileAtMs(),
+      summaryModelConfigured: () => workerRunnerOwner.llm.isConfigured(),
       nowIso,
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       namespaceIdFromMemory,

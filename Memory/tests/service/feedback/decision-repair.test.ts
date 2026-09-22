@@ -59,7 +59,12 @@ function createDecisionRepairLlm(
       }
       if (options.operation === "capture.summarize") {
         return {
-          summary: "sqlite migration workflow"
+          l1: {
+            title: "Sqlite migration workflow",
+            summary: "sqlite migration workflow",
+            evidence: []
+          },
+          user: null
         } as unknown as T;
       }
       if (options.operation === "decision.repair.v1") {
