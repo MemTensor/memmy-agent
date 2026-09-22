@@ -31,6 +31,11 @@ export type MicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "
 export interface AsrTranscribeOptions {
   /** Requests speaker separation. Honoured only by upstream models that support it. */
   diarization?: boolean;
+  /**
+   * Called once the browser recording has been stopped, before the ASR request
+   * starts. Callers can keep the audio visible while transcription is pending.
+   */
+  onRecordingReady?(recording: Blob, recordingMimeType: string, durationMs: number | undefined): void;
 }
 
 export interface AsrRecorder {
@@ -292,6 +297,10 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       stopStream(streamRef.current);
       streamRef.current = null;
       startedAtRef.current = null;
+      // The recording is already complete at this point. Notify the caller
+      // before size checks and encoding so it can keep the audio visible even
+      // when the final ASR request will be rejected.
+      transcribeOptions.onRecordingReady?.(blob, blob.type || "audio/webm", durationMs);
       if (blob.size > ASR_MAX_AUDIO_BYTES) {
         // Fail here with the recording still in hand rather than letting the
         // gateway reject the payload after a long upload.

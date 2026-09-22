@@ -35,7 +35,7 @@ import { persistRecording } from "../lib/recording-deliverables.js";
  */
 export type RecordingDelivery = "summarize" | "attach";
 
-/** A recording that has been transcribed and is available to send. */
+/** A captured recording, including one whose transcription is still pending. */
 export interface RecordingArchiveEntry {
   id: string;
   /** Shown as the row title. */
@@ -48,6 +48,8 @@ export interface RecordingArchiveEntry {
   transcript: RecordingPanelTranscript;
   /** Object URL of the audio, when it was captured here and can be played back. */
   audioUrl: string | null;
+  /** The row can exist before ASR has finished, or when ASR failed. */
+  status?: "transcribing" | "ready" | "failed";
 }
 
 /** Everything the recording page renders. */
@@ -59,7 +61,7 @@ export interface RecordingEntrySession {
   lines: AsrLiveLine[];
   /** The recording captured in this page, once it has been transcribed. */
   live: RecordingArchiveEntry | null;
-  /** Recordings finished in this session, newest first. */
+  /** Captured recordings in this session, newest first. */
   recordings: RecordingArchiveEntry[];
   /** The archive row opened for reading, when one is. */
   opened: RecordingArchiveEntry | null;
@@ -125,6 +127,11 @@ export function useRecordingEntry(
   const [opened, setOpened] = useState<RecordingArchiveEntry | null>(null);
   const [deliverables, setDeliverables] = useState<UploadedAgentMedia[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // The transcription request outlives the click that starts it. Keeping the
+  // view in a ref lets its completion preserve a deliberate return to the
+  // recording list instead of unexpectedly navigating back into the transcript.
+  const viewRef = useRef<RecordingEntrySession["view"]>(view);
+  viewRef.current = view;
   const recorder = useAsrRecorder(asrClient, {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
@@ -152,30 +159,59 @@ export function useRecordingEntry(
   const finish = useCallback(() => {
     setError(null);
     void (async () => {
+      const id = `rec-${Date.now()}`;
+      let audioUrl: string | null = null;
+      let transcriptionCompleted = false;
       try {
-        const result = await recorder.finishAndTranscribe({ diarization: true });
-        const audioUrl = URL.createObjectURL(result.recording);
-        audioUrlsRef.current.push(audioUrl);
+        const result = await recorder.finishAndTranscribe({
+          diarization: true,
+          onRecordingReady: (recording, _recordingMimeType, durationMs) => {
+            audioUrl = URL.createObjectURL(recording);
+            audioUrlsRef.current.push(audioUrl);
+            const pending = buildEntry({
+              id,
+              transcript: { text: "", segments: [] },
+              durationMs: durationMs ?? elapsedMs,
+              audioUrl,
+              status: "transcribing",
+              title: t("recording.page.defaultTitle")
+            });
+            setLive(pending);
+            setRecordings((current) => [pending, ...current.filter((row) => row.id !== id)]);
+          }
+        });
+        if (!audioUrl) {
+          audioUrl = URL.createObjectURL(result.recording);
+          audioUrlsRef.current.push(audioUrl);
+        }
         const transcript: RecordingPanelTranscript = { text: result.text, segments: result.segments ?? [] };
         const entry = buildEntry({
-          id: `rec-${Date.now()}`,
+          id,
           transcript,
           durationMs: result.durationMs ?? lastOffset(transcript.segments),
           audioUrl,
           title: t("recording.page.defaultTitle")
         });
         setLive(entry);
-        setRecordings((current) => [entry, ...current]);
-        setView("transcript");
+        setRecordings((current) => current.some((row) => row.id === id)
+          ? current.map((row) => row.id === id ? entry : row)
+          : [entry, ...current]);
+        transcriptionCompleted = true;
+        if (viewRef.current === "live") setView("transcript");
         const files = await persistRecording(result, t, uploadFiles);
         setDeliverables([files.audio, files.transcript].filter((item): item is UploadedAgentMedia => item !== undefined));
       } catch (caught) {
         // The recorder surfaces its own message through `recorder.error`, which
-        // the page shows; there is nothing to add here.
+        // the page shows. Keep the stopped audio in the list so returning to
+        // the page cannot make a recording disappear just because ASR failed.
+        if (!transcriptionCompleted) {
+          setRecordings((current) => current.map((row) => row.id === id ? { ...row, status: "failed" } : row));
+          setLive((current) => current?.id === id ? { ...current, status: "failed" } : current);
+        }
         setError(caught instanceof Error ? caught.message : null);
       }
     })();
-  }, [recorder, t, uploadFiles]);
+  }, [elapsedMs, recorder, t, uploadFiles]);
 
   const start = useCallback(() => {
     setError(null);
@@ -183,9 +219,11 @@ export function useRecordingEntry(
     setElapsedMs(0);
     setLines([]);
     setDeliverables([]);
+    viewRef.current = "live";
     setView("live");
     void recorder.start().catch((caught: unknown) => {
       setError(caught instanceof Error ? caught.message : null);
+      viewRef.current = "list";
       setView("list");
     });
   }, [recorder]);
@@ -196,6 +234,7 @@ export function useRecordingEntry(
       return;
     }
     setError(null);
+    viewRef.current = "live";
     setView("live");
     void (async () => {
       try {
@@ -220,9 +259,13 @@ export function useRecordingEntry(
         });
         setLive(entry);
         setRecordings((current) => [entry, ...current]);
-        setView("transcript");
+        if (viewRef.current === "live") {
+          viewRef.current = "transcript";
+          setView("transcript");
+        }
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : null);
+        viewRef.current = "list";
         setView("list");
       }
     })();
@@ -234,6 +277,7 @@ export function useRecordingEntry(
     setLines([]);
     setDeliverables([]);
     setError(null);
+    viewRef.current = "list";
     setView("list");
   }, []);
 
@@ -270,14 +314,17 @@ export function useRecordingEntry(
     finish,
     back: () => {
       setOpened(null);
+      viewRef.current = "list";
       setView("list");
     },
     showLive: () => {
       setOpened(null);
+      viewRef.current = "live";
       setView("live");
     },
     open: (entry) => {
       setOpened(entry);
+      viewRef.current = "transcript";
       setView("transcript");
     },
     upload,
@@ -310,6 +357,10 @@ export function RecordingEntryPage(props: { session: RecordingEntrySession }): R
   const { t } = useTranslation();
   const session = props.session;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // While ASR is pending, the active row above is the single source of truth.
+  // Hide its archive copy until the final transcript replaces it, so returning
+  // to the list never produces two rows for the same recording.
+  const archiveRows = session.recordings.filter((row) => !(row.status === "transcribing" && session.status === "transcribing"));
 
   if (session.view === "live") return <LiveView session={session} />;
   const entry = session.opened ?? session.live;
@@ -371,36 +422,41 @@ export function RecordingEntryPage(props: { session: RecordingEntrySession }): R
           </li>
         </ul>
       ) : null}
-      {session.status === "idle" && session.recordings.length === 0 ? (
+      {session.status === "idle" && archiveRows.length === 0 ? (
         <p className="recording-page__hint">{t("recording.page.hint")}</p>
-      ) : session.recordings.length > 0 ? (
+      ) : archiveRows.length > 0 ? (
         <ul className="recording-page__list">
-          {session.recordings.map((row) => (
-            <li key={row.id} className="recording-page__list-row">
-              <button type="button" className="recording-page__list-open" onClick={() => session.open(row)}>
-                <span className="recording-page__list-icon" aria-hidden="true"><Mic size={15} /></span>
-                <span className="recording-page__list-body">
-                  <span className="recording-page__list-title">{row.title}</span>
-                  <span className="recording-page__list-meta">
-                    <span>{formatRecordedAt(row.recordedAt)}</span>
-                    <span>{t("recording.page.duration", { time: formatClock(row.durationMs) })}</span>
-                    <span>{t("recording.page.speakers", { count: row.speakerCount })}</span>
-                    <span>{t("recording.page.transcribed")}</span>
+          {archiveRows.map((row) => {
+            const pending = row.status === "transcribing";
+            const failed = row.status === "failed";
+            return (
+              <li key={row.id} className="recording-page__list-row">
+                <button type="button" className="recording-page__list-open" onClick={() => session.open(row)}>
+                  <span className="recording-page__list-icon" aria-hidden="true"><Mic size={15} /></span>
+                  <span className="recording-page__list-body">
+                    <span className="recording-page__list-title">{row.title}</span>
+                    <span className="recording-page__list-meta">
+                      <span>{pending ? t("plugin.ui.audio.transcribing") : failed ? t("recording.page.transcriptionFailed") : formatRecordedAt(row.recordedAt)}</span>
+                      <span>{t("recording.page.duration", { time: formatClock(row.durationMs) })}</span>
+                      {!pending && !failed ? <><span>{t("recording.page.speakers", { count: row.speakerCount })}</span><span>{t("recording.page.transcribed")}</span></> : null}
+                    </span>
                   </span>
-                </span>
-              </button>
-              <div className="recording-page__list-actions">
-                <button type="button" className="recording-page__list-action" onClick={() => session.deliver(row, "summarize")}>
-                  <Sparkles size={13} aria-hidden="true" />
-                  <span>{t("recording.page.summarize")}</span>
                 </button>
-                <button type="button" className="recording-page__list-action" onClick={() => session.deliver(row, "attach")}>
-                  <Plus size={13} aria-hidden="true" />
-                  <span>{t("recording.page.addToChat")}</span>
-                </button>
-              </div>
-            </li>
-          ))}
+                {!pending && !failed ? (
+                  <div className="recording-page__list-actions">
+                    <button type="button" className="recording-page__list-action" onClick={() => session.deliver(row, "summarize")}>
+                      <Sparkles size={13} aria-hidden="true" />
+                      <span>{t("recording.page.summarize")}</span>
+                    </button>
+                    <button type="button" className="recording-page__list-action" onClick={() => session.deliver(row, "attach")}>
+                      <Plus size={13} aria-hidden="true" />
+                      <span>{t("recording.page.addToChat")}</span>
+                    </button>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       ) : null}
     </div>
@@ -604,6 +660,7 @@ function buildEntry(input: {
   transcript: RecordingPanelTranscript;
   durationMs: number;
   audioUrl: string | null;
+  status?: RecordingArchiveEntry["status"];
 }): RecordingArchiveEntry {
   const speakers = new Set(input.transcript.segments.map((segment) => segment.speakerId ?? 0));
   return {
@@ -611,9 +668,10 @@ function buildEntry(input: {
     title: input.title,
     recordedAt: new Date().toISOString(),
     durationMs: input.durationMs,
-    speakerCount: Math.max(speakers.size, 1),
+    speakerCount: input.status === "transcribing" ? 0 : Math.max(speakers.size, 1),
     transcript: input.transcript,
-    audioUrl: input.audioUrl
+    audioUrl: input.audioUrl,
+    status: input.status ?? "ready"
   };
 }
 
