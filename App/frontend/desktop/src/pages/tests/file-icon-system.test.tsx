@@ -95,7 +95,7 @@ describe("shared file icon system", () => {
     expect(styles).not.toContain("#d4a017");
   });
 
-  it("uses the operating-system icon for real local files and keeps SVG as fallback", () => {
+  it("keeps operating-system icons opt-in and uses SVG for chat attachments", () => {
     const iconSource = readFileSync(new URL("../../components/file-type-icon.tsx", import.meta.url), "utf8");
     const home = readFileSync(new URL("../home-page.tsx", import.meta.url), "utf8");
     const attachments = readFileSync(new URL("../agent-file-attachment-chip.tsx", import.meta.url), "utf8");
@@ -106,8 +106,8 @@ describe("shared file icon system", () => {
     expect(iconSource).toContain("preferSystemIcon");
     expect(iconSource).toContain('className="file-type-icon__native-image"');
     expect(iconSource).toContain("<DocumentSheet");
-    expect(home).toContain("window.memmy.getPathForFile(file)");
-    expect(home).toContain("filePath={item.localPath}");
+    expect(home).not.toContain("localPathForAgentAttachment");
+    expect(home).not.toContain("filePath={item.localPath}");
     expect(attachments).toContain("filePath={props.filePath}");
     expect(styles).toContain(".file-type-icon__native-image");
   });
@@ -120,7 +120,7 @@ describe("shared file icon system", () => {
     const attachments = readFileSync(new URL("../agent-file-attachment-chip.tsx", import.meta.url), "utf8");
 
     expect(references).toContain('<FileTypeIcon name={chip.label} surface="card" />');
-    expect(home).toContain("filePath={item.localPath}");
+    expect(home).not.toContain("filePath={item.localPath}");
     expect(messages).toContain('surface="inline"');
     expect(workspace).toContain('<FileTypeIcon name={entry.name} surface="inline" />');
     expect(attachments).toContain('surface={props.size === "md" ? "card" : "row"}');

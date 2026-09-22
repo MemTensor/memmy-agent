@@ -754,7 +754,6 @@ export function ComposerFileAttachmentChip(props: {
       kind="file"
       name={item.fileName}
       mime={item.uploadMime}
-      filePath={item.localPath}
       subline={`${extensionLabel} · ${formatBytes(item.uploadBytes ?? item.originalBytes)}`}
       removable
       removeLabel={props.removeLabel}
@@ -5112,7 +5111,6 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
     throw new Error("home.media.error.sendUnsupported");
   }
   if (classification.kind === "file") {
-    const localPath = localPathForAgentAttachment(file);
     return {
       id: randomPendingAttachmentId("file"),
       sourceKey,
@@ -5120,7 +5118,6 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
       kind: "file",
       status: "ready",
       originalBytes: file.size,
-      ...(localPath ? { localPath } : {}),
       uploadBlob: file,
       uploadMime: classification.mime as UploadedAgentMedia["mime"],
       uploadBytes: file.size,
@@ -5136,15 +5133,6 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
     status: "encoding",
     originalBytes: file.size
   };
-}
-
-function localPathForAgentAttachment(file: File): string | undefined {
-  if (typeof window === "undefined" || !window.memmy) return undefined;
-  try {
-    return window.memmy.getPathForFile(file) || undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function encodePendingAgentImage(file: File): Promise<{ blob: Blob; mime: AgentImageMime; bytes: number; normalized: boolean }> {
