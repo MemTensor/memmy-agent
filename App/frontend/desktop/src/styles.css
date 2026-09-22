@@ -2487,10 +2487,6 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
 }
 
-.agent-activity-timeline-item--error .agent-activity-timeline-item__icon {
-  color: color-mix(in srgb, var(--color-status-error) 82%, transparent);
-}
-
 .agent-activity-timeline-item__body {
   min-width: 0;
   flex: 1 1 auto;
@@ -2531,19 +2527,6 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
 }
 
-.agent-activity-timeline-item--error .agent-activity-timeline-item__line,
-.agent-activity-timeline-item--error .agent-activity-timeline-item__verb {
-  color: color-mix(in srgb, var(--color-status-error) 80%, var(--color-text-ink));
-}
-
-.agent-activity-timeline-item__error {
-  margin: 2px 0 0;
-  color: color-mix(in srgb, var(--color-status-error) 80%, var(--color-text-ink));
-  font-size: 12.5px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
 .agent-activity-tool-details {
   display: block;
   padding: 0;
@@ -2579,8 +2562,8 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 /* Expanded tool payload = ONE quiet code card (Cursor-style). The clickable
    row above is already the human summary, so the card only carries raw
    input/output: no ALL-CAPS form labels, sections separated by hairlines,
-   errors tinted, and long payloads scroll inside the card instead of
-   stretching the whole conversation. One generic shape fits every tool. */
+   and long payloads scroll inside the card instead of stretching the whole
+   conversation. One generic shape fits every tool. */
 .agent-activity-tool-card {
   margin: 4px 0 6px;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
@@ -2614,10 +2597,6 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
-}
-
-.agent-activity-tool-card__section--error .agent-activity-tool-card__value {
-  color: color-mix(in srgb, var(--color-status-error) 78%, var(--color-text-ink));
 }
 
 /* Reasoning body uses the shared markdown renderer but stays in the compact

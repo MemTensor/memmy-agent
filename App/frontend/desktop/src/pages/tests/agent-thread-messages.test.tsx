@@ -1103,8 +1103,48 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html.replaceAll("&#x27;", "'")).toContain(WINDOWS_COMMAND_ERROR);
-    expect(html).toContain("agent-activity-timeline-item__error");
+    expect(html).toContain('data-detail="error"');
+    expect(html).not.toContain("agent-activity-timeline-item__error");
+    expect(html).not.toContain("agent-activity-timeline-item--error");
+    expect(html).not.toContain("agent-activity-tool-card__section--error");
     expect(html).not.toContain("����");
+  });
+
+  it("renders failed file edits as a single quiet row without an inline error", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-file-edit-error"
+          messages={[
+            {
+              id: "file-edit-error",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              traces: [],
+              fileEdits: [
+                {
+                  call_id: "call-edit-error",
+                  tool: "edit_file",
+                  path: "src/app.ts",
+                  phase: "error",
+                  status: "error",
+                  error: "EACCES: permission denied"
+                }
+              ],
+              activitySegmentId: "activity-file-edit-error",
+              isStreaming: true,
+              stoppedByUser: true
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("Failed src/app.ts");
+    expect(html).not.toContain("EACCES: permission denied");
+    expect(html).not.toContain("agent-activity-timeline-item--error");
+    expect(html).not.toContain("agent-activity-timeline-item__error");
   });
 
   it("matches compact persisted trace JSON to structured tool events without duplicating rows", () => {

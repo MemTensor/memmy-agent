@@ -2234,8 +2234,8 @@ function ToolGroupSegmentLabel(props: { segment: ActivityToolGroupSegment }) {
 /**
  * Expanded tool payload. The clickable row above is already the summary, so
  * the card only shows raw input/output as one bordered code card — arguments
- * dimmed, result normal, errors tinted — with no form labels. This single
- * generic shape works for any tool, however exotic its payload.
+ * dimmed, result and errors in the same body text — with no form labels. This
+ * single generic shape works for any tool, however exotic its payload.
  */
 function ToolDetailRows(props: { item: ActivityToolStepItem }) {
   const sections = props.item.details.filter((detail) => detail.value.trim().length > 0);
@@ -2248,7 +2248,7 @@ function ToolDetailRows(props: { item: ActivityToolStepItem }) {
         <div
           key={`${detail.label}:${index}`}
           data-detail={detail.label.toLowerCase()}
-          className={`agent-activity-tool-card__section${detail.tone === "error" ? " agent-activity-tool-card__section--error" : ""}`}
+          className="agent-activity-tool-card__section"
         >
           <pre className="agent-activity-tool-card__value">{detail.value}</pre>
         </div>
@@ -2333,8 +2333,6 @@ const TRACE_CATEGORY_ICONS: Record<ToolTraceCategory, ComponentType<SVGProps<SVG
 
 function TraceLine(props: { item: ActivityToolStepItem; t: Translate }) {
   void props.t;
-  const phase = props.item.event.phase;
-  const isError = phase === "error";
   const category = props.item.category;
   const Icon = TRACE_CATEGORY_ICONS[category] ?? Wand2;
   const summary = (
@@ -2345,13 +2343,10 @@ function TraceLine(props: { item: ActivityToolStepItem; t: Translate }) {
           {props.item.verb ? <span className="agent-activity-timeline-item__verb">{props.item.verb}</span> : null}
           {props.item.detail ? <span className="agent-activity-timeline-item__detail">{props.item.detail}</span> : null}
         </p>
-        {isError && props.item.event?.error != null && (
-          <p className="agent-activity-timeline-item__error">{formatToolDetailValue(props.item.event.error)}</p>
-        )}
       </div>
     </>
   );
-  const className = `agent-activity-timeline-item agent-activity-timeline-item--tool agent-activity-timeline-item--${category}${isError ? " agent-activity-timeline-item--error" : ""}`;
+  const className = `agent-activity-timeline-item agent-activity-timeline-item--tool agent-activity-timeline-item--${category}`;
   if (props.item.details.length > 0) {
     return (
       <details className={`${className} agent-activity-tool-details`}>
@@ -2387,7 +2382,7 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
   const deleted = props.edit.deleted ?? 0;
   const hasDiff = !isUnchanged && !props.edit.binary && (added > 0 || deleted > 0);
   return (
-    <div className={`agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit${isError ? " agent-activity-timeline-item--error" : ""}`}>
+    <div className="agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit">
       <Pencil size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />
       <div className="agent-activity-timeline-item__body">
         <p className="agent-activity-timeline-item__line">
@@ -2403,7 +2398,6 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
         <p className="agent-activity-timeline__status sr-only">
           {isUnchanged ? "unchanged" : `${status} · ${props.edit.binary ? "binary" : `+${added} / -${deleted}`}`}
         </p>
-        {props.edit.error && <p className="agent-activity-timeline-item__error">{props.edit.error}</p>}
       </div>
     </div>
   );
@@ -2432,7 +2426,6 @@ interface ActivityToolStepItem {
 interface ActivityToolDetail {
   label: string;
   value: string;
-  tone?: "error";
 }
 
 interface ActivityFileEditItem {
@@ -2790,7 +2783,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   appendToolDetailRow(rows, "Result", event.result);
   appendToolDetailRow(rows, "Files", event.files);
   appendToolDetailRow(rows, "Embeds", event.embeds);
-  appendToolDetailRow(rows, "Error", event.error, "error");
+  appendToolDetailRow(rows, "Error", event.error);
   const trace = legacyLine?.trim();
   if (trace && trace !== summaryLine) {
     rows.push({ label: "Trace", value: truncateToolDetailValue(trace) });
@@ -2798,7 +2791,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   return rows;
 }
 
-function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: unknown, tone?: ActivityToolDetail["tone"]): void {
+function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: unknown): void {
   if (value == null) {
     return;
   }
@@ -2812,7 +2805,7 @@ function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: u
   if (!formatted.trim()) {
     return;
   }
-  rows.push({ label, value: formatted, tone });
+  rows.push({ label, value: formatted });
 }
 
 function toolEventFallbackLine(event: AgentToolProgressEvent): string {
