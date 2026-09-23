@@ -29,7 +29,9 @@ records general tool contracts and less obvious usage patterns.
 - Use `fixed_strings=true` for literal keywords containing regex characters.
 - Before reading full matches, use `output_mode="count"` to estimate the scale of broad searches.
 - Use `head_limit` and `offset` to page through large result sets.
-- You may skip binary or very large files to keep results readable.
+- For long documents, use `read_file` with `char_offset` and `char_limit`; use `pages` to select PDF pages. Follow the returned continuation offset with the same path and page selection until the required content is read. When the task requires the whole document, continue to the end before claiming it is fully read.
+- A truncated excerpt does not establish that a fact is absent or unavailable. Retrieve the missing range before drawing conclusions or asking the user to supply information already in the document.
+- If command output is truncated while extracting a document, save the extracted text to a file and read the relevant ranges, or use `read_file` on the original document. Polling a completed command does not recover omitted output.
 
 ## File and Coding Workflows
 
