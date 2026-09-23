@@ -21,6 +21,9 @@ import {
   LocalDataClearResponseSchema,
   LocalDataExportResponseSchema,
   LocalDataRevealResponseSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
+  LotteryStatusSchema,
   ImageGenModelConfigInputSchema,
   ImageGenModelConfigViewSchema,
   ModelConfigInputSchema,
@@ -541,6 +544,45 @@ describe("local app contracts", () => {
     expect(LocalDataClearResponseSchema.parse({ ok: true, clearedAt: "2026-06-02T10:00:00.000Z" })).toMatchObject({
       ok: true
     });
+  });
+
+  it("parses the remote lottery status contract", () => {
+    expect(LotteryStatusSchema.parse({
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    })).toEqual({
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    });
+    expect(() => LotteryStatusSchema.parse({
+      shouldShow: true,
+      startAt: 1790812800000,
+      endAt: 1790121600000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    })).toThrow();
+  });
+
+  it("parses lottery reward and acknowledgement contracts", () => {
+    expect(LotteryRewardSchema.parse({ hasReward: false })).toEqual({ hasReward: false });
+    expect(LotteryRewardSchema.parse({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    })).toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    expect(LotteryRewardAckInputSchema.parse({ drawId: "1" })).toEqual({ drawId: "1" });
+    expect(LotteryRewardAckInputSchema.parse({})).toEqual({});
+    expect(() => LotteryRewardSchema.parse({ hasReward: true, tokenAmount: 0 })).toThrow();
   });
 
   it("parses tool integration contracts", () => {

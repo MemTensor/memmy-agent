@@ -20,6 +20,12 @@ export interface AgentModelSelectorProps {
   scopeKey: string;
   disabled: boolean;
   seedConfig?: ModelProviderConfig | null;
+  /**
+   * Called when the user explicitly picks a model, so the caller can persist it as the
+   * mode default (remembered for new chats after restart). The per-chat selection is
+   * still tracked separately in Agent state.
+   */
+  onDefaultModelSelected?: (candidateId: string) => void;
 }
 
 /** Per-chat catalog preset picker. Selection lives in Agent state, never browser storage. */
@@ -80,6 +86,7 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
 
   function selectModel(candidateId: string) {
     dispatch(agentActions.pendingModelPresetUpdated(props.scopeKey, candidateId));
+    props.onDefaultModelSelected?.(candidateId);
   }
 
   function openCustomModelSettings() {

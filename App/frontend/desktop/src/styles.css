@@ -7017,6 +7017,153 @@ input[type="checkbox"].check-sky:checked::after {
   background: var(--color-action-sky-hover);
 }
 
+.memmy-notification-stack {
+  position: fixed;
+  top: var(--codex-toolbar-height);
+  right: var(--space-5);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 220px;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-stack {
+  top: calc(var(--codex-toolbar-height) * 2);
+}
+
+.memmy-notification {
+  pointer-events: auto;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  border-radius: var(--radius-card);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-soft);
+  animation: memmy-notification-in 180ms ease-out;
+}
+
+.memmy-notification--success {
+  --memmy-notification-accent: var(--color-action-sky);
+}
+
+.memmy-notification--info {
+  --memmy-notification-accent: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+}
+
+.memmy-notification--warning {
+  --memmy-notification-accent: var(--color-accent-peach);
+}
+
+.memmy-notification__badge {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 1px;
+  border-radius: 8px;
+  color: var(--memmy-notification-accent);
+  background: color-mix(in srgb, var(--memmy-notification-accent) 12%, var(--color-background-paper));
+}
+
+.memmy-notification__content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memmy-notification__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memmy-notification__title {
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  color: var(--color-text-ink);
+}
+
+.memmy-notification__emphasis {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  color: var(--color-action-sky);
+}
+
+.memmy-notification__body {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+}
+
+.memmy-notification__action {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-action-sky);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.memmy-notification__action:hover {
+  color: var(--color-action-sky-hover);
+}
+
+.memmy-notification__close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: -2px -4px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.memmy-notification__close:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+@keyframes memmy-notification-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memmy-notification { animation: none; }
+}
+
 .banner {
   display: flex;
   align-items: flex-start;

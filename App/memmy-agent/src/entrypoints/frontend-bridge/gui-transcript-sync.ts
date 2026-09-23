@@ -46,6 +46,7 @@ function guiSessionKey(sessionKey: string): string {
 export class GuiTranscriptMirror {
   readonly sessions: SessionManager;
   readonly workspace: string;
+  private lastCreatedAt = 0;
 
   constructor(sessions: SessionManager, workspace: string) {
     this.sessions = sessions;
@@ -112,7 +113,17 @@ export class GuiTranscriptMirror {
   }
 
   append(sessionKey: string, record: Record<string, any>): number {
-    return appendTranscriptObject(guiSessionKey(sessionKey), record);
+    const suppliedCreatedAt = typeof record.createdAt === "number" && Number.isFinite(record.createdAt)
+      ? Math.trunc(record.createdAt)
+      : null;
+    const createdAt = suppliedCreatedAt == null
+      ? Math.max(Date.now(), this.lastCreatedAt + 1)
+      : suppliedCreatedAt;
+    this.lastCreatedAt = Math.max(this.lastCreatedAt, createdAt);
+    return appendTranscriptObject(guiSessionKey(sessionKey), {
+      ...record,
+      createdAt,
+    });
   }
 
   private appendTurn(turn: MirrorTurn, record: Record<string, any>): number {

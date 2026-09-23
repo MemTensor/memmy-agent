@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveStartupSplashHtml, resolveUpdateSplashHtml } from "../src/main/startup-splash.js";
+import {
+  resolveStartupSplashHtml,
+  resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
+} from "../src/main/startup-splash.js";
 
 // Execute the real startup/window callbacks without importing Electron or starting user services.
 // The AST extraction keeps the race tests tied to main.ts rather than a copy of its implementation.
@@ -114,7 +118,9 @@ function setup(options: { delay?: number; error?: Error; apiError?: Error; clean
     hideInWindowMenuBar: noop, updateFullWindowButtonPosition: noop, attachWindowOpenHandler: noop,
     attachRendererContextMenu: noop, attachRendererShortcutGuards: noop, attachMainWindowFullScreenSync: noop,
     handleMainWindowClose: noop, handleMainWindowMinimize: noop, resolveRendererUrl: () => "http://test-renderer.invalid",
-    shouldIgnoreStaleReopenQuit: () => false, hasSingleInstanceLock: true,
+    shouldIgnoreStaleReopenQuit: () => false,
+    shouldQuitWhenAllWindowsClosed,
+    hasSingleInstanceLock: true,
     readStopMemoryServiceOnExitSetting: () => false, armQuitCleanupForceExitTimer: noop,
     cleanupBeforeQuit: async () => {}, clearQuitCleanupForceExitTimer: noop, relaunchAfterQuitCleanupIfRequested: noop
   });

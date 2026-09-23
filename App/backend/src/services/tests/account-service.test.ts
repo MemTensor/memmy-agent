@@ -28,6 +28,75 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("treats a logged-out lottery reward lookup as no reward", async () => {
+    let cloudCalls = 0;
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward() {
+          cloudCalls += 1;
+          return { hasReward: true as const, drawId: "1", tokenAmount: 500_000 };
+        }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({ hasReward: false });
+    expect(cloudCalls).toBe(0);
+  });
+
+  it("reads and acknowledges lottery rewards with the current cloud credential", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward(input) {
+          calls.push({ get: input });
+          return { hasReward: true as const, drawId: "1", tokenAmount: 500_000 };
+        },
+        async ackLotteryReward(input) {
+          calls.push({ ack: input });
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return "cloud.login.uuid";
+        }
+      }
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    await expect(service.ackLotteryReward({ drawId: "1" })).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { get: { uuid: "cloud.login.uuid" } },
+      { ack: { uuid: "cloud.login.uuid", drawId: "1" } }
+    ]);
+  });
+
+  it("fails closed when the cloud lottery reward lookup is unavailable", async () => {
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward() {
+          throw Object.assign(new Error("unauthorized"), { code: "unauthorized" as const });
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return "stale.cloud.uuid";
+        }
+      }
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({ hasReward: false });
+  });
+
   it("rejects verification channels that are not supported by the desktop package", async () => {
     let cloudCalls = 0;
     const service = createAccountService({
@@ -1070,6 +1139,12 @@ function createCloudClientStub() {
     },
     async grantImprovementProgramTokens() {
       return this.getTokenUsage({});
+    },
+    async getLotteryReward() {
+      return { hasReward: false as const };
+    },
+    async ackLotteryReward() {
+      return undefined;
     },
     async sendTelemetry() {
       return undefined;

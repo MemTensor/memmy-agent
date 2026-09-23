@@ -25,7 +25,7 @@ import type {
   UpdateAccountGuideInput,
   UpdateCloudAccountProfileInput
 } from "../../adapters/outbound/cloud-client/types.js";
-import type { LegalAgreementUrls, PromotionFlags } from "@memmy/local-api-contracts";
+import type { LegalAgreementUrls, LotteryStatus, PromotionFlags } from "@memmy/local-api-contracts";
 
 export interface CreateMockCloudClientOptions {
   health?: CloudHealth;
@@ -35,6 +35,8 @@ export interface CreateMockCloudClientOptions {
   legal?: LegalAgreementUrls;
   /** Promotions. */
   promotions?: PromotionFlags;
+  /** Lottery campaign status. */
+  lotteryStatus?: LotteryStatus;
 }
 
 export function createMockCloudClient(options: CreateMockCloudClientOptions = {}): CloudClient {
@@ -225,6 +227,18 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
 
     async getPromotions() {
       return options.promotions;
+    },
+
+    async getLotteryStatus() {
+      return options.lotteryStatus;
+    },
+
+    async getLotteryReward() {
+      return { hasReward: false };
+    },
+
+    async ackLotteryReward() {
+      return undefined;
     }
   };
 }

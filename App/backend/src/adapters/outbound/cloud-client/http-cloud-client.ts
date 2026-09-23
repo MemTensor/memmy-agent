@@ -9,6 +9,8 @@ import {
   LegalAgreementUrlsSchema,
   IntegrationToolResultSchema,
   InvitationResultSchema,
+  LotteryRewardSchema,
+  LotteryStatusSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
@@ -20,6 +22,8 @@ import {
   type IntegrationConnection,
   type IntegrationConnectionsResponse,
   type LegalAgreementUrls,
+  type LotteryReward,
+  type LotteryStatus,
   type IntegrationToolResult,
   type OkResponse,
   type PromotionFlags,
@@ -45,10 +49,12 @@ import type {
   CloudStartSocialLoginResult,
   CloudLogoutInput,
   GetAccountInfoInput,
+  GetLotteryRewardInput,
   EnsureInvitationCodeInput,
   GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
+  AckLotteryRewardInput,
   ReleaseCheckResult,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
@@ -414,6 +420,36 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       } catch {
         return undefined;
       }
+    },
+
+    async getLotteryStatus(): Promise<LotteryStatus | undefined> {
+      try {
+        const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/status", {
+          method: "GET",
+          lang: "zh"
+        });
+        const parsed = LotteryStatusSchema.safeParse(data);
+        return parsed.success ? parsed.data : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    async getLotteryReward(input: GetLotteryRewardInput): Promise<LotteryReward> {
+      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/reward", {
+        method: "GET",
+        lang: "zh",
+        bearerCredential: input.uuid
+      });
+      return LotteryRewardSchema.parse(data);
+    },
+
+    async ackLotteryReward(input: AckLotteryRewardInput): Promise<void> {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/reward/ack", {
+        body: input.drawId ? { drawId: input.drawId } : {},
+        lang: "zh",
+        bearerCredential: input.uuid
+      });
     }
   };
 }

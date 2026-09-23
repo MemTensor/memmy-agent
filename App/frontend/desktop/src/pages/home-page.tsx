@@ -51,7 +51,7 @@ import {
   type PendingFileAttachment,
   type PendingImage
 } from "../state/agent-composer-state.js";
-import { createModelWorkspace, resolveModelSelection } from "../state/model-workspace.js";
+import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection } from "../state/model-workspace.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -898,6 +898,27 @@ export function HomePage() {
       allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)
     }
   );
+  // Persist the model the user picks in the chat selector as the mode default, so a new chat
+  // after restart defaults to the last-used model instead of the platform default. Only the
+  // account/byok `agent.default` is written (the backend mirrors it to agents.defaults.modelPreset);
+  // the per-chat selection stays in Agent state. Relies on the BYOK-candidate enrollment fix so
+  // the default survives the account-mode startup re-projection.
+  const persistDefaultModelRef = useRef(false);
+  const persistDefaultModel = useCallback(async (candidateId: string) => {
+    const configClient = clients?.config;
+    if (!configClient || persistDefaultModelRef.current) return;
+    const input = defaultModelSelectionInput(modelWorkspace, modelWorkspaceMode, candidateId);
+    if (!input) return;
+    persistDefaultModelRef.current = true;
+    try {
+      const saved = await configClient.saveModelCatalog(input);
+      dispatch(appActions.modelConfigUpdated(saved));
+    } catch {
+      // The per-chat selection is already applied; a failed default persist must not break it.
+    } finally {
+      persistDefaultModelRef.current = false;
+    }
+  }, [clients, modelWorkspace, modelWorkspaceMode, dispatch]);
   useEffect(() => {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
@@ -2726,6 +2747,7 @@ export function HomePage() {
                     scopeKey={modelSelectionScopeKey}
                     disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                     seedConfig={state.modelConfig}
+                    onDefaultModelSelected={persistDefaultModel}
                   />
                   <button
                     type="button"
@@ -2944,6 +2966,7 @@ export function HomePage() {
                           scopeKey={modelSelectionScopeKey}
                           disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                           seedConfig={state.modelConfig}
+                          onDefaultModelSelected={persistDefaultModel}
                         />
                         <button
                           type="button"
