@@ -13,14 +13,11 @@
   letter-spacing: 0;
 }
 
-.budgetCard {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 16px;
-  padding: 16px;
-  border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-card-lg);
+.budgetSection {
+  margin-top: 24px;
+}
+
+.budgetPanel {
   background: var(--color-background-paper);
 }
 
@@ -47,18 +44,7 @@
   }
 }
 
-.budgetTitle {
-  margin: 0;
-  font-size: var(--codex-text-base);
-  line-height: var(--codex-leading-base);
-  font-weight: 600;
-  color: var(--usage-ink);
-}
-
-.budgetRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px 16px;
+.platformQuotaRow.budgetRow {
   align-items: center;
 }
 
@@ -95,11 +81,11 @@
   grid-column: 1 / -1;
   box-sizing: border-box;
   width: 100%;
-  height: 8px;
+  height: 4px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 78%, var(--usage-ink) 8%);
+  border: 0;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--color-canvas-oat) 72%, white);
+  background: var(--usage-track);
 }
 
 .budgetMeterFill {
@@ -110,7 +96,7 @@
 }
 
 .budgetMeterFillGreen {
-  background: var(--color-status-success);
+  background: var(--color-action-sky);
 }
 
 .budgetMeterFillYellow {
@@ -133,7 +119,7 @@
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 44%, transparent);
   border-radius: var(--radius-btn, 8px);
-  background: color-mix(in srgb, var(--color-canvas-oat) 30%, transparent);
+  background: var(--color-background-paper);
   color: var(--usage-ink);
   font-family: var(--font-sans);
   font-size: var(--codex-text-sm);
@@ -141,6 +127,10 @@
 }
 
 .budgetHint {
+  margin: 0 0 6px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  line-height: 19px;
   white-space: pre-line;
 }
 

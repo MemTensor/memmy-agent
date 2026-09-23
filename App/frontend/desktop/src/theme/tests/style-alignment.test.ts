@@ -221,8 +221,13 @@ describe("prototype style alignment", () => {
     expect(settingsTokenUsageCss).toContain("font-family: var(--font-sans);");
     expect(globalCss).not.toContain("font-family: -apple-system");
     expect(settingsTokenUsageCss).not.toContain("OpenAI Sans");
-    expect(settingsTokenUsageCss).toMatch(/\.budgetCard\s*\{[^}]*background: var\(--color-background-paper\);/s);
-    expect(settingsTokenUsageCss).toMatch(/\.budgetInput\s*\{[^}]*background: color-mix\(in srgb, var\(--color-canvas-oat\) 30%, transparent\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.budgetMeter\s*\{[^}]*height: 4px;[^}]*border: 0;[^}]*background: var\(--usage-track\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.budgetMeterFillGreen\s*\{[^}]*background: var\(--color-action-sky\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.meterFill\s*\{[^}]*background: var\(--color-action-sky\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.budgetHint\s*\{[^}]*margin: 0 0 6px;[^}]*font-size: var\(--codex-text-sm\);[^}]*line-height: 19px;/s);
+    expect(settingsTokenUsageCss).toContain(".budgetMeterFillYellow");
+    expect(settingsTokenUsageCss).toContain(".budgetMeterFillRed");
+    expect(settingsTokenUsageCss).toMatch(/\.budgetInput\s*\{[^}]*background: var\(--color-background-paper\);/s);
     expect(contentTopbarRule).toContain("position: absolute;");
     expect(contentTopbarRule).toContain("top: 0;");
     expect(contentTopbarRule).toContain("z-index: 10000;");

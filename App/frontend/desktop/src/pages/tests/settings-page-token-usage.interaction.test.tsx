@@ -782,9 +782,11 @@ describe("memory token budget limit inputs", () => {
       await Promise.resolve();
     });
 
-    const card = container.querySelector("#memory-token-budget");
+    const section = container.querySelector("#memory-token-budget");
+    const card = section?.querySelector("[class*='budgetPanel']");
     expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(false);
-    expect(card).not.toBeNull();
+    expect(section).not.toBeNull();
+    expect(section?.className).not.toMatch(/budgetCardFlash/);
     expect(card?.className).toMatch(/budgetCardFlash/);
     expect(scrollIntoView).not.toHaveBeenCalled();
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView;

@@ -683,6 +683,24 @@ describe("SettingsPageView", () => {
     expect(source).toContain("byokTokenUsageClient.getSummary");
     expect(source).toContain("byokTokenUsageClient.getMemoryBudget");
     expect(source).toContain("function MemoryTokenBudgetCard");
+    const budgetCardSource = source.slice(
+      source.indexOf("function MemoryTokenBudgetCard"),
+      source.indexOf("export type MemoryBudgetUsageTone")
+    );
+    expect(budgetCardSource).toContain("<Gauge");
+    expect(budgetCardSource).toContain("usageStyles.sectionHead");
+    expect(budgetCardSource).toContain("usageStyles.budgetSection");
+    expect(budgetCardSource).toContain("usageStyles.budgetPanel");
+    expect(budgetCardSource).toContain("usageStyles.platformQuotaList");
+    const budgetRowSource = source.slice(
+      source.indexOf("export function MemoryTokenBudgetRow"),
+      source.indexOf("export interface UsageDetailsProps")
+    );
+    expect(budgetRowSource).toContain("usageStyles.platformQuotaRow");
+    expect(budgetRowSource).toContain("usageStyles.budgetMeter");
+    expect(budgetCardSource.indexOf('t("settings.token.memoryBudgetHint")')).toBeLessThan(
+      budgetCardSource.indexOf('t("settings.token.memoryBudgetDaily")')
+    );
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
     expect(source).toContain("function UsageDetails");

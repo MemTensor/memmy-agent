@@ -1,6 +1,6 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
 import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
@@ -814,14 +814,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       return undefined;
     }
 
-    const card = document.getElementById(MEMORY_TOKEN_BUDGET_SECTION_ID);
+    const section = document.getElementById(MEMORY_TOKEN_BUDGET_SECTION_ID);
+    const card = section?.querySelector<HTMLElement>(`.${usageStyles.budgetPanel}`) ?? null;
     const flashClass = usageStyles.budgetCardFlash;
-    if (!card || !flashClass) {
+    if (!section || !card || !flashClass) {
       return undefined;
     }
 
     const alignCard = () => {
-      scrollSettingsSectionIntoView(card);
+      scrollSettingsSectionIntoView(section);
     };
 
     card.classList.add(flashClass);
@@ -2052,50 +2053,55 @@ function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
   const lifetimeUsed = props.budget?.lifetimeUsed ?? 0;
 
   return (
-    <section id={MEMORY_TOKEN_BUDGET_SECTION_ID} className={`${usageStyles.detailContent} ${usageStyles.budgetCard}`}>
-      <h3 className={usageStyles.budgetTitle}>{t("settings.token.memoryBudget")}</h3>
-      <MemoryTokenBudgetRow
-        label={t("settings.token.memoryBudgetDaily")}
-        noteLabel={dailyLimitM === 0 ? undefined : t("settings.token.memoryBudgetDailyUsedLabel")}
-        note={dailyLimitM === 0
-          ? t("settings.token.memoryBudgetUnlimited")
-          : t("settings.token.memoryBudgetUsed", {
-            used: formatBudgetUsedM(dailyUsed),
-            limit: String(dailyLimitM)
-          })}
-        draft={props.dailyLimitDraft}
-        savedValue={dailyLimitM}
-        usedTokens={dailyUsed}
-        limitM={dailyLimitM}
-        onDraftChange={props.onDailyDraftChange}
-        onCommit={props.onCommitDaily}
-      />
-      <MemoryTokenBudgetRow
-        label={t("settings.token.memoryBudgetTotal")}
-        noteLabel={totalLimitM === 0 ? undefined : t("settings.token.memoryBudgetTotalUsedLabel")}
-        note={totalLimitM === 0
-          ? t("settings.token.memoryBudgetUnlimited")
-          : t("settings.token.memoryBudgetUsed", {
-            used: formatBudgetUsedM(lifetimeUsed),
-            limit: String(totalLimitM)
-          })}
-        draft={props.totalLimitDraft}
-        savedValue={totalLimitM}
-        usedTokens={lifetimeUsed}
-        limitM={totalLimitM}
-        onDraftChange={props.onTotalDraftChange}
-        onCommit={props.onCommitTotal}
-      />
-      {props.budget?.stale ? (
-        <div className={usageStyles.compactScene}>
-          <p>{t("settings.token.memoryBudgetStale")}</p>
-        </div>
-      ) : null}
-      {props.saveError ? (
-        <p className={usageStyles.statusError} role="alert">{props.saveError}</p>
-      ) : null}
-      <div className={usageStyles.compactScene}>
+    <section id={MEMORY_TOKEN_BUDGET_SECTION_ID} className={`${usageStyles.detailContent} ${usageStyles.usageSection} ${usageStyles.budgetSection}`}>
+      <div className={usageStyles.sectionHead}>
+        <h2>
+          <Gauge size={16} className="text-text-ink/60" aria-hidden="true" />
+          {t("settings.token.memoryBudget")}
+        </h2>
+      </div>
+      <div className={`${usageStyles.platformQuotaList} ${usageStyles.budgetPanel}`}>
         <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetHint")}</p>
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetDaily")}
+          noteLabel={dailyLimitM === 0 ? undefined : t("settings.token.memoryBudgetDailyUsedLabel")}
+          note={dailyLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(dailyUsed),
+              limit: String(dailyLimitM)
+            })}
+          draft={props.dailyLimitDraft}
+          savedValue={dailyLimitM}
+          usedTokens={dailyUsed}
+          limitM={dailyLimitM}
+          onDraftChange={props.onDailyDraftChange}
+          onCommit={props.onCommitDaily}
+        />
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetTotal")}
+          noteLabel={totalLimitM === 0 ? undefined : t("settings.token.memoryBudgetTotalUsedLabel")}
+          note={totalLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(lifetimeUsed),
+              limit: String(totalLimitM)
+            })}
+          draft={props.totalLimitDraft}
+          savedValue={totalLimitM}
+          usedTokens={lifetimeUsed}
+          limitM={totalLimitM}
+          onDraftChange={props.onTotalDraftChange}
+          onCommit={props.onCommitTotal}
+        />
+        {props.budget?.stale ? (
+          <div className={usageStyles.compactScene}>
+            <p>{t("settings.token.memoryBudgetStale")}</p>
+          </div>
+        ) : null}
+        {props.saveError ? (
+          <p className={usageStyles.statusError} role="alert">{props.saveError}</p>
+        ) : null}
       </div>
     </section>
   );
@@ -2159,7 +2165,7 @@ export function MemoryTokenBudgetRow(props: {
   }
 
   return (
-    <div className={usageStyles.budgetRow}>
+    <article className={`${usageStyles.platformQuotaRow} ${usageStyles.budgetRow}`}>
       <div className={usageStyles.compactScene}>
         <h3>{props.label}</h3>
         <p className={usageStyles.byokBreakdown}>
@@ -2212,7 +2218,7 @@ export function MemoryTokenBudgetRow(props: {
           />
         </div>
       ) : null}
-    </div>
+    </article>
   );
 }
 
