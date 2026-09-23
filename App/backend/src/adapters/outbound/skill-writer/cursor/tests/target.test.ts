@@ -1,4 +1,5 @@
 /** Target tests. */
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -7,6 +8,7 @@ import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { createCursorSkillTarget } from "../index.js";
 import type { SkillManifest } from "../../types.js";
@@ -149,17 +151,23 @@ describe("cursor skill target", () => {
         };
       };
       expect(hooksConfig.version).toBe(1);
-      expect(hooksConfig.hooks.beforeSubmitPrompt[0]).toMatchObject({
+      const submitHook = hooksConfig.hooks.beforeSubmitPrompt[0];
+      const responseHook = hooksConfig.hooks.afterAgentResponse[0];
+      const stopHook = hooksConfig.hooks.stop[0];
+      assert(submitHook, "beforeSubmitPrompt hook must be installed");
+      assert(responseHook, "afterAgentResponse hook must be installed");
+      assert(stopHook, "stop hook must be installed");
+      expect(submitHook).toMatchObject({
         timeout: 60
       });
-      expect(hooksConfig.hooks.beforeSubmitPrompt[0]).not.toHaveProperty("matcher");
-      expect(hooksConfig.hooks.beforeSubmitPrompt[0].command).toContain("memmy-resume-hook.mjs");
-      expect(hooksConfig.hooks.beforeSubmitPrompt[0].command).not.toContain("Electron.app");
-      expectSafeNodeHookCommand(hooksConfig.hooks.beforeSubmitPrompt[0].command);
-      expect(hooksConfig.hooks.afterAgentResponse[0]).toMatchObject({ timeout: 60 });
-      expect(hooksConfig.hooks.afterAgentResponse[0].command).toContain("memmy-resume-hook.mjs");
-      expect(hooksConfig.hooks.stop[0]).toMatchObject({ timeout: 60 });
-      expect(hooksConfig.hooks.stop[0].command).toContain("memmy-resume-hook.mjs");
+      expect(submitHook).not.toHaveProperty("matcher");
+      expect(submitHook.command).toContain("memmy-resume-hook.mjs");
+      expect(submitHook.command).not.toContain("Electron.app");
+      expectSafeNodeHookCommand(submitHook.command);
+      expect(responseHook).toMatchObject({ timeout: 60 });
+      expect(responseHook.command).toContain("memmy-resume-hook.mjs");
+      expect(stopHook).toMatchObject({ timeout: 60 });
+      expect(stopHook.command).toContain("memmy-resume-hook.mjs");
 
       const run = await runNodeHook(
         hookScriptPath,
@@ -167,7 +175,7 @@ describe("cursor skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expect(run.stderr).toBe("");
+      expectNoUnexpectedNodeStderr(run.stderr);
       const output = JSON.parse(run.stdout) as { continue: boolean; user_message: string };
       expect(output.continue).toBe(false);
       expect(output.user_message).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');

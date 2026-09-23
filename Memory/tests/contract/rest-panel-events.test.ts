@@ -14,7 +14,12 @@ describe("REST panel contract", () => {
   it("serves the minimal panel endpoints", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-rest-contract-"));
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
-    const service = new MemoryService({ db, mode: "dev", embedder: createTestEmbedder() });
+    const service = new MemoryService({
+      db,
+      mode: "dev",
+      embedder: createTestEmbedder(),
+      fetchAppMemoryBudget: async () => null
+    });
     const server = createMemoryHttpServer({
       service,
       auth: {
@@ -107,6 +112,7 @@ describe("REST panel contract", () => {
       expect(Date.parse(deleted.serverTime)).not.toBeNaN();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await service.stop();
       db.close();
       rmSync(root, { recursive: true, force: true });
     }

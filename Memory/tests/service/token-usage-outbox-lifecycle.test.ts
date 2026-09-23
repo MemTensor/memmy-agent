@@ -20,7 +20,7 @@ afterEach(async () => {
     await closeMemoryHttpServer(server);
   }
   for (const service of extraServices.splice(0)) {
-    service.stopTokenUsageDelivery();
+    await service.stop();
   }
   for (const database of extraDatabases.splice(0)) {
     if (database.db.open) {

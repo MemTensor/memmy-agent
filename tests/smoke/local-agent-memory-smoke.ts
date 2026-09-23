@@ -60,6 +60,7 @@ export async function runLocalAgentMemorySmoke(
   const sourceIds = validateSourceIds(requestedSourceIds);
   const root = mkdtempSync(join(tmpdir(), "memmy-local-agent-smoke-"));
   let db: MemoryDb | undefined;
+  let openedService: MemoryService | undefined;
   let executor: AgentSourceExecutor | undefined;
   let server: Awaited<ReturnType<typeof listenMemoryHttpServer>> | undefined;
   let client: MemmyMemoryClient | undefined;
@@ -106,8 +107,10 @@ export async function runLocalAgentMemorySmoke(
       config,
       llm,
       skillLlm: llm,
-      embedder: createSmokeEmbedder()
+      embedder: createSmokeEmbedder(),
+      fetchAppMemoryBudget: async () => null
     });
+    openedService = service;
     executor = createAgentSourceExecutor({
       service,
       configPath,
@@ -278,6 +281,7 @@ export async function runLocalAgentMemorySmoke(
       cleanupErrors.push(error);
     }
     try {
+      await openedService?.stop();
       if (db?.db.open) db.close();
     } catch (error) {
       cleanupErrors.push(error);

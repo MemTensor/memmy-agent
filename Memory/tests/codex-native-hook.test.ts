@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { expectNoUnexpectedNodeStderr } from "./fixtures/node-stderr.js";
 import { buildSourceTurnRequest, readCodexSourceTurn } from "@memmy/agent-source-core";
 import { renderMemmyResumeHookScript } from "../src/agent-source/integration/templates/memmy-resume-hook.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../src/agent-source/integration/workspace-bridge/runtime-loader.js";
@@ -56,7 +57,7 @@ describe("installed Codex Hook native capture", () => {
     const f = await fixture();
     try {
       const result = await run(f.dir, f.path);
-      expect(result.status).toBe(0); expect(result.stderr).toBe("");
+      expect(result.status).toBe(0); expectNoUnexpectedNodeStderr(result.stderr);
       expect(f.requests).toHaveLength(1);
       const turn = (await readCodexSourceTurn(f.path)).turn!;
       expect(f.requests[0]).toEqual({ path: "/api/v1/source-turns/complete", body: { ...buildSourceTurnRequest(turn, "hook"), namespace: expectedNamespace, adapterId: "memmy-codex-hook" } });
@@ -71,7 +72,7 @@ describe("installed Codex Hook native capture", () => {
       expect((await run(f.dir, f.path)).stderr).toContain("turn_incomplete");
       expect(f.requests).toHaveLength(0);
       writeFileSync(f.path, transcript());
-      expect((await run(f.dir, f.path)).stderr).toBe("");
+      expectNoUnexpectedNodeStderr((await run(f.dir, f.path)).stderr);
       expect(f.requests).toHaveLength(1);
     } finally { await f.close(); }
   });
@@ -81,7 +82,7 @@ describe("installed Codex Hook native capture", () => {
     try {
       writeFileSync(f.path, transcript(false));
       const hookResult = await run(f.dir, f.path);
-      expect(hookResult.stderr).toBe("");
+      expectNoUnexpectedNodeStderr(hookResult.stderr);
       expect(f.requests).toHaveLength(1);
       expect((await readCodexSourceTurn(f.path)).turn).toBeNull();
       const completedRecords = transcript().trim().split("\n").map(line => JSON.parse(line));

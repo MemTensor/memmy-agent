@@ -554,7 +554,7 @@ function errorName(error: unknown): string {
 }
 
 export async function fetchAppMemoryBudget(
-  options: HttpByokTokenUsageRecorderOptions = {}
+  options: HttpByokTokenUsageRecorderOptions & { signal?: AbortSignal } = {}
 ): Promise<{ dailyUsed: number; lifetimeUsed: number } | null> {
   const env = options.env ?? process.env;
   const runtime = options.runtimeConfig
@@ -564,13 +564,15 @@ export async function fetchAppMemoryBudget(
   }
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal ? AbortSignal.any([timeoutSignal, options.signal]) : timeoutSignal;
   try {
     const response = await fetchImpl(new URL(MEMORY_PIPELINE_USAGE_PATH, runtime.baseUrl), {
       method: "GET",
       headers: {
         [RUNTIME_TOKEN_HEADER]: runtime.localToken
       },
-      signal: AbortSignal.timeout(timeoutMs)
+      signal
     });
     if (!response.ok) {
       return null;

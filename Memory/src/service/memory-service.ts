@@ -20,7 +20,7 @@ import {
   resolveEvolutionConfig,
   type MemmyConfig
 } from "../config/index.js";
-import { createMemoryLogger } from "../logging/logger.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
 import {
@@ -205,7 +205,7 @@ export interface MemoryServiceOptions {
   embedder?: Embedder;
   /** Actual HTTP endpoint used by the current server instance. */
   viewerEndpoint?: string;
-  fetchAppMemoryBudget?: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  fetchAppMemoryBudget?: (signal?: AbortSignal) => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
   tokenUsage?: Pick<
     HttpByokTokenUsageRecorderOptions,
     "fetchImpl" | "runtimeConfig" | "runtimeConfigPath" | "timeoutMs" | "retryDelaysMs" | "continueDelayMs"
@@ -247,6 +247,10 @@ function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
   return options.db;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 export class MemoryService {
   private readonly embeddingJobs: EmbeddingJobProcessor;
   private readonly evolutionJobs: EvolutionJobProcessor;
@@ -275,7 +279,8 @@ export class MemoryService {
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
   private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
-  private readonly fetchAppMemoryBudgetFn: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  private readonly fetchAppMemoryBudgetFn: (signal?: AbortSignal) => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  private readonly budgetAbort = new AbortController();
   private appBudgetReconcile: {
     succeeded: boolean;
     inFlight?: Promise<boolean>;
@@ -288,6 +293,7 @@ export class MemoryService {
     backoffMs: 1_000
   };
   private persistRecoveredListener?: () => void;
+  private closing = false;
   private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
@@ -309,8 +315,9 @@ export class MemoryService {
       touchBudget: () => this.tokenBudgetLedger.touch(),
       onPersistRecovered: () => this.persistRecoveredListener?.()
     });
-    this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget ?? fetchAppMemoryBudget;
-    void this.reconcileMemoryTokenBudgetFromApp();
+    this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget
+      ?? ((signal) => fetchAppMemoryBudget({ signal }));
+    this.startAppBudgetReconcile();
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
@@ -675,6 +682,15 @@ export class MemoryService {
     this.tokenUsageRecorder.stop();
   }
 
+  async stop(): Promise<void> {
+    if (this.closing) {
+      return;
+    }
+    this.closing = true;
+    this.tokenUsageRecorder.stop();
+    this.budgetAbort.abort();
+  }
+
   private createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
     return createLlmClient(
       modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
@@ -720,7 +736,23 @@ export class MemoryService {
     return this.tokenBudgetLedger.snapshot().paused || this.tokenUsageRecorder.isPersistUnreliable();
   }
 
+  private startAppBudgetReconcile(): void {
+    if (this.closing) {
+      return;
+    }
+    void this.reconcileMemoryTokenBudgetFromApp().catch((error) => {
+      if (this.closing) {
+        serviceLogger.warn("token_budget.reconcile_abandoned", memoryErrorFields(error));
+        return;
+      }
+      serviceLogger.error("token_budget.reconcile_failed", memoryErrorFields(error));
+    });
+  }
+
   private async reconcileMemoryTokenBudgetFromApp(): Promise<boolean> {
+    if (this.closing) {
+      return false;
+    }
     if (this.appBudgetReconcile.inFlight) {
       return this.appBudgetReconcile.inFlight;
     }
@@ -732,7 +764,24 @@ export class MemoryService {
 
   private async performAppBudgetReconcile(): Promise<boolean> {
     try {
-      const remote = await this.fetchAppMemoryBudgetFn();
+      if (this.closing) {
+        return false;
+      }
+      let remote: { dailyUsed: number; lifetimeUsed: number } | null;
+      try {
+        remote = await this.fetchAppMemoryBudgetFn(this.budgetAbort.signal);
+      } catch (error) {
+        if (this.closing || isAbortError(error)) {
+          return false;
+        }
+        serviceLogger.error("token_budget.reconcile_failed", memoryErrorFields(error));
+        this.appBudgetReconcile.nextAttemptAtMs = Date.now() + this.appBudgetReconcile.backoffMs;
+        this.appBudgetReconcile.backoffMs = Math.min(this.appBudgetReconcile.backoffMs * 2, 30_000);
+        return false;
+      }
+      if (this.closing) {
+        return false;
+      }
       if (!remote) {
         this.appBudgetReconcile.nextAttemptAtMs = Date.now() + this.appBudgetReconcile.backoffMs;
         this.appBudgetReconcile.backoffMs = Math.min(this.appBudgetReconcile.backoffMs * 2, 30_000);
@@ -743,7 +792,9 @@ export class MemoryService {
       this.appBudgetReconcile.backoffMs = 1_000;
       return true;
     } finally {
-      this.appBudgetReconcile.settledListener?.();
+      if (!this.closing) {
+        this.appBudgetReconcile.settledListener?.();
+      }
     }
   }
 
@@ -756,14 +807,14 @@ export class MemoryService {
   }
 
   private nextAppBudgetReconcileAtMs(): number | undefined {
-    if (this.appBudgetReconcile.succeeded || this.appBudgetReconcile.nextAttemptAtMs <= 0) {
+    if (this.closing || this.appBudgetReconcile.succeeded || this.appBudgetReconcile.nextAttemptAtMs <= 0) {
       return undefined;
     }
     return this.appBudgetReconcile.nextAttemptAtMs;
   }
 
   private async ensureAppBudgetReconciled(waitMs = 1_500): Promise<void> {
-    if (this.appBudgetReconcile.succeeded) {
+    if (this.closing || this.appBudgetReconcile.succeeded) {
       return;
     }
     if (this.appBudgetReconcile.inFlight) {
@@ -939,7 +990,7 @@ export class MemoryService {
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
     this.appBudgetReconcile.succeeded = false;
     this.appBudgetReconcile.nextAttemptAtMs = 0;
-    void this.reconcileMemoryTokenBudgetFromApp();
+    this.startAppBudgetReconcile();
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }

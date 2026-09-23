@@ -1,4 +1,5 @@
 /** Target tests. */
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -6,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { createClaudeCodeSkillTarget } from "../index.js";
 import type { SkillManifest } from "../../types.js";
 
@@ -152,18 +154,22 @@ describe("claude code skill target", () => {
           UserPromptSubmit: Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>;
         };
       };
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({
+      const submitHook = settings.hooks.UserPromptSubmit[0]?.hooks[0];
+      const stopHook = settings.hooks.Stop[0]?.hooks[0];
+      assert(submitHook, "UserPromptSubmit hook must be installed");
+      assert(stopHook, "Stop hook must be installed");
+      expect(submitHook).toMatchObject({
         type: "command",
         timeout: 60
       });
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toContain("memmy-resume-hook.mjs");
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).not.toContain("Electron.app");
-      expectSafeNodeHookCommand(settings.hooks.UserPromptSubmit[0].hooks[0].command);
-      expect(settings.hooks.Stop[0].hooks[0]).toMatchObject({
+      expect(submitHook.command).toContain("memmy-resume-hook.mjs");
+      expect(submitHook.command).not.toContain("Electron.app");
+      expectSafeNodeHookCommand(submitHook.command);
+      expect(stopHook).toMatchObject({
         type: "command",
         timeout: 60
       });
-      expect(settings.hooks.Stop[0].hooks[0].command).toContain("memmy-resume-hook.mjs");
+      expect(stopHook.command).toContain("memmy-resume-hook.mjs");
       const commandFilePath = join(rootDirectory, "commands", "memmy-resume.md");
       const commandFile = readFileSync(commandFilePath, "utf8");
       expect(commandFile).toContain("argument-hint: <query | 1-5 | cancel>");
@@ -176,7 +182,7 @@ describe("claude code skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expect(run.stderr).toBe("");
+      expectNoUnexpectedNodeStderr(run.stderr);
       const output = JSON.parse(run.stdout) as { decision: string; reason: string };
       expect(output.decision).toBe("block");
       expect(output.reason).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');

@@ -145,7 +145,9 @@ async function runMemoryService(argv: string[], lifecycle: {
         if (server) {
             await closeMemoryHttpServer(server);
         }
-        service?.stopTokenUsageDelivery();
+        if (service) {
+            await service.stop();
+        }
         backend?.close();
         removeRuntimeState(serviceHome);
         sqliteLock?.release();

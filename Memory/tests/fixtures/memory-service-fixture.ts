@@ -91,7 +91,7 @@ export function createMemoryServiceFixture(): {
 
   function cleanup(): void {
     for (const service of services.splice(0)) {
-      service.stopTokenUsageDelivery();
+      void service.stop();
     }
     for (const database of databases.splice(0)) {
       if (database.db.open) {

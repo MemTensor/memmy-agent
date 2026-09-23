@@ -38,7 +38,8 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
     configPath,
     configLoader: () => ({ config: DEFAULT_MEMMY_CONFIG, path: configPath }),
     config: DEFAULT_MEMMY_CONFIG,
-    embedder: createSmokeEmbedder()
+    embedder: createSmokeEmbedder(),
+    fetchAppMemoryBudget: async () => null
   });
   let server: Awaited<ReturnType<typeof listenMemoryHttpServer>> | undefined;
   let backend: LocalBackend | undefined;
@@ -224,6 +225,7 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
       }
     }
     try {
+      await service.stop();
       db.close();
     } catch (error) {
       cleanupErrors.push(error);
