@@ -20,10 +20,13 @@ describe("Pi skill target", () => {
 
     await target.install(renderMemmyDefaultSkillManifest("pi"));
     const skillPath = join(rootDirectory, "skills", "memmy-memory", "SKILL.md");
+    const resumeSkillPath = join(rootDirectory, "skills", "memmy-resume", "SKILL.md");
     expect(readFileSync(skillPath, "utf8")).toContain("--source pi");
+    expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source pi");
     await expect(target.isInstalled("pi")).resolves.toBe(true);
 
     await target.uninstall("pi");
     expect(existsSync(skillPath)).toBe(false);
+    expect(existsSync(resumeSkillPath)).toBe(false);
   });
 });

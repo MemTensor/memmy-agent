@@ -32,6 +32,9 @@ describe("workbuddy skill target", () => {
     expect(content).toContain("## Delete Memory");
     expect(content).toContain("--source workbuddy");
     expect(content).not.toContain("--layer");
+    const resumeContent = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+    expect(resumeContent).toContain("name: memmy-resume");
+    expect(resumeContent).toContain("--source workbuddy");
     await expect(target.isInstalled("workbuddy")).resolves.toBe(true);
   });
 
@@ -44,6 +47,7 @@ describe("workbuddy skill target", () => {
     await target.uninstall("workbuddy");
 
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
     expect(readFileSync(join(rootDirectory, "USER.md"), "utf8")).toBe("keep");
   });
 });

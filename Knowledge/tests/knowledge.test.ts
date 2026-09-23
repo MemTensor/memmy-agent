@@ -305,6 +305,22 @@ it("local routes require auth, reject credential overrides and have no reveal en
     expect(renameUrl).toBe("https://cloud.example/api/knowledge/bases/owned");
     expect(renameInit.method).toBe("PATCH");
     expect(renameInit.body).toBe(JSON.stringify({ name: "新名称" }));
+    fetcher.mockImplementationOnce(async () => reply({ ok: true }));
+    const shared = await app.inject({
+      method: "POST",
+      url: "/api/knowledge/bases/owned/members",
+      headers,
+      payload: { userId: "ada@example.com" },
+    });
+    expect(shared.statusCode).toBe(200);
+    const [shareUrl, shareInit] = fetcher.mock.calls.at(-1) as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(shareUrl).toBe(
+      "https://cloud.example/api/knowledge/bases/owned/members",
+    );
+    expect(shareInit.body).toBe(JSON.stringify({ userId: "ada@example.com" }));
     const response = await app.inject({
       method: "GET",
       url: "/api/knowledge/settings",

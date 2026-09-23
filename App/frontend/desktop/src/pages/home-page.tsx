@@ -885,13 +885,18 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
-  const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
-    ?? state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId
+  const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
+  const committedModelSelection = state.agent.committedModelSelectionByScope[modelSelectionScopeKey];
+  const selectedModelPreset = pendingModelPreset
+    ?? committedModelSelection?.presetId
     ?? null;
   const resolvedConversationModel = resolveModelSelection(
     modelWorkspace,
     modelWorkspaceMode,
-    selectedModelPreset
+    selectedModelPreset,
+    {
+      allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)
+    }
   );
   // Persist the model the user picks in the chat selector as the mode default, so a new chat
   // after restart defaults to the last-used model instead of the platform default. Only the

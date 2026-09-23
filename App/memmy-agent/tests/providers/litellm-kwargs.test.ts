@@ -481,6 +481,7 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o", "medium")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("kimi-k2.5")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("moonshotai/kimi-k2.6")).toBe(false);
+    expect(OpenAICompatProvider.supportsTemperature("kimi-k3")).toBe(false);
 
     const kwargs = providerFor("openai", "gpt-5-chat").buildKwargs({
       messages: [{ role: "user", content: "hello" }],
@@ -744,6 +745,7 @@ describe("OpenAI-compatible request kwargs", () => {
       reasoning: { effort: "medium" },
     });
     expect(buildKwargsFor("moonshot", "kimi-k2.6", null)).not.toHaveProperty("temperature");
+    expect(buildKwargsFor("moonshot", "kimi-k3", null)).not.toHaveProperty("temperature");
     expect(buildKwargsFor("openrouter", "moonshotai/kimi-k2.5", null)).not.toHaveProperty("extra_body");
     expect(buildKwargsFor("moonshot", "k2.6-code-preview", "high").extra_body).toEqual({ thinking: { type: "enabled" } });
     expect(buildKwargsFor("moonshot", "k2.6-code-preview", null)).not.toHaveProperty("temperature");

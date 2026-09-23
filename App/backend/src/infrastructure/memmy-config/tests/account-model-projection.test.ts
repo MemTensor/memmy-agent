@@ -198,6 +198,36 @@ describe("account model projection current catalog", () => {
     });
   });
 
+  it("preserves account-only BYOK candidates when refreshing an existing startup projection", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a"
+    }, file);
+    const running = await readConfig(file);
+    running.modelAssignments.account.agent = {
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    };
+    await writeFile(file, YAML.stringify(running), "utf8");
+
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a",
+      preserveAccountByokSelection: true
+    }, file);
+
+    const restarted = await readConfig(file);
+    expect(restarted.modelAssignments.account.agent).toEqual({
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    });
+    expect(restarted.modelAssignments.byok.agent).toEqual({
+      candidates: ["byokAgent"],
+      default: "byokAgent"
+    });
+  });
+
   it("preserves built-in local Embedding for the same account and restores cloud for a new owner", async () => {
     const file = await configFile(currentByokCatalog());
     await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);

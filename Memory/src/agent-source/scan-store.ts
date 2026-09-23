@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { hasStagedSourceTurn } from "@memmy/agent-source-core";
 import type { ConversationCheckpoint, ConversationMessage, MessageCursor, PreparedConversation, PreparedTurn, ScanSourceState, ScanStore, ScanStoredResult } from "@memmy/agent-source-core";
 
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
@@ -18,10 +19,9 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
   db.pragma("busy_timeout = 5000");
   db.exec(`CREATE TABLE IF NOT EXISTS scan_meta (id INTEGER PRIMARY KEY CHECK(id=1), job_id TEXT NOT NULL, source_id TEXT NOT NULL, mode TEXT NOT NULL, phase TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT);
     CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
-    INSERT INTO schema_meta(version) SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
-    UPDATE schema_meta SET version=2 WHERE version<2;
-    CREATE TABLE IF NOT EXISTS staged_messages (job_id TEXT NOT NULL, source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, workspace_path TEXT, git_root TEXT, raw_meta_json TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(job_id,source_id,message_id));
-    CREATE INDEX IF NOT EXISTS staged_order ON staged_messages(job_id,source_id,conversation_id,created_at,message_id,ordinal);
+    INSERT INTO schema_meta(version) SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);`);
+  recoverPartialStagedMigration(db);
+  db.exec(`CREATE TABLE IF NOT EXISTS staged_messages (job_id TEXT NOT NULL, source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, workspace_path TEXT, git_root TEXT, raw_meta_json TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(job_id,source_id,conversation_id,message_id));
     CREATE TABLE IF NOT EXISTS scan_source_state (source_id TEXT PRIMARY KEY, mode TEXT NOT NULL, phase TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, scan_started_at TEXT, watermarked_since TEXT, updated_at TEXT NOT NULL, error TEXT);
     CREATE TABLE IF NOT EXISTS scan_cursors (source_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, created_at TEXT NOT NULL, message_id TEXT NOT NULL, ordinal INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS checkpoints (source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, last_message_id TEXT NOT NULL, last_created_at TEXT NOT NULL, content_hash TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(source_id,conversation_id));
@@ -30,12 +30,15 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     CREATE INDEX IF NOT EXISTS turn_selection_order ON turn_meta(first_created_at DESC,source_id,conversation_id,first_message_id,turn_id);
     CREATE TABLE IF NOT EXISTS scan_results (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, memory_id TEXT, error TEXT);
     CREATE INDEX IF NOT EXISTS scan_result_identity ON scan_results(source_id,conversation_id,memory_id,error);`);
+  migrateStagedMessagesPrimaryKey(db);
+  backfillEmptyStagedJobId(db, job.jobId);
+  db.exec("CREATE INDEX IF NOT EXISTS staged_order ON staged_messages(job_id,source_id,conversation_id,created_at,message_id,ordinal)");
   if (!db.prepare("SELECT 1 FROM scan_meta WHERE id=1").get()) db.prepare("INSERT INTO scan_meta(id,job_id,source_id,mode,phase,created_at,updated_at,error) VALUES(1,@jobId,@sourceId,@mode,@phase,@createdAt,@updatedAt,@error)").run({ ...job, error: job.error ?? null });
   let ordinal = Number((db.prepare("SELECT COALESCE(MAX(ordinal),-1) AS value FROM staged_messages WHERE job_id=?").get(job.jobId) as { value: number }).value) + 1;
   const insert = db.prepare("INSERT OR IGNORE INTO staged_messages(job_id,source_id,conversation_id,message_id,role,content,created_at,workspace_path,git_root,raw_meta_json,ordinal) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
-  const refreshCodex = db.prepare(`UPDATE staged_messages
-    SET conversation_id=?,role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
-    WHERE job_id=? AND source_id=? AND message_id=?`);
+  const refreshStaged = db.prepare(`UPDATE staged_messages
+    SET role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
+    WHERE job_id=? AND source_id=? AND conversation_id=? AND message_id=?`);
   const store: MemoryAgentSourceScanStore = {
     path,
     stage(message) {
@@ -43,10 +46,10 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
       if (bytes > MAX_RECORD_BYTES) throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`);
       const rawMetaJson = JSON.stringify(message.rawMeta);
       const inserted = Number(insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, ordinal++).changes) > 0;
-      if (!inserted && message.sourceId === "codex" && typeof message.rawMeta.sourceTurnState === "string") {
+      if (!inserted && hasStagedSourceTurn(message)) {
         // Retrying a staged turn can add native identity or completion evidence
         // to an existing message. Preserve its ordinal and the insertion count.
-        refreshCodex.run(message.conversationId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.messageId);
+        refreshStaged.run(message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.conversationId, message.messageId);
       }
       return inserted;
     },
@@ -82,6 +85,76 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     remove(){db.close(); rmSync(path,{force:true}); rmSync(`${path}-wal`,{force:true}); rmSync(`${path}-shm`,{force:true});}
   };
   return store;
+}
+
+function migrateStagedMessagesPrimaryKey(db: InstanceType<typeof Database>): void {
+  ensureStagedJobIdColumn(db);
+  const version = Number((db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as { version?: number } | undefined)?.version ?? 0);
+  if (version >= 3) return;
+  if (!hasScanTable(db, "staged_messages")) {
+    db.exec("UPDATE schema_meta SET version = 3");
+    return;
+  }
+  const migrate = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE staged_messages_v3 (
+        job_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        workspace_path TEXT,
+        git_root TEXT,
+        raw_meta_json TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        PRIMARY KEY (job_id, source_id, conversation_id, message_id)
+      );
+      INSERT OR IGNORE INTO staged_messages_v3
+        SELECT job_id, source_id, conversation_id, message_id, role, content, created_at, workspace_path, git_root, raw_meta_json, ordinal
+        FROM staged_messages;
+      DROP TABLE staged_messages;
+      ALTER TABLE staged_messages_v3 RENAME TO staged_messages;
+    `);
+    db.exec("UPDATE schema_meta SET version = 3");
+  });
+  migrate();
+}
+
+function recoverPartialStagedMigration(db: InstanceType<typeof Database>): void {
+  const leftover = hasScanTable(db, "staged_messages_v3");
+  const current = hasScanTable(db, "staged_messages");
+  if (leftover && current) db.exec("DROP TABLE staged_messages_v3");
+  else if (leftover && !current && leftoverStagedTableIsComplete(db, "staged_messages_v3")) {
+    db.exec("ALTER TABLE staged_messages_v3 RENAME TO staged_messages");
+  } else if (leftover && !current) {
+    db.exec("DROP TABLE staged_messages_v3");
+  }
+}
+
+function leftoverStagedTableIsComplete(db: InstanceType<typeof Database>, tableName: string): boolean {
+  const names = new Set((db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).map((row) => row.name));
+  return ["job_id", "source_id", "conversation_id", "message_id", "role", "content", "created_at", "raw_meta_json", "ordinal"]
+    .every((column) => names.has(column));
+}
+
+function ensureStagedJobIdColumn(db: InstanceType<typeof Database>): void {
+  if (!hasScanTable(db, "staged_messages") || scanTableHasColumn(db, "staged_messages", "job_id")) return;
+  db.exec("ALTER TABLE staged_messages ADD COLUMN job_id TEXT NOT NULL DEFAULT ''");
+}
+
+function backfillEmptyStagedJobId(db: InstanceType<typeof Database>, jobId: string): void {
+  if (!hasScanTable(db, "staged_messages") || !scanTableHasColumn(db, "staged_messages", "job_id")) return;
+  db.prepare("UPDATE staged_messages SET job_id = ? WHERE job_id = '' OR job_id IS NULL").run(jobId);
+}
+
+function hasScanTable(db: InstanceType<typeof Database>, tableName: string): boolean {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName));
+}
+
+function scanTableHasColumn(db: InstanceType<typeof Database>, tableName: string, column: string): boolean {
+  return (db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).some((row) => row.name === column);
 }
 
 function rowToMessage(row: Record<string,unknown>): ConversationMessage { return { sourceId:String(row.sourceId), conversationId:String(row.conversationId), messageId:String(row.messageId), role:row.role as ConversationMessage["role"], content:String(row.content), createdAt:String(row.createdAt), workspacePath:row.workspacePath==null?null:String(row.workspacePath), gitRoot:row.gitRoot==null?null:String(row.gitRoot), rawMeta:JSON.parse(String(row.rawMetaJson)) as Record<string,unknown>, ordinal:Number(row.ordinal) }; }
