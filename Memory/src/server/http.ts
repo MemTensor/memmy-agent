@@ -48,6 +48,7 @@ import type { ViewerCliOptions } from "./viewer-cli.js";
 import {
   VIEWER_API_ROUTES,
   assertLocalViewerRequest,
+  assertNotBrowserCrossOrigin,
   isViewerApiRequest,
   routeViewerRequest,
   streamViewerEvents
@@ -192,6 +193,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           agentSources
         }, request, response, url);
         return;
+      }
+      // Admin routes are machine-local control operations. A browser page that
+      // reaches this service — directly or through a DNS rebinding — must not
+      // be able to shut the Memory service down (#468): every legitimate admin
+      // client is a non-browser process that sends no Origin/Sec-Fetch-*.
+      if (url.pathname.startsWith("/api/v1/admin/")) {
+        assertNotBrowserCrossOrigin(request);
       }
       const principal = {
         ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
