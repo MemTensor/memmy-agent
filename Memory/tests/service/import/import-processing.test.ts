@@ -10,6 +10,7 @@ import {
 } from "../../../src/index.js";
 import { ModelHttpError } from "../../../src/model/http.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { upsertMemoryVectorForTest } from "../../fixtures/evolution-fixture.js";
 import {
   accountRuntimeConfig,
   addAgentSourceImport,
@@ -365,6 +366,57 @@ describe("MemoryService / import / processing", () => {
     expect(jobCounts).toEqual([
       { job_type: "import_summary", count: 1 }
     ]);
+
+    db.close();
+  });
+
+  it("does not mark failed placeholder summaries ready just because a vector exists", async () => {
+    const root = createTestRoot("mindock-memory-placeholder-vector-ready-");
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "hermes",
+      profileId: "default",
+      userId: "user-placeholder-vector-ready"
+    };
+    const added = addAgentSourceImport(
+      service,
+      namespace,
+      "placeholder embeddings must not look ready",
+      "placeholder-vector-ready"
+    );
+    await runWorkerRounds(service, 3, 1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "failed",
+      stage: "summary",
+      retryAction: "retry"
+    });
+
+    upsertMemoryVectorForTest(db, added.id, "vec_summary", [1, 0, 0]);
+    expect(new Repositories(db.db).memories.hasVector(added.id, "vec_summary")).toBe(true);
+
+    service.reloadConfig({ reason: "model_settings_saved" });
+
+    const processing = service.memoryProcessingStatus([added.id], { namespace }).items[0];
+    expect(processing?.state).not.toBe("ready");
+    const stored = db.db.prepare(
+      `SELECT properties_json
+       FROM memories
+       WHERE id = ?`
+    ).get(added.id) as { properties_json: string };
+    const properties = JSON.parse(stored.properties_json) as {
+      internal_info: { trace: { summary: string } };
+    };
+    expect(properties.internal_info.trace.summary).toBe("摘要排队中");
+    expect(processing).toMatchObject({
+      state: "summary_pending",
+      stage: "summary"
+    });
 
     db.close();
   });

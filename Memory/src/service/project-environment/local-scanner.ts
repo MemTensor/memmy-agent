@@ -32,8 +32,18 @@ const execFileAsync = promisify(execFile);
 
 const FIXED_EXCLUDES = new Set([
   ".git", "node_modules", "vendor", ".venv", "venv", "env", "dist", "build", "out",
-  "coverage", ".cache", ".next", ".nuxt", "target", "__pycache__", ".pytest_cache", ".mypy_cache"
+  "coverage", ".cache", ".next", ".nuxt", "target", "__pycache__", ".pytest_cache", ".mypy_cache",
+  ".pnpm-store"
 ]);
+
+const FIXED_EXCLUDE_PATHS = [".yarn/cache", ".bun/install/cache"] as const;
+
+function isFixedExcluded(name: string, relativePath: string): boolean {
+  if (FIXED_EXCLUDES.has(name)) return true;
+  return FIXED_EXCLUDE_PATHS.some(
+    (path) => relativePath === path || relativePath.startsWith(`${path}/`)
+  );
+}
 
 const BINARY_EXTENSIONS = new Set([
   ".7z", ".a", ".avi", ".bin", ".bmp", ".class", ".dll", ".dylib", ".exe",
@@ -102,7 +112,7 @@ async function scanInventory(root: string): Promise<InventorySnapshot> {
       const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
       if (
         validateWorkspaceRelativePath(relativePath) ||
-        FIXED_EXCLUDES.has(child.name) ||
+        isFixedExcluded(child.name, relativePath) ||
         isSensitivePath(relativePath) ||
         ignored.ignores(relativePath) ||
         (child.isDirectory() && ignored.ignores(`${relativePath}/`))
