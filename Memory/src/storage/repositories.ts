@@ -712,6 +712,34 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listMemoryTags(ids: readonly string[]): string[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT tags_json, info_json, properties_json
+      FROM memories
+      WHERE id IN (${placeholders}) AND deleted_at IS NULL AND status != 'deleted'
+    `).all(...ids) as Array<{ tags_json: string; info_json: string; properties_json: string }>;
+    return uniq(rows.flatMap((row) => {
+      const info = parseJson<Record<string, unknown>>(row.info_json, {});
+      const properties = parseJson<Record<string, unknown>>(row.properties_json, {});
+      return [
+        ...asStringArray(parseJson(row.tags_json, [])),
+        ...asStringArray(info.tags),
+        ...asStringArray(properties.tags)
+      ];
+    }));
+  }
+
+  listUserMemoriesByKeyIncludingDeleted(userId: string, memoryKey: string): MemoryRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = 'L1' AND memory_key = ?
+      ORDER BY updated_at DESC, id DESC
+    `).all(userId, memoryKey) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
   archivePriorReadOnlySkillVersions(input: {
     sourceAgentId: string;
     sourceSkillIdentity: string;
@@ -2572,11 +2600,120 @@ export class RuntimeRepository {
     return row ? rawTurnFromSql(row) : undefined;
   }
 
+  episodeHasLaterRawTurn(episodeId: string, turnId: string, startedAt: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE episode_id = ?
+        AND turn_id != ?
+        AND created_at > ?
+      LIMIT 1
+    `).get(episodeId, turnId, startedAt) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  episodeRelationTexts(episodeId: string, rawTurnIds: readonly string[] = []): {
+    firstUser: string;
+    lastUser: string;
+    lastAssistant: string;
+    lastCompletedAt?: string;
+  } {
+    const completed = `json_type(message_payload_json, '$.turn_complete') = 'object'`;
+    const boundary = (column: "user_text" | "assistant_text" | "created_at", edge: "first" | "last") => {
+      const nonempty = column === "created_at" ? "1 = 1" : `trim(COALESCE(${column}, '')) != ''`;
+      const time = this.db.prepare(`
+        SELECT ${edge === "first" ? "MIN" : "MAX"}(created_at) AS boundary
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty}
+      `).get(episodeId) as { boundary: string | null } | undefined;
+      if (!time?.boundary) return [];
+      return this.db.prepare(`
+        SELECT id, created_at AS createdAt, user_text AS userText, assistant_text AS assistantText
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty} AND created_at = ?
+      `).all(episodeId, time.boundary) as Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>;
+    };
+    const pick = (
+      rows: Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>,
+      field: "userText" | "assistantText" | "createdAt",
+      edge: "first" | "last"
+    ) => {
+      const rank = new Map(rawTurnIds.map((id, index) => [id, index]));
+      const ordered = [...rows].sort((left, right) =>
+        (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      );
+      const chosen = edge === "first" ? ordered[0] : ordered[ordered.length - 1];
+      const value = chosen?.[field];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const firstUsers = boundary("user_text", "first");
+    const lastUsers = boundary("user_text", "last");
+    const lastAssistants = boundary("assistant_text", "last");
+    const lastCompleted = boundary("created_at", "last");
+    const lastCompletedAt = pick(lastCompleted, "createdAt", "last");
+    return {
+      firstUser: pick(firstUsers, "userText", "first"),
+      lastUser: pick(lastUsers, "userText", "last"),
+      lastAssistant: pick(lastAssistants, "assistantText", "last"),
+      ...(lastCompletedAt ? { lastCompletedAt } : {})
+    };
+  }
+
   getRawTurnBySessionTurn(sessionId: string, turnId: string): RawTurnRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM raw_turns WHERE session_id = ? AND turn_id = ?`)
       .get(sessionId, turnId) as SqlRawTurnRow | undefined;
     return row ? rawTurnFromSql(row) : undefined;
+  }
+
+  hasCompletedSourceTurnInScope(input: {
+    userId: string;
+    source: string;
+    profileId: string;
+    conversationId: string;
+    turnId: string;
+    namespaceKey: string;
+    defaultNamespaceKey: string;
+    tenantId: string | null;
+    storedProjectId: string | null;
+    workspaceId: string | null;
+  }): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE raw_turns.user_id = @userId
+        AND raw_turns.turn_id = @turnId
+        AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+        AND EXISTS (
+          SELECT 1
+          FROM sessions
+          WHERE sessions.id = raw_turns.session_id
+            AND sessions.user_id = @userId
+            AND sessions.source = @source
+            AND sessions.profile_id = @profileId
+            AND (
+              sessions.host_session_key = @conversationId
+              OR sessions.conversation_id = @conversationId
+              OR sessions.host_session_key = @source || '-memory-' || @conversationId
+            )
+            AND (
+              json_extract(sessions.meta_json, '$.source_namespace_key') = @namespaceKey
+              OR (
+                json_extract(sessions.meta_json, '$.source_namespace_key') IS NULL
+                AND @tenantId IS NULL
+                AND (
+                  @namespaceKey = @defaultNamespaceKey
+                  OR (
+                    sessions.project_id IS @storedProjectId
+                    AND sessions.workspace_id IS @workspaceId
+                  )
+                )
+              )
+            )
+        )
+      LIMIT 1
+    `).get(input) as { found: number } | undefined;
+    return row?.found === 1;
   }
 
   listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {

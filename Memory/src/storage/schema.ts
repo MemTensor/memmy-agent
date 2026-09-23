@@ -221,6 +221,8 @@ const statements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_raw_turns_episode_created
     ON raw_turns (episode_id, created_at ASC)`,
+  `CREATE INDEX IF NOT EXISTS idx_raw_turns_user_turn
+    ON raw_turns (user_id, turn_id)`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

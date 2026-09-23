@@ -491,7 +491,9 @@ export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sess
     completionEvidence: NonEmptyStringSchema
   }),
   channel: z.enum(["hook", "agent_source_scan"]),
-  workspacePath: z.string().optional()
+  workspacePath: z.string().optional(),
+  captureLegacyHistory: z.boolean().optional(),
+  legacyImportTurnId: z.string().min(1).optional()
 });
 export type SourceTurnCompleteInput = z.infer<typeof SourceTurnCompleteInputSchema>;
 

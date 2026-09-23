@@ -262,6 +262,32 @@ export function legacyTurnId(turn: ImportedTurn): string {
   return `${turn.sourceId}:${createHash("sha256").update(stableTurnIdentity(turn)).digest("hex").slice(0, 24)}`;
 }
 
+/** Rebuilds the pre-native import turn id from the first user message id. */
+export function legacyImportTurnId(sourceId: string, conversationId: string, firstUserMessageId: string): string {
+  const identity = `${sourceId}::${conversationId}::${firstUserMessageId}`;
+  return `${sourceId}:${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+}
+
+export function legacyImportTurnIdFromMessages(
+  sourceId: string,
+  conversationId: string,
+  messages: readonly { role: string; messageId?: string; rawMeta?: Readonly<Record<string, unknown>> }[]
+): string | undefined {
+  const firstUser = messages.find((message) => message.role === "user" && message.messageId);
+  if (!firstUser?.messageId) return undefined;
+  const legacyConversationId = textValue(firstUser.rawMeta?.legacyConversationId);
+  const legacyMessageId = textValue(firstUser.rawMeta?.legacyMessageId);
+  return legacyImportTurnId(
+    sourceId,
+    legacyConversationId || conversationId,
+    legacyMessageId || firstUser.messageId
+  );
+}
+
+function textValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 /** Leaves ample room for JSON escaping and the add-memory envelope. */
 export const TURN_CONTENT_MAX_BYTES = 512 * 1024;
 
