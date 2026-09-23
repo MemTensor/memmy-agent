@@ -1,3 +1,5 @@
+import { useComputerHistoryModelSync } from "./app/computer-history-model-sync.js";
+import { isComputerHistorySupported } from "./app/computer-history-platform.js";
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,8 +16,11 @@ import {
 import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
+import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
+import { NotificationCenterProvider } from "./components/notification-center.js";
+import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -35,6 +40,7 @@ import { createAppClients } from "./api/client-types.js";
 import { createEventsConnection } from "./api/events.js";
 import { MemmyAgentRequestError, type MemmyAgentClient } from "./api/memmy-agent-client.js";
 import { getRuntimeConfig } from "./api/runtime-config.js";
+import { readHistoryPermissionSetup } from "./pages/memory/computer-history-permission-state.js";
 import { clearMemoryPanelCache } from "./pages/memory/memory-panel-cache.js";
 import { readLocalNickname } from "./app/nickname.js";
 import {
@@ -65,6 +71,14 @@ export function App() {
 function RuntimeApp() {
   const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
+  const historyModelScope = state.agent.currentChatId ?? "draft-new-task";
+  useComputerHistoryModelSync({
+    client: clients?.memmyAgent ?? null,
+    enabled: Boolean(state.bootstrap && state.modelConfig),
+    preset: state.agent.pendingPresetByScope[historyModelScope]
+      ?? state.agent.committedModelSelectionByScope[historyModelScope]?.presetId ?? null,
+    revision: JSON.stringify([state.bootstrap?.app.userMode, state.account.userId, state.modelConfig?.configRevision]),
+  });
   const { track } = useAnalytics();
   const { t } = useTranslation();
   const translationRef = useRef(t);
@@ -191,7 +205,7 @@ function RuntimeApp() {
         const initialPath = resolveLaunchInitialView({
           defaultPath: defaultInitialPath,
           currentRoute,
-          launchRouteOverride,
+          launchRouteOverride: launchRouteOverride ?? (isComputerHistorySupported() && readHistoryPermissionSetup() && launchModeOverride !== "pet" ? "/memory" : null),
           launchModeOverride,
           petIntent
         });
@@ -311,9 +325,12 @@ function RuntimeApp() {
   return (
     <UpdateCoordinatorProvider>
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
-        <AppRouter onRetry={retry} />
-        <GithubStarPromptHost />
-        {state.invitationToast ? (
+        <NotificationCenterProvider>
+          <AppRouter onRetry={retry} />
+          <CampaignPromptHost />
+          <TokenCreditToastHost />
+          <GithubStarPromptHost />
+          {state.invitationToast ? (
           <InviteResultToast
             key={state.invitationToast.id}
             text={t(
@@ -336,7 +353,8 @@ function RuntimeApp() {
               }
             }}
           />
-        ) : null}
+          ) : null}
+        </NotificationCenterProvider>
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
   );

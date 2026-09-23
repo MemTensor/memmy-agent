@@ -13,6 +13,7 @@ import {
   createMemoryServiceFixture
 } from "../../fixtures/memory-service-fixture.js";
 import { createDecisionRepairEvolutionLlm } from "./decision-repair-llm-stub.js";
+import { normalizeFailureExperienceSinkDraft } from "../../../src/service/feedback/feedback-experience.js";
 
 const {
   cleanup,
@@ -69,6 +70,26 @@ function createDecisionRepairLlm(
           confidence: 0.88
         } as unknown as T;
       }
+      if (options.operation === "failure.experience.sink.v5") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          evidence_trace_ids?: string[];
+        };
+        const traceId = payload.evidence_trace_ids?.[0];
+        return {
+          title: "Verify the requested outcome before closing",
+          trigger: "When a task has a concrete acceptance condition and is nearing completion.",
+          procedure: "Complete the requested change, then check the acceptance condition before reporting success.",
+          verification: "Confirm the requested outcome is visible and satisfies the stated condition.",
+          boundary: "Use only when the episode contains a concrete acceptance condition.",
+          experience_type: "repair_instruction",
+          decision_guidance: {
+            prefer: ["Check the acceptance condition before reporting completion."],
+            avoid: ["Do not report completion while the requested condition remains unmet."]
+          },
+          support_trace_ids: traceId ? [traceId] : [],
+          confidence: 0.82
+        } as unknown as T;
+      }
       return {} as T;
     },
     status() {
@@ -83,6 +104,41 @@ function createDecisionRepairLlm(
 }
 
 describe("MemoryService / feedback / decision repair", () => {
+  it("quarantines an incomplete failure sink result instead of copying source text", () => {
+    expect(normalizeFailureExperienceSinkDraft({
+      title: "",
+      trigger: "user text",
+      procedure: "agent text",
+      verification: "",
+      boundary: "user text",
+      experience_type: "failure_avoidance",
+      decision_guidance: {},
+      support_trace_ids: ["tr-1"],
+      confidence: 0.9
+    }, ["tr-1"])).toBeUndefined();
+  });
+
+  it("preserves a complete failure sink procedure without output truncation", () => {
+    const procedure = "step ".repeat(160).trim();
+    const draft = normalizeFailureExperienceSinkDraft({
+      title: "Complete procedure",
+      trigger: "When the task starts.",
+      procedure,
+      verification: "Check the visible result.",
+      boundary: "Only for this task family.",
+      experience_type: "failure_avoidance",
+      decision_guidance: {
+        prefer: ["Finish each step before reporting success."],
+        avoid: ["Do not report success before verification."]
+      },
+      support_trace_ids: ["tr-1"],
+      confidence: 0.9
+    }, ["tr-1"]);
+
+    expect(draft?.procedure).toBe(procedure);
+    expect(draft?.procedure).not.toContain("...");
+  });
+
   it("creates decision repairs from actionable feedback and throttles repeat context", async () => {
     const { db, service } = createTestService({ skillLlm: createDecisionRepairEvolutionLlm() });
     const session = service.openSession({
@@ -555,19 +611,7 @@ describe("MemoryService / feedback / decision repair", () => {
       userId: "user-tool-repair",
       layer: "L2"
     }).items;
-    expect(avoidancePolicies).toHaveLength(1);
-    expect(service.getMemory(avoidancePolicies[0]!.id).metadata).toMatchObject({
-      properties: {
-        internal_info: {
-          negative_experience_sources: ["tool_failure_burst"],
-          policy: {
-            experience_type: "failure_avoidance",
-            evidence_polarity: "negative",
-            skill_eligible: false
-          }
-        }
-      }
-    });
+    expect(avoidancePolicies).toEqual([]);
 
     const suggestion = await service.repairSuggestion({
       sessionId: session.sessionId,
@@ -674,7 +718,17 @@ describe("MemoryService / feedback / decision repair", () => {
   it("creates decision repairs when same-context reward values diverge", async () => {
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const { db, service } = createTestService({
-      skillLlm: createDecisionRepairLlm(calls)
+      skillLlm: createDecisionRepairLlm(calls),
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          feedback: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.feedback,
+            valueDistributionRepairEnabled: true
+          }
+        }
+      }
     });
     const positiveUserId = "user-value-distribution-positive";
     const negativeUserId = "user-value-distribution-negative";

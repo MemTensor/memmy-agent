@@ -592,6 +592,35 @@ export const PromotionFlagsSchema = z.object({
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
+export const LotteryStatusSchema = z.object({
+    shouldShow: z.boolean(),
+    startAt: z.number().int().nonnegative(),
+    endAt: z.number().int().nonnegative(),
+    serverNow: z.number().int().nonnegative(),
+    landingUrl: z.string().url()
+}).refine((status) => status.endAt > status.startAt, {
+    message: "Lottery endAt must be later than startAt",
+    path: ["endAt"]
+});
+export type LotteryStatus = z.infer<typeof LotteryStatusSchema>;
+
+export const LotteryRewardSchema = z.discriminatedUnion("hasReward", [
+    z.object({
+        hasReward: z.literal(false)
+    }),
+    z.object({
+        hasReward: z.literal(true),
+        drawId: z.string().min(1).optional(),
+        tokenAmount: z.number().int().positive()
+    })
+]);
+export type LotteryReward = z.infer<typeof LotteryRewardSchema>;
+
+export const LotteryRewardAckInputSchema = z.object({
+    drawId: z.string().min(1).optional()
+});
+export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -611,7 +640,8 @@ export const AppBootstrapResponseSchema = z.object({
     legal: LegalAgreementUrlsSchema.optional(),
     // Src module.
     // Promotions.
-    promotions: PromotionFlagsSchema.optional()
+    promotions: PromotionFlagsSchema.optional(),
+    lotteryStatus: LotteryStatusSchema.optional()
 });
 export type AppBootstrapResponse = z.infer<typeof AppBootstrapResponseSchema>;
 
@@ -663,7 +693,9 @@ export const ModelProviderSchema = z.enum([
     "kimi",
     "minimax",
     "baidu",
-    "doubao"
+    "doubao",
+    "stepfun",
+    "xiaomi"
 ]);
 export type ModelProvider = z.infer<typeof ModelProviderSchema>;
 
@@ -678,6 +710,8 @@ export const CatalogProviderIdSchema = z.enum([
     "minimax",
     "qianfan",
     "volcengine",
+    "stepfun",
+    "xiaomi_mimo",
     "memmy_account"
 ]);
 export type CatalogProviderId = z.infer<typeof CatalogProviderIdSchema>;
@@ -688,7 +722,8 @@ const CATALOG_PROVIDER_ALIASES: Readonly<Record<string, CatalogProviderId>> = {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
 };
 
 export function canonicalCatalogProviderId(value: string): CatalogProviderId | null {
@@ -1093,8 +1128,24 @@ export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSc
 export const AccountChannelSchema = z.enum(["email", "phone"]);
 export type AccountChannel = z.infer<typeof AccountChannelSchema>;
 
+/**
+ * Map the desktop language setting onto a language Memory can write in.
+ * `system` follows the package channel: phone/CN defaults to Chinese, email/intl to English.
+ */
+export function resolveMemoryLanguage(
+  language: string | undefined,
+  accountChannel?: AccountChannel | string
+): "zh-CN" | "en-US" {
+  if (language === "zh-CN" || language === "en-US") return language;
+  return accountChannel === "email" ? "en-US" : "zh-CN";
+}
+
 export const AccountLocaleSchema = z.enum(["zh", "en"]);
 export type AccountLocale = z.infer<typeof AccountLocaleSchema>;
+
+/** Third-party sign-in providers supported by the international desktop package. */
+export const SocialLoginProviderSchema = z.enum(["google", "github"]);
+export type SocialLoginProvider = z.infer<typeof SocialLoginProviderSchema>;
 
 /** Definition for send code input. */
 export const SendCodeInputSchema = z
@@ -1190,6 +1241,48 @@ export const AccountLoginResultViewSchema = z.object({
     invitationResult: InvitationResultSchema
 });
 export type AccountLoginResultView = z.infer<typeof AccountLoginResultViewSchema>;
+
+/** Starts a browser-based social-login flow. */
+export const StartSocialLoginInputSchema = z.object({
+    provider: SocialLoginProviderSchema,
+    locale: AccountLocaleSchema,
+    loginSource: z.literal("Memmy"),
+    invitationCode: z.string().trim().max(12).optional()
+});
+export type StartSocialLoginInput = z.infer<typeof StartSocialLoginInputSchema>;
+
+/** Opaque credentials used by the desktop client to poll a social-login flow. */
+export const StartSocialLoginResponseSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32),
+    authorizationUrl: z.string().url(),
+    expiresInSec: z.number().int().positive().max(1800),
+    pollIntervalSec: z.number().int().positive().max(30)
+});
+export type StartSocialLoginResponse = z.infer<typeof StartSocialLoginResponseSchema>;
+
+/** Identifies a previously started social-login flow. */
+export const SocialLoginStatusInputSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32)
+});
+export type SocialLoginStatusInput = z.infer<typeof SocialLoginStatusInputSchema>;
+
+/** Current state of a browser-based social-login flow. */
+export const SocialLoginStatusResponseSchema = z.discriminatedUnion("status", [
+    z.object({ status: z.literal("pending") }),
+    z.object({
+        status: z.literal("completed"),
+        result: AccountLoginResultViewSchema
+    }),
+    z.object({
+        status: z.literal("failed"),
+        code: z.string().min(1).optional(),
+        message: z.string().min(1)
+    }),
+    z.object({ status: z.literal("expired") })
+]);
+export type SocialLoginStatusResponse = z.infer<typeof SocialLoginStatusResponseSchema>;
 
 /** Current account invitation code and today's reserved-slot summary. */
 export const AccountInvitationViewSchema = z.object({
@@ -1555,3 +1648,5 @@ export const TokenQuotaEligibilitySchema = z.object({
     latestReviewNote: z.string().nullable()
 });
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
+export * from './desktop-screen-capture.js';
+export * from './computer-use-onboarding.js';

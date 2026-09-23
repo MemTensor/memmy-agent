@@ -16,7 +16,9 @@ describe("llmProviderLogoUrl", () => {
       "moonshot",
       "minimax",
       "baidu",
-      "doubao"
+      "doubao",
+      "stepfun",
+      "xiaomi"
     ]) {
       expect(llmProviderLogoUrl(provider)).toMatch(/^data:image\/svg\+xml/);
     }
@@ -24,6 +26,7 @@ describe("llmProviderLogoUrl", () => {
     expect(llmProviderLogoUrl("memmy_account")).toMatch(/memmy-account\.png$/);
     expect(llmProviderLogoUrl("google")).toBe(llmProviderLogoUrl("gemini"));
     expect(llmProviderLogoUrl("kimi")).toBe(llmProviderLogoUrl("moonshot"));
+    expect(llmProviderLogoUrl("xiaomi_mimo")).toBe(llmProviderLogoUrl("xiaomi"));
     expect(llmProviderLogoUrl("openrouter")).toBeNull();
   });
 

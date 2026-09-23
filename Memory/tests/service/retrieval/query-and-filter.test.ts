@@ -257,7 +257,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       };
     };
     properties.internal_info.policy.last_verified_at = "2026-08-18T00:00:00.000Z";
-    properties.internal_info.policy.revalidate_after = "2026-09-18T00:00:00.000Z";
+    properties.internal_info.policy.revalidate_after = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     db.db.prepare(`UPDATE memories SET properties_json = ? WHERE id = ?`)
       .run(JSON.stringify(properties), "policy_dynamic_stale");
 

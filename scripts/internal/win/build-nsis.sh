@@ -534,6 +534,9 @@ verify_windows_agent_native_artifacts() {
   local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64"
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
     exit 1
@@ -621,6 +624,9 @@ verify_packaged_windows_unpacked_artifacts() {
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
     "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
@@ -742,6 +748,8 @@ verify_windows_sharp_module
 
 package_step_start "Stage Windows memmy-agent runtime files"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
+
+node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_DIR/memmy-agent"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
@@ -762,6 +770,11 @@ if [ ! -f "$RUNTIME_LOCAL_API_CONTRACTS_DIR/dist/index.js" ]; then
   echo "Packaged local API contracts entrypoint is missing." >&2
   exit 1
 fi
+RUNTIME_KNOWLEDGE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/knowledge"
+rm -rf "$RUNTIME_KNOWLEDGE_DIR"
+mkdir -p "$RUNTIME_KNOWLEDGE_DIR"
+cp "$ROOT_DIR/Knowledge/package.json" "$RUNTIME_KNOWLEDGE_DIR/package.json"
+cp -R "$ROOT_DIR/Knowledge/dist" "$RUNTIME_KNOWLEDGE_DIR/dist"
 RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
 rm -rf "$RUNTIME_MIGRATIONS_DIR"
 mkdir -p "$RUNTIME_MIGRATIONS_DIR"

@@ -9,6 +9,8 @@ import {
   LegalAgreementUrlsSchema,
   IntegrationToolResultSchema,
   InvitationResultSchema,
+  LotteryRewardSchema,
+  LotteryStatusSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
@@ -20,9 +22,12 @@ import {
   type IntegrationConnection,
   type IntegrationConnectionsResponse,
   type LegalAgreementUrls,
+  type LotteryReward,
+  type LotteryStatus,
   type IntegrationToolResult,
   type OkResponse,
   type PromotionFlags,
+  type SocialLoginProvider,
   type TokenSceneUsageDto
 } from "@memmy/local-api-contracts";
 import type {
@@ -38,12 +43,18 @@ import type {
   CloudIntegrationSessionInput,
   CloudLoginInput,
   CloudLoginResult,
+  CloudSocialLoginCredentials,
+  CloudSocialLoginStatus,
+  CloudStartSocialLoginInput,
+  CloudStartSocialLoginResult,
   CloudLogoutInput,
   GetAccountInfoInput,
+  GetLotteryRewardInput,
   EnsureInvitationCodeInput,
   GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
+  AckLotteryRewardInput,
   ReleaseCheckResult,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
@@ -129,25 +140,44 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         ...(input.email ? { toError: toCloudEmailVerificationError } : {})
       });
 
-      const uuid = readString(data.uuid) ?? readString(data.token);
-      if (!uuid) {
-        throw new Error("Cloud login response missing uuid");
-      }
-      const profile = toCloudAccountProfile(data);
-      const invitationResult = InvitationResultSchema.safeParse(data.invitationResult);
-      const userType = readString(data.userType);
+      return toCloudLoginResult(data);
+    },
 
-      return {
-        uuid,
-        accountUuid: resolveAccountUuid(data, profile),
-        profile,
-        isNewUser: userType === "NEW_USER"
-          ? true
-          : readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin),
-        invitationResult: invitationResult.success
-          ? invitationResult.data
-          : { status: "not_provided" }
-      };
+    async startSocialLogin(input: CloudStartSocialLoginInput): Promise<CloudStartSocialLoginResult> {
+      const data = await requestCloudData<Record<string, unknown>>(
+        fetchImpl,
+        baseUrl,
+        timeoutMs,
+        "/api/agentUser/oauth/start",
+        {
+          body: {
+            provider: input.provider,
+            locale: input.locale,
+            loginSource: input.loginSource.toLowerCase(),
+            ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
+          },
+          lang: input.locale,
+          deviceId
+        }
+      );
+      const result = toCloudStartSocialLoginResult(data);
+      assertProviderAuthorizationUrl(input.provider, result.authorizationUrl);
+      return result;
+    },
+
+    async getSocialLoginStatus(input: CloudSocialLoginCredentials): Promise<CloudSocialLoginStatus> {
+      const data = await requestCloudData<Record<string, unknown>>(
+        fetchImpl,
+        baseUrl,
+        timeoutMs,
+        "/api/agentUser/oauth/status",
+        {
+          body: { flowId: input.flowId, pollToken: input.pollToken },
+          lang: "en",
+          deviceId
+        }
+      );
+      return toCloudSocialLoginStatus(data);
     },
 
     async ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView> {
@@ -390,6 +420,36 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       } catch {
         return undefined;
       }
+    },
+
+    async getLotteryStatus(): Promise<LotteryStatus | undefined> {
+      try {
+        const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/status", {
+          method: "GET",
+          lang: "zh"
+        });
+        const parsed = LotteryStatusSchema.safeParse(data);
+        return parsed.success ? parsed.data : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    async getLotteryReward(input: GetLotteryRewardInput): Promise<LotteryReward> {
+      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/reward", {
+        method: "GET",
+        lang: "zh",
+        bearerCredential: input.uuid
+      });
+      return LotteryRewardSchema.parse(data);
+    },
+
+    async ackLotteryReward(input: AckLotteryRewardInput): Promise<void> {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/reward/ack", {
+        body: input.drawId ? { drawId: input.drawId } : {},
+        lang: "zh",
+        bearerCredential: input.uuid
+      });
     }
   };
 }
@@ -484,7 +544,10 @@ function normalizeAgentRegion(value: string | undefined): "cn" | "intl" {
  */
 async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
   try {
-    const value = await response.json() as Partial<CloudEnvelope>;
+    // Account IDs are BIGINT values. Parse their numeric JSON representation as
+    // strings before JSON.parse so JavaScript cannot round them past 2^53.
+    const raw = await response.text();
+    const value = JSON.parse(preserveIntegerIdentifiers(raw)) as Partial<CloudEnvelope>;
     return {
       code: typeof value.code === "number" ? value.code : response.ok ? 0 : response.status,
       message: typeof value.message === "string" ? value.message : undefined,
@@ -497,6 +560,10 @@ async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
       data: null
     };
   }
+}
+
+function preserveIntegerIdentifiers(raw: string): string {
+  return raw.replace(/("(?:id|userId|user_id|accountUuid|account_uuid)"\s*:\s*)(\d{16,})/g, '$1"$2"');
 }
 
 /**
@@ -527,6 +594,72 @@ function toCloudAccountProfile(data: Record<string, unknown>): CloudAccountProfi
     registeredAt: readIsoTime(data.registeredAt, data.registerTime, data.createdAt, data.created_at, data.createTime, data.create_time),
     rawProfile
   };
+}
+
+function toCloudLoginResult(data: Record<string, unknown>): CloudLoginResult {
+  const uuid = readString(data.uuid) ?? readString(data.token);
+  if (!uuid) {
+    throw new Error("Cloud login response missing uuid");
+  }
+  const profile = toCloudAccountProfile(data);
+  const invitationResult = InvitationResultSchema.safeParse(data.invitationResult);
+  const userType = readString(data.userType);
+
+  return {
+    uuid,
+    accountUuid: resolveAccountUuid(data, profile),
+    profile,
+    isNewUser: userType === "NEW_USER"
+      ? true
+      : readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin),
+    invitationResult: invitationResult.success
+      ? invitationResult.data
+      : { status: "not_provided" }
+  };
+}
+
+function toCloudStartSocialLoginResult(data: Record<string, unknown>): CloudStartSocialLoginResult {
+  const flowId = readString(data.flowId);
+  const pollToken = readString(data.pollToken);
+  const authorizationUrl = readString(data.authorizationUrl);
+  const expiresInSec = readInteger(data.expiresInSec);
+  const pollIntervalSec = readInteger(data.pollIntervalSec);
+  if (!flowId || !pollToken || !authorizationUrl || expiresInSec <= 0 || pollIntervalSec <= 0) {
+    throw new Error("Cloud social login response is incomplete");
+  }
+  return { flowId, pollToken, authorizationUrl, expiresInSec, pollIntervalSec };
+}
+
+function assertProviderAuthorizationUrl(provider: SocialLoginProvider, rawUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("Cloud social login authorization URL is invalid");
+  }
+  const expectedHost = provider === "google" ? "accounts.google.com" : "github.com";
+  if (url.protocol !== "https:" || url.hostname !== expectedHost) {
+    throw new Error(`Cloud social login authorization URL is not allowed for ${provider}`);
+  }
+}
+
+function toCloudSocialLoginStatus(data: Record<string, unknown>): CloudSocialLoginStatus {
+  const status = readString(data.status);
+  if (status === "pending" || status === "expired") {
+    return { status };
+  }
+  if (status === "completed") {
+    return { status, result: toCloudLoginResult(asRecord(data.result)) };
+  }
+  if (status === "failed") {
+    const code = readString(data.code) ?? undefined;
+    return {
+      status,
+      ...(code ? { code } : {}),
+      message: readString(data.message) ?? "Social login failed"
+    };
+  }
+  throw new Error("Cloud social login returned an unknown status");
 }
 
 /**

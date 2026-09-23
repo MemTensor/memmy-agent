@@ -1,6 +1,7 @@
 /** Src module. */
 import { RuntimeConfigSchema, type AccountChannel, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { randomBytes } from "node:crypto";
+import { removeLegacyKnowledgeCredentials } from "@memmy/knowledge";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
 import { createAppStateStore } from "./infrastructure/app-state-store/index.js";
@@ -107,6 +108,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    const memmyConfigWriter = createMemmyConfigWriter({
+      configPath: memmyConfigPath,
+      accountChannel: options.accountChannel
+    });
+    await memmyConfigWriter.writeMemoryLanguage?.(
+      appStateStore.repositories.bootstrap.getAppSettings().language
+    );
     const memoryConfigReload = options.memoryReady
       ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
       : memoryClient.reloadConfig({ reason: "desktop_startup" });
@@ -126,7 +134,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       createDefaultAgentAdapterRegistry({
         pluginDirectories: options.agentAdapterPluginDirectories
       });
-    const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
     const services = createBackendServices({
       appStateStore,
@@ -144,7 +151,17 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
+    await removeLegacyKnowledgeCredentials(memmyConfigPath);
     server = createLocalApiServer({
+      knowledge: {
+        baseUrl: cloudConfig.baseUrl,
+        getSession: () => {
+          const account = appStateStore.repositories.accountSession;
+          const session = account.get();
+          const credential = account.getCloudUuid();
+          return session.authenticated && credential ? { accountId: session.profile.userId, credential } : null;
+        }
+      },
       permissionManager,
       services,
       composioMcpToken,

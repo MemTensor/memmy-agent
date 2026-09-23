@@ -5,7 +5,6 @@ import mammoth from "mammoth";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { detectImageMime } from "./helpers.js";
 
 export const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",
@@ -33,7 +32,6 @@ export const SUPPORTED_EXTENSIONS = new Set([
 ]);
 
 const MAX_TEXT_LENGTH = 200_000;
-const MAX_EXTRACT_FILE_SIZE = 50 * 1024 * 1024;
 
 const TEXT_EXTENSIONS = new Set([
   ".txt",
@@ -330,43 +328,4 @@ export async function extractText(filePath: string): Promise<string | null> {
   }
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) return `[image: ${path.basename(file)}]`;
   return null;
-}
-
-function guessImage(file: string): boolean {
-  try {
-    const fd = fs.openSync(file, "r");
-    const header = Buffer.alloc(16);
-    const read = fs.readSync(fd, header, 0, 16, 0);
-    fs.closeSync(fd);
-    if (detectImageMime(header.subarray(0, read))) return true;
-  } catch {
-    return false;
-  }
-  return [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(path.extname(file).toLowerCase());
-}
-
-export async function extractDocuments(
-  text: string,
-  mediaPaths: string[] = [],
-  { maxFileSize }: { maxFileSize?: number } = {},
-): Promise<[string, string[]]> {
-  const limit = maxFileSize ?? MAX_EXTRACT_FILE_SIZE;
-  const imagePaths: string[] = [];
-  const docTexts: string[] = [];
-
-  for (const item of mediaPaths) {
-    if (!fs.existsSync(item) || !fs.statSync(item).isFile()) continue;
-    const stat = fs.statSync(item);
-    if (stat.size > limit) continue;
-    if (guessImage(item)) {
-      imagePaths.push(item);
-      continue;
-    }
-    const extracted = await extractText(item);
-    if (extracted && !extracted.startsWith("[error:")) {
-      docTexts.push(`[File: ${path.basename(item)}]\n${extracted}`);
-    }
-  }
-
-  return [docTexts.length ? `${text}\n\n${docTexts.join("\n\n")}` : text, imagePaths];
 }

@@ -1,6 +1,7 @@
 /** Settings page tests. */
 import { renderToString } from "react-dom/server";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ModelConfigView } from "@memmy/local-api-contracts";
@@ -28,7 +29,8 @@ import {
   availableConnectionProtocols,
   editorProtocolForCapabilities,
   modelCapabilitiesForKind,
-  normalizeEditorCapabilities
+  normalizeEditorCapabilities,
+  protocolFromConnection
 } from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
@@ -375,6 +377,28 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain('<LinkButton label={t("settings.about.terms")} href="#" />');
   });
 
+  it("关于区承接加入社区入口，微信群二维码为静态图片且外链顺序不变", () => {
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    const communityLinksSource = readFileSync(resolve(settingsPageSourcePath, "..", "..", "community", "community-links.ts"), "utf8");
+    const githubIndex = source.indexOf('SettingsCommunityLink href={communityLinks.githubUrl}');
+    const discordIndex = source.indexOf('SettingsCommunityLink href={communityLinks.discordUrl}');
+
+    expect(source).toContain('t("settings.about.community")');
+    expect(source).toContain('className="community-popover-wechat"');
+    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
+    expect(source).toContain('className="community-link flex flex-col rounded-lg');
+    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
+    expect(source).toContain('detail="MemTensor/memmy-agent"');
+    expect(githubIndex).toBeGreaterThan(-1);
+    expect(githubIndex).toBeLessThan(discordIndex);
+    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
+
+    const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
+    expect(html).toContain('id="settings-panel-about"');
+    expect(html).toContain("community-popover-wechat");
+    expect(html).toContain("community-link");
+  });
+
   it("关于区只消费应用级更新状态，下载和弹窗不随页面卸载", () => {
     const settingsSource = readFileSync(settingsPageSourcePath, "utf8");
     const coordinatorSource = readFileSync(updateCoordinatorSourcePath, "utf8");
@@ -700,6 +724,16 @@ describe("SettingsPageView", () => {
     expect(workspaceSource).toContain("testEditorConnection");
   });
 
+  it("把 catalog 侧的 provider id 还原回工作区协议", () => {
+    expect(protocolFromConnection("volcengine")).toBe("doubao");
+    expect(protocolFromConnection("qianfan")).toBe("baidu");
+    expect(protocolFromConnection("dashscope")).toBe("qwen");
+    expect(protocolFromConnection("xiaomi_mimo")).toBe("xiaomi");
+    expect(protocolFromConnection("xiaomi")).toBe("xiaomi");
+    expect(protocolFromConnection("stepfun")).toBe("stepfun");
+    expect(protocolFromConnection("unknown-provider")).toBe("openai");
+  });
+
   it("模型工作区协议默认地址与模型配置常量保持一致", () => {
     const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const modelSource = readFileSync(modelConfigSourcePath, "utf8");
@@ -714,7 +748,9 @@ describe("SettingsPageView", () => {
       ["moonshot", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
       ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
-      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"]
+      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"],
+      ["stepfun", "https://api.stepfun.com/v1", "step-3.5-flash"],
+      ["xiaomi", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"]
     ];
 
     for (const [protocol, endpoint, placeholder] of defaults) {

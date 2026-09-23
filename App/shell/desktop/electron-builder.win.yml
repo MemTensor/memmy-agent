@@ -9,6 +9,14 @@ directories:
 files:
   - dist/**/*
   - package.json
+  - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/docx-rendering{,/**}"
+  - "!**/node_modules/open-computer-use/dist/linux/**"
+  - "!**/node_modules/open-computer-use/dist/Open Computer Use.app/**"
+  - "!**/node_modules/open-computer-use/dist/windows/arm64/**"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
@@ -20,6 +28,7 @@ files:
 
 asar: true
 asarUnpack:
+  - "**/node_modules/open-computer-use/dist/**"
   - "**/*.node"
   - "**/onnxruntime-node/bin/napi-v3/win32/x64/**/*.dll"
   - "**/@img/sharp-win32-x64/lib/libvips*.dll"

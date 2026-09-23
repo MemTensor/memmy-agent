@@ -85,6 +85,38 @@ describe("account-client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("读取并确认到账 Token 奖励", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      expect(init?.headers).toMatchObject({
+        "x-memmy-local-token": "token"
+      });
+
+      if (url.endsWith("/api/account/lottery/reward")) {
+        expect(init?.method).toBe("GET");
+        return jsonResponse({ hasReward: true, drawId: "1", tokenAmount: 500_000 });
+      }
+
+      if (url.endsWith("/api/account/lottery/reward/ack")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({ drawId: "1" });
+        return jsonResponse({ ok: true });
+      }
+
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpAccountClient(config);
+
+    await expect(client.getLotteryReward()).resolves.toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    await expect(client.ackLotteryReward({ drawId: "1" })).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("通过真实本地 API 完成验证码发送、校验和昵称更新", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();

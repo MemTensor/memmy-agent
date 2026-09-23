@@ -668,6 +668,54 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("浏览了 1 处");
   });
 
+  it("de-emphasizes a tool validation error after the same tool succeeds on retry", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-recovered-tool-error"
+          messages={[{
+            id: "trace",
+            role: "tool",
+            kind: "trace",
+            content: "",
+            traces: [],
+            toolEvents: [
+              { phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" },
+              { phase: "end", call_id: "call-valid", name: "review_update_spec", result: JSON.stringify({ ok: true }) }
+            ],
+            stoppedByUser: true
+          }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).not.toContain("agent-activity-timeline-item--error");
+    expect(html).not.toContain("agent-activity-timeline-item__error");
+    expect(html).toContain("Invalid outputFormats");
+  });
+
+  it("keeps an unrecovered tool error visibly red", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-unrecovered-tool-error"
+          messages={[{
+            id: "trace",
+            role: "tool",
+            kind: "trace",
+            content: "",
+            traces: [],
+            toolEvents: [{ phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" }],
+            stoppedByUser: true
+          }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("agent-activity-timeline-item--error");
+    expect(html).toContain("agent-activity-timeline-item__error");
+  });
+
   it("folds the whole finished run — thoughts, tools, drafts — behind one worked-for header", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">

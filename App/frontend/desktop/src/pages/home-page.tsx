@@ -1,5 +1,5 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -51,7 +51,7 @@ import {
   type PendingFileAttachment,
   type PendingImage
 } from "../state/agent-composer-state.js";
-import { createModelWorkspace, resolveModelSelection } from "../state/model-workspace.js";
+import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection } from "../state/model-workspace.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -101,7 +101,6 @@ export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, P
 
 const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
-const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
 
@@ -386,7 +385,7 @@ export function ComposerMediaPreviewStrip(props: {
 
   return (
     <>
-      <div className="composer-media-preview-strip" style={COMPOSER_MEDIA_STRIP_STYLE} aria-label={props.selectedLabel ?? "Selected media"}>
+      <div className="composer-media-preview-strip" aria-label={props.selectedLabel ?? "Selected media"}>
         {props.items.map((item) => (
           item.kind === "image" ? (
             <ComposerImageAttachmentChip
@@ -894,6 +893,27 @@ export function HomePage() {
     modelWorkspaceMode,
     selectedModelPreset
   );
+  // Persist the model the user picks in the chat selector as the mode default, so a new chat
+  // after restart defaults to the last-used model instead of the platform default. Only the
+  // account/byok `agent.default` is written (the backend mirrors it to agents.defaults.modelPreset);
+  // the per-chat selection stays in Agent state. Relies on the BYOK-candidate enrollment fix so
+  // the default survives the account-mode startup re-projection.
+  const persistDefaultModelRef = useRef(false);
+  const persistDefaultModel = useCallback(async (candidateId: string) => {
+    const configClient = clients?.config;
+    if (!configClient || persistDefaultModelRef.current) return;
+    const input = defaultModelSelectionInput(modelWorkspace, modelWorkspaceMode, candidateId);
+    if (!input) return;
+    persistDefaultModelRef.current = true;
+    try {
+      const saved = await configClient.saveModelCatalog(input);
+      dispatch(appActions.modelConfigUpdated(saved));
+    } catch {
+      // The per-chat selection is already applied; a failed default persist must not break it.
+    } finally {
+      persistDefaultModelRef.current = false;
+    }
+  }, [clients, modelWorkspace, modelWorkspaceMode, dispatch]);
   useEffect(() => {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
@@ -2657,6 +2677,7 @@ export function HomePage() {
         </div>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+      windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
         {!hasActiveConversation ? (
@@ -2721,6 +2742,7 @@ export function HomePage() {
                     scopeKey={modelSelectionScopeKey}
                     disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                     seedConfig={state.modelConfig}
+                    onDefaultModelSelected={persistDefaultModel}
                   />
                   <button
                     type="button"
@@ -2939,6 +2961,7 @@ export function HomePage() {
                           scopeKey={modelSelectionScopeKey}
                           disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                           seedConfig={state.modelConfig}
+                          onDefaultModelSelected={persistDefaultModel}
                         />
                         <button
                           type="button"

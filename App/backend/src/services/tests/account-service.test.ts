@@ -28,6 +28,75 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("treats a logged-out lottery reward lookup as no reward", async () => {
+    let cloudCalls = 0;
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward() {
+          cloudCalls += 1;
+          return { hasReward: true as const, drawId: "1", tokenAmount: 500_000 };
+        }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({ hasReward: false });
+    expect(cloudCalls).toBe(0);
+  });
+
+  it("reads and acknowledges lottery rewards with the current cloud credential", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward(input) {
+          calls.push({ get: input });
+          return { hasReward: true as const, drawId: "1", tokenAmount: 500_000 };
+        },
+        async ackLotteryReward(input) {
+          calls.push({ ack: input });
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return "cloud.login.uuid";
+        }
+      }
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    await expect(service.ackLotteryReward({ drawId: "1" })).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { get: { uuid: "cloud.login.uuid" } },
+      { ack: { uuid: "cloud.login.uuid", drawId: "1" } }
+    ]);
+  });
+
+  it("fails closed when the cloud lottery reward lookup is unavailable", async () => {
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getLotteryReward() {
+          throw Object.assign(new Error("unauthorized"), { code: "unauthorized" as const });
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return "stale.cloud.uuid";
+        }
+      }
+    });
+
+    await expect(service.getLotteryReward()).resolves.toEqual({ hasReward: false });
+  });
+
   it("rejects verification channels that are not supported by the desktop package", async () => {
     let cloudCalls = 0;
     const service = createAccountService({
@@ -57,6 +126,84 @@ describe("AccountService", () => {
       loginSource: "Memmy"
     })).rejects.toMatchObject({ code: "invalid_argument" });
     expect(cloudCalls).toBe(0);
+  });
+
+  it("keeps social login unavailable in the phone-only China package", async () => {
+    let cloudCalls = 0;
+    const service = createAccountService({
+      accountChannel: "phone",
+      cloudClient: {
+        ...createCloudClientStub(),
+        async startSocialLogin() {
+          cloudCalls += 1;
+          throw new Error("unexpected social-login start");
+        },
+        async getSocialLoginStatus() {
+          cloudCalls += 1;
+          throw new Error("unexpected social-login poll");
+        }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+
+    await expect(service.startSocialLogin({
+      provider: "google",
+      locale: "zh",
+      loginSource: "Memmy"
+    })).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(service.getSocialLoginStatus({
+      flowId: "social-flow-id-0001",
+      pollToken: "social-poll-token-0000000000000001"
+    })).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(cloudCalls).toBe(0);
+  });
+
+  it("stores a completed international social login as an email-channel session", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      accountChannel: "email",
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getSocialLoginStatus(input) {
+          calls.push({ status: input });
+          return {
+            status: "completed" as const,
+            result: {
+              uuid: "cloud.social.uuid",
+              accountUuid: "cloud-account-user-1",
+              isNewUser: false,
+              profile: cloudProfile(),
+              invitationResult: { status: "not_provided" as const }
+            }
+          };
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        upsert(input) {
+          calls.push({ upsert: input });
+          return {
+            authenticated: true,
+            isNewUser: input.isNewUser ?? false,
+            profile: input.profile
+          };
+        }
+      }
+    });
+
+    await expect(service.getSocialLoginStatus({
+      flowId: "social-flow-id-0001",
+      pollToken: "social-poll-token-0000000000000001"
+    })).resolves.toMatchObject({
+      status: "completed",
+      result: { session: { authenticated: true, profile: { email: "hello@example.com" } } }
+    });
+    expect(calls).toContainEqual({
+      upsert: expect.objectContaining({
+        cloudUuid: "cloud.social.uuid",
+        authChannel: "email"
+      })
+    });
   });
 
   it("sends verification codes through cloud-client and rate-limits by channel address", async () => {
@@ -956,6 +1103,18 @@ function createCloudClientStub() {
     async login() {
       return { uuid: "cloud.login.uuid", accountUuid: "cloud-account-user-1", isNewUser: true, profile: cloudProfile() };
     },
+    async startSocialLogin() {
+      return {
+        flowId: "social-flow-id-0001",
+        pollToken: "social-poll-token-0000000000000001",
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+        expiresInSec: 600,
+        pollIntervalSec: 2
+      };
+    },
+    async getSocialLoginStatus() {
+      return { status: "pending" as const };
+    },
     async logout() {
       return undefined;
     },
@@ -980,6 +1139,12 @@ function createCloudClientStub() {
     },
     async grantImprovementProgramTokens() {
       return this.getTokenUsage({});
+    },
+    async getLotteryReward() {
+      return { hasReward: false as const };
+    },
+    async ackLotteryReward() {
+      return undefined;
     },
     async sendTelemetry() {
       return undefined;

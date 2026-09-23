@@ -114,23 +114,22 @@ export function SearchPalette(props: SearchPaletteProps) {
               missingProjectLabel: props.missingProjectLabel,
               registryUnavailableLabel: props.registryUnavailableLabel
             });
+            const taskLabel = [task.title || untitledLabel || "", ownership].filter(Boolean).join(" · ");
             return (
             <button
               key={task.sessionKey}
               type="button"
               role="option"
               aria-selected={i === activeIndex}
-              aria-label={`${task.title || untitledLabel || ""} · ${ownership}`}
-              title={ownership}
+              aria-label={taskLabel}
+              title={ownership || undefined}
               className={`search-palette-item${i === activeIndex ? " search-palette-item--active" : ""}`}
               onMouseEnter={() => setActiveIndex(i)}
               onClick={() => onSelectTask(task)}
             >
               <span className="search-palette-item-title">{task.title || untitledLabel}</span>
               {task.preview && <span className="search-palette-item-preview">{task.preview}</span>}
-              <span className="search-palette-item-preview">
-                {ownership}
-              </span>
+              {ownership && <span className="search-palette-item-preview">{ownership}</span>}
             </button>
             );
           })}
@@ -175,7 +174,7 @@ export function resolveTaskOwnership(
     ? projects.find((candidate) => candidate.id === task.groupProjectId) ?? null
     : null;
   if (project) return `${project.name} · ${task.cwd}`;
-  if (task.projectId == null) return labels.standaloneLabel ?? "";
+  if (task.projectId == null) return "";
   const unavailableLabel = labels.projectRegistryState === "corrupt"
     ? labels.registryUnavailableLabel
     : labels.missingProjectLabel;

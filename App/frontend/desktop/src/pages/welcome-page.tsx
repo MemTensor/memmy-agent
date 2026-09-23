@@ -1,5 +1,5 @@
 /** Welcome page module. */
-import type { OnboardingStateDto } from "@memmy/local-api-contracts";
+import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } from "@memmy/local-api-contracts";
 import { Gift, Key } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
@@ -9,9 +9,11 @@ import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
+import { SocialLoginButtons } from "../components/social-login-buttons.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
+import { useSocialLogin } from "../components/use-social-login.js";
 import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
@@ -28,6 +30,7 @@ export function WelcomePage() {
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
   const verificationCodeAuth = useVerificationCodeAuth();
+  const socialLogin = useSocialLogin();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -49,12 +52,14 @@ export function WelcomePage() {
     setModePersistenceFeedback(null);
     setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
-  }, [channel, verificationCodeAuth.resetInteractionState]);
+    socialLogin.reset();
+  }, [channel, verificationCodeAuth.resetInteractionState, socialLogin.reset]);
 
   /** Handles toggle language. */
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
     verificationCodeAuth.clearFeedback();
+    socialLogin.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
@@ -62,7 +67,7 @@ export function WelcomePage() {
 
   /** Handles submit login. */
   async function submitLogin() {
-    if (verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || socialLogin.pendingProvider || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
@@ -78,6 +83,21 @@ export function WelcomePage() {
       code,
       invitationEnabled ? inviteCode : undefined
     );
+    await finishAccountLogin(loginResult, channel);
+  }
+
+  async function startSocialLogin(provider: SocialLoginProvider) {
+    const loginResult = await socialLogin.start(
+      provider,
+      invitationEnabled ? inviteCode : undefined
+    );
+    await finishAccountLogin(loginResult, provider);
+  }
+
+  async function finishAccountLogin(
+    loginResult: AccountLoginResultView | null,
+    method: "email" | "phone" | SocialLoginProvider
+  ) {
     if (!loginResult || !loginResult.session.authenticated) {
       return;
     }
@@ -90,7 +110,7 @@ export function WelcomePage() {
     }
 
     track(buildInvitationSignupEvent({
-      channel,
+      channel: method,
       isNewUser: session.isNewUser,
       invitationCode: invitationEnabled ? inviteCode : undefined
     }));
@@ -185,7 +205,7 @@ export function WelcomePage() {
 
       <LanguageToggleButton language={language} onClick={toggleLanguage} />
 
-      <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-10 min-h-0">
+      <div className="flex-1 flex flex-col items-center justify-center px-4 relative z-10 min-h-0 overflow-y-auto py-6">
         <div className="w-full max-w-md flex flex-col items-center">
           <div className="text-center mb-6">
             <div className="welcome-brand-mascot flex justify-center">
@@ -220,8 +240,8 @@ export function WelcomePage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
-                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}
+                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}
                 sendCodeLabel={verificationCodeAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
@@ -250,6 +270,14 @@ export function WelcomePage() {
             <Key size={15} />
             {t("welcome.byok.quickAction")}
           </button>
+          {channel === "email" ? (
+            <SocialLoginButtons
+              pendingProvider={socialLogin.pendingProvider}
+              disabled={verificationCodeAuth.loginPending || modePersistencePending}
+              feedback={socialLogin.feedback}
+              onLogin={(provider) => void startSocialLogin(provider)}
+            />
+          ) : null}
           </div>
         </div>
       </div>

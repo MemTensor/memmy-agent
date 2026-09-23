@@ -34,6 +34,23 @@ export interface LoadCloudServiceEnvOptions {
 /** Loads the public cloud-service origin without allowing packaged raw env files. */
 export function loadCloudServiceEnv(options: LoadCloudServiceEnvOptions = {}): string | null {
   const env = options.env ?? process.env;
+  if (options.manifestPath !== undefined) {
+    if (!existsSync(options.manifestPath)) {
+      throw new Error("Packaged desktop runtime manifest is missing");
+    }
+    const manifestService = cloudServiceFromDesktopRuntimeManifest(
+      readFileSync(options.manifestPath, "utf8"),
+    );
+    if (!manifestService.startsWith("https://")) {
+      throw new Error("Packaged desktop runtime manifest cloud service must use HTTPS");
+    }
+    env.MEMMY_CLOUD_SERVICE = manifestService;
+    // MEMMY_CLOUD_URL is a development-only override. Do not let a stale
+    // value inherited from an older installation redirect a packaged app.
+    delete env.MEMMY_CLOUD_URL;
+    return options.manifestPath;
+  }
+
   if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
     const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
     if (externalValue) {
@@ -41,16 +58,6 @@ export function loadCloudServiceEnv(options: LoadCloudServiceEnvOptions = {}): s
       return "environment";
     }
     delete env.MEMMY_CLOUD_SERVICE;
-  }
-
-  if (options.manifestPath !== undefined) {
-    if (!existsSync(options.manifestPath)) {
-      throw new Error("Packaged desktop runtime manifest is missing");
-    }
-    env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
-      readFileSync(options.manifestPath, "utf8"),
-    );
-    return options.manifestPath;
   }
 
   const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));

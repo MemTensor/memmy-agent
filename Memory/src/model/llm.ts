@@ -729,7 +729,7 @@ function openAiCompatibleThinkingStyle(
   if (vendor === "qwen") return "enable_thinking";
   if (vendor === "minimax") return "minimax_direct";
   if (vendor === "baidu" && (slug.includes("ernie") || slug.includes("qwen"))) return "enable_thinking";
-  if (["deepseek", "zhipu", "kimi", "baidu", "doubao"].includes(vendor)) return "thinking_type";
+  if (["deepseek", "zhipu", "kimi", "baidu", "doubao", "xiaomi"].includes(vendor)) return "thinking_type";
   if (vendor === "openai_compatible" && isOpenAiReasoningModel(slug)) return "reasoning_effort";
   if (haystack.includes("dashscope") || haystack.includes("qwen")) return "enable_thinking";
   if (haystack.includes("minimax")) return "minimax_direct";

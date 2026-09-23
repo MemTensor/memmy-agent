@@ -54,6 +54,26 @@ function createCountingLlm(
           user: null
         } as unknown as T;
       }
+      if (options.operation === "failure.experience.sink.v5") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          evidence_trace_ids?: string[];
+        };
+        const traceId = payload.evidence_trace_ids?.[0];
+        return {
+          title: "Avoid reporting TLS completion before verification",
+          trigger: "When configuring TLS and reporting the service endpoint.",
+          procedure: "Use the requested secure port and verify TLS before reporting completion.",
+          verification: "Confirm the secure endpoint responds successfully with certificate verification enabled.",
+          boundary: "Use for TLS configuration tasks with an explicit port or verification requirement.",
+          experience_type: "failure_avoidance",
+          decision_guidance: {
+            prefer: ["Verify the secure endpoint before reporting completion."],
+            avoid: ["Do not report TLS completion while the requested port or verification remains wrong."]
+          },
+          support_trace_ids: traceId ? [traceId] : [],
+          confidence: 0.82
+        } as unknown as T;
+      }
       if (options.operation === "reward.reward.r_human.v7" && reward) {
         return reward as unknown as T;
       }
@@ -71,7 +91,7 @@ function createCountingLlm(
 }
 
 describe("MemoryService / evolution / negative experience", () => {
-  it("materializes explicit negative feedback as an independent avoidance policy without another LLM call", async () => {
+  it("materializes explicit negative feedback from a complete failure sink draft", async () => {
     const operations: string[] = [];
     const embeddedTexts: string[] = [];
     const embeddingRoles: Array<"query" | "document" | undefined> = [];
@@ -179,8 +199,9 @@ describe("MemoryService / evolution / negative experience", () => {
         }
       }
     });
-    expect(detail.body).toContain("Wrong port");
-    expect(detail.body).toContain("443");
+    expect(detail.body).toContain("Use the requested secure port and verify TLS before reporting completion.");
+    expect(detail.body).not.toContain("I configured port 80 and skipped TLS verification.");
+    expect(operations.filter((operation) => operation === "failure.experience.sink.v5")).toHaveLength(1);
     expect(operations[0]).toBe("capture.summarize");
     expect(operations.filter((operation) => operation === "reward.reward.r_human.v7")).toHaveLength(1);
     const negativePolicy = (detail.metadata.properties as {
@@ -210,14 +231,14 @@ describe("MemoryService / evolution / negative experience", () => {
       (section) => section.id === "failure-avoidance"
     );
     expect(avoidance?.memoryIds).toContain(policies[0]!.id);
-    expect(avoidance?.content).toContain("Wrong port");
+    expect(avoidance?.content).toContain("TLS completion");
     expect(recall.injectedContext.sections.find(
       (section) => section.id === "decision-guidance"
     )?.memoryIds ?? []).not.toContain(policies[0]!.id);
     db.close();
   });
 
-  it("does not turn a weak negative score at the boundary into a policy", async () => {
+  it("lets a complete sink draft materialize at the negative reward boundary", async () => {
     const operations: string[] = [];
     const llm = createCountingLlm(operations, {
       goal_achievement: -0.15,
@@ -295,7 +316,7 @@ describe("MemoryService / evolution / negative experience", () => {
     await service.runWorkerOnce(50);
 
     const policies = service.panelItems({ namespace, layer: "L2" }).items;
-    expect(policies).toEqual([]);
+    expect(policies).toHaveLength(1);
     expect(operations[0]).toBe("capture.summarize");
     expect(operations.filter((operation) => operation === "reward.reward.r_human.v7")).toHaveLength(1);
     db.close();
@@ -303,6 +324,8 @@ describe("MemoryService / evolution / negative experience", () => {
 
   it("merges the same avoidance across episodes and user ids", async () => {
     const { db, service } = createTestService({
+      llm: createCountingLlm([]),
+      skillLlm: createCountingLlm([]),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -359,6 +382,7 @@ describe("MemoryService / evolution / negative experience", () => {
       await service.runWorkerOnce(50);
       await service.runWorkerOnce(50);
       await service.runWorkerOnce(50);
+      await service.runWorkerOnce(50);
       const recall = await service.search({
         sessionId: session.sessionId,
         query: "TLS port verification",
@@ -406,6 +430,7 @@ describe("MemoryService / evolution / negative experience", () => {
       rationale: "Wrong port: use 443 and verify TLS before reporting completion."
     });
     service.closeSession(otherSession.sessionId);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
@@ -485,6 +510,8 @@ describe("MemoryService / evolution / negative experience", () => {
 
   it("recalls negative policies written under another user id", async () => {
     const { db, service } = createTestService({
+      llm: createCountingLlm([]),
+      skillLlm: createCountingLlm([]),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -536,19 +563,24 @@ describe("MemoryService / evolution / negative experience", () => {
     await service.runWorkerOnce(1000);
     await service.runWorkerOnce(1000);
     await service.runWorkerOnce(1000);
+    await service.runWorkerOnce(1000);
     const crossUserPolicy = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = ?
-         AND memory_layer = 'L2'
+       WHERE memory_layer = 'L2'
          AND deleted_at IS NULL
        LIMIT 1`
-    ).get("negative-other-user-0") as { id: string } | undefined;
+    ).get() as { id: string } | undefined;
     expect(crossUserPolicy?.id).toBeTruthy();
 
+    const reader = service.openSession({ namespace: {
+      source: "codex",
+      profileId: "candidate-isolation",
+      userId: "negative-new-reader"
+    } });
     const result = await service.search({
-      sessionId: targetSessionId,
-      query: "TLS_ROTATION_GUARD_0",
+      sessionId: reader.sessionId,
+      query: "TLS port verification",
       layers: ["L2"],
       limit: 5
     });

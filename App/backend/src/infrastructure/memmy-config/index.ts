@@ -10,6 +10,9 @@ import {
   type ActualModelContext,
   type ModelConfigInput,
   type ModelConfigView,
+  type AccountChannel,
+  type Language,
+  resolveMemoryLanguage,
   type ModelProvider,
   type ModelSelectionResolution,
   type ResolvedProviderSnapshot,
@@ -120,6 +123,9 @@ export interface MemmyConfigWriter {
   /** Atomically persist the active account/BYOK namespace without rewriting the model catalog. */
   writeUserMode?(mode: UserMode): Promise<void>;
 
+  /** Publish the interface language so Memory can write memories in it. */
+  writeMemoryLanguage?(language: Language): Promise<void>;
+
   writeModelConfig?(input: ModelConfigInput): Promise<ModelConfigView>;
 
   /**
@@ -164,6 +170,8 @@ export interface CreateMemmyConfigWriterOptions {
    * - configPath: defaults to ~/.memmy/config.yaml; tests can inject a temporary path.
    */
   configPath?: string;
+  /** Package login channel. Resolves the `system` language to zh-CN or en-US. */
+  accountChannel?: AccountChannel;
 }
 
 /**
@@ -197,6 +205,15 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
         const app = asRecord(config.app);
         if (app) app.userMode = mode;
         else config.app = { userMode: mode };
+      });
+    },
+
+    async writeMemoryLanguage(language) {
+      const resolved = resolveMemoryLanguage(language, options.accountChannel);
+      await mutateRuntimeConfig(configPath, (config) => {
+        const memory = asRecord(config.memmyMemory) ?? {};
+        memory.language = resolved;
+        config.memmyMemory = memory;
       });
     },
 
@@ -384,6 +401,10 @@ export function mapModelProtocol(provider: ModelProvider): ModelProtocolProjecti
       return { agentProvider: "qianfan", agentApiType: "auto", memoryProvider: "openai_compatible" };
     case "doubao":
       return { agentProvider: "volcengine", agentApiType: "auto", memoryProvider: "openai_compatible" };
+    case "stepfun":
+      return { agentProvider: "stepfun", agentApiType: "auto", memoryProvider: "openai_compatible" };
+    case "xiaomi":
+      return { agentProvider: "xiaomi_mimo", agentApiType: "auto", memoryProvider: "openai_compatible" };
   }
 }
 

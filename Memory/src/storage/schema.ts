@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 7;
-export const SCHEMA_MIGRATION_ID = "007_memory_capture_claims";
+export const SCHEMA_VERSION = 8;
+export const SCHEMA_MIGRATION_ID = "008_source_turn_captures";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -400,6 +400,38 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_skill_trials_raw_status
     ON skill_trials (raw_turn_id, status, created_at DESC)`,
 
+  `CREATE TABLE IF NOT EXISTS skill_clusters (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    tools_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tools_json)),
+    artifacts_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(artifacts_json)),
+    tool_bigrams_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tool_bigrams_json)),
+    centroid_json TEXT,
+    skill_memory_id TEXT,
+    meta_skill_md TEXT NOT NULL DEFAULT '',
+    processed_episode_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(processed_episode_ids_json)),
+    member_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_clusters_scope
+    ON skill_clusters (user_id, project_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_clusters_skill
+    ON skill_clusters (skill_memory_id)`,
+
+  `CREATE TABLE IF NOT EXISTS skill_cluster_members (
+    cluster_id TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'unknown'
+      CHECK (outcome IN ('success', 'failure', 'unknown')),
+    r_task REAL,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (cluster_id, episode_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_cluster_members_episode
+    ON skill_cluster_members (episode_id, assigned_at DESC)`,
+
   `CREATE TABLE IF NOT EXISTS recall_events (
     id TEXT PRIMARY KEY,
     namespace_id TEXT,
@@ -468,6 +500,27 @@ const statements = [
     created_at TEXT NOT NULL,
     expires_at TEXT
   )`,
+
+  `CREATE TABLE IF NOT EXISTS source_turn_captures (
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    namespace_key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    session_id TEXT,
+    episode_id TEXT,
+    raw_turn_id TEXT,
+    response_json TEXT NOT NULL CHECK (json_valid(response_json)),
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    source_sequence INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, source, profile_id, namespace_key, conversation_id, turn_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_conversation
+    ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
 
   `CREATE TABLE IF NOT EXISTS memory_capture_claims (
     user_id TEXT NOT NULL,
@@ -620,7 +673,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -657,6 +710,11 @@ export function migrate(db: Database.Database): void {
          ON evolution_jobs (dedupe_key)
          WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`
       ).run();
+
+      // This boundary belongs to the Memory database and is shared by Hook and scanners.
+      db.prepare(`INSERT INTO runtime_kv (key, value_json, updated_at)
+        VALUES ('source_turn_capture_activated_at', ?, ?)
+        ON CONFLICT(key) DO NOTHING`).run(JSON.stringify(now), now);
 
       if (hasMemories && version > 0 && version < 5) {
         backfillMemoryProcessingState(db, now);

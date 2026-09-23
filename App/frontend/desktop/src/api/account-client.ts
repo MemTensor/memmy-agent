@@ -3,19 +3,31 @@ import {
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
+  SocialLoginStatusInputSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginInputSchema,
+  StartSocialLoginResponseSchema,
   UpdateAccountProfileInputSchema,
   VerifyCodeInputSchema,
   type AccountInvitationView,
   type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
+  type LotteryReward,
+  type LotteryRewardAckInput,
   type OkResponse,
   type RuntimeConfig,
   type SendCodeInput,
   type SendCodeResponse,
+  type SocialLoginStatusInput,
+  type SocialLoginStatusResponse,
+  type StartSocialLoginInput,
+  type StartSocialLoginResponse,
   type UpdateAccountProfileInput,
   type VerifyCodeInput
 } from "@memmy/local-api-contracts";
@@ -52,7 +64,11 @@ export type AccountCodeValidationResult =
 export interface AccountClient {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
   verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
+  getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
+  getLotteryReward(): Promise<LotteryReward>;
+  ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -79,12 +95,48 @@ export function createHttpAccountClient(config: RuntimeConfig): AccountClient {
       });
     },
 
+    async startSocialLogin(input) {
+      return requestJson({
+        config,
+        path: "/api/account/oauth/start",
+        schema: StartSocialLoginResponseSchema,
+        body: StartSocialLoginInputSchema.parse(input)
+      });
+    },
+
+    async getSocialLoginStatus(input) {
+      return requestJson({
+        config,
+        path: "/api/account/oauth/status",
+        schema: SocialLoginStatusResponseSchema,
+        body: SocialLoginStatusInputSchema.parse(input)
+      });
+    },
+
     async getInvitation() {
       return requestJson({
         config,
         path: "/api/account/invitation",
         schema: AccountInvitationViewSchema,
         init: { method: "PUT" }
+      });
+    },
+
+    async getLotteryReward() {
+      return requestJson({
+        config,
+        path: "/api/account/lottery/reward",
+        schema: LotteryRewardSchema
+      });
+    },
+
+    async ackLotteryReward(input) {
+      return requestJson({
+        config,
+        path: "/api/account/lottery/reward/ack",
+        schema: OkResponseSchema,
+        init: { method: "POST" },
+        body: LotteryRewardAckInputSchema.parse(input)
       });
     },
 

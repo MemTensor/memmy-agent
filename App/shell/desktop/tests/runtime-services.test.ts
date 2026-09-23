@@ -11,6 +11,8 @@ import {
   AgentGatewaySupervisor,
   bundledMemoryInstallArguments,
   ensureMemoryService,
+  hasMemoryOwnerProgressed,
+  matchesMemoryServiceCommandLine,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
   readLiveMemoryServerLock,
@@ -20,6 +22,7 @@ import {
   resolveRuntimeEntryPaths,
   runPackagedMigrationCommand,
   restartExternalMemoryService,
+  sampleMemoryOwnerProgress,
   spawnNodeService,
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
@@ -425,6 +428,15 @@ describe("packaged desktop runtime config", () => {
       agentGatewayBootstrapSecret: "stable-secret"
     });
     expect(config).toMatchObject({
+      tools: {
+        mcpServers: {
+          open_computer_use: {
+            type: "stdio",
+            command: "open-computer-use",
+            args: ["mcp"]
+          }
+        }
+      },
       agents: {
         defaults: { workspace: join(memmyHome, "workspace") }
       },
@@ -564,6 +576,21 @@ describe("packaged desktop runtime config", () => {
     });
 
     expect(runtime.agentWorkspace).toBe(legacyWorkspace);
+  });
+
+  it.each([
+    {},
+    { custom: { command: "custom-mcp", args: [] } },
+    { open_computer_use: { command: "/custom/ocu", args: ["mcp"], enabledTools: [] } }
+  ])("preserves existing MCP maps on desktop startup: %j", async (mcpServers) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ tools: { mcpServers } }));
+    await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    });
+    expect(recordValue(recordValue(await readYaml(configPath), "tools"), "mcpServers")).toEqual(mcpServers);
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {
@@ -1402,6 +1429,80 @@ describe("spawnNodeService 落盘与 env 注入", () => {
     await stopManagedChild(managed);
 
     expect(managed.exitDescription).toBe("signal SIGKILL");
+  });
+});
+
+describe("Memory lock owner progress", () => {
+  it("accounts for the database and its journal companions", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    await writeFile(`${databasePath}-wal`, "bb");
+
+    const sample = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    expect(sample.databaseBytes).toBe(3);
+    expect(sample.databaseMtimeMs).toBeGreaterThan(0);
+    expect(sample.cpuMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("treats a database write as progress", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    const previous = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    await writeFile(`${databasePath}-wal`, "growing");
+
+    expect(hasMemoryOwnerProgressed(previous, sampleMemoryOwnerProgress(process.pid, databasePath))).toBe(true);
+  });
+
+  it("treats accumulated cpu time alone as progress", () => {
+    const idle = { cpuMs: 5_000, databaseBytes: 10, databaseMtimeMs: 100 };
+    expect(hasMemoryOwnerProgressed(idle, { ...idle, cpuMs: 6_200 })).toBe(true);
+    expect(hasMemoryOwnerProgressed(idle, { ...idle, cpuMs: 5_100 })).toBe(false);
+  });
+
+  it("reports no progress once the process and the database go quiet", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    const previous = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    expect(hasMemoryOwnerProgressed(previous, { ...previous })).toBe(false);
+  });
+});
+
+describe("Memory lock owner identification", () => {
+  const home = resolve("/memmy-home");
+  const serviceHome = join(home, "memory-service");
+  const activeEntry = join(serviceHome, "runtime", "2.1.2", "win32-x64", "dist", "src", "server", "index.js");
+  const previousEntry = join(serviceHome, "runtime", "2.1.1", "win32-x64", "dist", "src", "server", "index.js");
+
+  it("accepts a service left behind by the previous version", () => {
+    expect(matchesMemoryServiceCommandLine(`"C:/node.exe" "${previousEntry}" --config x`, activeEntry, serviceHome))
+      .toBe(true);
+  });
+
+  it("accepts the active pointer and the bundled runtime entry", () => {
+    expect(matchesMemoryServiceCommandLine(`node "${activeEntry}"`, activeEntry, serviceHome)).toBe(true);
+    expect(matchesMemoryServiceCommandLine(
+      "node /Applications/Memmy.app/Contents/Resources/memory-runtime/dist/src/server/index.js",
+      activeEntry,
+      serviceHome
+    )).toBe(true);
+  });
+
+  it("matches only the active pointer during a runtime takeover", () => {
+    expect(matchesMemoryServiceCommandLine(`node "${previousEntry}"`, activeEntry, serviceHome, true)).toBe(false);
+    expect(matchesMemoryServiceCommandLine(`node "${activeEntry}"`, activeEntry, serviceHome, true)).toBe(true);
+  });
+
+  it("rejects a service from another home and unrelated processes", () => {
+    const foreignEntry = join(resolve("/other-home"), "memory-service", "runtime", "2.1.1", "win32-x64", "dist", "src", "server", "index.js");
+    expect(matchesMemoryServiceCommandLine(`node "${foreignEntry}"`, activeEntry, serviceHome)).toBe(false);
+    expect(matchesMemoryServiceCommandLine("C:/Windows/explorer.exe", activeEntry, serviceHome)).toBe(false);
+    expect(matchesMemoryServiceCommandLine("", activeEntry, serviceHome)).toBe(false);
   });
 });
 

@@ -313,7 +313,6 @@ export class QQChannel extends BaseChannel {
       const shown = filename || (saved ? path.basename(saved) : url);
       if (saved) {
         mediaPaths.push(saved);
-        recvLines.push(`- ${shown}\n  saved: ${saved}`);
       } else {
         recvLines.push(`- ${shown}\n  saved: [download failed]`);
       }

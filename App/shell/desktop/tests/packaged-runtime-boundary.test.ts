@@ -124,7 +124,7 @@ describe("desktop packaged runtime boundaries", () => {
       yaml: expect.any(String),
       zod: expect.any(String)
     });
-    expect(memoryPackage.version).toBe("2.1.2");
+    expect(memoryPackage.version).toBe("2.1.3");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
     expect(memoryPackage.scripts?.prebuild).toBeUndefined();
@@ -198,7 +198,7 @@ describe("desktop packaged runtime boundaries", () => {
     });
     for (const scriptName of ["prebuild", "pretypecheck", "pretest"]) {
       expect(agentPackage.scripts?.[scriptName]).toBe(
-        "npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
+        "npm --prefix ../../Knowledge run build && npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
       );
     }
   });
@@ -351,6 +351,9 @@ describe("desktop packaged runtime boundaries", () => {
       };
       expect(config.asarUnpack).toContain(
         "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
+      );
+      expect(config.asarUnpack).not.toContain(
+        "dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering/**"
       );
     }
   });
@@ -1121,6 +1124,24 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:export-diagnostics-report")');
   });
 
+  it("stops the Windows memory service by default during app exit", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    expect(mainSource).toContain('process.platform === "win32"');
+    expect(mainSource).toContain("stopMemoryServiceOnExit");
+  });
+
+  it("opens Computer History Markdown through a restricted desktop bridge", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    const preloadSource = readFileSync(preloadSourcePath, "utf8");
+
+    expect(preloadSource).toContain("openComputerHistoryMarkdown(filePath: string): Promise<void>;");
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:open-computer-history-markdown", filePath)');
+    expect(mainSource).toContain('ipcMain.handle("memmy:open-computer-history-markdown"');
+    expect(mainSource).toContain("resolveComputerHistoryMarkdownPath(rawPath)");
+    expect(mainSource).toContain("await shell.openPath(filePath)");
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:open-computer-history-markdown")');
+  });
+
   it("exposes app version and update checks through the desktop bridge", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
@@ -1218,6 +1239,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
     expect(mainSource).toContain("app processes still running before install; waiting");
+    expect(mainSource).toContain("function Get-MemmyUpdateAppProcesses");
+    expect(mainSource).toContain("$AppPid");
+    expect(mainSource).toContain("memory-service");
+    expect(mainSource).not.toContain("$_.Path -eq $AppExe");
     expect(mainSource).toContain("function hideMacDockForPreparedUpdateInstall");
     expect(mainSource).toContain("app.dock?.hide()");
     expect(mainSource).toContain("isManagedUpdateInstallerRunning");
@@ -1526,7 +1551,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("InstallLocation is shared-looking or contains a protected path");
     expect(source).toContain("-IncludeMachineScope requires an already elevated PowerShell session");
     expect(source).toContain("This script can only run on Windows.");
-    expect(source).toContain("Type CLEAR MEMMY to continue");
+    expect(source).toContain("This permanently deletes Memmy application state and local data.");
+    expect(source).not.toContain("Read-Host");
   });
 
   it("keeps packaged CLI launchers on Memmy.app and ~/.memmy/config.yaml", () => {
@@ -1874,6 +1900,7 @@ describe("desktop packaged runtime boundaries", () => {
     const versionGuardSource = readFileSync(verifyPackageVersionPath, "utf8");
     const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
 
+    expect(mainSource).toContain("loadCloudServiceEnv({");
     expect(mainSource).toContain('manifestPath: app.isPackaged ? join(import.meta.dirname, "desktop-edition.json") : undefined');
     for (const source of [macSource, winSource]) {
       expect(source).toContain("write-desktop-edition-manifest.mjs");
