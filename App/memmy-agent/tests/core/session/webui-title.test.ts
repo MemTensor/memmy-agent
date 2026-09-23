@@ -118,6 +118,32 @@ describe("WebuiTitleService", () => {
     });
   });
 
+  it("stores only the visible title when the title model answers with a think block (#432)", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    createSession(sessions, "chat-think", "帮我整理这个长问题的需求范围");
+    const provider = titleProvider("<think>The user is asking about r…</think>需求范围整理");
+    const { service, scheduled } = createService({ sessions, provider });
+
+    service.trackUserMessage({ chatId: "chat-think", content: "帮我整理这个长问题的需求范围", metadata: { webui: true } });
+    service.onUserMessagePersisted("chat-think");
+    await scheduled[0];
+
+    expect(sessions.loadSession("websocket:chat-think")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("需求范围整理");
+  });
+
+  it("does not store a title when the title model only produced thinking (#432)", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    createSession(sessions, "chat-think-only", "帮我整理这个长问题的需求范围");
+    const provider = titleProvider("<think>The user is asking about r…");
+    const { service, scheduled } = createService({ sessions, provider });
+
+    service.trackUserMessage({ chatId: "chat-think-only", content: "帮我整理这个长问题的需求范围", metadata: { webui: true } });
+    service.onUserMessagePersisted("chat-think-only");
+    await scheduled[0];
+
+    expect(sessions.loadSession("websocket:chat-think-only")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBeUndefined();
+  });
+
   it("uses an explicitly resolved canonical Session key for GUI projections", async () => {
     const sessions = new SessionManager(sessionRoot());
     const sessionKey = "telegram:chat-1";
