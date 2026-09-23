@@ -11,7 +11,7 @@ describe("project version", () => {
     );
 
     expect(MEMMY_VERSION).toBe(rootManifest.version);
-    expect(MEMMY_VERSION).toBe("1.1.7");
+    expect(MEMMY_VERSION).toBe("1.1.8");
     expect(MEMMY_VERSION).toMatch(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
     expect(readFileSync(resolve(repoRoot, "App/backend/src/project-version.ts"), "utf8"))
       .toContain(`MEMMY_VERSION = ${JSON.stringify(rootManifest.version)}`);

@@ -7,7 +7,7 @@ export interface KnowledgeBase {
   ownerName?: string;
   memberCount?: number;
 }
-export interface KnowledgeMember { userId: string; name: string; status: string; }
+export interface KnowledgeMember { userId: string; name: string; status: string; contact?: string; }
 export interface KnowledgeSettings {
   authenticated: boolean;
   enabled: boolean;

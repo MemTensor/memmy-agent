@@ -2,7 +2,7 @@ import { Repositories, RuntimeRepository } from "../../../src/storage/repositori
 import { memoryCaptureQaHash } from "../../../src/utils/memory-capture-claim.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildSourceTurnRequest } from "@memmy/agent-source-core";
+import { buildSourceTurnRequest, readOpencodeSourceTurn } from "@memmy/agent-source-core";
 import { MemoryDb } from "../../../src/index.js";
 import type { SourceTurnCompleteRequest } from "../../../src/types.js";
 import { createMemoryServiceFixture, createBatchReflectionLlm, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
@@ -44,6 +44,95 @@ describe("native source turn submission", () => {
       query: input.query, answer: input.answer, status: "succeeded", toolCalls: [], toolResults: []
     }, "agent_source_scan");
     expect(service.completeSourceTurn(built).status).toBe("stored");
+  });
+
+  it("reuses one OpenCode capture after the live session agent changes", async () => {
+    const { db, service } = createTestService();
+    const messages = () => [
+      { id: "u", data: { role: "user", agent: "build", time: { created: 4_070_944_800_000 } } },
+      {
+        id: "a",
+        data: {
+          role: "assistant",
+          parentID: "u",
+          finish: "stop",
+          time: { created: 4_070_944_801_000, completed: 4_070_944_802_000 }
+        }
+      }
+    ];
+    const parts = (id: string) => [{
+      id: `p${id}`,
+      data: { type: "text", text: id === "u" ? "Implement a transaction that preserves the native source turn identity." : "The transaction now stores the full source turn and schedules capture." }
+    }];
+    const hook = await readOpencodeSourceTurn({
+      sessions: () => [{ id: "same-session", parentId: null, directory: null, agent: "build" }],
+      messages,
+      parts
+    }, { conversationId: "same-session", turnId: "u" });
+    const scan = await readOpencodeSourceTurn({
+      sessions: () => [{ id: "same-session", parentId: null, directory: null, agent: "plan" }],
+      messages,
+      parts
+    }, { conversationId: "same-session", turnId: "u" });
+    expect(hook.turn?.profileId).toBe("build");
+    expect(scan.turn?.profileId).toBe("build");
+    const first = service.completeSourceTurn({
+      ...buildSourceTurnRequest(hook.turn!, "hook"),
+      namespace: { source: "opencode", profileId: hook.turn!.profileId!, userId: "source-user" }
+    });
+    const second = service.completeSourceTurn({
+      ...buildSourceTurnRequest(scan.turn!, "agent_source_scan"),
+      namespace: { source: "opencode", profileId: scan.turn!.profileId!, userId: "source-user" }
+    });
+    expect(first.status).toBe("stored");
+    expect(second.status).toBe("existing");
+    expect(second.result?.sessionId).toBe(first.result?.sessionId);
+    expect(second.result?.l1MemoryId).toBe(first.result?.l1MemoryId);
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM source_turn_captures").get()).toEqual({ count: 1 });
+  });
+
+  it("reuses one OpenCode capture when only the assistant carries the agent", async () => {
+    const { db, service } = createTestService();
+    const messages = () => [
+      { id: "u", data: { role: "user", time: { created: 4_070_944_800_000 } } },
+      {
+        id: "a",
+        data: {
+          role: "assistant",
+          agent: "build",
+          parentID: "u",
+          finish: "stop",
+          time: { created: 4_070_944_801_000, completed: 4_070_944_802_000 }
+        }
+      }
+    ];
+    const parts = (id: string) => [{
+      id: `p${id}`,
+      data: { type: "text", text: id === "u" ? "Implement a transaction that preserves the native source turn identity." : "The transaction now stores the full source turn and schedules capture." }
+    }];
+    const hook = await readOpencodeSourceTurn({
+      sessions: () => [{ id: "same-session", parentId: null, directory: null, agent: "build" }],
+      messages,
+      parts
+    }, { conversationId: "same-session", turnId: "u" });
+    const scan = await readOpencodeSourceTurn({
+      sessions: () => [{ id: "same-session", parentId: null, directory: null, agent: "plan" }],
+      messages,
+      parts
+    }, { conversationId: "same-session", turnId: "u" });
+    expect(hook.turn?.profileId).toBe("build");
+    expect(scan.turn?.profileId).toBe("build");
+    const first = service.completeSourceTurn({
+      ...buildSourceTurnRequest(hook.turn!, "hook"),
+      namespace: { source: "opencode", profileId: hook.turn!.profileId!, userId: "source-user" }
+    });
+    const second = service.completeSourceTurn({
+      ...buildSourceTurnRequest(scan.turn!, "agent_source_scan"),
+      namespace: { source: "opencode", profileId: scan.turn!.profileId!, userId: "source-user" }
+    });
+    expect(first.status).toBe("stored");
+    expect(second.status).toBe("existing");
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM source_turn_captures").get()).toEqual({ count: 1 });
   });
 
   it.each(["hook", "agent_source_scan"] as const)("commits one lifecycle when %s arrives first and reuses it after restart", (channel) => {
