@@ -559,6 +559,17 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     return createdAt == null ? {} : { createdAt };
   }
 
+  function messageCreatedAtPatch(role: "user" | "assistant", rec: Dict): Dict {
+    const eventTime = createdAtPatch(rec);
+    if (Object.keys(eventTime).length > 0) {
+      // Keep the legacy session-message fallback aligned for later records
+      // that still omit an event-level timestamp.
+      sessionCreatedAtIndexByRole[role] += 1;
+      return eventTime;
+    }
+    return roleCreatedAtPatch(role);
+  }
+
   function newActivitySegment({ activate = true }: { activate?: boolean } = {}): string {
     activitySegmentCounter += 1;
     const segmentId = `activity-${activitySegmentCounter}`;
@@ -811,7 +822,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       messages.push({
         id: newId("as", idx),
         role: "assistant",
-        ...roleCreatedAtPatch("assistant"),
+        ...messageCreatedAtPatch("assistant", rec),
         ...extra,
         ...activeTurnPatch(),
       });
@@ -819,7 +830,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       messages.push({
         id: newId("as", idx),
         role: "assistant",
-        ...roleCreatedAtPatch("assistant"),
+        ...messageCreatedAtPatch("assistant", rec),
         ...extra,
         ...activeTurnPatch(),
       });
@@ -1158,7 +1169,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         role: "user",
         content: text,
         ...activeTurnPatch(),
-        ...roleCreatedAtPatch("user"),
+        ...messageCreatedAtPatch("user", rec),
       };
       const clientRequestId = stringValue(rec.client_request_id)
         ?? stringValue(rec.clientRequestId);
@@ -1197,7 +1208,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
           bufferMessageId = adopted;
           const messageIndex = messages.findIndex((message) => message.id === adopted);
           if (messageIndex >= 0 && messages[messageIndex].createdAt == null) {
-            messages[messageIndex] = { ...messages[messageIndex], ...roleCreatedAtPatch("assistant") };
+            messages[messageIndex] = { ...messages[messageIndex], ...messageCreatedAtPatch("assistant", rec) };
           }
         } else {
           bufferMessageId = newId("buf", idx);
@@ -1207,7 +1218,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             content: "",
             isStreaming: true,
             ...activeTurnPatch(),
-            ...roleCreatedAtPatch("assistant"),
+            ...messageCreatedAtPatch("assistant", rec),
           });
         }
       }
@@ -1237,7 +1248,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             content: finalText,
             isStreaming: true,
             ...activeTurnPatch(),
-            ...roleCreatedAtPatch("assistant"),
+            ...messageCreatedAtPatch("assistant", rec),
           });
         } else {
           const messageIndex = messages.findIndex((message) => message.id === bufferMessageId);

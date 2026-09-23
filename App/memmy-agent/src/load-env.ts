@@ -6,8 +6,9 @@
  *
  * Note: this module must be the first import in each entrypoint (main.ts /
  * index.ts), so it completes before providers/registry.ts or any other module
- * reads MEMMY_CLOUD_SERVICE during module evaluation. Existing env values, such
- * as externally injected ones, take priority and are not overwritten.
+ * reads MEMMY_CLOUD_SERVICE during module evaluation. Packaged manifest values
+ * take priority over inherited environment values so upgrades cannot keep a
+ * stale cloud endpoint from an earlier installation.
  */
 import { config as loadDotenv } from "dotenv";
 import {
@@ -56,18 +57,9 @@ export interface LoadCloudServiceEnvOptions {
   loadDotenv?: typeof loadDotenv;
 }
 
-/** Loads external env, then a packaged manifest, then a development .env. */
+/** Loads a packaged manifest first, then external env, then a development .env. */
 export function loadCloudServiceEnv(options: LoadCloudServiceEnvOptions = {}): string | null {
   const env = options.env ?? process.env;
-  if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
-    const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
-    if (externalValue) {
-      env.MEMMY_CLOUD_SERVICE = externalValue;
-      return "environment";
-    }
-    delete env.MEMMY_CLOUD_SERVICE;
-  }
-
   const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));
   const packagedRuntime = isPackagedRuntimeModule(moduleDir);
   if (options.manifestPath !== undefined || packagedRuntime) {
@@ -78,7 +70,19 @@ export function loadCloudServiceEnv(options: LoadCloudServiceEnvOptions = {}): s
     env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
       readFileSync(manifestPath, "utf8"),
     );
+    // MEMMY_CLOUD_URL is a development-only override. Do not let a stale
+    // value inherited from an older installation redirect a packaged app.
+    delete env.MEMMY_CLOUD_URL;
     return manifestPath;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
+    const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
+    if (externalValue) {
+      env.MEMMY_CLOUD_SERVICE = externalValue;
+      return "environment";
+    }
+    delete env.MEMMY_CLOUD_SERVICE;
   }
 
   const envPath = findRepoEnvFile(options.cwd ?? process.cwd()) ?? findRepoEnvFile(moduleDir);

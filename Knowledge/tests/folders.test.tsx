@@ -236,6 +236,75 @@ it("batch deletes selected folders and files", async () => {
   expect(releaseDelete).toBeDefined();
 });
 
+it("batch deletes a nested uploaded folder without waiting on the server", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true,
+    enabled: true,
+    serviceAvailable: true,
+    bases: [{ id: "base-1", name: "121212", selected: true }],
+  };
+  const folders = [
+    { id: "lenovo", parentId: "", name: "联想" },
+    { id: "docs", parentId: "lenovo", name: "知识库资料" },
+    { id: "attr", parentId: "lenovo", name: "属性记忆能力更新" },
+  ];
+  const calls: { url: string; method: string; body?: Record<string, unknown> }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: URL, init: RequestInit) => {
+      const body = init.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url: String(url), method: init.method ?? "GET", body });
+      const path = String(url);
+      if (init.method === "DELETE")
+        return new Promise<Response>(() => undefined);
+      if (path.includes("/files?"))
+        return Promise.resolve(
+          new Response(JSON.stringify({ files: [], total: 0, page: 1 })),
+        );
+      if (path.endsWith("/folders"))
+        return Promise.resolve(new Response(JSON.stringify({ folders })));
+      return Promise.resolve(new Response(JSON.stringify(state)));
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{ baseUrl: "http://localhost:1234", localToken: "t" }}
+      />,
+    );
+  });
+  await act(async () => {
+    container
+      .querySelector<HTMLInputElement>('input[aria-label="选择文件夹 联想"]')!
+      .click();
+  });
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>(".mk-batchbar button")]
+      .find((button) => button.textContent === "删除")!
+      .click();
+  });
+  const confirm = [
+    ...container.querySelectorAll<HTMLButtonElement>(".mk-action-modal button"),
+  ].find((button) => button.textContent === "确认删除")!;
+  await act(async () => {
+    confirm.click();
+  });
+  expect(
+    calls.some(
+      (call) =>
+        call.method === "DELETE" &&
+        call.url.includes("/folders/lenovo") &&
+        call.body?.mode === "all",
+    ),
+  ).toBe(true);
+  expect(container.querySelector(".mk-modal-backdrop")).toBeNull();
+  expect(container.textContent).not.toContain("联想");
+}, 2000);
+
 it("highlights matching text in file and folder names while searching", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const state: KnowledgeSettings = {
@@ -685,3 +754,85 @@ it("opens a file's folder from search results and leaves search", async () => {
   expect(container.textContent).toContain("属性对照.md");
   expect(container.querySelector(".mk-frow")?.className).not.toContain("focus");
 });
+
+it("searches and deletes folders when parent links form a cycle", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true,
+    enabled: true,
+    serviceAvailable: true,
+    bases: [{ id: "base-1", name: "小治的知识库", selected: true }],
+  };
+  const folders = [
+    { id: "a", parentId: "b", name: "属性资料" },
+    { id: "b", parentId: "a", name: "历史稿" },
+    { id: "c", parentId: "c", name: "属性对照" },
+  ];
+  const deletes: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: URL, init: RequestInit) => {
+      const path = String(url);
+      if (path.includes("/folders/") && init.method === "DELETE") {
+        deletes.push(path);
+        return new Response(JSON.stringify({ ok: true }));
+      }
+      if (path.includes("/files?") && init.method !== "POST")
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: "a1",
+                name: "属性模板.md",
+                status: "AVAILABLE",
+                message: "",
+                folderId: "a",
+              },
+            ],
+            total: 1,
+            page: 1,
+          }),
+        );
+      if (path.endsWith("/folders"))
+        return new Response(JSON.stringify({ folders }));
+      return new Response(JSON.stringify(state));
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{ baseUrl: "http://localhost:1234", localToken: "t" }}
+      />,
+    );
+  });
+  const search = await openFileSearch(container);
+  await act(async () => {
+    setInputValue(search, "属性");
+  });
+  expect(container.textContent).toContain("历史稿 / 属性资料 /");
+  expect(container.textContent).toContain("属性对照 /");
+  const match = [...container.querySelectorAll<HTMLElement>(".mk-frow-folder")].find(
+    (row) => row.textContent?.includes("属性资料"),
+  )!;
+  await act(async () => {
+    match.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(container.querySelector(".mk-crumb")?.textContent).toContain("属性资料");
+  const deleteButton = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="删除文件夹 历史稿"]',
+  )!;
+  await act(async () => {
+    deleteButton.click();
+  });
+  const confirm = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === "确认删除",
+  )!;
+  await act(async () => {
+    confirm.click();
+  });
+  expect(deletes.some((url) => url.includes("/folders/b"))).toBe(true);
+  expect(container.querySelector(".mk-modal-backdrop")).toBeNull();
+}, 2000);

@@ -19,11 +19,13 @@ import {
   assignedCatalogEndpointId,
   clearLegacyModelWorkspace,
   createModelWorkspace,
+  defaultModelSelectionInput,
   deleteModelConnection,
   getModelCandidates,
   getTaskModelCandidates,
   modelConfigInput,
   resolveModelSelection,
+  setDefaultTaskModel,
   setModelAssignment,
   setTaskModelCandidates,
   upsertByokPreset,
@@ -806,6 +808,64 @@ describe("canonical model workspace adapter", () => {
 
     expect(assigned.catalog.modelAssignments.account.agent).toEqual({ candidates: ["byok-agent"], default: "byok-agent" });
     expect(assigned.catalog.modelAssignments.byok).toEqual(originalByok);
+  });
+
+  it("账号模式新增自定义 BYOK 模型时同步登记进 byok 真源候选（重启后账号投影不丢弃）", () => {
+    const workspace = createModelWorkspace(catalog());
+    const added = upsertModelConnection(workspace, "account", {
+      provider: "openai",
+      endpoint: "https://api-int.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-custom",
+      models: ["gpt-5.6-sol"],
+      modelCapabilities: { "gpt-5.6-sol": "chat" }
+    });
+
+    expect(added.error).toBeNull();
+    const newPreset = added.workspace.catalog.providers
+      .flatMap((provider) => provider.models)
+      .find((model) => model.model === "gpt-5.6-sol");
+    expect(newPreset).toBeDefined();
+    // 当次可见：进入账号候选
+    expect(added.workspace.catalog.modelAssignments.account.agent.candidates).toContain(newPreset!.presetId);
+    // 关键：后端每次重启用 byok.agent.candidates 重算账号候选，自定义模型必须同时登记于此才不会丢
+    expect(added.workspace.catalog.modelAssignments.byok.agent.candidates).toContain(newPreset!.presetId);
+  });
+
+  it("账号模式选新自定义模型为默认时，该默认因已登记进 byok 真源而能跨重启保留", () => {
+    const workspace = createModelWorkspace(catalog());
+    const added = upsertModelConnection(workspace, "account", {
+      provider: "openai",
+      endpoint: "https://api-int.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-custom",
+      models: ["gpt-5.6-sol"],
+      modelCapabilities: { "gpt-5.6-sol": "chat" }
+    });
+    expect(added.error).toBeNull();
+    const newPresetId = added.workspace.catalog.providers
+      .flatMap((provider) => provider.models)
+      .find((model) => model.model === "gpt-5.6-sol")!.presetId;
+
+    const selected = setDefaultTaskModel(added.workspace, "account", newPresetId);
+
+    // 选中项成为账号默认
+    expect(selected.catalog.modelAssignments.account.agent.default).toBe(newPresetId);
+    // 且它在 byok 真源候选里 —— 后端账号投影仅当默认仍在“由 byok 候选重算出的候选集”中时才保留默认
+    //（见 account-model-projection.test.ts:146-155），因此该默认重启后不会被回退到平台默认
+    expect(selected.catalog.modelAssignments.byok.agent.candidates).toContain(newPresetId);
+  });
+
+  it("defaultModelSelectionInput：仅在选中项是候选且非当前默认时才产出持久化 payload", () => {
+    const workspace = createModelWorkspace(catalog());
+    // account 当前默认是 account-agent;选候选内的 byok-agent → 产出把默认设为 byok-agent 的 payload
+    const input = defaultModelSelectionInput(workspace, "account", "byok-agent");
+    expect(input).not.toBeNull();
+    expect(input!.modelAssignments.account.agent.default).toBe("byok-agent");
+    // 已是当前默认 → 无需写,返回 null(避免重复持久化)
+    expect(defaultModelSelectionInput(workspace, "account", "account-agent")).toBeNull();
+    // 不是该模式候选 → null
+    expect(defaultModelSelectionInput(workspace, "account", "not-a-candidate")).toBeNull();
   });
 
   it("清空本地 Embedding Assignment 时保留账号 Assignment 与目录项", () => {

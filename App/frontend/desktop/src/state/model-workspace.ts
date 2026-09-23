@@ -481,6 +481,18 @@ export function upsertModelConnection(
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
+  // BYOK presets are the source of truth: the backend re-derives account.agent.candidates
+  // from byok.agent.candidates on every account-mode startup, dropping any BYOK preset that
+  // is absent there. So a custom (source: "byok") model added while in account mode must also
+  // be enrolled in the byok candidate list, otherwise it survives the session but vanishes on
+  // the next restart.
+  if (mode !== "byok") {
+    const byokAgent = next.modelAssignments.byok.agent;
+    byokAgent.candidates = replaceIds(byokAgent.candidates, previousPresetIds, nextAgentPresetIds);
+    if (!byokAgent.default || previousPresetIds.includes(byokAgent.default)) {
+      byokAgent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? byokAgent.default;
+    }
+  }
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
@@ -548,6 +560,22 @@ export function setDefaultTaskModel(
     next.modelAssignments[mode].agent.default = candidateId;
   }
   return createModelWorkspace(next);
+}
+
+/**
+ * Builds the persistence payload that makes `candidateId` the `mode` default, or null when there
+ * is nothing to persist (the id is not a candidate for this mode, or it is already the default).
+ * Used to remember the model picked in the chat selector as the default for new chats across
+ * restart, without redundant config writes.
+ */
+export function defaultModelSelectionInput(
+  workspace: ModelWorkspace,
+  mode: ModelWorkspaceMode,
+  candidateId: string
+): ModelConfigInput | null {
+  const agent = workspace.catalog.modelAssignments[mode].agent;
+  if (!agent.candidates.includes(candidateId) || agent.default === candidateId) return null;
+  return modelConfigInput(setDefaultTaskModel(workspace, mode, candidateId));
 }
 
 export function setModelAssignment(

@@ -4,6 +4,7 @@ import {
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
+  LotteryRewardSchema,
   SendCodeResponseSchema,
   SocialLoginStatusResponseSchema,
   StartSocialLoginResponseSchema,
@@ -12,6 +13,8 @@ import {
   type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
+  type LotteryReward,
+  type LotteryRewardAckInput,
   type SendCodeInput,
   type SendCodeResponse,
   type SocialLoginStatusInput,
@@ -39,6 +42,8 @@ export interface AccountService {
   startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
   getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
+  getLotteryReward(): Promise<LotteryReward>;
+  ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -134,6 +139,32 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
       return AccountInvitationViewSchema.parse(
         await options.cloudClient.ensureInvitationCode({ uuid: cloudUuid })
       );
+    },
+
+    async getLotteryReward() {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) {
+        return { hasReward: false };
+      }
+      try {
+        return LotteryRewardSchema.parse(await options.cloudClient.getLotteryReward({ uuid }));
+      } catch {
+        return { hasReward: false };
+      }
+    },
+
+    async ackLotteryReward(input) {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) {
+        throw Object.assign(new Error("Account session is not authenticated"), {
+          code: "unauthorized" as const
+        });
+      }
+      await options.cloudClient.ackLotteryReward({
+        uuid,
+        ...(input.drawId ? { drawId: input.drawId } : {})
+      });
+      return { ok: true };
     },
 
     async updateProfile(input) {

@@ -3,6 +3,21 @@ import { DatabaseSync } from "node:sqlite";
 
 export type StartupSplashLanguage = "zh-CN" | "en-US";
 
+/**
+ * Returns whether closing the last window should terminate the desktop app.
+ *
+ * During boot the splash can be the only visible window. Treating its native
+ * close as a normal post-boot window close would terminate a slow startup
+ * before the runtime has finished initializing. macOS keeps the app resident
+ * after its windows close, so it follows the platform convention there.
+ */
+export function shouldQuitWhenAllWindowsClosed(
+  platform: NodeJS.Platform,
+  isBootReady: boolean,
+): boolean {
+  return isBootReady && platform !== "darwin";
+}
+
 export function resolveStartupSplashLanguage(
   databasePath: string,
   fallback: StartupSplashLanguage

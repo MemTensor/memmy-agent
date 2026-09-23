@@ -674,6 +674,7 @@ export class WebSocketChannel extends BaseChannel {
   sessionManager: any = null;
   guiSessionProjection: GuiSessionProjection | null = null;
   transcriptMonitor: GatewayTranscriptMonitor | null = null;
+  private lastWebuiTranscriptCreatedAt = 0;
   terminalRunControl: TerminalRunControl | null = null;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
@@ -2579,7 +2580,17 @@ export class WebSocketChannel extends BaseChannel {
   tryAppendWebuiTranscript(chatId: string, wire: Record<string, any>): void {
     try {
       const key = `websocket:${chatId}`;
-      const offset = appendTranscriptObject(key, structuredClone(wire));
+      const record = structuredClone(wire);
+      const suppliedCreatedAt = record.createdAt ?? record.created_at ?? record.timestamp;
+      if (!(
+        (typeof suppliedCreatedAt === "number" && Number.isFinite(suppliedCreatedAt))
+        || (typeof suppliedCreatedAt === "string" && suppliedCreatedAt.trim())
+      )) {
+        const createdAt = Math.max(Date.now(), this.lastWebuiTranscriptCreatedAt + 1);
+        this.lastWebuiTranscriptCreatedAt = createdAt;
+        record.createdAt = createdAt;
+      }
+      const offset = appendTranscriptObject(key, record);
       this.transcriptMonitor?.noteConsumed(key, offset);
     } catch {
       // Transcript persistence is best-effort for live WebSocket delivery.

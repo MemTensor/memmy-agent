@@ -35,6 +35,12 @@ function sent(ws: { send: ReturnType<typeof vi.fn> }, index = 0): any {
   return JSON.parse(ws.send.mock.calls[index][0]);
 }
 
+function withoutCreatedAt<T extends Record<string, any>>(row: T): T {
+  const copy = { ...row };
+  delete copy.createdAt;
+  return copy;
+}
+
 function modelSelection(preset: string, provider: string, model: string): any {
   const endpointId = provider === "anthropic" ? "messages" : "chat";
   const protocol = provider === "anthropic" ? "anthropic-messages" : "openai-chat-completions";
@@ -1167,6 +1173,18 @@ describe("WebSocket channel", () => {
     expect(sent(ws, 3).model_error).toEqual({ category: "image_input_unsupported" });
   });
 
+  it("persists an event timestamp for WebUI transcript rows", () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    channel.tryAppendWebuiTranscript("chat-timestamp", { event: "message", text: "hello" });
+    channel.tryAppendWebuiTranscript("chat-timestamp", { event: "turn_end" });
+    const rows = fs.readFileSync(webuiTranscriptPath("websocket:chat-timestamp"), "utf8")
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(2);
+    expect(rows[0].createdAt).toEqual(expect.any(Number));
+    expect(rows[1].createdAt).toBeGreaterThan(rows[0].createdAt);
+  });
+
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {
     tempDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());
@@ -1197,7 +1215,7 @@ describe("WebSocket channel", () => {
       .trim()
       .split(/\n/u)
       .map((line) => JSON.parse(line));
-    expect(transcript).toEqual([sent(ws)]);
+    expect(transcript.map(withoutCreatedAt)).toEqual([sent(ws)]);
   });
 
   it("sends retry wait as a live-only event without transcript content", async () => {
@@ -1584,7 +1602,7 @@ describe("WebSocket channel", () => {
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    expect(lines).toEqual([{ event: "stop_result", chat_id: "chat-1", stopped: 1 }]);
+    expect(lines.map(withoutCreatedAt)).toEqual([{ event: "stop_result", chat_id: "chat-1", stopped: 1 }]);
   });
 
   it("emits stream and goal control events to subscribers", async () => {
@@ -2050,7 +2068,7 @@ describe("WebSocket channel", () => {
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    expect(lines).toEqual([sent(ws, 1)]);
+    expect(lines.map(withoutCreatedAt)).toEqual([sent(ws, 1)]);
   });
 
   it("sends agent UI blobs on progress messages", async () => {
@@ -2136,7 +2154,7 @@ describe("WebSocket channel", () => {
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    expect(lines).toEqual([
+    expect(lines.map(withoutCreatedAt)).toEqual([
       { event: "reasoning_delta", chat_id: "chat-1", text: "thinking", stream_id: "r1" },
       { event: "reasoning_end", chat_id: "chat-1", stream_id: "r1" },
       {
@@ -2595,7 +2613,7 @@ describe("WebSocket channel", () => {
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    expect(lines).toEqual([
+    expect(lines.map(withoutCreatedAt)).toEqual([
       { event: "delta", chat_id: "chat-1", text: "hel", stream_id: "s1" },
       { event: "stream_end", chat_id: "chat-1", resuming: true, text: "hello", stream_id: "s1" },
     ]);

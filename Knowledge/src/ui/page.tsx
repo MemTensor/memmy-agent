@@ -19,6 +19,12 @@ import {
 } from "../types.js";
 
 import { isAbortLike, knowledgeLog } from "../log.js";
+import {
+  descendantFolderIds as collectDescendantFolderIds,
+  folderBreadcrumb,
+  folderDepth,
+  folderLocationPath,
+} from "./folder-path.js";
 import { visiblePages } from "./pagination.js";
 import {
   DOCUMENT_EXTENSIONS,
@@ -127,30 +133,16 @@ function fileExtension(name: string) {
   return (ext || "file").toUpperCase().slice(0, 4);
 }
 
-function folderLocationPath(
-  folderById: Map<string, KnowledgeFolder>,
-  targetId: string,
-): string {
-  if (!targetId) return "";
-  const names: string[] = [];
-  let cursor = targetId;
-  while (cursor) {
-    const folder = folderById.get(cursor);
-    if (!folder) return "";
-    names.unshift(folder.name);
-    cursor = folder.parentId;
-  }
-  return names.length ? `${names.join(" / ")} /` : "";
-}
-
 function highlightName(name: string, query: string): ReactNode {
   const needle = query.trim();
   if (!needle) return name;
   const lower = name.toLowerCase();
   const token = needle.toLowerCase();
+  if (!token) return name;
   const nodes: ReactNode[] = [];
   let cursor = 0;
   let key = 0;
+  const step = Math.max(needle.length, 1);
   while (cursor < name.length) {
     const index = lower.indexOf(token, cursor);
     if (index === -1) {
@@ -164,7 +156,9 @@ function highlightName(name: string, query: string): ReactNode {
       </mark>,
     );
     key += 1;
-    cursor = index + needle.length;
+    const next = index + step;
+    if (next <= cursor) break;
+    cursor = next;
   }
   return nodes;
 }
@@ -628,16 +622,7 @@ export function KnowledgePage({
     hiddenFolderIds.current = next;
   }
   function descendantFolderIds(rootId: string) {
-    const ids = new Set<string>([rootId]);
-    let grown = true;
-    while (grown) {
-      grown = false;
-      for (const folder of folders) {
-        if (folder.parentId && ids.has(folder.parentId) && ids.add(folder.id))
-          grown = true;
-      }
-    }
-    return [...ids];
+    return collectDescendantFolderIds(folders, [rootId]);
   }
   function filesInFolders(folderIds: Iterable<string>) {
     const targets = new Set(folderIds);
@@ -925,28 +910,16 @@ export function KnowledgePage({
         .sort((a, b) => a.name.localeCompare(b.name, zh ? "zh" : "en")),
     [folders, folderId, zh],
   );
-  const crumbPath = useMemo(() => {
-    const path: KnowledgeFolder[] = [];
-    let cursor = folderId;
-    while (cursor) {
-      const folder = folderById.get(cursor);
-      if (!folder) break;
-      path.unshift(folder);
-      cursor = folder.parentId;
-    }
-    return path;
-  }, [folderById, folderId]);
+  const crumbPath = useMemo(
+    () => folderBreadcrumb(folderById, folderId),
+    [folderById, folderId],
+  );
   /** 目录的可读路径（含根），用于标注上传落点，如「文件 / folder / 新建文件夹」。 */
   function folderPathLabel(id: string) {
-    const names: string[] = [];
-    let cursor = id;
-    while (cursor) {
-      const folder = folderById.get(cursor);
-      if (!folder) break;
-      names.unshift(folder.name);
-      cursor = folder.parentId;
-    }
-    return [t("文件", "Files"), ...names].join(" / ");
+    return [
+      t("文件", "Files"),
+      ...folderBreadcrumb(folderById, id).map((folder) => folder.name),
+    ].join(" / ");
   }
   /** 移动弹窗可选目录（排除被移动目录自身及其后代）。 */
   const moveOptions = useMemo(() => {
@@ -956,23 +929,9 @@ export function KnowledgePage({
         .sort((a, b) => a.name.localeCompare(b.name, zh ? "zh" : "en"))
         .map((folder) => ({ folder, depth: 0 }));
     }
-    const banned = new Set<string>([moveTarget.id]);
-    let grown = true;
-    while (grown) {
-      grown = false;
-      for (const folder of folders)
-        if (!banned.has(folder.id) && banned.has(folder.parentId) && banned.add(folder.id))
-          grown = true;
-    }
-    const depthOf = (folder: KnowledgeFolder): number => {
-      let depth = 0;
-      let cursor = folder.parentId;
-      while (cursor) {
-        depth += 1;
-        cursor = folderById.get(cursor)?.parentId ?? "";
-      }
-      return depth;
-    };
+    const banned = new Set(collectDescendantFolderIds(folders, [moveTarget.id]));
+    const depthOf = (folder: KnowledgeFolder): number =>
+      folderDepth(folderById, folder.parentId);
     return folders
       .filter((folder) => !banned.has(folder.id))
       .sort((a, b) => a.name.localeCompare(b.name, zh ? "zh" : "en"))
@@ -1022,7 +981,19 @@ export function KnowledgePage({
     const fileIds = [...checked]
       .filter((key) => key.startsWith("file:"))
       .map((key) => key.slice("file:".length));
-    const doomedFolders = [...new Set(folderIds.flatMap(descendantFolderIds))];
+    knowledgeLog(
+      {
+        hop: "ui",
+        action: "batch-delete",
+        kind: "start",
+        status: folderIds.length,
+        message: `${folderIds.length} folders ${fileIds.length} files`,
+      },
+      "info",
+    );
+    setBatchDeleteOpen(false);
+    setChecked(new Set());
+    const doomedFolders = collectDescendantFolderIds(folders, folderIds);
     const doomedFiles = [
       ...new Set([...fileIds, ...filesInFolders(doomedFolders)]),
     ];
@@ -1033,8 +1004,6 @@ export function KnowledgePage({
     hideFolders(doomedFolders);
     if (crumbPath.some((folder) => doomedFolders.includes(folder.id)))
       setFolderId("");
-    setBatchDeleteOpen(false);
-    setChecked(new Set());
     void Promise.all([
       ...folderIds.map((id) =>
         api(`/folders/${encodeURIComponent(id)}`, "DELETE", { mode: "all" }),

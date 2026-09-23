@@ -1124,6 +1124,12 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:export-diagnostics-report")');
   });
 
+  it("stops the Windows memory service by default during app exit", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    expect(mainSource).toContain('process.platform === "win32"');
+    expect(mainSource).toContain("stopMemoryServiceOnExit");
+  });
+
   it("opens Computer History Markdown through a restricted desktop bridge", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
@@ -1233,6 +1239,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
     expect(mainSource).toContain("app processes still running before install; waiting");
+    expect(mainSource).toContain("function Get-MemmyUpdateAppProcesses");
+    expect(mainSource).toContain("$AppPid");
+    expect(mainSource).toContain("memory-service");
+    expect(mainSource).not.toContain("$_.Path -eq $AppExe");
     expect(mainSource).toContain("function hideMacDockForPreparedUpdateInstall");
     expect(mainSource).toContain("app.dock?.hide()");
     expect(mainSource).toContain("isManagedUpdateInstallerRunning");
@@ -1890,6 +1900,7 @@ describe("desktop packaged runtime boundaries", () => {
     const versionGuardSource = readFileSync(verifyPackageVersionPath, "utf8");
     const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
 
+    expect(mainSource).toContain("loadCloudServiceEnv({");
     expect(mainSource).toContain('manifestPath: app.isPackaged ? join(import.meta.dirname, "desktop-edition.json") : undefined');
     for (const source of [macSource, winSource]) {
       expect(source).toContain("write-desktop-edition-manifest.mjs");

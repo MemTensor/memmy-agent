@@ -3,6 +3,8 @@ import {
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
@@ -16,6 +18,8 @@ import {
   type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
+  type LotteryReward,
+  type LotteryRewardAckInput,
   type OkResponse,
   type RuntimeConfig,
   type SendCodeInput,
@@ -63,6 +67,8 @@ export interface AccountClient {
   startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
   getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
+  getLotteryReward(): Promise<LotteryReward>;
+  ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -113,6 +119,24 @@ export function createHttpAccountClient(config: RuntimeConfig): AccountClient {
         path: "/api/account/invitation",
         schema: AccountInvitationViewSchema,
         init: { method: "PUT" }
+      });
+    },
+
+    async getLotteryReward() {
+      return requestJson({
+        config,
+        path: "/api/account/lottery/reward",
+        schema: LotteryRewardSchema
+      });
+    },
+
+    async ackLotteryReward(input) {
+      return requestJson({
+        config,
+        path: "/api/account/lottery/reward/ack",
+        schema: OkResponseSchema,
+        init: { method: "POST" },
+        body: LotteryRewardAckInputSchema.parse(input)
       });
     },
 
