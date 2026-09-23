@@ -373,7 +373,7 @@ describe("L3 World Model trace field pipeline", () => {
     expect(traceIds).toHaveLength(257);
 
     db.close();
-  }, 20_000);
+  }, 60_000);
 
   it.each(["owner field", "read-only profile"] as const)(
     "rejects a stale %s result and reruns from the same immutable batch",

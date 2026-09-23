@@ -11,7 +11,7 @@ export type ModelTokenDefaultGroup = Readonly<{
   maxTokens: number;
 }>;
 
-export const MODEL_TOKEN_DEFAULTS_REVIEWED_AT = "2026-08-24";
+export const MODEL_TOKEN_DEFAULTS_REVIEWED_AT = "2026-09-15";
 
 function assertPositiveSafeInteger(field: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -269,14 +269,17 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   },
   { models: ["qwen/qwen3.6-27b"], contextWindowTokens: 131_072, maxTokens: 16_384 },
 
-  // DeepSeek. Reviewed 2026-08-24.
-  // Source: https://api-docs.deepseek.com/updates
+  // DeepSeek. Reviewed 2026-09-15.
+  // Source: https://api-docs.deepseek.com/quick_start/pricing
+  // Official Flash/Pro limits are 1M context and 384K max output.
   {
     models: [
+      "deepseek-flash",
+      "deepseek-v4.1-flash",
       "deepseek-v4-pro",
       "deepseek-v4-flash",
       "deepseek-v4-flash-0731",
-      // The experimental vision route inherits the V4 Flash limits.
+      // Retired experimental route; DeepSeek still accepts the name and serves V4.1-Flash.
       "deepseek-v4-flash-vision-exp",
     ],
     contextWindowTokens: 1_000_000,

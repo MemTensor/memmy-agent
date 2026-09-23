@@ -493,9 +493,6 @@ export function upsertModelConnection(
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
-  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
-  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
-  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   // BYOK presets are the source of truth: the backend re-derives account.agent.candidates
   // from byok.agent.candidates on every account-mode startup, dropping any BYOK preset that
   // is absent there. So a custom (source: "byok") model added while in account mode must also
@@ -508,6 +505,9 @@ export function upsertModelConnection(
       byokAgent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? byokAgent.default;
     }
   }
+  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
+  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
+  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }

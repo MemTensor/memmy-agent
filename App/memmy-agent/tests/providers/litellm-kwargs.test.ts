@@ -957,25 +957,28 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kwargs.messages[1]).not.toHaveProperty("reasoning_content");
   });
 
-  it("backfills DeepSeek V4 reasoning history when effort is implicit", () => {
-    const kwargs = providerFor("deepseek", "deepseek-v4-pro").buildKwargs({
-      messages: [
-        { role: "system", content: "system" },
-        { role: "user", content: "hi" },
-        { role: "assistant", content: "", tool_calls: [toolCall("tc1")] },
-        { role: "tool", tool_call_id: "tc1", content: "result" },
-        { role: "user", content: "thanks" },
-      ],
-      model: "deepseek-v4-pro",
-      maxTokens: 1024,
-      temperature: 0.7,
-      reasoningEffort: null,
-    });
+  it.each(["deepseek-v4-pro", "deepseek-flash", "deepseek-v4.1-flash"])(
+    "backfills DeepSeek reasoning history for %s when effort is implicit",
+    (model) => {
+      const kwargs = providerFor("deepseek", model).buildKwargs({
+        messages: [
+          { role: "system", content: "system" },
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "", tool_calls: [toolCall("tc1")] },
+          { role: "tool", tool_call_id: "tc1", content: "result" },
+          { role: "user", content: "thanks" },
+        ],
+        model,
+        maxTokens: 1024,
+        temperature: 0.7,
+        reasoningEffort: null,
+      });
 
-    expect(kwargs.messages.map((message: any) => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
-    expect(kwargs.messages[2].reasoning_content).toBe("");
-    expect(kwargs.messages.at(-1).content).toBe("thanks");
-  });
+      expect(kwargs.messages.map((message: any) => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
+      expect(kwargs.messages[2].reasoning_content).toBe("");
+      expect(kwargs.messages.at(-1).content).toBe("thanks");
+    },
+  );
 
   it("keeps DeepSeek chat tool history untouched when effort is implicit", () => {
     const kwargs = providerFor("deepseek", "deepseek-chat").buildKwargs({

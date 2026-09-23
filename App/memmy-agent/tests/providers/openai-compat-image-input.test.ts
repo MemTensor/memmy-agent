@@ -52,13 +52,17 @@ describe("OpenAI-compatible image input", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
-  it("sends image blocks to the exact DeepSeek experimental vision model", async () => {
+  it.each([
+    "deepseek-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-flash-vision-exp",
+  ])("sends image blocks to DeepSeek vision model %s", async (model) => {
     const create = vi.fn(async () => ({
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
     }));
     const provider = new OpenAICompatProvider({
       apiKey: "deepseek-key",
-      defaultModel: "deepseek-v4-flash-vision-exp",
+      defaultModel: model,
       spec: findByName("deepseek"),
     });
     provider.client = { chat: { completions: { create } }, responses: { create: vi.fn() } };

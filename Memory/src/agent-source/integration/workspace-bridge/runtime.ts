@@ -16,7 +16,6 @@ import {
 } from "@memmy/agent-source-core";
 export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
 import { createHash, randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import {
   resolveCursorDataPaths,
   resolveDeepseekHarnessSessionsDirectory,
@@ -283,6 +282,35 @@ export async function completeSourceTurn(input: {
   })));
 }
 
+type NodeSqliteDatabase = import("node:sqlite").DatabaseSync;
+
+let nodeSqlite: Promise<typeof import("node:sqlite")> | undefined;
+
+function loadNodeSqlite(): Promise<typeof import("node:sqlite")> {
+  if (!nodeSqlite) {
+    silenceSqliteExperimentalWarning();
+    nodeSqlite = import("node:sqlite");
+  }
+  return nodeSqlite;
+}
+
+function silenceSqliteExperimentalWarning(): void {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = ((warning, ...args) => {
+    const message = typeof warning === "string" ? warning : warning.message;
+    const warningType = typeof warning === "string"
+      ? (typeof args[0] === "string" ? args[0] : undefined)
+      : warning.name;
+    if (warningType === "ExperimentalWarning" && message.includes("SQLite is an experimental feature")) return;
+    return Reflect.apply(emitWarning, process, [warning, ...args]);
+  }) as typeof process.emitWarning;
+}
+
+async function openReadOnlySqlite(path: string): Promise<NodeSqliteDatabase> {
+  const { DatabaseSync } = await loadNodeSqlite();
+  return new DatabaseSync(path, { readOnly: true });
+}
+
 /**
  * Reads the turn Cursor just finished out of its own global `state.vscdb`, using the same
  * parser the offline scan uses. The hook only receives `generation_id`, which is the user
@@ -295,9 +323,9 @@ export async function readCursorHookSourceTurn(input: {
   globalStateDbPath?: string;
 }): Promise<{ turn: SourceTurn | null; reason?: string }> {
   const path = input.globalStateDbPath || resolveCursorDataPaths().globalStateDbPath;
-  let db: DatabaseSync;
+  let db: NodeSqliteDatabase;
   try {
-    db = new DatabaseSync(path, { readOnly: true });
+    db = await openReadOnlySqlite(path);
   } catch {
     return { turn: null, reason: "source_store_unavailable" };
   }
@@ -337,9 +365,9 @@ export async function readOpenclawHookSourceTurn(input: {
 }): Promise<{ turn: SourceTurn | null; reason?: string }> {
   const path = input.databasePath
     || join(resolveOpenclawStateDirectory(), "agents", input.agentId || "main", "agent", "openclaw-agent.sqlite");
-  let db: DatabaseSync;
+  let db: NodeSqliteDatabase;
   try {
-    db = new DatabaseSync(path, { readOnly: true });
+    db = await openReadOnlySqlite(path);
   } catch {
     return { turn: null, reason: "source_store_unavailable" };
   }
@@ -377,9 +405,9 @@ export async function readOpencodeHookSourceTurn(input: {
   databasePath?: string;
 }): Promise<{ turn: SourceTurn | null; reason?: string }> {
   const path = input.databasePath || resolveOpencodeDatabasePath();
-  let db: DatabaseSync;
+  let db: NodeSqliteDatabase;
   try {
-    db = new DatabaseSync(path, { readOnly: true });
+    db = await openReadOnlySqlite(path);
   } catch {
     return { turn: null, reason: "source_store_unavailable" };
   }

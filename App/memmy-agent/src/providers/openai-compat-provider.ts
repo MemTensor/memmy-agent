@@ -652,7 +652,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const implicitDeepseekThinking =
       specName(this.spec) === "deepseek" &&
       !["none", "minimal", "minimum"].includes(String(semanticEffort)) &&
-      /deepseek-v4|deepseek-reasoner/i.test(modelName);
+      /deepseek-v4|deepseek-flash|deepseek-reasoner/i.test(modelName);
     if (explicitThinking || implicitDeepseekThinking) {
       for (const message of kwargs.messages) {
         if (message.role === "assistant" && !("reasoning_content" in message))
