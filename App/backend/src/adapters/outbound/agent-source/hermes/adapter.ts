@@ -130,13 +130,16 @@ async function discoverHermesTargets(rootDirectory: string, options: ScanOptions
 }
 
 async function* streamJsonlMessages(session: HermesSessionFile, signal?: AbortSignal): AsyncIterable<RawHermesStateDbMessage> {
+  let ordinal = 0;
   for await (const rawMessage of readHermesRollout(session.sessionFilePath, signal)) {
     yield {
       ...rawMessage,
+      ordinal,
       workspacePath: session.workspacePath,
       gitRoot: session.gitRoot,
       rawMeta: Object.freeze({})
     };
+    ordinal += 1;
   }
 }
 

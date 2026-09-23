@@ -29,13 +29,16 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
   const workspace = createModelWorkspace(props.seedConfig ?? state.modelConfig);
   const candidates = getTaskModelCandidates(workspace, props.mode);
   const committedSelection = state.agent.committedModelSelectionByScope[props.scopeKey];
-  const selectedPreset = state.agent.pendingPresetByScope[props.scopeKey]
+  const pendingPreset = state.agent.pendingPresetByScope[props.scopeKey];
+  const selectedPreset = pendingPreset
     ?? committedSelection?.presetId
     ?? null;
-  const resolved = resolveModelSelection(workspace, props.mode, selectedPreset);
-  const hasNoModels = candidates.length === 0;
+  const resolved = resolveModelSelection(workspace, props.mode, selectedPreset, {
+    allowUnassignedSelected: pendingPreset == null && Boolean(committedSelection)
+  });
+  const hasNoModels = candidates.length === 0 && !resolved.candidate;
 
-  const options: SelectOption[] = candidates.map((candidate) => ({
+  const optionForCandidate = (candidate: (typeof candidates)[number]): SelectOption => ({
         value: candidate.id,
         label: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
         selectedLabel: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
@@ -43,7 +46,12 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
           ? t("home.modelSelector.platformGroup")
           : t("home.modelSelector.byokGroup"),
         icon: <ModelProviderIcon source={candidate.source} provider={candidate.provider} />
-      }));
+  });
+  const options: SelectOption[] = candidates.map(optionForCandidate);
+  const resolvedCandidate = resolved.candidate;
+  if (resolvedCandidate && !candidates.some((candidate) => candidate.id === resolvedCandidate.id)) {
+    options.push(optionForCandidate(resolvedCandidate));
+  }
   if (resolved.unavailable && resolved.candidateId) {
     const unavailableModel = committedSelection?.model ?? resolved.previousModel ?? t("home.modelSelector.unavailableOption");
     const unavailableOption: SelectOption = {

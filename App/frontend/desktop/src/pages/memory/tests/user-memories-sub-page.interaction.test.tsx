@@ -114,4 +114,38 @@ describe("UserMemoriesSubPage interaction", () => {
     act(() => container.querySelector<HTMLButtonElement>(".memory-drawer-backdrop__close")?.click());
     expect(container.querySelector(".memory-drawer")).toBeNull();
   });
+
+  it("contains long unbroken content in the list row and detail drawer", async () => {
+    const longContent = `https://example.com/${"unbroken".repeat(80)}`;
+    const item = {
+      id: "user_memory_long_content",
+      kind: "user_memory" as const,
+      memoryLayer: "UserMemory" as const,
+      status: "activated" as const,
+      title: longContent,
+      summary: longContent,
+      tags: ["User Fact"],
+      metadata: { memoryTypes: ["User Fact"], sourceTurnRefs: ["turn-long"] },
+      createdAt: "2026-08-17T00:00:00.000Z",
+      updatedAt: "2026-08-17T00:00:00.000Z",
+      version: 1
+    };
+    const client = createMemoryRuntimeClientStub({
+      listPanelItems: vi.fn(async () => panelItemsOutput([item]))
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UserMemoriesSubPage client={client} />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.querySelector(".memory-card__body")?.tagName).toBe("DIV");
+    expect(container.querySelector(".memory-card__title")?.tagName).toBe("DIV");
+    act(() => container.querySelector<HTMLButtonElement>(".memory-card")?.click());
+    const detail = container.querySelector(".memory-detail-text");
+    expect(detail?.textContent).toBe(longContent);
+  });
 });

@@ -239,6 +239,57 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
+  it("uses the semantic user query instead of XML metadata as an import title", () => {
+    const { db, service } = createTestService();
+    const added = service.addMemory({
+      adapterId: "agent-source:cursor",
+      requestId: "cursor-wrapped-turn",
+      layer: "L1",
+      source: "cursor",
+      tags: ["agent-source", "cursor"],
+      title: "<timestamp>Thursday, Sep 17, 2026, 7:00 PM (UTC+8)</timestamp>",
+      turnId: "cursor:wrapped-turn",
+      content: [
+        "## user",
+        "",
+        "<timestamp>Thursday, Sep 17, 2026, 7:00 PM (UTC+8)</timestamp>",
+        "<system_reminder>Workspace metadata.</system_reminder>",
+        "<user_query>",
+        "修复 Cursor 记忆标题。",
+        "</user_query>",
+        "",
+        "## assistant",
+        "",
+        "已修复。"
+      ].join("\n")
+    });
+
+    expect(added.title).toBe("修复 Cursor 记忆标题。");
+
+    const notification = service.addMemory({
+      adapterId: "agent-source:cursor",
+      requestId: "cursor-notification-only",
+      layer: "L1",
+      source: "cursor",
+      tags: ["agent-source", "cursor"],
+      title: "<timestamp>Thursday, Sep 17, 2026, 7:01 PM (UTC+8)</timestamp>",
+      turnId: "cursor:notification-only",
+      content: [
+        "## user",
+        "",
+        "<timestamp>Thursday, Sep 17, 2026, 7:01 PM (UTC+8)</timestamp>",
+        "<system_notification>Task completed.</system_notification>",
+        "",
+        "## assistant",
+        "",
+        "Done."
+      ].join("\n")
+    });
+
+    expect(notification.title).toBe("cursor conversation");
+    db.close();
+  });
+
   it("uses the standard summary prompt for account summaries", async () => {
     const root = createTestRoot("mindock-memory-account-summary-");
     const db = new MemoryDb({
@@ -1565,6 +1616,143 @@ describe("MemoryService / import / processing", () => {
     });
     expect(afterEmbedding.hits.map((hit) => hit.id)).toContain(added.id);
     expect(afterEmbedding.candidateMemoryIds).toContain(added.id);
+
+    db.close();
+  });
+
+  it("keeps a completed import summary when the same agent-source turn is scanned again", async () => {
+    const root = createTestRoot("mindock-memory-import-rescan-preserve-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm(llmCalls, "preserved import summary"),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "user-import-rescan-preserve"
+    };
+    const added = addAgentSourceImport(service, namespace, "keep this summarized turn", "rescan-preserve");
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    const summarized = db.db.prepare(
+      `SELECT info_json, version FROM memories WHERE id = ?`
+    ).get(added.id) as { info_json: string; version: number };
+    expect(JSON.parse(summarized.info_json).summary).toBe("preserved import summary");
+    expect(new Repositories(db.db).processing.get(added.id)?.state).toBe("ready");
+    const summaryCalls = llmCalls.filter((call) => call.options.operation === "capture.summarize").length;
+
+    const rescanned = addAgentSourceImport(service, namespace, "keep this summarized turn", "rescan-preserve");
+    expect(rescanned.duplicate).toBe(true);
+    expect(rescanned.id).toBe(added.id);
+    const afterRescan = db.db.prepare(
+      `SELECT info_json, version FROM memories WHERE id = ?`
+    ).get(added.id) as { info_json: string; version: number };
+    expect(JSON.parse(afterRescan.info_json).summary).toBe("preserved import summary");
+    expect(afterRescan.version).toBe(summarized.version);
+    expect(new Repositories(db.db).processing.get(added.id)?.state).toBe("ready");
+    expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(summaryCalls);
+
+    db.close();
+  });
+
+  it("requeues import summary when a later scan revises the same turn body", async () => {
+    const root = createTestRoot("mindock-memory-import-rescan-revise-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm(llmCalls, "revised import summary"),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "user-import-rescan-revise"
+    };
+    const added = addAgentSourceImport(service, namespace, "original turn body", "rescan-revise");
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    expect(JSON.parse(
+      (db.db.prepare(`SELECT info_json FROM memories WHERE id = ?`).get(added.id) as { info_json: string }).info_json
+    ).summary).toBe("revised import summary");
+
+    const revised = addAgentSourceImport(service, namespace, "updated turn body after edit", "rescan-revise");
+    expect(revised.duplicate).toBeUndefined();
+    expect(revised.id).toBe(added.id);
+    expect(JSON.parse(
+      (db.db.prepare(`SELECT info_json FROM memories WHERE id = ?`).get(added.id) as { info_json: string }).info_json
+    ).summary).toBe("摘要排队中");
+    expect(new Repositories(db.db).processing.get(added.id)?.state).toBe("summary_pending");
+
+    db.close();
+  });
+
+  it("repairs ready import memories whose summary was overwritten back to a placeholder", async () => {
+    const root = createTestRoot("mindock-memory-import-placeholder-repair-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm(llmCalls, "repaired import summary"),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "user-import-placeholder-repair"
+    };
+    const added = addAgentSourceImport(service, namespace, "repair this overwritten summary", "placeholder-repair");
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    expect(new Repositories(db.db).processing.get(added.id)?.state).toBe("ready");
+
+    db.db.prepare(
+      `UPDATE memories
+       SET memory_value = replace(memory_value, 'Summary: repaired import summary', 'Summary: 摘要排队中'),
+           info_json = json_set(info_json, '$.summary', '摘要排队中'),
+           properties_json = json_set(
+             json_set(properties_json, '$.internal_info.summary', '摘要排队中'),
+             '$.internal_info.trace.summary',
+             '摘要排队中'
+           )
+       WHERE id = ?`
+    ).run(added.id);
+    expect(JSON.parse(
+      (db.db.prepare(`SELECT info_json FROM memories WHERE id = ?`).get(added.id) as { info_json: string }).info_json
+    ).summary).toBe("摘要排队中");
+
+    const startup = service.reconcileWorkerStartup();
+    expect(startup.enqueuedImportSummaries).toBe(1);
+    expect(new Repositories(db.db).processing.get(added.id)?.state).toBe("summary_pending");
+    expect(db.db.prepare(
+      `SELECT 1 AS present FROM memory_vector_entries WHERE memory_id = ? AND vector_field = 'vec_summary'`
+    ).get(added.id)).toBeUndefined();
+
+    await service.runWorkerOnce(100);
+    expect(JSON.parse(
+      (db.db.prepare(`SELECT info_json FROM memories WHERE id = ?`).get(added.id) as { info_json: string }).info_json
+    ).summary).toBe("repaired import summary");
 
     db.close();
   });

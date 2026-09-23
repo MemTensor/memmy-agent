@@ -28,6 +28,10 @@ import {
 } from "../import/import-job-processor.js";
 import { summarizeTurn as sessionSummarizeTurn } from "../session/session-turn-service.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import {
+  normalizeCaptureSummaryUserText,
+  sanitizeCaptureSummary
+} from "./capture-summary.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
@@ -681,8 +685,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
         temperature: 0,
         maxTokens: MEMORY_SUMMARY_MAX_TOKENS
       });
-      const summary = sanitizeSummaryText(stringOr(result.summary, ""));
-      return summary || input.trace.summary;
+      return sanitizeCaptureSummary(stringOr(result.summary, ""), input);
     };
 
     try {
@@ -759,7 +762,9 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
     }
     const l1 = isRecord(result.l1) ? result.l1 : undefined;
     const user = isRecord(result.user) ? result.user : undefined;
-    const l1Summary = sanitizeSummaryText(stringOr(l1?.summary, ""));
+    const l1Summary = l1
+      ? sanitizeCaptureSummary(stringOr(l1.summary, ""), input)
+      : "";
     if (l1 && !l1Summary) {
       throw new Error("turn memory decision requires l1.summary when l1 is not null");
     }
@@ -999,6 +1004,8 @@ Rules:
 - For images, files, or search results, preserve image captions, visible text,
   retrieval queries, topics, and answer-relevant evidence; omit raw URLs unless
   the URL itself is important.
+- ATTACHMENT METADATA is internal context. Never use an attachment wrapper,
+  generic "attachment/file" wording, or metadata alone as the summary.
 - Preserve original speaker/person names. User/assistant roles may be import
   roles and must not replace real participants when names are present.
 - Do not invent facts. Do not infer ownership from neighboring turns.
@@ -1023,6 +1030,8 @@ L1 — apply in order; earlier rules override later exclusions.
 3. Also create for reusable work constraints, decisions, verified tool results, durable project facts, or task feedback.
 4. Otherwise do not create for questions, acknowledgements, social chat, recalled answers, ordinary personal facts/preferences, or volatile facts.
 A durable Agent work convention marked by 以后/每次/始终/always MUST create both L1 and User Memory. Keep summary grounded, in USER language, <=200 characters.
+ATTACHMENT METADATA is internal context. Never summarize its wrapper or generic
+attachment/file wording; summarize the actual request, content, or outcome.
 
 OUTPUT
 - Use null when that memory is not created. Every evidence quote must be a non-empty exact substring of its source.
@@ -1254,14 +1263,6 @@ function sanitizeReflectionText(value: string): string {
     .trim();
 }
 
-function sanitizeSummaryText(value: string): string {
-  return value
-    .replace(/^```(?:json|text|markdown)?/i, "")
-    .replace(/```$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function reflectionContextIncludesDownstream(mode: string): boolean {
   return mode === "downstream" || mode === "task_downstream";
 }
@@ -1382,8 +1383,9 @@ function traceSummaryPayload(input: {
   reflectionText: string;
 }, includeToolOutput = false): string {
   const parts: string[] = [`CAPTURED AT: ${formatZonedTime(input.trace.ts, input.trace.timeZone)}`];
-  if (input.userText) {
-    parts.push(`USER:\n${clip(input.userText, 1400)}`);
+  const normalizedUser = normalizeCaptureSummaryUserText(input.userText);
+  if (normalizedUser.requestText) {
+    parts.push(`USER:\n${clip(normalizedUser.requestText, 1400)}`);
   }
   if (input.agentText) {
     parts.push(`ASSISTANT:\n${clip(input.agentText, 1400)}`);
@@ -1397,6 +1399,12 @@ function traceSummaryPayload(input: {
   }
   if (input.reflectionText) {
     parts.push(`REFLECTION:\n${clip(input.reflectionText, 300)}`);
+  }
+  if (normalizedUser.attachmentMetadata.length > 0) {
+    parts.push([
+      "ATTACHMENT METADATA (internal context; do not quote as summary/evidence):",
+      clip(normalizedUser.attachmentMetadata.map((item) => `- ${item}`).join("\n"), 400)
+    ].join("\n"));
   }
   return clip(parts.join("\n\n"), includeToolOutput ? 5_000 : 3_500);
 }

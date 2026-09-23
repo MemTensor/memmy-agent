@@ -433,6 +433,58 @@ describe("canonical model workspace adapter", () => {
     expect(saved.providers[0]!.models.map((model) => model.model)).not.toContain("embedding-delete");
   });
 
+  it("真实 Backend catalog：账号空间编辑共享连接并删除部分模型时清理双空间引用", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    const created = await writeModelConfigCatalog(file, {
+      configRevision: empty.configRevision,
+      providers: [{
+        provider: "openai",
+        endpoints: [{
+          endpointId: "chat",
+          apiBase: "https://api.openai.com/v1",
+          protocol: "openai-chat-completions",
+          apiKey: "sk-partial-delete"
+        }],
+        models: [
+          { endpointId: "chat", model: "gpt-keep", source: "byok", capabilities: ["agent"] },
+          { endpointId: "chat", model: "gpt-delete", source: "byok", capabilities: ["agent"] }
+        ]
+      }],
+      modelAssignments: structuredClone(emptyAssignments)
+    });
+    const keepId = created.providers[0]!.models.find((model) => model.model === "gpt-keep")!.presetId;
+    const deleteId = created.providers[0]!.models.find((model) => model.model === "gpt-delete")!.presetId;
+    const assigned = modelConfigInput(createModelWorkspace(created));
+    assigned.modelAssignments.byok.agent = { candidates: [keepId, deleteId], default: keepId };
+    assigned.modelAssignments.account.agent = { candidates: [keepId, deleteId], default: keepId };
+    const base = await writeModelConfigCatalog(file, assigned);
+
+    const workspace = createModelWorkspace(base);
+    const connection = workspace.spaces.account.connections.find((item) => item.provider === "openai")!;
+    const edited = upsertModelConnection(workspace, "account", {
+      id: connection.id,
+      provider: "openai",
+      endpoint: connection.endpoint,
+      protocol: connection.protocol,
+      models: ["gpt-keep"],
+      modelEntries: [{ presetId: keepId, model: "gpt-keep", capability: "chat" }]
+    });
+
+    expect(edited.error).toBeNull();
+    expect(edited.workspace.catalog.modelAssignments.byok.agent).toEqual({ candidates: [keepId], default: keepId });
+    expect(edited.workspace.catalog.modelAssignments.account.agent).toEqual({ candidates: [keepId], default: keepId });
+
+    const saved = await persistModelCatalogMutation(modelConfigInput(edited.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, base);
+
+    expect(saved.providers[0]!.models.map((model) => model.model)).toEqual(["gpt-keep"]);
+    expect(saved.modelAssignments.byok.agent).toEqual({ candidates: [keepId], default: keepId });
+    expect(saved.modelAssignments.account.agent).toEqual({ candidates: [keepId], default: keepId });
+  });
+
   it("真实 Backend catalog：从账号空间删除共享 DashScope 配置并清理双空间引用", async () => {
     const file = catalogFixture();
     const empty = await readModelConfigCatalog(file);
@@ -868,6 +920,25 @@ describe("canonical model workspace adapter", () => {
       unavailable: true,
       reason: "unavailable"
     });
+  });
+
+  it("历史会话可继续使用目录中仍有效但已从当前候选移除的已提交模型", () => {
+    const workspace = createModelWorkspace(catalog());
+    workspace.catalog.modelAssignments.account.agent = {
+      candidates: ["account-agent"],
+      default: "account-agent"
+    };
+
+    expect(resolveModelSelection(workspace, "account", "byok-agent", {
+      allowUnassignedSelected: true
+    })).toMatchObject({
+      candidate: { id: "byok-agent", model: "gpt-4o", available: true },
+      candidateId: "byok-agent",
+      unavailable: false,
+      reason: "committed"
+    });
+    expect(resolveModelSelection(workspace, "account", "byok-agent"))
+      .toMatchObject({ candidate: null, unavailable: true, reason: "unavailable" });
   });
 
   it("引导只 patch 自己的 endpoint/preset/assignment 并保留既有目录项", () => {

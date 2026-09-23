@@ -38,6 +38,7 @@ import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { firstSemanticUserLine } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
 import {
   attachMemoryVectors,
@@ -891,6 +892,34 @@ export class MemoryRepository {
                  'summary_pending', 'summarizing', 'embedding_pending', 'embedding'
                )
            )
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  listImportMemoriesNeedingSummary(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND LOWER(TRIM(COALESCE(
+             json_extract(properties_json, '$.internal_info.trace.summary'),
+             json_extract(info_json, '$.summary'),
+             json_extract(properties_json, '$.internal_info.summary'),
+             ''
+           ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
          ORDER BY created_at DESC, updated_at DESC, id DESC
          LIMIT ?`
       )
@@ -1843,7 +1872,7 @@ export class RuntimeRepository {
   sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
     return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
-        OR (@source = 'codex' AND host_session_key = 'codex-memory-' || @conversationId))
+        OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
   }
 
@@ -6110,22 +6139,25 @@ function firstReadableMemoryValueLine(value: string): string | undefined {
 
 function firstUserMemoryValueLine(value: string): string | undefined {
   let inUserSection = false;
+  const userLines: string[] = [];
   for (const line of value.split(/\r?\n/)) {
     const role = memoryValueRoleMarker(line);
     if (role) {
+      if (inUserSection && role !== "user") {
+        break;
+      }
       inUserSection = role === "user";
       continue;
     }
     if (!inUserSection) {
       continue;
     }
-
-    const cleaned = cleanMemoryValueLine(line);
-    if (cleaned && !isPlaceholderMemorySummary(cleaned) && !isWorldSectionHeading(cleaned) && !isInternalMemoryKey(cleaned)) {
-      return cleaned;
-    }
+    userLines.push(line);
   }
-  return undefined;
+  const title = firstSemanticUserLine(userLines.join("\n"));
+  return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
+    ? title
+    : undefined;
 }
 
 function isPlaceholderMemorySummary(value: string | undefined): boolean {
@@ -6133,7 +6165,7 @@ function isPlaceholderMemorySummary(value: string | undefined): boolean {
     ?.split(/\r?\n/)
     .map(cleanMemoryValueLine)
     .find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
 }
 
 function memoryValueRoleMarker(value: string): string | undefined {

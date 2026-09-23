@@ -188,7 +188,8 @@ describe("HomePage", () => {
     expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
     expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
     expect(source).toContain("state.agent.pendingPresetByScope[modelSelectionScopeKey]");
-    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId");
+    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]");
+    expect(source).toContain("allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)");
     expect(source).toContain("modelPreset: resolvedConversationModel.candidateId ?? undefined");
     expect(source).not.toContain("copyScopedModelSelection");
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");

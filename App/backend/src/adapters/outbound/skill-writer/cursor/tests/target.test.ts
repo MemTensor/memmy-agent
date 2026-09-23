@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { createCursorSkillTarget } from "../index.js";
 import type { SkillManifest } from "../../types.js";
 
@@ -100,7 +102,7 @@ describe("cursor skill target", () => {
     }
   });
 
-  it("installs a beforeSubmitPrompt hook that blocks resume commands with top L1 candidates", async () => {
+  it("installs a resume Skill and reads the current memmyMemory storage instead of legacy storage", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
     let authorization = "";
@@ -119,7 +121,17 @@ describe("cursor skill target", () => {
     const address = server.address() as AddressInfo;
     writeFileSync(
       memmyConfigPath,
-      ["storage:", `  endpoint: "http://127.0.0.1:${address.port}"`, '  token: "test-token"', ""].join("\n"),
+      [
+        "memosMemory:",
+        "  storage:",
+        '    endpoint: "http://127.0.0.1:18799"',
+        '    token: "legacy-token"',
+        "memmyMemory:",
+        "  storage:",
+        `    endpoint: "http://127.0.0.1:${address.port}"`,
+        '    token: "test-token"',
+        ""
+      ].join("\n"),
       "utf8"
     );
     const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
@@ -180,6 +192,31 @@ describe("cursor skill target", () => {
       expect(skillFile).toContain("A Memmy Memory Hook or plugin is installed for this agent.");
       expect(skillFile).toContain('memmy-memory search "query text" --source cursor');
       expect(skillFile).not.toContain("memmy-memory add");
+      const resumeSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+      expect(resumeSkillFile).toContain("name: memmy-resume");
+      expect(resumeSkillFile).toContain("disable-model-invocation: true");
+      expect(resumeSkillFile).toContain("memmy-memory search");
+
+      const selectionRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "1" })
+      );
+      const selectionOutput = JSON.parse(selectionRun.stdout) as { continue: boolean; user_message: string };
+      expect(selectionOutput.continue).toBe(false);
+      expect(selectionOutput.user_message).toContain("Episode id: episode_1");
+      expect(selectionOutput.user_message).toContain("Full episode body 1");
+
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume another query" })
+      );
+      const cancelRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume cancel" })
+      );
+      const cancelOutput = JSON.parse(cancelRun.stdout) as { continue: boolean; user_message: string };
+      expect(cancelOutput.continue).toBe(false);
+      expect(cancelOutput.user_message).toBe("Memmy resume selection cancelled.");
 
       await target.uninstallPlugin?.("cursor");
       expect(existsSync(hookScriptPath)).toBe(false);
@@ -190,6 +227,74 @@ describe("cursor skill target", () => {
       expect(hooksAfter.hooks?.afterAgentResponse).toBeUndefined();
       expect(hooksAfter.hooks?.stop).toBeUndefined();
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
+    } finally {
+      await close(server);
+    }
+  });
+
+  it("includes the request URL and underlying network cause when resume search cannot connect", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const server = createServer();
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    await close(server);
+    writeFileSync(
+      memmyConfigPath,
+      ["memmyMemory:", "  storage:", `    endpoint: "http://127.0.0.1:${address.port}"`, ""].join("\n"),
+      "utf8"
+    );
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+
+    await target.installPlugin?.("cursor");
+    const hookScriptPath = join(rootDirectory, "hooks", "memmy-resume-hook.mjs");
+    const run = await runNodeHook(
+      hookScriptPath,
+      JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume unreachable" })
+    );
+    const output = JSON.parse(run.stdout) as { continue: boolean; user_message: string };
+
+    expect(output.continue).toBe(false);
+    expect(output.user_message).toContain(
+      `Memmy request to http://127.0.0.1:${address.port}/api/v1/memory/search failed:`
+    );
+    expect(output.user_message).toContain("ECONNREFUSED");
+  });
+
+  it("falls back to the installed endpoint snapshot when runtime YAML has no endpoint", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    let searchRequested = false;
+    const server = createServer((request, response) => {
+      if (request.method === "POST" && request.url === "/api/v1/memory/search") {
+        searchRequested = true;
+        writeJsonResponse(response, 200, { hits: [] });
+        return;
+      }
+      writeJsonResponse(response, 404, {});
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    writeFileSync(memmyConfigPath, "memmyMemory:\n  enabled: true\n", "utf8");
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+
+    try {
+      await target.installPlugin?.("cursor");
+      writeFileSync(
+        join(rootDirectory, "hooks", "memmy-memory-config.json"),
+        JSON.stringify({
+          memmy_config_path: memmyConfigPath,
+          endpoint: `http://127.0.0.1:${address.port}`
+        }),
+        "utf8"
+      );
+      const run = await runNodeHook(
+        join(rootDirectory, "hooks", "memmy-resume-hook.mjs"),
+        JSON.stringify({ hook_event_name: "beforeSubmitPrompt", prompt: "/memmy-resume snapshot" })
+      );
+      const output = JSON.parse(run.stdout) as { user_message: string };
+
+      expect(searchRequested).toBe(true);
+      expect(output.user_message).toBe('No L1 Memmy memories found for: "snapshot"');
     } finally {
       await close(server);
     }
@@ -218,8 +323,8 @@ describe("cursor skill target", () => {
         });
         return;
       }
-      if (url.pathname === "/api/v1/turns/cursor-turn-1/complete") {
-        writeJsonResponse(response, 200, { turnId: "cursor-turn-1", l1MemoryId: "trace-1" });
+      if (url.pathname === "/api/v1/source-turns/complete") {
+        writeJsonResponse(response, 200, { status: "stored", result: { l1MemoryIds: ["trace-1"] } });
         return;
       }
       writeJsonResponse(response, 404, {});
@@ -237,6 +342,25 @@ describe("cursor skill target", () => {
       generation_id: "cursor-generation-1",
       workspace_roots: ["/tmp/cursor-project"]
     };
+    const cursorHome = join(rootDirectory, "cursor-home");
+    // The completed turn is the one Cursor already wrote to its own database. The cancelled
+    // and unfinished generations are deliberately absent or missing their closing answer.
+    writeCursorTurnFixture(cursorHome, [
+      {
+        conversationId: eventBase.conversation_id,
+        requestId: "cursor-generation-1",
+        bubbleId: "bubble-user-1",
+        query: "继续检查 episode 生命周期",
+        answer: "Cursor 生命周期修复完成"
+      },
+      {
+        conversationId: eventBase.conversation_id,
+        requestId: "cursor-generation-3",
+        bubbleId: "bubble-user-3",
+        query: "当前尚未完成的问题",
+        answer: ""
+      }
+    ]);
 
     try {
       await target.installPlugin?.("cursor");
@@ -247,7 +371,8 @@ describe("cursor skill target", () => {
           ...eventBase,
           hook_event_name: "beforeSubmitPrompt",
           prompt: "继续检查 episode 生命周期"
-        })
+        }),
+        cursorHome
       );
       expect(start.status).toBe(0);
       expect(JSON.parse(start.stdout)).toEqual({ continue: true });
@@ -258,7 +383,8 @@ describe("cursor skill target", () => {
           ...eventBase,
           hook_event_name: "afterAgentResponse",
           text: "Cursor 生命周期修复完成"
-        })
+        }),
+        cursorHome
       );
       expect(agentResponse.status).toBe(0);
       expect(JSON.parse(agentResponse.stdout)).toEqual({});
@@ -269,7 +395,8 @@ describe("cursor skill target", () => {
           ...eventBase,
           hook_event_name: "stop",
           status: "completed"
-        })
+        }),
+        cursorHome
       );
       expect(stop.status).toBe(0);
       expect(JSON.parse(stop.stdout)).toEqual({});
@@ -277,9 +404,7 @@ describe("cursor skill target", () => {
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
-        "/api/v1/health",
-        "/api/v1/sessions/open",
-        "/api/v1/turns/cursor-turn-1/complete"
+        "/api/v1/source-turns/complete"
       ]);
       expect(requests[1]?.body).toMatchObject({
         sessionId: "cursor-memory-cursor-conversation-1",
@@ -293,15 +418,24 @@ describe("cursor skill target", () => {
         turnId: "cursor-generation-1",
         query: "继续检查 episode 生命周期"
       });
-      expect(requests[5]?.body).toMatchObject({
+      // The durable turn id is the user bubble, not the hook-only generation id, so the
+      // offline scan recomputes the same identity from the same rows.
+      expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-cursor-hook",
+        channel: "hook",
         sessionId: "cursor-memory-session",
         query: "继续检查 episode 生命周期",
         answer: "Cursor 生命周期修复完成",
         sourceMemoryIds: ["cursor-memory-1"],
-        status: "succeeded"
+        status: "succeeded",
+        sourceTurn: {
+          source: "cursor",
+          conversationId: "cursor-conversation-1",
+          turnId: "bubble-user-1",
+          completionEvidence: "assistant_text:bubble-assistant-1"
+        }
       });
-      expect(requests[5]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
 
       const cancelledEvent = {
         ...eventBase,
@@ -313,7 +447,8 @@ describe("cursor skill target", () => {
           ...cancelledEvent,
           hook_event_name: "beforeSubmitPrompt",
           prompt: "这个任务会被用户取消"
-        })
+        }),
+        cursorHome
       );
       await runNodeHook(
         hookScriptPath,
@@ -321,7 +456,8 @@ describe("cursor skill target", () => {
           ...cancelledEvent,
           hook_event_name: "afterAgentResponse",
           text: "尚未完成的部分回复"
-        })
+        }),
+        cursorHome
       );
       await runNodeHook(
         hookScriptPath,
@@ -329,52 +465,51 @@ describe("cursor skill target", () => {
           ...cancelledEvent,
           hook_event_name: "stop",
           status: "cancelled"
-        })
+        }),
+        cursorHome
       );
-      expect(requests.slice(6).map((item) => item.path)).toEqual([
+      expect(requests.slice(4).map((item) => item.path)).toEqual([
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start"
       ]);
 
+      // A generation Cursor never persisted stays unwritten instead of being guessed at.
       await runNodeHook(
         hookScriptPath,
         JSON.stringify({
           ...cancelledEvent,
           hook_event_name: "stop",
           status: "completed"
-        })
+        }),
+        cursorHome
       );
-      expect(requests).toHaveLength(9);
+      expect(requests).toHaveLength(7);
 
       const incompleteEvent = {
         ...eventBase,
         generation_id: "cursor-generation-3"
       };
-      const transcriptPath = join(rootDirectory, "incomplete-transcript.jsonl");
-      writeFileSync(transcriptPath, [
-        JSON.stringify({ role: "user", content: "上一轮问题" }),
-        JSON.stringify({ role: "assistant", content: "上一轮完整回复" }),
-        JSON.stringify({ role: "user", content: "当前尚未完成的问题" })
-      ].join("\n"), "utf8");
       await runNodeHook(
         hookScriptPath,
         JSON.stringify({
           ...incompleteEvent,
           hook_event_name: "beforeSubmitPrompt",
           prompt: "当前尚未完成的问题"
-        })
+        }),
+        cursorHome
       );
-      await runNodeHook(
+      const unfinished = await runNodeHook(
         hookScriptPath,
         JSON.stringify({
           ...incompleteEvent,
           hook_event_name: "stop",
-          status: "completed",
-          transcript_path: transcriptPath
-        })
+          status: "completed"
+        }),
+        cursorHome
       );
-      expect(requests.slice(9).map((item) => item.path)).toEqual([
+      expect(unfinished.stderr).toContain("turn_incomplete");
+      expect(requests.slice(7).map((item) => item.path)).toEqual([
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start"
@@ -514,8 +649,76 @@ async function close(server: ReturnType<typeof createServer>): Promise<void> {
   });
 }
 
-async function runNodeHook(scriptPath: string, input: string): Promise<{ status: number; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, [scriptPath], { stdio: ["pipe", "pipe", "pipe"] });
+/**
+ * Writes the Cursor globalStorage rows a finished turn is read back from. A turn whose
+ * answer is empty stays unfinished on disk, which is how Cursor looks before the closing
+ * assistant bubble is flushed.
+ */
+function writeCursorTurnFixture(homeDirectory: string, turns: ReadonlyArray<{
+  conversationId: string;
+  requestId: string;
+  bubbleId: string;
+  query: string;
+  answer: string;
+}>): void {
+  const databasePath = resolveCursorDataPaths({ homeDirectory, environment: {} }).globalStateDbPath;
+  mkdirSync(dirname(databasePath), { recursive: true });
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.exec("CREATE TABLE IF NOT EXISTS composerHeaders (composerId TEXT PRIMARY KEY, isSubagent INTEGER, subagentTypeName TEXT)");
+    const byConversation = new Map<string, Array<Record<string, unknown>>>();
+    for (const [index, turn] of turns.entries()) {
+      const bubbles = byConversation.get(turn.conversationId) ?? [];
+      bubbles.push({
+        bubbleId: turn.bubbleId,
+        type: 1,
+        text: turn.query,
+        createdAt: `2026-09-16T10:0${index}:00.000Z`,
+        requestId: turn.requestId
+      });
+      if (turn.answer) {
+        bubbles.push({
+          bubbleId: turn.bubbleId.replace("user", "assistant"),
+          type: 2,
+          text: turn.answer,
+          createdAt: `2026-09-16T10:0${index}:30.000Z`
+        });
+      }
+      byConversation.set(turn.conversationId, bubbles);
+    }
+    for (const [conversationId, bubbles] of byConversation) {
+      db.prepare("INSERT OR REPLACE INTO composerHeaders (composerId, isSubagent, subagentTypeName) VALUES (?, 0, '')")
+        .run(conversationId);
+      db.prepare("INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+        `composerData:${conversationId}`,
+        JSON.stringify({
+          composerId: conversationId,
+          fullConversationHeadersOnly: bubbles.map((bubble) => ({
+            bubbleId: bubble.bubbleId,
+            type: bubble.type,
+            createdAt: bubble.createdAt
+          }))
+        })
+      );
+      for (const bubble of bubbles) {
+        db.prepare("INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)")
+          .run(`bubbleId:${conversationId}:${String(bubble.bubbleId)}`, JSON.stringify({ _v: 3, ...bubble }));
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+async function runNodeHook(scriptPath: string, input: string, homeDirectory?: string): Promise<{ status: number; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [scriptPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      ...(homeDirectory ? { HOME: homeDirectory, USERPROFILE: homeDirectory, XDG_CONFIG_HOME: join(homeDirectory, ".config") } : {})
+    }
+  });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
