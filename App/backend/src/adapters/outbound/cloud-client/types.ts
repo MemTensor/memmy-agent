@@ -9,6 +9,8 @@ import type {
   LegalAgreementUrls,
   IntegrationToolResult,
   InvitationResult,
+  LotteryReward,
+  LotteryStatus,
   OkResponse,
   PromotionFlags,
   SocialLoginProvider,
@@ -127,6 +129,15 @@ export interface UpdateCloudAccountProfileInput {
 export interface GrantTokensInput {
   /** Uuid. */
   uuid?: string;
+}
+
+export interface GetLotteryRewardInput {
+  uuid: string;
+}
+
+export interface AckLotteryRewardInput {
+  uuid: string;
+  drawId?: string;
 }
 
 /** Contract for request token quota input. */
@@ -254,4 +265,10 @@ export interface CloudClient {
   getLegalUrls(): Promise<LegalAgreementUrls | undefined>;
   /** Reads get promotions. */
   getPromotions(): Promise<PromotionFlags | undefined>;
+  /** Reads the remotely controlled lottery campaign status. */
+  getLotteryStatus(): Promise<LotteryStatus | undefined>;
+  /** Reads the latest unacknowledged lottery reward for the account. */
+  getLotteryReward(input: GetLotteryRewardInput): Promise<LotteryReward>;
+  /** Marks the latest matching lottery reward as shown. */
+  ackLotteryReward(input: AckLotteryRewardInput): Promise<void>;
 }

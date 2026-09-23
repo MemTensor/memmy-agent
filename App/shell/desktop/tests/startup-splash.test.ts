@@ -7,6 +7,7 @@ import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
   resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
   type StartupSplashLanguage
 } from "../src/main/startup-splash.js";
 
@@ -19,6 +20,18 @@ afterEach(() => {
 });
 
 describe("startup splash localization", () => {
+  it("does not quit when the last window closes before boot is ready", () => {
+    expect(shouldQuitWhenAllWindowsClosed("win32", false)).toBe(false);
+  });
+
+  it("quits after boot when the last window closes on Windows", () => {
+    expect(shouldQuitWhenAllWindowsClosed("win32", true)).toBe(true);
+  });
+
+  it("keeps macOS resident after all windows close", () => {
+    expect(shouldQuitWhenAllWindowsClosed("darwin", true)).toBe(false);
+  });
+
   it.each<StartupSplashLanguage>(["zh-CN", "en-US"])("reads the persisted %s application language", (language) => {
     const databasePath = createSettingsDatabase(language);
 

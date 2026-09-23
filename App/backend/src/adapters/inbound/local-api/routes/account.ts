@@ -5,6 +5,8 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   AvatarOptionSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
@@ -118,6 +120,25 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (_request, reply) => {
       const response = AccountSessionViewSchema.parse(await options.account.getSession());
+      return reply.send(response);
+    })
+  );
+
+  app.get(
+    "/api/account/lottery/reward",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = LotteryRewardSchema.parse(await options.account.getLotteryReward());
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/lottery/reward/ack",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = LotteryRewardAckInputSchema.parse(request.body);
+      const response = OkResponseSchema.parse(await options.account.ackLotteryReward(input));
       return reply.send(response);
     })
   );

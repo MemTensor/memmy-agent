@@ -592,6 +592,35 @@ export const PromotionFlagsSchema = z.object({
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
+export const LotteryStatusSchema = z.object({
+    shouldShow: z.boolean(),
+    startAt: z.number().int().nonnegative(),
+    endAt: z.number().int().nonnegative(),
+    serverNow: z.number().int().nonnegative(),
+    landingUrl: z.string().url()
+}).refine((status) => status.endAt > status.startAt, {
+    message: "Lottery endAt must be later than startAt",
+    path: ["endAt"]
+});
+export type LotteryStatus = z.infer<typeof LotteryStatusSchema>;
+
+export const LotteryRewardSchema = z.discriminatedUnion("hasReward", [
+    z.object({
+        hasReward: z.literal(false)
+    }),
+    z.object({
+        hasReward: z.literal(true),
+        drawId: z.string().min(1).optional(),
+        tokenAmount: z.number().int().positive()
+    })
+]);
+export type LotteryReward = z.infer<typeof LotteryRewardSchema>;
+
+export const LotteryRewardAckInputSchema = z.object({
+    drawId: z.string().min(1).optional()
+});
+export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -611,7 +640,8 @@ export const AppBootstrapResponseSchema = z.object({
     legal: LegalAgreementUrlsSchema.optional(),
     // Src module.
     // Promotions.
-    promotions: PromotionFlagsSchema.optional()
+    promotions: PromotionFlagsSchema.optional(),
+    lotteryStatus: LotteryStatusSchema.optional()
 });
 export type AppBootstrapResponse = z.infer<typeof AppBootstrapResponseSchema>;
 

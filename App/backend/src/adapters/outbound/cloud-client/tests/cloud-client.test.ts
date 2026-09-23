@@ -1101,6 +1101,112 @@ describe("cloud client", () => {
     await expect(client.getPromotions()).resolves.toBeUndefined();
   });
 
+  it("http client fetches the remote lottery status", async () => {
+    const requests: Array<{ path: string; method: string | undefined }> = [];
+    const lotteryStatus = {
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    };
+    server = createServer((request, response) => {
+      requests.push({
+        path: request.url ?? "",
+        method: request.method
+      });
+      sendJson(response, { code: 0, message: "ok", data: lotteryStatus });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+
+    await expect(client.getLotteryStatus()).resolves.toEqual(lotteryStatus);
+    expect(requests).toEqual([{
+      path: "/api/memmy/lottery/status",
+      method: "GET"
+    }]);
+  });
+
+  it("http client fails closed when the lottery status is invalid", async () => {
+    server = createServer((_request, response) => {
+      sendJson(response, {
+        code: 0,
+        message: "ok",
+        data: {
+          shouldShow: true,
+          startAt: 1790121600000,
+          endAt: 1790812800000
+        }
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+
+    await expect(client.getLotteryStatus()).resolves.toBeUndefined();
+  });
+
+  it("http client reads and acknowledges a lottery reward with account authorization", async () => {
+    const requests: Array<{
+      path: string;
+      method: string | undefined;
+      body: unknown;
+      authorization: string | undefined;
+    }> = [];
+    server = createServer(async (request, response) => {
+      requests.push({
+        path: request.url ?? "",
+        method: request.method,
+        body: await readJson(request),
+        authorization: request.headers.authorization
+      });
+      sendJson(response, request.url === "/api/memmy/lottery/reward"
+        ? {
+            code: 0,
+            message: "ok",
+            data: { hasReward: true, drawId: "1", tokenAmount: 500_000 }
+          }
+        : { code: 0, message: "ok", data: true });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+
+    await expect(client.getLotteryReward({ uuid: "cloud.login.uuid" })).resolves.toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    await expect(client.ackLotteryReward({
+      uuid: "cloud.login.uuid",
+      drawId: "1"
+    })).resolves.toBeUndefined();
+    expect(requests).toEqual([
+      {
+        path: "/api/memmy/lottery/reward",
+        method: "GET",
+        body: {},
+        authorization: "Bearer cloud.login.uuid"
+      },
+      {
+        path: "/api/memmy/lottery/reward/ack",
+        method: "POST",
+        body: { drawId: "1" },
+        authorization: "Bearer cloud.login.uuid"
+      }
+    ]);
+  });
+
 });
 
 function listen(serverToListen: ReturnType<typeof createServer>): Promise<void> {

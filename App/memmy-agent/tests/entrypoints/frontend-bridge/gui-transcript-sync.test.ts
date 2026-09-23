@@ -140,6 +140,9 @@ describe("GUI transcript synchronization", () => {
       client_request_id: clientRequestId,
       source: { kind: "im", channel: "telegram" },
     });
+    const createdAts = transcript.map((record) => record.createdAt);
+    expect(createdAts.every((createdAt) => typeof createdAt === "number")).toBe(true);
+    expect(createdAts).toEqual([...createdAts].sort((left, right) => left - right));
     for (const record of transcript.slice(1, 10)) {
       expect(record.source).toEqual({ kind: "im", channel: "telegram" });
     }
