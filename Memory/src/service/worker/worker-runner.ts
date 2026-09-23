@@ -29,7 +29,7 @@ import {
   embeddingRetryBackoffMs,
   embeddingRetryToRunItem
 } from "../embedding/embedding-pipeline.js";
-import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { memoryHasImportPipeline, memoryNeedsImportSummary } from "../import/import-job-processor.js";
 import {
   classifyProcessingError,
   type EnqueueJobInput,
@@ -196,7 +196,10 @@ export class WorkerRunner {
     for (const processing of activeProcessing) {
       const memory = this.deps.repos.memories.get(processing.memoryId);
       if (!memory) continue;
-      if (this.deps.repos.memories.hasVector(memory.id, "vec_summary")) {
+      if (
+        this.deps.repos.memories.hasVector(memory.id, "vec_summary") &&
+        !memoryNeedsImportSummary(memory)
+      ) {
         this.deps.repos.processing.update(memory.id, {
           state: "ready",
           stage: null,
@@ -272,6 +275,42 @@ export class WorkerRunner {
         activeJobId: job.id,
         updatedAt: at
       }, ["embedding_pending", "embedding"]);
+    }
+
+    for (const memory of this.deps.repos.memories.listImportMemoriesNeedingSummary(limit)) {
+      const processing = this.deps.repos.processing.get(memory.id);
+      if (processing?.state === "summary_pending" || processing?.state === "summarizing") continue;
+      const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+      let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
+      if (!job) {
+        this.deps.repos.memories.deleteVector(memory.id, "vec_summary");
+        job = this.deps.enqueueJob({
+          jobType,
+          userId: memory.userId,
+          sessionId: memory.sessionId,
+          targetMemoryId: memory.id,
+          payload: {
+            source: "startup.placeholder_summary_repair",
+            contentHash: memory.contentHash
+          },
+          maxAttempts: 3,
+          createdAt: at
+        });
+        if (jobType === "import_summary") enqueuedImportSummaries += 1;
+      }
+      this.deps.repos.processing.save({
+        memoryId: memory.id,
+        state: "summary_pending",
+        stage: "summary",
+        activeJobId: job.id,
+        attemptCount: processing?.attemptCount ?? 0,
+        manualRetryCount: processing?.manualRetryCount ?? 0,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      });
     }
 
     const retrievalMemories = this.deps.repos.memories.list({

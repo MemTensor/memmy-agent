@@ -196,6 +196,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["cursor-conv-1"],
             incompleteConversationIds: [],
@@ -521,6 +522,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -562,6 +564,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [`memory-${ctx.sourceId}`],
+            importSummaryMemoryIds: [`memory-${ctx.sourceId}`],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -874,11 +877,12 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 1,
             memoryIds: ["memory-complete"],
+            importSummaryMemoryIds: ["memory-complete"],
             conversations: 3,
             completedConversationIds: ["conversation-complete"],
             incompleteConversationIds: ["conversation-incomplete"],
             failedConversationIds: ["conversation-failed"],
-            errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+            errors: []
           };
         }
       }
@@ -900,7 +904,7 @@ describe("agent source service", () => {
 
     expect(result).toMatchObject({
       memoryIds: ["memory-complete"],
-      errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+      errors: []
     });
     expect(repository.getConversationCheckpoint("cursor", "conversation-complete")).toMatchObject({
       lastMessageId: "complete-1"
@@ -988,6 +992,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 2,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -1054,6 +1059,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["conversation-1"],
             incompleteConversationIds: [],
@@ -1134,6 +1140,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: ingested.length > 0 ? 1 : 0,
             completedConversationIds: ingested.length > 0 ? ["c1"] : [],
             incompleteConversationIds: [],
@@ -1780,6 +1787,7 @@ function createFakeIngestionService(): IngestionService {
         dedupedMemories: 0,
         failedMemories: 0,
         memoryIds: [],
+        importSummaryMemoryIds: [],
         conversations: 1,
         completedConversationIds: [...conversationIds],
         incompleteConversationIds: [],

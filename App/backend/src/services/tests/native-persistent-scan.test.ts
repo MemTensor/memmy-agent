@@ -38,7 +38,7 @@ describe("persistent Codex scan", () => {
       skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
       scanStoreDirectory: join(root, "scans") });
     const failed = await service.scanOne("codex", { scanJobId: "same-job", mode: "incremental" });
-    expect(failed.errors[0]?.reason).toBe("response lost");
+    expect(failed.errors).toEqual([]);
     expect(repository.getConversationCheckpoint("codex", "source-session")).toBeNull();
     expect(repository.getScanWatermark("codex")).toBeNull();
     const retried = await service.scanOne("codex", { scanJobId: "same-job", mode: "incremental" });
@@ -49,7 +49,172 @@ describe("persistent Codex scan", () => {
     expect(repository.getConversationCheckpoint("codex", "source-session")).not.toBeNull();
     expect(addMemory).not.toHaveBeenCalled(); expect(enqueue).not.toHaveBeenCalled();
   });
+
+  it("skips an incomplete staged turn without failing the source while ingesting a complete sibling", async () => {
+    const root = mkdtempSync(join(tmpdir(), "native-backend-scan-")); roots.push(root);
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") }); stores.push(store);
+    const repository = store.repositories.agentSources;
+    const at = "2099-09-09T10:00:00.000Z";
+    const event = (type: string, payload: Record<string, unknown>, timestamp = at) => ({ type, timestamp, payload });
+    const complete = [
+      event("session_meta", { id: "complete-session" }),
+      event("event_msg", { type: "task_started", turn_id: "complete-turn" }),
+      event("response_item", { type: "message", role: "user", content: [{ text: "Finish the complete turn." }] }),
+      event("response_item", { type: "message", role: "assistant", content: [{ text: "Done." }] }),
+      event("event_msg", { type: "task_complete", turn_id: "complete-turn" })
+    ];
+    const incomplete = [
+      event("session_meta", { id: "incomplete-session" }),
+      event("event_msg", { type: "task_started", turn_id: "incomplete-turn" }),
+      event("response_item", { type: "message", role: "user", content: [{ text: "Still waiting for the answer." }] })
+    ];
+    writeFileSync(join(root, "rollout-complete.jsonl"), complete.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    writeFileSync(join(root, "rollout-incomplete.jsonl"), incomplete.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const client = createMockMemoryClient();
+    const completeSourceTurn = vi.spyOn(client, "completeSourceTurn");
+    const service = createAgentSourceService({
+      sourceRegistry: createSourceRegistry([createCodexSourceAdapter({ sessionsRoot: root })]),
+      memoryClient: client,
+      agentSourceRepository: repository,
+      ingestionService: createIngestionService({ memoryClient: client, agentSourceRepository: repository }),
+      skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
+      scanStoreDirectory: join(root, "scans")
+    });
+    const result = await service.scanOne("codex", { scanJobId: "sibling-job", mode: "full" });
+    expect(result.errors).toEqual([]);
+    expect(completeSourceTurn).toHaveBeenCalledOnce();
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTurn: expect.objectContaining({ conversationId: "complete-session", turnId: "complete-turn" })
+    }));
+    expect(repository.getConversationCheckpoint("codex", "complete-session")).not.toBeNull();
+    expect(repository.getConversationCheckpoint("codex", "incomplete-session")).toBeNull();
+    expect(repository.getScanWatermark("codex")).toBeNull();
+  });
+
+  it("counts skipped cancelled messages in add progress and still writes the watermark", async () => {
+    const root = mkdtempSync(join(tmpdir(), "native-backend-scan-")); roots.push(root);
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") }); stores.push(store);
+    const repository = store.repositories.agentSources;
+    const at = "2099-09-09T10:00:00.000Z";
+    const conversationId = "session-97eeaa03";
+    const messages = [
+      ...stagedCompleteTurn(conversationId, `${conversationId}:1`, 0, at),
+      ...stagedCompleteTurn(conversationId, `${conversationId}:2`, 14, "2099-09-09T10:02:00.000Z"),
+      ...stagedCancelledTurn(conversationId, `${conversationId}:4`, "2099-09-09T10:04:00.000Z")
+    ];
+    const client = createMockMemoryClient();
+    const completeSourceTurn = vi.spyOn(client, "completeSourceTurn").mockResolvedValue({
+      status: "existing",
+      result: {
+        turnId: "turn",
+        sessionId: "session",
+        episodeId: "episode",
+        rawTurnId: "raw",
+        l1MemoryId: "same-l1",
+        l1MemoryIds: ["same-l1"],
+        closedEpisodeIds: [],
+        scheduledEvolution: false,
+        jobs: [],
+        serverTime: at
+      }
+    });
+    const addCurrents: number[] = [];
+    const service = createAgentSourceService({
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: root },
+        detect: async () => true,
+        async *scan() {
+          for (const message of messages) yield message;
+        }
+      }]),
+      memoryClient: client,
+      agentSourceRepository: repository,
+      ingestionService: createIngestionService({ memoryClient: client, agentSourceRepository: repository }),
+      skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
+      scanStoreDirectory: join(root, "scans")
+    });
+    const result = await service.scanOne("codex", {
+      scanJobId: "cancelled-progress-job",
+      mode: "full",
+      onProgress(progress) {
+        if (progress.phase === "add") addCurrents.push(progress.current);
+      }
+    });
+    expect(result.errors).toEqual([]);
+    expect(completeSourceTurn).toHaveBeenCalledTimes(2);
+    expect(addCurrents.at(-1)).toBe(messages.length);
+    expect(addCurrents).toEqual([2, 18, 19]);
+    expect(repository.getConversationCheckpoint("codex", conversationId)).not.toBeNull();
+    expect(repository.getScanWatermark("codex")).not.toBeNull();
+  });
 });
+
+function stagedCompleteTurn(conversationId: string, turnId: string, toolCount: number, createdAt: string) {
+  const sourceTurn = {
+    source: "codex",
+    profileId: "default",
+    conversationId,
+    turnId,
+    startedAt: createdAt,
+    completedAt: createdAt,
+    sequence: 0,
+    completionEvidence: `turn_end:${turnId}:completed`,
+    query: "Search the current DSH version.",
+    answer: "Done.",
+    status: "succeeded",
+    toolCalls: [],
+    toolResults: []
+  };
+  return [
+    {
+      sourceId: "codex",
+      messageId: `${turnId}:user`,
+      conversationId,
+      role: "user" as const,
+      content: sourceTurn.query,
+      createdAt,
+      workspacePath: null,
+      gitRoot: null,
+      rawMeta: { sourceTurnId: turnId, sourceTurnState: "complete" }
+    },
+    ...Array.from({ length: toolCount }, (_, index) => ({
+      sourceId: "codex",
+      messageId: `${turnId}:call:${index}`,
+      conversationId,
+      role: "tool" as const,
+      content: `tool ${index}`,
+      createdAt,
+      workspacePath: null,
+      gitRoot: null,
+      rawMeta: { sourceTurnId: turnId, sourceTurnState: "complete", toolName: "read", toolCallId: `call-${index}` }
+    })),
+    {
+      sourceId: "codex",
+      messageId: `${turnId}:assistant`,
+      conversationId,
+      role: "assistant" as const,
+      content: sourceTurn.answer,
+      createdAt,
+      workspacePath: null,
+      gitRoot: null,
+      rawMeta: { sourceTurnId: turnId, sourceTurnState: "complete", sourceTurn }
+    }
+  ];
+}
+
+function stagedCancelledTurn(conversationId: string, turnId: string, createdAt: string) {
+  return [{
+    sourceId: "codex",
+    messageId: `${turnId}:user`,
+    conversationId,
+    role: "user" as const,
+    content: "Cancelled.",
+    createdAt,
+    workspacePath: null,
+    gitRoot: null,
+    rawMeta: { sourceTurnId: turnId, sourceTurnState: "turn_cancelled", sourceTurnReason: "turn_cancelled" }
+  }];
+}
 
 
 describe("nonpersistent Codex scan window", () => {

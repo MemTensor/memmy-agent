@@ -34,6 +34,7 @@ import {
   buildUserMemory,
   isDynamicCurrentFactQuery
 } from "../user-memory/user-memory.js";
+import { fallbackCaptureSummary } from "../evolution/capture-summary.js";
 import {
   embeddingTextForMemory,
   traceSummaryEmbeddingText,
@@ -641,11 +642,12 @@ export function updateTraceSummary(memory: MemoryRow, input: { summary: string; 
   if (!trace) return memory;
   const internalTrace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : {};
   const nextTrace = { ...internalTrace, summary: input.summary, summary_at: input.updatedAt };
-  return { ...memory, memoryValue: renderTraceMemoryValue({
+  const memoryValue = renderTraceMemoryValue({
     summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"),
     userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls,
     reflection: { text: trace.reflection, alpha: trace.alpha }, value: trace.value, priority: trace.priority
-  }), info: { ...memory.info, summary: input.summary }, properties: {
+  });
+  return { ...memory, memoryValue, contentHash: stableHash(memoryValue), info: { ...memory.info, summary: input.summary }, properties: {
     ...memory.properties, info: { ...(memory.properties.info ?? {}), summary: input.summary },
     internal_info: { ...memory.properties.internal_info, summary: input.summary, trace: nextTrace }
   }, updatedAt: input.updatedAt };
@@ -840,7 +842,11 @@ function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {
 }
 
 function fallbackTraceSummary(trace: TraceMeta): string {
-  return clip(firstLine([trace.summary, trace.userText, trace.agentText].filter(Boolean).join("\n")) || "trace memory", 200);
+  return fallbackCaptureSummary({
+    userText: trace.userText,
+    agentText: trace.agentText,
+    toolCalls: trace.toolCalls
+  });
 }
 
 function renderTraceMemoryValue(step: { summary: string; rawTurnId?: string; stepIndex?: number; userText?: string; agentText?: string; toolCalls: Array<{ name: string; input?: unknown; output?: unknown; error?: string }>; reflection: { text: string | null; alpha: number }; value: number; priority: number }): string {
