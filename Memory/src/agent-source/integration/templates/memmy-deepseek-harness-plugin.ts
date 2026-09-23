@@ -527,7 +527,7 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = [];
+    const inject = ["uiConversation"];
 
     function resolveConversationEventRegistry(ctx) {
       const uiConversation = ctx.get("uiConversation");
