@@ -668,52 +668,60 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("浏览了 1 处");
   });
 
-  it("de-emphasizes a tool validation error after the same tool succeeds on retry", () => {
+  it("keeps process tool errors in the detail card without an error treatment", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
-          chatScopeKey="chat-recovered-tool-error"
+          chatScopeKey="chat-process-tool-error"
           messages={[{
             id: "trace",
             role: "tool",
             kind: "trace",
             content: "",
             traces: [],
-            toolEvents: [
-              { phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" },
-              { phase: "end", call_id: "call-valid", name: "review_update_spec", result: JSON.stringify({ ok: true }) }
-            ],
+            toolEvents: [{ phase: "error", call_id: "call-invalid", name: "exec", error: "Error: command exited with 1 STDERR: path not found" }],
             stoppedByUser: true
           }]}
         />
       </I18nProvider>
     );
 
+    expect(html).toContain("Error: command exited with 1 STDERR: path not found");
+    expect(html).toContain('data-detail="error"');
     expect(html).not.toContain("agent-activity-timeline-item--error");
     expect(html).not.toContain("agent-activity-timeline-item__error");
-    expect(html).toContain("Invalid outputFormats");
+    expect(html).not.toContain("agent-activity-tool-card__section--error");
   });
 
-  it("keeps an unrecovered tool error visibly red", () => {
+  it("keeps a failed file edit on one ordinary row", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
-          chatScopeKey="chat-unrecovered-tool-error"
+          chatScopeKey="chat-file-edit-error"
           messages={[{
-            id: "trace",
+            id: "edit",
             role: "tool",
             kind: "trace",
             content: "",
             traces: [],
-            toolEvents: [{ phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" }],
+            fileEdits: [{
+              call_id: "call-edit-error",
+              tool: "edit_file",
+              path: "BROKEN.md",
+              status: "error",
+              error: "permission denied while writing"
+            }],
             stoppedByUser: true
           }]}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-activity-timeline-item--error");
-    expect(html).toContain("agent-activity-timeline-item__error");
+    expect(html).toContain("Failed");
+    expect(html).toContain("BROKEN.md");
+    expect(html).not.toContain("permission denied while writing");
+    expect(html).not.toContain("agent-activity-timeline-item--error");
+    expect(html).not.toContain("agent-activity-timeline-item__error");
   });
 
   it("folds the whole finished run — thoughts, tools, drafts — behind one worked-for header", () => {
@@ -1151,7 +1159,9 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html.replaceAll("&#x27;", "'")).toContain(WINDOWS_COMMAND_ERROR);
-    expect(html).toContain("agent-activity-timeline-item__error");
+    expect(html).toContain('data-detail="error"');
+    expect(html).not.toContain("agent-activity-timeline-item__error");
+    expect(html).not.toContain("agent-activity-tool-card__section--error");
     expect(html).not.toContain("����");
   });
 
