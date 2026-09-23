@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
@@ -51,8 +50,7 @@ describe("memmy resume hook stop capture", () => {
           prompt: "Explain branch and worktree", text: "A worktree is a separate checkout",
           last_assistant_message: "A worktree is a separate checkout", cwd: tempDir,
         });
-        expect(result).toMatchObject({ status: 0, stdout: "" });
-        expectNoUnexpectedNodeStderr(result.stderr);
+        expect(result).toEqual({ status: 0, stdout: "", stderr: "" });
       }
       expect(paths).toEqual([]);
       expect(readDirectory(tempDir).sort()).toEqual(filesBefore);
@@ -106,7 +104,7 @@ describe("memmy resume hook stop capture", () => {
           const result = await runHook(script, { ...payload, hook_event_name: event,
             text: "A worktree is a separate checkout", last_assistant_message: "A worktree is a separate checkout" }, cursorHome);
           expect(result.status).toBe(0);
-          expectNoUnexpectedNodeStderr(result.stderr);
+          expect(result.stderr).toBe("");
         }
       }
       const completions = () => requests.filter(request => request.path.endsWith("/complete"));
@@ -137,7 +135,7 @@ describe("memmy resume hook stop capture", () => {
           prompt: "Explain native Claude capture", last_assistant_message: "Captured by Claude only", cwd: tempDir,
         });
         expect(result.status).toBe(0);
-        expectNoUnexpectedNodeStderr(result.stderr);
+        expect(result.stderr).toBe("");
       }
       expect(completions()).toHaveLength(2);
       expect(completions()[1]?.body).toMatchObject({

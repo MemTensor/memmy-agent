@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { createClaudeCodeSkillTarget } from "../index.js";
 import type { SkillManifest } from "../../types.js";
 
@@ -182,7 +181,7 @@ describe("claude code skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expectNoUnexpectedNodeStderr(run.stderr);
+      expect(run.stderr).toBe("");
       const output = JSON.parse(run.stdout) as { decision: string; reason: string };
       expect(output.decision).toBe("block");
       expect(output.reason).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');

@@ -8,7 +8,6 @@ import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { createCursorSkillTarget } from "../index.js";
 import type { SkillManifest } from "../../types.js";
@@ -175,7 +174,7 @@ describe("cursor skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expectNoUnexpectedNodeStderr(run.stderr);
+      expect(run.stderr).toBe("");
       const output = JSON.parse(run.stdout) as { continue: boolean; user_message: string };
       expect(output.continue).toBe(false);
       expect(output.user_message).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');

@@ -6,7 +6,6 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { expectNoUnexpectedNodeStderr } from "../../../../../../../../Memory/tests/fixtures/node-stderr.js";
 import { createCodexSkillTarget } from "../index.js";
 import type { TrustMemmyCodexHooksOptions } from "../hook-trust.js";
 import type { SkillManifest } from "../../types.js";
@@ -222,7 +221,7 @@ describe("codex skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expectNoUnexpectedNodeStderr(run.stderr);
+      expect(run.stderr).toBe("");
       const output = JSON.parse(run.stdout) as { decision: string; reason: string };
       expect(output.decision).toBe("block");
       expect(output.reason).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');
@@ -251,7 +250,7 @@ describe("codex skill target", () => {
         JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "2" })
       );
       expect(selectionRun.status).toBe(0);
-      expectNoUnexpectedNodeStderr(selectionRun.stderr);
+      expect(selectionRun.stderr).toBe("");
       const selectionOutput = JSON.parse(selectionRun.stdout) as {
         hookSpecificOutput?: { additionalContext?: string; hookEventName?: string };
       };
@@ -361,7 +360,7 @@ describe("codex skill target", () => {
       );
 
       expect(run.status).toBe(0);
-      expectNoUnexpectedNodeStderr(run.stderr);
+      expect(run.stderr).toBe("");
       expect(JSON.parse(run.stdout)).toEqual({ continue: true, suppressOutput: true });
       expect(requests.map((item) => item.path)).toEqual([
         "/api/v1/health",
