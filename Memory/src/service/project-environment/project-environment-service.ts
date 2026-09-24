@@ -1,3 +1,4 @@
+import type { MemoryLanguage } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,
@@ -14,6 +15,7 @@ import type { ProjectEnvironmentDerivedEvidence } from "./types.js";
 interface ProjectEnvironmentServiceDeps {
   repos: Repositories;
   readonly llm: LlmClient;
+  readonly language?: MemoryLanguage;
 }
 
 export class ProjectEnvironmentService {

@@ -7,7 +7,7 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
-import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
+import { MEMORY_SUMMARY_MAX_TOKENS, type MemoryLanguage } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
@@ -975,6 +975,7 @@ Produce ONE policy describing the action pattern. The policy must:
 - Name a TRIGGER recognizable from the agent's STATE — a condition the
   agent can detect at the moment of decision (an error code, a missing
   file, a request shape). NOT a fact about the environment in general.
+  Do not copy the title into the trigger.
 - Prescribe an ACTION template — a parameterized step or short step
   sequence. Templates over single exact commands. NOT a single example.
 - Note at least one CAVEAT or failure mode observed in the traces — a
@@ -1046,8 +1047,8 @@ libs by default":
 Return JSON:
 {
   "should_generate": true | false,
-  "title": "short imperative title",
-  "trigger": "state-level condition the agent can detect",
+  "title": "short imperative name, at most 30 characters; not the trigger",
+  "trigger": "state-level condition the agent can detect; not the title",
   "action": "templated step or step sequence",
   "expected_outcome": "observable result expected after the action",
   "verification": "how to verify that result",
@@ -3689,6 +3690,24 @@ export function buildPolicyDraft(args: {
 }
 
 export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): PromptLanguage {
+  return detectPromptLanguage(samples, 0.7, "en", false);
+}
+
+/** Share of CJK among letters that selects Chinese when no interface language is pinned. */
+const STEERED_CHINESE_LETTER_SHARE = 0.2;
+
+export function pinnedPromptLanguage(language: MemoryLanguage | undefined): PromptLanguage | undefined {
+  if (language === "zh-CN") return "zh";
+  if (language === "en-US") return "en";
+  return undefined;
+}
+
+export function detectPromptLanguage(
+  samples: ReadonlyArray<string | null | undefined>,
+  chineseShare = STEERED_CHINESE_LETTER_SHARE,
+  empty: PromptLanguage = "auto",
+  inclusive = true
+): PromptLanguage {
   let zh = 0;
   let en = 0;
   for (const sample of samples) {
@@ -3703,8 +3722,16 @@ export function detectDominantLanguage(samples: ReadonlyArray<string | null | un
     }
   }
   const total = zh + en;
-  if (total === 0) return "en";
-  return zh / total > 0.7 ? "zh" : "en";
+  if (total === 0) return empty;
+  const share = zh / total;
+  return (inclusive ? share >= chineseShare : share > chineseShare) ? "zh" : "en";
+}
+
+export function steeredPromptLanguage(
+  language: MemoryLanguage | undefined,
+  samples: ReadonlyArray<string | null | undefined>
+): PromptLanguage {
+  return pinnedPromptLanguage(language) ?? detectPromptLanguage(samples);
 }
 
 export function languageSteeringLine(language: PromptLanguage): string {

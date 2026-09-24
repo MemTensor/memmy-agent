@@ -8,6 +8,7 @@
  *
  * Intended destination: Memory/src/service/read-model/episode.ts
  */
+import { episodeTitleDisplayState } from "../episode-title/episode-title-service.js";
 import type {
   EpisodeRecord,
   RawTurnRecord,
@@ -344,9 +345,10 @@ export class EpisodeReadModel {
   }
 }
 
-export function episodeRef(episode: EpisodeRecord): Record<string, unknown> {
+export function episodeRef(episode: EpisodeRecord, titleJobPending = false): Record<string, unknown> {
   const skillStatus = episodeSkillStatus(episode);
   const skillReason = episodeSkillReason(episode);
+  const titleState = episodeTitleDisplayState(episode, titleJobPending);
   return {
     id: episode.id,
     sessionId: episode.sessionId,
@@ -367,7 +369,9 @@ export function episodeRef(episode: EpisodeRecord): Record<string, unknown> {
     skillMemoryIds: episode.skillMemoryIds,
     linkedSkillId: episode.skillMemoryIds[0],
     skillStatus,
-    skillReason
+    skillReason,
+    titleGenerated: titleState.titleGenerated,
+    titlePending: titleState.titlePending
   };
 }
 

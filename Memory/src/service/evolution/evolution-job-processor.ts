@@ -35,7 +35,7 @@ import {
 import { SkillClusterPipeline } from "./skill-cluster-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
-import type { TurnMemoryCaptureDecision } from "./span-pipeline.js";
+import type { TraceCaptureSummary, TurnMemoryCaptureDecision } from "./span-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -130,7 +130,8 @@ export class EvolutionJobProcessor {
     });
     this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
-      get skillLlm() { return owner.deps.skillLlm; }
+      get skillLlm() { return owner.deps.skillLlm; },
+      get language() { return owner.deps.config.language; }
     });
     this.span = new SpanPipeline({
       repos: deps.repos,
@@ -146,6 +147,7 @@ export class EvolutionJobProcessor {
     this.bigTurnSpan = new BigTurnSpanPipeline({
       repos: deps.repos,
       get llm() { return owner.deps.llm; },
+      get config() { return owner.deps.config; },
       buildMemory: deps.buildMemory,
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
@@ -230,7 +232,7 @@ export class EvolutionJobProcessor {
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
-  }, options: { strict?: boolean } = {}): Promise<string> {
+  }, options: { strict?: boolean } = {}): Promise<TraceCaptureSummary> {
     return this.span.summarizeTraceForCapture(input, options);
   }
 
@@ -240,6 +242,7 @@ export class EvolutionJobProcessor {
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
+    mustKeep?: boolean;
   }): Promise<TurnMemoryCaptureDecision> {
     return this.span.decideTurnMemoryForCapture(input);
   }

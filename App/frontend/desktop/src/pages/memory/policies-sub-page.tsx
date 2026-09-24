@@ -14,7 +14,7 @@ import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, Search, Sparkles, X } from "./memory-prototype-icons.js";
 import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
-import { cleanMemoryBody, displayMemoryTitle, drawerEyebrow } from "./memory-display.js";
+import { cleanMemoryBody, displayMemoryTitle, drawerEyebrow, experienceDisplayTitle, isExperienceWaiting, waitingPrimaryText } from "./memory-display.js";
 import {
   MemoryReferenceTags,
   type MemoryReferenceOpenRequest,
@@ -240,7 +240,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
   );
 }
 
-function ExperienceState(props: {
+export function ExperienceState(props: {
   state: RemoteData<PanelItemsOutput>;
   detail: DetailState;
   onOpenDetail: (item: MemoryListItem) => void;
@@ -259,7 +259,10 @@ function ExperienceState(props: {
       {props.state.status === "ready" && props.state.data.items.length > 0 && (
         <>
           <div className="memory-list">
-            {props.state.data.items.map((item) => (
+            {props.state.data.items.map((item) => {
+              const waiting = isExperienceWaiting(item);
+              const title = waiting ? waitingPrimaryText(item) : (experienceDisplayTitle(item) ?? displayMemoryTitle(item));
+              return (
               <button
                 key={item.id}
                 type="button"
@@ -267,8 +270,13 @@ function ExperienceState(props: {
                 className="memory-card"
               >
                 <div className="memory-card__body">
-                  <div className="memory-card__title">{displayMemoryTitle(item)}</div>
+                  <div className="memory-card__title">{title}</div>
                   <div className="memory-card__meta">
+                    {waiting && (
+                      <span className="memory-pill memory-pill--processing">
+                        {t("memory.memories.processing.summary")}
+                      </span>
+                    )}
                     <PolicyStatusPill status={item.status} />
                     <span>{t("memory.memories.updatedAt")}: {formatDateTime(item.updatedAt)}</span>
                     {item.tags.slice(0, 4).map((tag) => (
@@ -280,7 +288,8 @@ function ExperienceState(props: {
                   <ChevronRight size={16} />
                 </div>
               </button>
-            ))}
+              );
+            })}
           </div>
           <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
         </>
@@ -308,7 +317,8 @@ function ExperienceDrawer(props: {
   }
 
   const readyDetail = props.detail.status === "ready" ? props.detail.data : null;
-  const title = readyDetail ? experienceFromDetail(readyDetail).title : t("memory.policies.detailTitle");
+  const waiting = readyDetail ? isExperienceWaiting(readyDetail.item) : false;
+  const generatedTitle = readyDetail && !waiting ? experienceDisplayTitle(readyDetail.item) : undefined;
   const eyebrow = readyDetail ? drawerEyebrow(readyDetail.item) : t("memory.policies.detailTitle");
 
   return (
@@ -317,13 +327,13 @@ function ExperienceDrawer(props: {
         e.stopPropagation();
         props.onClose();
       }} />
-      <aside className="memory-drawer" role="dialog" aria-modal="true" aria-labelledby="memory-policy-title" onClick={(e) => e.stopPropagation()}>
+      <aside className="memory-drawer" role="dialog" aria-modal="true" aria-labelledby={generatedTitle ? "memory-policy-title" : "memory-policy-eyebrow"} onClick={(e) => e.stopPropagation()}>
         <header className="memory-drawer__header">
           <div>
             <div className="memory-drawer__identity">
-              <span className="memory-drawer__eyebrow">{eyebrow}</span>
+              <span id="memory-policy-eyebrow" className="memory-drawer__eyebrow">{eyebrow}</span>
             </div>
-            <h4 id="memory-policy-title" className="memory-drawer__title">{title}</h4>
+            {generatedTitle ? <h4 id="memory-policy-title" className="memory-drawer__title">{generatedTitle}</h4> : null}
           </div>
           <button type="button" className="memory-drawer__close" onClick={props.onClose} aria-label={t("common.close")}>
             <X size={16} />
@@ -474,7 +484,10 @@ function experienceFromDetail(detail: GetMemoryOutput): ExperienceView {
   );
 
   return {
-    title: displayMemoryTitle(detail.item, firstString(policy.title, internalInfo.title)),
+    title: experienceDisplayTitle(detail.item)
+      ?? (isExperienceWaiting(detail.item)
+        ? waitingPrimaryText(detail.item)
+        : displayMemoryTitle(detail.item, firstString(policy.title, internalInfo.title))),
     status: firstString(policy.status, internalInfo.status, info.status, detail.item.status),
     trigger: firstString(policy.trigger, internalInfo.trigger, parseBodyField(detail.item.body, "Trigger")),
     procedure: firstString(policy.procedure, policy.action, internalInfo.procedure, parseBodyField(detail.item.body, "Procedure")),

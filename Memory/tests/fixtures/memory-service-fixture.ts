@@ -368,7 +368,7 @@ export function createFailingLlm(): LlmClient {
 export function createBatchReflectionLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
-}>, captureSummary = "LLM batch summary", model = "reflection-batch"): LlmClient {
+}>, captureSummary = "LLM batch summary", model = "reflection-batch", evidenceQuote?: string): LlmClient {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -405,13 +405,14 @@ export function createBatchReflectionLlm(calls: Array<{
       }
       if (options.operation === "capture.summarize") {
         const decisionCall = messages[0]?.content.includes("Judge L1 and User Memory") === true;
-        if (!decisionCall) return { summary: captureSummary } as unknown as T;
+        if (!decisionCall) return { title: "测试捕获标题", summary: captureSummary } as unknown as T;
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
-        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
+        const userQuote = payload.match(/USER:\s*([^\n]+)/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "测试捕获标题",
             summary: captureSummary,
-            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+            evidence: [{ quote: evidenceQuote || userQuote, role: "user", kind: "task_outcome" }]
           },
           user: null
         } as unknown as T;

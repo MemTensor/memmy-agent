@@ -10,6 +10,7 @@ import {
   type WorkspaceUri
 } from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
+import { displayFieldsForMemory } from "../service/read-model/display-fields.js";
 import type {
   ProjectEnvironmentKind,
   ProjectEnvironmentStateRecord
@@ -1278,6 +1279,7 @@ export class MemoryRepository {
       summary: listSummaryForMemory(memory),
       tags: memory.tags,
       metrics: listMetricsForMemory(memory),
+      ...displayFieldsForMemory(memory),
       createdAt: memory.createdAt,
       updatedAt: memory.updatedAt,
       version: memory.version
@@ -3388,6 +3390,7 @@ export class RuntimeRepository {
   nextWorkerRunAt(options?: {
     jobType?: string;
     jobTypes?: readonly string[];
+    excludedJobTypes?: readonly string[];
     includeEmbeddingRetries?: boolean;
   }): number | undefined {
     const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
@@ -3396,7 +3399,14 @@ export class RuntimeRepository {
         ? "AND 1=0"
         : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
       : "";
-    const jobTypeParams = jobTypes && jobTypes.length > 0 ? jobTypes : [];
+    const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    const excludeFilter = excluded
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      : "";
+    const jobTypeParams = [
+      ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
+      ...(excluded ?? [])
+    ];
     const queuedJob = this.db
       .prepare(
         `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
@@ -3405,6 +3415,7 @@ export class RuntimeRepository {
            AND attempts < max_attempts
            AND json_type(payload_json, '$.runAfter') = 'text'
            ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY run_after ASC
          LIMIT 1`
       )
@@ -3417,6 +3428,7 @@ export class RuntimeRepository {
            AND attempts < max_attempts
            AND leased_until IS NOT NULL
            ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY leased_until ASC
          LIMIT 1`
       )
@@ -3535,7 +3547,8 @@ export class RuntimeRepository {
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
     priorityCohortOnly = false,
-    allowedJobTypes?: readonly string[]
+    allowedJobTypes?: readonly string[],
+    excludedJobTypes?: readonly string[]
   ): EvolutionJobRecord[] {
     if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
@@ -3606,11 +3619,12 @@ export class RuntimeRepository {
                )
              )
              ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
+             ${excludedJobTypes?.length ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})` : ""}
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(allowedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -6477,7 +6491,6 @@ function listSummaryForMemory(memory: MemoryRow): string {
   return firstNonEmptyString(
     stringLike(memory.info.summary),
     stringLike(internal.summary),
-    stringLike(policy.trigger),
     stringLike(policy.procedure),
     stringLike(world.summary),
     stringLike(world.body),

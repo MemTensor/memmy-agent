@@ -47,6 +47,7 @@ function createEmptyRewardSummaryLlm(calls: Array<{
         const turnSummary = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "completed task turn";
         return {
           l1: {
+            title: "Completed task turn",
             summary: turnSummary,
             evidence: [{ quote: turnSummary, role: "user", kind: "task_outcome" }]
           },
@@ -106,6 +107,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? turnSummary;
         return {
           l1: {
+            title: "Reward scoring turn",
             summary: turnSummary,
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
@@ -210,6 +212,7 @@ function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: num
         const accepted = payload.includes("implement the durable migration");
         return {
           l1: accepted ? {
+            title: "Durable migration",
             summary: "Implement the durable migration.",
             evidence: [{ quote: "implement the durable migration", role: "user", kind: "task_request" }]
           } : null,
