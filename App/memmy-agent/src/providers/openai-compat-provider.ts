@@ -47,6 +47,7 @@ const THINKING_STYLE_MAP: Record<string, (on: boolean) => Record<string, any>> =
   thinking_type: (on) => ({ thinking: { type: on ? "enabled" : "disabled" } }),
   enable_thinking: (on) => ({ enable_thinking: on }),
   reasoning_split: (on) => ({ reasoning_split: on }),
+  thinking_adaptive: (on) => ({ thinking: { type: on ? "adaptive" : "disabled" } }),
 };
 const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<string, any>> = {
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
@@ -1296,6 +1297,9 @@ export function modelThinkingStyle(modelName: string): string {
 }
 
 export function thinkingStylesFor(spec: any, modelName: string): string[] {
+  if (["minimax", "minimax_cn"].includes(spec?.name) && modelSlug(modelName) === "minimax-m3") {
+    return ["thinking_adaptive"];
+  }
   const styles: string[] = [];
   const specStyle = spec?.thinkingStyle ?? "";
   if (specStyle) styles.push(specStyle);
