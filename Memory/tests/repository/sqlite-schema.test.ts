@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { MemoryDb, SCHEMA_MIGRATION_ID, SCHEMA_VERSION } from "../../src/index.js";
-import { Repositories } from "../../src/storage/repositories.js";
+import { Repositories, RuntimeRepository } from "../../src/storage/repositories.js";
 import type { MemoryRow } from "../../src/types.js";
 
 describe("repository sqlite schema contract", () => {
@@ -55,6 +55,47 @@ describe("repository sqlite schema contract", () => {
     }
   });
 
+  it("restores the raw-turn user index and looks up a turn before its session", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-raw-turn-index-"));
+    const dbPath = join(root, "memory.sqlite");
+    try {
+      const initial = new MemoryDb({ path: dbPath });
+      initial.db.exec("DROP INDEX idx_raw_turns_user_turn");
+      initial.close();
+
+      const reopened = new MemoryDb({ path: dbPath });
+      const indexes = reopened.db.prepare("PRAGMA index_list(raw_turns)").all() as Array<{ name: string }>;
+      expect(indexes.map((index) => index.name)).toContain("idx_raw_turns_user_turn");
+      const runtime = new RuntimeRepository(reopened.db);
+      expect(runtime.hasCompletedSourceTurnInScope({
+        userId: "missing-user",
+        source: "codex",
+        profileId: "default",
+        conversationId: "missing-conversation",
+        turnId: "missing-turn",
+        namespaceKey: "missing-namespace",
+        defaultNamespaceKey: "default-namespace",
+        tenantId: null,
+        storedProjectId: null,
+        workspaceId: null
+      })).toBe(false);
+      const plan = reopened.db.prepare(`EXPLAIN QUERY PLAN
+        SELECT 1 AS found
+        FROM raw_turns
+        WHERE raw_turns.user_id = ?
+          AND raw_turns.turn_id = ?
+          AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+          AND EXISTS (
+            SELECT 1 FROM sessions WHERE sessions.id = raw_turns.session_id
+          )`).all("missing-user", "missing-turn") as Array<{ detail: string }>;
+      expect(plan.some((step) => step.detail.includes("idx_raw_turns_user_turn"))).toBe(true);
+      expect(plan.some((step) => step.detail.includes("sqlite_autoindex_sessions_1"))).toBe(true);
+      reopened.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates the runtime tables on a fresh sqlite database", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-schema-"));
     try {
@@ -93,7 +134,8 @@ describe("repository sqlite schema contract", () => {
         "memory_processing_state",
         "artifacts",
         "audit_logs",
-        "memory_vector_entries"
+        "memory_vector_entries",
+        "token_usage_outbox"
       ]));
       expect(tables.map((table) => table.name)).not.toEqual(expect.arrayContaining([
         "memory_embeddings",

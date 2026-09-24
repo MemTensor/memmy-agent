@@ -70,6 +70,19 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async getMemoryTokenBudget() {
+      failIfNeeded();
+      return {
+        dailyLimitM: 10,
+        totalLimitM: 500,
+        dailyUsed: 0,
+        lifetimeUsed: 0,
+        paused: false,
+        trigger: null,
+        nextLocalMidnightAt: now()
+      };
+    },
+
     async openSession() {
       failIfNeeded();
       return {

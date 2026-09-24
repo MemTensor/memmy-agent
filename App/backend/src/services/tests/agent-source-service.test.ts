@@ -377,13 +377,15 @@ describe("agent source service", () => {
 
     expect(scanOptions[0]).toMatchObject({
       order: "recent_first",
-      maxScanTargets: 1000,
-      since: undefined
+      since: undefined,
+      fullHistory: true
     });
+    expect(scanOptions[0]?.maxScanTargets).toBeUndefined();
     expect(scanOptions[0]?.maxMessages).toBeUndefined();
     expect(scanOptions[1]).toMatchObject({
       order: "source_default",
-      since: "2026-05-28T10:00:02.000Z"
+      since: "2026-05-28T10:00:02.000Z",
+      fullHistory: false
     });
     expect(repository.getScanWatermark("cursor")).toMatchObject({
       sourceId: "cursor",

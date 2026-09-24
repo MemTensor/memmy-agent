@@ -58,7 +58,8 @@ export const JobTypeSchema = z.enum([
   "skill_crystallization",
   "skill_trial_resolve",
   "decision_repair",
-  "work_memory_extract"
+  "work_memory_extract",
+  "feedback_experience"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -490,7 +491,9 @@ export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sess
     completionEvidence: NonEmptyStringSchema
   }),
   channel: z.enum(["hook", "agent_source_scan"]),
-  workspacePath: z.string().optional()
+  workspacePath: z.string().optional(),
+  captureLegacyHistory: z.boolean().optional(),
+  legacyImportTurnId: z.string().min(1).optional()
 });
 export type SourceTurnCompleteInput = z.infer<typeof SourceTurnCompleteInputSchema>;
 

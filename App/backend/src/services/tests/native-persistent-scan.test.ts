@@ -45,6 +45,7 @@ describe("persistent Codex scan", () => {
     expect(retried.errors).toEqual([]); expect(retried.memoryIdCount).toBe(0);
     expect(complete).toHaveBeenCalledTimes(2);
     expect(complete.mock.calls[0]?.[0]).toEqual(complete.mock.calls[1]?.[0]);
+    expect(complete.mock.calls[0]?.[0].captureLegacyHistory).toBeUndefined();
     expect(complete.mock.calls[0]?.[0].toolCalls).toEqual([expect.objectContaining({ id: "call-1", input: "npm test", output: "passed ".repeat(4000) })]);
     expect(repository.getConversationCheckpoint("codex", "source-session")).not.toBeNull();
     expect(addMemory).not.toHaveBeenCalled(); expect(enqueue).not.toHaveBeenCalled();
@@ -84,6 +85,7 @@ describe("persistent Codex scan", () => {
     expect(result.errors).toEqual([]);
     expect(completeSourceTurn).toHaveBeenCalledOnce();
     expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({
+      captureLegacyHistory: true,
       sourceTurn: expect.objectContaining({ conversationId: "complete-session", turnId: "complete-turn" })
     }));
     expect(repository.getConversationCheckpoint("codex", "complete-session")).not.toBeNull();

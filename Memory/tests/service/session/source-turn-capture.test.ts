@@ -2,7 +2,7 @@ import { Repositories, RuntimeRepository } from "../../../src/storage/repositori
 import { memoryCaptureQaHash } from "../../../src/utils/memory-capture-claim.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildSourceTurnRequest, readOpencodeSourceTurn } from "@memmy/agent-source-core";
+import { buildSourceTurnRequest, legacyImportTurnId, readOpencodeSourceTurn } from "@memmy/agent-source-core";
 import { MemoryDb } from "../../../src/index.js";
 import type { SourceTurnCompleteRequest } from "../../../src/types.js";
 import { createMemoryServiceFixture, createBatchReflectionLlm, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
@@ -352,6 +352,511 @@ describe("native source turn submission", () => {
     expect(service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, startedAt: "2000-01-01T10:00:00.000Z", completedAt: "2000-01-01T10:01:00.000Z" } }))).toMatchObject({ status: "rejected", reason: "legacy_before_activation" });
     expect(service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, startedAt: "2000-01-01T10:00:00.000Z" } })).status).toBe("stored");
   });
+
+  it("stores pre-activation history for an initial or full scan and still rejects hooks and incremental scans", () => {
+    const { service } = createTestService();
+    const historicalTurn = {
+      ...request().sourceTurn,
+      turnId: "historical-turn",
+      startedAt: "2000-01-01T10:00:00.000Z",
+      completedAt: "2000-01-01T10:01:00.000Z"
+    };
+    const stored = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: historicalTurn
+    }));
+    expect(stored).toMatchObject({ status: "stored", result: { scheduledEvolution: true } });
+    expect(stored.result?.l1MemoryIds).toHaveLength(1);
+    expect(service.completeSourceTurn(request({
+      channel: "hook",
+      captureLegacyHistory: true,
+      sourceTurn: { ...historicalTurn, turnId: "hook-historical" }
+    }))).toMatchObject({ status: "rejected", reason: "legacy_before_activation" });
+    expect(service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      sourceTurn: { ...historicalTurn, turnId: "incremental-historical" }
+    }))).toMatchObject({ status: "rejected", reason: "legacy_before_activation" });
+  });
+
+  it("backfills history ahead of a newer capture without reopening that episode", () => {
+    const { db, service } = createTestService();
+    const newer = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        turnId: "newer-turn",
+        startedAt: "2000-01-02T10:00:00.000Z",
+        completedAt: "2000-01-02T10:01:00.000Z"
+      }
+    }));
+    expect(newer.status).toBe("stored");
+    const newerEpisode = new Repositories(db.db).runtime.getEpisode(newer.result!.episodeId)!;
+    const older = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        turnId: "older-turn",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    const retry = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        turnId: "older-turn",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    expect(older).toMatchObject({ status: "stored", result: { scheduledEvolution: true } });
+    expect(older.result?.sessionId).not.toBe(newer.result?.sessionId);
+    expect(older.result?.episodeId).not.toBe(newer.result?.episodeId);
+    expect(retry).toMatchObject({ status: "existing", result: { l1MemoryId: older.result?.l1MemoryId, duplicate: true } });
+    const preserved = new Repositories(db.db).runtime.getEpisode(newer.result!.episodeId)!;
+    expect(preserved).toMatchObject({ status: "open", l1MemoryIds: newerEpisode.l1MemoryIds, rawTurnIds: newerEpisode.rawTurnIds });
+    expect(new Repositories(db.db).runtime.getSession(newer.result!.sessionId)?.status).toBe("open");
+    expect(new Repositories(db.db).runtime.getSession(older.result!.sessionId)?.status).toBe("closed");
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM source_turn_captures").get()).toEqual({ count: 2 });
+  });
+
+  it("backfills history beside a closed session and a closed episode without reopening them", () => {
+    const { db, service } = createTestService();
+    const runtime = new Repositories(db.db).runtime;
+    const closedSession = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: "closed-session" },
+      meta: { conversationId: "closed-session" }
+    });
+    runtime.closeSession(closedSession.sessionId, "2099-01-01T00:00:00.000Z");
+    const historicalSession = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "closed-session",
+        turnId: "historical-before-closed-session",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    const historicalSessionRetry = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "closed-session",
+        turnId: "historical-before-closed-session",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    expect(historicalSession).toMatchObject({ status: "stored" });
+    expect(historicalSession.result?.sessionId).not.toBe(closedSession.sessionId);
+    expect(historicalSessionRetry).toMatchObject({ status: "existing", result: { duplicate: true } });
+    expect(runtime.getSession(closedSession.sessionId)?.status).toBe("closed");
+    expect(runtime.getSession(historicalSession.result!.sessionId)?.status).toBe("closed");
+
+    const openSession = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: "closed-episode" },
+      meta: { conversationId: "closed-episode" }
+    });
+    const legacy = service.completeTurn("legacy-writer-turn", {
+      sessionId: openSession.sessionId,
+      query: "Implement the source capture transaction",
+      answer: "Implemented and verified the source capture transaction"
+    });
+    runtime.closeEpisode(legacy.episodeId, { closeReason: "evaluated" }, "2099-01-01T00:00:00.000Z");
+    const beforeEpisode = runtime.getEpisode(legacy.episodeId)!;
+    const historicalEpisode = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "closed-episode",
+        turnId: "historical-before-closed-episode",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    const historicalEpisodeRetry = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "closed-episode",
+        turnId: "historical-before-closed-episode",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    expect(historicalEpisode).toMatchObject({ status: "stored" });
+    expect(historicalEpisode.result?.episodeId).not.toBe(legacy.episodeId);
+    expect(historicalEpisodeRetry).toMatchObject({ status: "existing", result: { duplicate: true } });
+    expect(runtime.getEpisode(legacy.episodeId)).toMatchObject({
+      status: "closed",
+      l1MemoryIds: beforeEpisode.l1MemoryIds,
+      rawTurnIds: beforeEpisode.rawTurnIds
+    });
+    expect(runtime.getSession(openSession.sessionId)?.status).toBe("open");
+  });
+
+  it("keeps an explicit closed episode unchanged and rejects an episode from another namespace", () => {
+    const { db, service } = createTestService();
+    const runtime = new Repositories(db.db).runtime;
+    const opened = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: "explicit-episode" },
+      meta: { conversationId: "explicit-episode" }
+    });
+    const legacy = service.completeTurn("legacy-writer", {
+      sessionId: opened.sessionId,
+      query: "Implement the source capture transaction",
+      answer: "Implemented and verified the source capture transaction"
+    });
+    runtime.closeEpisode(legacy.episodeId, { closeReason: "evaluated" }, "2099-01-01T00:00:00.000Z");
+    const before = runtime.getEpisode(legacy.episodeId)!;
+    const historical = service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sessionId: opened.sessionId,
+      episodeId: legacy.episodeId,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "explicit-episode",
+        turnId: "historical-explicit-episode",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    expect(historical).toMatchObject({ status: "stored" });
+    expect(historical.result?.sessionId).not.toBe(opened.sessionId);
+    expect(historical.result?.episodeId).not.toBe(legacy.episodeId);
+    expect(runtime.getEpisode(legacy.episodeId)).toEqual(before);
+    const raw = runtime.getRawTurn(historical.result!.rawTurnId)!;
+    expect(raw.sessionId).toBe(runtime.getEpisode(historical.result!.episodeId)?.sessionId);
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns r JOIN episodes e ON e.id = r.episode_id WHERE r.session_id <> e.session_id").get()).toEqual({ count: 0 });
+
+    const foreignSession = service.openSession({
+      namespace: { userId: "review-b", source: "cursor", profileId: "default", sessionKey: "foreign-conversation" },
+      meta: { conversationId: "foreign-conversation" }
+    });
+    const foreign = service.completeTurn("foreign-turn", {
+      sessionId: foreignSession.sessionId,
+      query: "Implement a separate transaction for the other workspace.",
+      answer: "The separate transaction is ready and verified."
+    });
+    const foreignBefore = runtime.getEpisode(foreign.episodeId)!;
+    expect(service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "review-conversation",
+        turnId: "newer-review-turn",
+        startedAt: "2000-01-02T10:00:00.000Z",
+        completedAt: "2000-01-02T10:01:00.000Z"
+      }
+    })).status).toBe("stored");
+    expect(() => service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      episodeId: foreign.episodeId,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId: "review-conversation",
+        turnId: "cross-namespace-history",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }))).toThrow("source_episode_scope_conflict");
+    expect(runtime.getEpisode(foreign.episodeId)).toEqual(foreignBefore);
+  });
+
+  it("does not recreate a source turn already completed by the old writer", () => {
+    const { db, service } = createTestService();
+    const runtime = new Repositories(db.db).runtime;
+    const content = {
+      query: "Implement capture identity transactions.",
+      answer: "Implemented and verified the capture identity transaction."
+    };
+    const historicalTurn = {
+      ...request().sourceTurn,
+      conversationId: "legacy-writer-conversation",
+      turnId: "same-native-turn",
+      startedAt: "2000-01-01T10:00:00.000Z",
+      completedAt: "2000-01-01T10:01:00.000Z"
+    };
+    const opened = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: historicalTurn.conversationId },
+      meta: { conversationId: historicalTurn.conversationId }
+    });
+    const old = service.completeTurn("same-native-turn", { sessionId: opened.sessionId, ...content });
+    runtime.closeEpisode(old.episodeId, { closeReason: "evaluated" }, "2099-01-01T00:00:00.000Z");
+    const scan = () => service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: historicalTurn,
+      ...content
+    }));
+    const activeMemories = () => (db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL").get() as { count: number }).count;
+    const rawCount = () => (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE turn_id = ?").get("same-native-turn") as { count: number }).count;
+    const before = activeMemories();
+    expect(scan()).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+    expect(scan()).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+    expect(rawCount()).toBe(1);
+    expect(activeMemories()).toBe(before);
+
+    const closed = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: "legacy-closed-session" },
+      meta: { conversationId: "legacy-closed-session" }
+    });
+    service.completeTurn("same-native-turn", { sessionId: closed.sessionId, ...content });
+    service.closeSession(closed.sessionId);
+    const closedBefore = activeMemories();
+    const closedRawBefore = (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE turn_id = ?").get("same-native-turn") as { count: number }).count;
+    expect(service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: { ...historicalTurn, conversationId: "legacy-closed-session" },
+      ...content
+    }))).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+    expect(activeMemories()).toBe(closedBefore);
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE turn_id = ?").get("same-native-turn") as { count: number }).count).toBe(closedRawBefore);
+
+    const deleted = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: "legacy-deleted" },
+      meta: { conversationId: "legacy-deleted" }
+    });
+    const deletedTurn = service.completeTurn("same-native-turn", { sessionId: deleted.sessionId, ...content });
+    runtime.closeEpisode(deletedTurn.episodeId, { closeReason: "evaluated" }, "2099-01-01T00:00:00.000Z");
+    service.deleteMemory(deletedTurn.l1MemoryId, { namespace: request().namespace });
+    const deletedBefore = activeMemories();
+    expect(service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      sourceTurn: { ...historicalTurn, conversationId: "legacy-deleted" },
+      ...content
+    }))).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+    expect(activeMemories()).toBe(deletedBefore);
+  });
+
+  it("reuses an old agent-source import and keeps it deleted", () => {
+    const { db, service } = createTestService();
+    const conversationId = request().sourceTurn.conversationId;
+    const firstUserMessageId = "legacy-user-message";
+    const importedTurnId = legacyImportTurnId("codex", conversationId, firstUserMessageId);
+    const content = {
+      query: "Implement capture identity transactions.",
+      answer: "Implemented and verified the capture identity transaction."
+    };
+    const imported = service.addMemory({
+      namespace: request().namespace,
+      adapterId: "agent-source:codex",
+      turnId: importedTurnId,
+      source: "codex",
+      content: `## user\n\n${content.query}\n\n## assistant\n\n${content.answer}`,
+      layer: "L1",
+      title: content.query,
+      tags: ["agent-source", "codex"]
+    });
+    const historical = () => service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      legacyImportTurnId: importedTurnId,
+      ...content,
+      sourceTurn: {
+        ...request().sourceTurn,
+        turnId: "native-after-import",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    expect(historical()).toMatchObject({ status: "existing", legacyImportMemoryId: imported.id });
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL").get() as { count: number }).count).toBe(1);
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(0);
+    service.deleteMemory(imported.id, { namespace: request().namespace });
+    expect(historical()).toMatchObject({ status: "rejected", reason: "capture_deleted" });
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL").get() as { count: number }).count).toBe(0);
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(0);
+  });
+
+  it("does not reuse an old import from the same project and a different workspace", () => {
+    const { db, service } = createTestService();
+    const conversationId = "workspace-scope";
+    const importedTurnId = legacyImportTurnId("codex", conversationId, "legacy-user-message");
+    const content = {
+      query: "Implement capture identity transactions.",
+      answer: "Implemented and verified the capture identity transaction."
+    };
+    const opened = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: conversationId, projectId: "project-p", workspaceId: "workspace-a" },
+      meta: { conversationId }
+    });
+    const imported = service.addMemory({
+      sessionId: opened.sessionId,
+      namespace: { ...request().namespace!, projectId: "project-p", workspaceId: "workspace-a" },
+      adapterId: "agent-source:codex",
+      turnId: importedTurnId,
+      source: "codex",
+      content: `## user\n\n${content.query}\n\n## assistant\n\n${content.answer}`,
+      layer: "L1",
+      title: content.query,
+      tags: ["agent-source", "codex"]
+    });
+    const scan = (workspaceId: string) => service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      legacyImportTurnId: importedTurnId,
+      namespace: { ...request().namespace!, projectId: "project-p", workspaceId },
+      ...content,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId,
+        turnId: `native-${workspaceId}`,
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }));
+    const otherWorkspace = scan("workspace-b");
+    expect(otherWorkspace.status).toBe("stored");
+    expect(otherWorkspace.legacyImportMemoryId).toBeUndefined();
+    service.deleteMemory(imported.id, { namespace: { ...request().namespace!, projectId: "project-p", workspaceId: "workspace-a" } });
+    const afterDelete = scan("workspace-c");
+    expect(afterDelete.status).toBe("stored");
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL AND id != ?").get(imported.id) as { count: number }).count).toBe(2);
+  });
+
+  it.each(["projectId", "workspaceId"] as const)(
+    "does not recreate an unkeyed %s turn, including after it was deleted",
+    (dimension) => {
+      const { db, service } = createTestService();
+      const content = {
+        query: "Implement capture identity transactions.",
+        answer: "Implemented and verified the capture identity transaction."
+      };
+      const scan = (conversationId: string, scopeValue: string) => service.completeSourceTurn(request({
+        channel: "agent_source_scan",
+        captureLegacyHistory: true,
+        namespace: {
+          ...request().namespace!,
+          sessionKey: conversationId,
+          [dimension]: scopeValue
+        },
+        ...content,
+        sourceTurn: {
+          ...request().sourceTurn,
+          conversationId,
+          turnId: "same-native-turn",
+          startedAt: "2000-01-01T10:00:00.000Z",
+          completedAt: "2000-01-01T10:01:00.000Z"
+        }
+      }));
+      const prepare = (conversationId: string, deleted: boolean) => {
+        const namespace = {
+          ...request().namespace!,
+          sessionKey: conversationId,
+          [dimension]: "original-scope"
+        };
+        const opened = service.openSession({ namespace, meta: { conversationId } });
+        const old = service.completeTurn("same-native-turn", { sessionId: opened.sessionId, ...content });
+        service.closeSession(opened.sessionId);
+        if (deleted) service.deleteMemory(old.l1MemoryId, { namespace });
+        const stored = db.db.prepare("SELECT project_id, workspace_id, meta_json FROM sessions WHERE id = ?")
+          .get(opened.sessionId) as { project_id: string | null; workspace_id: string | null; meta_json: string };
+        expect(stored[dimension === "projectId" ? "project_id" : "workspace_id"]).toBe("original-scope");
+        expect(JSON.parse(stored.meta_json).source_namespace_key).toBeUndefined();
+        return old.l1MemoryId;
+      };
+      const activeMemories = () => (db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL").get() as { count: number }).count;
+      const rawCount = () => (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE turn_id = ?").get("same-native-turn") as { count: number }).count;
+
+      prepare(`unkeyed-${dimension}`, false);
+      const keptBefore = activeMemories();
+      expect(scan(`unkeyed-${dimension}`, "original-scope")).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+      expect(rawCount()).toBe(1);
+      expect(activeMemories()).toBe(keptBefore);
+
+      prepare(`unkeyed-${dimension}-deleted`, true);
+      const deletedBefore = activeMemories();
+      const rawBeforeDeleteScan = rawCount();
+      expect(scan(`unkeyed-${dimension}-deleted`, "original-scope")).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+      expect(rawCount()).toBe(rawBeforeDeleteScan);
+      expect(activeMemories()).toBe(deletedBefore);
+
+      prepare(`unkeyed-${dimension}-other`, false);
+      const other = scan(`unkeyed-${dimension}-other`, "other-scope");
+      expect(other.status).toBe("stored");
+      expect(other.result?.l1MemoryId).toBeTruthy();
+    }
+  );
+
+  it("still treats an unkeyed project session as completed for a default-scope scan", () => {
+    const { service } = createTestService();
+    const conversationId = "unkeyed-project-to-default";
+    const content = {
+      query: "Implement capture identity transactions.",
+      answer: "Implemented and verified the capture identity transaction."
+    };
+    const opened = service.openSession({
+      namespace: { ...request().namespace!, sessionKey: conversationId, projectId: "project-a" },
+      meta: { conversationId }
+    });
+    service.completeTurn("same-native-turn", { sessionId: opened.sessionId, ...content });
+    service.closeSession(opened.sessionId);
+    expect(service.completeSourceTurn(request({
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      namespace: { ...request().namespace!, sessionKey: conversationId },
+      ...content,
+      sourceTurn: {
+        ...request().sourceTurn,
+        conversationId,
+        turnId: "same-native-turn",
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:01:00.000Z"
+      }
+    }))).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+  });
+
+  it.each(["projectId", "workspaceId", "tenantId"] as const)(
+    "backfills the same historical turn into a different %s scope",
+    (dimension) => {
+      const { db, service } = createTestService();
+      const conversationId = `scoped-conversation-${dimension}`;
+      const base = { ...request().namespace!, sessionKey: conversationId };
+      const content = {
+        query: "Implement capture identity transactions.",
+        answer: "Implemented and verified the capture identity transaction."
+      };
+      const capture = (scopeValue: string, turnId: string, day: "01" | "02") => service.completeSourceTurn(request({
+        channel: "agent_source_scan",
+        captureLegacyHistory: true,
+        namespace: { ...base, [dimension]: scopeValue },
+        ...content,
+        sourceTurn: {
+          ...request().sourceTurn,
+          conversationId,
+          turnId,
+          startedAt: `2000-01-${day}T10:00:00.000Z`,
+          completedAt: `2000-01-${day}T10:01:00.000Z`
+        }
+      }));
+      const first = capture("scope-a", "same-native-turn", "01");
+      const newer = capture("scope-b", "newer-turn", "02");
+      const historical = capture("scope-b", "same-native-turn", "01");
+      const retry = capture("scope-b", "same-native-turn", "01");
+      expect(first.status).toBe("stored");
+      expect(newer.status).toBe("stored");
+      expect(historical).toMatchObject({ status: "stored" });
+      expect(historical.result?.sessionId).not.toBe(first.result?.sessionId);
+      expect(retry).toMatchObject({ status: "existing", result: { l1MemoryId: historical.result?.l1MemoryId, duplicate: true } });
+      const captures = db.db.prepare("SELECT namespace_key, turn_id FROM source_turn_captures WHERE turn_id = ?").all("same-native-turn") as Array<{ namespace_key: string }>;
+      expect(new Set(captures.map((row) => row.namespace_key)).size).toBe(2);
+    }
+  );
 
   it("fills a missing turn bounded by captured turns in the same open Episode", () => {
     const { db, service } = createTestService();

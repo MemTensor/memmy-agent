@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, type ConversationMessage } from "../index.js";
+import { readCodexRollout, readCodexSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages, buildSourceTurnRequest, orderedTurns, legacyImportTurnId, legacyImportTurnIdFromMessages, type ConversationMessage } from "../index.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const path of dirs.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -37,6 +37,11 @@ describe("Codex native source turns", () => {
     const staged = messages.map(m => ({ ...m, sourceId: "codex", workspacePath: null, gitRoot: null })) as ConversationMessage[];
     expect(await collect(orderedTurns((async function* () { yield* staged; })()))).toHaveLength(1);
     expect(buildSourceTurnRequest(turn!, "hook").sourceTurn).toEqual(buildSourceTurnRequest(turn!, "agent_source_scan").sourceTurn);
+    const firstUser = messages.find((item) => item.role === "user");
+    expect(firstUser?.rawMeta.legacyMessageId).toBe("rollout-file:3");
+    expect(firstUser?.rawMeta.legacyConversationId).toBe("rollout-file");
+    expect(firstUser?.messageId).toBe("rollout-file:000000000003");
+    expect(legacyImportTurnIdFromMessages("codex", "conversation", staged)).toBe(legacyImportTurnId("codex", "rollout-file", "rollout-file:3"));
   });
 
   it("does not create a canonical turn without native identity, completion, or matching completion", async () => {

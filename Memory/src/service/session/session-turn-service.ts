@@ -1259,6 +1259,13 @@ export class SessionTurnService {
         if (existing.contentHash !== contentHash) {
           return { status: "conflict", reason: "source_turn_content_conflict" };
         }
+        if (existing.response.legacyImportMemoryId) {
+          const memory = this.deps.repos.memories.getIncludingDeleted(existing.response.legacyImportMemoryId);
+          if (!memory || memory.status === "deleted" || memory.deletedAt) {
+            return { status: "rejected", reason: "capture_deleted", legacyImportMemoryId: existing.response.legacyImportMemoryId };
+          }
+          return { status: "existing", legacyImportMemoryId: memory.id };
+        }
         const result = existing.response.result;
         if (!result) return existing.response;
         const responseResult = { ...result, duplicate: true, scheduledEvolution: false, jobs: [] };
@@ -1279,7 +1286,7 @@ export class SessionTurnService {
       if (typeof activation !== "string" || !Number.isFinite(Date.parse(activation))) {
         return { status: "pending", reason: "source_capture_activation_unresolved" };
       }
-      if (completedAtMs <= Date.parse(activation)) {
+      if (completedAtMs <= Date.parse(activation) && !allowsLegacyHistoryCapture(request)) {
         return { status: "rejected", reason: "legacy_before_activation" };
       }
       const hasTools = normalizeCompleteTurnToolCalls(normalized).length > 0
@@ -1291,38 +1298,49 @@ export class SessionTurnService {
       if (!this.deps.memoryAddEnabled()) {
         return { status: "pending", reason: "memory_add_disabled" };
       }
+      const adoptedImport = this.adoptLegacyImport(request, namespace, normalized, scope, contentHash);
+      if (adoptedImport) return adoptedImport;
       const previous = this.deps.repos.runtime.latestSourceTurnCapture(scope);
       let gapEpisode: EpisodeRecord | undefined;
       let targetSessionId = previous?.sessionId;
+      const legacyBackfill = allowsLegacyHistoryCapture(request);
+      const detachLegacyHistory = (reason: string): SourceTurnCompleteResponse => {
+        if (!legacyBackfill) return { status: "pending", reason };
+        return this.captureDetachedLegacyHistory(request, normalized, sourceTurn, scope, contentHash);
+      };
       if (previous && (startedAtMs < Date.parse(previous.startedAt) || completedAtMs < Date.parse(previous.completedAt))) {
         const neighbors = this.deps.repos.runtime.sourceTurnCaptureNeighbors(scope, sourceTurn.startedAt);
         const before = neighbors.before;
         const after = neighbors.after;
         if (!before?.episodeId || before.episodeId !== after?.episodeId || before.sessionId !== after.sessionId ||
             Date.parse(before.completedAt) > startedAtMs || completedAtMs > Date.parse(after.startedAt)) {
-          return { status: "pending", reason: "source_turn_out_of_order" };
+          return detachLegacyHistory("source_turn_out_of_order");
         }
         const candidate = this.deps.repos.runtime.getEpisode(before.episodeId);
         const beforeRaw = before.rawTurnId ? this.deps.repos.runtime.getRawTurn(before.rawTurnId) : undefined;
         if (!candidate || candidate.status !== "open" || !beforeRaw) {
-          return { status: "pending", reason: "source_episode_closed" };
+          return detachLegacyHistory("source_episode_closed");
         }
         const relation = classifyTurnRelation({
           prevUserText: beforeRaw.userText ?? "", prevAssistantText: beforeRaw.assistantText ?? "",
           newUserText: normalized.query, gapMs: startedAtMs - Date.parse(before.completedAt), prevTags: []
         });
         if (relation.relation === "new_task" || relation.relation === "end_topic" || explicitEndTopicDecision(normalized.query)) {
-          return { status: "pending", reason: "source_turn_out_of_order" };
+          return detachLegacyHistory("source_turn_out_of_order");
         }
         gapEpisode = candidate;
         targetSessionId = before.sessionId;
       }
       const resolved = this.resolveSourceSession({ ...request, namespace }, sourceTurn, scope, targetSessionId);
-      if ("status" in resolved && resolved.status === "pending") return resolved;
+      if ("status" in resolved && resolved.status === "pending") {
+        return resolved.reason === "source_session_closed"
+          ? detachLegacyHistory(resolved.reason)
+          : resolved;
+      }
       const session = resolved as SessionRecord;
       const observed = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, identity.turnId);
       if (observed && this.deps.repos.runtime.getEpisode(observed.episodeId)?.status !== "open") {
-        return { status: "pending", reason: "source_episode_closed" };
+        return detachLegacyHistory("source_episode_closed");
       }
       const requestedEpisodeId = gapEpisode?.id ?? request.episodeId;
       const episode = requestedEpisodeId
@@ -1337,13 +1355,11 @@ export class SessionTurnService {
         // reopen an evaluated Episode merely because an offline turn arrived late.
         if (request.episodeId || proposal.relationDecision.relation !== "new_task" ||
             startedAtMs < Date.parse(episode.closedAt ?? episode.updatedAt)) {
-          return { status: "pending", reason: "source_episode_closed" };
+          return detachLegacyHistory("source_episode_closed");
         }
       }
-      if (episode && !gapEpisode) {
-        const laterRaw = episode.rawTurnIds.map((id) => this.deps.repos.runtime.getRawTurn(id))
-          .some((raw) => raw && raw.turnId !== identity.turnId && Date.parse(raw.createdAt) > startedAtMs);
-        if (laterRaw) return { status: "pending", reason: "source_turn_out_of_order" };
+      if (episode && !gapEpisode && this.deps.repos.runtime.episodeHasLaterRawTurn(episode.id, identity.turnId, sourceTurn.startedAt)) {
+        return detachLegacyHistory("source_turn_out_of_order");
       }
       if (observed && isRecord(observed.messagePayload?.turn_complete)) {
         // An old writer has already completed this turn without the source ledger. Do not
@@ -1373,6 +1389,178 @@ export class SessionTurnService {
         response, createdAt: nowIso()
       });
       return response;
+    });
+  }
+
+  private adoptLegacyImport(
+    request: SourceTurnCompleteRequest,
+    namespace: ReturnType<typeof normalizeNamespace>,
+    normalized: TurnCompleteRequest,
+    scope: SourceTurnCaptureScope,
+    contentHash: string
+  ): SourceTurnCompleteResponse | undefined {
+    const legacyTurnId = request.legacyImportTurnId?.trim();
+    if (!legacyTurnId) return undefined;
+    const source = request.sourceTurn.source;
+    const memories = this.deps.repos.memories.listUserMemoriesByKeyIncludingDeleted(
+      namespace.userId,
+      `memory.add:agent-source:${source}:turn:${legacyTurnId}`
+    ).filter((memory) => legacyImportMatchesScope(memory, namespace, source, legacyTurnId));
+    if (memories.length === 0) return undefined;
+    if (memories.length > 1) return { status: "pending", reason: "legacy_identity_unresolved" };
+    const memory = memories[0]!;
+    const texts = legacyImportTexts(memory);
+    const deleted = memory.status === "deleted" || Boolean(memory.deletedAt);
+    if (!deleted && texts.user && texts.agent && (texts.user !== normalized.query || texts.agent !== normalized.answer)) {
+      return { status: "conflict", reason: "legacy_import_content_conflict" };
+    }
+    const response: SourceTurnCompleteResponse = deleted
+      ? { status: "rejected", reason: "capture_deleted", legacyImportMemoryId: memory.id }
+      : { status: "existing", legacyImportMemoryId: memory.id };
+    this.deps.repos.runtime.insertSourceTurnCapture({
+      ...scope,
+      turnId: request.sourceTurn.turnId,
+      contentHash,
+      startedAt: request.sourceTurn.startedAt,
+      completedAt: request.sourceTurn.completedAt,
+      sequence: request.sourceTurn.sequence,
+      response,
+      createdAt: nowIso()
+    });
+    return response;
+  }
+
+  private captureDetachedLegacyHistory(
+    request: SourceTurnCompleteRequest,
+    normalized: TurnCompleteRequest,
+    sourceTurn: SourceTurnIdentity,
+    scope: SourceTurnCaptureScope,
+    contentHash: string
+  ): SourceTurnCompleteResponse {
+    const namespace = normalizeNamespace(request.namespace);
+    this.assertExplicitEpisodeInSourceScope(request, namespace, sourceTurn, scope);
+    if (this.completedLegacySourceTurn(namespace, scope, sourceTurn.turnId)) {
+      return { status: "pending", reason: "legacy_source_turn_already_completed" };
+    }
+    const opened = this.openSession({
+      namespace: { ...namespace, sessionKey: sourceTurn.conversationId },
+      source: sourceTurn.source,
+      profileId: sourceTurn.profileId,
+      workspacePath: request.workspacePath,
+      meta: {
+        conversationId: sourceTurn.conversationId,
+        source_namespace_key: scope.namespaceKey,
+        legacy_history_backfill: true
+      },
+      timeZone: request.timeZone
+    }, { createNew: true, at: sourceTurn.startedAt });
+    const withoutEpisode = { ...normalized };
+    delete withoutEpisode.episodeId;
+    const result = this.completeTurn(sourceTurn.turnId, {
+      ...withoutEpisode,
+      sessionId: opened.sessionId
+    }, sourceTurn);
+    const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
+      ? { status: "stored", result }
+      : { status: "rejected", reason: "capture_policy", result };
+    this.deps.repos.runtime.insertSourceTurnCapture({
+      ...scope,
+      turnId: sourceTurn.turnId,
+      contentHash,
+      sessionId: result.sessionId,
+      episodeId: result.episodeId,
+      rawTurnId: result.rawTurnId,
+      startedAt: sourceTurn.startedAt,
+      completedAt: sourceTurn.completedAt,
+      sequence: sourceTurn.sequence,
+      response,
+      createdAt: nowIso()
+    });
+    this.sealDetachedLegacySession(opened.sessionId, sourceTurn.completedAt);
+    return response;
+  }
+
+  private assertExplicitEpisodeInSourceScope(
+    request: SourceTurnCompleteRequest,
+    namespace: ReturnType<typeof normalizeNamespace>,
+    sourceTurn: SourceTurnIdentity,
+    scope: SourceTurnCaptureScope
+  ): void {
+    if (!request.episodeId) return;
+    const episode = this.deps.repos.runtime.getEpisode(request.episodeId);
+    const episodeSession = episode ? this.deps.repos.runtime.getSession(episode.sessionId) : undefined;
+    const inScope = Boolean(episode && episodeSession &&
+      episode.userId === namespace.userId &&
+      episodeSession.userId === namespace.userId &&
+      episodeSession.source === sourceTurn.source &&
+      episodeSession.profileId === sourceTurn.profileId &&
+      (!episodeSession.conversationId || episodeSession.conversationId === sourceTurn.conversationId) &&
+      (episodeSession.hostSessionKey === sourceTurn.conversationId ||
+        episodeSession.conversationId === sourceTurn.conversationId ||
+        episodeSession.hostSessionKey === `${sourceTurn.source}-memory-${sourceTurn.conversationId}`) &&
+      (!namespace.projectId || episodeSession.projectId === namespace.projectId) &&
+      (!namespace.workspaceId || episodeSession.workspaceId === namespace.workspaceId) &&
+      (episodeSession.meta.source_namespace_key === undefined ||
+        episodeSession.meta.source_namespace_key === scope.namespaceKey) &&
+      (!namespace.tenantId || episodeSession.meta.source_namespace_key === scope.namespaceKey));
+    if (!inScope) {
+      throw new MemoryServiceError("forbidden", "source_episode_scope_conflict");
+    }
+  }
+
+  private completedLegacySourceTurn(
+    namespace: ReturnType<typeof normalizeNamespace>,
+    scope: SourceTurnCaptureScope,
+    turnId: string
+  ): boolean {
+    return this.deps.repos.runtime.hasCompletedSourceTurnInScope({
+      userId: scope.userId,
+      source: scope.source,
+      profileId: scope.profileId,
+      conversationId: scope.conversationId,
+      turnId,
+      namespaceKey: scope.namespaceKey,
+      defaultNamespaceKey: stableHash({ tenantId: null, projectId: null, workspaceId: null }),
+      tenantId: namespace.tenantId ?? null,
+      storedProjectId: namespace.projectId ?? namespace.workspaceId ?? null,
+      workspaceId: namespace.workspaceId ?? null
+    });
+  }
+
+  /** Close only the session created for one historical turn. Live sessions stay untouched. */
+  private sealDetachedLegacySession(sessionId: string, at: string): void {
+    const existing = this.deps.repos.runtime.getSession(sessionId);
+    if (!existing || existing.status !== "open") return;
+    const closedEpisodes = this.deps.repos.runtime.closeOpenEpisodesForSession(sessionId, at);
+    const session = this.deps.repos.runtime.closeSession(sessionId, at);
+    if (!session) return;
+    for (const episode of closedEpisodes) {
+      this.deps.repos.runtime.appendChange({
+        memoryId: episode.id,
+        namespaceId: this.deps.namespaceIdFromSession(session),
+        kind: "episode",
+        op: "updated",
+        entityId: episode.id,
+        userId: episode.userId,
+        changeType: "episode_closed",
+        after: episode,
+        source: "source_turn.legacy_history",
+        createdAt: at
+      });
+      this.deps.finalizeClosedEpisode(episode, at, "session_closed");
+    }
+    this.deps.repos.runtime.appendChange({
+      memoryId: session.id,
+      namespaceId: this.deps.namespaceIdFromSession(session),
+      kind: "session",
+      op: "updated",
+      entityId: session.id,
+      userId: session.userId,
+      changeType: "session_closed",
+      before: existing,
+      after: session,
+      source: "source_turn.legacy_history",
+      createdAt: at
     });
   }
 
@@ -2358,7 +2546,10 @@ export class SessionTurnService {
       };
     }
 
-    const llmDraft = await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
+    const deferDecisionRepair = this.deps.shouldDeferBudgetedEvolutionLlm?.() === true;
+    const llmDraft = deferDecisionRepair
+      ? undefined
+      : await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
     const preference = llmDraft?.preference ?? failureBurstPreference(burst, reason, evidence.highValueMemories[0]);
     const antiPattern = llmDraft?.antiPattern ?? failureBurstAntiPattern(burst, reason);
     const repair = this.deps.repos.runtime.insertDecisionRepair({
@@ -2429,6 +2620,21 @@ export class SessionTurnService {
       },
       createdAt: at
     });
+    if (deferDecisionRepair) {
+      this.deps.enqueueJob({
+        jobType: "decision_repair",
+        userId: session.userId,
+        sessionId: session.id,
+        episodeId: episode.id,
+        dedupeKey: `decision_repair:${repair.id}`,
+        payload: {
+          repairId: repair.id,
+          trigger: "failure-burst",
+          feedbackText: `${burst.toolId}: ${reason}`
+        },
+        createdAt: at
+      });
+    }
     return {
       repairId: repair.id,
       contextHash: burst.contextHash,
@@ -2806,13 +3012,15 @@ export class SessionTurnService {
     at: string,
     currentTurnOnly = false
   ): ReturnType<typeof captureTurnSteps> {
-    const seenRawTurnIds = new Set(
-      episode.l1MemoryIds
-        .map((id) => this.deps.repos.memories.getIncludingDeleted(id))
-        .filter((memory): memory is MemoryRow => Boolean(memory))
-        .map((memory) => this.deps.rawTurnIdFromMemory(memory))
-        .filter((id): id is string => Boolean(id))
-    );
+    const seenRawTurnIds = currentTurnOnly
+      ? new Set<string>()
+      : new Set(
+          episode.l1MemoryIds
+            .map((id) => this.deps.repos.memories.getIncludingDeleted(id))
+            .filter((memory): memory is MemoryRow => Boolean(memory))
+            .map((memory) => this.deps.rawTurnIdFromMemory(memory))
+            .filter((id): id is string => Boolean(id))
+        );
     const rawTurns = uniq(currentTurnOnly ? [currentRawTurn.id] : [...episode.rawTurnIds, currentRawTurn.id])
       .map((id) => id === currentRawTurn.id ? currentRawTurn : this.deps.repos.runtime.getRawTurn(id))
       .filter((rawTurn): rawTurn is RawTurnRecord =>
@@ -3223,32 +3431,18 @@ export class SessionTurnService {
     lastTurnAtMs?: number;
     tags: string[];
   } {
-    const rawTurns = episode.rawTurnIds
-      .map((id) => this.deps.repos.runtime.getRawTurn(id))
-      .filter((rawTurn): rawTurn is RawTurnRecord => Boolean(rawTurn))
-      .filter((rawTurn) => isRecord(rawTurn.messagePayload?.turn_complete))
-      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-    const userTurns = rawTurns
-      .map((rawTurn) => rawTurn.userText?.trim())
-      .filter((text): text is string => Boolean(text));
-    const assistantTurns = rawTurns
-      .map((rawTurn) => rawTurn.assistantText?.trim())
-      .filter((text): text is string => Boolean(text));
-    const firstUser = userTurns[0] ?? "";
-    const lastUser = userTurns[userTurns.length - 1] ?? "";
-    const lastAssistant = assistantTurns[assistantTurns.length - 1] ?? "";
+    const relationTexts = this.deps.repos.runtime.episodeRelationTexts(episode.id, episode.rawTurnIds);
+    const firstUser = relationTexts.firstUser;
+    const lastUser = relationTexts.lastUser;
+    const lastAssistant = relationTexts.lastAssistant;
     const prevUserText = firstUser && lastUser && firstUser !== lastUser
       ? [
           `[Task topic]: ${firstUser.slice(0, 300)}`,
           `[Latest user message]: ${lastUser.slice(0, 700)}`
         ].join("\n\n")
       : (lastUser || firstUser).slice(0, 1000);
-    const tags = uniq(
-      episode.l1MemoryIds.flatMap((id) => this.deps.repos.memories.get(id)?.tags ?? [])
-    );
-    const lastTurnAtMs = rawTurns.length > 0
-      ? Date.parse(rawTurns[rawTurns.length - 1]!.createdAt)
-      : undefined;
+    const tags = this.deps.repos.memories.listMemoryTags(episode.l1MemoryIds);
+    const lastTurnAtMs = relationTexts.lastCompletedAt ? Date.parse(relationTexts.lastCompletedAt) : undefined;
     return {
       prevUserText,
       prevAssistantText: lastAssistant.slice(0, 2000),
@@ -3523,4 +3717,51 @@ function v2SessionMeta(
 function optionalMetaString(meta: Record<string, unknown>, key: string): string | undefined {
   const value = meta[key];
   return typeof value === "string" && value ? value : undefined;
+}
+
+/** Historical backfill is limited to initial and full scans. Hooks cannot opt in. */
+function allowsLegacyHistoryCapture(request: SourceTurnCompleteRequest): boolean {
+  return request.channel === "agent_source_scan" && request.captureLegacyHistory === true;
+}
+
+function recordText(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function legacyImportTexts(memory: MemoryRow): { user?: string; agent?: string } {
+  const internal = memory.properties.internal_info;
+  const trace = isRecord(internal.trace) ? internal.trace : isRecord(memory.info.trace) ? memory.info.trace : undefined;
+  return {
+    user: recordText(trace, "user_text") ?? recordText(trace, "userText"),
+    agent: recordText(trace, "agent_text") ?? recordText(trace, "agentText")
+  };
+}
+
+function legacyImportMatchesScope(
+  memory: MemoryRow,
+  namespace: ReturnType<typeof normalizeNamespace>,
+  source: string,
+  legacyTurnId: string
+): boolean {
+  const info = memory.info;
+  const internal = memory.properties.internal_info;
+  const turnId = recordText(info, "turn_id") ?? recordText(internal, "turn_id");
+  const memorySource = recordText(info, "source") ?? memory.agentId;
+  const profileId = recordText(info, "profile_id");
+  const projectId = recordText(info, "project_id");
+  if (turnId && turnId !== legacyTurnId) return false;
+  if (memorySource && memorySource !== source) return false;
+  if (profileId && profileId !== namespace.profileId) return false;
+  if (namespace.tenantId) return false;
+  const requestProject = namespace.projectId ?? null;
+  const requestWorkspace = namespace.workspaceId ?? null;
+  const memoryProject = projectId ?? null;
+  const memoryWorkspace = memory.appId ?? null;
+  if (requestWorkspace && !requestProject) {
+    return memoryWorkspace === requestWorkspace && (memoryProject === requestWorkspace || memoryProject === null);
+  }
+  if (requestProject !== memoryProject) return false;
+  if (requestWorkspace !== memoryWorkspace) return false;
+  return true;
 }

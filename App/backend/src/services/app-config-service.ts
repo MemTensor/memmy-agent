@@ -108,6 +108,13 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
         await options.memoryClient?.reloadConfig({ reason: "app_language_saved" });
       }
       const settings = options.bootstrapRepository.updateAppSettings(input);
+      if (input.memoryByokDailyLimitM !== undefined || input.memoryByokTotalLimitM !== undefined) {
+        await options.memmyConfigWriter?.writeMemoryTokenBudget?.({
+          dailyLimitM: settings.memoryByokDailyLimitM,
+          totalLimitM: settings.memoryByokTotalLimitM
+        });
+        await options.memoryClient?.reloadConfig({ reason: "memory_token_budget_saved" });
+      }
       preserveCompletedGuideWhenSwitchingToByok(previousOnboarding, options);
       return settings;
     },

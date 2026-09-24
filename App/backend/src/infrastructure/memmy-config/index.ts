@@ -126,6 +126,9 @@ export interface MemmyConfigWriter {
   /** Publish the interface language so Memory can write memories in it. */
   writeMemoryLanguage?(language: Language): Promise<void>;
 
+  /** Publish custom-key memory pipeline token caps so the Memory worker can pause. */
+  writeMemoryTokenBudget?(budget: { dailyLimitM: number; totalLimitM: number }): Promise<void>;
+
   writeModelConfig?(input: ModelConfigInput): Promise<ModelConfigView>;
 
   /**
@@ -217,6 +220,17 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
       await mutateRuntimeConfig(configPath, (config) => {
         const memory = asRecord(config.memmyMemory) ?? {};
         memory.language = resolved;
+        config.memmyMemory = memory;
+      });
+    },
+
+    async writeMemoryTokenBudget(budget) {
+      await mutateRuntimeConfig(configPath, (config) => {
+        const memory = asRecord(config.memmyMemory) ?? {};
+        memory.tokenBudget = {
+          dailyLimitM: budget.dailyLimitM,
+          totalLimitM: budget.totalLimitM
+        };
         config.memmyMemory = memory;
       });
     },

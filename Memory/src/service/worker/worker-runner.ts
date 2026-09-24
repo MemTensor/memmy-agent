@@ -4,6 +4,9 @@
  * Read-only behavior, durable write helpers, and job-specific execution are
  * injected explicitly so this module has no service-class dependency.
  */
+import {
+  allowedMemoryBudgetJobTypes
+} from "@memmy/agent-source-core";
 import type { Embedder } from "../../model/types.js";
 import {
   retrievalDocumentIsCurrent,
@@ -109,6 +112,11 @@ export interface WorkerRunnerDeps {
   capture: { embedAfterCapture: boolean };
   embeddingRetryWorkerId: string;
   memoryAddEnabled: () => boolean;
+  memoryBudgetPaused: () => boolean;
+  memoryBudgetJobConsumes: (jobType: string) => boolean;
+  memoryBudgetModelSources: () => Parameters<typeof allowedMemoryBudgetJobTypes>[0];
+  memoryBudgetNextWakeAtMs: () => number;
+  memoryBudgetNextReconcileAtMs?: () => number | undefined;
   nowIso: () => string;
   nowMs?: () => number;
   encodeChangeCursor: (changeSeq: number) => string;
@@ -150,9 +158,23 @@ export class WorkerRunner {
   constructor(private readonly deps: WorkerRunnerDeps) {}
 
   nextWorkerRunAt(): number | undefined {
-    return this.deps.memoryAddEnabled()
-      ? this.deps.repos.runtime.nextWorkerRunAt()
-      : undefined;
+    if (!this.deps.memoryAddEnabled()) {
+      return undefined;
+    }
+    const reconcileAt = this.deps.memoryBudgetNextReconcileAtMs?.();
+    if (this.deps.memoryBudgetPaused()) {
+      const allowed = allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources());
+      const allowedAt = this.deps.repos.runtime.nextWorkerRunAt({
+        jobTypes: allowed,
+        includeEmbeddingRetries: !this.deps.memoryBudgetJobConsumes("embedding")
+      });
+      const midnight = this.deps.memoryBudgetNextWakeAtMs();
+      const times = [allowedAt, midnight, reconcileAt].filter((time): time is number => Number.isFinite(time));
+      return times.length > 0 ? Math.min(...times) : undefined;
+    }
+    const scheduled = this.deps.repos.runtime.nextWorkerRunAt();
+    const times = [scheduled, reconcileAt].filter((time): time is number => Number.isFinite(time));
+    return times.length > 0 ? Math.min(...times) : undefined;
   }
 
   reconcileWorkerStartup(limit = 10000): WorkerStartupReconciliation {
@@ -370,27 +392,60 @@ export class WorkerRunner {
     for (const { before, after } of requeuedJobs) {
       this.deps.appendJobChange(after, "queued", before);
     }
+    const pausedAtLease = this.deps.memoryBudgetPaused();
+    const allowedWhenPaused = pausedAtLease
+      ? allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources())
+      : undefined;
+    if (pausedAtLease) {
+      const expiredBudgeted = this.deps.repos.runtime.requeueExpiredLeasedJobsExcept(
+        allowedWhenPaused ?? [],
+        this.deps.nowIso()
+      );
+      for (const { before, after } of expiredBudgeted) {
+        this.deps.appendJobChange(after, "queued", before);
+      }
+    }
     const jobs = this.deps.repos.runtime.leaseQueuedJobs(
       normalizedLimit,
       60,
       targetMemoryIds,
-      request.priorityCohortOnly
+      request.priorityCohortOnly,
+      allowedWhenPaused
     );
     const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
     const results: WorkerJobRunResult[] = [];
-    for (let index = 0; index < jobs.length;) {
-      const job = jobs[index]!;
+    const queue = [...jobs];
+    while (queue.length > 0) {
+      if (this.deps.memoryBudgetPaused()) {
+        const hold = queue.filter((job) => this.deps.memoryBudgetJobConsumes(job.jobType));
+        this.requeueUnstartedBudgetedJobs(hold);
+        for (const job of hold) {
+          const index = queue.indexOf(job);
+          if (index >= 0) queue.splice(index, 1);
+        }
+        if (queue.length === 0) {
+          break;
+        }
+      }
+      const job = queue[0]!;
       if (workerJobCanRunInParallel(job)) {
         const batchType = job.jobType;
         const batch: EvolutionJobRecord[] = [];
-        while (index < jobs.length && jobs[index]?.jobType === batchType) {
-          batch.push(jobs[index]!);
-          index += 1;
+        while (queue.length > 0 && queue[0]?.jobType === batchType) {
+          batch.push(queue.shift()!);
+        }
+        if (this.deps.memoryBudgetPaused() && this.deps.memoryBudgetJobConsumes(batchType)) {
+          this.requeueUnstartedBudgetedJobs(batch);
+          continue;
         }
         if (batchType === "embedding") {
           results.push(...await this.runLeasedEmbeddingJobs(batch));
         } else {
           for (let offset = 0; offset < batch.length; offset += SUMMARY_WORKER_CONCURRENCY) {
+            if (offset > 0 && this.deps.memoryBudgetPaused() && this.deps.memoryBudgetJobConsumes(batchType)) {
+              this.requeueUnstartedBudgetedJobs(batch.slice(offset));
+              break;
+            }
             results.push(...await Promise.all(
               batch.slice(offset, offset + SUMMARY_WORKER_CONCURRENCY)
                 .map((item) => this.runLeasedWorkerJob(item))
@@ -399,10 +454,11 @@ export class WorkerRunner {
         }
         continue;
       }
+      queue.shift();
       results.push(await this.runLeasedWorkerJob(job));
-      index += 1;
     }
-    const embeddingRetries = retryCapacity > 0
+    const embeddingHeld = this.deps.memoryBudgetPaused() && this.deps.memoryBudgetJobConsumes("embedding");
+    const embeddingRetries = !embeddingHeld && retryCapacity > 0
       ? await this.runEmbeddingRetryOnce(retryCapacity, targetMemoryIds)
       : { leased: 0, succeeded: 0, failed: 0, items: [] };
 
@@ -785,6 +841,19 @@ export class WorkerRunner {
       return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(updated) };
     }
     return { succeeded: 0, failed: 1, item: null };
+  }
+
+  private requeueUnstartedBudgetedJobs(jobs: readonly EvolutionJobRecord[]): void {
+    if (jobs.length === 0) {
+      return;
+    }
+    const requeued = this.deps.repos.runtime.requeueUnstartedLeasedJobs(
+      jobs.map((job) => job.id),
+      this.deps.nowIso()
+    );
+    for (const { before, after } of requeued) {
+      this.deps.appendJobChange(after, "queued", before);
+    }
   }
 
   private nowMs(): number {
