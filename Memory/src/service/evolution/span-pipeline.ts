@@ -883,6 +883,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
   }
 
   private enqueuePostReflectionEmbedding(memory: MemoryRow, job: EvolutionJobRecord, at: string): void {
+    if (this.summaryStillBlocksIndexing(memory)) return;
     this.deps.scheduleEmbeddingAfterTextUpdate({
       memory,
       sourceJob: job,
@@ -892,6 +893,19 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
       textOnlyAttemptCount: 0,
       at
     });
+  }
+
+  private summaryStillBlocksIndexing(memory: MemoryRow): boolean {
+    const processing = this.deps.repos.processing.get(memory.id);
+    if (
+      processing?.state === "summary_pending"
+      || processing?.state === "summarizing"
+      || (processing?.state === "failed" && processing.stage === "summary")
+    ) {
+      return true;
+    }
+    const summaryJob = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+    return this.deps.repos.runtime.hasPendingJob(memory.id, summaryJob);
   }
 }
 

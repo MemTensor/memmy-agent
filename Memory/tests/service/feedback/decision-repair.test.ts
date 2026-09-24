@@ -10,6 +10,7 @@ import {
 import { makeTraceEligibleForL2 } from "../../fixtures/evolution-fixture.js";
 import {
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createMemoryServiceFixture
 } from "../../fixtures/memory-service-fixture.js";
 import { createDecisionRepairEvolutionLlm } from "./decision-repair-llm-stub.js";
@@ -723,6 +724,7 @@ describe("MemoryService / feedback / decision repair", () => {
   it("creates decision repairs when same-context reward values diverge", async () => {
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "Inspect migration output before retrying"),
       skillLlm: createDecisionRepairLlm(calls),
       config: {
         ...DEFAULT_MEMMY_CONFIG,

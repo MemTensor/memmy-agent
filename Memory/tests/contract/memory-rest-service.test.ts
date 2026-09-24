@@ -16,6 +16,7 @@ import {
   accountRuntimeConfig,
   addAgentSourceImport,
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
@@ -616,6 +617,7 @@ describe("MemoryService / REST contract", () => {
   it("auto-drains REST turn.complete embedding jobs", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "remember auto worker embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
     const server = createMemoryHttpServer({ service });
@@ -843,6 +845,7 @@ describe("MemoryService / REST contract", () => {
   it("auto-drains queued jobs when the REST server starts", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "remember queued startup embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
     const namespace = {

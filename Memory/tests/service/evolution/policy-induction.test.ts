@@ -19,6 +19,7 @@ import {
 } from "./evolution-llm-stubs.js";
 import {
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createMemoryServiceFixture,
   runWorkerRounds
 } from "../../fixtures/memory-service-fixture.js";
@@ -644,6 +645,7 @@ describe("MemoryService / evolution / policy induction", () => {
       db,
       mode: "dev",
       skillLlm: createCapturingL2Llm([]),
+      llm: createBatchReflectionLlm([], "run tests and keep the policy as a candidate", "reflection-batch", "pytest workflow status candidate policy"),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -677,7 +679,7 @@ describe("MemoryService / evolution / policy induction", () => {
       rationale: "positive but minGain is intentionally high"
     });
     service.closeSession(session.sessionId);
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);
     }
 
@@ -725,6 +727,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const service = createTestMemoryService({
       db,
       mode: "dev",
+      llm: createBatchReflectionLlm([], "pytest workflow fails around sqlite migration output", "reflection-batch", "pytest failure workflow"),
       skillLlm: createCapturingL2Llm(l2Calls, undefined, {
         title: "Use focused pytest migration checks <script>alert(1)</script>",
         trigger: "pytest workflow fails around [sqlite](javascript:alert(1)) migration output",
@@ -782,7 +785,7 @@ describe("MemoryService / evolution / policy induction", () => {
       rationale: "this focused pytest workflow worked"
     });
     service.closeSession(session.sessionId);
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);
     }
 

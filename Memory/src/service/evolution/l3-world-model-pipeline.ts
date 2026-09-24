@@ -101,7 +101,7 @@ export class L3WorldModelTraceFieldPipeline {
 
     const prompt = promptForField(payload.targetField);
     const language = currentField.trim()
-      ? steeredPromptLanguage(undefined, [currentField])
+      ? undefined
       : steeredPromptLanguage(this.deps.language, userTextsFromRawTurns(evidence.rawTurns));
     const dynamicInput = dynamicInputForField(
       payload.targetField,
@@ -112,7 +112,7 @@ export class L3WorldModelTraceFieldPipeline {
     const output = await completeStrictJson({
       llm: this.deps.skillLlm,
       operation: `l3_world_model.${payload.targetField}`,
-      systemPrompt: `${prompt}\n\n${languageSteeringLine(language)}`,
+      systemPrompt: language ? `${prompt}\n\n${languageSteeringLine(language)}` : prompt,
       dynamicInput,
       expectedSchema: expectedSchemaForField(payload.targetField),
       validate: (value) => validateFieldOutput(value, payload.targetField, currentField)

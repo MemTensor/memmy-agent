@@ -16,6 +16,7 @@ import { languageSteeringLine, steeredPromptLanguage, type PromptLanguage } from
 import type { MemoryLanguage } from "../../config/index.js";
 import type { JsonValue } from "../../contracts/index.js";
 import type { LlmClient } from "../../model/types.js";
+import { SummaryModelUnconfiguredError } from "../embedding/embedding-job-processor.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
@@ -123,7 +124,7 @@ export class EpisodeTitleService {
     if (!episode) throw new Error(`episode title target not found: ${episodeId}`);
     if (!this.deps.llm.isConfigured()) {
       this.markUnconfigured(episode);
-      return;
+      throw new SummaryModelUnconfiguredError();
     }
     if (!shouldGenerateEpisodeTitle(episode, stage)) return;
 

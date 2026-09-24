@@ -45,10 +45,18 @@ describe("project environment profile pipeline", () => {
 
   it("keeps the language of an existing profile on update", async () => {
     const complete = vi.fn().mockResolvedValue('{"op":"update","profile":"Updated Chinese profile"}');
-    const { pipeline } = fixture(complete, "现有项目画像：这是一份中文说明。", "scan-1", "en-US");
-    await pipeline.process(job(), derived("code"));
-    expect(complete.mock.calls[0]?.[0]?.[0]?.content).toContain("Simplified Chinese");
-    expect(complete.mock.calls[0]?.[0]?.[0]?.content).not.toContain("All natural-language answers MUST be in English.");
+    const profiles = [
+      "现有项目画像：这是一份中文说明。",
+      "项目使用 TypeScript、Next.js、React、TanStackQuery、Electron 和 better-sqlite3。"
+    ];
+    for (const currentProfile of profiles) {
+      complete.mockClear();
+      const { pipeline } = fixture(complete, currentProfile, "scan-1", "zh-CN");
+      await pipeline.process(job(), derived("code"));
+      const system = complete.mock.calls[0]?.[0]?.[0]?.content ?? "";
+      expect(system).not.toContain("All natural-language answers MUST be in English.");
+      expect(system).not.toContain("All natural-language answers MUST be in Simplified Chinese");
+    }
   });
 
   it("passes the current profile and applies noop without repeating it", async () => {

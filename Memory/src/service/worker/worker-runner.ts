@@ -45,7 +45,7 @@ import {
 
 export const SUMMARY_WORKER_CONCURRENCY = 4;
 export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
-const SUMMARY_JOBS_REQUIRING_MODEL: readonly string[] = ["trace_summary", "import_summary"];
+const SUMMARY_JOBS_REQUIRING_MODEL: readonly string[] = ["trace_summary", "import_summary", "episode_title"];
 
 const workerLogger = createMemoryLogger("worker");
 

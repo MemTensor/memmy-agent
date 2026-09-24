@@ -11,6 +11,7 @@ import { Repositories } from "../../../src/storage/repositories.js";
 import {
   addAgentSourceImport,
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createMemoryServiceFixture
 } from "../../fixtures/memory-service-fixture.js";
 
@@ -742,6 +743,7 @@ describe("MemoryService / read model / panel", () => {
   it("exposes OpenClaw as the panel source for OpenClaw trace memories", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "remember openclaw panel source"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
     const namespace = {
@@ -777,6 +779,7 @@ describe("MemoryService / read model / panel", () => {
     });
 
     service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     expect(embeddingTexts.length).toBeGreaterThan(0);

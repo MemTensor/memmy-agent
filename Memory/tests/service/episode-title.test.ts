@@ -237,7 +237,7 @@ describe("episode title generation", () => {
     };
     const { repos, titleService } = createTitleService(db, unconfigured);
 
-    await titleService.generate(titleJob(episodeId, "final"));
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow("summary model is not configured");
 
     const episode = repos.runtime.getEpisode(episodeId)!;
     expect(episode.title ?? "").toBe("");
@@ -268,9 +268,9 @@ describe("episode title generation", () => {
       meta: { episodeTitle: provisional }
     }, now);
 
-    await titleService.generate(titleJob(episodeId, "final"));
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow("summary model is not configured");
     now = "2026-09-22T02:00:00.000Z";
-    await titleService.generate(titleJob(episodeId, "final"));
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow("summary model is not configured");
 
     const kept = repos.runtime.getEpisode(episodeId)!;
     expect(kept.title).toBe("已生成任务标题");
@@ -289,7 +289,7 @@ describe("episode title generation", () => {
       meta: { episodeTitle: finalMeta }
     }, now);
     now = "2026-09-22T03:00:00.000Z";
-    await titleService.generate(titleJob(episodeId, "final"));
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow("summary model is not configured");
     const finalEpisode = repos.runtime.getEpisode(episodeId)!;
     expect(finalEpisode.title).toBe("终版任务标题");
     expect(finalEpisode.summary).toBe("终版摘要");
@@ -297,10 +297,10 @@ describe("episode title generation", () => {
     expect(episodeTitleDisplayState(finalEpisode, false)).toEqual({ titleGenerated: true, titlePending: false });
 
     const bare = completeOneTurn(service, "repeat-unconfigured");
-    await titleService.generate(titleJob(bare.episodeId, "final"));
+    await expect(titleService.generate(titleJob(bare.episodeId, "final"))).rejects.toThrow("summary model is not configured");
     const skipped = episodeTitleMeta(repos.runtime.getEpisode(bare.episodeId)!);
     now = "2026-09-22T04:00:00.000Z";
-    await titleService.generate(titleJob(bare.episodeId, "final"));
+    await expect(titleService.generate(titleJob(bare.episodeId, "final"))).rejects.toThrow("summary model is not configured");
     const repeated = repos.runtime.getEpisode(bare.episodeId)!;
     expect(episodeTitleMeta(repeated)).toEqual(skipped);
     expect(repeated.title ?? "").toBe("");
@@ -470,6 +470,35 @@ describe("episode title generation", () => {
       `SELECT COUNT(*) AS count FROM evolution_jobs WHERE job_type IN ('reflection', 'reward')`
     ).get() as { count: number };
     expect(followUps.count).toBeGreaterThan(0);
+  });
+
+  it("generates a held title job after the summary model is configured", async () => {
+    let configured = false;
+    const llm = titleLlm(async () => JSON.stringify({ title: "恢复后的标题", summary: "恢复后的摘要" }));
+    llm.isConfigured = () => configured;
+    const { service } = createTestService({ llm });
+    const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "recover-title" } });
+    const completed = service.completeTurn("turn_recover-title", {
+      sessionId: opened.sessionId,
+      query: FIRST_USER_TEXT,
+      answer: FIRST_ASSISTANT_TEXT,
+      status: "succeeded"
+    });
+    service.closeSession(opened.sessionId, {});
+    await service.runWorkerOnce(20);
+    const waiting = service.panelTasks({}).tasks.find((task) => task.id === completed.episodeId);
+    expect(waiting?.episode.titlePending).toBe(true);
+    expect(waiting?.episode.title ?? "").toBe("");
+
+    configured = true;
+    await service.runWorkerOnce(20);
+    const ready = service.panelTasks({}).tasks.find((task) => task.id === completed.episodeId);
+    expect(ready?.episode.title).toBe("恢复后的标题");
+    expect(ready?.episode.summary).toBe("恢复后的摘要");
+    expect(ready?.episode.titlePending).toBe(false);
+    await service.runWorkerOnce(20);
+    const jobs = service.panelJobs({}).items.filter((job) => job.jobType === "episode_title" && job.status === "queued");
+    expect(jobs).toEqual([]);
   });
 
   it("treats a queued title job as waiting and an old episode without meta as ready fallback", () => {

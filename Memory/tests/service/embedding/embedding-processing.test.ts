@@ -108,7 +108,12 @@ describe("MemoryService / embedding / processing", () => {
       path: join(root, "memory.sqlite")
     });
     const embedder = createFlakyEmbedder();
-    const service = createTestMemoryService({ db, mode: "dev", embedder });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      embedder,
+      llm: createBatchReflectionLlm([], "Remember that transient embedding failures should be retried.")
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -125,15 +130,16 @@ describe("MemoryService / embedding / processing", () => {
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
 
-    service.closeSession(session.sessionId);
-    const reflectionRun = await service.runWorkerOnce(20);
-    expect(reflectionRun.jobs.some((job) => job.jobType === "reflection" && job.status === "succeeded")).toBe(true);
-    const reflectedMemory = db.db
-      .prepare(`SELECT version FROM memories WHERE id = ?`)
-      .get(complete.l1MemoryId) as { version: number };
+    const summaryRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(summaryRun.jobs.some((job) => job.jobType === "trace_summary" && job.status === "succeeded")).toBe(true);
+    const firstRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const failedEmbedding = firstRun.jobs.find((job) => job.jobType === "embedding" && job.status === "failed");
+    expect(failedEmbedding?.jobId).toBeTruthy();
+    const failedJob = db.db.prepare(
+      `SELECT id, status, attempts FROM evolution_jobs WHERE id = ?`
+    ).get(failedEmbedding!.jobId) as { id: string; status: string; attempts: number };
+    expect(failedJob).toMatchObject({ status: "failed", attempts: 1 });
 
-    const firstRun = await service.runWorkerOnce(20);
-    expect(firstRun.jobs.some((job) => job.jobType === "embedding" && job.status === "failed")).toBe(true);
     const queued = db.db
       .prepare(
         `SELECT target_kind, target_id, vector_field, status, attempts
@@ -154,8 +160,10 @@ describe("MemoryService / embedding / processing", () => {
       attemptCount: 1
     });
 
-    const secondRun = await service.runWorkerOnce(20);
-    expect(secondRun.jobs.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
+    const secondRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(secondRun.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: failedJob.id, jobType: "embedding", status: "succeeded" })
+    ]));
     expect(secondRun.embeddingRetries.succeeded).toBe(0);
     const drained = db.db
       .prepare(
@@ -165,6 +173,16 @@ describe("MemoryService / embedding / processing", () => {
       )
       .all(complete.l1MemoryId) as Array<{ vector_field: string; status: string; attempts: number }>;
     expect(drained).toEqual([]);
+    expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("ready");
+
+    service.closeSession(session.sessionId);
+    const reflectionRun = await service.runWorkerOnce(20);
+    expect(reflectionRun.jobs.some((job) => job.jobType === "reflection" && job.status === "succeeded")).toBe(true);
+    const reflectedMemory = db.db
+      .prepare(`SELECT version FROM memories WHERE id = ?`)
+      .get(complete.l1MemoryId) as { version: number };
+    const reindexRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(reindexRun.jobs.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("ready");
     const memory = db.db
       .prepare(
@@ -369,7 +387,12 @@ describe("MemoryService / embedding / processing", () => {
     });
     const seenTexts: string[] = [];
     const embedder = createCapturingEmbedder(seenTexts);
-    const service = createTestMemoryService({ db, mode: "dev", embedder });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      embedder,
+      llm: createBatchReflectionLlm([], "Remember the SQLite migration rule.")
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -383,7 +406,7 @@ describe("MemoryService / embedding / processing", () => {
       answer: "I will run the focused migration test before broad checks."
     });
 
-    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
 

@@ -81,10 +81,11 @@ export class ProjectEnvironmentProfilePipeline {
       payload.projectId
     ).projectEnvironmentProfile;
     const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
+    const basePrompt = derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT;
     const language = currentProfile?.trim()
-      ? steeredPromptLanguage(undefined, [currentProfile])
+      ? undefined
       : steeredPromptLanguage(this.deps.language, [derived.compactFileTree]);
-    const systemPrompt = `${derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT}\n\n${languageSteeringLine(language)}`;
+    const systemPrompt = language ? `${basePrompt}\n\n${languageSteeringLine(language)}` : basePrompt;
     let output: ReturnType<typeof validateProjectEnvironmentProfileOutput>;
     try {
       output = await completeStrictJson({
