@@ -48,6 +48,7 @@ describe("repository PolarDB schema contract", () => {
     expect(sql).toContain("idx_embedding_retry_due");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_scopes");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_session_cursors");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS work_memory_session_cursors");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_input_traces");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_evidence_batches");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_batch_targets");

@@ -112,6 +112,7 @@ describe("repository sqlite schema contract", () => {
         "l3_world_model_scopes",
         "sessions",
         "l3_world_model_session_cursors",
+        "work_memory_session_cursors",
         "episodes",
         "raw_turns",
         "l3_world_model_input_traces",
@@ -763,6 +764,9 @@ describe("repository sqlite schema contract", () => {
       ).get()).toEqual({ status: "open" });
       expect((migrated.db.prepare(`PRAGMA table_info(l3_world_model_scopes)`).all() as Array<{ name: string }>)
         .map((column) => column.name)).toContain("workspace_uri");
+      expect(migrated.db.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_memory_session_cursors'`
+      ).get()).toEqual({ name: "work_memory_session_cursors" });
       const projectEnvironmentColumns = migrated.db.prepare(
         `PRAGMA table_info(l3_world_model_project_environment_state)`
       ).all() as Array<{ name: string }>;

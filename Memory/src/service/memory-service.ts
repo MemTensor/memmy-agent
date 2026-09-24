@@ -383,7 +383,10 @@ export class MemoryService {
           embedUserMemory: (job) => this.embeddingJobs.embedUserMemory(job)
         },
         workMemory: {
-          extract: (job) => this.workMemory.extract(job)
+          extract: (job) => this.workMemory.extract(job),
+          flushIdle: (job) => {
+            this.workMemory.flushIdle(job);
+          }
         },
         episodeTitle: {
           generate: (job) => this.episodeTitle.generate(job)
@@ -661,6 +664,8 @@ export class MemoryService {
       shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm(),
       firstLine,
       memoryLayersForIntent,
+      armWorkMemoryIdleFlush: this.armWorkMemoryIdleFlush.bind(this),
+      extractUnextractedWorkMemory: this.extractUnextractedWorkMemory.bind(this),
       namespaceIdFromContext,
       namespaceIdFromMemory,
       namespaceIdFromSession,
@@ -1183,6 +1188,16 @@ export class MemoryService {
     return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
   }
 
+  /** Arm the Work Memory idle flush for a Session inside the caller's transaction. */
+  private armWorkMemoryIdleFlush(sessionId: string, at: string): void {
+    this.workMemory.armIdleFlush(sessionId, at);
+  }
+
+  /** Extract unextracted Work Memory for a Session inside the caller's transaction. */
+  private extractUnextractedWorkMemory(sessionId: string, throughTraceSeq: number, at: string): void {
+    this.workMemory.extractUnextracted(sessionId, throughTraceSeq, at);
+  }
+
   l3WorldModelTraceHead(
     sessionId: string,
     request: L3WorldModelRequestEnvelope
@@ -1208,8 +1223,8 @@ export class MemoryService {
       trigger: request.trigger,
       throughL1MemoryId: request.throughL1MemoryId
     }, (frozen) => {
-      if (request.trigger === "token_compaction" && frozen.batchIds.length > 0) {
-        this.workMemory.scheduleBatchesInTransaction(frozen.batchIds, nowIso());
+      if (request.trigger === "token_compaction" && frozen.throughTraceSeq) {
+        this.workMemory.extractUnextracted(sessionId, frozen.throughTraceSeq, nowIso());
       }
     });
     if (!result.throughTraceSeq) {

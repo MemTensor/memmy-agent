@@ -164,6 +164,12 @@ const statements = [
     updated_at TEXT NOT NULL
   )`,
 
+  `CREATE TABLE IF NOT EXISTS work_memory_session_cursors (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    last_extracted_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_extracted_seq >= 0),
+    updated_at TEXT NOT NULL
+  )`,
+
   `CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
