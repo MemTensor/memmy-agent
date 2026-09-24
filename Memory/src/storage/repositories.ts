@@ -719,6 +719,34 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listMemoryTags(ids: readonly string[]): string[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT tags_json, info_json, properties_json
+      FROM memories
+      WHERE id IN (${placeholders}) AND deleted_at IS NULL AND status != 'deleted'
+    `).all(...ids) as Array<{ tags_json: string; info_json: string; properties_json: string }>;
+    return uniq(rows.flatMap((row) => {
+      const info = parseJson<Record<string, unknown>>(row.info_json, {});
+      const properties = parseJson<Record<string, unknown>>(row.properties_json, {});
+      return [
+        ...asStringArray(parseJson(row.tags_json, [])),
+        ...asStringArray(info.tags),
+        ...asStringArray(properties.tags)
+      ];
+    }));
+  }
+
+  listUserMemoriesByKeyIncludingDeleted(userId: string, memoryKey: string): MemoryRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = 'L1' AND memory_key = ?
+      ORDER BY updated_at DESC, id DESC
+    `).all(userId, memoryKey) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
   archivePriorReadOnlySkillVersions(input: {
     sourceAgentId: string;
     sourceSkillIdentity: string;
@@ -2579,11 +2607,120 @@ export class RuntimeRepository {
     return row ? rawTurnFromSql(row) : undefined;
   }
 
+  episodeHasLaterRawTurn(episodeId: string, turnId: string, startedAt: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE episode_id = ?
+        AND turn_id != ?
+        AND created_at > ?
+      LIMIT 1
+    `).get(episodeId, turnId, startedAt) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  episodeRelationTexts(episodeId: string, rawTurnIds: readonly string[] = []): {
+    firstUser: string;
+    lastUser: string;
+    lastAssistant: string;
+    lastCompletedAt?: string;
+  } {
+    const completed = `json_type(message_payload_json, '$.turn_complete') = 'object'`;
+    const boundary = (column: "user_text" | "assistant_text" | "created_at", edge: "first" | "last") => {
+      const nonempty = column === "created_at" ? "1 = 1" : `trim(COALESCE(${column}, '')) != ''`;
+      const time = this.db.prepare(`
+        SELECT ${edge === "first" ? "MIN" : "MAX"}(created_at) AS boundary
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty}
+      `).get(episodeId) as { boundary: string | null } | undefined;
+      if (!time?.boundary) return [];
+      return this.db.prepare(`
+        SELECT id, created_at AS createdAt, user_text AS userText, assistant_text AS assistantText
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty} AND created_at = ?
+      `).all(episodeId, time.boundary) as Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>;
+    };
+    const pick = (
+      rows: Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>,
+      field: "userText" | "assistantText" | "createdAt",
+      edge: "first" | "last"
+    ) => {
+      const rank = new Map(rawTurnIds.map((id, index) => [id, index]));
+      const ordered = [...rows].sort((left, right) =>
+        (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      );
+      const chosen = edge === "first" ? ordered[0] : ordered[ordered.length - 1];
+      const value = chosen?.[field];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const firstUsers = boundary("user_text", "first");
+    const lastUsers = boundary("user_text", "last");
+    const lastAssistants = boundary("assistant_text", "last");
+    const lastCompleted = boundary("created_at", "last");
+    const lastCompletedAt = pick(lastCompleted, "createdAt", "last");
+    return {
+      firstUser: pick(firstUsers, "userText", "first"),
+      lastUser: pick(lastUsers, "userText", "last"),
+      lastAssistant: pick(lastAssistants, "assistantText", "last"),
+      ...(lastCompletedAt ? { lastCompletedAt } : {})
+    };
+  }
+
   getRawTurnBySessionTurn(sessionId: string, turnId: string): RawTurnRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM raw_turns WHERE session_id = ? AND turn_id = ?`)
       .get(sessionId, turnId) as SqlRawTurnRow | undefined;
     return row ? rawTurnFromSql(row) : undefined;
+  }
+
+  hasCompletedSourceTurnInScope(input: {
+    userId: string;
+    source: string;
+    profileId: string;
+    conversationId: string;
+    turnId: string;
+    namespaceKey: string;
+    defaultNamespaceKey: string;
+    tenantId: string | null;
+    storedProjectId: string | null;
+    workspaceId: string | null;
+  }): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE raw_turns.user_id = @userId
+        AND raw_turns.turn_id = @turnId
+        AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+        AND EXISTS (
+          SELECT 1
+          FROM sessions
+          WHERE sessions.id = raw_turns.session_id
+            AND sessions.user_id = @userId
+            AND sessions.source = @source
+            AND sessions.profile_id = @profileId
+            AND (
+              sessions.host_session_key = @conversationId
+              OR sessions.conversation_id = @conversationId
+              OR sessions.host_session_key = @source || '-memory-' || @conversationId
+            )
+            AND (
+              json_extract(sessions.meta_json, '$.source_namespace_key') = @namespaceKey
+              OR (
+                json_extract(sessions.meta_json, '$.source_namespace_key') IS NULL
+                AND @tenantId IS NULL
+                AND (
+                  @namespaceKey = @defaultNamespaceKey
+                  OR (
+                    sessions.project_id IS @storedProjectId
+                    AND sessions.workspace_id IS @workspaceId
+                  )
+                )
+              )
+            )
+        )
+      LIMIT 1
+    `).get(input) as { found: number } | undefined;
+    return row?.found === 1;
   }
 
   listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {
@@ -3248,7 +3385,18 @@ export class RuntimeRepository {
     return counts;
   }
 
-  nextWorkerRunAt(): number | undefined {
+  nextWorkerRunAt(options?: {
+    jobType?: string;
+    jobTypes?: readonly string[];
+    includeEmbeddingRetries?: boolean;
+  }): number | undefined {
+    const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
+    const jobTypeFilter = jobTypes
+      ? jobTypes.length === 0
+        ? "AND 1=0"
+        : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
+      : "";
+    const jobTypeParams = jobTypes && jobTypes.length > 0 ? jobTypes : [];
     const queuedJob = this.db
       .prepare(
         `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
@@ -3256,10 +3404,11 @@ export class RuntimeRepository {
          WHERE status = 'queued'
            AND attempts < max_attempts
            AND json_type(payload_json, '$.runAfter') = 'text'
+           ${jobTypeFilter}
          ORDER BY run_after ASC
          LIMIT 1`
       )
-      .get() as { run_after: string } | undefined;
+      .get(...jobTypeParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(
         `SELECT leased_until
@@ -3267,29 +3416,35 @@ export class RuntimeRepository {
          WHERE status = 'leased'
            AND attempts < max_attempts
            AND leased_until IS NOT NULL
+           ${jobTypeFilter}
          ORDER BY leased_until ASC
          LIMIT 1`
       )
-      .get() as { leased_until: string } | undefined;
-    const pendingEmbedding = this.db
-      .prepare(
-        `SELECT next_attempt_at
-         FROM embedding_retry_queue
-         WHERE status = 'pending'
-         ORDER BY next_attempt_at ASC
-         LIMIT 1`
-      )
-      .get() as { next_attempt_at: number } | undefined;
-    const inProgressEmbedding = this.db
-      .prepare(
-        `SELECT MAX(next_attempt_at, lease_until) AS run_at
-         FROM embedding_retry_queue
-         WHERE status = 'in_progress'
-           AND lease_until IS NOT NULL
-         ORDER BY run_at ASC
-         LIMIT 1`
-      )
-      .get() as { run_at: number } | undefined;
+      .get(...jobTypeParams) as { leased_until: string } | undefined;
+    const includeEmbeddingRetries = options?.includeEmbeddingRetries !== false;
+    const pendingEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT next_attempt_at
+           FROM embedding_retry_queue
+           WHERE status = 'pending'
+           ORDER BY next_attempt_at ASC
+           LIMIT 1`
+        )
+        .get() as { next_attempt_at: number } | undefined
+      : undefined;
+    const inProgressEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+           FROM embedding_retry_queue
+           WHERE status = 'in_progress'
+             AND lease_until IS NOT NULL
+           ORDER BY run_at ASC
+           LIMIT 1`
+        )
+        .get() as { run_at: number } | undefined
+      : undefined;
     const times = [
       queuedJob ? Date.parse(queuedJob.run_after) : Number.NaN,
       leasedJob ? Date.parse(leasedJob.leased_until) : Number.NaN,
@@ -3379,9 +3534,10 @@ export class RuntimeRepository {
     limit = 10,
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
-    priorityCohortOnly = false
+    priorityCohortOnly = false,
+    allowedJobTypes?: readonly string[]
   ): EvolutionJobRecord[] {
-    if (targetMemoryIds?.length === 0) {
+    if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
     }
     const at = nowIso();
@@ -3449,11 +3605,12 @@ export class RuntimeRepository {
                  )
                )
              )
+             ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, ...(allowedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -3560,6 +3717,79 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}`
         )
         .all() as SqlJobRow[];
+
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE evolution_jobs
+             SET status = 'queued',
+                 attempts = MAX(0, attempts - 1),
+                 leased_until = NULL,
+                 updated_at = ?
+             WHERE id = ?`
+          )
+          .run(at, row.id);
+      }
+
+      return rows.map((row) => ({
+        before: jobFromSql(row),
+        after: jobFromSql({
+          ...row,
+          status: "queued",
+          attempts: Math.max(0, row.attempts - 1),
+          leased_until: null,
+          updated_at: at
+        })
+      }));
+    });
+    return transaction();
+  }
+
+  requeueUnstartedLeasedJobs(
+    ids: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased' AND id IN (${ids.map(() => "?").join(", ")})`,
+      [...ids],
+      at
+    );
+  }
+
+  requeueExpiredLeasedJobsExcept(
+    excludedJobTypes: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const excludeFilter = excludedJobTypes.length > 0
+      ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})`
+      : "";
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased'
+         AND leased_until IS NOT NULL
+         AND leased_until <= ?
+         ${excludeFilter}`,
+      [at, ...excludedJobTypes],
+      at
+    );
+  }
+
+  private requeueLeasedJobsWhere(
+    whereSql: string,
+    params: readonly unknown[],
+    at: string
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT *
+           FROM evolution_jobs
+           WHERE ${whereSql}
+           ORDER BY ${evolutionJobOrderSql()}`
+        )
+        .all(...params) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -4177,6 +4407,38 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM decision_repairs WHERE id = ?`)
       .get(id) as SqlDecisionRepairRow | undefined;
     return row ? decisionRepairFromSql(row) : undefined;
+  }
+
+  updateDecisionRepair(id: string, patch: {
+    suggestion?: string;
+    preference?: string;
+    antiPattern?: string;
+    source?: unknown;
+    meta?: Record<string, unknown>;
+  }): DecisionRepairRecord | undefined {
+    const current = this.getDecisionRepair(id);
+    if (!current) {
+      return undefined;
+    }
+    this.db
+      .prepare(
+        `UPDATE decision_repairs
+         SET suggestion = ?,
+             preference = ?,
+             anti_pattern = ?,
+             source_json = ?,
+             meta_json = ?
+         WHERE id = ?`
+      )
+      .run(
+        patch.suggestion ?? current.suggestion,
+        patch.preference ?? current.preference ?? null,
+        patch.antiPattern ?? current.antiPattern ?? null,
+        toJson(patch.source ?? current.source ?? {}),
+        toJson(patch.meta ?? current.meta ?? {}),
+        id
+      );
+    return this.getDecisionRepair(id);
   }
 
   upsertCandidatePoolTrace(input: {

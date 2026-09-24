@@ -80,9 +80,37 @@ export const AppSettingsDtoSchema = z.object({
     // Menu bar icon enabled.
     menuBarIconEnabled: z.boolean().default(true),
     // Stop the standalone Memory daemon when Desktop exits.
-    stopMemoryServiceOnExit: z.boolean().default(false)
+    stopMemoryServiceOnExit: z.boolean().default(false),
+    // Daily custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokDailyLimitM: z.number().int().min(0).max(99_999).default(10),
+    // Lifetime custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokTotalLimitM: z.number().int().min(0).max(99_999).default(500)
 });
 export type AppSettingsDto = z.infer<typeof AppSettingsDtoSchema>;
+
+export const MemoryTokenBudgetTriggerSchema = z.enum(["daily", "total"]);
+export type MemoryTokenBudgetTrigger = z.infer<typeof MemoryTokenBudgetTriggerSchema>;
+
+export const MemoryTokenBudgetDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    paused: z.boolean(),
+    trigger: MemoryTokenBudgetTriggerSchema.nullable(),
+    nextLocalMidnightAt: z.string().datetime(),
+    stale: z.boolean().optional()
+});
+export type MemoryTokenBudgetDto = z.infer<typeof MemoryTokenBudgetDtoSchema>;
+
+export const MemoryPipelineUsageDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    nextLocalMidnightAt: z.string().datetime()
+});
+export type MemoryPipelineUsageDto = z.infer<typeof MemoryPipelineUsageDtoSchema>;
 
 export const FirstEncounterReportStatusSchema = z.enum(["pending", "shown", "skipped"]);
 export type FirstEncounterReportStatus = z.infer<typeof FirstEncounterReportStatusSchema>;
@@ -656,7 +684,9 @@ export const PatchAppSettingsInputSchema = z
         taskDoneNotificationEnabled: z.boolean(),
         notificationSoundEnabled: z.boolean(),
         menuBarIconEnabled: z.boolean(),
-        stopMemoryServiceOnExit: z.boolean()
+        stopMemoryServiceOnExit: z.boolean(),
+        memoryByokDailyLimitM: z.number().int().min(0).max(99_999),
+        memoryByokTotalLimitM: z.number().int().min(0).max(99_999)
     })
     .partial();
 export type PatchAppSettingsInput = z.infer<typeof PatchAppSettingsInputSchema>;

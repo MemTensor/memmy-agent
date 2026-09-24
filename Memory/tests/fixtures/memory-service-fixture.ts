@@ -8,6 +8,7 @@ import {
   type Embedder,
   type LlmClient
 } from "../../src/index.js";
+import type { ActualModelContext } from "../../src/contracts/index.js";
 
 export function createMemoryServiceFixture(): {
   cleanup: () => void;
@@ -21,6 +22,8 @@ export function createMemoryServiceFixture(): {
     llm?: LlmClient;
     skillLlm?: LlmClient;
     embedder?: Embedder;
+    fetchAppMemoryBudget?: ConstructorParameters<typeof MemoryService>[0]["fetchAppMemoryBudget"];
+    configLoader?: ConstructorParameters<typeof MemoryService>[0]["configLoader"];
   }) => {
     root: string;
     db: MemoryDb;
@@ -29,6 +32,7 @@ export function createMemoryServiceFixture(): {
 } {
   const roots: string[] = [];
   const databases: MemoryDb[] = [];
+  const services: MemoryService[] = [];
 
   function createTestRoot(prefix = "mindock-memory-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -39,11 +43,17 @@ export function createMemoryServiceFixture(): {
   function createTestMemoryService(
     options: ConstructorParameters<typeof MemoryService>[0]
   ): MemoryService {
-    return new MemoryService({
+    if (options.db) {
+      databases.push(options.db);
+    }
+    const service = new MemoryService({
       ...options,
+      fetchAppMemoryBudget: options.fetchAppMemoryBudget ?? (async () => null),
       skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
     });
+    services.push(service);
+    return service;
   }
 
   function createTestService(options: {
@@ -52,6 +62,8 @@ export function createMemoryServiceFixture(): {
     llm?: LlmClient;
     skillLlm?: LlmClient;
     embedder?: Embedder;
+    fetchAppMemoryBudget?: ConstructorParameters<typeof MemoryService>[0]["fetchAppMemoryBudget"];
+    configLoader?: ConstructorParameters<typeof MemoryService>[0]["configLoader"];
   } = {}): {
     root: string;
     db: MemoryDb;
@@ -61,7 +73,6 @@ export function createMemoryServiceFixture(): {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    databases.push(db);
     return {
       root,
       db,
@@ -69,6 +80,8 @@ export function createMemoryServiceFixture(): {
         db,
         mode: options.mode ?? "dev",
         config: options.config,
+        configLoader: options.configLoader,
+        fetchAppMemoryBudget: options.fetchAppMemoryBudget,
         llm: options.llm,
         skillLlm: options.skillLlm,
         embedder: options.embedder ?? createCapturingEmbedder([])
@@ -77,6 +90,9 @@ export function createMemoryServiceFixture(): {
   }
 
   function cleanup(): void {
+    for (const service of services.splice(0)) {
+      void service.stop();
+    }
     for (const database of databases.splice(0)) {
       if (database.db.open) {
         database.close();
@@ -143,6 +159,23 @@ export function configWithMemoryGates(gates: {
   };
 }
 
+function testModelContext(
+  source: "account" | "byok",
+  capability: "memory_summary" | "memory_evolution" | "embedding"
+): ActualModelContext {
+  return {
+    presetId: `${source}-${capability}`,
+    provider: source === "account" ? "memmy_account" : "openai",
+    endpointId: "endpoint-test",
+    protocol: "openai-chat-completions",
+    model: capability,
+    source,
+    ownerAccountId: source === "account" ? "acct-test" : null,
+    capability,
+    capabilities: [capability]
+  };
+}
+
 export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
   const endpoint = "https://apigw-pre.memtensor.cn/api/agentExternal/v1";
   const apiKey = "cloud-uuid";
@@ -158,7 +191,8 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
       sourceProvider: "memmy_account",
       endpoint,
       model: "memory_summary",
-      apiKey
+      apiKey,
+      actualModelContext: testModelContext("account", "memory_summary")
     },
     evolution: {
       ...DEFAULT_MEMMY_CONFIG.evolution,
@@ -166,7 +200,8 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
       sourceProvider: "memmy_account",
       endpoint,
       model: "memory_evolution",
-      apiKey
+      apiKey,
+      actualModelContext: testModelContext("account", "memory_evolution")
     },
     embedding: {
       ...DEFAULT_MEMMY_CONFIG.embedding,
@@ -175,7 +210,59 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
       provider: "openai_compatible",
       endpoint,
       model: "embedding",
-      apiKey
+      apiKey,
+      actualModelContext: testModelContext("account", "embedding")
+    }
+  };
+}
+
+export function byokRuntimeConfig(
+  overrides: Partial<typeof DEFAULT_MEMMY_CONFIG> = {}
+): typeof DEFAULT_MEMMY_CONFIG {
+  const endpoint = "https://api.openai.com/v1";
+  const apiKey = "sk-test";
+  return {
+    ...DEFAULT_MEMMY_CONFIG,
+    ...overrides,
+    roleRouting: {
+      summary: "fixed",
+      evolution: "fixed",
+      ...overrides.roleRouting
+    },
+    summary: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "openai_compatible",
+      sourceProvider: "openai",
+      endpoint,
+      model: "memory_summary",
+      apiKey,
+      actualModelContext: testModelContext("byok", "memory_summary"),
+      ...overrides.summary
+    },
+    evolution: {
+      ...DEFAULT_MEMMY_CONFIG.evolution,
+      provider: "openai_compatible",
+      sourceProvider: "openai",
+      endpoint,
+      model: "memory_evolution",
+      apiKey,
+      actualModelContext: testModelContext("byok", "memory_evolution"),
+      ...overrides.evolution
+    },
+    embedding: {
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      mode: "custom",
+      sourceProvider: "openai",
+      provider: "openai_compatible",
+      endpoint,
+      model: "embedding",
+      apiKey,
+      actualModelContext: testModelContext("byok", "embedding"),
+      ...overrides.embedding
+    },
+    tokenBudget: {
+      ...DEFAULT_MEMMY_CONFIG.tokenBudget,
+      ...overrides.tokenBudget
     }
   };
 }

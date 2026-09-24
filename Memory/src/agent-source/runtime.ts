@@ -42,6 +42,7 @@ import {
   renderTurnClipped,
   stableTurnIdentity,
   legacyTurnId,
+  legacyImportTurnIdFromMessages,
   legacyTurnRequestId,
   type ScanStore
 } from "@memmy/agent-source-core";
@@ -290,12 +291,21 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         if (await adapter.detect()) available.push(adapter);
         else if (request.sourceId !== "all") throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
+      const preservedModes = new Map<string, "initial_subset" | "incremental" | "full">();
+      if (!request.mode) {
+        for (const adapter of available) {
+          const existing = store.getSourceState(adapter.descriptor.sourceId);
+          if (existing && existing.phase !== "done" && (existing.mode === "initial_subset" || existing.mode === "incremental" || existing.mode === "full")) {
+            preservedModes.set(adapter.descriptor.sourceId, existing.mode);
+          }
+        }
+      }
       const globalInitial = request.sourceId === "all" && available.length > 0 &&
-        (request.mode === "initial_subset" || (request.mode === undefined && available.every((adapter) => !state.sources[adapter.descriptor.sourceId]?.lastScannedAt)));
+        (request.mode === "initial_subset" || (request.mode === undefined && preservedModes.size === 0 && available.every((adapter) => !state.sources[adapter.descriptor.sourceId]?.lastScannedAt)));
       const stages: StandaloneSourceStage[] = [];
       for (const adapter of available) {
         const stored = state.sources[adapter.descriptor.sourceId] ?? emptySourceState();
-        const mode = request.mode ?? (stored.lastScannedAt ? "incremental" : "initial_subset");
+        const mode = request.mode ?? preservedModes.get(adapter.descriptor.sourceId) ?? (stored.lastScannedAt ? "incremental" : "initial_subset");
         store.saveMeta({ jobId, sourceId: store.getMeta()?.sourceId ?? request.sourceId, mode, phase: "stage", createdAt: store.getMeta()?.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() });
         stages.push(await stageStandaloneSource(adapter, stored, mode, store, signal, () => waitWhilePaused(signal), (progress) => {
           if (!scanPaused) { progressBeforePause = progress; scan = { ...scan, progress }; }
@@ -341,7 +351,9 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           messageCount: mode === "incremental"
             ? stored.messageCount + result.messageCount
             : result.messageCount,
-          lastScannedAt: now,
+          ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips
+            ? { lastScannedAt: now }
+            : stored.lastScannedAt ? { lastScannedAt: stored.lastScannedAt } : {}),
           ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips && preparedContentHashes.has(sourceId)
             ? { contentHash: preparedContentHashes.get(sourceId) }
             : stored.contentHash ? { contentHash: stored.contentHash } : {}),
@@ -353,7 +365,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         store.saveSourceState({
           sourceId,
           mode,
-          phase: sourceErrorCount > 0 ? "failed" : "done",
+          phase: sourceErrorCount > 0 || result.hasUncommittedSkips ? "failed" : "done",
           messageCount: result.messageCount,
           resultCount: store.resultCount(sourceId),
           errorCount: sourceErrorCount,
@@ -367,7 +379,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         const meta = store.getMeta();
         if (meta) store.saveMeta({ ...meta, phase: "failed", updatedAt: new Date().toISOString(), error: failures.slice(0, 3).join("; ") });
       }
-      completed = failureCount === 0 && store.resultCount() <= INITIAL_SCAN_MESSAGE_LIMIT;
+      completed = failureCount === 0 && stages.every((stage) => {
+        const sourceState = store?.getSourceState(stage.sourceId);
+        return sourceState?.phase === "done";
+      }) && store.resultCount() <= INITIAL_SCAN_MESSAGE_LIMIT;
     } catch (error) {
       if (store) {
         const meta = store.getMeta();
@@ -676,10 +691,10 @@ async function stageStandaloneSource(
     for await (const message of adapter.scan({
       ...(mode === "incremental" && stored.latestSeenAt ? { since: stored.latestSeenAt } : {}),
       order: mode === "initial_subset" ? "recent_first" : "source_default",
-      // Incremental scans must honor the persisted boundary. Full-history
-      // streaming is only safe for an explicit full scan; otherwise the
-      // adapter would stage every historical message in an active session.
-      fullHistory: mode === "full",
+      // Incremental scans must honor the persisted boundary. Initial and full
+      // scans read every historical message; initial scans still select only
+      // the recent memory subset before capture.
+      fullHistory: mode === "initial_subset" || mode === "full",
       signal,
       onProgress
     })) {
@@ -824,7 +839,19 @@ async function ingestStagedMessages(
           onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
           continue;
         }
-        const result = service.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+        const legacyImportTurnId = legacyImportTurnIdFromMessages(sourceId, turn.conversationId, turn.messages);
+        const result = service.completeSourceTurn({
+          ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
+          ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
+          ...(scanMode === "initial_subset" || scanMode === "full" ? { captureLegacyHistory: true } : {})
+        });
+        if (result.status === "rejected" && result.reason === "legacy_before_activation" && (scanMode === "initial_subset" || scanMode === "full")) {
+          recordScanItemSkip(store, sourceId, turn.conversationId, result.reason);
+          noteUncommittedSkip(result.reason);
+          processed += turn.messages.length;
+          onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
         if (result.status === "pending" || result.status === "conflict") {
           const reason = result.reason ?? result.status;
           recordScanItemSkip(store, sourceId, turn.conversationId, reason);

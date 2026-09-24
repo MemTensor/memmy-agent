@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
@@ -290,6 +291,10 @@ export interface MemmyConfig {
   embedding: EmbeddingConfig;
   agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
+  tokenBudget: {
+    dailyLimitM: number;
+    totalLimitM: number;
+  };
 }
 
 const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
@@ -360,6 +365,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     autoScanKnownAgents: true,
     watchFileChanges: true,
     autoInjectSkill: false
+  },
+  tokenBudget: {
+    dailyLimitM: 10,
+    totalLimitM: 500
   },
   algorithm: {
     enableMemoryAdd: true,
@@ -669,7 +678,21 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     evolution,
     embedding,
     agentAccess,
-    algorithm
+    algorithm,
+    tokenBudget: normalizeTokenBudget(asRecord(input.tokenBudget))
+  };
+}
+
+function normalizeTokenBudget(input: Record<string, unknown>): MemmyConfig["tokenBudget"] {
+  return {
+    dailyLimitM: normalizeMemoryByokLimitM(
+      input.dailyLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.dailyLimitM
+    ),
+    totalLimitM: normalizeMemoryByokLimitM(
+      input.totalLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.totalLimitM
+    )
   };
 }
 

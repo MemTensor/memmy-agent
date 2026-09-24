@@ -42,8 +42,18 @@ describe("native Codex ingestion", () => {
       channel: "agent_source_scan", sourceTurn: expect.objectContaining({ conversationId: "native-conversation", turnId: "native-turn" }),
       toolCalls: [expect.objectContaining({ id: "test-call", input: "npm test", output: "passed" })]
     }));
+    expect(completeSourceTurn.mock.calls[0]?.[0].captureLegacyHistory).toBeUndefined();
     expect(stats.memoryIds).toEqual(["l1-native"]);
     expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks a full scan to capture history that completed before activation", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-historical"] } });
+    await createService({ completeSourceTurn }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "full" });
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
+    const initial = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-initial"] } });
+    await createService({ completeSourceTurn: initial }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "initial_subset" });
+    expect(initial).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
   });
 
   it.each(["pending", "conflict"])("retains %s turns for retry without marking seen or completing the conversation", async status => {

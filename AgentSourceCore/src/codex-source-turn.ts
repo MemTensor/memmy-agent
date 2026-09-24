@@ -168,7 +168,7 @@ export async function* readCodexRollout(
     if (!content) continue;
     if (!timestamp && role !== "system") invalidReason = "timestamp_unresolved";
     current.push({ messageId: `${fileId}:${String(lineNumber).padStart(12, "0")}`, conversationId: conversationId || fileId, role, content, createdAt: timestamp || new Date(0).toISOString(), ordinal: lineNumber,
-      rawMeta: { sourceFile: filePath, sourceRecordId: text(payload.id) || undefined, sourcePhase: text(payload.phase) || undefined, sourceTurnId: turnId || undefined, sourceTurnSequence: sequence, sourceTurnStartedAt: startedAt || undefined } });
+      rawMeta: { sourceFile: filePath, sourceRecordId: text(payload.id) || undefined, sourcePhase: text(payload.phase) || undefined, sourceTurnId: turnId || undefined, sourceTurnSequence: sequence, sourceTurnStartedAt: startedAt || undefined, legacyConversationId: fileId, legacyMessageId: `${fileId}:${lineNumber}` } });
   }
   const lastResponse = [...current].reverse().find(message => message.role !== "system");
   const stopMatches = stopEvidence?.turnId === turnId &&

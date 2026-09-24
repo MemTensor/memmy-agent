@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 8;
-export const SCHEMA_MIGRATION_ID = "008_source_turn_captures";
+export const SCHEMA_VERSION = 9;
+export const SCHEMA_MIGRATION_ID = "009_token_usage_outbox";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -227,6 +227,8 @@ const statements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_raw_turns_episode_created
     ON raw_turns (episode_id, created_at ASC)`,
+  `CREATE INDEX IF NOT EXISTS idx_raw_turns_user_turn
+    ON raw_turns (user_id, turn_id)`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -669,7 +671,13 @@ const statements = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
-    ON audit_logs (user_id, created_at DESC)`
+    ON audit_logs (user_id, created_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS token_usage_outbox (
+    sequence INTEGER PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+  )`
 ];
 
 export function migrate(db: Database.Database): void {
@@ -679,7 +687,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );

@@ -1,6 +1,6 @@
 /** Ingestion service module. */
 import { createHash } from "node:crypto";
-import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest, hasStagedSourceTurn } from "@memmy/agent-source-core";
+import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest, hasStagedSourceTurn, legacyImportTurnIdFromMessages } from "@memmy/agent-source-core";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -319,7 +319,12 @@ async function processNativeConversation(
       continue;
     }
     try {
-      const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+      const legacyImportTurnId = legacyImportTurnIdFromMessages(ctx.sourceId, turn.conversationId, turn.messages);
+      const result = await options.memoryClient.completeSourceTurn({
+        ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
+        ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
+        ...(ctx.scanMode === "initial_subset" || ctx.scanMode === "full" ? { captureLegacyHistory: true } : {})
+      });
       if (result.status === "pending" || result.status === "conflict") {
         failed = true;
         stats.failed += turn.messages.length;

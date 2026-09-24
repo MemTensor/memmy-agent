@@ -26,7 +26,7 @@ export function I18nProvider(props: { language: Language | string | undefined; c
         return formatMessage(messageCatalogs[language][key], values);
       }
     }),
-    [language]
+    [language, messageCatalogs]
   );
 
   return <I18nContext.Provider value={value}>{props.children}</I18nContext.Provider>;

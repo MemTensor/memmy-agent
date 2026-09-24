@@ -49,4 +49,32 @@ describe("byok-token-usage-client", () => {
       byKind: [{ kind: "agent_chat" }]
     });
   });
+
+  it("reads memory token budget with runtime token", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input.toString()).toBe("http://127.0.0.1:18100/api/app/byok-token-usage/memory-budget");
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({
+        "x-memmy-local-token": "token"
+      });
+      return new Response(JSON.stringify({
+        dailyLimitM: 10,
+        totalLimitM: 500,
+        dailyUsed: 1_700_000,
+        lifetimeUsed: 23_000_000,
+        paused: false,
+        trigger: null,
+        nextLocalMidnightAt: "2026-09-18T16:00:00.000Z"
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createHttpByokTokenUsageClient(config).getMemoryBudget()).resolves.toMatchObject({
+      dailyLimitM: 10,
+      paused: false
+    });
+  });
 });

@@ -13,6 +13,127 @@
   letter-spacing: 0;
 }
 
+.budgetSection {
+  margin-top: 24px;
+}
+
+.budgetPanel {
+  background: var(--color-background-paper);
+}
+
+.budgetCardFlash {
+  animation: budget-card-flash 1.6s ease;
+}
+
+@keyframes budget-card-flash {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+
+  30% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-error) 40%, transparent);
+    background: color-mix(in srgb, var(--color-status-error-soft) 64%, var(--color-canvas-oat));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .budgetCardFlash {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-error) 40%, transparent);
+  }
+}
+
+.platformQuotaRow.budgetRow {
+  align-items: center;
+}
+
+.budgetRow .byokBreakdown {
+  align-items: center;
+}
+
+.budgetPausedMark {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-status-error) 14%, var(--color-background-paper));
+  color: var(--color-status-error);
+  line-height: 0;
+  font-size: 0;
+  cursor: help;
+}
+
+.budgetPausedMark svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.budgetMeter {
+  grid-column: 1 / -1;
+  box-sizing: border-box;
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--usage-track);
+}
+
+.budgetMeterFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--duration-normal) ease, background-color var(--duration-normal) ease;
+}
+
+.budgetMeterFillGreen {
+  background: var(--color-action-sky);
+}
+
+.budgetMeterFillYellow {
+  background: var(--color-status-warning, #e4b44a);
+}
+
+.budgetMeterFillRed {
+  background: var(--color-status-error);
+}
+
+.budgetControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.budgetInput {
+  width: 88px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 44%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  background: var(--color-background-paper);
+  color: var(--usage-ink);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.budgetHint {
+  margin: 0 0 6px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  line-height: 19px;
+  white-space: pre-line;
+}
+
 .invitationCard {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

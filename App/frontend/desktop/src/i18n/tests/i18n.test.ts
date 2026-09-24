@@ -13,6 +13,23 @@ describe("desktop i18n helpers", () => {
     expect(formatMessage("剩余 {count} Token", { count: 30000000 })).toBe("剩余 30000000 Token");
   });
 
+  it("formats memory budget used totals with spaces around the slash in both locales", () => {
+    expect(messageCatalogs["zh-CN"]["settings.token.memoryBudgetUsed"]).toBe("{used}M / {limit}M");
+    expect(messageCatalogs["en-US"]["settings.token.memoryBudgetUsed"]).toBe("{used}M / {limit}M");
+    expect(formatMessage(messageCatalogs["zh-CN"]["settings.token.memoryBudgetUsed"], { used: "2.1", limit: "2" }))
+      .toBe("2.1M / 2M");
+    expect(formatMessage(messageCatalogs["en-US"]["settings.token.memoryBudgetUsed"], { used: "2.1", limit: "2" }))
+      .toBe("2.1M / 2M");
+    expect(messageCatalogs["zh-CN"]["settings.token.memoryBudgetScale"]).toBe("M");
+    expect(messageCatalogs["en-US"]["settings.token.memoryBudgetScale"]).toBe("M");
+    expect(messageCatalogs["zh-CN"]["settings.token.memoryBudgetUnit"]).toBe("Token");
+    expect(messageCatalogs["en-US"]["settings.token.memoryBudgetUnit"]).toBe("Token");
+    expect(messageCatalogs["zh-CN"]["memory.tokenBudget.capsuleDaily"]).toBe("已达记忆进化任务今日 Token 限额，暂停后台记忆进化。对话、记忆读写仍可继续进行。");
+    expect(messageCatalogs["zh-CN"]["memory.tokenBudget.capsuleTotal"]).toBe("已达记忆进化任务累计 Token 限额，暂停后台记忆进化。对话、记忆读写仍可继续进行。");
+    expect(messageCatalogs["en-US"]["memory.tokenBudget.capsuleDaily"]).toBe("Today's Token limit for memory evolution has been reached. Background evolution is paused. Chat and memory read/write can continue.");
+    expect(messageCatalogs["en-US"]["memory.tokenBudget.capsuleTotal"]).toBe("The lifetime Token limit for memory evolution has been reached. Background evolution is paused. Chat and memory read/write can continue.");
+  });
+
   it("formats the welcome Agent trial quota from runtime values", () => {
     expect(formatMessage(messageCatalogs["zh-CN"]["welcome.gift"], { count: "2,000,000" }))
       .toBe("注册即送 2,000,000 Agent 任务体验 Token，开箱即用");

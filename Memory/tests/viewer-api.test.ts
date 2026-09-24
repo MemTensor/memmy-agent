@@ -539,7 +539,8 @@ async function startFixture(options: {
     configLoader: () => ({ config, path: configPath }),
     llm: options.llm,
     skillLlm: options.skillLlm,
-    embedder: testEmbedder()
+    embedder: testEmbedder(),
+    fetchAppMemoryBudget: async () => null
   });
   const server = createMemoryHttpServer({
     service,
@@ -554,6 +555,7 @@ async function startFixture(options: {
   cleanup.push(
     () => rmSync(root, { recursive: true, force: true }),
     () => db.close(),
+    async () => service.stop(),
     async () => closeServer(server)
   );
   return { baseUrl: `http://127.0.0.1:${address.port}`, configPath, db, service };

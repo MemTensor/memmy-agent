@@ -59,6 +59,7 @@ import {
   isCompleteTurn,
   hasStagedSourceTurn,
   legacyTurnId,
+  legacyImportTurnIdFromMessages,
   legacyTurnRequestId
 } from "@memmy/agent-source-core";
 import { openAppAgentSourceScanStore, type AppAgentSourceScanStore } from "../infrastructure/agent-source-scan-store/index.js";
@@ -660,10 +661,10 @@ async function stagePersistentSource(
     for await (const message of adapter.scan({
       since,
       order: scanOptions.order ?? (mode === "initial_subset" ? "recent_first" : "source_default"),
-      // Only explicit full scans may bypass the incremental boundary. If an
-      // incremental scan streams every historical message, an active long
-      // conversation can make the scanner re-import its entire history.
-      fullHistory: mode === "full",
+      // Incremental scans must keep the watermark boundary. Initial and full
+      // scans read every historical message, then initial scans still select
+      // only the recent memory subset.
+      fullHistory: capturesHistoricalMemories(mode),
       signal: scanOptions.signal,
       onProgress: (progress) => emitProgress(scanOptions, { ...progress, phase: "scan" })
     })) {
@@ -916,7 +917,12 @@ async function ingestPersistentSource(
           emitAddProgress("Capturing conversation turns");
           continue;
         }
-        const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+        const legacyImportTurnId = legacyImportTurnIdFromMessages(sourceId, turn.conversationId, turn.messages);
+        const result = await options.memoryClient.completeSourceTurn({
+          ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
+          ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
+          ...(capturesHistoricalMemories(scanMode) ? { captureLegacyHistory: true } : {})
+        });
         if (result.status === "pending" || result.status === "conflict") {
           const reason = result.reason ?? result.status;
           skipPersistentTurn(store, sourceId, turn.conversationId, reason);
@@ -1039,6 +1045,10 @@ function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode
   return value === "initial_subset" || value === "incremental" || value === "full" ? value : undefined;
 }
 
+function capturesHistoricalMemories(mode: AgentSourceScanMode | undefined): boolean {
+  return mode === "initial_subset" || mode === "full";
+}
+
 function firstTurnLine(messages: readonly ConversationMessage[]): string | undefined {
   const value = messages.find((message) => message.role === "user")?.content;
   const line = value?.split(/\r?\n/).map((part) => part.trim()).find(Boolean);
@@ -1084,8 +1094,7 @@ async function collectSourceMessages(
   const scanStartedAt = scanOptions.scanStartedAt ?? now();
   const since = scanOptions.since ?? (scanMode === "incremental" ? watermarkCursor(watermark) : undefined);
   const maxMessages = scanOptions.maxMessages;
-  const maxScanTargets =
-    scanOptions.maxScanTargets ?? (scanMode === "initial_subset" ? INITIAL_SOURCE_MEMORY_LIMIT : undefined);
+  const maxScanTargets = scanOptions.maxScanTargets;
   const order = scanOptions.order ?? (scanMode === "initial_subset" ? "recent_first" : "source_default");
 
   const collected: CollectedSourceScan = {
@@ -1113,6 +1122,7 @@ async function collectSourceMessages(
       maxMessages,
       maxScanTargets,
       order,
+      fullHistory: capturesHistoricalMemories(scanMode),
       signal: scanOptions.signal,
       onProgress(progress) {
         emitProgress(scanOptions, {

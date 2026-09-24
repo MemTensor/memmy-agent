@@ -288,7 +288,7 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain("topBarEnd={hasActiveConversation || environmentScope ? (");
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');

@@ -45,7 +45,8 @@ describe("memory layer smoke plan", () => {
       db,
       mode: "dev",
       config: DEFAULT_MEMMY_CONFIG,
-      embedder: createSmokeEmbedder()
+      embedder: createSmokeEmbedder(),
+      fetchAppMemoryBudget: async () => null
     });
     const namespace = {
       source: "smoke-plan",
@@ -124,6 +125,7 @@ describe("memory layer smoke plan", () => {
       expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
       expect(recall.injectedContext.markdown).not.toContain("# Memory context");
     } finally {
+      await service.stop();
       db.close();
     }
   });
