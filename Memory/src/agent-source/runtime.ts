@@ -750,6 +750,9 @@ async function ingestStagedMessages(
   let written = 0;
   let messageCount = 0;
   let processed = 0;
+  // Staged rows do not change during ingestion, so count them once: COUNT(*) per
+  // turn is a full index range scan and makes large sources quadratic.
+  const total = store.count(sourceId);
   let latestSeenAt: string | null = null;
   const errors: string[] = [];
   let errorCount = 0;
@@ -820,7 +823,7 @@ async function ingestStagedMessages(
         store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
       }
       processed += turn.messages.length;
-      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      onProgress({ sourceId, phase: "add", current: processed, total, message: "Capturing conversation turns" });
       continue;
     }
     let succeeded = true;
@@ -871,7 +874,7 @@ async function ingestStagedMessages(
       flush();
     }
     processed += turn.messages.length;
-    onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Adding raw memories" });
+    onProgress({ sourceId, phase: "add", current: processed, total, message: "Adding raw memories" });
   }
   flush(true);
   commitConversation();
