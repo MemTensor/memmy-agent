@@ -3,11 +3,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
-  type LlmClient
+  type LlmClient,
+  type LlmCompletionOptions,
+  type LlmMessage
 } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
+  createBatchReflectionLlm,
   createCapturingEmbedder,
   createMemoryServiceFixture,
   runWorkerRounds
@@ -131,6 +134,44 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
   };
 }
 
+const END_TOPIC_CONVENTION = "以后查看本地项目版本号都按这个步骤来";
+
+function createEndTopicCaptureLlm(
+  calls: string[],
+  closingText: string,
+  closingDecision: { l1: unknown; user: unknown }
+): LlmClient {
+  const base = createBatchReflectionLlm([], "captured task turn");
+  return {
+    ...base,
+    async completeJson<T extends Record<string, unknown>>(
+      messages: LlmMessage[],
+      options: LlmCompletionOptions
+    ): Promise<T> {
+      calls.push(options.operation);
+      if (options.operation === "retrieval.retrieval.query.extract.v2") {
+        return { queryVecText: "", keywords: [] } as unknown as T;
+      }
+      if (options.operation === "relation.classify.v1") {
+        return {
+          relation: "end_topic",
+          confidence: 1,
+          reason: "user ends the current topic"
+        } as unknown as T;
+      }
+      const payload = messages.find((message) => message.role === "user")?.content ?? "";
+      if (
+        options.operation === "capture.summarize" &&
+        messages[0]?.content.includes("Judge L1 and User Memory") &&
+        payload.includes(closingText)
+      ) {
+        return closingDecision as unknown as T;
+      }
+      return base.completeJson<T>(messages, options);
+    }
+  };
+}
+
 describe("MemoryService / session / episode relation", () => {
   it("closes an explicitly ended topic without capturing the control turn as L1", async () => {
     const relationCalls: string[] = [];
@@ -245,10 +286,11 @@ describe("MemoryService / session / episode relation", () => {
     expect(completed.l1MemoryIds).toEqual([]);
   });
 
-  it("commits an LLM end-topic proposal without capturing the control turn as L1", async () => {
-    const relationCalls: string[] = [];
-    const { service } = createTestService({
-      llm: createRelationClassifierLlm(relationCalls, undefined, "end_topic")
+  it("commits an LLM end-topic proposal and lets the capture decision drop a closing-only turn", async () => {
+    const calls: string[] = [];
+    const closingQuery = "That covers everything for this topic";
+    const { db, service } = createTestService({
+      llm: createEndTopicCaptureLlm(calls, closingQuery, { l1: null, user: null })
     });
     const session = service.openSession({
       namespace: {
@@ -265,10 +307,10 @@ describe("MemoryService / session / episode relation", () => {
     const started = await service.startTurn({
       turnId: "turn-llm-end-topic-close",
       sessionId: session.sessionId,
-      query: "That covers everything for this topic"
+      query: closingQuery
     });
     expect(started.status).toContain("relation:end_topic:proposed");
-    expect(relationCalls).toContain("relation.classify.v1");
+    expect(calls).toContain("relation.classify.v1");
     expect(service.getMemory(first.episodeId)).toMatchObject({
       kind: "episode",
       status: "open"
@@ -276,14 +318,103 @@ describe("MemoryService / session / episode relation", () => {
 
     const completed = service.completeTurn("turn-llm-end-topic-close", {
       sessionId: session.sessionId,
-      query: "That covers everything for this topic",
+      query: closingQuery,
       answer: "Understood."
     });
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
-    expect(completed.l1MemoryIds).toEqual([]);
+    expect(completed.l1MemoryIds).toHaveLength(1);
     expect(service.getMemory(first.episodeId)).toMatchObject({
       kind: "episode",
       status: "closed"
+    });
+
+    await runWorkerRounds(service, 4, 50);
+
+    expect(db.db.prepare(
+      `SELECT status FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryId)).toEqual({ status: "deleted" });
+    const reward = db.db.prepare(
+      `SELECT payload_json FROM evolution_jobs WHERE episode_id = ? AND job_type = 'reward'`
+    ).get(first.episodeId) as { payload_json: string } | undefined;
+    expect(reward).toBeDefined();
+    expect(JSON.parse(reward!.payload_json)).toMatchObject({
+      l1MemoryId: first.l1MemoryId,
+      targetKind: "episode"
+    });
+  });
+
+  it("keeps the feedback and work convention of an LLM end-topic turn in L1 before the episode reward", async () => {
+    const calls: string[] = [];
+    const { db, service } = createTestService({
+      llm: createEndTopicCaptureLlm(calls, END_TOPIC_CONVENTION, {
+        l1: {
+          summary: END_TOPIC_CONVENTION,
+          evidence: [{ quote: END_TOPIC_CONVENTION, role: "user", kind: "user_directive" }]
+        },
+        user: {
+          action: "create",
+          evidence: [{ quote: END_TOPIC_CONVENTION, type: "User Preference" }],
+          target: "",
+          replacement: ""
+        }
+      })
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic-feedback"
+      }
+    });
+    const first = service.completeTurn("turn-end-topic-feedback-first", {
+      sessionId: session.sessionId,
+      query: "查看本地项目的版本号",
+      answer: "读取 package.json 的 version 字段，当前版本是 1.1.8。"
+    });
+    const closingQuery = `很好，这个步骤很有用，谢谢。${END_TOPIC_CONVENTION}。结束会话`;
+    const started = await service.startTurn({
+      turnId: "turn-end-topic-feedback-close",
+      sessionId: session.sessionId,
+      query: closingQuery
+    });
+    expect(started.status).toContain("relation:end_topic:proposed");
+
+    const completed = service.completeTurn("turn-end-topic-feedback-close", {
+      sessionId: session.sessionId,
+      query: closingQuery,
+      answer: "好的，以后查看本地项目版本号都会按这个步骤来。"
+    });
+    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.l1MemoryIds).toHaveLength(1);
+    const episodeEvolutionJobs = () => db.db.prepare(
+      `SELECT job_type, payload_json
+       FROM evolution_jobs
+       WHERE episode_id = ?
+         AND job_type IN ('reflection', 'reward')`
+    ).all(first.episodeId) as Array<{ job_type: string; payload_json: string }>;
+    expect(episodeEvolutionJobs()).toEqual([]);
+
+    await runWorkerRounds(service, 4, 50);
+
+    expect(db.db.prepare(
+      `SELECT status FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryId)).toEqual({ status: "activated" });
+    expect(db.db.prepare(
+      `SELECT l1_memory_ids_json FROM episodes WHERE id = ?`
+    ).get(first.episodeId)).toEqual({
+      l1_memory_ids_json: JSON.stringify([first.l1MemoryId, completed.l1MemoryId])
+    });
+    expect(db.db.prepare(
+      `SELECT content, source_turn_id FROM user_memories WHERE user_id = ? AND status = 'active'`
+    ).all("user-end-topic-feedback")).toEqual([{
+      content: closingQuery,
+      source_turn_id: completed.rawTurnId
+    }]);
+    const reward = episodeEvolutionJobs().find((job) => job.job_type === "reward");
+    expect(reward).toBeDefined();
+    expect(JSON.parse(reward!.payload_json)).toMatchObject({
+      l1MemoryId: completed.l1MemoryId,
+      targetKind: "episode"
     });
   });
 
