@@ -288,9 +288,6 @@ function endTopicDecisionFromRawTurn(rawTurn: RawTurnRecord): EndTopicDecision |
 }
 
 function rawTurnIsExcludedFromL1(rawTurn: RawTurnRecord): boolean {
-  if (endTopicDecisionFromRawTurn(rawTurn)) {
-    return true;
-  }
   const turnStart = isRecord(rawTurn.messagePayload?.turn_start)
     ? rawTurn.messagePayload.turn_start
     : undefined;
@@ -2814,7 +2811,9 @@ export class SessionTurnService {
         Boolean(rawTurn && (rawTurn.id === currentRawTurn.id || !seenRawTurnIds.has(rawTurn.id)))
       )
       .filter((rawTurn) => isRecord(rawTurn.messagePayload?.turn_complete))
-      .filter((rawTurn) => !endTopicDecisionFromRawTurn(rawTurn))
+      // A bare end-topic command has nothing to remember. Any other end_topic turn can still
+      // carry feedback or instructions, so it goes through the same capture decision.
+      .filter((rawTurn) => !explicitEndTopicDecision(rawTurn.userText ?? ""))
       .filter((rawTurn) => this.deps.llm.isConfigured() || !rawTurnIsExcludedFromL1(rawTurn))
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
     return rawTurns.flatMap((rawTurn) =>
