@@ -159,8 +159,24 @@ async function reconcileMigratedAccountProjection(
   const session = options.appStateStore.repositories.accountSession.get();
   const projection = accountProjectionFromState(state);
   if (!session.authenticated) {
+    const authoritativeMigration = options.migrationConsistency?.accountSourceIsAuthoritative === true;
+    const recoveryCloudUuid = projection?.cloudUuid
+      ?? (authoritativeMigration
+        && options.appStateStore.repositories.bootstrap.getAppSettings().userMode === "account"
+        ? options.appStateStore.repositories.accountSession.getLatestCloudUuid()
+        : null);
+    if (
+      authoritativeMigration
+      && recoveryCloudUuid
+      && options.appStateStore.repositories.accountSession.activateByCloudUuid(
+        recoveryCloudUuid,
+        options.accountChannel
+      )
+    ) {
+      return reconcileMigratedAccountProjection(options, state);
+    }
     if (projection || (
-      options.migrationConsistency?.accountSourceIsAuthoritative
+      authoritativeMigration
       && options.appStateStore.repositories.bootstrap.getAppSettings().userMode === "account"
     )) {
       throw createMigrationConsistencyError(

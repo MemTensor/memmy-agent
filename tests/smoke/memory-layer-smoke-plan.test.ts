@@ -9,7 +9,8 @@ import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
   MemoryService,
-  type Embedder
+  type Embedder,
+  type LlmClient
 } from "../../Memory/src/index.js";
 
 const tempRoots: string[] = [];
@@ -45,6 +46,7 @@ describe("memory layer smoke plan", () => {
       db,
       mode: "dev",
       config: DEFAULT_MEMMY_CONFIG,
+      llm: createSmokeLlm(),
       embedder: createSmokeEmbedder(),
       fetchAppMemoryBudget: async () => null
     });
@@ -195,6 +197,32 @@ function createSmokeEmbedder(): Embedder {
         model: "smoke-plan-embedding",
         configured: true,
         remote: false
+      };
+    }
+  };
+}
+
+function createSmokeLlm(): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/smoke-plan",
+      model: "smoke-plan-model"
+    },
+    isConfigured: () => true,
+    async complete() {
+      return JSON.stringify({ title: "Smoke trace", summary: "Smoke summary" });
+    },
+    async completeJson<T extends Record<string, unknown>>() {
+      return { l1: { title: "Smoke trace", summary: "Smoke summary" }, user: null } as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "smoke-plan-model",
+        configured: true,
+        remote: true
       };
     }
   };

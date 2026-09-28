@@ -929,6 +929,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
     expect(includeSource).toContain("lockPath = relayLockPath");
+    expect(includeSource).toContain("If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
     expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
     expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");

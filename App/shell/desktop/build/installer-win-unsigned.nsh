@@ -886,6 +886,11 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "If fso.FolderExists(relayLockPath) Then$\r$\n"
   FileWrite $1 "  lockPath = relayLockPath$\r$\n"
   FileWrite $1 "End If$\r$\n"
+  ; A cancelled direct upgrade can leave the install-local marker lock behind. Run the
+  ; same age/process-aware recovery used for relay locks before treating it as an active lock.
+  FileWrite $1 "If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"
+  FileWrite $1 "End If$\r$\n"
   FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
   FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"
   FileWrite $1 "  If fso.FileExists(powerShellPath) And fso.FileExists(promptPath) Then$\r$\n"

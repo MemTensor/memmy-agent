@@ -600,7 +600,9 @@ export class WorkerRunner {
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
     const stage = processingStageForJob(job.jobType);
-    const forceDeadLetter = Boolean(stage && classifyProcessingError(error).retryAction !== "retry");
+    const classification = classifyProcessingError(error);
+    const forceDeadLetter = classification.code === "40309"
+      || Boolean(stage && classification.retryAction !== "retry");
     const failedJob = this.deps.repos.runtime.failJob(
       job.id,
       errorMessage,

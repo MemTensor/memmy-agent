@@ -185,17 +185,25 @@ function parseProviderFailure(text: string): {
       };
     }
     if (typeof parsed.message === "string" && parsed.message.trim()) {
+      const message = parsed.message.trim();
+      const isMemoryEvolutionQuota = isMemoryEvolutionQuotaMessage(message);
       return {
         detail: parsed.message,
-        errorCode,
-        isBusinessError: isQuotaCode,
-        message: parsed.message.trim()
+        errorCode: errorCode ?? (isMemoryEvolutionQuota ? "40309" : undefined),
+        isBusinessError: isQuotaCode || isMemoryEvolutionQuota,
+        message
       };
     }
     return { detail: text, errorCode, isBusinessError: isQuotaCode };
   } catch {
     return { detail: text, isBusinessError: false };
   }
+}
+
+function isMemoryEvolutionQuotaMessage(message: string): boolean {
+  const normalized = message.toLowerCase().replace(/\s+/gu, " ").trim();
+  return normalized.includes("memory_evolution")
+    && /(token 用量不足|额度(?:不足|耗尽)|quota(?:\s+)?(?:exhausted|insufficient))/u.test(normalized);
 }
 
 function describeResponseType(response: Response, text: string): string {

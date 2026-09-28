@@ -897,8 +897,20 @@ export class MemoryService {
   health(routes: string[] = []): HealthResponse {
     const schema = this.schemaVersion();
     const backend = this.storageCapabilities();
+    const summary = {
+      ...this.llm.status(),
+      routing: this.config.roleRouting.summary
+    };
+    const evolution = {
+      ...this.skillLlm.status(),
+      routing: this.config.roleRouting.evolution
+    };
+    const embedding = {
+      ...this.embedder.status(),
+      mode: this.config.embedding.mode
+    };
     return {
-      ok: true,
+      ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
       serviceVersion: PROJECT_VERSION,
       protocolVersion: MEMORY_PROTOCOL_VERSION,
       viewerVersion: MEMORY_VIEWER_VERSION,
@@ -913,18 +925,9 @@ export class MemoryService {
         lastMigrationId: schema.lastMigrationId
       },
       models: {
-        summary: {
-          ...this.llm.status(),
-          routing: this.config.roleRouting.summary
-        },
-        evolution: {
-          ...this.skillLlm.status(),
-          routing: this.config.roleRouting.evolution
-        },
-        embedding: {
-          ...this.embedder.status(),
-          mode: this.config.embedding.mode
-        }
+        summary,
+        evolution,
+        embedding
       },
       capabilities: {
         routes,

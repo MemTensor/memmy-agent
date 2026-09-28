@@ -469,6 +469,34 @@ describe("syncRuntimeConfigWithAppState", () => {
     expect(saved.modelAssignments.account.ownerAccountId).toBe("owner-a");
   });
 
+  it("restores the active account after an upgrade left active_uuid empty", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    context.store.db.prepare("UPDATE app_settings SET active_uuid = NULL WHERE id = 'default'").run();
+    context.writeConfig(currentAccountCatalog());
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: true,
+        categorySourcesShareGeneration: false
+      }
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      hydratedAppState: true
+    });
+
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "owner-a" }
+    });
+    expect(context.store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get())
+      .toMatchObject({ active_uuid: "account-a" });
+  });
+
   it("uses an authoritative migrated account database to replace only a stale account projection", async () => {
     const context = createContext();
     seedAccountSession(context);
