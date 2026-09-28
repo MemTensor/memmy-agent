@@ -2264,9 +2264,9 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("min-width:max-content");
     expect(stylesSource).toMatch(/\.agent-message-content__table-scroll\s*\{[^}]*overflow-x:\s*auto;/s);
     expect(stylesSource).toMatch(/\.agent-message-content__code-scroll,\s*\.agent-message-content__pre\s*\{[^}]*overflow-x:\s*auto;/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll,\s*\.agent-message-content__code-scroll,\s*\.agent-message-content__pre\s*\{(?=[^}]*scrollbar-width:\s*thin;)(?=[^}]*scrollbar-color:\s*var\(--codex-scrollbar-thumb\)\s+transparent;)[^}]*\}/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar,\s*\.agent-message-content__code-scroll::-webkit-scrollbar,\s*\.agent-message-content__pre::-webkit-scrollbar\s*\{(?=[^}]*display:\s*block;)(?=[^}]*height:\s*var\(--codex-scrollbar-size\);)[^}]*\}/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__code-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__pre::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--codex-scrollbar-thumb\);/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll,\s*\.agent-message-content__code-scroll,\s*\.agent-message-content__pre,\s*\.composer-media-preview-strip\s*\{(?=[^}]*scrollbar-width:\s*thin;)(?=[^}]*scrollbar-color:\s*var\(--codex-scrollbar-thumb\)\s+transparent;)[^}]*\}/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar,\s*\.agent-message-content__code-scroll::-webkit-scrollbar,\s*\.agent-message-content__pre::-webkit-scrollbar,\s*\.composer-media-preview-strip::-webkit-scrollbar\s*\{(?=[^}]*display:\s*block;)(?=[^}]*height:\s*var\(--codex-scrollbar-size\);)[^}]*\}/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__code-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__pre::-webkit-scrollbar-thumb,\s*\.composer-media-preview-strip::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--codex-scrollbar-thumb\);/s);
   });
 
   it("wraps long file paths inside user message bubbles", () => {
