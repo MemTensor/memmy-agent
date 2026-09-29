@@ -424,6 +424,26 @@ export function resolveEndpointKind(url: string): EndpointKind {
   return "remote";
 }
 
+// Keep in sync with runCommand and mapTopLevelCommand in commands.ts. Only these fixed words are
+// reported; other positionals can be search queries, memory text, or ids.
+const CLI_COMMAND_ACTIONS = new Map<string, readonly string[]>([
+  ["init", []],
+  ["install", []],
+  ["upgrade", []],
+  ["stop", []],
+  ["service", ["start", "stop", "status", "repair-launcher"]],
+  ["raw", ["GET", "POST", "DELETE"]],
+  ["serve", []],
+  ["health", []],
+  ["reload-config", []],
+  ["session", ["open", "close"]],
+  ["turn", ["start", "complete"]],
+  ["search", []],
+  ["add", []],
+  ["get", []],
+  ["delete", []],
+]);
+
 export function resolveCommandIdentity(argv: string[]): {
   command_group: string;
   command_action?: string;
@@ -456,8 +476,11 @@ export function resolveCommandIdentity(argv: string[]): {
     };
   }
 
-  const group = words[0] ?? "help";
-  const action = words[1];
+  const [first = "", second = ""] = words;
+  const knownActions = CLI_COMMAND_ACTIONS.get(first);
+  const group = knownActions ? first : "unknown";
+  // raw accepts its method in any case, like runRaw in commands.ts.
+  const action = knownActions?.includes(group === "raw" ? second.toUpperCase() : second) ? second : undefined;
   const positionalId = words[2]?.trim() || "";
 
   const has_session_id =
