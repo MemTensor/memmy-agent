@@ -1,8 +1,9 @@
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
 import { decompress, Decompress, ZstdErrorCode } from "fzstd";
 import { readJsonlObjects, type JsonObject } from "../jsonl-lines.js";
+
+import { deepseekHarnessSessionFallbackId, isDeepseekHarnessCompressedSession } from "./session-file.js";
 
 const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
@@ -23,7 +24,7 @@ export async function readDeepseekHarnessSession(
   signal?.throwIfAborted();
   const bytes = await readFile(filePath);
   signal?.throwIfAborted();
-  const text = filePath.endsWith(".zstd") ? decompressFrames(bytes) : bytes.toString("utf8");
+  const text = isDeepseekHarnessCompressedSession(filePath) ? decompressFrames(bytes) : bytes.toString("utf8");
   return parseSessionRows(text, filePath, signal);
 }
 
@@ -32,8 +33,8 @@ export async function* streamDeepseekHarnessSession(
   filePath: string,
   signal?: AbortSignal
 ): AsyncIterable<RawDeepseekHarnessMessage> {
-  if (filePath.endsWith(".zstd")) {
-    let conversationId = basename(filePath).replace(/\.jsonl\.zstd$/u, "");
+  if (isDeepseekHarnessCompressedSession(filePath)) {
+    let conversationId = deepseekHarnessSessionFallbackId(filePath);
     let workspacePath: string | null = null;
     for await (const record of streamZstdJsonlObjects(filePath, signal)) {
       signal?.throwIfAborted();
@@ -47,7 +48,7 @@ export async function* streamDeepseekHarnessSession(
     }
     return;
   }
-  let conversationId = basename(filePath).replace(/\.jsonl$/u, "");
+  let conversationId = deepseekHarnessSessionFallbackId(filePath);
   let workspacePath: string | null = null;
   for await (const record of readJsonlObjects(filePath, signal)) {
     signal?.throwIfAborted();
@@ -160,7 +161,7 @@ function parseSessionRows(
   const header = records.find((record) => isRecord(record) && record.type === "session");
   const conversationId = isRecord(header) && typeof header.id === "string"
     ? header.id
-    : basename(filePath).replace(/\.jsonl(?:\.zstd)?$/u, "");
+    : deepseekHarnessSessionFallbackId(filePath);
   const workspacePath = isRecord(header) && typeof header.cwd === "string" ? header.cwd : null;
   const messages: RawDeepseekHarnessMessage[] = [];
 
