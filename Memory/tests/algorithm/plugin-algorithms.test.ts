@@ -24,6 +24,8 @@ import {
   l2CandidateSignatureHash,
   languageSteeringLine,
   packL2InductionTraces,
+  pinnedPromptLanguage,
+  steeredPromptLanguage,
   renderRepositoryRepairProtocol,
   retrievePluginMemories,
   retrievalLayersForMode,
@@ -1277,6 +1279,17 @@ describe("plugin algorithm parity helpers", () => {
     expect(packed).toContain("tools: shell");
     expect(packed).not.toContain("x".repeat(500));
     expect(languageSteeringLine(detectDominantLanguage(["请修复这个失败流程"]))).toContain("Simplified Chinese");
+  });
+
+  it("pins prompt language from the interface and falls back to a 20% CJK detector", () => {
+    expect(pinnedPromptLanguage("en-US")).toBe("en");
+    expect(pinnedPromptLanguage("zh-CN")).toBe("zh");
+    expect(pinnedPromptLanguage(undefined)).toBeUndefined();
+    expect(steeredPromptLanguage("en-US", ["请修复这个失败流程"])).toBe("en");
+    expect(languageSteeringLine(steeredPromptLanguage("en-US", ["请修复这个失败流程"]))).toContain("English");
+    expect(languageSteeringLine(steeredPromptLanguage("en-US", ["请修复这个失败流程"]))).not.toContain("Simplified Chinese");
+    expect(steeredPromptLanguage(undefined, ["请修复这个失败流程 process.arch arm64"])).toBe("zh");
+    expect(steeredPromptLanguage(undefined, ["please fix the failing pipeline"])).toBe("en");
   });
 
   it("keeps plugin L3 loose admission dampening and domain tags", () => {

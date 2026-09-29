@@ -66,7 +66,7 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
         detect: async () => true, async *scan() { for await (const message of readCodexRollout(path)) yield { ...message, sourceId: "codex", workspacePath: null, gitRoot: null }; } }]) });
     try {
       await executor.startScan({ sourceId: "codex", mode: "incremental" }); await wait(executor);
-      expect(executor.scanStatus().error).toContain("turn_incomplete");
+      expect(executor.scanStatus().error).toBeNull();
       expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.latestSeenAt).toBeNull();
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns").get()).toEqual({ n: 0 });
       write(true);
@@ -75,5 +75,44 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns").get()).toEqual({ n: 1 });
       expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.latestSeenAt).toBe(at);
     } finally { await executor.dispose(); }
+  });
+
+  it("advances the scan cursor when a cancelled turn sits next to a complete sibling", async () => {
+    const { service, root } = fixture.createTestService();
+    const statePath = join(root, "scan-state.json");
+    const completePath = join(root, "rollout-complete.jsonl");
+    const cancelledPath = join(root, "rollout-cancelled.jsonl");
+    writeFileSync(completePath, records(true).map((record) => JSON.stringify(record)).join("\n") + "\n");
+    writeFileSync(cancelledPath, [
+      event("session_meta", { id: "cancelled-session" }),
+      event("event_msg", { type: "task_started", turn_id: "cancelled-turn" }),
+      event("response_item", { type: "message", role: "user", content: [{ text: "Stop this turn." }] }),
+      event("event_msg", { type: "task_aborted", turn_id: "cancelled-turn" })
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath,
+      resolveAgentSkillRoot: () => null,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: root },
+        detect: async () => true,
+        async *scan() {
+          for (const path of [completePath, cancelledPath]) {
+            for await (const message of readCodexRollout(path)) {
+              yield { ...message, sourceId: "codex", workspacePath: null, gitRoot: null };
+            }
+          }
+        }
+      }])
+    });
+    try {
+      await executor.startScan({ sourceId: "codex", mode: "incremental" });
+      await wait(executor);
+      expect(executor.scanStatus().error).toBeNull();
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.latestSeenAt).toBe(at);
+    } finally {
+      await executor.dispose();
+    }
   });
 });

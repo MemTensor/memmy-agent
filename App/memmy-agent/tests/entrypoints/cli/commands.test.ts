@@ -142,7 +142,10 @@ function usePrompt(responses: any[]): void {
     select(_message, options) {
       const choices = Array.isArray(options) ? options : options.choices;
       const raw = next();
-      if (raw === "done") return new FakePrompt("[Done]");
+      if (raw === "done") {
+        const done = choices.find((choice) => choice === "[Done]" || choice === "[Continue]");
+        return new FakePrompt(done ?? "[Done]");
+      }
       if (raw === "back") return new FakePrompt("<- Back");
       if (raw instanceof RegExp) return new FakePrompt(choices.find((choice) => raw.test(choice)) ?? choices[0]);
       return new FakePrompt(raw);

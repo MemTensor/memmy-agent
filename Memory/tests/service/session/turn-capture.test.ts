@@ -5,7 +5,10 @@ import {
   MemoryDb
 } from "../../../src/index.js";
 import { captureTurnSteps } from "../../../src/algorithm/plugin-algorithms.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import {
+  createBatchReflectionLlm,
+  createMemoryServiceFixture
+} from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup,
@@ -761,6 +764,64 @@ describe("MemoryService / session / turn capture", () => {
     expect(detail.item.body).toContain("Agent:\nDone with the current task.");
     expect(detail.item.body).not.toContain("Historical User");
     expect(detail.item.body).not.toContain("memmy_memory_context");
+
+    db.close();
+  });
+
+  it("keeps raw attachment turns but sends normalized input to capture summary", async () => {
+    const calls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
+    }> = [];
+    const llm = createBatchReflectionLlm(calls, "<attachments>", "attachment-summary");
+    const { db, service } = createTestService({ llm });
+    const session = service.openSession({
+      namespace: {
+        source: "memmy-agent",
+        profileId: "default",
+        userId: "attachment-summary-user"
+      }
+    });
+    const query = [
+      "<attachments>",
+      "- hypre.txt  (application/octet-stream, 15.4MB)  /Users/test/.memmy/media/hypre.txt",
+      "",
+      "请用 read_file 工具按需读取上述附件；PDF 可用 pages 参数分页读取。",
+      "</attachments>",
+      "",
+      "这个文件的内容是什么？"
+    ].join("\n");
+    const complete = service.completeTurn("turn-attachment-summary", {
+      sessionId: session.sessionId,
+      query,
+      answer: "这个附件是一个 **HYPRE 2.31.0 源码集合**，包含并行求解器实现。",
+      toolCalls: [{
+        name: "read_file",
+        input: { path: "/Users/test/.memmy/media/hypre.txt" },
+        output: "set(HYPRE_VERSION 2.31.0)",
+        success: true
+      }]
+    });
+
+    await service.runWorkerOnce(20);
+
+    const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
+    const payload = summaryCall?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(payload).toContain("USER: 这个文件的内容是什么？");
+    expect(payload).not.toContain("USER: <attachments>");
+    expect(payload).not.toContain("请用 read_file 工具按需读取上述附件");
+    expect(payload).toContain(
+      "ATTACHMENT METADATA (internal context; do not quote as summary/evidence): - hypre.txt (application/octet-stream, 15.4MB)"
+    );
+    expect(payload.split("ATTACHMENT METADATA")[1]).not.toContain("/Users/test");
+
+    const rawTurn = db.db.prepare(
+      "SELECT user_text FROM raw_turns WHERE id = ?"
+    ).get(complete.rawTurnId) as { user_text: string };
+    expect(rawTurn.user_text).toBe(query);
+    expect(service.getMemory(complete.l1MemoryId).item.summary).toBe(
+      "这个附件是一个 HYPRE 2.31.0 源码集合，包含并行求解器实现。"
+    );
 
     db.close();
   });

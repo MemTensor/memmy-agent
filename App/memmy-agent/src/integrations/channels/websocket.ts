@@ -2591,6 +2591,12 @@ export class WebSocketChannel extends BaseChannel {
         record.createdAt = createdAt;
       }
       const offset = appendTranscriptObject(key, record);
+      // appendTranscriptObject stamps this record's own starting offset onto the
+      // object it wrote. Mirror that onto `wire` so the broadcast payload and the
+      // persisted record carry one shared identity. Note `offset` is the return
+      // value — the position the *next* record starts at — so it must not be used
+      // here. A failed write leaves the field absent and the client skips dedup.
+      wire.transcript_offset = record.transcript_offset;
       this.transcriptMonitor?.noteConsumed(key, offset);
     } catch {
       // Transcript persistence is best-effort for live WebSocket delivery.
@@ -2661,7 +2667,9 @@ export class WebSocketChannel extends BaseChannel {
   ): Promise<void> {
     if (!this.shouldSendTurnPayload(chatId, payload)) return;
     const source = this.turnSourceForPayload(chatId, payload);
-    const enrichedPayload = source ? { ...payload, source } : payload;
+    // Always a copy: tryAppendWebuiTranscript stamps transcript_offset in place,
+    // and the caller's payload object must not be mutated.
+    const enrichedPayload = { ...payload, ...(source ? { source } : {}) };
     if (appendTranscript) this.tryAppendWebuiTranscript(chatId, enrichedPayload);
     for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) {
       const projected = this.payloadForConnection(connection, chatId, enrichedPayload, source);

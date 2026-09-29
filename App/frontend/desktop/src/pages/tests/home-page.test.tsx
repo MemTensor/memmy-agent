@@ -188,7 +188,8 @@ describe("HomePage", () => {
     expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
     expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
     expect(source).toContain("state.agent.pendingPresetByScope[modelSelectionScopeKey]");
-    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId");
+    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]");
+    expect(source).toContain("allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)");
     expect(source).toContain("modelPreset: resolvedConversationModel.candidateId ?? undefined");
     expect(source).not.toContain("copyScopedModelSelection");
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
@@ -287,7 +288,7 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain("topBarEnd={hasActiveConversation || environmentScope ? (");
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');

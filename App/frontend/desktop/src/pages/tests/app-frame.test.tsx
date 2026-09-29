@@ -76,6 +76,9 @@ describe("AppFrame", () => {
     );
 
     expect(html).toContain("app-frame-content-topbar");
+    expect(html).toContain("app-frame-content-topbar__start");
+    expect(html).toContain("app-frame-content-topbar__center");
+    expect(html).toContain("app-frame-content-topbar__end");
     expect(html).not.toContain("app-frame-content-topbar--bordered");
   });
 

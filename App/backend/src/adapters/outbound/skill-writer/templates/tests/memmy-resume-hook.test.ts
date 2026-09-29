@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
 import { renderMemmyResumeHookScript as renderCliHook } from "../../../../../../../../Memory/src/agent-source/integration/templates/memmy-resume-hook.js";
@@ -73,6 +75,8 @@ describe("memmy resume hook stop capture", () => {
         response.end(JSON.stringify({ sessionId: `session-${(body.namespace as { source: string }).source}` }));
       } else if (request.url === "/api/v1/turns/start") {
         response.end(JSON.stringify({ sessionId: body.sessionId, turnId: body.turnId, episodeId: `episode-${body.sessionId}` }));
+      } else if (request.url === "/api/v1/source-turns/complete") {
+        response.end(JSON.stringify({ status: "stored", result: { l1MemoryIds: ["trace-cursor"] } }));
       } else {
         response.end(JSON.stringify({ ok: true }));
       }
@@ -90,26 +94,44 @@ describe("memmy resume hook stop capture", () => {
         cursor_version: "3.17.19", session_id: "cursor-conversation", conversation_id: "cursor-conversation",
         generation_id: "cursor-turn", prompt: "Explain branch and worktree", cwd: tempDir,
       };
+      const cursorHome = join(tempDir, "cursor-home");
+      writeCursorTurnFixture(cursorHome, {
+        conversationId: payload.conversation_id, requestId: payload.generation_id,
+        query: payload.prompt, answer: "A worktree is a separate checkout",
+      });
       for (const event of ["beforeSubmitPrompt", "afterAgentResponse", "stop"]) {
         for (const script of scripts) {
           const result = await runHook(script, { ...payload, hook_event_name: event,
-            text: "A worktree is a separate checkout", last_assistant_message: "A worktree is a separate checkout" });
+            text: "A worktree is a separate checkout", last_assistant_message: "A worktree is a separate checkout" }, cursorHome);
           expect(result.status).toBe(0);
           expect(result.stderr).toBe("");
         }
       }
       const completions = () => requests.filter(request => request.path.endsWith("/complete"));
       expect(completions()).toHaveLength(1);
+      expect(completions()[0]?.path).toBe("/api/v1/source-turns/complete");
       expect(completions()[0]?.body).toMatchObject({
         namespace: { source: "cursor" }, query: payload.prompt, answer: "A worktree is a separate checkout",
+        channel: "hook", adapterId: "memmy-cursor-hook",
+        sourceTurn: { source: "cursor", conversationId: payload.conversation_id, turnId: "bubble-user" },
       });
       expect(requests.filter(request => request.path === "/api/v1/turns/start")).toHaveLength(1);
       expect(requests.some(request => request.body.namespace?.source === "claude_code")).toBe(false);
 
       // Host detection uses event provenance, not inherited terminal environment.
+      const claudeTranscript = join(tempDir, "native-claude-session.jsonl");
+      const claudeRows = { sessionId: "native-claude-session", isSidechain: false, promptId: "claude-turn" };
+      writeFileSync(claudeTranscript, [
+        { ...claudeRows, type: "user", origin: { kind: "human" }, uuid: "cu1", timestamp: "2026-09-16T11:00:00.000Z",
+          message: { role: "user", content: "Explain native Claude capture" } },
+        { ...claudeRows, type: "assistant", uuid: "ca1", timestamp: "2026-09-16T11:00:08.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "Captured by Claude only" }] } },
+        { ...claudeRows, type: "system", subtype: "turn_duration", uuid: "cd1", timestamp: "2026-09-16T11:00:09.000Z" },
+      ].map((row) => JSON.stringify(row)).join("\n"));
       for (const event of ["UserPromptSubmit", "Stop"]) {
         const result = await runHook(scripts[1]!, {
-          hook_event_name: event, session_id: "native-claude-session", turn_id: "claude-turn",
+          hook_event_name: event, session_id: "native-claude-session", prompt_id: "claude-turn",
+          transcript_path: claudeTranscript,
           prompt: "Explain native Claude capture", last_assistant_message: "Captured by Claude only", cwd: tempDir,
         });
         expect(result.status).toBe(0);
@@ -118,13 +140,14 @@ describe("memmy resume hook stop capture", () => {
       expect(completions()).toHaveLength(2);
       expect(completions()[1]?.body).toMatchObject({
         namespace: { source: "claude_code" }, query: "Explain native Claude capture", answer: "Captured by Claude only",
+        sourceTurn: { source: "claude_code", conversationId: "native-claude-session", turnId: "claude-turn" },
       });
     } finally {
       await close(server);
     }
   }, 30000);
 
-  it("captures the user prompt instead of the last tool result when turn state is missing", async () => {
+  it("captures the human prompt instead of the last tool result when turn state is missing", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-resume-hook-stop-"));
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -136,6 +159,10 @@ describe("memmy resume hook stop capture", () => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/api/v1/sessions/open") {
         response.end(JSON.stringify({ sessionId: "server-session", status: "open" }));
+        return;
+      }
+      if (request.url === "/api/v1/source-turns/complete") {
+        response.end(JSON.stringify({ status: "stored", result: { l1MemoryIds: ["trace-1"] } }));
         return;
       }
       response.end(JSON.stringify({ ok: true }));
@@ -153,19 +180,25 @@ describe("memmy resume hook stop capture", () => {
         token: ""
       }));
 
+      // A tool result is also a `type: user` row. Only the row carrying a human origin is
+      // the question, so the reply is never attributed to the last tool output.
       const toolResultText = "src/auth/login.ts\n42: if (password == storedHash) { grantSession(user); }";
       const transcriptPath = join(tempDir, "transcript.jsonl");
+      const shared = { sessionId: "stop-capture-session", isSidechain: false, promptId: "stop-prompt-1" };
       writeFileSync(transcriptPath, [
-        JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "please fix the login bug in auth" }] } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", content: [
+        { ...shared, type: "user", origin: { kind: "human" }, uuid: "u1", timestamp: "2026-09-16T10:00:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "please fix the login bug in auth" }] } },
+        { ...shared, type: "assistant", uuid: "a1", timestamp: "2026-09-16T10:00:05.000Z", message: { role: "assistant", content: [
           { type: "text", text: "Let me look at the code first." },
           { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "src/auth/login.ts" } }
-        ] } }),
-        JSON.stringify({ type: "user", message: { role: "user", content: [
+        ] } },
+        { ...shared, type: "user", uuid: "u2", timestamp: "2026-09-16T10:00:06.000Z", message: { role: "user", content: [
           { type: "tool_result", tool_use_id: "tool-1", content: [{ type: "text", text: toolResultText }] }
-        ] } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Fixed: login.ts now compares hashes." }] } })
-      ].join("\n") + "\n");
+        ] } },
+        { ...shared, type: "assistant", uuid: "a2", timestamp: "2026-09-16T10:00:09.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "Fixed: login.ts now compares hashes." }] } },
+        { ...shared, type: "system", subtype: "turn_duration", uuid: "d1", timestamp: "2026-09-16T10:00:10.000Z" }
+      ].map((row) => JSON.stringify(row)).join("\n") + "\n");
 
       const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
         const child = spawn(process.execPath, [hookScriptPath], {
@@ -179,6 +212,7 @@ describe("memmy resume hook stop capture", () => {
         child.stdin.end(JSON.stringify({
           hook_event_name: "Stop",
           session_id: "stop-capture-session",
+          prompt_id: "stop-prompt-1",
           transcript_path: transcriptPath,
           stop_hook_active: false
         }));
@@ -186,8 +220,15 @@ describe("memmy resume hook stop capture", () => {
 
       expect(result.status).toBe(0);
       const complete = requests.find((request) => request.path.includes("/complete"));
+      expect(complete?.path).toBe("/api/v1/source-turns/complete");
       expect(complete?.body?.query).toBe("please fix the login bug in auth");
-      expect(complete?.body?.answer).toBe("Fixed: login.ts now compares hashes.");
+      expect(complete?.body?.answer).toBe("Let me look at the code first.\n\nFixed: login.ts now compares hashes.");
+      expect(complete?.body?.sourceTurn).toMatchObject({
+        source: "claude_code", conversationId: "stop-capture-session", turnId: "stop-prompt-1"
+      });
+      expect(complete?.body?.toolCalls).toEqual([
+        expect.objectContaining({ id: "tool-1", name: "Read" })
+      ]);
     } finally {
       server.close();
     }
@@ -361,14 +402,57 @@ function installHookFixture(
   return hookScriptPath;
 }
 
-async function runHook(scriptPath: string, payload: Record<string, unknown>): Promise<{
+/**
+ * Writes the Cursor globalStorage rows one finished turn is read from. The Cursor hook
+ * rereads this database on stop, exactly like the offline scan does, so the fixture has
+ * to carry the real composerHeaders / composerData / bubble shape.
+ */
+function writeCursorTurnFixture(homeDirectory: string, input: {
+  conversationId: string;
+  requestId: string;
+  query: string;
+  answer: string;
+}): void {
+  const databasePath = resolveCursorDataPaths({ homeDirectory, environment: {} }).globalStateDbPath;
+  mkdirSync(dirname(databasePath), { recursive: true });
+  const bubbles = [
+    { bubbleId: "bubble-user", type: 1, text: input.query, createdAt: "2026-09-16T10:00:00.000Z", requestId: input.requestId },
+    { bubbleId: "bubble-assistant", type: 2, text: input.answer, createdAt: "2026-09-16T10:00:20.000Z" },
+  ];
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.exec("CREATE TABLE IF NOT EXISTS composerHeaders (composerId TEXT PRIMARY KEY, isSubagent INTEGER, subagentTypeName TEXT)");
+    db.prepare("INSERT OR REPLACE INTO composerHeaders (composerId, isSubagent, subagentTypeName) VALUES (?, 0, '')")
+      .run(input.conversationId);
+    db.prepare("INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      `composerData:${input.conversationId}`,
+      JSON.stringify({
+        composerId: input.conversationId,
+        fullConversationHeadersOnly: bubbles.map(({ bubbleId, type, createdAt }) => ({ bubbleId, type, createdAt })),
+      }),
+    );
+    for (const bubble of bubbles) {
+      db.prepare("INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)")
+        .run(`bubbleId:${input.conversationId}:${bubble.bubbleId}`, JSON.stringify({ _v: 3, ...bubble }));
+    }
+  } finally {
+    db.close();
+  }
+}
+
+async function runHook(scriptPath: string, payload: Record<string, unknown>, homeDirectory?: string): Promise<{
   status: number | null;
   stdout: string;
   stderr: string;
 }> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [scriptPath], {
-      env: { ...process.env, MEMMY_CONFIG: join(dirname(scriptPath), "missing-config.yaml") },
+      env: {
+        ...process.env,
+        MEMMY_CONFIG: join(dirname(scriptPath), "missing-config.yaml"),
+        ...(homeDirectory ? { HOME: homeDirectory, USERPROFILE: homeDirectory, XDG_CONFIG_HOME: join(homeDirectory, ".config") } : {}),
+      },
     });
     const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
     let stdout = "";

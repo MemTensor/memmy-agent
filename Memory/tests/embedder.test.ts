@@ -114,9 +114,9 @@ describe("embedder", () => {
   });
 
   it("uses an explicit token budget for an OpenAI-compatible deployment alias", async () => {
-    const sentInputs: number[][] = [];
+    const sentInputs: string[] = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { input: number[][] };
+      const body = JSON.parse(String(init?.body)) as { input: string[] };
       sentInputs.push(...body.input);
       return new Response(JSON.stringify({
         data: body.input.map(() => ({ embedding: [1, 0] }))
@@ -136,10 +136,12 @@ describe("embedder", () => {
     await expect(embedder.embedOne(" memory".repeat(600))).resolves.toEqual([1, 0]);
 
     expect(sentInputs.length).toBeGreaterThan(1);
-    expect(sentInputs.every((input) => input.length <= 512)).toBe(true);
+    const encoder = get_encoding("o200k_base");
+    expect(sentInputs.every((input) => encoder.encode(input).length <= 512)).toBe(true);
+    expect(sentInputs.join("")).toBe(" memory".repeat(600));
   });
 
-  it("uses the conservative token budget for an opaque deployment alias by default", async () => {
+  it("chunks opaque-model input conservatively without dropping text", async () => {
     const sentInputs: string[] = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { input: string[] };
@@ -161,8 +163,8 @@ describe("embedder", () => {
     await expect(embedder.embedOne(" memory".repeat(8_001))).resolves.toEqual([1, 0]);
 
     expect(sentInputs.length).toBeGreaterThan(1);
-    const encoder = get_encoding("cl100k_base");
-    expect(sentInputs.every((input) => encoder.encode(input).length <= 7_500)).toBe(true);
+    const encoder = get_encoding("o200k_base");
+    expect(sentInputs.every((input) => encoder.encode(input).length <= 4_000)).toBe(true);
     expect(sentInputs.join("")).toBe(" memory".repeat(8_001));
   });
 

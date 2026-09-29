@@ -81,6 +81,7 @@ describe("createMockMemoryClient", () => {
       "enqueueImportSummaries",
       "getMemory",
       "getMemoryProcessingStatus",
+      "getMemoryTokenBudget",
       "health",
       "memoryApiLogs",
       "openSession",

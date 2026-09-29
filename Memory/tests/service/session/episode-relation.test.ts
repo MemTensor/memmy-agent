@@ -45,7 +45,7 @@ function createRelationClassifierLlm(
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: string }
     ): Promise<T> {
-      if (options.operation === "retrieval.retrieval.query.extract.v2") {
+      if (options.operation === "retrieval.retrieval.query.extract.v3") {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
       calls.push(options.operation);
@@ -96,7 +96,7 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "retrieval.retrieval.query.extract.v2") {
+      if (options.operation === "retrieval.retrieval.query.extract.v3") {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
       calls.push(options.operation);
@@ -956,7 +956,7 @@ describe("MemoryService / session / episode relation", () => {
             reason: "the database task is unrelated to nginx"
           } as unknown as T;
         }
-        if (options.operation === "retrieval.retrieval.query.extract.v2") {
+        if (options.operation === "retrieval.retrieval.query.extract.v3") {
           retrievalExtractStarted = true;
           return {
             queryVecText: "database certificate rotation",

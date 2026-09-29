@@ -95,7 +95,7 @@ describe("webui transcript replay", () => {
     appendTranscriptObject(key, { event: "message", chat_id: "t-large-record", text });
 
     expect(readTranscriptLines(key)).toEqual([
-      { event: "message", chat_id: "t-large-record", text },
+      { event: "message", chat_id: "t-large-record", text, transcript_offset: 0 },
     ]);
   });
 

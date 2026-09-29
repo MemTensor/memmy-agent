@@ -885,13 +885,18 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
-  const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
-    ?? state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId
+  const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
+  const committedModelSelection = state.agent.committedModelSelectionByScope[modelSelectionScopeKey];
+  const selectedModelPreset = pendingModelPreset
+    ?? committedModelSelection?.presetId
     ?? null;
   const resolvedConversationModel = resolveModelSelection(
     modelWorkspace,
     modelWorkspaceMode,
-    selectedModelPreset
+    selectedModelPreset,
+    {
+      allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)
+    }
   );
   // Persist the model the user picks in the chat selector as the mode default, so a new chat
   // after restart defaults to the last-used model instead of the platform default. Only the
@@ -2656,25 +2661,25 @@ export function HomePage() {
     <AppFrame
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
-        <div className="agent-conversation-topbar">
-          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
-            <span className="agent-conversation-title__text">
-              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
-            </span>
-            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-          </h1>
-          <button
-            type="button"
-            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
-            data-agent-environment-toggle
-            aria-label={t("home.environment.title")}
-            aria-pressed={environmentPanelOpen}
-            title={t("home.environment.title")}
-            onClick={() => setEnvironmentPanelOpen((open) => !open)}
-          >
-            <SlidersHorizontal size={16} aria-hidden="true" />
-          </button>
-        </div>
+        <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+          <span className="agent-conversation-title__text">
+            {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+          </span>
+          {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+        </h1>
+      ) : null}
+      topBarEnd={hasActiveConversation || environmentScope ? (
+        <button
+          type="button"
+          className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
+          data-agent-environment-toggle
+          aria-label={t("home.environment.title")}
+          aria-pressed={environmentPanelOpen}
+          title={t("home.environment.title")}
+          onClick={() => setEnvironmentPanelOpen((open) => !open)}
+        >
+          <SlidersHorizontal size={16} aria-hidden="true" />
+        </button>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope)}
       windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}

@@ -217,7 +217,18 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   const obj = typeof objOrId === "string" ? maybeObj : objOrId;
   if (!isDict(obj)) throw new Error("webui transcript object must be a JSON object");
 
-  const raw = JSON.stringify(obj);
+  // The pre-write file size is this record's starting byte offset: appends land
+  // at the end, so a file of N bytes puts the new line at byte N. Stamping it
+  // here gives live delivery and transcript replay one shared identity for the
+  // same chunk — a JSONL line cannot be amended after it is written.
+  let startOffset = 0;
+  try {
+    startOffset = fs.statSync(file).size;
+  } catch {
+    // No file yet: this is the first record, starting at byte 0.
+  }
+
+  const raw = JSON.stringify({ ...obj, transcript_offset: startOffset });
   if (Buffer.byteLength(raw, "utf8") > MAX_TRANSCRIPT_FILE_BYTES) {
     throw new Error("webui transcript line too large");
   }
@@ -226,10 +237,17 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   try {
     fs.writeSync(fd, `${raw}\n`, undefined, "utf8");
     fs.fsyncSync(fd);
-    return fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
   }
+  // Only a record that actually reached disk gets an identity. If the write
+  // threw, the caller keeps an offset-free object and its broadcast omits the
+  // field, so the client falls back to applying the chunk. Stamping before the
+  // write would push the watermark to an offset that was never persisted, and
+  // the next real record — whose start offset equals that value — would be
+  // dropped as a duplicate.
+  obj.transcript_offset = startOffset;
+  return fs.statSync(file).size;
 }
 
 export function readTranscriptChunk(

@@ -170,7 +170,7 @@ relevance   = max(channelScore) + 层级 bonus + RRF bonus
 | 配置 | 默认值 | 作用 |
 | --- | ---: | --- |
 | `llmFilterEnabled` | `true` | 是否启用最终语义过滤 |
-| `llmFilterMinCandidates` | `2` | 至少有多少条机械候选才调用 LLM |
+| `llmFilterMinCandidates` | `1` | 至少有多少条机械候选才调用 LLM |
 | `llmFilterMaxKeep` | `8` | LLM 成功时最多保留数量 |
 | `llmFilterFallbackMaxKeep` | `6` | 未配置 LLM、超时或返回异常时的保底上限 |
 | `llmFilterCandidateBodyChars` | `500` | 每条候选提供给过滤模型的正文字符数 |
@@ -264,7 +264,7 @@ memmyMemory:
       llmFilterEnabled: true
       llmFilterMaxKeep: 8
       llmFilterFallbackMaxKeep: 6
-      llmFilterMinCandidates: 2
+      llmFilterMinCandidates: 1
       llmFilterCandidateBodyChars: 500
       readOnlyInjectionProfile: all
 ```
