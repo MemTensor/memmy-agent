@@ -148,8 +148,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         ))
     : [];
   const availableProviders: EditorProvider[] = [
-    ...MODEL_PLAN_PROVIDER_OPTIONS.map((option) => option.value),
-    ...availableConnectionProtocols(space.connections)
+    ...availableConnectionProtocols(space.connections),
+    ...MODEL_PLAN_PROVIDER_OPTIONS.map((option) => option.value)
   ];
   const nextAvailableProvider = availableProviders[0];
   const canAddConnection = Boolean(nextAvailableProvider);
@@ -1089,18 +1089,18 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               setEditorTest({ status: "idle", message: null });
             }}
             options={[
+              ...PROTOCOL_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.labelKey),
+                groupLabel: t("settings.modelWorkspace.plan.meteredGroup"),
+                icon: <ModelProviderLogo provider={option.value} size={16} />
+              })),
               ...MODEL_PLAN_PROVIDER_OPTIONS.map((option) => ({
                 value: option.value,
                 label: t(option.labelKey),
                 selectedLabel: `${t(option.labelKey)} · ${t(option.groupLabelKey)}`,
                 groupLabel: t(option.groupLabelKey),
                 icon: <ModelProviderLogo provider={option.logoProvider} size={16} />
-              })),
-              ...PROTOCOL_OPTIONS.map((option) => ({
-                value: option.value,
-                label: t(option.labelKey),
-                groupLabel: t("settings.modelWorkspace.plan.meteredGroup"),
-                icon: <ModelProviderLogo provider={option.value} size={16} />
               }))
             ]}
             className="select-control--subtle model-connection-select"

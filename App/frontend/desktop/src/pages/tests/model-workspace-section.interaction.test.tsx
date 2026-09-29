@@ -55,14 +55,14 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(dialog?.textContent).toContain("删除配置？");
   });
 
-  it("shows Token, Coding, and metered groups and applies the selected plan API base", () => {
+  it("shows metered, Token, and Coding groups and applies the selected plan API base", () => {
     renderWorkspace(createSeedConfig(1));
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="添加配置"]')!.click());
 
     const providerSelect = container.querySelector<HTMLButtonElement>('.model-connection-select [role="combobox"]')!;
     act(() => providerSelect.click());
     expect([...container.querySelectorAll(".model-connection-select .select-control__group-label")]
-      .map((node) => node.textContent)).toEqual(["Token Plan", "Coding Plan", "按量计费 API"]);
+      .map((node) => node.textContent)).toEqual(["按量计费 API", "Token Plan", "Coding Plan"]);
 
     act(() => getOption("百度千帆（团队版）")!.click());
     expect(providerSelect.textContent).toContain("百度千帆（团队版） · Token Plan");
