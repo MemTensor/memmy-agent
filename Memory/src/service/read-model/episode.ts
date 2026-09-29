@@ -237,11 +237,11 @@ export class EpisodeReadModel {
         tool_call_start: number;
         tool_call_end: number;
       };
-      const rawTurn = this.deps.repos.runtime.getRawTurn(span.raw_turn_id)!;
+      const rawTurn = this.deps.repos.runtime.getRawTurn(span.raw_turn_id);
       item.metadata.spanDetail = {
         toolCallStart: span.tool_call_start,
         toolCallEnd: span.tool_call_end,
-        toolCalls: rawTurn.toolCalls.slice(span.tool_call_start, span.tool_call_end + 1)
+        toolCalls: rawTurn?.toolCalls.slice(span.tool_call_start, span.tool_call_end + 1) ?? []
       };
     }
     return {

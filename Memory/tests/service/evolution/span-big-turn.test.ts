@@ -576,4 +576,71 @@ describe("MemoryService / evolution / span big turn", () => {
     );
     db.close();
   });
+
+  it("keeps span details readable after deleting the task that owned the raw turn", async () => {
+    const llm = createSpanBigTurnLlm([]);
+    const { db, service } = createTestService({ llm, skillLlm: llm });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "span-big-turn-deleted-task"
+    };
+    const session = service.openSession({ namespace });
+    const toolCalls = Array.from({ length: 11 }, (_, index) => ({
+      id: `deleted-task-tool-${index}`,
+      name: "task_step",
+      input: { index }
+    }));
+    const completed = service.completeTurn("span-big-turn-deleted-task", {
+      namespace,
+      sessionId: session.sessionId,
+      query: "修复项目构建失败并完成测试验证",
+      answer: "已经定位依赖冲突，完成修复并通过构建与测试。",
+      toolCalls,
+      toolResults: toolCalls.map((call, index) => ({
+        toolCallId: call.id,
+        name: call.name,
+        output: { ok: true, index }
+      }))
+    });
+    service.closeSession(session.sessionId);
+    await service.feedback({
+      namespace,
+      sessionId: session.sessionId,
+      episodeId: completed.episodeId,
+      l1MemoryId: completed.l1MemoryId,
+      channel: "explicit",
+      polarity: "positive",
+      magnitude: 1,
+      rationale: "复杂任务已经正确完成"
+    });
+    await runWorkerRounds(service, 8);
+    const spanId = service.panelItems({ namespace, layer: "L1" }).items.find(
+      (item) => item.kind === "span" && item.title === "定位构建失败的根本原因"
+    )?.id;
+    expect(spanId).toBeDefined();
+
+    expect(service.deletePanelTask(completed.episodeId, { namespace })).toMatchObject({
+      deletedMemoryIds: [completed.l1MemoryId]
+    });
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM raw_turns WHERE id = ?`
+    ).get(completed.rawTurnId)).toEqual({ count: 0 });
+    expect(service.panelItems({ namespace, layer: "L1" }).items.map((item) => item.id)).toContain(spanId);
+
+    const detail = service.getMemory(spanId!, { namespace });
+    expect(detail.item).toMatchObject({
+      id: spanId,
+      kind: "span",
+      memoryLayer: "L1",
+      title: "定位构建失败的根本原因",
+      summary: "检查日志和依赖配置，确认失败来自版本冲突"
+    });
+    expect(detail.item.metadata.spanDetail).toEqual({
+      toolCallStart: 0,
+      toolCallEnd: 3,
+      toolCalls: []
+    });
+    db.close();
+  });
 });
