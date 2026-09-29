@@ -1,6 +1,7 @@
 /** Pure view-model helpers for the canonical model catalog returned by the local API. */
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  canonicalCatalogProviderId,
   type CatalogEndpointInput,
   type CatalogProviderId,
   type ModelAssignment,
@@ -725,19 +726,14 @@ function cloneAssignment<T extends Omit<ModelAssignment, "ownerAccountId"> | Mod
 }
 
 function normalizeProvider(provider: string): CatalogProviderId | null {
-  const normalized = provider.trim().toLowerCase();
-  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine", xiaomi: "xiaomi_mimo" };
-  const candidate = aliases[normalized] ?? normalized;
-  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo", "memmy_account"].includes(candidate)
-    ? candidate as CatalogProviderId
-    : null;
+  return canonicalCatalogProviderId(provider);
 }
 
 function protocolFor(provider: CatalogProviderId, capability: ModelCapability): ModelEndpointProtocol {
   if (capability === "embedding") return "openai-embeddings";
   if (capability === "asr") return "dashscope-input-audio-chat";
   if (capability === "image") return provider === "dashscope" ? "dashscope-multimodal-generation" : "openai-images";
-  if (provider === "anthropic") return "anthropic-messages";
+  if (provider === "anthropic" || provider === "minimax_token_plan") return "anthropic-messages";
   if (provider === "gemini") return "gemini-generate-content";
   if (provider === "memmy_account") return "memmy-account";
   return "openai-chat-completions";

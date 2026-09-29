@@ -55,6 +55,23 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(dialog?.textContent).toContain("删除配置？");
   });
 
+  it("shows Token, Coding, and metered groups and applies the selected plan API base", () => {
+    renderWorkspace(createSeedConfig(1));
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="添加配置"]')!.click());
+
+    const providerSelect = container.querySelector<HTMLButtonElement>('.model-connection-select [role="combobox"]')!;
+    act(() => providerSelect.click());
+    expect([...container.querySelectorAll(".model-connection-select .select-control__group-label")]
+      .map((node) => node.textContent)).toEqual(["Token Plan", "Coding Plan", "按量计费 API"]);
+
+    act(() => getOption("百度千帆（团队版）")!.click());
+    expect(providerSelect.textContent).toContain("百度千帆（团队版） · Token Plan");
+    const endpoint = container.querySelector<HTMLInputElement>(
+      'input[placeholder="https://qianfan.baidubce.com/v2/tokenplan/team"]'
+    );
+    expect(endpoint?.value).toBe("https://qianfan.baidubce.com/v2/tokenplan/team");
+  });
+
   it("shows an actionable save error above the model assignment title", async () => {
     const seedConfig = createSeedConfig(1);
     const configClient = {

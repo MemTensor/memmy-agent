@@ -69,6 +69,45 @@ function openAiInput(revision: string, presetId?: string): ModelConfigInput {
 }
 
 describe("model config catalog", () => {
+  it("round-trips plan and metered Providers with separate endpoint keys", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [
+        {
+          provider: "minimax",
+          endpoints: [{
+            endpointId: "metered",
+            apiBase: "https://api.minimax.chat/v1",
+            protocol: "openai-chat-completions",
+            apiKey: "metered-key"
+          }],
+          models: [{ endpointId: "metered", model: "metered-model", source: "byok", capabilities: ["agent"] }]
+        },
+        {
+          provider: "minimax_token_plan",
+          endpoints: [{
+            endpointId: "token-plan",
+            apiBase: "https://api.minimax.cn/anthropic",
+            protocol: "anthropic-messages",
+            apiKey: "plan-key"
+          }],
+          models: [{ endpointId: "token-plan", model: "plan-model", source: "byok", capabilities: ["agent"] }]
+        }
+      ],
+      modelAssignments: emptyAssignments()
+    });
+
+    expect(saved.providers.map((provider) => provider.provider)).toEqual(["minimax", "minimax_token_plan"]);
+    const stored = YAML.parse(readFileSync(file, "utf8")) as Record<string, any>;
+    expect(stored.providers.minimax.endpoints.metered.apiKey).toBe("metered-key");
+    expect(stored.providers.minimax_token_plan.endpoints["token-plan"].apiKey).toBe("plan-key");
+    expect((await readModelConfigCatalog(file)).providers.map((provider) => provider.provider)).toEqual([
+      "minimax", "minimax_token_plan"
+    ]);
+  });
+
   it("round-trips StepFun and Xiaomi MiMo connections back into the view", async () => {
     const file = fixture({ modelAssignments: emptyAssignments() });
     const current = await readModelConfigCatalog(file);

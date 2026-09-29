@@ -1,7 +1,10 @@
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, Info, KeyRound, Loader2, Pencil, Plus, Trash2, Wrench, X, XCircle } from "lucide-react";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  canonicalCatalogProviderId,
+  isModelPlanProviderId,
   MODEL_NAME_MAX_LENGTH,
+  type ModelPlanProviderId,
   type ModelEndpointProtocol
 } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -37,6 +40,7 @@ import {
   TestButton as ApiKeyTestButton
 } from "./api-key-form-fields.js";
 import { DEFAULT_ENDPOINTS, DEFAULT_MODEL_IDS, PROTOCOL_OPTIONS, fromProtocol, type Protocol } from "./model-config.js";
+import { MODEL_PLAN_PROVIDER_OPTIONS, modelPlanProviderOption } from "./model-plan-providers.js";
 import {
   SETTINGS_ADD_MODEL_EVENT,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
@@ -52,8 +56,9 @@ import {
   type StoredConnectionTestStatus
 } from "./model-workspace-connection-test-state.js";
 
-type TestStatus = "idle" | "testing" | "success" | "error";
+type TestStatus = "idle" | "testing" | "success" | "error" | "inconclusive";
 export type ModelKind = "text" | "embedding" | "asr" | "image";
+type EditorProvider = Protocol | ModelPlanProviderId;
 
 const DEFAULT_TEXT_CAPABILITIES: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
 const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;
@@ -74,7 +79,7 @@ interface ConnectionTestState {
 
 interface ConnectionEditorState {
   connectionId: string | null;
-  provider: Protocol;
+  provider: EditorProvider;
   endpoint: string;
   apiKey: string;
   models: Array<{
@@ -142,7 +147,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           && items.findIndex((item) => item.id === candidate.id) === index
         ))
     : [];
-  const availableProviders = availableConnectionProtocols(space.connections);
+  const availableProviders: EditorProvider[] = [
+    ...MODEL_PLAN_PROVIDER_OPTIONS.map((option) => option.value),
+    ...availableConnectionProtocols(space.connections)
+  ];
   const nextAvailableProvider = availableProviders[0];
   const canAddConnection = Boolean(nextAvailableProvider);
 
@@ -221,11 +229,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     setEditor({
       connectionId: null,
       provider,
-      endpoint: DEFAULT_ENDPOINTS[provider],
+      endpoint: editorEndpoint(provider),
       apiKey: "",
       models: [],
-      modelDraft: DEFAULT_MODEL_IDS[provider],
-      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      modelDraft: editorDefaultModel(provider),
+      capabilityDrafts: editorDefaultCapabilities(provider),
       addingModel: true,
       editingModelIndex: null
     });
@@ -269,7 +277,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   }, [openAddConnection, props.autoOpenAddConnection]);
 
   function openEditConnection(connection: ModelConnection) {
-    const provider = protocolFromConnection(connection.provider);
+    const provider = editorProviderFromConnection(connection.provider);
     const savedTest = connectionTestState(connection, testStates);
     setFormError(null);
     setEditorTest(savedTest
@@ -284,10 +292,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       models: connection.modelEntries.map((entry) => ({
         presetId: entry.presetId,
         name: entry.model,
-        capabilities: normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))
+        capabilities: isModelPlanProviderId(provider)
+          ? entry.capabilities.map(fromCatalogCapability)
+          : normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))
       })),
       modelDraft: "",
-      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      capabilityDrafts: editorDefaultCapabilities(provider),
       addingModel: false,
       editingModelIndex: null
     });
@@ -337,7 +347,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       ? space.connections.find((connection) => connection.id === editor.connectionId)
       : undefined;
     const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
+      existing && existing.provider !== editorProviderId(editor.provider)
     );
     const capabilities = resolved.models.flatMap((model) => model.capabilities);
     const result = upsertModelConnection(workspace, props.mode, {
@@ -370,7 +380,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       connection.id === editor.connectionId
       || (
         editor.connectionId === null
-        && protocolFromConnection(connection.provider) === editor.provider
+        && connection.provider === editorProviderId(editor.provider)
         && connection.endpoint === editor.endpoint.trim().replace(/\/+$/, "")
         && resolved.models.every((model) => connection.modelEntries.some((entry) => (
           entry.model === model.name
@@ -462,7 +472,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       ...editor,
       models,
       modelDraft: "",
-      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      capabilityDrafts: editorDefaultCapabilities(editor.provider),
       addingModel: false,
       editingModelIndex: null
     });
@@ -555,7 +565,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       ? space.connections.find((connection) => connection.id === editor.connectionId)
       : undefined;
     const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
+      existing && existing.provider !== editorProviderId(editor.provider)
     );
     if (!editor.apiKey.trim() && (!existing?.apiKeyMasked || providerChanged)) {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testKeyRequired") });
@@ -563,9 +573,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     }
     setEditorTest({ status: "testing", message: t("settings.modelWorkspace.testing") });
     try {
-      const result = props.configClient
+      const result: { ok: boolean; inconclusive?: boolean } = props.configClient
         ? await props.configClient.testModelConfig({
-          provider: fromProtocol(editor.provider),
+          provider: isModelPlanProviderId(editor.provider) ? editor.provider : fromProtocol(editor.provider),
           endpointId: existing?.endpointId ?? editor.connectionId ?? "connection-test-new",
           protocol: editorProtocolForCapabilities(
             editor.provider,
@@ -580,8 +590,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
         : await simulateConnectionTest();
       setEditorTest({
-        status: result.ok ? "success" : "error",
-        message: result.ok ? t("settings.modelWorkspace.testSuccess") : t("settings.modelWorkspace.testFailed")
+        status: result.inconclusive ? "inconclusive" : result.ok ? "success" : "error",
+        message: result.inconclusive
+          ? t("settings.modelWorkspace.plan.testInconclusive")
+          : result.ok ? t("settings.modelWorkspace.testSuccess") : t("settings.modelWorkspace.testFailed")
       });
     } catch {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testFailed") });
@@ -684,7 +696,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
   const editorOriginalProvider = editorExistingConnection
-    ? protocolFromConnection(editorExistingConnection.provider)
+    ? editorProviderFromConnection(editorExistingConnection.provider)
     : null;
   const editorProviderChanged = Boolean(
     editor && editorOriginalProvider && editor.provider !== editorOriginalProvider
@@ -1025,7 +1037,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           footer={(
             <div className="model-connection-modal__footer-actions">
               <ApiKeyTestButton
-                status={editorTest.status}
+                status={editorTest.status === "inconclusive" ? "idle" : editorTest.status}
                 onClick={() => void testEditorConnection()}
                 label={t("settings.modelWorkspace.test")}
               />
@@ -1057,18 +1069,18 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             label={t("apiKey.provider")}
             value={editor.provider}
             onValueChange={(value) => {
-              const provider = value as Protocol;
+              const provider = value as EditorProvider;
               setEditor((current) => current ? {
                 ...current,
                 provider,
-                endpoint: DEFAULT_ENDPOINTS[provider],
+                endpoint: editorEndpoint(provider),
                 apiKey: "",
                 ...(current.connectionId
                   ? {}
                   : {
                       models: [],
-                      modelDraft: DEFAULT_MODEL_IDS[provider],
-                      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+                      modelDraft: editorDefaultModel(provider),
+                      capabilityDrafts: editorDefaultCapabilities(provider),
                       addingModel: true,
                       editingModelIndex: null
                     })
@@ -1076,14 +1088,23 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               setFormError(null);
               setEditorTest({ status: "idle", message: null });
             }}
-            options={PROTOCOL_OPTIONS.map((option) => {
-              return {
+            options={[
+              ...MODEL_PLAN_PROVIDER_OPTIONS.map((option) => ({
                 value: option.value,
                 label: t(option.labelKey),
+                selectedLabel: `${t(option.labelKey)} · ${t(option.groupLabelKey)}`,
+                groupLabel: t(option.groupLabelKey),
+                icon: <ModelProviderLogo provider={option.logoProvider} size={16} />
+              })),
+              ...PROTOCOL_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.labelKey),
+                groupLabel: t("settings.modelWorkspace.plan.meteredGroup"),
                 icon: <ModelProviderLogo provider={option.value} size={16} />
-              };
-            })}
+              }))
+            ]}
             className="select-control--subtle model-connection-select"
+            menuClassName="model-connection-select__menu"
             labelClassName="model-connection-select__label"
           />
           <ConfigField
@@ -1093,7 +1114,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               setEditor((current) => current ? { ...current, endpoint: value } : current);
               setEditorTest({ status: "idle", message: null });
             }}
-            placeholder={DEFAULT_ENDPOINTS[editor.provider]}
+            placeholder={editorEndpoint(editor.provider)}
           />
           <PasswordConfigField
             label={editor.connectionId && !editorProviderChanged
@@ -1174,6 +1195,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 />
                 <ModelCapabilityPicker
                   capabilities={editor.capabilityDrafts}
+                  textCapabilities={editorDefaultCapabilities(editor.provider)}
                   onChange={(capabilityDrafts) => setEditor({ ...editor, capabilityDrafts })}
                 />
               </div>
@@ -1212,7 +1234,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           {editorTest.message && (
             <p
               className={`flex items-center gap-1.5 text-xs ${
-                editorTest.status === "success" ? "text-status-success" : "text-status-error"
+                editorTest.status === "success" ? "text-status-success"
+                  : editorTest.status === "error" ? "text-status-error" : "text-text-ink/65"
               }`}
               role={editorTest.status === "error" ? "alert" : "status"}
             >
@@ -1220,7 +1243,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 ? <CheckCircle2 size={12} aria-hidden="true" />
                 : editorTest.status === "error"
                   ? <XCircle size={12} aria-hidden="true" />
-                  : <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
+                  : editorTest.status === "inconclusive"
+                    ? <Info size={12} aria-hidden="true" />
+                    : <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
               {editorTest.message}
             </p>
           )}
@@ -1451,9 +1476,32 @@ function connectionProtocolLabel(
   provider: string,
   t: ReturnType<typeof useTranslation>["t"]
 ): string {
+  const plan = modelPlanProviderOption(provider);
+  if (plan) return `${t(plan.labelKey)} · ${t(plan.groupLabelKey)}`;
   const protocol = protocolFromConnection(provider);
   const option = PROTOCOL_OPTIONS.find((item) => item.value === protocol);
   return option ? t(option.labelKey) : provider;
+}
+
+function editorProviderFromConnection(provider: string): EditorProvider {
+  return isModelPlanProviderId(provider) ? provider : protocolFromConnection(provider);
+}
+
+function editorProviderId(provider: EditorProvider): string {
+  return canonicalCatalogProviderId(provider) ?? provider;
+}
+
+function editorEndpoint(provider: EditorProvider): string {
+  return modelPlanProviderOption(provider)?.endpoint
+    ?? DEFAULT_ENDPOINTS[provider as Protocol];
+}
+
+function editorDefaultModel(provider: EditorProvider): string {
+  return isModelPlanProviderId(provider) ? "" : DEFAULT_MODEL_IDS[provider];
+}
+
+function editorDefaultCapabilities(provider: EditorProvider): ModelCapability[] {
+  return isModelPlanProviderId(provider) ? ["chat"] : [...DEFAULT_TEXT_CAPABILITIES];
 }
 
 export function protocolFromConnection(provider: string): Protocol {
@@ -1466,12 +1514,14 @@ export function protocolFromConnection(provider: string): Protocol {
   return "openai";
 }
 
-function protocolForEditor(provider: Protocol, capability: ModelCapability): ModelEndpointProtocol {
+function protocolForEditor(provider: EditorProvider, capability: ModelCapability): ModelEndpointProtocol {
   if (capability === "embedding") return "openai-embeddings";
   if (capability === "asr") return "dashscope-input-audio-chat";
   if (capability === "image") return provider === "qwen" ? "dashscope-multimodal-generation" : "openai-images";
   if (provider === "anthropic") return "anthropic-messages";
   if (provider === "gemini") return "gemini-generate-content";
+  const plan = modelPlanProviderOption(provider);
+  if (plan) return plan.protocol;
   return "openai-chat-completions";
 }
 
@@ -1483,7 +1533,7 @@ function editorCapabilitiesForProtocol(protocol: ModelEndpointProtocol): ModelCa
 }
 
 export function editorProtocolForCapabilities(
-  provider: Protocol,
+  provider: EditorProvider,
   capabilities: ModelCapability[],
   existingProtocol?: ModelEndpointProtocol
 ): ModelEndpointProtocol {
@@ -1502,6 +1552,7 @@ function modelKindForCapabilities(capabilities: ModelCapability[]): ModelKind {
 
 function ModelCapabilityPicker(props: {
   capabilities: ModelCapability[];
+  textCapabilities?: ModelCapability[];
   onChange: (capabilities: ModelCapability[]) => void;
 }) {
   const { t } = useTranslation();
@@ -1513,7 +1564,9 @@ function ModelCapabilityPicker(props: {
       labelClassName="model-capability-select__label"
       value={kind}
       options={modelKindOptions(t)}
-      onValueChange={(value) => props.onChange(modelCapabilitiesForKind(value as ModelKind))}
+      onValueChange={(value) => props.onChange(value === "text" && props.textCapabilities
+        ? [...props.textCapabilities]
+        : modelCapabilitiesForKind(value as ModelKind))}
       className="select-control--subtle model-capability-select"
       menuClassName="model-capability-select__menu"
     />

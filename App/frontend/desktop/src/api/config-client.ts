@@ -22,6 +22,7 @@ import {
   AppSettingsDtoSchema,
   ModelConfigInputSchema,
   ModelConfigTestInputSchema,
+  isModelPlanProviderId,
   ModelConfigTestResultSchema,
   ModelConfigViewSchema,
   OnboardingStateDtoSchema,
@@ -263,7 +264,9 @@ export function createHttpConfigClient(config: RuntimeConfig): ConfigClient {
         path: "/api/app/model-config/test",
         schema: ModelConfigTestResultSchema,
         body: ModelConfigTestInputSchema.parse({
-          provider: toModelProvider(modelConfig.provider),
+          provider: isModelPlanProviderId(modelConfig.provider)
+            ? modelConfig.provider
+            : toModelProvider(modelConfig.provider),
           endpointId: modelConfig.endpointId ?? `connection-test-${secretTarget ?? capability}`,
           protocol: modelConfig.protocol ?? testProtocolFor(modelConfig.provider, capability),
           apiBase: modelConfig.endpoint,
