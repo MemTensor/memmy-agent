@@ -712,9 +712,35 @@ export const CatalogProviderIdSchema = z.enum([
     "volcengine",
     "stepfun",
     "xiaomi_mimo",
+    "dashscope_token_plan",
+    "qianfan_token_plan_personal",
+    "qianfan_token_plan_team",
+    "minimax_token_plan",
+    "xiaomi_mimo_token_plan",
+    "dashscope_coding_plan",
+    "zhipu_coding_plan",
+    "moonshot_coding_plan",
+    "volcengine_coding_plan",
     "memmy_account"
 ]);
 export type CatalogProviderId = z.infer<typeof CatalogProviderIdSchema>;
+
+export const MODEL_PLAN_PROVIDER_IDS = [
+    "dashscope_token_plan",
+    "qianfan_token_plan_personal",
+    "qianfan_token_plan_team",
+    "minimax_token_plan",
+    "xiaomi_mimo_token_plan",
+    "dashscope_coding_plan",
+    "zhipu_coding_plan",
+    "moonshot_coding_plan",
+    "volcengine_coding_plan"
+] as const satisfies readonly CatalogProviderId[];
+export type ModelPlanProviderId = typeof MODEL_PLAN_PROVIDER_IDS[number];
+
+export function isModelPlanProviderId(value: string): value is ModelPlanProviderId {
+    return (MODEL_PLAN_PROVIDER_IDS as readonly string[]).includes(value);
+}
 
 const CATALOG_PROVIDER_ALIASES: Readonly<Record<string, CatalogProviderId>> = {
     openai_compatible: "openai",
@@ -935,7 +961,7 @@ export type ModelConfigInput = z.infer<typeof ModelConfigInputSchema>;
 
 /** Definition for model config test input. */
 export const ModelConfigTestInputSchema = z.object({
-    provider: ModelProviderSchema,
+    provider: z.union([ModelProviderSchema, CatalogProviderIdSchema]),
     endpointId: z.string().trim().min(1),
     protocol: ModelEndpointProtocolSchema,
     apiBase: z.string().url(),
@@ -949,6 +975,7 @@ export type ModelConfigTestInput = z.infer<typeof ModelConfigTestInputSchema>;
 /** Schema for model config test result. */
 export const ModelConfigTestResultSchema = z.object({
     ok: z.boolean(),
+    inconclusive: z.boolean().optional(),
     message: z.string().min(1),
     checkedAt: z.string().datetime(),
     modelListed: z.boolean().optional()

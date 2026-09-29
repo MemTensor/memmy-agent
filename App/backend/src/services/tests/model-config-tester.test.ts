@@ -188,6 +188,41 @@ describe("model config tester", () => {
     expect(response.message).toContain("/v1");
   });
 
+  it("treats an unsupported plan model-list endpoint as inconclusive without sending a generation request", async () => {
+    const calls: string[] = [];
+    const tester = createHttpModelConfigTester({
+      now: () => checkedAt,
+      fetch: async (request) => {
+        calls.push(request.toString());
+        return json({ error: { message: "not found" } }, 404);
+      }
+    });
+
+    await expect(tester.test(input({
+      provider: "dashscope_coding_plan",
+      apiBase: "https://coding.dashscope.aliyuncs.com/v1"
+    }))).resolves.toEqual({
+      ok: false,
+      inconclusive: true,
+      message: "模型列表接口不可用，无法判断套餐连接是否可用；请检查 API Base 和 Key",
+      checkedAt
+    });
+    expect(calls).toEqual(["https://coding.dashscope.aliyuncs.com/v1/models"]);
+  });
+
+  it("keeps plan authentication errors definitive", async () => {
+    const tester = createHttpModelConfigTester({
+      now: () => checkedAt,
+      fetch: async () => json({ error: { message: "invalid key" } }, 401)
+    });
+
+    await expect(tester.test(input({ provider: "dashscope_coding_plan" }))).resolves.toEqual({
+      ok: false,
+      message: "invalid key",
+      checkedAt
+    });
+  });
+
   it("normalizes timeout errors without exposing the key", async () => {
     const tester = createHttpModelConfigTester({
       now: () => checkedAt,

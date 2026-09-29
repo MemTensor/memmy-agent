@@ -279,7 +279,7 @@ function projectedMemoryEmbedding(
     ? {
         ...mergeMemoryConnection(previous, connection),
         mode: "custom",
-        provider: "openai_compatible"
+        provider: connection.provider
       }
     : {
         ...withoutMemoryConnection(previous),
@@ -302,7 +302,7 @@ function memoryConnection(config: ConfigRecord, presetId: string): ConfigRecord 
   const extraHeaders = { ...record(provider.extraHeaders), ...record(endpoint.extraHeaders) };
   const extraBody = { ...record(provider.extraBody), ...record(endpoint.extraBody) };
   return {
-    provider: memoryProvider(providerId),
+    provider: memoryProvider(stringValue(endpoint.protocol)),
     sourceProvider: providerId,
     endpoint: apiBase,
     model,
@@ -312,9 +312,9 @@ function memoryConnection(config: ConfigRecord, presetId: string): ConfigRecord 
   };
 }
 
-function memoryProvider(providerId: string): string {
-  if (providerId === "anthropic") return "anthropic";
-  if (providerId === "gemini") return "gemini";
+function memoryProvider(protocol: string | undefined): string {
+  if (protocol === "anthropic-messages") return "anthropic";
+  if (protocol === "gemini-generate-content") return "gemini";
   return "openai_compatible";
 }
 

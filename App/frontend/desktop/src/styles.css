@@ -7812,6 +7812,10 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   padding: 12px 42px 12px 20px;
 }
 
+.model-connection-select__menu {
+  max-height: min(56vh, 520px);
+}
+
 /* Nested add/edit model row: match list density, not full form controls. */
 .model-connection-modal .model-editor-fields .auth-code-form-input,
 .model-capability-select .select-control__button {

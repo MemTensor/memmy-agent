@@ -37,6 +37,19 @@ describe("provider initialization", () => {
     expect(makeProvider("openai", "openai/gpt-4o-mini")).toBeInstanceOf(OpenAICompatProvider);
   });
 
+  it("routes Token and Coding plans through their own API bases and protocol backends", () => {
+    const minimax = makeProvider("minimax_token_plan", "MiniMax-M2.5");
+    const dashscope = makeProvider("dashscope_coding_plan", "qwen-coder");
+
+    expect(minimax).toBeInstanceOf(AnthropicProvider);
+    expect(minimax.apiBase).toBe("https://api.minimax.cn/anthropic");
+    expect(dashscope).toBeInstanceOf(OpenAICompatProvider);
+    expect(dashscope.apiBase).toBe("https://coding.dashscope.aliyuncs.com/v1");
+    expect(findByName("volcengine_coding_plan")?.defaultApiBase).toBe(
+      "https://ark.cn-beijing.volces.com/api/coding/v3"
+    );
+  });
+
   it("validates required provider credentials", () => {
     expect(() => makeProvider(new Config({ agents: { defaults: { provider: "openai", model: "gpt-4.1" } } }))).toThrow(
       ValueError,

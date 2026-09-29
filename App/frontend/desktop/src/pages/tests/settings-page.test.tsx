@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { ModelConfigView } from "@memmy/local-api-contracts";
+import { MODEL_PLAN_PROVIDER_IDS, type ModelConfigView } from "@memmy/local-api-contracts";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 import { appActions } from "../../state/app-actions.js";
@@ -32,6 +32,7 @@ import {
   normalizeEditorCapabilities,
   protocolFromConnection
 } from "../model-workspace-section.js";
+import { MODEL_PLAN_PROVIDER_OPTIONS } from "../model-plan-providers.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
 const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coordinator.tsx", import.meta.url));
@@ -66,6 +67,42 @@ function createMemoryStorage(): Storage {
 }
 
 describe("多 BYOK endpoint 入口", () => {
+  it("按 Token、Coding 套餐顺序提供独立 Provider 与 API Base", () => {
+    expect(MODEL_PLAN_PROVIDER_OPTIONS.map((option) => option.value)).toEqual([...MODEL_PLAN_PROVIDER_IDS]);
+    expect(MODEL_PLAN_PROVIDER_OPTIONS.map((option) => option.groupLabelKey)).toEqual([
+      ...Array(5).fill("settings.modelWorkspace.plan.tokenGroup"),
+      ...Array(4).fill("settings.modelWorkspace.plan.codingGroup")
+    ]);
+    expect(MODEL_PLAN_PROVIDER_OPTIONS.find((option) => option.value === "minimax_token_plan")).toMatchObject({
+      protocol: "anthropic-messages",
+      endpoint: "https://api.minimax.cn/anthropic"
+    });
+  });
+
+  it("同厂商套餐与按量 API 各自保存 Endpoint Key", () => {
+    const metered = upsertModelConnection(createModelWorkspace(null), "byok", {
+      provider: "qwen",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      apiKey: "metered-key",
+      models: ["qwen-model"]
+    });
+    expect(metered.error).toBeNull();
+    const plan = upsertModelConnection(metered.workspace, "byok", {
+      provider: "dashscope_coding_plan",
+      endpoint: "https://coding.dashscope.aliyuncs.com/v1",
+      apiKey: "plan-key",
+      models: ["coding-model"],
+      modelEntries: [{ model: "coding-model", capability: "chat", capabilities: ["chat"] }]
+    });
+    expect(plan.error).toBeNull();
+    const providers = modelConfigInput(plan.workspace).providers;
+    expect(providers.map((provider) => provider.provider)).toEqual(["dashscope", "dashscope_coding_plan"]);
+    expect(providers.map((provider) => provider.endpoints[0]?.apiKey)).toEqual(["metered-key", "plan-key"]);
+    expect(plan.workspace.spaces.byok.connections.map((connection) => connection.provider)).toEqual([
+      "dashscope", "dashscope_coding_plan"
+    ]);
+  });
+
   it("同 Provider 可继续添加不同协议 endpoint", () => {
     const available = availableConnectionProtocols([
       {
@@ -191,7 +228,7 @@ describe("自定义模型能力选择", () => {
     expect(source).toContain('const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;');
     expect(source).toContain("value={kind}");
     expect(source).toContain("options={modelKindOptions(t)}");
-    expect(source).toContain("onValueChange={(value) => props.onChange(modelCapabilitiesForKind(value as ModelKind))}");
+    expect(source).toContain('onValueChange={(value) => props.onChange(value === "text" && props.textCapabilities');
     expect(source).toContain('className="select-control--subtle model-capability-select"');
     expect(source.match(/t\("settings\.modelWorkspace\.modelCapability"\)/g)).toHaveLength(1);
     expect(source).toContain("normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))");
@@ -758,10 +795,10 @@ describe("SettingsPageView", () => {
       expect(modelSource).toContain(`${protocol}: "${placeholder}"`);
     }
 
-    expect(workspaceSource).toContain("endpoint: DEFAULT_ENDPOINTS[provider]");
-    expect(workspaceSource).toContain("modelDraft: DEFAULT_MODEL_IDS[provider]");
-    expect(workspaceSource).toContain("endpoint: DEFAULT_ENDPOINTS[provider]");
-    expect(workspaceSource).toContain("modelDraft: DEFAULT_MODEL_IDS[provider]");
+    expect(workspaceSource).toContain("endpoint: editorEndpoint(provider)");
+    expect(workspaceSource).toContain("modelDraft: editorDefaultModel(provider)");
+    expect(workspaceSource).toContain("DEFAULT_ENDPOINTS[provider as Protocol]");
+    expect(workspaceSource).toContain("DEFAULT_MODEL_IDS[provider]");
     expect(modelSource).toContain("endpoint: DEFAULT_ENDPOINTS[protocol]");
     expect(modelSource).toContain('modelId: ""');
     expect(modelSource).toContain('apiKey: ""');

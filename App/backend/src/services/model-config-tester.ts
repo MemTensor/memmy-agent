@@ -2,9 +2,9 @@
 import type {
   ModelConfigTestInput,
   ModelConfigTestResult,
-  ModelEndpointProtocol,
-  ModelProvider
+  ModelEndpointProtocol
 } from "@memmy/local-api-contracts";
+import { isModelPlanProviderId } from "@memmy/local-api-contracts";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -26,6 +26,7 @@ const SUCCESS_MESSAGE = "连接成功";
 const FALLBACK_ERROR_MESSAGE = "API Key 无效或模型列表不可用";
 const INVALID_SUCCESS_BODY_MESSAGE = "API 返回格式不符合模型列表接口，请检查 API 地址和协议";
 const UNSUPPORTED_MESSAGE = "当前 endpoint 协议不支持模型列表连接测试";
+const INCONCLUSIVE_PLAN_MESSAGE = "模型列表接口不可用，无法判断套餐连接是否可用；请检查 API Base 和 Key";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 type ListProbe = {
@@ -53,6 +54,9 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
         });
         if (!response.ok) {
           const errorMessage = redactSecret(await readErrorMessage(response), input.apiKey);
+          if (isModelPlanProviderId(input.provider) && (response.status === 404 || response.status === 405)) {
+            return { ...result(false, INCONCLUSIVE_PLAN_MESSAGE, now), inconclusive: true };
+          }
           return result(
             false,
             response.status === 404
@@ -156,7 +160,7 @@ function resourceUrl(apiBase: string, resource: string): string {
   return `${apiBase.replace(/\/+$/u, "")}/${resource}`;
 }
 
-function baseUrlGuidance(provider: ModelProvider): string {
+function baseUrlGuidance(provider: ModelConfigTestInput["provider"]): string {
   if (provider === "anthropic") {
     return "Anthropic API 地址通常不包含 /v1，例如 https://api.anthropic.com";
   }
@@ -164,7 +168,7 @@ function baseUrlGuidance(provider: ModelProvider): string {
   return "OpenAI 兼容 API 地址通常以 /v1 结尾，例如 https://api.openai.com/v1";
 }
 
-function appendBaseUrlGuidance(message: string, provider: ModelProvider): string {
+function appendBaseUrlGuidance(message: string, provider: ModelConfigTestInput["provider"]): string {
   const hint = baseUrlGuidance(provider);
   if (!hint) return message;
   return `${message.replace(/[。\.\s]+$/u, "")}。${hint}`;
