@@ -568,7 +568,8 @@ async function routeRequest(
     const result = await service.idempotent("sessions.close", request, { sessionId, request }, () =>
       service.closeSession(sessionId, request)
     );
-    scheduleAutoWorkerForEvolution(result, autoWorker);
+    // Close can queue L3 batches even when no episode closes, so always wake the worker.
+    autoWorker.schedule();
     return publicCloseSessionResponse(result);
   }
 
