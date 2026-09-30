@@ -39,6 +39,27 @@ describe("local project scanner", () => {
     );
   });
 
+  it("excludes package-manager content-addressed stores from the inventory", async () => {
+    const { root, uri } = await fixture();
+    await mkdir(join(root, ".pnpm-store", "v11", "files", "61"), { recursive: true });
+    await writeFile(
+      join(root, ".pnpm-store", "v11", "files", "61", "66c22ee28ca374a330f849acc2b403294b4fdd40199d9eda92cf72959f446d"),
+      "hashed"
+    );
+    await mkdir(join(root, ".yarn", "cache"), { recursive: true });
+    await writeFile(join(root, ".yarn", "cache", "lodash-npm-4.17.21.zip"), "cached");
+    await mkdir(join(root, ".bun", "install", "cache"), { recursive: true });
+    await writeFile(join(root, ".bun", "install", "cache", "pkg"), "cached");
+    await writeFile(join(root, "visible.txt"), "visible");
+
+    const result = await scanLocalProject(uri);
+    const paths = result.entries.map((entry) => entry.relativePath);
+    expect(paths).toContain("visible.txt");
+    expect(paths.some((path) => path === ".pnpm-store" || path.startsWith(".pnpm-store/"))).toBe(false);
+    expect(paths.some((path) => path === ".yarn/cache" || path.startsWith(".yarn/cache/"))).toBe(false);
+    expect(paths.some((path) => path === ".bun/install/cache" || path.startsWith(".bun/install/cache/"))).toBe(false);
+  });
+
   it("excludes gitignored, fixed, sensitive, binary, and symlink paths from the inventory", async () => {
     const { root, uri } = await fixture();
     await mkdir(join(root, "node_modules"));
