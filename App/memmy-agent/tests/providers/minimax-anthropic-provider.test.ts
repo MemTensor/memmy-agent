@@ -27,3 +27,29 @@ describe("MiniMax Anthropic provider", () => {
     expect(provider).toBeInstanceOf(AnthropicProvider);
   });
 });
+
+describe("MiniMax regional endpoints and thinking", () => {
+  it("exposes China provider defaults", () => {
+    expect(findByName("minimax_cn")?.defaultApiBase).toBe("https://api.minimaxi.com/v1");
+    expect(findByName("minimax_anthropic_cn")?.defaultApiBase).toBe("https://api.minimaxi.com/anthropic");
+    expect(findByName("minimax_anthropic_cn")?.backend).toBe("anthropic");
+    expect(new ProvidersConfig().minimax_cn).toBeDefined();
+    expect(new ProvidersConfig().minimax_anthropic_cn).toBeDefined();
+  });
+  it.each([["medium", "adaptive"], ["adaptive", "adaptive"], ["none", "disabled"], ["minimal", "disabled"], ["minimum", "disabled"], ["MINIMAL", "disabled"]])("maps %s to %s", (effort, mode) => {
+    const provider = new AnthropicProvider({ apiKey: "test-key", defaultModel: "MiniMax-M3" });
+    const args = provider.buildKwargs({ messages: [{ role: "user", content: "hi" }], reasoningEffort: effort });
+    expect(args.thinking).toEqual({ type: mode });
+  });
+  it("preserves forced tool choice when thinking is disabled", () => {
+    const provider = new AnthropicProvider({ apiKey: "test-key", defaultModel: "MiniMax-M3" });
+    const args = provider.buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningEffort: "minimal",
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }],
+      toolChoice: "required",
+    });
+    expect(args.thinking).toEqual({ type: "disabled" });
+    expect(args.tool_choice).toEqual({ type: "any" });
+  });
+});
