@@ -7614,6 +7614,11 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
                AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
+             WHEN job_type IN ('trace_summary', 'import_summary')
+               AND json_extract(payload_json, '$.source') IN (
+                 'startup.processing_repair',
+                 'startup.placeholder_summary_repair'
+               ) THEN 90
              WHEN job_type = 'trace_summary'
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
              WHEN job_type = 'import_summary'
