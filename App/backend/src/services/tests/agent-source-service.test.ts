@@ -196,6 +196,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["cursor-conv-1"],
             incompleteConversationIds: [],
@@ -376,13 +377,15 @@ describe("agent source service", () => {
 
     expect(scanOptions[0]).toMatchObject({
       order: "recent_first",
-      maxScanTargets: 1000,
-      since: undefined
+      since: undefined,
+      fullHistory: true
     });
+    expect(scanOptions[0]?.maxScanTargets).toBeUndefined();
     expect(scanOptions[0]?.maxMessages).toBeUndefined();
     expect(scanOptions[1]).toMatchObject({
       order: "source_default",
-      since: "2026-05-28T10:00:02.000Z"
+      since: "2026-05-28T10:00:02.000Z",
+      fullHistory: false
     });
     expect(repository.getScanWatermark("cursor")).toMatchObject({
       sourceId: "cursor",
@@ -521,6 +524,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -562,6 +566,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [`memory-${ctx.sourceId}`],
+            importSummaryMemoryIds: [`memory-${ctx.sourceId}`],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -874,11 +879,12 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 1,
             memoryIds: ["memory-complete"],
+            importSummaryMemoryIds: ["memory-complete"],
             conversations: 3,
             completedConversationIds: ["conversation-complete"],
             incompleteConversationIds: ["conversation-incomplete"],
             failedConversationIds: ["conversation-failed"],
-            errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+            errors: []
           };
         }
       }
@@ -900,7 +906,7 @@ describe("agent source service", () => {
 
     expect(result).toMatchObject({
       memoryIds: ["memory-complete"],
-      errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+      errors: []
     });
     expect(repository.getConversationCheckpoint("cursor", "conversation-complete")).toMatchObject({
       lastMessageId: "complete-1"
@@ -988,6 +994,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 2,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -1054,6 +1061,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["conversation-1"],
             incompleteConversationIds: [],
@@ -1134,6 +1142,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: ingested.length > 0 ? 1 : 0,
             completedConversationIds: ingested.length > 0 ? ["c1"] : [],
             incompleteConversationIds: [],
@@ -1807,6 +1816,7 @@ function createFakeIngestionService(): IngestionService {
         dedupedMemories: 0,
         failedMemories: 0,
         memoryIds: [],
+        importSummaryMemoryIds: [],
         conversations: 1,
         completedConversationIds: [...conversationIds],
         incompleteConversationIds: [],

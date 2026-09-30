@@ -8,10 +8,11 @@ import { join } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import {
   closeRuntimeSession,
-  completeRuntimeTurn,
+  completeSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
+  readOpencodeHookSourceTurn,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
@@ -54,7 +55,9 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
   }
 
   async function ensureSession(memmy, externalSessionId, agent) {
-    const cached = sessionCache.get(externalSessionId);
+    const profileId = normalizeText(agent) || "main";
+    const cacheKey = externalSessionId + ":" + profileId;
+    const cached = sessionCache.get(cacheKey);
     if (cached) {
       return cached;
     }
@@ -62,13 +65,13 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       configUrl: CONFIG_URL,
       source: SOURCE,
       adapterId: "memmy-opencode-plugin",
-      profileId: normalizeText(agent) || "main",
+      profileId,
       sessionKey: "opencode-memory-" + externalSessionId,
       workspaceRoot: worktree || directory || null,
       transition: "allow_legacy_rollover"
     });
     if (!opened) throw new Error("Memmy session unavailable");
-    sessionCache.set(externalSessionId, opened);
+    sessionCache.set(cacheKey, opened);
     return opened;
   }
 
@@ -103,6 +106,7 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
         query: cleanQuery,
         userMessageId: normalizeText(output && output.message && output.message.id) || requestedTurnId,
+        profileId: normalizeText(input.agent) || "main",
         answerParts: new Map(),
         toolCalls: [],
         toolResults: [],
@@ -142,24 +146,32 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
     captureJobs.add(job);
   }
 
+  // Capture reads the turn back from opencode.db so the plugin and the offline scan submit
+  // the same identity, text and tools. A turn that is not on disk yet is left for the scan.
   async function completeTurn(pending) {
-    const answer = sanitizeCaptureText([...pending.answerParts.values()].filter(Boolean).join("\n\n")) ||
-      sanitizeCaptureText(pending.error);
-    if (!sanitizeCaptureText(pending.query) || !answer) {
+    const conversationId = normalizeText(pending.externalSessionId);
+    const turnId = normalizeText(pending.userMessageId);
+    if (!conversationId || !turnId) {
+      log("warn", "Memmy turn capture skipped", { reason: "identity_unresolved", sessionID: pending.externalSessionId });
       return;
     }
-    const runtimeSession = sessionCache.get(pending.externalSessionId);
-    if (!runtimeSession) return;
-    await completeRuntimeTurn(runtimeSession, {
-      turnId: pending.turnId,
-      episodeId: pending.episodeId,
-      query: pending.query,
-      answer,
-      status: pending.status,
+    const parsed = await readOpencodeHookSourceTurn({ conversationId, turnId });
+    if (!parsed.turn) {
+      log("warn", "Memmy turn capture skipped", { reason: parsed.reason || "identity_unresolved", sessionID: conversationId });
+      return;
+    }
+    const result = await completeSourceTurn({
+      configUrl: CONFIG_URL,
+      turn: parsed.turn,
+      sessionId: normalizeText(pending.sessionId) || undefined,
       sourceMemoryIds: pending.sourceMemoryIds,
-      toolCalls: pending.toolCalls.length ? pending.toolCalls : undefined,
-      toolResults: pending.toolResults.length ? pending.toolResults : undefined
+      profileId: normalizeText(parsed.turn.profileId) || normalizeText(pending.profileId) || "main",
+      adapterId: "memmy-opencode-plugin"
     });
+    const status = normalizeText(result && result.status);
+    if (status !== "stored" && status !== "existing" && status !== "rejected") {
+      log("warn", "Memmy turn capture failed", { reason: normalizeText(result && result.reason) || status || "unexpected_response", sessionID: conversationId });
+    }
   }
 
   async function handleResumeSearch(sessionID, query, parts) {
@@ -387,14 +399,11 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         }
         return;
       }
+      // An interrupted turn is not dropped here: the database decides whether it produced
+      // usable text or a finished tool, and the scan can still fill it in later.
       if (event && event.type === "session.error") {
-        const sessionID = normalizeText(properties.sessionID);
-        const pending = pendingTurns.get(sessionID);
+        const pending = pendingTurns.get(normalizeText(properties.sessionID));
         if (pending) {
-          if (isCancellationError(properties.error)) {
-            pendingTurns.delete(sessionID);
-            return;
-          }
           pending.status = "failed";
           pending.error = errorText(properties.error);
         }
@@ -559,39 +568,50 @@ async function readMemmyConfig(configPath) {
   const content = await readFile(configPath, "utf8");
   const storage = parseStorageBlock(content);
   return {
-    endpoint: normalizeText(storage.endpoint) || "http://127.0.0.1:18960",
+    endpoint: normalizeText(storage.endpoint),
     token: normalizeText(storage.token)
   };
 }
 
 function parseStorageBlock(content) {
-  const storages = [];
-  let activeStorage = null;
-  let storageIndent = 0;
+  const storage = parseYamlObjectAtPath(content, ["memmyMemory", "storage"]) || {};
+  const memory = parseYamlObjectAtPath(content, ["memmyMemory"]) || {};
+  const legacy = parseYamlObjectAtPath(content, ["storage"]) || {};
+  return {
+    endpoint: storage.endpoint || memory.endpoint || legacy.endpoint,
+    token: storage.token || memory.token || legacy.token
+  };
+}
+
+function parseYamlObjectAtPath(content, targetPath) {
+  const result = {};
+  const parents = [];
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.replace(/#.*$/u, "").replace(/\s+$/u, "");
     if (!line.trim()) {
       continue;
     }
     const indent = line.match(/^\s*/u)[0].length;
-    if (/^\s*storage:\s*$/u.test(line)) {
-      activeStorage = {};
-      storageIndent = indent;
-      storages.push(activeStorage);
+    const match = line.match(/^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
+    if (!match) {
       continue;
     }
-    if (activeStorage && indent <= storageIndent) {
-      activeStorage = null;
+    while (parents.length && parents[parents.length - 1].indent >= indent) {
+      parents.pop();
     }
-    if (!activeStorage) {
+    const key = match[1];
+    const value = match[2];
+    const path = [...parents.map(parent => parent.key), key];
+    if (!value) {
+      parents.push({ indent, key });
       continue;
     }
-    const match = line.match(/^\s+([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
-    if (match) {
-      activeStorage[match[1]] = parseYamlScalar(match[2]);
+    if (path.length === targetPath.length + 1 &&
+      targetPath.every((segment, index) => path[index] === segment)) {
+      result[key] = parseYamlScalar(value);
     }
   }
-  return storages.find((storage) => storage.endpoint) || storages[0] || {};
+  return Object.keys(result).length ? result : null;
 }
 
 function parseYamlScalar(value) {
@@ -616,12 +636,29 @@ async function fetchWithTimeout(url, init, timeoutMs) {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw new Error("Memmy request timed out after " + timeoutMs + "ms");
+      throw new Error("Memmy request to " + url + " timed out after " + timeoutMs + "ms");
     }
-    throw error;
+    throw new Error("Memmy request to " + url + " failed: " + formatErrorWithCause(error));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function formatErrorWithCause(error) {
+  const messages = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = current && typeof current === "object" && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) {
+      messages.push(detail);
+    }
+    current = current && typeof current === "object" ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 
 async function parseResponse(response) {

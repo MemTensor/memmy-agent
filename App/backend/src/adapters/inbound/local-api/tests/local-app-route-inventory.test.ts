@@ -81,6 +81,8 @@ describe("local app route inventory", () => {
       { method: "POST", url: "/api/v1/channels/wechat/disconnect", payload: {} },
       { method: "POST", url: "/api/app/byok-token-usage/events", payload: byokUsageEvent() },
       { method: "GET", url: "/api/app/byok-token-usage/summary" },
+      { method: "GET", url: "/api/app/byok-token-usage/memory-pipeline-usage" },
+      { method: "GET", url: "/api/app/byok-token-usage/memory-budget" },
       { method: "POST", url: "/api/asr/transcriptions", payload: { audioBase64: "UklGRg==", mimeType: "audio/wav" } },
       { method: "POST", url: "/api/onboarding/insight-report", payload: { locale: "zh-CN" } },
       { method: "POST", url: "/api/onboarding/insight-report/stream", payload: { locale: "zh-CN", stream: true } }
@@ -231,6 +233,26 @@ function createServer(): FastifyInstance {
       },
       async getSummary() {
         return byokUsageSummary();
+      },
+      async getMemoryPipelineUsage() {
+        return {
+          dailyLimitM: 10,
+          totalLimitM: 500,
+          dailyUsed: 0,
+          lifetimeUsed: 0,
+          nextLocalMidnightAt: "2026-09-19T16:00:00.000Z"
+        };
+      },
+      async getMemoryBudget() {
+        return {
+          dailyLimitM: 10,
+          totalLimitM: 500,
+          dailyUsed: 0,
+          lifetimeUsed: 0,
+          paused: false,
+          trigger: null,
+          nextLocalMidnightAt: "2026-09-19T16:00:00.000Z"
+        };
       }
     },
     asr: {

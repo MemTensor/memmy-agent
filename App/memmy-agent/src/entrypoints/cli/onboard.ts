@@ -755,7 +755,11 @@ const FIELD_HANDLERS: Record<string, (workingModel: any, fieldName: string, fiel
   fallbackModels: handleFallbackModelsField,
 };
 
-export async function configureDraftModel(model: any, displayName: string, { skipFields = new Set<string>() }: { skipFields?: Set<string> } = {}): Promise<any | null> {
+export async function configureDraftModel(
+  model: any,
+  displayName: string,
+  { skipFields = new Set<string>(), doneLabel = "[Done]" }: { skipFields?: Set<string>; doneLabel?: string } = {},
+): Promise<any | null> {
   const workingModel = cloneValue(model);
   const fields = editableFields(workingModel, skipFields);
   if (!fields.length) return workingModel;
@@ -765,11 +769,11 @@ export async function configureDraftModel(model: any, displayName: string, { ski
     const choices = fields.map(([name, info]) => {
       const display = getFieldDisplayName(name, info);
       return `${display}: ${formatValue(workingModel[name], { rich: false, fieldName: name })}`;
-    }).concat("[Done]");
+    }).concat(doneLabel);
     const defaultChoice = lastFieldName ? choices[fields.findIndex(([name]) => name === lastFieldName)] : null;
     const answer = await selectWithBack("Select field to configure:", choices, defaultChoice ?? undefined);
     if (answer === BACK_PRESSED || answer == null) return null;
-    if (answer === "[Done]") return workingModel;
+    if (answer === doneLabel) return workingModel;
     const fieldIdx = choices.indexOf(answer);
     if (fieldIdx < 0 || fieldIdx >= fields.length) return null;
     const [fieldName, fieldInfo] = fields[fieldIdx];
@@ -1277,7 +1281,7 @@ export async function configureModelPresets(config: Config, actions: PresetActio
           provider: config.agents.defaults.provider,
         }),
         `New Preset: ${name}`,
-        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]) },
+        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]), doneLabel: "[Continue]" },
       );
       const updated = draft ? await configurePresetEndpointAndCapabilities(config, draft) : null;
       if (updated) {
@@ -1333,7 +1337,7 @@ export async function configureModelPresets(config: Config, actions: PresetActio
       const draft = await configureDraftModel(
         preset,
         `Edit Preset: ${presetName}`,
-        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]) },
+        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]), doneLabel: "[Continue]" },
       );
       const updated = draft ? await configurePresetEndpointAndCapabilities(config, draft) : null;
       if (updated) commitInteractivePreset(config, presetName, updated, "edit");
@@ -1403,7 +1407,7 @@ export async function configureProvider(
   const updated = await configureDraftModel(
     provider,
     displayName,
-    { skipFields: new Set(["ownerAccountId", "endpoints"]) },
+    { skipFields: new Set(["ownerAccountId", "endpoints"]), doneLabel: "[Continue]" },
   );
   if (!updated) return;
   provider = updated;

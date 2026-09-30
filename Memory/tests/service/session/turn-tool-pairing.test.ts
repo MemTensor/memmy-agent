@@ -108,6 +108,42 @@ describe("complete turn tool pairing", () => {
     expect(normalize([], [])).toEqual([]);
   });
 
+  it("does not apply scanner secret redaction to an ordinary completeTurn", () => {
+    const query = "Remember artifact checksum 0123456789abcdef0123456789abcdef.";
+    const answer = "The verified artifact checksum is fedcba9876543210fedcba9876543210.";
+    const sanitized = sanitizeTurnCompleteRequest({
+      sessionId: "ordinary-runtime",
+      query,
+      answer
+    });
+    expect(sanitized.query).toBe(query);
+    expect(sanitized.answer).toBe(answer);
+  });
+
+  it("keeps distinct long tool IDs so two results still pair after sanitize", () => {
+    const firstId = "abcdefghijklmnopqrstuvwxyz012345";
+    const secondId = "ABCDEFGHIJKLMNOPQRSTUVWXYZ678901";
+    const sanitized = sanitizeTurnCompleteRequest({
+      sessionId: "session-long-ids",
+      query: "Read two files. password=review-fixture",
+      answer: "Done.",
+      toolCalls: [
+        { id: firstId, name: "read", input: { path: "a.ts" } },
+        { id: secondId, name: "read", input: { path: "b.ts" } }
+      ],
+      toolResults: [
+        { id: firstId, output: "result A" },
+        { id: secondId, output: "result B" }
+      ]
+    });
+    expect(sanitized.query).toBe("Read two files. password=review-fixture");
+    expect(sanitized.toolCalls).toEqual([
+      { id: firstId, name: "read", input: { path: "a.ts" } },
+      { id: secondId, name: "read", input: { path: "b.ts" } }
+    ]);
+    expect(normalizeCompleteTurnToolCalls(sanitized).map((call) => call.output)).toEqual(["result A", "result B"]);
+  });
+
   it("uses result ID to select recall sanitization without hiding another tool's output", () => {
     const sanitized = sanitizeTurnCompleteRequest({
       sessionId: "session-tools", query: "Read the files.", answer: "Done.",

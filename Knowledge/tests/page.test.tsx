@@ -386,8 +386,9 @@ it("shows share failure inside the modal instead of the page banner", async () =
       .find((button) => button.textContent?.includes("共享管理"))!
       .click();
   });
+  expect(container.textContent).toContain("用户 ID、手机号或邮箱");
   const input = container.querySelector<HTMLInputElement>(
-    '[aria-label="Memmy 用户 ID"]',
+    '[aria-label="用户 ID、手机号或邮箱"]',
   )!;
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(

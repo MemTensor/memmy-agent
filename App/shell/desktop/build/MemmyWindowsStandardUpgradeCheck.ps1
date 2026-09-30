@@ -154,8 +154,7 @@ try {
       }
     }
 
-    Write-Output 'relay-required:installation target differs from the installed application'
-    exit 1
+    Stop-Installation "installation target differs from the installed application at $normalizedInstallDir; manually migrate files before choosing a new directory"
   }
   $installedExeExists = Test-Path -LiteralPath $normalizedInstalledExePath -PathType Leaf
   if (-not $installedExeExists -and -not $AllowMissingExecutable) {

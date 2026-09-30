@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
-  completeRuntimeTurn,
+  completeSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
+  readDeepseekHookSourceTurn,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
@@ -63,7 +64,7 @@ export function apply(ctx, config = {}) {
         "deepseek-turn-" + hashText([sessionId, query, String(payload.turn)].join("\u0000")),
         query
       );
-      pendingStarts.set(turnKey(payload.agent.id, payload.turn), {
+      pendingStarts.set(turnKey(payload.agent.session.id, payload.turn), {
         sessionId,
         turnId: cleanText(started.turnId),
         episodeId: cleanText(started.episodeId),
@@ -147,14 +148,12 @@ export function apply(ctx, config = {}) {
     pendingStarts.delete(key);
     if (event.data.reason && event.data.reason.kind === "aborted") return;
     const previous = captureJobs.get(sessionKey) || Promise.resolve();
-    const capture = previous.then(() => completeTurn(
-      memmyConfigPath,
-      memorySessionIds,
-      session,
-      state,
-      event.data.reason,
-      pending
-    )).catch((error) => {
+    const capture = previous.then(async () => {
+      if (ctx.sessions && typeof ctx.sessions.flush === "function") {
+        await ctx.sessions.flush(session);
+      }
+      await completeTurn(memorySessionIds, session, event.data.turn, pending);
+    }).catch((error) => {
       ctx.logger.warn("memmy-memory: turn capture failed: " + errorText(error));
     });
     captureJobs.set(sessionKey, capture);
@@ -163,7 +162,6 @@ export function apply(ctx, config = {}) {
     });
   });
 
-  ctx.on("session/flush", (session) => captureJobs.get(String(session.id)));
   ctx.effect(() => () => Promise.allSettled([...captureJobs.values()]), "memmy-memory.captureDrain()");
 }
 
@@ -256,27 +254,22 @@ function createTurnState(turn) {
   };
 }
 
-async function completeTurn(memmyConfigPath, memorySessionIds, session, state, reason, pending) {
-  const query = cleanText(pending && pending.query) || state.queries.join("\n\n").trim();
-  if (!query) return;
+async function completeTurn(memorySessionIds, session, turn, pending) {
+  const conversationId = String(session.id);
+  const parsed = await readDeepseekHookSourceTurn({
+    conversationId,
+    turn: typeof turn === "number" ? turn : undefined,
+    cwd: session.header && session.header.cwd
+  });
+  if (!parsed.turn) return;
   const runtimeSession = await ensureSession(null, memorySessionIds, session);
-  const sessionId = cleanText(pending && pending.sessionId) || runtimeSession.sessionId;
-  let started = pending;
-  if (!started || !cleanText(started.turnId)) {
-    started = await startRuntimeTurn(runtimeSession, "deepseek-fallback-" + hashText([sessionId, query].join("\u0000")), query);
-  }
-  const answer = state.answers.join("\n\n").trim() || failureAnswer(reason);
-  if (!answer) return;
-  await completeRuntimeTurn(runtimeSession, {
-    turnId: cleanText(started.turnId),
-    episodeId: cleanText(started.episodeId) || undefined,
-    query,
-    answer,
-    status: reason && (reason.kind === "error" || reason.kind === "blocked") ? "failed" : "succeeded",
-    sourceMemoryIds: Array.isArray(started.sourceMemoryIds) ? started.sourceMemoryIds : undefined,
-    reasoningSummary: state.reasoning.join("\n\n").trim() || undefined,
-    toolCalls: state.toolCalls.length ? state.toolCalls : undefined,
-    toolResults: state.toolResults.length ? state.toolResults : undefined
+  await completeSourceTurn({
+    configUrl: CONFIG_URL,
+    turn: parsed.turn,
+    sessionId: cleanText(pending && pending.sessionId) || runtimeSession.sessionId,
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
+    profileId: parsed.turn.profileId || session.header && session.header.agentPreset || "main",
+    adapterId: "memmy-deepseek-harness-plugin"
   });
 }
 
@@ -289,7 +282,7 @@ async function ensureSession(client, cache, session) {
     source: SOURCE,
     adapterId: "memmy-deepseek-harness-plugin",
     profileId: session.header.agentPreset || "main",
-    sessionKey: "deepseek-harness-" + externalId,
+    sessionKey: "deepseek_harness-memory-" + externalId,
     workspaceRoot: session.header.cwd || null,
     transition: "allow_legacy_rollover"
   });
@@ -299,7 +292,12 @@ async function ensureSession(client, cache, session) {
 }
 
 async function createClient(configPath) {
-  const config = await readMemmyConfig(configPath);
+  const localConfig = await readLocalConfig();
+  const resolved = await readMemmyConfig(configPath).catch(() => ({}));
+  const config = {
+    baseUrl: (cleanText(resolved.baseUrl) || cleanText(localConfig.endpoint) || "http://127.0.0.1:18960").replace(/\/+$/u, ""),
+    token: cleanText(resolved.token) || cleanText(localConfig.token)
+  };
   return {
     get(path, signal) {
       return request(config, path, { method: "GET", signal });
@@ -315,21 +313,36 @@ async function createClient(configPath) {
   };
 }
 
+async function readLocalConfig() {
+  try {
+    const parsed = JSON.parse(await readFile(CONFIG_URL, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 async function request(config, path, init) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error("Memmy request timed out")), HTTP_TIMEOUT_MS);
   const abort = () => controller.abort(init.signal.reason);
   if (init.signal) init.signal.addEventListener("abort", abort, { once: true });
+  const url = new URL(path, config.baseUrl);
   try {
     const headers = { ...(init.headers || {}) };
     if (config.token) headers.authorization = "Bearer " + config.token;
-    const response = await fetch(new URL(path, config.baseUrl), { ...init, headers, signal: controller.signal });
+    const response = await fetch(url, { ...init, headers, signal: controller.signal });
     const text = await response.text();
     const data = text ? JSON.parse(text) : {};
     if (!response.ok) {
       throw new Error(cleanText(data && data.error && data.error.message) || response.statusText || "Memmy request failed");
     }
     return data;
+  } catch (error) {
+    if (controller.signal.aborted && !(init.signal && init.signal.aborted)) {
+      throw new Error("Memmy request to " + url + " timed out after " + HTTP_TIMEOUT_MS + "ms");
+    }
+    throw new Error("Memmy request to " + url + " failed: " + formatErrorWithCause(error));
   } finally {
     clearTimeout(timeout);
     if (init.signal) init.signal.removeEventListener("abort", abort);
@@ -345,32 +358,48 @@ async function readMemmyConfig(path) {
   }
   const storage = parseStorageBlock(content);
   return {
-    baseUrl: (cleanText(storage.endpoint) || "http://127.0.0.1:18960").replace(/\/+$/u, ""),
+    baseUrl: cleanText(storage.endpoint).replace(/\/+$/u, ""),
     token: cleanText(storage.token)
   };
 }
 
 function parseStorageBlock(content) {
-  const storages = [];
-  let current;
-  let storageIndent = 0;
+  const storage = parseYamlObjectAtPath(content, ["memmyMemory", "storage"]) || {};
+  const memory = parseYamlObjectAtPath(content, ["memmyMemory"]) || {};
+  const legacy = parseYamlObjectAtPath(content, ["storage"]) || {};
+  return {
+    endpoint: storage.endpoint || memory.endpoint || legacy.endpoint,
+    token: storage.token || memory.token || legacy.token
+  };
+}
+
+function parseYamlObjectAtPath(content, targetPath) {
+  const result = {};
+  const parents = [];
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.split("#", 1)[0].replace(/[ \t]+$/u, "");
     if (!line.trim()) continue;
     const indent = line.length - line.trimStart().length;
-    if (line.trim() === "storage:") {
-      current = {};
-      storageIndent = indent;
-      storages.push(current);
+    const match = line.match(/^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
+    if (!match) {
       continue;
     }
-    if (current && indent <= storageIndent) current = undefined;
-    if (!current) continue;
-    const separator = line.trim().indexOf(":");
-    if (separator < 0) continue;
-    current[line.trim().slice(0, separator)] = yamlScalar(line.trim().slice(separator + 1));
+    while (parents.length && parents[parents.length - 1].indent >= indent) {
+      parents.pop();
+    }
+    const key = match[1];
+    const value = match[2];
+    const path = [...parents.map(parent => parent.key), key];
+    if (!value) {
+      parents.push({ indent, key });
+      continue;
+    }
+    if (path.length === targetPath.length + 1 &&
+      targetPath.every((segment, index) => path[index] === segment)) {
+      result[key] = yamlScalar(value);
+    }
   }
-  return storages.find((item) => cleanText(item.endpoint)) || storages[0] || {};
+  return Object.keys(result).length ? result : null;
 }
 
 function yamlScalar(value) {
@@ -518,6 +547,21 @@ function cleanText(value) {
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
+
+function formatErrorWithCause(error) {
+  const messages = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = current && typeof current === "object" && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) messages.push(detail);
+    current = current && typeof current === "object" ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
+}
 `;
 
 export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__.load({
@@ -527,12 +571,13 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = [];
+    const inject = ["uiConversation"];
 
     function resolveConversationEventRegistry(ctx) {
-      const uiConversation = ctx.get("uiConversation");
+      const uiConversation = ctx.uiConversation
+        || (typeof ctx.get === "function" ? ctx.get("uiConversation") : undefined);
       if (uiConversation && uiConversation.events) return uiConversation.events;
-      const conversationEvents = ctx.get("conversationEvents");
+      const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
       throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
     }

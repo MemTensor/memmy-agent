@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
-import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
@@ -31,17 +31,22 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
+  MEMORY_TOKEN_BUDGET_SECTION_ID,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
+  SETTINGS_MEMORY_BUDGET_EVENT,
   readInitialSettingsTab,
   readSettingsAddModelReturnRoute,
   resolveSettingsTabFromHash,
+  resetSettingsOuterScroll,
+  scrollSettingsSectionIntoView,
+  shouldFocusMemoryBudgetFromHash,
   writeSettingsTabHash,
   type SettingsTabId
 } from "./settings-nav.js";
 import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 
-export { resolveSettingsTabFromHash, type SettingsTabId } from "./settings-nav.js";
+export { resolveSettingsTabFromHash, shouldFocusMemoryBudgetFromHash, type SettingsTabId } from "./settings-nav.js";
 import {
   OptionalModelMissingWarningModal,
   resolveOptionalModelMissingWarning,
@@ -87,6 +92,7 @@ import {
 } from "./model-config.js";
 import { ValidationMessage } from "./api-key-form-fields.js";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
+import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 
 type LogLevel = "error" | "warn" | "info" | "debug";
@@ -254,6 +260,7 @@ export function SettingsPage() {
         update={update}
         track={track}
         activeTab={activeTab}
+        onActiveTabChange={selectSettingsTab}
       />
     </AppFrame>
   );
@@ -371,6 +378,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
+  const [memoryBudgetFocusNonce, setMemoryBudgetFocusNonce] = useState(0);
   const activeTab = activeTabProp ?? activeTabState;
 
   function setActiveTab(tab: SettingsTabId) {
@@ -390,6 +398,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [memoryBudget, setMemoryBudget] = useState<MemoryTokenBudgetDto | null>(null);
+  const [budgetSaveError, setBudgetSaveError] = useState<string | null>(null);
+  const [dailyLimitDraft, setDailyLimitDraft] = useState(() => String(bootstrap?.app.memoryByokDailyLimitM ?? 10));
+  const [totalLimitDraft, setTotalLimitDraft] = useState(() => String(bootstrap?.app.memoryByokTotalLimitM ?? 500));
+  const savedDailyLimitRef = useRef<number | null>(bootstrap?.app.memoryByokDailyLimitM ?? 10);
+  const savedTotalLimitRef = useRef<number | null>(bootstrap?.app.memoryByokTotalLimitM ?? 500);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
   const [invitationLoadStatus, setInvitationLoadStatus] =
@@ -709,7 +723,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
 
     let requestVersion = 0;
-    const refreshByokUsage = () => {
+    const refreshByokUsage = (syncBudgetDrafts = true) => {
       const currentRequestVersion = ++requestVersion;
       setByokUsageStatus("loading");
       void byokTokenUsageClient.getSummary().then((summary) => {
@@ -726,14 +740,26 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
         setByokUsageStatus("error");
       });
+      refreshMemoryBudget(syncBudgetDrafts);
     };
 
-    refreshByokUsage();
-    window.addEventListener("focus", refreshByokUsage);
+    refreshByokUsage(true);
+    const onBudgetUpdated = (event: Event) => {
+      const budget = (event as CustomEvent<MemoryTokenBudgetDto>).detail;
+      if (budget) {
+        applyMemoryBudget(budget, false);
+      }
+    };
+    const onWindowFocus = () => {
+      refreshByokUsage(false);
+    };
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("memmy:memory-token-budget-updated", onBudgetUpdated);
 
     return () => {
       cancelled = true;
-      window.removeEventListener("focus", refreshByokUsage);
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("memmy:memory-token-budget-updated", onBudgetUpdated);
     };
   }, [activeTab, byokTokenUsageClient]);
 
@@ -751,6 +777,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       }
     }
 
+    const settingsPage = document.querySelector(".settings-page");
+    if (settingsPage instanceof HTMLElement) {
+      resetSettingsOuterScroll(settingsPage);
+    }
+
     if (window.location.hash !== "#pet-avatar") {
       return;
     }
@@ -760,6 +791,63 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }, 0);
     // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const requestMemoryBudgetFocus = () => {
+      setActiveTab("tokens");
+      setMemoryBudgetFocusNonce((current) => current + 1);
+    };
+
+    if (shouldFocusMemoryBudgetFromHash(window.location.hash)) {
+      requestMemoryBudgetFocus();
+    }
+    window.addEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+    return () => window.removeEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+  }, []);
+
+  useEffect(() => {
+    if (memoryBudgetFocusNonce === 0 || activeTab !== "tokens" || typeof document === "undefined") {
+      return undefined;
+    }
+
+    const section = document.getElementById(MEMORY_TOKEN_BUDGET_SECTION_ID);
+    const card = section?.querySelector<HTMLElement>(`.${usageStyles.budgetPanel}`) ?? null;
+    const flashClass = usageStyles.budgetCardFlash;
+    if (!section || !card || !flashClass) {
+      return undefined;
+    }
+
+    const alignCard = () => {
+      scrollSettingsSectionIntoView(section);
+    };
+
+    card.classList.add(flashClass);
+    const frame = window.requestAnimationFrame(() => {
+      alignCard();
+      window.requestAnimationFrame(alignCard);
+    });
+    const panel = document.getElementById("settings-panel-tokens");
+    const observer = typeof ResizeObserver !== "undefined" && panel
+      ? new ResizeObserver(alignCard)
+      : null;
+    if (observer && panel) {
+      observer.observe(panel);
+    }
+    const timer = window.setTimeout(() => {
+      observer?.disconnect();
+      card.classList.remove(flashClass);
+    }, 1600);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      card.classList.remove(flashClass);
+    };
+  }, [memoryBudgetFocusNonce, activeTab]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
@@ -824,15 +912,59 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     };
   }, []);
 
+  function applyMemoryBudget(budget: MemoryTokenBudgetDto, syncDrafts: boolean) {
+    setMemoryBudget(budget);
+    setDailyLimitDraft((current) => {
+      const previousSaved = savedDailyLimitRef.current;
+      savedDailyLimitRef.current = budget.dailyLimitM;
+      if (syncDrafts || previousSaved === null || current === String(previousSaved)) {
+        return String(budget.dailyLimitM);
+      }
+      return current;
+    });
+    setTotalLimitDraft((current) => {
+      const previousSaved = savedTotalLimitRef.current;
+      savedTotalLimitRef.current = budget.totalLimitM;
+      if (syncDrafts || previousSaved === null || current === String(previousSaved)) {
+        return String(budget.totalLimitM);
+      }
+      return current;
+    });
+  }
+
+  function refreshMemoryBudget(syncDrafts = true) {
+    if (!byokTokenUsageClient) {
+      return;
+    }
+    void byokTokenUsageClient.getMemoryBudget().then((budget) => {
+      applyMemoryBudget(budget, syncDrafts);
+      if (syncDrafts) {
+        window.dispatchEvent(new Event("memmy:memory-token-budget-refresh"));
+      }
+    }).catch((error) => {
+      console.warn("load memory token budget failed", error);
+    });
+  }
+
   /**
    * Saves the app settings and syncs the reducer.
    *
    * @param patch The app settings patch.
    */
   function persistSettings(patch: Partial<AppSettingsDto>) {
-    void (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
+    const savingBudget = patch.memoryByokDailyLimitM !== undefined || patch.memoryByokTotalLimitM !== undefined;
+    const pending = (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
       dispatch(appActions.settingsUpdated(savedSettings));
+      if (savingBudget) {
+        setBudgetSaveError(null);
+        refreshMemoryBudget();
+      }
     });
+    if (savingBudget) {
+      void pending.catch((error) => {
+        setBudgetSaveError(error instanceof Error ? error.message : t("settings.token.memoryBudgetSaveFailed"));
+      });
+    }
   }
 
   /**
@@ -1514,6 +1646,18 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             byokUsageStatus={byokUsageStatus}
             modelCatalog={state.modelConfig.catalog}
           />
+          <MemoryTokenBudgetCard
+            dailyLimitDraft={dailyLimitDraft}
+            totalLimitDraft={totalLimitDraft}
+            budget={memoryBudget}
+            fallbackDailyLimitM={appSettings?.memoryByokDailyLimitM ?? 10}
+            fallbackTotalLimitM={appSettings?.memoryByokTotalLimitM ?? 500}
+            saveError={budgetSaveError}
+            onDailyDraftChange={setDailyLimitDraft}
+            onTotalDraftChange={setTotalLimitDraft}
+            onCommitDaily={(value) => persistSettings({ memoryByokDailyLimitM: value })}
+            onCommitTotal={(value) => persistSettings({ memoryByokTotalLimitM: value })}
+          />
         </div>
 
         {isAccountMode && showGiftQuota && showInvitationBanner ? (
@@ -1888,6 +2032,196 @@ export function SettingsPageView(props: SettingsPageViewProps) {
  * - byokUsage: The local BYOK API Key Token usage summary.
  * - byokUsageStatus: The local usage loading status.
  */
+interface MemoryTokenBudgetCardProps {
+  dailyLimitDraft: string;
+  totalLimitDraft: string;
+  budget: MemoryTokenBudgetDto | null;
+  fallbackDailyLimitM: number;
+  fallbackTotalLimitM: number;
+  saveError?: string | null;
+  onDailyDraftChange: (value: string) => void;
+  onTotalDraftChange: (value: string) => void;
+  onCommitDaily: (value: number) => void;
+  onCommitTotal: (value: number) => void;
+}
+
+function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
+  const { t } = useTranslation();
+  const dailyLimitM = props.budget?.dailyLimitM ?? props.fallbackDailyLimitM;
+  const totalLimitM = props.budget?.totalLimitM ?? props.fallbackTotalLimitM;
+  const dailyUsed = props.budget?.dailyUsed ?? 0;
+  const lifetimeUsed = props.budget?.lifetimeUsed ?? 0;
+
+  return (
+    <section id={MEMORY_TOKEN_BUDGET_SECTION_ID} className={`${usageStyles.detailContent} ${usageStyles.usageSection} ${usageStyles.budgetSection}`}>
+      <div className={usageStyles.sectionHead}>
+        <h2>
+          <Gauge size={16} className="text-text-ink/60" aria-hidden="true" />
+          {t("settings.token.memoryBudget")}
+        </h2>
+      </div>
+      <div className={`${usageStyles.platformQuotaList} ${usageStyles.budgetPanel}`}>
+        <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetHint")}</p>
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetDaily")}
+          noteLabel={dailyLimitM === 0 ? undefined : t("settings.token.memoryBudgetDailyUsedLabel")}
+          note={dailyLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(dailyUsed),
+              limit: String(dailyLimitM)
+            })}
+          draft={props.dailyLimitDraft}
+          savedValue={dailyLimitM}
+          usedTokens={dailyUsed}
+          limitM={dailyLimitM}
+          onDraftChange={props.onDailyDraftChange}
+          onCommit={props.onCommitDaily}
+        />
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetTotal")}
+          noteLabel={totalLimitM === 0 ? undefined : t("settings.token.memoryBudgetTotalUsedLabel")}
+          note={totalLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(lifetimeUsed),
+              limit: String(totalLimitM)
+            })}
+          draft={props.totalLimitDraft}
+          savedValue={totalLimitM}
+          usedTokens={lifetimeUsed}
+          limitM={totalLimitM}
+          onDraftChange={props.onTotalDraftChange}
+          onCommit={props.onCommitTotal}
+        />
+        {props.budget?.stale ? (
+          <div className={usageStyles.compactScene}>
+            <p>{t("settings.token.memoryBudgetStale")}</p>
+          </div>
+        ) : null}
+        {props.saveError ? (
+          <p className={usageStyles.statusError} role="alert">{props.saveError}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+export type MemoryBudgetUsageTone = "green" | "yellow" | "red";
+
+export function memoryBudgetUsageFill(
+  usedTokens: number,
+  limitM: number
+): { percent: number; tone: MemoryBudgetUsageTone } | null {
+  if (!Number.isFinite(limitM) || limitM <= 0) {
+    return null;
+  }
+  const ratio = Math.max(0, usedTokens) / (limitM * 1_000_000);
+  const percent = Math.min(100, ratio * 100);
+  const tone: MemoryBudgetUsageTone = percent <= 60 ? "green" : percent <= 80 ? "yellow" : "red";
+  return { percent, tone };
+}
+
+export function commitMemoryByokLimitDraft(
+  draft: string,
+  savedValue: number
+): { draft: string; value?: number } {
+  const trimmed = draft.trim();
+  if (trimmed === "") {
+    return { draft: String(savedValue) };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 99_999) {
+    return { draft: String(savedValue) };
+  }
+  return { draft: String(parsed), value: parsed };
+}
+
+export function MemoryTokenBudgetRow(props: {
+  label: string;
+  noteLabel?: string;
+  note: string;
+  draft: string;
+  savedValue: number;
+  usedTokens?: number;
+  limitM?: number;
+  onDraftChange: (value: string) => void;
+  onCommit: (value: number) => void;
+}) {
+  const { t } = useTranslation();
+  const fill = props.usedTokens !== undefined && props.limitM !== undefined
+    ? memoryBudgetUsageFill(props.usedTokens, props.limitM)
+    : null;
+  const pausedTip = t("settings.token.memoryBudgetPausedTip");
+  const limitReached = fill !== null && fill.percent >= 100;
+  const noteText = props.noteLabel ? `${props.noteLabel} ${props.note}` : props.note;
+
+  function commitDraft(event?: { currentTarget: { value: string } }) {
+    const next = commitMemoryByokLimitDraft(event?.currentTarget.value ?? props.draft, props.savedValue);
+    props.onDraftChange(next.draft);
+    if (next.value !== undefined && next.value !== props.savedValue) {
+      props.onCommit(next.value);
+    }
+  }
+
+  return (
+    <article className={`${usageStyles.platformQuotaRow} ${usageStyles.budgetRow}`}>
+      <div className={usageStyles.compactScene}>
+        <h3>{props.label}</h3>
+        <p className={usageStyles.byokBreakdown}>
+          <span>
+            {props.noteLabel ? <>{props.noteLabel} <strong>{props.note}</strong></> : props.note}
+          </span>
+          {limitReached ? (
+            <Tooltip content={pausedTip}>
+              <button type="button" className={usageStyles.budgetPausedMark} aria-label={pausedTip}>
+                <AlertTriangle size={14} aria-hidden="true" />
+              </button>
+            </Tooltip>
+          ) : null}
+        </p>
+      </div>
+      <label className={usageStyles.budgetControl}>
+        <input
+          type="number"
+          min={0}
+          max={99999}
+          step={1}
+          className={usageStyles.budgetInput}
+          value={props.draft}
+          onChange={(event) => props.onDraftChange(event.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        <span className={usageStyles.byokUsageValue}>
+          <strong>{t("settings.token.memoryBudgetScale")}</strong>
+          <em>{t("settings.token.memoryBudgetUnit")}</em>
+        </span>
+      </label>
+      {fill ? (
+        <div
+          className={usageStyles.budgetMeter}
+          role="progressbar"
+          aria-label={noteText}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(fill.percent)}
+          data-tone={fill.tone}
+        >
+          <span
+            className={`${usageStyles.budgetMeterFill} ${budgetMeterFillClass(fill.tone)}`}
+            style={{ width: `${fill.percent}%` }}
+          />
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 export interface UsageDetailsProps {
   showPlatform: boolean;
   platformUsage: TokenUsageDto;
@@ -3384,6 +3718,20 @@ function formatCompactTokenCount(value: number): string {
  * @param value The raw number.
  * @returns Uses the one-decimal M abbreviation when it can be shown, otherwise the full number with thousands separators.
  */
+function formatBudgetUsedM(tokens: number): string {
+  return (Math.max(0, tokens) / 1_000_000).toFixed(1);
+}
+
+function budgetMeterFillClass(tone: MemoryBudgetUsageTone): string {
+  if (tone === "yellow") {
+    return usageStyles.budgetMeterFillYellow ?? "";
+  }
+  if (tone === "red") {
+    return usageStyles.budgetMeterFillRed ?? "";
+  }
+  return usageStyles.budgetMeterFillGreen ?? "";
+}
+
 function formatTokenSummary(value: number): string {
   const abbreviated = formatNumber(value);
   return abbreviated === "0.0M" ? formatTokens(value) : abbreviated;
