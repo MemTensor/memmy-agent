@@ -112,6 +112,7 @@ afterEach(() => {
   delete process.env.KAGI_API_KEY;
   delete process.env.JINA_API_KEY;
   delete process.env.TAVILY_API_KEY;
+  delete process.env.YDC_API_KEY;
 });
 
 describe("web_search providers", () => {
@@ -478,6 +479,106 @@ describe("web_search providers", () => {
     stubDuckDuckGo();
 
     const result = await tool({ provider: "olostep", apiKey: "" }).execute({ query: "test" });
+
+    expect(result).toContain("Duck Result");
+  });
+
+  it("formats You.com search results", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        expect(url).toBe("https://ydc-index.io/v1/search");
+        expect(init.method).toBe("POST");
+        expect((init.headers as Record<string, string>)["X-API-Key"]).toBe("ydc-key");
+        expect((init.headers as Record<string, string>)["User-Agent"]).toBe("memmy-search-test");
+        expect(JSON.parse(String(init.body))).toEqual({ query: "test", count: 2 });
+        return jsonResponse({
+          results: {
+            web: [
+              {
+                title: "You.com Result",
+                url: "https://you.com",
+                snippets: ["Cited search"],
+                description: "AI search engine",
+              },
+            ],
+          },
+        });
+      }),
+    );
+
+    const result = await tool({
+      provider: "youcom",
+      apiKey: "ydc-key",
+      userAgent: "memmy-search-test",
+    }).execute({
+      query: "test",
+      count: 2,
+    });
+
+    expect(result).toContain("You.com Result");
+    expect(result).toContain("https://you.com");
+    expect(result).toContain("Cited search");
+  });
+
+  it("prefers You.com snippets over descriptions", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          results: {
+            web: [
+              {
+                title: "Snippet Result",
+                url: "https://example.com/snippet",
+                description: "fallback description",
+                snippets: ["primary snippet"],
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const result = await tool({ provider: "youcom", apiKey: "ydc-key" }).execute({ query: "test" });
+
+    expect(result).toContain("primary snippet");
+    expect(result).not.toContain("fallback description");
+  });
+
+  it("falls back to You.com descriptions when snippets are missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          results: {
+            web: [{ title: "Description Result", url: "https://example.com", description: "description body" }],
+          },
+        }),
+      ),
+    );
+
+    const result = await tool({ provider: "youcom", apiKey: "ydc-key" }).execute({ query: "test" });
+
+    expect(result).toContain("description body");
+  });
+
+  it("reports You.com search errors clearly", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401)),
+    );
+
+    const result = await tool({ provider: "youcom", apiKey: "ydc-key" }).execute({ query: "test" });
+
+    expect(result).toContain("Error");
+    expect(result).toContain("401");
+  });
+
+  it("falls back to DuckDuckGo when You.com has no key", async () => {
+    stubDuckDuckGo();
+
+    const result = await tool({ provider: "youcom", apiKey: "" }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });

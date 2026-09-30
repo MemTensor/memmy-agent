@@ -479,6 +479,8 @@ export class WebSearchTool extends Tool {
       return this.config.apiKey || process.env.KAGI_API_KEY ? "kagi" : "duckduckgo";
     if (provider === "olostep")
       return this.config.apiKey || process.env.OLOSTEP_API_KEY ? "olostep" : "duckduckgo";
+    if (provider === "youcom")
+      return this.config.apiKey || process.env.YDC_API_KEY ? "youcom" : "duckduckgo";
     return provider;
   }
 
@@ -497,6 +499,7 @@ export class WebSearchTool extends Tool {
         .toLowerCase() || "brave";
 
     if (provider === "olostep") return this.searchOlostep(query, n);
+    if (provider === "youcom") return this.searchYoucom(query, n);
     if (provider === "duckduckgo") return this.searchDuckduckgo(query, n);
     if (provider === "tavily") return this.searchTavily(query, n);
     if (provider === "searxng") return this.searchSearxng(query, n);
@@ -689,6 +692,30 @@ export class WebSearchTool extends Tool {
       );
     } catch (err) {
       return `Olostep search error: ${(err as Error).message}`;
+    }
+  }
+
+  async searchYoucom(query: string, n: number): Promise<string> {
+    const apiKey = this.config.apiKey || process.env.YDC_API_KEY || "";
+    if (!apiKey) return this.searchDuckduckgo(query, n);
+    try {
+      const data = await requestJson("https://ydc-index.io/v1/search", {
+        method: "POST",
+        headers: {
+          "X-API-Key": apiKey,
+          "Content-Type": "application/json",
+          "User-Agent": this.userAgent,
+        },
+        body: JSON.stringify({ query, count: n }),
+      });
+      const items = ((data.results?.web ?? []) as Array<Record<string, any>>).map((item) => ({
+        title: item.title ?? "",
+        url: item.url ?? "",
+        content: item.snippets?.join(" ") || item.description || "",
+      }));
+      return formatResults(query, items, n);
+    } catch (err) {
+      return `Error: ${(err as Error).message}`;
     }
   }
 }
