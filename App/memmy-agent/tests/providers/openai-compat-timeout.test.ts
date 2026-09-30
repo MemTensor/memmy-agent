@@ -28,7 +28,7 @@ describe("OpenAI-compatible local timeout hints", () => {
     expect((provider as any).client).toBeNull();
     const client = await provider.ensureClient();
 
-    expect(client.timeout).toBe(120_000);
+    expect(client.timeout).toBe(300_000);
     expect(client.fetchOptions).toBeUndefined();
   });
 
@@ -37,7 +37,7 @@ describe("OpenAI-compatible local timeout hints", () => {
 
     const client = await provider.ensureClient();
 
-    expect(client.timeout).toBe(120_000);
+    expect(client.timeout).toBe(300_000);
     expect(client.fetchOptions.keepalive).toBe(false);
   });
 
