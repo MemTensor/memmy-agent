@@ -60,17 +60,17 @@ export async function apply(ctx, config) {
       if (query) {
         const started = await request("/turns/start", profileId, { sessionId, query }, config.recallTimeoutMs);
         turns.set(String(agent?.id || "default"), { sessionId, query, turnId: started.turnId });
-        if (started.injectedContext && Array.isArray(payload?.messages)) payload.messages.push({ role: "user", content: [{ type: "text", text: started.injectedContext }], source: { kind: "plugin", plugin: name, form: "recall" } });
+        if (started.injectedContext && Array.isArray(payload?.messages)) payload.messages.push({ role: "user", content: [{ type: "text", text: started.injectedContext }], source: { kind: "memmy-memory", form: "recall" } });
       }
     } catch (error) { ctx.logger.warn(`memmy-memory recall unavailable: ${String(error)}`); }
     return next();
   }));
   disposers.push(ctx.on("session/event", (session, event) => {
-    if (!config.captureEnabled || event?.type !== "assistant") return;
+    if (!config.captureEnabled || event?.type !== "assistant/message") return;
     const active = turns.get(String(session?.id || "default"));
     if (!active) return;
     turns.delete(String(session?.id || "default"));
-    const answer = String(event?.message?.content?.map?.((part) => part.text || "").join("\n") || event?.content || "");
+    const answer = String(event?.data?.message?.content?.map?.((part) => part.text || "").join("\n") || "");
     void request(`/turns/${encodeURIComponent(active.turnId)}/complete`, profileId, { sessionId: active.sessionId, query: active.query, answer, status: "succeeded" }, 10000).catch(() => undefined);
   }));
   disposers.push(ctx.on("session/disposed", (session) => { const key = String(session?.id || "default"); const id = sessions.get(key); sessions.delete(key); if (id) void request(`/sessions/${encodeURIComponent(id)}/close`, profileId, {}).catch(() => undefined); }));

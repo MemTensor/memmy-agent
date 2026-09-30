@@ -76,7 +76,7 @@ export function apply(ctx, config = {}) {
       pendingL3.delete(String(payload.agent.session.id));
       if (!markdown && !l3) return decision;
       const memory = createUserMessage({
-        source: { kind: "plugin", plugin: name, form: "recall" },
+        source: { kind: "memmy-memory", form: "recall" },
         content: [{ type: "text", text: [l3, markdown ? renderMemoryPacket(markdown, "turn_start", query) : ""].filter(Boolean).join("\n\n") }]
       });
       return { ...decision, messages: insertAfterUserMessage(decision.messages, memory) };
