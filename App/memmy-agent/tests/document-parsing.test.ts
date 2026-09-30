@@ -91,6 +91,16 @@ describe("document parsing", () => {
     expect(await extractText(file)).toBe("Hello, world!\nThis is a test.");
   });
 
+  it("can extract a complete document while retaining the default preview limit", async () => {
+    const text = "long paragraph ".repeat(20_000) + "TAIL_AFTER_200K";
+    const docx = zipTree(
+      { "word/document.xml": `<w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>` },
+      "long.docx",
+    );
+    expect(await extractText(docx)).not.toContain("TAIL_AFTER_200K");
+    expect(await extractText(docx, { maxChars: null })).toBe(text);
+  });
+
   it("truncates large text files", async () => {
     const root = tempRoot();
     const file = path.join(root, "large.txt");
