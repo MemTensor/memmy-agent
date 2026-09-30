@@ -653,6 +653,7 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
 export function createDeepseekHarnessPluginPackageManifest(): Record<string, unknown> {
   return {
     name: "@memmy/memmy-memory",
+    version: "1.0.0",
     private: true,
     type: "module",
     exports: {

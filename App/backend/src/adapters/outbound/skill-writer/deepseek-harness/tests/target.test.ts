@@ -44,6 +44,7 @@ describe("DeepSeek Harness skill target", () => {
     const packageManifest = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
     expect(packageManifest).toMatchObject({
       name: "@memmy/memmy-memory",
+      version: "1.0.0",
       type: "module",
       exports: {
         ".": "./index.mjs",
@@ -51,7 +52,6 @@ describe("DeepSeek Harness skill target", () => {
       },
       dsh: { client: { platform: "web" } }
     });
-    expect(packageManifest).not.toHaveProperty("version");
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
     expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source deepseek_harness");
     expect(patch).toContain("id: user-plugin");
