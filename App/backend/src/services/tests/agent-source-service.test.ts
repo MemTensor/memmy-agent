@@ -1395,6 +1395,33 @@ describe("agent source service", () => {
     });
   });
 
+  it("reports whether an installed hook matches the bundled revision", async () => {
+    const fallback = createService();
+    const service = createService({
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async isInstalledHookCurrent(sourceId) {
+          return sourceId !== "cursor";
+        }
+      }
+    });
+
+    await expect(fallback.isInstalledHookCurrent("cursor")).resolves.toBe(true);
+    await expect(service.isInstalledHookCurrent("cursor")).resolves.toBe(false);
+    await expect(service.isInstalledHookCurrent("claude_code")).resolves.toBe(true);
+  });
+
   it("emits skill install analytics", async () => {
     const repository = createRepository();
     repository.upsertSource({

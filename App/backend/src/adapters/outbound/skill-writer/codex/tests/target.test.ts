@@ -122,6 +122,23 @@ describe("codex skill target", () => {
     }
   });
 
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("codex");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("codex");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+  });
+
   it("persists trust for the installed user-level hooks before installation completes", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let trustOptions: TrustMemmyCodexHooksOptions | undefined;

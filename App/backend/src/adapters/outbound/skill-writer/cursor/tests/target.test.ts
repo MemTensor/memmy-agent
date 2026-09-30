@@ -100,6 +100,27 @@ describe("cursor skill target", () => {
     }
   });
 
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("cursor");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    delete installed.hook_revision;
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("cursor");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+  });
+
   it("installs a beforeSubmitPrompt hook that blocks resume commands with top L1 candidates", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
