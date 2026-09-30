@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveCodexHomeDirectory } from "../../agent-paths.js";
 import { createNodeHookCommand } from "../hook-command.js";
+import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import {
   removeMemmyResumeSkillDirectory,
@@ -91,6 +92,19 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
     },
 
+    async isInstalledHookCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      return isInstalledMemmyHookCurrent({
+        source: CODEX_TARGET_ID,
+        mode: "codex",
+        hookScriptPath: join(hookDirectory, HOOK_SCRIPT_FILE_NAME),
+        bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
+      });
+    },
+
     async installPlugin(_targetId) {
       const root = await this.resolveRootDirectory();
       if (!root) {
@@ -102,7 +116,11 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       await mkdir(hookDirectory, { recursive: true });
       await writeFileAtomically(
         join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
+        `${JSON.stringify({
+          memmy_config_path: memmyConfigPath,
+          ...(await readMemmyMemoryServiceConfig(memmyConfigPath)),
+          ...(await memmyHookRevisionField(CODEX_TARGET_ID, "codex"))
+        }, null, 2)}\n`
       );
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
       await writeFileAtomically(

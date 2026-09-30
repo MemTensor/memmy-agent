@@ -1039,6 +1039,9 @@ function createFakeAgentSourceService(): AgentSourceService {
     async uninstallPlugin() {
       return undefined;
     },
+    async isInstalledHookCurrent() {
+      return true;
+    },
     async detectMemoryPluginConflicts() {
       return [];
     }

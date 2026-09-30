@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
+import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
@@ -85,6 +86,19 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
     },
 
+    async isInstalledHookCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      return isInstalledMemmyHookCurrent({
+        source: CLAUDE_CODE_TARGET_ID,
+        mode: "claude-code",
+        hookScriptPath: join(hookDirectory, HOOK_SCRIPT_FILE_NAME),
+        bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
+      });
+    },
+
     async installPlugin(_targetId) {
       const root = await this.resolveRootDirectory();
       if (!root) {
@@ -96,7 +110,11 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await mkdir(hookDirectory, { recursive: true });
       await writeFileAtomically(
         join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
+        `${JSON.stringify({
+          memmy_config_path: memmyConfigPath,
+          ...(await readMemmyMemoryServiceConfig(memmyConfigPath)),
+          ...(await memmyHookRevisionField(CLAUDE_CODE_TARGET_ID, "claude-code"))
+        }, null, 2)}\n`
       );
       await writeFileAtomically(
         hookScriptPath,
