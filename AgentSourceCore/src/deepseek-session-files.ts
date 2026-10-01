@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { decompress, ZstdErrorCode } from "fzstd";
 import type { DeepseekHarnessEvent } from "./deepseek-source-turn.js";
@@ -11,6 +11,7 @@ export interface DeepseekHarnessSessionFile {
 export interface DeepseekHarnessLogName {
   version: number;
   compressed: boolean;
+  backup?: boolean;
 }
 
 const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
@@ -18,22 +19,32 @@ const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 /**
  * Discovers DeepSeek Harness session logs. Production files are `session.vN.jsonl.zstd`;
  * older `session.jsonl` names still count as version 0. Each session directory contributes
- * only its newest generation so a leftover v1 next to v3 is not imported twice.
+ * only its newest live generation so a leftover v1 next to v3 is not imported twice.
+ * History scans can additionally request all timestamped rotation backups.
  */
 export async function discoverDeepseekHarnessSessions(options: {
   root: string;
+  roots?: readonly string[];
+  signal?: AbortSignal;
+  includeBackups?: boolean;
   order?: "path_asc" | "recent_first";
   maxSessions?: number;
 }): Promise<DeepseekHarnessSessionFile[]> {
   const byDirectory = new Map<string, { path: string; version: number; compressed: boolean; mtimeMs: number }>();
-  const directories = [options.root];
+  const backups: Array<{ path: string; mtimeMs: number }> = [];
+  const visited = new Set<string>();
+  const directories = [...(options.roots ?? [options.root])];
   for (let index = 0; index < directories.length; index += 1) {
+    options.signal?.throwIfAborted();
     const directory = directories[index]!;
     let entries;
     try {
+      const canonical = await realpath(directory);
+      if (visited.has(canonical)) continue;
+      visited.add(canonical);
       entries = await readdir(directory, { withFileTypes: true });
     } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") continue;
+      if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) continue;
       throw error;
     }
     for (const entry of entries) {
@@ -44,22 +55,33 @@ export async function discoverDeepseekHarnessSessions(options: {
       }
       if (!entry.isFile()) continue;
       const parsed = parseDeepseekHarnessLogName(entry.name);
-      if (!parsed) continue;
+      if (!parsed || (parsed.backup && !options.includeBackups)) continue;
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await stat(path)).mtimeMs;
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") continue;
+        throw error;
+      }
+      if (parsed.backup) {
+        backups.push({ path, mtimeMs });
+        continue;
+      }
       const current = byDirectory.get(directory);
       if (current && !isNewerLog(parsed, current)) continue;
       byDirectory.set(directory, {
         path,
         version: parsed.version,
         compressed: parsed.compressed,
-        mtimeMs: (await stat(path)).mtimeMs
+        mtimeMs
       });
     }
   }
-  return [...byDirectory.values()]
+  return [...byDirectory.values(), ...backups]
     .sort((left, right) => options.order === "recent_first"
       ? right.mtimeMs - left.mtimeMs || right.path.localeCompare(left.path)
       : left.path.localeCompare(right.path))
-    .slice(0, options.maxSessions ?? byDirectory.size)
+    .slice(0, options.maxSessions ?? (byDirectory.size + backups.length))
     .map((file) => ({ sessionFilePath: file.path, gitRoot: null }));
 }
 
@@ -71,9 +93,9 @@ export async function findLatestDeepseekHarnessSessionFile(directory: string): P
 }
 
 export function parseDeepseekHarnessLogName(fileName: string): DeepseekHarnessLogName | undefined {
-  const match = /^session(?:\.v(\d+))?\.jsonl(\.zstd)?$/u.exec(fileName);
+  const match = /^session(?:\.v(\d+))?\.jsonl(\.zstd)?(\.bak-\d+)?$/u.exec(fileName);
   if (!match) return undefined;
-  return { version: match[1] ? Number(match[1]) : 0, compressed: Boolean(match[2]) };
+  return { version: match[1] ? Number(match[1]) : 0, compressed: Boolean(match[2]), ...(match[3] ? { backup: true } : {}) };
 }
 
 /** DSH session-directory encoding. Same rules as `session-persistence-jsonl`. */
@@ -123,7 +145,7 @@ export async function loadDeepseekHarnessEvents(
   signal?.throwIfAborted();
   const bytes = await readFile(filePath);
   signal?.throwIfAborted();
-  const text = filePath.endsWith(".zstd") ? decompressFrames(bytes) : bytes.toString("utf8");
+  const text = /\.zstd(?:\.bak-\d+)?$/u.test(filePath) ? decompressFrames(bytes) : bytes.toString("utf8");
   return parseDeepseekHarnessEvents(text);
 }
 

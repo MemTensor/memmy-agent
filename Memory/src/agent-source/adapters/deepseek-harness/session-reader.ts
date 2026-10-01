@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { deepseekHarnessSessionFallbackId } from "./session-file.js";
 import {
   loadDeepseekHarnessEvents,
   readDeepseekHarnessEvents,
@@ -15,8 +15,7 @@ export async function readDeepseekHarnessSession(
   filePath: string,
   signal?: AbortSignal
 ): Promise<RawDeepseekHarnessMessage[]> {
-  const events = await loadDeepseekHarnessEvents(filePath, signal);
-  return (await collect(readDeepseekHarnessEvents(events, signal))).map(withWorkspace);
+  return collect(streamDeepseekHarnessSession(filePath, signal));
 }
 
 /** Streams one session as staged native turns. Compressed files are decoded first. */
@@ -26,7 +25,7 @@ export async function* streamDeepseekHarnessSession(
 ): AsyncIterable<RawDeepseekHarnessMessage> {
   const events = await loadDeepseekHarnessEvents(filePath, signal);
   if (!events.some((event) => event.type === "session")) {
-    const fallbackId = basename(filePath).replace(/\.jsonl(?:\.zstd)?$/u, "");
+    const fallbackId = deepseekHarnessSessionFallbackId(filePath);
     for await (const message of readDeepseekHarnessEvents([{ type: "session", id: fallbackId }, ...events], signal)) {
       yield withWorkspace(message);
     }
