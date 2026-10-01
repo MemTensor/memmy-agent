@@ -19,7 +19,7 @@ import {
   panelItemsOutput
 } from "./fixtures.js";
 import { createMockMemoryRuntimeClient } from "./memory-runtime-fixtures.js";
-import { displayMemoryTitle, memoryDisplaySource } from "../memory-display.js";
+import { displayMemoryTitle, independentGeneratedTitle, memoryDisplaySource, showsGeneratedSummaryRow } from "../memory-display.js";
 import {
   MEMORY_SOURCE_AGENT_EXCLUSIONS,
   OTHER_MEMORY_SOURCE_AGENT
@@ -116,11 +116,12 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("memory-pill--source");
   });
 
-  it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
+  it("摘要完成前展示用户原句，生成后把独立标题和摘要分成两行", () => {
     const trace = {
       id: "memory-trace-import",
       kind: "trace" as const,
       title: "修复自动扫描卡顿和标题占位",
+      generatedTitle: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
     } as const;
@@ -136,6 +137,13 @@ describe("MemoriesSubPage", () => {
     expect(displayMemoryTitle({
       ...trace,
       summary: "已修复自动扫描卡顿，并替换临时标题"
+    })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      id: "memory-trace-legacy",
+      kind: "trace",
+      title: "已修复自动扫描卡顿，并替换临时标题",
+      summary: "已修复自动扫描卡顿，并替换临时标题",
+      memoryLayer: "L1"
     })).toBe("已修复自动扫描卡顿，并替换临时标题");
   });
 
@@ -149,10 +157,12 @@ describe("MemoriesSubPage", () => {
 
     expect(displayMemoryTitle({
       ...trace,
+      title: "甲".repeat(21),
       summary: "甲".repeat(21)
     })).toBe("甲".repeat(21));
     expect(displayMemoryTitle({
       ...trace,
+      title: Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" "),
       summary: Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" ")
     })).toBe(Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" "));
   });
@@ -167,12 +177,32 @@ describe("MemoriesSubPage", () => {
     })).toBe("SFT training pipeline");
   });
 
+  it("经验列表使用生成标题，草稿标题走 waiting 用户原句", () => {
+    expect(displayMemoryTitle({
+      id: "policy_ready",
+      kind: "policy",
+      title: "使用 focused pytest",
+      generatedTitle: "使用 focused pytest",
+      summary: "当 pytest 失败时检查 sqlite 迁移输出",
+      memoryLayer: "L2"
+    })).toBe("使用 focused pytest");
+    expect(displayMemoryTitle({
+      id: "policy_draft",
+      kind: "policy",
+      title: "Policy: pytest retry",
+      summary: "pytest workflow fails around sqlite migration output",
+      sourceText: "请修 pytest 失败",
+      memoryLayer: "L2"
+    })).toBe("请修 pytest 失败");
+  });
+
   it("span 列表展示子目标，详情只展示子目标和摘要", () => {
     const spanItem = {
       ...memoryListItemFixture,
       id: "span_38dff97911bbdf533513",
       kind: "span" as const,
       title: "span_38dff97911bbdf533513",
+      generatedTitle: "单独生成的标题",
       summary: "阅读策略、指标和组合模型相关文件。",
       metadata: { spanGoal: "读取并分析源码，分类金融策略" }
     };
@@ -207,7 +237,10 @@ describe("MemoriesSubPage", () => {
     });
 
     expect(displayMemoryTitle(spanItem)).toBe("读取并分析源码，分类金融策略");
-    expect(html).toContain("读取并分析源码，分类金融策略");
+    expect(html).toContain('class="memory-card__title">读取并分析源码，分类金融策略');
+    expect(html).toContain("memory-card__summary");
+    expect(html).not.toContain("memory-drawer__title");
+    expect(html).not.toContain("单独生成的标题");
     expect(html).toContain("子目标");
     expect(html).toContain("摘要");
     expect(html).toContain("阅读策略、指标和组合模型相关文件。");
@@ -219,6 +252,156 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("正文");
     expect(html).not.toContain("Goal:");
     expect(html).not.toContain("Summary:");
+  });
+
+  it("生成完成后的记忆卡显示标题和摘要两行，waiting 时只留用户原句和 pill", () => {
+    const readyHtml = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([memoryListItemFixture]),
+      detail: null
+    });
+    expect(readyHtml).toContain("Memmy 记忆管理模块执行规范");
+    expect(readyHtml).toContain("按照 codex 规范补齐 MemoryPage 页壳、MemOS Local View 子页和接入源管理复用。");
+    expect(readyHtml).toContain("memory-card__summary");
+    expect(readyHtml).not.toContain("摘要总结中");
+
+    const waitingHtml = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        title: "尚未生成的标题",
+        generatedTitle: undefined,
+        summary: "RawTurn: raw_pending",
+        sourceText: "请修复自动扫描卡顿",
+        processing: processingRecord(memoryListItemFixture.id, "summary_pending", "summary")
+      }]),
+      detail: null
+    });
+    expect(waitingHtml).toContain("请修复自动扫描卡顿");
+    expect(waitingHtml).not.toContain("尚未生成的标题");
+    expect(waitingHtml).not.toContain("memory-card__summary");
+    expect(waitingHtml).toContain("摘要总结中");
+    expect(waitingHtml).not.toContain('memory-card__title">摘要总结中');
+  });
+
+  it("waiting 列表标题是记忆 id 时使用 sourceText", () => {
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        id: "trace_457c41a4ec1e730ecd39",
+        title: "trace_457c41a4ec1e730ecd39",
+        generatedTitle: undefined,
+        sourceText: "旧经验为什么全变成这样了？我们最开始说的是「不要影响已有数据」",
+        summary: "",
+        processing: processingRecord("trace_457c41a4ec1e730ecd39", "summary_pending", "summary")
+      }]),
+      detail: null
+    });
+    expect(html).toContain('class="memory-card__title">旧经验为什么全变成这样了？我们最开始说的是「不要影响已有数据」');
+    expect(html).toContain("摘要总结中");
+    expect(html).not.toContain('class="memory-card__title">trace_457c41a4ec1e730ecd39');
+  });
+
+  it("waiting 列表的 RawTurn 标题不盖过正文里的用户原句", () => {
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        id: "trace_waiting_raw",
+        title: "RawTurn: raw_pending",
+        generatedTitle: undefined,
+        sourceText: undefined,
+        summary: "",
+        body: "User:\n请修复自动扫描卡顿",
+        processing: processingRecord("trace_waiting_raw", "summary_pending", "summary")
+      }]),
+      detail: null
+    });
+    expect(html).toContain('class="memory-card__title">请修复自动扫描卡顿');
+    expect(html).toContain("摘要总结中");
+    expect(html).not.toContain("RawTurn: raw_pending");
+  });
+
+  it("waiting 的记忆详情不显示标题，并把记忆摘要固定成摘要总结中", () => {
+    const waitingDetail = {
+      ...memoryDetailFixture,
+      item: {
+        ...memoryDetailFixture.item,
+        title: "尚未生成的标题",
+        summary: "RawTurn: raw_pending",
+        processing: processingRecord(memoryDetailFixture.item.id, "summarizing", "summary"),
+        metadata: {
+          ...memoryDetailFixture.item.metadata,
+          traceDetail: {
+            ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+            summary: "RawTurn: raw_pending"
+          }
+        }
+      }
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        processing: processingRecord(memoryListItemFixture.id, "summarizing", "summary")
+      }]),
+      detail: { status: "ready", data: waitingDetail }
+    });
+    expect(html).toContain("记忆摘要");
+    expect(html).toContain("摘要总结中");
+    expect(html).not.toContain("尚未生成的标题");
+    expect(html).not.toContain("RawTurn: raw_pending");
+    expect(html).not.toContain("memory-drawer__title");
+  });
+
+  it("旧记忆没有独立标题时不把截断摘要排成两行", () => {
+    const summary = "已修复自动扫描卡顿，并验证标题与摘要显示。".repeat(6);
+    const truncated = `${summary.slice(0, 77)}...`;
+    const legacy = {
+      ...memoryListItemFixture,
+      id: "trace_legacy_long",
+      title: truncated,
+      generatedTitle: undefined,
+      summary,
+      processing: undefined
+    };
+    expect(independentGeneratedTitle(legacy)).toBeUndefined();
+    expect(showsGeneratedSummaryRow(legacy, false)).toBe(false);
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([legacy]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: {
+            ...memoryDetailFixture.item,
+            ...legacy,
+            body: `Summary: ${summary}`,
+            sourceMemoryIds: [],
+            metadata: memoryDetailFixture.item.metadata
+          }
+        }
+      }
+    });
+    expect(html).not.toContain("memory-card__summary");
+    expect(html).not.toContain(truncated);
+    expect(html).toContain(summary);
+    expect(html).not.toContain("memory-drawer__title");
+  });
+
+  it("记忆抽屉把生成标题放在 id 下面", () => {
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([memoryListItemFixture]),
+      detail: { status: "ready", data: memoryDetailFixture }
+    });
+    const identity = html.match(/<div class="memory-drawer__identity">([\s\S]*?)<\/div>/);
+    expect(identity?.[1]).toContain("memory-drawer__eyebrow");
+    expect(identity?.[1]).not.toContain("memory-drawer__title");
+    expect(html).toContain("memory-drawer__title");
+    expect(html.indexOf("memory-drawer__eyebrow")).toBeLessThan(html.indexOf("memory-drawer__title"));
   });
 
   it("搜索列表和点击详情都调用 memoryRuntime client", async () => {

@@ -17,7 +17,9 @@ import {
   closeRuntimeSession,
   completeRuntimeTurn,
   completeSourceTurn,
+  readClaudeCodeSourceTurn,
   readCodexSourceTurn,
+  readCursorHookSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
@@ -234,6 +236,14 @@ async function captureCompletedTurn(payload) {
     await captureCodexSourceTurn(payload);
     return;
   }
+  if (MODE === "cursor") {
+    await captureCursorSourceTurn(payload);
+    return;
+  }
+  if (MODE === "claude-code") {
+    await captureClaudeCodeSourceTurn(payload);
+    return;
+  }
   const pending = await readTurnState(payload);
   const status = completedTurnStatus(payload);
   if (status === "cancelled") {
@@ -306,11 +316,70 @@ async function captureCodexSourceTurn(payload) {
     await clearTurnState(payload);
     return;
   }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function captureCursorSourceTurn(payload) {
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
+  const conversationId = sessionStateKey(payload);
+  const requestId = platformTurnId(payload);
+  if (!conversationId || !requestId) {
+    reportCaptureFailure("identity_unresolved", undefined, payload);
+    return;
+  }
+  const pending = await readTurnState(payload);
+  const parsed = await readCursorHookSourceTurn({ conversationId, requestId });
+  if (!parsed.turn) {
+    reportCaptureFailure(parsed.reason || "identity_unresolved", undefined, payload);
+    return;
+  }
+  if (isResumeCommand(parsed.turn.query)) {
+    await clearTurnState(payload);
+    return;
+  }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function captureClaudeCodeSourceTurn(payload) {
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
+  const transcriptPath = normalizeText(payload.transcript_path || payload.transcriptPath);
+  const promptId = platformTurnId(payload);
+  if (!transcriptPath || !promptId) {
+    reportCaptureFailure(transcriptPath ? "identity_unresolved" : "transcript_unavailable", undefined, payload);
+    return;
+  }
+  const pending = await readTurnState(payload);
+  const parsed = await readClaudeCodeSourceTurn(transcriptPath, {
+    conversationId: sessionStateKey(payload) || undefined,
+    promptId,
+    stop: status === "succeeded"
+  });
+  if (!parsed.turn) {
+    reportCaptureFailure(parsed.reason || "identity_unresolved", undefined, payload);
+    return;
+  }
+  if (isResumeCommand(parsed.turn.query)) {
+    await clearTurnState(payload);
+    return;
+  }
+  await submitSourceTurn(parsed.turn, pending, payload);
+}
+
+async function submitSourceTurn(turn, pending, payload) {
   const result = await completeSourceTurn({
     configUrl: CONFIG_URL,
-    turn: parsed.turn,
+    turn,
     sessionId: normalizeText(pending && pending.sessionId) || undefined,
-    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
+    adapterId: "memmy-" + SOURCE + "-hook"
   });
   if (result.status === "stored" || result.status === "existing" || result.status === "rejected") {
     await clearTurnState(payload);
@@ -555,7 +624,9 @@ function platformTurnId(payload) {
   return normalizeText(payload.turn_id) ||
     normalizeText(payload.turnId) ||
     normalizeText(payload.generation_id) ||
-    normalizeText(payload.generationId);
+    normalizeText(payload.generationId) ||
+    normalizeText(payload.prompt_id) ||
+    normalizeText(payload.promptId);
 }
 
 function workspacePath(payload) {
@@ -752,39 +823,50 @@ async function readMemmyConfig(configPath) {
   const content = await readFile(configPath, "utf8");
   const storage = parseStorageBlock(content);
   return {
-    endpoint: normalizeText(storage.endpoint) || "http://127.0.0.1:18960",
+    endpoint: normalizeText(storage.endpoint),
     token: normalizeText(storage.token)
   };
 }
 
 function parseStorageBlock(content) {
-  const storages = [];
-  let activeStorage = null;
-  let storageIndent = 0;
+  const storage = parseYamlObjectAtPath(content, ["memmyMemory", "storage"]) || {};
+  const memory = parseYamlObjectAtPath(content, ["memmyMemory"]) || {};
+  const legacy = parseYamlObjectAtPath(content, ["storage"]) || {};
+  return {
+    endpoint: storage.endpoint || memory.endpoint || legacy.endpoint,
+    token: storage.token || memory.token || legacy.token
+  };
+}
+
+function parseYamlObjectAtPath(content, targetPath) {
+  const result = {};
+  const parents = [];
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.replace(/#.*$/u, "").replace(/\s+$/u, "");
     if (!line.trim()) {
       continue;
     }
     const indent = line.match(/^\s*/u)[0].length;
-    if (/^\s*storage:\s*$/u.test(line)) {
-      activeStorage = {};
-      storageIndent = indent;
-      storages.push(activeStorage);
+    const match = line.match(/^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
+    if (!match) {
       continue;
     }
-    if (activeStorage && indent <= storageIndent) {
-      activeStorage = null;
+    while (parents.length && parents[parents.length - 1].indent >= indent) {
+      parents.pop();
     }
-    if (!activeStorage) {
+    const key = match[1];
+    const value = match[2];
+    const path = [...parents.map(parent => parent.key), key];
+    if (!value) {
+      parents.push({ indent, key });
       continue;
     }
-    const match = line.match(/^\s+([A-Za-z0-9_]+):\s*(.*?)\s*$/u);
-    if (match) {
-      activeStorage[match[1]] = parseYamlScalar(match[2]);
+    if (path.length === targetPath.length + 1 &&
+      targetPath.every((segment, index) => path[index] === segment)) {
+      result[key] = parseYamlScalar(value);
     }
   }
-  return storages.find((storage) => storage.endpoint) || storages[0] || {};
+  return Object.keys(result).length ? result : null;
 }
 
 function parseYamlScalar(value) {
@@ -809,12 +891,29 @@ async function fetchWithTimeout(url, init, timeoutMs) {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw new Error("Memmy request timed out after " + timeoutMs + "ms");
+      throw new Error("Memmy request to " + url + " timed out after " + timeoutMs + "ms");
     }
-    throw error;
+    throw new Error("Memmy request to " + url + " failed: " + formatErrorWithCause(error));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function formatErrorWithCause(error) {
+  const messages = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = current && typeof current === "object" && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) {
+      messages.push(detail);
+    }
+    current = current && typeof current === "object" ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 
 async function parseResponse(response) {

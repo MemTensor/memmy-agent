@@ -1,6 +1,28 @@
-import { buildSourceTurnRequest, type SourceTurn } from "@memmy/agent-source-core";
-export { readCodexSourceTurn } from "@memmy/agent-source-core";
+import {
+  buildSourceTurnRequest,
+  deepseekHarnessSessionDirectory,
+  discoverDeepseekHarnessSessions,
+  encodeDeepseekHarnessSegment,
+  findLatestDeepseekHarnessSessionFile,
+  loadDeepseekHarnessEvents,
+  readCursorSourceTurn,
+  readDeepseekHarnessSourceTurn,
+  readOpenclawSourceTurn,
+  readOpencodeSourceTurn,
+  type CursorVscdbSource,
+  type OpenclawTranscriptSource,
+  type OpencodeSource,
+  type SourceTurn
+} from "@memmy/agent-source-core";
+export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  resolveCursorDataPaths,
+  resolveDeepseekHarnessSessionsDirectory,
+  resolveOpenclawStateDirectory,
+  resolveOpencodeDatabasePath
+} from "../../agent-paths.js";
+import { join } from "node:path";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, parse, resolve } from "node:path";
@@ -241,10 +263,11 @@ export async function completeSourceTurn(input: {
   sessionId?: string;
   sourceMemoryIds?: string[];
   profileId?: string;
+  adapterId?: string;
 }): Promise<Record<string, unknown>> {
   const config = await readRuntimeConfig(input.configUrl, true);
   const client = new RuntimeHttpClient(config);
-  const profileId = input.profileId || "default";
+  const profileId = input.turn.profileId || input.profileId || "default";
   return objectValue(await client.post("/api/v1/source-turns/complete", compact({
     ...buildSourceTurnRequest(input.turn, "hook", profileId),
     namespace: {
@@ -255,8 +278,218 @@ export async function completeSourceTurn(input: {
     },
     sessionId: input.sessionId,
     sourceMemoryIds: input.sourceMemoryIds,
-    adapterId: "memmy-codex-hook",
+    adapterId: input.adapterId || `memmy-${input.turn.source}-hook`,
   })));
+}
+
+type NodeSqliteDatabase = import("node:sqlite").DatabaseSync;
+
+let nodeSqlite: Promise<typeof import("node:sqlite")> | undefined;
+
+function loadNodeSqlite(): Promise<typeof import("node:sqlite")> {
+  if (!nodeSqlite) {
+    silenceSqliteExperimentalWarning();
+    nodeSqlite = import("node:sqlite");
+  }
+  return nodeSqlite;
+}
+
+function silenceSqliteExperimentalWarning(): void {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = ((warning, ...args) => {
+    const message = typeof warning === "string" ? warning : warning.message;
+    const warningType = typeof warning === "string"
+      ? (typeof args[0] === "string" ? args[0] : undefined)
+      : warning.name;
+    if (warningType === "ExperimentalWarning" && message.includes("SQLite is an experimental feature")) return;
+    return Reflect.apply(emitWarning, process, [warning, ...args]);
+  }) as typeof process.emitWarning;
+}
+
+async function openReadOnlySqlite(path: string): Promise<NodeSqliteDatabase> {
+  const { DatabaseSync } = await loadNodeSqlite();
+  return new DatabaseSync(path, { readOnly: true });
+}
+
+/**
+ * Reads the turn Cursor just finished out of its own global `state.vscdb`, using the same
+ * parser the offline scan uses. The hook only receives `generation_id`, which is the user
+ * bubble's `requestId`; the durable turn id is that bubble's `bubbleId`.
+ */
+export async function readCursorHookSourceTurn(input: {
+  conversationId: string;
+  requestId?: string;
+  turnId?: string;
+  globalStateDbPath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.globalStateDbPath || resolveCursorDataPaths().globalStateDbPath;
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const diskValue = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
+    const parse = (key: string): unknown => {
+      const row = diskValue.get(key) as { value?: unknown } | undefined;
+      if (typeof row?.value !== "string") return undefined;
+      try {
+        return JSON.parse(row.value);
+      } catch {
+        return undefined;
+      }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => [input.conversationId],
+      composerData: (composerId) => parse(`composerData:${composerId}`),
+      bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
+    };
+    return await readCursorSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the run OpenClaw just finished out of its own agent database, using the same
+ * parser the offline scan uses. The plugin only knows `runId` and the window id; the
+ * conversation identity is the window's session key.
+ */
+export async function readOpenclawHookSourceTurn(input: {
+  runId: string;
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+  databasePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.databasePath
+    || join(resolveOpenclawStateDirectory(), "agents", input.agentId || "main", "agent", "openclaw-agent.sqlite");
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const windows = db.prepare(
+      "SELECT session_id AS sessionId, session_key AS sessionKey FROM session_windows WHERE session_key IS NOT NULL"
+    );
+    const events = db.prepare("SELECT seq, event_json AS eventJson FROM transcript_events WHERE session_id = ? ORDER BY seq ASC");
+    const source: OpenclawTranscriptSource = {
+      windows: () => windows.all() as unknown as Array<{ sessionId: string; sessionKey: string }>,
+      events: (sessionId) => (events.all(sessionId) as unknown as Array<{ seq: number; eventJson: string }>).map((row) => {
+        let event: unknown;
+        try {
+          event = JSON.parse(row.eventJson);
+        } catch {
+          event = undefined;
+        }
+        return { seq: Number(row.seq), event };
+      })
+    };
+    return await readOpenclawSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the turn OpenCode just finished out of its own database, using the same parser the
+ * offline scan uses. The durable turn id is the user message id, which the plugin already
+ * holds and the scan reads from the same column.
+ */
+export async function readOpencodeHookSourceTurn(input: {
+  conversationId: string;
+  turnId: string;
+  databasePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.databasePath || resolveOpencodeDatabasePath();
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const columns = new Set((db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name));
+    const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session WHERE id = ?`);
+    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
+    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC");
+    const parse = (value: unknown): unknown => {
+      if (typeof value !== "string") return undefined;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return undefined;
+      }
+    };
+    const source: OpencodeSource = {
+      sessions: () => (sessions.all(input.conversationId) as unknown as Array<Record<string, unknown>>).map((row) => {
+        const revert = typeof row.revert === "string" ? parse(row.revert) : row.revert;
+        const messageId = revert && typeof revert === "object" && !Array.isArray(revert)
+          ? (revert as { messageID?: unknown }).messageID
+          : undefined;
+        return {
+          id: String(row.id),
+          parentId: row.parentId == null ? null : String(row.parentId),
+          directory: row.directory == null ? null : String(row.directory),
+          agent: typeof row.agent === "string" ? row.agent : null,
+          revertMessageId: typeof messageId === "string" && messageId ? messageId : null
+        };
+      }),
+      messages: (sessionId) => (messages.all(sessionId) as unknown as Array<{ id: string; data: string }>)
+        .map((row) => ({ id: row.id, data: parse(row.data) })),
+      parts: (messageId) => (parts.all(messageId) as unknown as Array<{ id: string; data: string }>)
+        .map((row) => ({ id: row.id, data: parse(row.data) }))
+    };
+    return await readOpencodeSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the turn DeepSeek Harness just finished out of its session log, using the same
+ * parser the offline scan uses. `turn/end` only knows `session.id` and `data.turn`; the
+ * durable turn id is `{sessionId}:{turn}`. Flush first — the log is not written at turn/end.
+ */
+export async function readDeepseekHookSourceTurn(input: {
+  conversationId: string;
+  turn?: number;
+  turnId?: string;
+  cwd?: string;
+  sessionsRoot?: string;
+  sessionFilePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const filePath = input.sessionFilePath || await resolveDeepseekHarnessSessionFile(input);
+  if (!filePath) return { turn: null, reason: "source_store_unavailable" };
+  try {
+    return await readDeepseekHarnessSourceTurn(await loadDeepseekHarnessEvents(filePath), {
+      conversationId: input.conversationId,
+      turn: input.turn,
+      turnId: input.turnId
+    });
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+}
+
+async function resolveDeepseekHarnessSessionFile(input: {
+  conversationId: string;
+  cwd?: string;
+  sessionsRoot?: string;
+}): Promise<string | undefined> {
+  const root = input.sessionsRoot || resolveDeepseekHarnessSessionsDirectory();
+  if (input.cwd) {
+    const latest = await findLatestDeepseekHarnessSessionFile(
+      deepseekHarnessSessionDirectory(root, input.cwd, input.conversationId)
+    );
+    if (latest) return latest;
+  }
+  const encoded = encodeDeepseekHarnessSegment(input.conversationId);
+  const discovered = await discoverDeepseekHarnessSessions({ root, order: "recent_first" });
+  return discovered.find((file) => file.sessionFilePath.includes(`${encoded}`))?.sessionFilePath;
 }
 
 class RuntimeHttpClient {
@@ -281,7 +514,12 @@ class RuntimeHttpClient {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
-    const response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+    } catch (error) {
+      throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
+    }
     const textValue = await response.text();
     const parsed = textValue.trim() ? JSON.parse(textValue) : null;
     if (!response.ok) {
@@ -295,6 +533,21 @@ class RuntimeHttpClient {
     }
     return parsed;
   }
+}
+
+function formatErrorWithCause(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = typeof current === "object" && "code" in current && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) messages.push(detail);
+    current = typeof current === "object" && "cause" in current ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
 }
 
 class RuntimeHttpError extends Error {

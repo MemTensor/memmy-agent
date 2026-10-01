@@ -1,8 +1,9 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { findLatestDeepseekHarnessSessionFile, discoverDeepseekHarnessSessions as discoverLive } from "@memmy/agent-source-core";
 import * as desktopPaths from "../App/backend/src/adapters/outbound/agent-paths.js";
 import * as memoryPaths from "../Memory/src/agent-source/agent-paths.js";
 import { createDeepseekHarnessSourceAdapter as desktopAdapter } from "../App/backend/src/adapters/outbound/agent-source/deepseek-harness/adapter.js";
@@ -36,15 +37,17 @@ function fixture(file: string, sessionId = "conversation", header = true) {
   const key = ["sk-", "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMN"].join("");
   const rows = [
     ...(header ? [{ type: "session", id: sessionId, cwd: "/fictional/project" }] : []),
+    { type: "turn/start", seq: 0, time: "2026-09-28T10:00:00Z", data: { turn: 1 } },
     { type: "user/message", seq: 1, time: "2026-09-28T10:00:00Z", data: {
-      role: "user", source: { kind: "user" }, content: [{ type: "text", text: `Remember OPENAI_API_KEY=${key}` }]
+      id: `${sessionId}:1`, role: "user", source: { kind: "user" }, content: [{ type: "text", text: `Remember OPENAI_API_KEY=${key}` }]
     } },
     { type: "user/message", seq: 2, time: "2026-09-28T10:00:01Z", data: {
       role: "user", source: { kind: "plugin" }, content: [{ type: "text", text: "Do not import recalled context" }]
     } },
     { type: "assistant/message", seq: 3, time: "2026-09-28T10:00:02Z", data: { message: {
-      role: "assistant", content: [{ type: "text", text: "DSH compatibility test response" }]
-    } } }
+      id: `${sessionId}:3`, role: "assistant", content: [{ type: "text", text: "DSH compatibility test response" }]
+    } } },
+    { type: "turn/end", seq: 4, time: "2026-09-28T10:00:03Z", data: { turn: 1, reason: { kind: "completed" } } }
   ];
   const lines = rows.map((row) => Buffer.from(JSON.stringify(row) + "\n"));
   mkdirSync(dirname(file), { recursive: true });
@@ -101,7 +104,7 @@ describe.each(implementations)("DSH compatibility: $name", ({ paths, adapter, re
   });
 
   it.each([
-    "session.jsonl", "session.jsonl.zstd", "session.v4.jsonl", "session.v4.jsonl.zstd",
+    "session.jsonl", "session.jsonl.zstd", "session.v0.jsonl", "session.v4.jsonl", "session.v4.jsonl.zstd",
     "session.jsonl.bak-1790604319265", "session.jsonl.zstd.bak-1790604319265",
     "session.v4.jsonl.bak-1790604319265", "session.v4.jsonl.zstd.bak-1790604319265"
   ])("discovers and reads %s without changing message identity", async (fileName) => {
@@ -120,9 +123,42 @@ describe.each(implementations)("DSH compatibility: $name", ({ paths, adapter, re
     expect(scanned[1]?.content).toBe("DSH compatibility test response");
   });
 
+  it("keeps upstream newest-live selection and also scans every rotation backup", async () => {
+    const root = temporaryDirectory();
+    const live = join(root, "session.v4.jsonl.zstd");
+    const backup = join(root, "session.v3.jsonl.zstd.bak-123");
+    const newerBackup = join(root, "session.v9.jsonl.zstd.bak-456");
+    for (const name of ["session.jsonl", "session.v3.jsonl.zstd", "session.v4.jsonl", "session.v4.jsonl.zstd", "session.v3.jsonl.zstd.bak-123", "session.v9.jsonl.zstd.bak-456"])
+      fixture(join(root, name));
+    expect((await discover({ root })).map((file) => file.sessionFilePath)).toEqual([backup, live, newerBackup].sort());
+    expect((await discoverLive({ root })).map((file) => file.sessionFilePath)).toEqual([live]);
+    expect(await findLatestDeepseekHarnessSessionFile(root)).toBe(live);
+    const backupsOnly = join(root, "backups-only");
+    fixture(join(backupsOnly, "session.v4.jsonl.zstd.bak-123"));
+    expect(await findLatestDeepseekHarnessSessionFile(backupsOnly)).toBeUndefined();
+    expect(await discover({ root: backupsOnly })).toHaveLength(1);
+  });
+
+  it("keeps shared native turn completion metadata when reading rotation backups", async () => {
+    const root = temporaryDirectory();
+    const live = join(root, "session.jsonl");
+    fixture(live);
+    const events = readFileSync(live, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const file = join(root, "session.v4.jsonl.zstd.bak-123");
+    writeFileSync(file, zstdCompressSync(Buffer.from(events.map((event) => JSON.stringify(event)).join("\n"))));
+    const complete = await reader.readDeepseekHarnessSession(file);
+    expect(complete).toHaveLength(2);
+    expect(complete[0]?.rawMeta).toMatchObject({ sourceTurnId: "conversation:1", sourceTurnState: "complete" });
+    const incomplete = events.filter((event) => event.type !== "turn/end");
+    writeFileSync(file, zstdCompressSync(Buffer.from(incomplete.map((event) => JSON.stringify(event)).join("\n"))));
+    const messages = await reader.readDeepseekHarnessSession(file);
+    expect(messages[0]?.rawMeta.sourceTurnId).toBe("conversation:1");
+    expect(messages[0]?.rawMeta).toMatchObject({ sourceTurnState: "turn_incomplete", sourceTurnReason: "turn_incomplete" });
+  });
+
   it("does not scan unrelated files or unsupported suffixes", async () => {
     const root = temporaryDirectory();
-    for (const name of ["credentials.jsonl", "session.jsonl.orig", "session.jsonl.zstd.tmp", "session.jsonl.zstd.bak-not-a-timestamp", "session.v0.jsonl", "session.jsonl.bak-123.extra"])
+    for (const name of ["credentials.jsonl", "session.jsonl.orig", "session.jsonl.zstd.tmp", "session.jsonl.zstd.bak-not-a-timestamp", "session.jsonl.bak-123.extra"])
       writeFileSync(join(root, name), "not a session");
     expect(await discover({ root })).toEqual([]);
   });
@@ -190,6 +226,7 @@ describe.each(implementations)("DSH compatibility: $name", ({ paths, adapter, re
     copyFileSync(file, `${file}.bak-1790604319265`);
     const messages = await collect(adapter({ sessionsRoot: root }).scan({ fullHistory: true }));
     expect(messages).toHaveLength(4);
+    expect(new Set(messages.map((message) => message.conversationId))).toEqual(new Set([header ? "conversation" : "session"]));
     const store = await openStore(join(root, "scan.sqlite"), { jobId: "job", sourceId: "deepseek_harness", mode: "full", phase: "stage", createdAt: "2026-09-29", updatedAt: "2026-09-29" });
     try {
       expect(store.stageBatch(messages)).toBe(2);

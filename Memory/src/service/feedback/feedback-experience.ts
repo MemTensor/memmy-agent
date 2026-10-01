@@ -111,6 +111,7 @@ export interface FeedbackExperienceServiceDeps {
   findExistingSkillForPolicy(policy: PolicyMeta): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null;
   upsertEvolutionMemory(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
   pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[];
+  shouldDeferBudgetedEvolutionLlm(): boolean;
 }
 
 export interface DecisionRepairTraceSource {
@@ -262,11 +263,14 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     if (feedback.episodeId) {
       this.deps.repos.runtime.appendEpisodeFeedback(feedback.episodeId, feedback.id, feedback.createdAt);
     }
-    const repairDraft = await this.maybeSynthesizeFeedbackDecisionRepair(
-      attributedRequest,
-      feedback,
-      feedbackContextHash
-    );
+    const deferDecisionRepair = this.deps.shouldDeferBudgetedEvolutionLlm();
+    const repairDraft = deferDecisionRepair
+      ? undefined
+      : await this.maybeSynthesizeFeedbackDecisionRepair(
+        attributedRequest,
+        feedback,
+        feedbackContextHash
+      );
     const isRevisionFeedback = isRecord(request.rawPayload)
       && request.rawPayload.source === "relation_classifier"
       && request.rawPayload.relation === "revision";
@@ -286,8 +290,51 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       this.applyRecallOutcome(updatedRecallEvent, feedback, feedback.createdAt);
     }
     const jobs: EvolutionJobRecord[] = [];
+    if (repair?.repairId && deferDecisionRepair) {
+      const queued = this.enqueueDeferredDecisionRepair({
+        userId: context.userId,
+        sessionId: attributedRequest.sessionId,
+        episodeId: attributedRequest.episodeId,
+        repairId: repair.repairId,
+        trigger: "user.feedback",
+        feedbackText: request.rationale ?? feedback.rationale
+      });
+      if (queued) {
+        jobs.push(queued);
+      }
+    } else if (
+      isRevisionFeedback && deferDecisionRepair &&
+      this.deps.config.algorithm.feedback.useLlm && this.deps.skillLlm.isConfigured()
+    ) {
+      jobs.push(this.deps.enqueueJob({
+        jobType: "decision_repair",
+        userId: context.userId,
+        sessionId: attributedRequest.sessionId,
+        episodeId: attributedRequest.episodeId,
+        payload: {
+          feedbackId: feedback.id,
+          contextHash: feedbackContextHash,
+          namespaceId: namespaceIdFromContext(context.namespace),
+          namespace: context.namespace
+        }
+      }));
+    }
     if (feedback.polarity !== "negative") {
-      jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
+      const queued = deferDecisionRepair
+        ? this.enqueueDeferredFeedbackExperience({
+          userId: context.userId,
+          sessionId: attributedRequest.sessionId,
+          episodeId: attributedRequest.episodeId,
+          feedbackId: feedback.id,
+          contextHash: feedback.contextHash,
+          polarity: feedback.polarity
+        })
+        : undefined;
+      if (queued) {
+        jobs.push(queued);
+      } else {
+        jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
+      }
     }
     const rewardEpisode = attributedRequest.episodeId
       ? this.deps.repos.runtime.getEpisode(attributedRequest.episodeId)
@@ -564,6 +611,137 @@ maybeCreateDecisionRepair(
       skipped: false,
       attachedPolicyIds: actuallyAttached
     };
+  }
+
+  enqueueDeferredDecisionRepair(input: {
+    userId: string;
+    sessionId?: string;
+    episodeId?: string;
+    repairId: string;
+    trigger: string;
+    feedbackText?: string;
+  }): EvolutionJobRecord | undefined {
+    if (!this.deps.shouldDeferBudgetedEvolutionLlm()) {
+      return undefined;
+    }
+    if (!this.deps.config.algorithm.feedback.useLlm || !this.deps.skillLlm.isConfigured()) {
+      return undefined;
+    }
+    return this.deps.enqueueJob({
+      jobType: "decision_repair",
+      userId: input.userId,
+      sessionId: input.sessionId,
+      episodeId: input.episodeId,
+      dedupeKey: `decision_repair:${input.repairId}`,
+      payload: {
+        repairId: input.repairId,
+        trigger: input.trigger,
+        ...(input.feedbackText ? { feedbackText: input.feedbackText } : {})
+      }
+    });
+  }
+
+  enqueueDeferredFeedbackExperience(input: {
+    userId: string;
+    sessionId?: string;
+    episodeId?: string;
+    feedbackId: string;
+    contextHash?: string;
+    polarity: FeedbackRequest["polarity"];
+  }): EvolutionJobRecord | undefined {
+    if (!this.deps.shouldDeferBudgetedEvolutionLlm()) {
+      return undefined;
+    }
+    if (!this.deps.config.algorithm.feedback.useLlm || !this.deps.skillLlm.isConfigured()) {
+      return undefined;
+    }
+    return this.deps.enqueueJob({
+      jobType: "feedback_experience",
+      userId: input.userId,
+      sessionId: input.sessionId,
+      episodeId: input.episodeId,
+      dedupeKey: `feedback_experience:${input.contextHash ?? input.feedbackId}:${input.polarity}`,
+      payload: {
+        feedbackId: input.feedbackId
+      }
+    });
+  }
+
+  async processFeedbackExperienceJob(job: EvolutionJobRecord): Promise<void> {
+    const feedbackId = typeof job.payload.feedbackId === "string" ? job.payload.feedbackId : undefined;
+    if (!feedbackId) {
+      throw new Error(`feedback experience target missing: ${job.id}`);
+    }
+    const feedback = this.deps.repos.runtime.getFeedback(feedbackId);
+    if (!feedback || feedback.polarity === "negative") {
+      return;
+    }
+    const request: FeedbackRequest = {
+      sessionId: feedback.sessionId,
+      episodeId: feedback.episodeId,
+      l1MemoryId: feedback.l1MemoryId,
+      rawTurnId: feedback.rawTurnId,
+      channel: feedback.channel,
+      polarity: feedback.polarity,
+      magnitude: feedback.magnitude,
+      rationale: feedback.rationale,
+      rawPayload: feedback.rawPayload
+    };
+    const context = this.resolveFeedbackContext(request);
+    await this.maybeCreateFeedbackExperience(request, feedback, context);
+  }
+
+  async processDecisionRepairJob(job: EvolutionJobRecord): Promise<void> {
+    const repairId = typeof job.payload.repairId === "string" ? job.payload.repairId : undefined;
+    if (!repairId) {
+      throw new Error(`decision repair target missing: ${job.id}`);
+    }
+    const repair = this.deps.repos.runtime.getDecisionRepair(repairId);
+    if (!repair) {
+      return;
+    }
+    const source = isRecord(repair.source) ? repair.source : {};
+    if (source.synthesis === "llm") {
+      return;
+    }
+    const classification = isRecord(source.classification)
+      ? source.classification as unknown as FeedbackTextClassification
+      : classifyFeedbackText(
+        typeof job.payload.feedbackText === "string" ? job.payload.feedbackText : repair.issue
+      );
+    const draft = await synthesizeDecisionRepairDraft({
+      trigger: typeof job.payload.trigger === "string" ? job.payload.trigger : "user.feedback",
+      contextHash: repair.contextHash ?? "",
+      feedbackText: typeof job.payload.feedbackText === "string" ? job.payload.feedbackText : repair.issue,
+      classification,
+      highValue: this.decisionRepairTraceSources(this.deps.repos.memories.getMany(repair.highValueMemoryIds)),
+      lowValue: this.decisionRepairTraceSources(this.deps.repos.memories.getMany(repair.lowValueMemoryIds)),
+      traceCharCap: this.deps.config.algorithm.feedback.traceCharCap,
+      diagnostics: {
+        pipeline: "decision_repair.queued",
+        feedbackId: repair.feedbackId
+      }
+    }, {
+      useLlm: this.deps.config.algorithm.feedback.useLlm,
+      llm: this.deps.skillLlm
+    });
+    if (!draft) {
+      return;
+    }
+    this.deps.repos.runtime.updateDecisionRepair(repair.id, {
+      suggestion: draft.preference,
+      preference: draft.preference,
+      antiPattern: draft.antiPattern,
+      source: {
+        ...source,
+        synthesis: "llm"
+      },
+      meta: {
+        ...repair.meta,
+        severity: draft.severity,
+        confidence: draft.confidence
+      }
+    });
   }
 
 async maybeCreateFeedbackExperience(

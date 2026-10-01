@@ -20,7 +20,7 @@ Missing roots are skipped; both existing roots are scanned. Root aliases, includ
 
 ## Filenames and decoding
 
-Recognized files are `session.jsonl` and `session.vN.jsonl` (positive integer N), with optional `.zstd` compression and optional `.bak-<numeric timestamp>` rotation suffix. For example:
+Recognized files are `session.jsonl` and `session.vN.jsonl` (nonnegative integer N, consistent with the shared core parser), with optional `.zstd` compression and optional `.bak-<numeric timestamp>` rotation suffix. For example:
 
 ```text
 session.jsonl
@@ -29,7 +29,9 @@ session.v4.jsonl.zstd
 session.v4.jsonl.zstd.bak-1790604319265
 ```
 
-Both buffered and streaming readers recognize compression before the backup suffix. They preserve session-header IDs and message IDs so existing scan-store deduplication handles overlapping live and backup logs. The fallback ID for headerless logs is also stable across rotation. Unrelated JSONL, `.orig`, and temporary files are not imported.
+Discovery and decoding use `AgentSourceCore`, retaining the upstream native-turn parser. Both reader entrypoints recognize compression before the backup suffix. The upstream loader buffers compressed files before yielding messages. They preserve session-header IDs and message IDs so existing scan-store deduplication handles overlapping live and backup logs. The fallback ID for headerless logs is also stable across rotation. Unrelated JSONL, `.orig`, and temporary files are not imported.
+
+For each directory, scans retain the upstream rule of selecting the newest live generation (preferring compressed files at the same generation), and additionally import all recognized rotation backups. The plugin still selects only live files, so backups do not replace the active conversation. Native `turn/start` and `turn/end` completion handling remains unchanged.
 
 After upgrading from a version that missed these files, run a DSH-only **full history scan** to recover old messages behind the incremental cursor. Routine incremental scans keep their existing behavior. No directory links, source-file renames, or installed-runtime patches are required.
 

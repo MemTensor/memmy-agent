@@ -7,7 +7,7 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
-import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
+import { MEMORY_SUMMARY_MAX_TOKENS, type MemoryLanguage } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
@@ -975,6 +975,7 @@ Produce ONE policy describing the action pattern. The policy must:
 - Name a TRIGGER recognizable from the agent's STATE — a condition the
   agent can detect at the moment of decision (an error code, a missing
   file, a request shape). NOT a fact about the environment in general.
+  Do not copy the title into the trigger.
 - Prescribe an ACTION template — a parameterized step or short step
   sequence. Templates over single exact commands. NOT a single example.
 - Note at least one CAVEAT or failure mode observed in the traces — a
@@ -1046,8 +1047,8 @@ libs by default":
 Return JSON:
 {
   "should_generate": true | false,
-  "title": "short imperative title",
-  "trigger": "state-level condition the agent can detect",
+  "title": "short imperative name, at most 30 characters; not the trigger",
+  "trigger": "state-level condition the agent can detect; not the title",
   "action": "templated step or step sequence",
   "expected_outcome": "observable result expected after the action",
   "verification": "how to verify that result",
@@ -1259,33 +1260,57 @@ If nothing is truly relevant, return {"ranked": [], "sufficient": false}.`,
 
 export const RETRIEVAL_QUERY_EXTRACT_PROMPT = {
   id: "retrieval.query.extract",
-  version: 2,
+  version: 3,
   description:
     "Extract semantic, lexical, and optional time-range constraints for memory retrieval.",
   system: `You prepare memory retrieval input for an AI agent.
 
-Given the complete current user input, return JSON with:
+Given CURRENT USER INPUT and, when present, RECENT CONVERSATION, return JSON with:
 - queryVecText: a compact semantic query for embedding search and later relevance filtering.
 - keywords: up to 5 short keyword strings for lexical FTS / pattern search.
 - timeFilter: an absolute time range only when the user is constraining which
   personal history or past activity memories should be searched; otherwise null.
 
 Rules:
-1. Use the complete input as evidence. Do not assume a fixed prompt template.
-2. Remove wrapper/protocol noise only when it is clearly not part of the user's real task.
-3. Preserve task-specific nouns, entities, technologies, filenames, error names, and requested deliverables when they are useful for retrieval.
-4. keywords must contain at most 5 items, ordered by retrieval usefulness.
-5. Do not invent keywords not grounded in the input.
-6. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
-7. Set timeFilter only when a time expression limits the user's own remembered
+1. Use CURRENT USER INPUT as the primary evidence. Do not assume a fixed prompt template.
+2. RECENT CONVERSATION, when present, is context only. Use it solely to resolve references (it, that, the script, the previous one, 那个, 上次, 它) and to restore entities the current input omits. Never turn a past topic into the query when the current input is self-contained.
+3. queryVecText must describe the task in CURRENT USER INPUT. Entities taken from RECENT CONVERSATION may be added only when the current input refers to them.
+4. keywords come from CURRENT USER INPUT; add a keyword from RECENT CONVERSATION only when it names the entity the current input refers to.
+5. Remove wrapper/protocol noise only when it is clearly not part of the user's real task.
+6. Preserve task-specific nouns, entities, technologies, filenames, error names, and requested deliverables when they are useful for retrieval.
+7. keywords must contain at most 5 items, ordered by retrieval usefulness.
+8. Do not invent keywords not grounded in the input.
+9. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
+10. Set timeFilter only when a time expression limits the user's own remembered
    conversations, actions, work, or prior events. Questions merely about dates,
    date parsing, historical facts, schedules, or current external information do
-   not request a memory time filter.
-8. Resolve relative expressions such as today, yesterday, this week, recently,
+   not request a memory time filter. Derive timeFilter from CURRENT USER INPUT only;
+   time expressions inside RECENT CONVERSATION never create a filter.
+11. Resolve relative expressions such as today, yesterday, this week, recently,
    今天, 昨天, 本周, and 最近 using CURRENT_TIME and TIME_ZONE supplied with the
    request. Approximate expressions may use a reasonable bounded range.
-9. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
+12. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
    an explicit UTC offset. endAt must be later than startAt.
+
+──── Example A (reference resolved from context) ────
+RECENT CONVERSATION (context only, oldest first):
+user: 帮我看看 scripts/migrate_sqlite.py 跑 pytest 为什么挂
+assistant: 失败在 test_migrate_schema，原因是 sqlite 版本低于 3.35 不支持 DROP COLUMN...
+
+CURRENT USER INPUT:
+那个脚本还是挂
+
+{"queryVecText": "scripts/migrate_sqlite.py pytest failure test_migrate_schema sqlite DROP COLUMN", "keywords": ["migrate_sqlite.py", "pytest", "test_migrate_schema", "sqlite"], "timeFilter": null}
+
+──── Example B (self-contained input, context ignored) ────
+RECENT CONVERSATION (context only, oldest first):
+user: 帮我看看 scripts/migrate_sqlite.py 跑 pytest 为什么挂
+assistant: 失败在 test_migrate_schema...
+
+CURRENT USER INPUT:
+把这个 React 组件改成支持暗黑模式
+
+{"queryVecText": "React component dark mode support", "keywords": ["React", "dark mode", "component"], "timeFilter": null}
 
 Return JSON only:
 {
@@ -3689,6 +3714,24 @@ export function buildPolicyDraft(args: {
 }
 
 export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): PromptLanguage {
+  return detectPromptLanguage(samples, 0.7, "en", false);
+}
+
+/** Share of CJK among letters that selects Chinese when no interface language is pinned. */
+const STEERED_CHINESE_LETTER_SHARE = 0.2;
+
+export function pinnedPromptLanguage(language: MemoryLanguage | undefined): PromptLanguage | undefined {
+  if (language === "zh-CN") return "zh";
+  if (language === "en-US") return "en";
+  return undefined;
+}
+
+export function detectPromptLanguage(
+  samples: ReadonlyArray<string | null | undefined>,
+  chineseShare = STEERED_CHINESE_LETTER_SHARE,
+  empty: PromptLanguage = "auto",
+  inclusive = true
+): PromptLanguage {
   let zh = 0;
   let en = 0;
   for (const sample of samples) {
@@ -3703,8 +3746,16 @@ export function detectDominantLanguage(samples: ReadonlyArray<string | null | un
     }
   }
   const total = zh + en;
-  if (total === 0) return "en";
-  return zh / total > 0.7 ? "zh" : "en";
+  if (total === 0) return empty;
+  const share = zh / total;
+  return (inclusive ? share >= chineseShare : share > chineseShare) ? "zh" : "en";
+}
+
+export function steeredPromptLanguage(
+  language: MemoryLanguage | undefined,
+  samples: ReadonlyArray<string | null | undefined>
+): PromptLanguage {
+  return pinnedPromptLanguage(language) ?? detectPromptLanguage(samples);
 }
 
 export function languageSteeringLine(language: PromptLanguage): string {

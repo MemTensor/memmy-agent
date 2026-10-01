@@ -81,6 +81,7 @@ function createSpanBigTurnLlm(
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "定位并修复构建失败",
             summary: "定位构建失败、修改依赖配置并验证修复结果",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
@@ -212,7 +213,12 @@ describe("MemoryService / evolution / span big turn", () => {
     });
     expect(spanCall?.messages[0]?.content).toContain("Spans must not overlap");
     expect(spanCall?.messages[0]?.content).toContain("may remain outside all spans");
-    const spanPayload = JSON.parse(spanCall?.messages[1]?.content ?? "{}") as {
+    expect(spanCall?.messages[0]?.content).toContain("Use that one language for both fields");
+    expect(spanCall?.messages[0]?.content).not.toContain("same language as the user's request");
+    expect(spanCall?.messages[1]?.content).toContain("Simplified Chinese");
+    const spanPayload = JSON.parse(
+      spanCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
+    ) as {
       userRequest?: string;
       assistantFinalAnswer?: string;
       traceSummary?: string;
@@ -237,7 +243,8 @@ describe("MemoryService / evolution / span big turn", () => {
     expect(spanPayload.toolCalls?.[5]?.raw).toHaveLength(100);
     expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/^"invalid-/);
     expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/\.\.\.$/);
-    const serializedSpanPrompt = spanCall?.messages[1]?.content ?? "";
+    const serializedSpanPrompt =
+      spanCall?.messages.find((message) => message.role === "user")?.content ?? "";
     expect(serializedSpanPrompt).toContain("[redacted]");
     expect(serializedSpanPrompt).not.toContain("sk-supersecret123456");
     expect(serializedSpanPrompt).not.toContain("private-token-value");

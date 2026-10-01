@@ -52,6 +52,8 @@ export interface MemoryTask {
   skillStatus?: TaskSkillStatus;
   skillReason?: string;
   statusReason?: string;
+  titleGenerated?: boolean;
+  titlePending?: boolean;
   chat: TaskChatMessage[];
 }
 
@@ -355,6 +357,8 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
         <div className="memory-list">
           {props.state.data.tasks.map((task) => {
             const skillLabel = task.skillStatus ? skillStatusLabel(task.skillStatus, t) : "";
+            const waiting = Boolean(task.titlePending) && !task.titleGenerated;
+            const primaryText = waiting ? (firstChatText(task.chat, "user") || task.title) : task.title;
             return (
               <article
                 key={task.id}
@@ -370,9 +374,14 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
                 className={`memory-card${props.selectedTask?.id === task.id ? " memory-card--selected" : ""}`}
               >
                 <div className="memory-card__body">
-                  <div className="memory-card__title">{task.title}</div>
-                  <div className="memory-card__summary">{task.summary}</div>
+                  <div className="memory-card__title">{primaryText}</div>
+                  {!waiting && task.summary ? <div className="memory-card__summary">{task.summary}</div> : null}
                   <div className="memory-card__meta">
+                    {waiting && (
+                      <span className="memory-pill memory-pill--processing">
+                        {t("memory.memories.processing.summary")}
+                      </span>
+                    )}
                     <span className={`memory-pill memory-pill--task-${taskStatusTone(task.status)}`}>{taskStatusLabel(task.status, t)}</span>
                     {skillLabel && <span className={`memory-pill memory-pill--skill-${skillStatusTone(task.skillStatus)}`}>{skillLabel}</span>}
                     <span>{`${t("memory.tasks.startedAt")}: ${formatDateTime(task.startedAt)}`}</span>
@@ -401,6 +410,7 @@ function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDele
   const { t } = useTranslation();
   const task = props.task;
   const skillLabel = task.skillStatus ? skillStatusLabel(task.skillStatus, t) : t("memory.tasks.skill.queued");
+  const waiting = Boolean(task.titlePending) && !task.titleGenerated;
   const reason = firstOptionalString(task.statusReason, task.skillReason);
 
   return (
@@ -409,13 +419,13 @@ function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDele
         e.stopPropagation();
         props.onClose();
       }} />
-      <aside className="memory-drawer" role="dialog" aria-modal="true" aria-labelledby="memory-task-title" onClick={(e) => e.stopPropagation()}>
+      <aside className="memory-drawer" role="dialog" aria-modal="true" aria-labelledby={waiting ? "memory-task-eyebrow" : "memory-task-title"} onClick={(e) => e.stopPropagation()}>
         <header className="memory-drawer__header">
           <div>
             <div className="memory-drawer__identity">
-              <span className="memory-drawer__eyebrow">{task.id}</span>
+              <span id="memory-task-eyebrow" className="memory-drawer__eyebrow">{task.id}</span>
             </div>
-            <h4 id="memory-task-title" className="memory-drawer__title">{task.title}</h4>
+            {!waiting ? <h4 id="memory-task-title" className="memory-drawer__title">{task.title}</h4> : null}
           </div>
           <button type="button" onClick={props.onClose} className="memory-drawer__close" aria-label={t("common.close")}>
             <X size={16} />
@@ -549,8 +559,15 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
   const chat = turns.flatMap((turn, index) => messagesForTurn(turn, index));
   const status = deriveTaskStatus(episode, chat);
   const startedAt = firstString(episode.startedAt, turns[0]?.createdAt, item.updatedAt);
-  const title = truncate(firstString(episode.title, episode.summary, firstChatText(chat, "user"), episode.id), 100);
-  const summary = truncate(firstString(episode.summary, firstChatText(chat, "assistant"), title), 180);
+  const titleGenerated = episode.titleGenerated === true;
+  const titlePending = episode.titlePending === true;
+  const waiting = titlePending && !titleGenerated;
+  const title = waiting
+    ? truncate(firstString(firstChatText(chat, "user"), episode.id), 100)
+    : truncate(firstString(episode.title, episode.summary, firstChatText(chat, "user"), episode.id), 100);
+  const summary = waiting
+    ? ""
+    : truncate(firstString(episode.summary, firstChatText(chat, "assistant"), titleGenerated ? undefined : title), 180);
 
   return {
     id: item.id,
@@ -569,6 +586,8 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
     skillStatus: deriveTaskSkillStatus(episode),
     skillReason: firstOptionalString(episode.skillReason, episode.pipelineError),
     statusReason: taskStatusReason(episode, status, t),
+    titleGenerated,
+    titlePending,
     chat
   };
 }

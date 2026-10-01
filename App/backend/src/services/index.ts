@@ -247,7 +247,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveMemoryUserId
     }),
     byokTokenUsage: createByokTokenUsageService({
-      repository: options.appStateStore.repositories.byokTokenUsage
+      repository: options.appStateStore.repositories.byokTokenUsage,
+      bootstrapRepository: options.appStateStore.repositories.bootstrap,
+      memoryClient: options.memoryClient
     }),
     asr: createAsrService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,

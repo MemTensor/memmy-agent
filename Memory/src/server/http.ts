@@ -60,6 +60,7 @@ export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
+  "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
   "GET /api/v1/admin/export",
   "DELETE /api/v1/admin/data",
@@ -332,6 +333,7 @@ function createAutoWorkerDrain(
   let disposed = false;
   let startupReleased = false;
   let startupReconciled = false;
+  let workerStarted = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
@@ -344,6 +346,7 @@ function createAutoWorkerDrain(
     if (disposed) {
       return;
     }
+    workerStarted = true;
     if (running) {
       requested = true;
       return;
@@ -438,6 +441,24 @@ function createAutoWorkerDrain(
     }, 0);
   }
 
+  service.setAppBudgetReconcileListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    if (delayedTimer) {
+      clearTimeout(delayedTimer);
+      delayedTimer = undefined;
+    }
+    scheduleNextDueJob();
+  });
+
+  service.setPersistRecoveredListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    schedule();
+  });
+
   return {
     start(): void {
       if (disposed || startupReleased || startupTimer) {
@@ -464,6 +485,8 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      service.setAppBudgetReconcileListener(undefined);
+      service.setPersistRecoveredListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -507,6 +530,10 @@ async function routeRequest(
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health([...API_ROUTES]);
+  }
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    requireMemoryRead(principal);
+    return service.memoryTokenBudget();
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
@@ -665,6 +692,10 @@ async function routeRequest(
     const result = service.completeSourceTurn({
       namespace: request.namespace, timeZone: request.timeZone, source: request.source,
       sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      ...(request.captureLegacyHistory === true ? { captureLegacyHistory: true } : {}),
+      ...(typeof request.legacyImportTurnId === "string" && request.legacyImportTurnId.trim()
+        ? { legacyImportTurnId: request.legacyImportTurnId.trim() }
+        : {}),
       sessionId: request.sessionId, episodeId: request.episodeId,
       query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,

@@ -32,8 +32,8 @@ import {
   type SkillClusterFeatures
 } from "../../algorithm/trace-direct-skill.js";
 import {
-  detectDominantLanguage,
   languageSteeringLine,
+  steeredPromptLanguage,
   skillMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
@@ -469,10 +469,11 @@ export class SkillClusterPipeline {
     rebuildScope?: DirectSkillRebuildScope;
   }): Promise<{ name: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
     const languageSamples = input.batch.flatMap((item) => item.turns.flatMap((turn) => [turn.user, turn.assistant]));
+    const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
     const outputLanguage = this.deps.config.algorithm.skill.outputLanguageMode === "zh" ||
       this.deps.config.algorithm.skill.outputLanguageMode === "en"
       ? this.deps.config.algorithm.skill.outputLanguageMode
-      : detectDominantLanguage(languageSamples) === "zh" ? "zh" : "en";
+      : steeredLanguage === "zh" ? "zh" : "en";
     const success = input.batch.filter((item) => item.outcome === "success");
     const failure = input.batch.filter((item) => item.outcome === "failure");
     const result = await this.deps.skillLlm.completeJson<Record<string, unknown>>([
@@ -484,7 +485,7 @@ export class SkillClusterPipeline {
       },
       {
         role: "system",
-        content: languageSteeringLine(detectDominantLanguage(languageSamples))
+        content: languageSteeringLine(outputLanguage)
       },
       {
         role: "user",

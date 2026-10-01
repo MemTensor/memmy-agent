@@ -31,6 +31,10 @@ describe("codex skill target", () => {
     const skillFile = readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8");
     expect(skillFile).toContain("# Memmy");
     expect(skillFile).toContain("Call memmy-memory search when context is needed.");
+    const resumeSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+    expect(resumeSkillFile).toContain("name: memmy-resume");
+    expect(resumeSkillFile).toContain("disable-model-invocation: true");
+    expect(resumeSkillFile).toContain("--source codex");
     await expect(target.isInstalled("codex")).resolves.toBe(true);
   });
 
@@ -78,6 +82,7 @@ describe("codex skill target", () => {
     await target.uninstall("codex");
     expect(readTargetFile(rootDirectory)).toBe(["manual prefix", "manual suffix", ""].join("\n"));
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
   });
 
   it("does not create Codex directory when Codex is not installed", async () => {
@@ -236,6 +241,9 @@ describe("codex skill target", () => {
         source: "codex"
       });
       expect(authorization).toBe("Bearer test-token");
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8")).toContain(
+        "--source codex"
+      );
 
       const selectionRun = await runNodeHook(
         hookScriptPath,
@@ -268,6 +276,7 @@ describe("codex skill target", () => {
       expect(hooksAfter.hooks?.Stop).toBeUndefined();
       expect(readFileSync(join(rootDirectory, "AGENTS.md"), "utf8")).toBe(existingTargetFile);
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
     } finally {
       await close(server);
     }
