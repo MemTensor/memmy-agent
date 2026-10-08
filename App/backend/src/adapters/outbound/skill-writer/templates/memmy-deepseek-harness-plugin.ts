@@ -577,6 +577,9 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
       const uiConversation = ctx.uiConversation
         || (typeof ctx.get === "function" ? ctx.get("uiConversation") : undefined);
       if (uiConversation && uiConversation.events) return uiConversation.events;
+      const conversation = ctx.conversation
+        || (typeof ctx.get === "function" ? ctx.get("conversation") : undefined);
+      if (conversation && conversation.events) return conversation.events;
       const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
       throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
@@ -664,10 +667,7 @@ export function createDeepseekHarnessPluginPackageManifest(): Record<string, unk
     dsh: {
       client: {
         platform: "web",
-        inject: [
-          "@deepseek-ai/dsh-client-runtime",
-          "@deepseek-ai/dsh-client-ui-conversation"
-        ]
+        inject: ["@deepseek-ai/dsh-client-ui-conversation"]
       }
     },
     peerDependencies: {
