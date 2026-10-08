@@ -44,14 +44,14 @@ describe("DeepSeek Harness skill target", () => {
     const packageManifest = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
     expect(packageManifest).toMatchObject({
       name: "@memmy/memmy-memory",
+      version: "1.0.0",
       type: "module",
       exports: {
         ".": "./index.mjs",
         "./client": "./client.js"
       },
-      dsh: { client: { platform: "web" } }
+      dsh: { client: { platform: "web", inject: ["@deepseek-ai/dsh-client-ui-conversation"] } }
     });
-    expect(packageManifest).not.toHaveProperty("version");
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
     expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source deepseek_harness");
     expect(patch).toContain("id: user-plugin");
@@ -227,6 +227,29 @@ describe("DeepSeek Harness skill target", () => {
     expect(definition?.kind).toBe("memmy-optimistic-user");
   });
 
+  it("supports the transitional conversation.events registry", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    let registered = 0;
+    const client = handoff?.factory();
+    client?.apply({
+      get(name: string) {
+        return name === "conversation"
+          ? { events: { register: () => { registered += 1; } } }
+          : undefined;
+      }
+    });
+
+    expect(registered).toBe(1);
+  });
+
   it("fails clearly when neither conversation event API is available", async () => {
     const rootDirectory = createRoot();
     const target = createDeepseekHarnessSkillTarget({ rootDirectory });
@@ -361,7 +384,7 @@ describe("DeepSeek Harness skill target", () => {
     ) as { messages: Array<{ source: { kind: string }; content: Array<{ text: string }> }> };
 
     expect(decision.messages[0]).toBe(userMessage);
-    expect(decision.messages[1]?.source.kind).toBe("plugin");
+    expect(decision.messages[1]?.source.kind).toBe("memmy-memory");
     expect(decision.messages[1]?.content[0]?.text).toContain("User prefers concise answers.");
     expect(decision.messages[1]?.content[0]?.text).toContain("<current_user_request>\n检查 README");
     expect(decision.messages[2]).toBe(runtimeContext);

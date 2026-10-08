@@ -76,7 +76,7 @@ export function apply(ctx, config = {}) {
       pendingL3.delete(String(payload.agent.session.id));
       if (!markdown && !l3) return decision;
       const memory = createUserMessage({
-        source: { kind: "plugin", plugin: name, form: "recall" },
+        source: { kind: "memmy-memory", form: "recall" },
         content: [{ type: "text", text: [l3, markdown ? renderMemoryPacket(markdown, "turn_start", query) : ""].filter(Boolean).join("\n\n") }]
       });
       return { ...decision, messages: insertAfterUserMessage(decision.messages, memory) };
@@ -577,6 +577,9 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
       const uiConversation = ctx.uiConversation
         || (typeof ctx.get === "function" ? ctx.get("uiConversation") : undefined);
       if (uiConversation && uiConversation.events) return uiConversation.events;
+      const conversation = ctx.conversation
+        || (typeof ctx.get === "function" ? ctx.get("conversation") : undefined);
+      if (conversation && conversation.events) return conversation.events;
       const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
       throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
@@ -653,6 +656,7 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
 export function createDeepseekHarnessPluginPackageManifest(): Record<string, unknown> {
   return {
     name: "@memmy/memmy-memory",
+    version: "1.0.0",
     private: true,
     type: "module",
     exports: {
@@ -663,10 +667,7 @@ export function createDeepseekHarnessPluginPackageManifest(): Record<string, unk
     dsh: {
       client: {
         platform: "web",
-        inject: [
-          "@deepseek-ai/dsh-client-runtime",
-          "@deepseek-ai/dsh-client-ui-conversation"
-        ]
+        inject: ["@deepseek-ai/dsh-client-ui-conversation"]
       }
     },
     peerDependencies: {
