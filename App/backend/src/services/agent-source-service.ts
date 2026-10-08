@@ -103,6 +103,7 @@ export interface AgentSourceService {
   uninstallSkill(sourceId: string): Promise<void>;
   installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
 
@@ -450,6 +451,10 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         });
         throw error;
       }
+    },
+
+    async isInstalledHookCurrent(sourceId) {
+      return options.skillDistributionService.isInstalledHookCurrent?.(sourceId) ?? true;
     },
 
     async uninstallPlugin(sourceId, action = {}) {

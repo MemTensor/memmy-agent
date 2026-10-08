@@ -103,6 +103,31 @@ describe("cursor skill target", () => {
     }
   });
 
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCursorSkillTarget({ rootDirectory, memmyConfigPath });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("cursor");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    writeFileSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"), "old hook\n", "utf8");
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    delete installed.hook_revision;
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("cursor");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+  });
+
   it("installs a resume Skill and reads the current memmyMemory storage instead of legacy storage", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;

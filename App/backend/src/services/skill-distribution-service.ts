@@ -25,6 +25,7 @@ export interface SkillDistributionService {
   uninstall(sourceId: string): Promise<void>;
   installPlugin(sourceId: string): Promise<void>;
   uninstallPlugin(sourceId: string): Promise<void>;
+  isInstalledHookCurrent?(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts?(): Promise<MemoryPluginConflict[]>;
 }
 
@@ -99,6 +100,12 @@ export function createSkillDistributionService(
 
       await target.uninstallPlugin(sourceId);
       await target.uninstall(sourceId);
+    },
+
+    async isInstalledHookCurrent(sourceId) {
+      const target = options.targetRegistry.get(sourceId);
+      if (!target?.isInstalledHookCurrent) return true;
+      return target.isInstalledHookCurrent();
     },
 
     async detectMemoryPluginConflicts() {
