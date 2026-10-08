@@ -610,6 +610,62 @@ describe("standalone Agent source executor", () => {
     }));
   });
 
+  it("emits add analytics only when a scanned skill is newly stored", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    for (const sourceSkillId of ["deleted-skill", "duplicate-skill", "failing-skill", "fresh-skill"]) {
+      const skillPath = join(codexRoot, "skills", sourceSkillId, "SKILL.md");
+      mkdirSync(join(skillPath, ".."), { recursive: true });
+      writeFileSync(skillPath, `---\nname: ${sourceSkillId}\nversion: 1\n---\n\n${sourceSkillId}\n`);
+    }
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = {
+      addMemory: vi.fn((input: { sourceSkillId?: string }) => {
+        if (input.sourceSkillId === "duplicate-skill") return { id: "dup", duplicate: true, status: "activated" };
+        if (input.sourceSkillId === "deleted-skill") return { id: "gone", status: "deleted" };
+        if (input.sourceSkillId === "failing-skill") throw new Error("skill import failed");
+        return { id: "fresh", status: "activated" };
+      }),
+      enqueuePendingImportSummaries: vi.fn()
+    } as unknown as MemoryService;
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+      detect: async () => true,
+      async *scan() {}
+    };
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter]),
+      memoryAddAnalytics: {
+        trackAddStarted(input) { events.push({ name: "started", payload: { ...input } }); },
+        trackAddSucceeded(input) { events.push({ name: "succeeded", payload: { ...input } }); },
+        trackAddFailed(input) { events.push({ name: "failed", payload: { ...input } }); }
+      }
+    });
+
+    await executor.startScan({ sourceId: "codex", mode: "incremental" });
+    await waitForScan(executor);
+
+    expect(events.map((event) => event.name)).toEqual(["started", "failed", "started", "succeeded"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      conversationId: "skill:failing-skill",
+      layer: "Skill",
+      scanMode: "incremental"
+    });
+    expect(events[3]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      conversationId: "skill:fresh-skill",
+      layer: "Skill",
+      scanMode: "incremental",
+      storedCount: 1
+    });
+    await executor.dispose();
+  });
+
   it("installs and removes a real Cursor Hook without Memmy Desktop", async () => {
     const root = tempRoot();
     const cursorRoot = join(root, ".cursor");

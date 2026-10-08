@@ -318,6 +318,14 @@ async function processNativeConversation(
       emitIngestionProgress(ctx, stats);
       continue;
     }
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${ctx.sourceId}`,
+      conversationId: turn.conversationId,
+      turnId: sourceTurn.turnId,
+      ...(ctx.scanMode ? { scanMode: ctx.scanMode } : {})
+    };
+    const addStartedAt = Date.now();
+    let reportedAdd = false;
     try {
       const legacyImportTurnId = legacyImportTurnIdFromMessages(ctx.sourceId, turn.conversationId, turn.messages);
       const result = await options.memoryClient.completeSourceTurn({
@@ -338,6 +346,13 @@ async function processNativeConversation(
         stats.written += turn.messages.length;
         stats.writtenMemories += ids.length;
         stats.memoryIds.push(...ids);
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: Math.max(ids.length, 1)
+        });
+        reportedAdd = true;
       } else {
         stats.deduped += turn.messages.length;
         if (result.status === "existing") stats.dedupedMemories += 1;
@@ -350,6 +365,14 @@ async function processNativeConversation(
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
       reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
+      if (!reportedAdd) {
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddFailed({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          error
+        });
+      }
     }
     emitIngestionProgress(ctx, stats);
   }

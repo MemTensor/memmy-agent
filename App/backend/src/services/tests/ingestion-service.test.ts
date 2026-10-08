@@ -47,6 +47,54 @@ describe("native Codex ingestion", () => {
     expect(markSeen).toHaveBeenCalledTimes(2);
   });
 
+  it("emits add analytics only when a native scan turn is newly stored", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const analytics = {
+      trackAddStarted(input: Record<string, unknown>) {
+        events.push({ name: "started", payload: { ...input } });
+      },
+      trackAddSucceeded(input: Record<string, unknown>) {
+        events.push({ name: "succeeded", payload: { ...input } });
+      },
+      trackAddFailed(input: Record<string, unknown>) {
+        events.push({ name: "failed", payload: { ...input } });
+      }
+    };
+    const stored = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-a", "l1-b"] } });
+    await createService({ completeSourceTurn: stored }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "initial_subset" }
+    );
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      conversationId: "native-conversation",
+      turnId: "native-turn",
+      scanMode: "initial_subset",
+      storedCount: 2
+    });
+
+    events.length = 0;
+    const existing = vi.fn().mockResolvedValue({ status: "existing", result: { l1MemoryIds: ["l1-a"] } });
+    await createService({ completeSourceTurn: existing }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "incremental" }
+    );
+    expect(events).toEqual([]);
+
+    const failed = vi.fn().mockRejectedValue(new Error("native write failed"));
+    await createService({ completeSourceTurn: failed }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "full" }
+    );
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      turnId: "native-turn",
+      scanMode: "full"
+    });
+  });
+
   it("asks a full scan to capture history that completed before activation", async () => {
     const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-historical"] } });
     await createService({ completeSourceTurn }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "full" });

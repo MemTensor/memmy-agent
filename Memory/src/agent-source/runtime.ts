@@ -337,7 +337,9 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           sourceId,
           store,
           options.resolveAgentSkillRoot,
-          options.scheduleWorker
+          options.scheduleWorker,
+          options.memoryAddAnalytics,
+          persistentScanMode(mode)
         );
         const sourceErrorCount = stage.scanErrorCount + result.errorCount + skillResult.errorCount;
         failureCount += sourceErrorCount;
@@ -829,6 +831,14 @@ async function ingestStagedMessages(
       continue;
     }
     if (hasStagedSourceTurn(turn.messages[0])) {
+      let addAnalyticsBase: {
+        adapterId: string;
+        conversationId: string;
+        turnId: string;
+        scanMode?: MemoryDesktopAddScanMode;
+      } | undefined;
+      let addStartedAt = 0;
+      let reportedAdd = false;
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) {
@@ -840,6 +850,14 @@ async function ingestStagedMessages(
           continue;
         }
         const legacyImportTurnId = legacyImportTurnIdFromMessages(sourceId, turn.conversationId, turn.messages);
+        const resolvedScanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanMode);
+        addAnalyticsBase = {
+          adapterId: `agent-source:${sourceId}`,
+          conversationId: turn.conversationId,
+          turnId: sourceTurn.turnId,
+          ...(resolvedScanMode ? { scanMode: resolvedScanMode } : {})
+        };
+        addStartedAt = Date.now();
         const result = service.completeSourceTurn({
           ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
           ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
@@ -861,7 +879,16 @@ async function ingestStagedMessages(
           continue;
         }
         const ids = result.result?.l1MemoryIds ?? [];
-        if (result.status === "stored") written += ids.length;
+        if (result.status === "stored") {
+          written += ids.length;
+          memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+          memoryAddAnalytics?.trackAddSucceeded({
+            ...addAnalyticsBase,
+            durationMs: Date.now() - addStartedAt,
+            storedCount: Math.max(ids.length, 1)
+          });
+          reportedAdd = true;
+        }
         if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
         for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
         messageCount += turn.messages.length;
@@ -870,6 +897,14 @@ async function ingestStagedMessages(
         const reason = error instanceof Error ? error.message : "native turn ingestion failed";
         recordScanItemSkip(store, sourceId, turn.conversationId, reason);
         noteUncommittedSkip(reason);
+        if (addAnalyticsBase && !reportedAdd) {
+          memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+          memoryAddAnalytics?.trackAddFailed({
+            ...addAnalyticsBase,
+            durationMs: Date.now() - addStartedAt,
+            error
+          });
+        }
       }
       processed += turn.messages.length;
       onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
@@ -1064,7 +1099,12 @@ async function ingestAgentSkills(
   sourceId: string,
   store: MemoryAgentSourceScanStore,
   resolveAgentSkillRoot: (sourceId: string) => string | null = agentRootDirectory,
-  scheduleWorker?: () => void
+  scheduleWorker?: () => void,
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >,
+  scanMode?: MemoryDesktopAddScanMode
 ): Promise<{ written: number; memoryIdCount: number; errorCount: number; errors: string[] }> {
   const root = resolveAgentSkillRoot(sourceId);
   if (!root) return { written: 0, memoryIdCount: 0, errorCount: 0, errors: [] };
@@ -1085,6 +1125,15 @@ async function ingestAgentSkills(
     const sourceSkillId = relative(skillsRoot, dirname(filePath)).replaceAll("\\", "/");
     const requestId = `agent-source-skill:${sourceId}:${sourceSkillId}:${contentHash}`;
     const fileStat = await stat(filePath);
+    const turnId = `skill:${sourceSkillId}:${contentHash}`;
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: `skill:${sourceSkillId}`,
+      turnId,
+      layer: "Skill" as const,
+      ...(scanMode ? { scanMode } : {})
+    };
+    const addStartedAt = Date.now();
     try {
       const added = service.addMemory({
         requestId,
@@ -1094,7 +1143,7 @@ async function ingestAgentSkills(
         title: frontmatterValue(content, "name") ?? sourceSkillId,
         tags: ["agent-source", "cross-agent-skill", sourceId],
         source: sourceId,
-        turnId: `skill:${sourceSkillId}:${contentHash}`,
+        turnId,
         createdAt: fileStat.mtime.toISOString(),
         sourceAgentId: sourceId,
         sourceSkillId,
@@ -1103,6 +1152,14 @@ async function ingestAgentSkills(
         sourceContentHash: contentHash,
         deferProcessing: true
       });
+      if (added.duplicate !== true && added.status !== "deleted") {
+        memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       written += 1;
       memoryIdCount += 1;
       store.saveResult({ sourceId, conversationId: `skill:${sourceSkillId}`, memoryId: added.id });
@@ -1117,6 +1174,12 @@ async function ingestAgentSkills(
         `skill:${sourceSkillId}`,
         error instanceof Error ? error.message : String(error)
       );
+      memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
   }
   flush(true);
