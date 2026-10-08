@@ -9,13 +9,16 @@ directories:
 files:
   - dist/**/*
   - package.json
+  - "!dist/runtime/memory/**"
+  - "!dist/native/sqlcipher/**"
   - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
   - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
   - "!dist/runtime/memmy-agent/dist/extra-dependencies/docx-rendering{,/**}"
-  - "!**/node_modules/open-computer-use/dist/linux/**"
-  - "!**/node_modules/open-computer-use/dist/windows/**"
+  - "!**/node_modules/open-computer-use/**"
+  - "!**/native-computer-use/windows/**"
+  - "!**/native-computer-use/linux/**"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
@@ -27,8 +30,12 @@ files:
 
 asar: true
 asarUnpack:
+  - "dist/native/memmy-pip.node"
+  - "dist/native/menu-bar-appearance.node"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/native/**"
-  - "**/node_modules/open-computer-use/dist/**"
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/wechat/**"
+  - "dist/runtime/memmy-agent/dist/tools/computer-use/mac/native/**"
+  - "**/native-computer-use/**"
   - "**/*.node"
   - "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"
   - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
@@ -38,6 +45,10 @@ asarUnpack:
   - "dist/renderer/**"
 
 extraResources:
+  - from: extensions/memmy-browser
+    to: browser-extension
+    filter:
+      - "**/*"
   - from: dist/runtime/memory
     to: memory-runtime
     filter:
@@ -60,10 +71,14 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
+  - from: dist/native/sqlcipher
+    to: native/sqlcipher
+    filter:
+      - "**/*"
 mac:
-  # Preserve the published native helper and its macOS permission identity.
+  # Preserve the source-built helper's permission identity.
   signIgnore:
-    - "/node_modules/open-computer-use/dist/Open Computer Use[.]app(/|$)"
+    - "/dist/native-computer-use/Memmy Computer Use[.]app(/|$)"
   icon: build/icon.icns
   category: public.app-category.productivity
   extendInfo:

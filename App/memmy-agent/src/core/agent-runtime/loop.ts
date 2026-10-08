@@ -1,4 +1,5 @@
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
+import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1082,6 +1083,18 @@ export class AgentLoop {
         }
       });
     return Object.freeze([...new Set(roots)]);
+  }
+
+  private usesExternalSessionWorkspace(projectId: string | null, sessionWorkspace: string): boolean {
+    if (projectId !== null) return true;
+    const canonical = (value: string) => {
+      try {
+        return fs.realpathSync(value);
+      } catch {
+        return path.resolve(value);
+      }
+    };
+    return canonical(sessionWorkspace) !== canonical(this.workspace);
   }
 
   private copyConnectedMcpTools(registry: ToolRegistryInstance): void {
@@ -3090,6 +3103,17 @@ export class AgentLoop {
   ): Promise<FollowupModelContextUpdate> {
     if (request.inputTokenBudget == null || request.inputTokenBudget <= 0) return null;
     try {
+      // The current turn is protected from DAG compaction. If it alone exceeds
+      // the input budget, archiving older turns cannot make this request fit.
+      const protectedMessages = descriptor.rebuildProjection(
+        session,
+        request.currentTurnMessages,
+        {
+          visibleMessageStart: descriptor.protectedSessionMessageStart,
+          summaryOverride: null,
+        },
+      );
+      if (request.estimatePromptTokens(protectedMessages) >= request.inputTokenBudget) return null;
       const result = await consolidator.maybeConsolidateByTokens(session, {
         replayMaxMessages: this.maxMessages,
         inputTokenBudget: request.inputTokenBudget,
@@ -3928,7 +3952,7 @@ export class AgentLoop {
     ctx.tools = this.createToolRegistry("turn", sessionWorkspace, {
       includeConnectedMcp: true,
       messageSendCallback: ctx.messageSendCallback,
-      ...(ctx.sessionProjectId !== null
+      ...(this.usesExternalSessionWorkspace(ctx.sessionProjectId, sessionWorkspace)
         ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
         : {}),
       modelSelection: ctx.modelSelection,
@@ -3941,6 +3965,10 @@ export class AgentLoop {
         ...(ctx.msg.metadata ?? {}),
         ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg)! } : {}),
         ...turnMetadata(ctx.turnId),
+        // A generated continuation turnId must never authorize locked Mac use.
+        computerUseInteractive: !ctx.msg.internal && Boolean(ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId)
+          && !['system', 'cron'].includes(ctx.msg.channel)
+          && !['subagent', 'goal-runtime', 'system', 'cron'].includes(ctx.msg.senderId),
       },
       ctx.sessionKey,
       sessionWorkspace,
@@ -4347,7 +4375,7 @@ export class AgentLoop {
       sessionWorkspace,
       {
         includeConnectedMcp: true,
-        ...(sessionBinding.projectId !== null
+        ...(this.usesExternalSessionWorkspace(sessionBinding.projectId, sessionWorkspace)
           ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
           : {}),
         modelSelection,
@@ -4361,7 +4389,10 @@ export class AgentLoop {
       channel,
       chatId,
       msg.metadata?.message_id ?? msg.metadata?.messageId ?? null,
-      msg.metadata ?? {},
+      { ...(msg.metadata ?? {}), computerUseInteractive: !msg.internal
+        && Boolean(msg.metadata?.message_id ?? msg.metadata?.messageId)
+        && !['system', 'cron'].includes(channel)
+        && !['subagent', 'goal-runtime', 'system', 'cron'].includes(msg.senderId) },
       key,
       sessionWorkspace,
       tools,
@@ -4921,6 +4952,10 @@ export class AgentLoop {
     });
     let effectiveAbortSignal = abortSignal;
     let boundary = createTurnCancellationBoundary({ turnId, signal: effectiveAbortSignal });
+    const releaseComputerUseInterrupt = slot && sharedTurnSource(effectiveMsg)?.kind === "gui"
+      ? registerComputerUseTurnInterrupt({ sessionKey, channel: effectiveMsg.channel,
+        chatId: effectiveMsg.chatId, turnId }, () => this.stopExpectedTurn(sessionKey, turnId, "gui"))
+      : null;
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
     let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
@@ -5100,6 +5135,10 @@ export class AgentLoop {
       }
       throw error;
     } finally {
+      releaseComputerUseInterrupt?.();
+      const surfaceScope = { sessionKey, channel: effectiveMsg.channel, chatId: effectiveMsg.chatId };
+      await this.browserSessionManager.closeSurfacesForTurn(surfaceScope);
+      closeNativeSurfacesForTurn(surfaceScope);
       if (slot && slot.state !== "closed") {
         slot.acceptingSteer = false;
         slot.state = "settling";

@@ -491,8 +491,15 @@ describe("model config catalog", () => {
       embeddingMode: "custom"
     });
 
+    const evolutionOnlyInput = structuredClone(assigned);
+    evolutionOnlyInput.configRevision = saved.configRevision;
+    evolutionOnlyInput.modelAssignments.byok.memoryEvolution = agentId;
+    const evolutionOnly = await writeModelConfigCatalog(file, evolutionOnlyInput);
+    expect(evolutionOnly.modelAssignments.byok.memorySummary).toBe(agentId);
+    expect(evolutionOnly.memorySettings?.roleRouting).toEqual({ summary: "follow", evolution: "follow" });
+
     const followInput = structuredClone(assigned);
-    followInput.configRevision = saved.configRevision;
+    followInput.configRevision = evolutionOnly.configRevision;
     followInput.modelAssignments.byok.memorySummary = agentId;
     followInput.modelAssignments.byok.memoryEvolution = agentId;
     const followed = await writeModelConfigCatalog(file, followInput);

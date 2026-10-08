@@ -212,4 +212,51 @@ describe("AgentLoop Session workspace", () => {
       { hostProjectId: project.id, workspace: projectCwd },
     ]);
   });
+
+  it("gives standalone task folders read-only access to profile skills", async () => {
+    const profile = tempRoot("memmy-profile-");
+    fs.mkdirSync(path.join(profile, "skills"));
+    const profileSkills = fs.realpathSync(path.join(profile, "skills"));
+    const taskCwd = fs.realpathSync(tempRoot("memmy-task-"));
+    const loop = makeLoop(profile);
+    const captured: unknown[] = [];
+    loop.runner.run = vi.fn(async (spec: any) => {
+      captured.push((spec.tools.get("exec") as any)?.readonlySkillRoots);
+      return new AgentRunResult({
+        finalContent: "done",
+        messages: [
+          ...spec.initialMessages,
+          { role: "assistant", content: "done" },
+        ],
+        stopReason: "completed",
+      });
+    });
+    const taskBinding = { projectId: null, cwd: taskCwd };
+
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "task-root",
+      senderId: "user",
+      content: "ordinary",
+      metadata: { webui: true },
+    }), undefined, { sessionBindingOverride: taskBinding });
+    await loop.processSystemMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "websocket:task-system-root",
+      senderId: "system",
+      content: "system",
+      metadata: { webui: true },
+    }), "websocket:task-system-root", { sessionBindingOverride: taskBinding });
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "profile-root",
+      senderId: "user",
+      content: "ordinary",
+      metadata: { webui: true },
+    }), undefined, { sessionBindingOverride: { projectId: null, cwd: fs.realpathSync(profile) } });
+
+    expect(captured[0]).toContain(profileSkills);
+    expect(captured[1]).toContain(profileSkills);
+    expect(captured[2]).toEqual([]);
+  });
 });

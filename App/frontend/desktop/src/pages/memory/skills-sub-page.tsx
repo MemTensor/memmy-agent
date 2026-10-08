@@ -262,6 +262,16 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
+  async function approveObservedSkill(id: string) {
+    if (!props.client?.approveObservedSkill) throw new Error(t("memory.clientNotReady"));
+    await props.client.approveObservedSkill(id);
+    clearMemoryPanelCache();
+    const skillDetail = await loadSkillDetail(props.client, id);
+    const timeline = await loadSkillTimeline(props.client, id).catch(() => []);
+    setDetail({ status: "ready", data: { detail: skillDetail, timeline } });
+    void refresh(page, { useCache: false }).catch(() => undefined);
+  }
+
   useEffect(() => {
     void refresh().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -295,6 +305,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       }}
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
+      onApproveObservedSkill={approveObservedSkill}
       onCloseSkill={closeSkill}
       onOpenMemoryReference={props.onOpenMemoryReference}
     />
@@ -312,6 +323,7 @@ export interface SkillsSubPageViewProps {
   onRefresh: () => void | Promise<void>;
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
+  onApproveObservedSkill?: (id: string) => Promise<void>;
   onCloseSkill: () => void;
   onOpenMemoryReference: OpenMemoryReference;
 }
@@ -384,6 +396,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
         detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
         onClose={props.onCloseSkill}
         onDelete={props.onDeleteSkill}
+        onApprove={props.onApproveObservedSkill}
         onOpenMemoryReference={props.onOpenMemoryReference}
       />
     </section>
@@ -401,9 +414,12 @@ function SkillDrawer(props: {
   detail: SkillDetailState;
   onClose: () => void;
   onDelete: (id: string) => Promise<void>;
+  onApprove?: (id: string) => Promise<void>;
   onOpenMemoryReference: OpenMemoryReference;
 }) {
   const { t } = useTranslation();
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
   if (!props.detail) {
     return null;
@@ -412,6 +428,9 @@ function SkillDrawer(props: {
   const readyDetail = props.detail.status === "ready" ? props.detail.data : null;
   const title = readyDetail ? skillFromDetail(readyDetail.detail).title : t("memory.skills.detailTitle");
   const eyebrow = readyDetail ? drawerEyebrow(readyDetail.detail.item) : t("memory.skills.detailTitle");
+  const internal = recordValue(recordValue(recordValue(readyDetail?.detail.item.metadata).properties).internal_info);
+  const awaitingObservedReview = readyDetail?.detail.item.status === "resolving"
+    && Boolean(internal.external_evidence_candidate);
 
   return (
     <div className="memory-drawer-backdrop" onClick={props.onClose}>
@@ -432,6 +451,20 @@ function SkillDrawer(props: {
           </button>
         </header>
         <div className="memory-drawer__body">
+          {awaitingObservedReview ? (
+            <section className="memory-detail-card">
+              <p>{t("memory.skills.observedCandidateReview")}</p>
+              {props.onApprove ? <button type="button" disabled={approving} onClick={() => {
+                if (!readyDetail) return;
+                setApproving(true);
+                setApproveError(null);
+                void props.onApprove!(readyDetail.detail.item.id).catch((error) => {
+                  setApproveError(error instanceof Error ? error.message : String(error));
+                }).finally(() => setApproving(false));
+              }}>{t("memory.skills.approveObservedCandidate")}</button> : null}
+              {approveError ? <p role="alert">{approveError}</p> : null}
+            </section>
+          ) : null}
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.skills.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
           {props.detail.status === "ready" && (
@@ -500,7 +533,7 @@ function SkillDetail(props: {
         title={t("memory.skills.sourceExperience")}
         ids={skill.sourcePolicyIds.length > 0 ? skill.sourcePolicyIds : props.detail.item.sourceMemoryIds}
         empty={t("memory.skills.noSourceExperience")}
-        fallbackPage="policies"
+        fallbackPage={skill.sourcePolicyIds.length > 0 ? "policies" : "memories"}
         onOpen={props.onOpenMemoryReference}
       />
       <LinkedIdsSection

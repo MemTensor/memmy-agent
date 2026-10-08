@@ -211,6 +211,17 @@ export function ModelPage() {
         </div>
 
         <ModelCard
+          icon={<Cog size={18} className="text-action-sky" />}
+          title={t("apiKey.modelPage.skillTitle")}
+          subtitle={t("apiKey.modelPage.skillSubtitle")}
+          cfg={skill}
+          primary={primaryModel}
+          reuseLabel={t("apiKey.modelPage.reuseAgentChat")}
+          onPatch={patchSkill}
+          onTest={() => testModelConfigConnection(skill, primaryModel, patchSkill, "skill")}
+        />
+
+        <ModelCard
           icon={<Brain size={18} className="text-action-sky" />}
           title={t("apiKey.modelPage.memoryTitle")}
           subtitle={t("apiKey.modelPage.memorySubtitle")}
@@ -220,17 +231,6 @@ export function ModelPage() {
           reuseLabel={t("apiKey.modelPage.reuseEvolution")}
           onPatch={patchMem}
           onTest={() => testModelConfigConnection(mem, evolutionModel, patchMem, "memory")}
-        />
-
-        <ModelCard
-          icon={<Cog size={18} className="text-action-sky" />}
-          title={t("apiKey.modelPage.skillTitle")}
-          subtitle={t("apiKey.modelPage.skillSubtitle")}
-          cfg={skill}
-          primary={primaryModel}
-          reuseLabel={t("apiKey.modelPage.reuseAgentChat")}
-          onPatch={patchSkill}
-          onTest={() => testModelConfigConnection(skill, primaryModel, patchSkill, "skill")}
         />
 
         <button

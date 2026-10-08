@@ -61,6 +61,9 @@ import {
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { ApiRequestError, requestJson } from "./http.js";
+import { z } from "zod";
+
+const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
 
 export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/health",
@@ -71,6 +74,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
+  "POST /api/v1/evidence/skills/:id/approve",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -95,6 +99,7 @@ export interface MemoryRuntimeClient {
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(id: string): Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
+  approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
   recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
@@ -171,6 +176,11 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
       });
+    },
+
+    async approveObservedSkill(id) {
+      return requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}/approve`,
+        schema: ApproveObservedSkillOutputSchema, body: {} });
     },
 
     async recallEvidence(queryId) {

@@ -10,6 +10,17 @@ export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
+export * from "./computer-use-surface.js";
+export * from "./browser-profile-control.js";
+export * from "./embedded-browser-control.js";
+export * from "./browser-access-approval.js";
+export * from "./native-app-approval.js";
+export * from "./locked-mac-use.js";
+export * from "./browser-download-approval.js";
+export * from "./browser-capability-approval.js";
+export * from "./browser-use-site-policy.js";
+export * from "./browser-cdp-readonly.js";
+export * from "./browser-cdp-write.js";
 
 export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
 

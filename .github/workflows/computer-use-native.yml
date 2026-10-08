@@ -6,10 +6,12 @@ on:
       - ".github/workflows/computer-use-native.yml"
       - "App/memmy-agent/package*.json"
       - "App/memmy-agent/src/tools/computer-use/**"
+      - "App/native-computer-use/**"
       - "App/shell/desktop/electron-builder*.yml"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "scripts/internal/linux/**"
       - "scripts/internal/mac/**"
+      - "scripts/internal/win/build-memmy-computer-use.sh"
       - "tests/ocu-dev-install.test.mjs"
       - "scripts/internal/win/build-nsis.sh"
   workflow_dispatch:
@@ -22,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2025]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     defaults:
@@ -35,20 +37,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install the pinned native package into an isolated directory
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        with:
+          go-version: '1.22'
+      - name: Build Memmy Computer Use for Linux
+        if: runner.os == 'Linux'
         run: |
-          version="$(node -p "require('./App/memmy-agent/package.json').dependencies['open-computer-use']")"
-          npm install --prefix "$RUNNER_TEMP/ocu-native" --ignore-scripts --no-audit --no-fund "open-computer-use@$version"
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import path from 'node:path';
-          const root = path.join(process.env.RUNNER_TEMP, 'ocu-native/node_modules/open-computer-use');
-          const arch = process.arch === 'x64' ? 'amd64' : process.arch;
-          const relative = process.platform === 'darwin'
-            ? 'dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse'
-            : `dist/${process.platform === 'win32' ? 'windows' : 'linux'}/${arch}/open-computer-use${process.platform === 'win32' ? '.exe' : ''}`;
-          fs.appendFileSync(process.env.GITHUB_ENV, `OCU_BINARY=${path.join(root, relative)}\n`);
-          NODE
+          (cd App/native-computer-use/apps/OpenComputerUseLinux && go test ./...)
+          bash scripts/internal/linux/build-memmy-computer-use.sh "$RUNNER_TEMP/native-computer-use/linux"
+          arch="$(node -p "process.arch === 'x64' ? 'amd64' : process.arch")"
+          echo "OCU_BINARY=$RUNNER_TEMP/native-computer-use/linux/$arch/memmy-computer-use" >> "$GITHUB_ENV"
+      - name: Build Memmy Computer Use for Windows
+        if: runner.os == 'Windows'
+        run: |
+          (cd App/native-computer-use/apps/OpenComputerUseWindows && go test ./...)
+          bash scripts/internal/win/build-memmy-computer-use.sh "$RUNNER_TEMP/memmy-computer-use.exe" amd64
+          echo "OCU_BINARY=$RUNNER_TEMP/memmy-computer-use.exe" >> "$GITHUB_ENV"
+      - name: Build Memmy Computer Use for macOS
+        if: runner.os == 'macOS'
+        run: |
+          bash scripts/internal/mac/build-memmy-computer-use.sh "$RUNNER_TEMP/Memmy Computer Use.app" "$(uname -m)" -
+          echo "OCU_BINARY=$RUNNER_TEMP/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse" >> "$GITHUB_ENV"
+      - name: Test Memmy macOS native source
+        if: runner.os == 'macOS'
+        run: swift test --package-path App/native-computer-use -c release
       - name: Prepare an isolated Linux desktop session
         if: runner.os == 'Linux'
         run: |
@@ -62,11 +75,11 @@ jobs:
       - name: Check Windows MCP and desktop backend
         if: runner.os == 'Windows'
         run: node scripts/internal/shared/check-open-computer-use.mjs "$OCU_BINARY" --list-apps | tee ocu-native-result.json
-      - name: Validate the published macOS bundle and installer
+      - name: Validate the Memmy macOS bundle and installer
         if: runner.os == 'macOS'
         run: |
-          codesign --verify --deep --strict "$RUNNER_TEMP/ocu-native/node_modules/open-computer-use/dist/Open Computer Use.app"
-          lipo "$OCU_BINARY" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$RUNNER_TEMP/Memmy Computer Use.app"
+          lipo "$OCU_BINARY" -verify_arch "$(uname -m)"
           node --test tests/ocu-dev-install.test.mjs
       - name: Check macOS MCP discovery
         if: runner.os == 'macOS'

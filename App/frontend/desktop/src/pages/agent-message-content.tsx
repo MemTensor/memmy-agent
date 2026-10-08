@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { ExternalLink, FileText, Image as ImageIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { Prism as SyntaxHighlighter, type SyntaxHighlighterProps } from "react-syntax-highlighter";
@@ -10,6 +10,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { MemmyAgentClient, ResolvedAgentArtifact } from "../api/memmy-agent-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { normalizeBrowserAddress, readBrowserPreferences, requestBrowserOpen } from "./browser-panel.js";
 
 export type AgentArtifactClient = {
   resolveArtifact(path: string): ReturnType<MemmyAgentClient["resolveArtifact"]>;
@@ -19,11 +20,18 @@ export type AgentArtifactClient = {
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
 export type AttachmentDownloadStarter = (url: string, name: string) => boolean;
+export type InAppFilePreview = {
+  name: string;
+  path?: string;
+  url?: string;
+};
+export type InAppFilePreviewHandler = (file: InAppFilePreview) => boolean;
 
 interface AgentMessageContentProps {
   content: string;
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
   deferRender?: boolean;
   deferredRevealDelayMs?: number;
   className?: string;
@@ -32,6 +40,65 @@ interface AgentMessageContentProps {
 
 const TRAILING_PUNCTUATION_RE = /[.,;:!?，。；：！？)）\]]+$/;
 const LONG_TEXT_WRAP_CLASS = "break-words [overflow-wrap:anywhere]";
+const LIST_ITEM_BLOCK_TAGS = new Set(["p", "pre", "blockquote", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
+
+function listItemElementTag(node: ReactNode): string | null {
+  if (!isValidElement(node)) {
+    return null;
+  }
+  if (typeof node.type === "string") {
+    return node.type;
+  }
+  if (typeof node.type === "function") {
+    return node.type.name || null;
+  }
+  return null;
+}
+
+function isListItemBlock(node: ReactNode): boolean {
+  const tag = listItemElementTag(node);
+  if (!tag || !isValidElement(node)) {
+    return false;
+  }
+  if (LIST_ITEM_BLOCK_TAGS.has(tag)) {
+    return true;
+  }
+  const className = typeof node.props === "object" && node.props && "className" in node.props ? String(node.props.className ?? "") : "";
+  return tag === "span" && className.split(/\s+/).includes("katex-display");
+}
+
+function listItemLeadIsVisible(node: ReactNode): boolean {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node).trim().length > 0;
+  }
+  return isValidElement(node);
+}
+
+// Tight list items keep their text as a text node. A following code block,
+// table, quote or formula is then the first element child, and the shared
+// :first-child rule drops its top margin. Wrap that lead so the block keeps
+// the gap defined in styles.css.
+function withListItemLead(children: ReactNode): ReactNode {
+  const nodes = Children.toArray(children);
+  const blockIndex = nodes.findIndex(isListItemBlock);
+  if (blockIndex <= 0) {
+    return children;
+  }
+  const lead = nodes.slice(0, blockIndex);
+  while (lead.length > 0 && typeof lead[0] === "string" && lead[0].trim() === "") {
+    lead.shift();
+  }
+  while (lead.length > 0 && typeof lead.at(-1) === "string" && String(lead.at(-1)).trim() === "") {
+    lead.pop();
+  }
+  if (!lead.some(listItemLeadIsVisible)) {
+    return children;
+  }
+  return [
+    <p key="list-item-lead" className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>{lead}</p>,
+    ...nodes.slice(blockIndex)
+  ];
+}
 const INLINE_CODE_WRAP_CLASS = "whitespace-pre-wrap break-all [overflow-wrap:anywhere]";
 const DEFERRED_MARKDOWN_ROOT_MARGIN = "900px 0px";
 const MIN_DEFERRED_MARKDOWN_HEIGHT = 56;
@@ -43,11 +110,19 @@ const AGENT_CODE_THEME = {
   ...oneLight,
   [PRISM_CODE_SELECTOR]: {
     ...oneLight[PRISM_CODE_SELECTOR],
-    background: AGENT_CODE_BACKGROUND
+    background: AGENT_CODE_BACKGROUND,
+    fontFamily: "var(--font-mono)",
+    fontSize: "inherit",
+    lineHeight: "inherit"
   },
   [PRISM_PRE_SELECTOR]: {
     ...oneLight[PRISM_PRE_SELECTOR],
-    background: AGENT_CODE_BACKGROUND
+    background: AGENT_CODE_BACKGROUND,
+    fontFamily: "var(--font-mono)",
+    lineHeight: 1.75,
+    padding: "12px 16px",
+    margin: 0,
+    borderRadius: 0
   }
 } satisfies NonNullable<SyntaxHighlighterProps["style"]>;
 
@@ -61,13 +136,23 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
-        return <FileReferenceChip path={localPath} label={children} isStreaming={props.isStreaming} artifactClient={props.artifactClient} />;
+        return <FileReferenceChip path={localPath} label={children} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
       }
       if (isMailtoHref(href)) {
         return <MailtoLink href={href?.trim() ?? ""}>{children}</MailtoLink>;
       }
       return (
-        <a href={href} target="_blank" rel="noreferrer noopener" className={`agent-message-content__link inline-flex max-w-full min-w-0 items-baseline gap-1 text-action-sky underline underline-offset-2 ${LONG_TEXT_WRAP_CLASS}`}>
+        <a href={href} target="_blank" rel="noreferrer noopener" onClick={event => {
+          if (!window.memmy || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          const url = normalizeBrowserAddress(href ?? "");
+          if (!url) return;
+          const host = new URL(url).hostname;
+          const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+          const preferences = readBrowserPreferences();
+          if ((local ? preferences.localLinks : preferences.webLinks) !== "memmy") return;
+          event.preventDefault();
+          requestBrowserOpen(url);
+        }} className={`agent-message-content__link inline-flex max-w-full min-w-0 items-baseline gap-1 ${LONG_TEXT_WRAP_CLASS}`}>
           <span className={`min-w-0 ${LONG_TEXT_WRAP_CLASS}`}>{children}</span>
           <ExternalLink size={12} aria-hidden="true" />
         </a>
@@ -79,19 +164,24 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
         return null;
       }
       if (isDirectMediaUrl(url)) {
-        return <img src={url} alt={alt ?? ""} className="agent-message-content__image my-3 max-h-80 max-w-full rounded-card border border-border-stone/30 object-contain" />;
+        return <img src={url} alt={alt ?? ""} className="agent-message-content__image" />;
       }
-      return <FileReferenceChip path={url} isStreaming={props.isStreaming} artifactClient={props.artifactClient} preferPreview />;
+      return <FileReferenceChip path={url} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} preferPreview />;
     },
     // Spacing, size, and color for every markdown block live in ONE place —
     // the `.agent-message-content*` rules in styles.css — so the vertical
     // rhythm cannot drift between elements (the old mix of Tailwind margin /
     // leading utilities and CSS overrides is exactly what caused uneven line
     // spacing around lists). Renderers only keep structural + wrap classes.
+    pre({ children }) {
+      return <>{children}</>;
+    },
     code({ className, children }) {
-      const code = String(children ?? "").replace(/\n$/, "");
+      // Fenced code always carries a trailing newline; inline code never does.
+      const raw = String(children ?? "");
+      const code = raw.replace(/\n$/, "");
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
-      const isInline = !language && !code.includes("\n");
+      const isInline = !language && !raw.includes("\n");
       if (isInline) {
         return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
       }
@@ -99,6 +189,9 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     },
     p({ children }) {
       return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>{children}</p>;
+    },
+    li({ children, className }) {
+      return <li className={className}>{withListItemLead(children)}</li>;
     },
     ul({ children }) {
       return <ul className={`agent-message-content__list agent-message-content__list--unordered ${LONG_TEXT_WRAP_CLASS}`}>{children}</ul>;
@@ -113,15 +206,21 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       return <hr className="agent-message-content__separator" />;
     },
     table({ children }) {
-      return <div className="agent-message-content__table-scroll"><table className="agent-message-content__table">{children}</table></div>;
+      return (
+        <div className="agent-message-content__table-scroll">
+          <div className="agent-message-content__table-frame">
+            <table className="agent-message-content__table">{children}</table>
+          </div>
+        </div>
+      );
     },
-    th({ children }) {
-      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`}>{children}</th>;
+    th({ children, style }) {
+      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</th>;
     },
-    td({ children }) {
-      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`}>{children}</td>;
+    td({ children, style }) {
+      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</td>;
     }
-  }), [props.artifactClient, props.isStreaming]);
+  }), [props.artifactClient, props.isStreaming, props.onPreviewFile]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -149,6 +248,7 @@ function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, ne
   return previous.content === next.content
     && previous.isStreaming === next.isStreaming
     && previous.artifactClient === next.artifactClient
+    && previous.onPreviewFile === next.onPreviewFile
     && previous.deferRender === next.deferRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.className === next.className
@@ -348,7 +448,7 @@ function CodeBlock(props: { code: string; language: string | null; highlight: bo
           <SyntaxHighlighter
             language={props.language}
             style={AGENT_CODE_THEME}
-            customStyle={{ margin: 0, background: "transparent", fontSize: "12px", minWidth: "max-content" }}
+            customStyle={{ margin: 0, background: "transparent", fontSize: "0.75em", minWidth: "max-content" }}
             PreTag="div"
           >
             {props.code}
@@ -366,6 +466,7 @@ function FileReferenceChip(props: {
   label?: ReactNode;
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
   preferPreview?: boolean;
 }) {
   const [resolved, setResolved] = useState<ResolvedAgentArtifact | null>(null);
@@ -416,6 +517,7 @@ function FileReferenceChip(props: {
       name: resolved.name,
       label: typeof props.label === "string" ? props.label : basename(cleanPath),
       artifactClient: props.artifactClient,
+      previewInApp: props.onPreviewFile,
     });
     setActionState(result === "failed" ? "error" : "idle");
   };
@@ -434,7 +536,7 @@ function FileReferenceChip(props: {
           disabled={actionState === "working"}
           className="block max-w-full cursor-pointer text-left disabled:cursor-wait disabled:opacity-70"
         >
-          <img src={resolved.media_url} alt={resolved.name} className="agent-message-content__preview-image max-h-80 max-w-full rounded-card border border-border-stone/30 object-contain" />
+          <img src={resolved.media_url} alt={resolved.name} className="agent-message-content__preview-image" />
           <span className="mt-1 inline-flex items-center gap-1 text-xs text-text-ink/45"><ImageIcon size={12} />{actionState === "working" ? t("agent.attachment.opening") : resolved.name}</span>
         </button>
         {actionState === "error" ? (
@@ -474,6 +576,7 @@ export async function runAttachmentAction(input: {
   name?: string;
   label: string;
   artifactClient?: AgentArtifactClient | null;
+  previewInApp?: InAppFilePreviewHandler;
   startDownload?: AttachmentDownloadStarter;
 }): Promise<AttachmentActionStatus> {
   let actionPath = input.path;
@@ -489,6 +592,15 @@ export async function runAttachmentAction(input: {
     } catch {
       // Keep the original values and continue through the existing fallbacks.
     }
+  }
+
+  if (input.previewInApp && (actionPath || actionUrl)) {
+    const handled = input.previewInApp({
+      name: actionName ?? input.label,
+      ...(actionPath ? { path: actionPath } : {}),
+      ...(actionUrl ? { url: actionUrl } : {}),
+    });
+    if (handled) return "opened";
   }
 
   if (actionPath && input.artifactClient) {
@@ -627,7 +739,7 @@ function MailtoLink(props: {
 
   return (
     <span className="inline-flex max-w-full min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-      <a href={props.href} onClick={handleOpen} className={`agent-message-content__link inline-flex max-w-full min-w-0 items-baseline gap-1 text-action-sky underline underline-offset-2 ${LONG_TEXT_WRAP_CLASS}`}>
+      <a href={props.href} onClick={handleOpen} className={`agent-message-content__link inline-flex max-w-full min-w-0 items-baseline gap-1 ${LONG_TEXT_WRAP_CLASS}`}>
         <span className={`min-w-0 ${LONG_TEXT_WRAP_CLASS}`}>{props.children}</span>
         <ExternalLink size={12} aria-hidden="true" />
       </a>

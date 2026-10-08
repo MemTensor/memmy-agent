@@ -160,10 +160,10 @@ printf 'Installing Agent production dependencies for this Linux machine...\n'
 (cd "$AGENT_DIR" && npm ci --omit=dev --no-audit --no-fund) \
   || fail "Agent dependency installation failed; the previous Memmy installation is unchanged"
 
-# OCU is installed from the release's local vendor tarball, not from npm.
+# Memmy Computer Use is source-built and included in the release payload.
 OCU_ARCH="$PLATFORM_ARCH"
 [ "$OCU_ARCH" != "x64" ] || OCU_ARCH="amd64"
-OCU_BINARY="$AGENT_DIR/node_modules/open-computer-use/dist/linux/$OCU_ARCH/open-computer-use"
+OCU_BINARY="$AGENT_DIR/dist/native-computer-use/linux/$OCU_ARCH/memmy-computer-use"
 [ -x "$OCU_BINARY" ] || fail "archive installation is missing the bundled Computer Use executable for $PLATFORM_ARCH"
 "$OCU_BINARY" --version >/dev/null || fail "bundled Computer Use executable cannot run on this machine"
 

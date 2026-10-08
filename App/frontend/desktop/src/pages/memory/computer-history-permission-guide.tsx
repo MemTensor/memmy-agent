@@ -18,24 +18,26 @@ export function ComputerHistoryPermissionGuide(props: {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ComputerHistoryPermissions | null>(null);
   const [busy, setBusy] = useState(false);
+  const [guiding, setGuiding] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const active = useRef(false);
+  const guideActive = useRef(false);
   const mounted = useRef(true);
   const requestVersion = useRef(0);
   const autoStartAttempted = useRef(false);
   const onStart = useRef(props.onStart);
   onStart.current = props.onStart;
 
-  const check = useCallback(async (open?: ComputerHistoryPermission, retry = false) => {
+  const check = useCallback(async (retry = false) => {
     if (active.current) return;
     active.current = true;
     const version = ++requestVersion.current;
     setBusy(true);
-    if (open || retry || !autoStartAttempted.current) setError(null);
+    if (retry || !autoStartAttempted.current) setError(null);
     try {
       const [next, sessionId] = await Promise.all([
-        open ? props.client.openComputerHistoryPermission(open, "settings") : props.client.checkComputerHistoryPermissions(),
+        props.client.checkComputerHistoryPermissions(),
         window.memmy?.getComputerHistoryPermissionSessionId?.() ?? Promise.resolve(null),
       ]);
       if (!mounted.current || version !== requestVersion.current) return;
@@ -61,6 +63,28 @@ export function ComputerHistoryPermissionGuide(props: {
       }
     }
   }, [props.client]);
+
+  const openPermission = async (permission: ComputerHistoryPermission) => {
+    if (active.current || guideActive.current) return;
+    guideActive.current = true;
+    setGuiding(true);
+    setError(null);
+    let failed = false;
+    try {
+      // The request must come from the process that installs the History tap.
+      try { await props.client.openComputerHistoryPermission(permission, "request"); } catch { /* Settings remains available. */ }
+      if (!mounted.current) return;
+      // Keep status reads independent: this panel may stay open in Settings
+      // while a focus event needs to refresh the newly granted permissions.
+      await window.memmy?.guideMemmyPermission?.(permission);
+    } catch (cause) {
+      failed = true;
+      if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      guideActive.current = false;
+      if (mounted.current) { setGuiding(false); if (!failed) void check(); }
+    }
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -88,7 +112,7 @@ export function ComputerHistoryPermissionGuide(props: {
   }, []);
 
   const restart = async () => {
-    if (active.current) return;
+    if (active.current || guideActive.current) return;
     active.current = true;
     setError(null);
     setBusy(true);
@@ -106,6 +130,7 @@ export function ComputerHistoryPermissionGuide(props: {
   };
 
   const ready = status?.supported && status.accessibility && status.inputMonitoring;
+  const blocked = busy || guiding;
   return createPortal(<div className="ch-recording-confirmation"><Modal
     open
     title={t("computerHistory.permissions.title")}
@@ -115,11 +140,11 @@ export function ComputerHistoryPermissionGuide(props: {
     style={{ width: 440, maxWidth: "calc(100vw - 32px)" }}
     closeLabel={t("common.close")}
     closeContent={<X size={16} aria-hidden="true" />}
-    closeDisabled={busy}
-    onClose={() => { if (!active.current) props.onCancel(); }}
+    closeDisabled={blocked}
+    onClose={() => { if (!active.current && !guideActive.current) props.onCancel(); }}
     footer={<>
-      <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={props.onCancel}>{t("dialog.cancel")}</Button>
-      {ready && !starting ? <Button type="button" variant="primary" size="sm" disabled={busy || !window.memmy?.restartForComputerHistoryPermissions} onClick={() => void restart()}>
+      <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={props.onCancel}>{t("dialog.cancel")}</Button>
+      {ready && !starting ? <Button type="button" variant="primary" size="sm" disabled={blocked || !window.memmy?.restartForComputerHistoryPermissions} onClick={() => void restart()}>
         {t("computerHistory.permissions.restart")}
       </Button> : null}
     </>}
@@ -131,12 +156,12 @@ export function ComputerHistoryPermissionGuide(props: {
         <span>{t(permission === "accessibility" ? "computerHistory.permissions.accessibility" : "computerHistory.permissions.inputMonitoring")}</span>
         {!status ? <span role="status">{t("computerHistory.permissions.checking")}</span>
           : status[permission] ? <span className="ch__permission-granted" role="status"><Check size={16} aria-hidden="true" />{t("computerHistory.permissions.granted")}</span>
-          : <Button type="button" variant="primary" className="ch__permission-open" size="sm" disabled={busy} onClick={() => void check(permission)}>{t("computerHistory.permissions.open")}</Button>}
+          : <Button type="button" variant="primary" className="ch__permission-open" size="sm" disabled={blocked} onClick={() => void openPermission(permission)}>{t("computerHistory.permissions.open")}</Button>}
       </div>,
     )}</div>}
     {ready ? <p className="ch__permission-description" role="status">{t(starting ? "computerHistory.permissions.starting" : "computerHistory.permissions.ready")}</p> : null}
     {error ? <div role="alert"><p className="ch__error">{t("computerHistory.permissions.checkFailed", { error })}</p>
-      <Button type="button" variant="ghost" disabled={busy} onClick={() => void check(undefined, true)}>{t("computerHistory.permissions.retry")}</Button>
+      <Button type="button" variant="ghost" disabled={blocked} onClick={() => void check(true)}>{t("computerHistory.permissions.retry")}</Button>
     </div> : null}
     </div>
   </Modal></div>, document.body);

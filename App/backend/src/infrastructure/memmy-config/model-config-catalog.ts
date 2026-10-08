@@ -186,6 +186,22 @@ function projectMemoryConfig(
 
   const previousModeAssignment = previousAssignments[mode];
   const previousRouting = record(record(previousConfig.memmyMemory).roleRouting);
+  if (mode === "byok") {
+    // Catalog saves contain the entire assignment object. When a parent model
+    // changes, unchanged child fields still carry the old inherited ID. Keep
+    // the previously selected follow route rather than turning it into fixed.
+    if (previousRouting.evolution === "follow"
+      && assignment.memoryEvolution === previousModeAssignment.memoryEvolution) {
+      assignment.memoryEvolution = inheritedAssignment("memory_evolution", assignment.agent.default);
+    }
+    if (previousRouting.summary === "follow"
+      && assignment.memorySummary === previousModeAssignment.memorySummary) {
+      assignment.memorySummary = inheritedAssignment(
+        "memory_summary",
+        assignment.memoryEvolution ?? assignment.agent.default
+      );
+    }
+  }
   projectMemoryRole(
     config,
     memory,
@@ -214,6 +230,12 @@ function projectMemoryConfig(
     previousModeAssignment.embedding
   );
   config.memmyMemory = memory;
+
+  function inheritedAssignment(capability: "memory_summary" | "memory_evolution", presetId: string | null): string | null {
+    if (!presetId) return null;
+    const preset = record(record(config.modelPresets)[presetId]);
+    return arrayValue(preset.capabilities).includes(capability) ? presetId : null;
+  }
 
   function projectMemoryRole(
     root: ConfigRecord,

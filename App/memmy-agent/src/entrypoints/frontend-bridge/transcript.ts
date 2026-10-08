@@ -683,7 +683,59 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     }
   }
 
+  function attachInterleavedReasoningChunk(prev: Dict[], chunk: string, rec: Dict, idx: number): boolean {
+    if (!bufferMessageId) return false;
+    const answerIndex = prev.findIndex((message) => (
+      message.id === bufferMessageId
+      && messageBelongsToActiveTurn(message)
+    ));
+    if (answerIndex < 0) return false;
+    const answer = prev[answerIndex];
+    if (
+      answer.role !== "assistant"
+      || answer.kind === "trace"
+      || !answer.isStreaming
+      || !String(answer.content ?? "").trim()
+    ) {
+      return false;
+    }
+
+    // Providers may briefly switch back to the reasoning channel between
+    // content deltas. Keep the answer buffer open so the next content delta
+    // continues the same message; otherwise its first token is stranded as a
+    // standalone answer during transcript replay.
+    let previousIndex = -1;
+    for (let index = answerIndex - 1; index >= 0; index -= 1) {
+      if (!messageBelongsToActiveTurn(prev[index])) continue;
+      previousIndex = index;
+      break;
+    }
+    const previous = previousIndex >= 0 ? prev[previousIndex] : null;
+    if (previous?.role === "assistant" && previous.kind !== "trace" && previous.reasoning) {
+      prev[previousIndex] = {
+        ...previous,
+        reasoning: `${previous.reasoning}${chunk}`,
+      };
+      return true;
+    }
+
+    const segment = currentTurnActivitySegment();
+    prev.splice(answerIndex, 0, {
+      id: newId("as", idx),
+      role: "assistant",
+      content: "",
+      isStreaming: false,
+      reasoning: chunk,
+      reasoningStreaming: false,
+      activitySegmentId: segment,
+      ...activeTurnPatch(),
+      ...createdAtPatch(rec),
+    });
+    return true;
+  }
+
   function attachReasoningChunk(prev: Dict[], chunk: string, rec: Dict, idx: number): void {
+    if (attachInterleavedReasoningChunk(prev, chunk, rec, idx)) return;
     detachOpenAnswerBeforeActivity();
     for (let i = prev.length - 1; i >= 0; i -= 1) {
       const candidate = prev[i];
@@ -823,6 +875,16 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       if (!messageBelongsToActiveTurn(messages[i])) continue;
       if (messages[i].role === "assistant" && messages[i].kind !== "trace" && messages[i].kind !== "narration") {
         messages[i] = { ...messages[i], latencyMs, isStreaming: false };
+        return;
+      }
+    }
+  }
+
+  function stampAssistantFinishedAt(finishedAt: number): void {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (!messageBelongsToActiveTurn(messages[i])) continue;
+      if (messages[i].role === "assistant" && messages[i].kind !== "trace" && messages[i].kind !== "narration") {
+        messages[i] = { ...messages[i], createdAt: finishedAt };
         return;
       }
     }
@@ -1454,6 +1516,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       ));
       pruneReasoningOnly();
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) stampLatency(Math.trunc(rec.latency_ms));
+      const finishedAt = transcriptCreatedAt(rec);
+      if (finishedAt != null) stampAssistantFinishedAt(finishedAt);
       closedAnswerMessageId = null;
       bufferMessageId = null;
       bufferParts = [];

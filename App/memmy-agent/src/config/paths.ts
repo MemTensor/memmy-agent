@@ -48,6 +48,10 @@ export function getWorkspacePath(workspace?: string | null): string {
   return ensureDir(expandHome(workspace || process.env.MEMMY_AGENT_WORKSPACE || "~/.memmy/workspace"));
 }
 
+export function getStandaloneTaskWorkspacesDir(): string {
+  return path.resolve(expandHome(process.env.MEMMY_AGENT_TASKS_DIR || "~/Memmy"));
+}
+
 export function isDefaultWorkspace(workspace?: string | null): boolean {
   if (!workspace) return true;
   return path.resolve(expandHome(workspace)) === path.resolve(defaultWorkspacePath());

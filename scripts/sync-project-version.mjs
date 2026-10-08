@@ -29,6 +29,21 @@ await updateText(
   `/** Generated from the root package.json by scripts/sync-project-version.mjs. */\nexport const MEMMY_VERSION = ${JSON.stringify(version)};\n`
 );
 
+await updateText(
+  "App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift",
+  `import Foundation\n\npublic let openComputerUseVersion = ${JSON.stringify(version)}\n\npublic func resolvedOpenComputerUseVersion(bundle: Bundle = .main) -> String {\n    if let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,\n       !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {\n        return version\n    }\n\n    return openComputerUseVersion\n}\n`
+);
+
+await updateText(
+  "App/native-computer-use/apps/OpenComputerUseWindows/version.go",
+  `package main\n\nvar version = ${JSON.stringify(version)}\n`
+);
+
+await updateText(
+  "App/native-computer-use/apps/OpenComputerUseLinux/version.go",
+  `package main\n\nvar version = ${JSON.stringify(version)}\n`
+);
+
 await updateJson("package-lock.json", (json) => {
   json.version = version;
   json.packages[""].version = version;

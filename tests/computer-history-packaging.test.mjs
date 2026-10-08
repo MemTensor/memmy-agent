@@ -11,6 +11,7 @@ import { afterEach, expect, it } from "vitest";
 
 const roots = [];
 const prefix = "dist/runtime/memmy-agent/dist/tools/computer-history/mac";
+const windowsPrefix = "dist/runtime/memmy-agent/dist/tools/computer-history/win";
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -40,9 +41,19 @@ async function packagedFixture(filename) {
     mkdirSync(dirname(target), { recursive: true });
     cpSync(file, target);
   }
+  // History now imports the shared Computer Use launcher. Stage that module
+  // under its real relative path so the ASAR probe catches a missing import.
+  const launcherRelative = "dist/runtime/memmy-agent/dist/tools/computer-use/open-computer-use-binary.js";
+  const launcherFile = join(source, launcherRelative);
+  mkdirSync(dirname(launcherFile), { recursive: true });
+  writeFileSync(launcherFile, "exports.managedOcuEnvironment = () => ({}); exports.resolveOpenComputerUseCommand = () => '';\n");
+  expect(include(launcherFile, lstatSync(launcherFile)), launcherRelative).toBe(true);
+  const stagedLauncher = join(staged, launcherRelative);
+  mkdirSync(dirname(stagedLauncher), { recursive: true });
+  cpSync(launcherFile, stagedLauncher);
   const archive = join(root, "app.asar");
   // Use electron-builder's actual relative-path matching and ASAR packer.
-  const stagedFiles = files.map(([relative]) => join(staged, prefix, relative));
+  const stagedFiles = [...files.map(([relative]) => join(staged, prefix, relative)), stagedLauncher];
   await new AsarPackager({ info: { getWorkspaceRoot: async () => root } }, {
     defaultDestination: staged,
     resourcePath: root,
@@ -84,4 +95,52 @@ it.runIf(process.platform === "darwin")("Electron resolves and executes both pac
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", HOME: root, PATH: join(root, "no-tools") },
   });
   expect(stdout.trim().split("\n")).toEqual(["native-helper-ok", "native-helper-ok"]);
+});
+
+it.each(["electron-builder.win.yml", "electron-builder.win.unsigned.yml"])("%s unpacks the Windows 11 observer next to app.asar", async (filename) => {
+  const config = parse(readFileSync(new URL(`../App/shell/desktop/${filename}`, import.meta.url), "utf8"));
+  const root = mkdtempSync(join(tmpdir(), "history-win-asar-"));
+  roots.push(root);
+  const source = join(root, "source");
+  const staged = join(root, "staged");
+  const relative = `${windowsPrefix}/win11-observer.ps1`;
+  const script = readFileSync(new URL(`../App/memmy-agent/src/tools/computer-history/win/win11-observer.ps1`, import.meta.url));
+  const file = join(source, relative);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, script);
+  const include = new FileMatcher(source, staged, (value) => value, config.files).createFilter();
+  expect(include(file, lstatSync(file))).toBe(true);
+  const stagedFile = join(staged, relative);
+  mkdirSync(dirname(stagedFile), { recursive: true });
+  cpSync(file, stagedFile);
+  const archive = join(root, "app.asar");
+  await new AsarPackager({ info: { getWorkspaceRoot: async () => root } }, {
+    defaultDestination: staged,
+    resourcePath: root,
+    options: { smartUnpack: false },
+    unpackPattern: new FileMatcher(staged, root, (value) => value, config.asarUnpack).createFilter(),
+  }).pack([{ src: staged, destination: staged, files: [stagedFile],
+    metadata: new Map([[stagedFile, lstatSync(stagedFile)]]) }]);
+  expect(readFileSync(join(`${archive}.unpacked`, relative))).toEqual(script);
+});
+
+it.each([
+  ["electron-builder.yml", true],
+  ["electron-builder.unsigned.yml", true],
+  ["electron-builder.win.yml", false],
+  ["electron-builder.win.unsigned.yml", false],
+])("%s stages SQLCipher only as a macOS external resource", (filename, macOS) => {
+  const config = parse(readFileSync(new URL(`../App/shell/desktop/${filename}`, import.meta.url), "utf8"));
+  const root = mkdtempSync(join(tmpdir(), "history-sqlcipher-package-"));
+  roots.push(root);
+  const source = join(root, "source");
+  const staged = join(root, "staged");
+  const library = join(source, "dist/native/sqlcipher/libsqlcipher.dylib");
+  mkdirSync(dirname(library), { recursive: true });
+  writeFileSync(library, "fixture");
+  const include = new FileMatcher(source, staged, (value) => value, config.files).createFilter();
+  expect(include(library, lstatSync(library))).toBe(false);
+  expect((config.extraResources ?? []).some(({ from, to }) =>
+    from === "dist/native/sqlcipher" && to === "native/sqlcipher"
+  )).toBe(macOS);
 });

@@ -99,10 +99,10 @@ it("creates folders and navigates with breadcrumbs", async () => {
       (call) => call.url.includes("folderId=f1") && call.url.includes("/files?"),
     ),
   ).toBe(true);
-  // 目录内新建文件夹：顶栏「新建」按钮 → 行内输入 → POST parentId=f1
+  // 目录内新建文件夹：顶栏「新建文件夹」按钮 → 行内输入 → POST parentId=f1
   const createButton = [
-    ...container.querySelectorAll<HTMLButtonElement>("button"),
-  ].find((button) => button.textContent === "新建")!;
+    ...container.querySelectorAll<HTMLButtonElement>("button.mk-primary"),
+  ].find((button) => button.textContent === "新建文件夹")!;
   await act(async () => {
     createButton.click();
   });
@@ -182,7 +182,9 @@ it("batch deletes selected folders and files", async () => {
       />,
     );
   });
-  // 勾选 1 个文件夹 + 1 个文件，出现批量操作条
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[aria-label="多选"]')!.click();
+  });
   const folderCheck = container.querySelector<HTMLInputElement>(
     'input[aria-label="选择文件夹 产品资料"]',
   )!;
@@ -195,12 +197,11 @@ it("batch deletes selected folders and files", async () => {
   await act(async () => {
     fileCheck.click();
   });
-  const bar = container.querySelector(".mk-batchbar");
-  expect(bar?.textContent).toContain("已选 2 项");
-  // 打开确认弹窗并确认
-  const deleteButton = [
-    ...container.querySelectorAll<HTMLButtonElement>(".mk-batchbar button"),
-  ].find((button) => button.textContent === "删除")!;
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("已选 2 项");
+  expect(container.querySelector(".mk-batchbar")).toBeNull();
+  const deleteButton = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="删除已选项"]',
+  )!;
   await act(async () => {
     deleteButton.click();
   });
@@ -278,13 +279,16 @@ it("batch deletes a nested uploaded folder without waiting on the server", async
     );
   });
   await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[aria-label="多选"]')!.click();
+  });
+  await act(async () => {
     container
       .querySelector<HTMLInputElement>('input[aria-label="选择文件夹 联想"]')!
       .click();
   });
   await act(async () => {
-    [...container.querySelectorAll<HTMLButtonElement>(".mk-batchbar button")]
-      .find((button) => button.textContent === "删除")!
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="删除已选项"]')!
       .click();
   });
   const confirm = [
@@ -836,3 +840,85 @@ it("searches and deletes folders when parent links form a cycle", async () => {
   expect(deletes.some((url) => url.includes("/folders/b"))).toBe(true);
   expect(container.querySelector(".mk-modal-backdrop")).toBeNull();
 }, 2000);
+
+it("shows created time in a column and reveals checkboxes only while selecting", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true,
+    enabled: true,
+    serviceAvailable: true,
+    bases: [{ id: "base-1", name: "小治的知识库", selected: true }],
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: URL, init: RequestInit) => {
+      const path = String(url);
+      if (path.includes("/files?") && init.method !== "POST")
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: "a1",
+                name: "指南.pdf",
+                status: "AVAILABLE",
+                message: "",
+                createdAt: "2026-08-26T07:04:00.000Z",
+              },
+            ],
+            total: 1,
+            page: 1,
+          }),
+        );
+      if (path.endsWith("/folders"))
+        return new Response(
+          JSON.stringify({
+            folders: [
+              {
+                id: "f1",
+                parentId: "",
+                name: "产品资料",
+                createdAt: "2026-08-26T07:15:00.000Z",
+              },
+            ],
+          }),
+        );
+      return new Response(JSON.stringify(state));
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{ baseUrl: "http://localhost:1234", localToken: "t" }}
+      />,
+    );
+  });
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("名称");
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("创建时间");
+  expect(container.textContent).toContain("2026年8月26日");
+  expect(container.querySelector(".mk-selecting")).toBeNull();
+  expect(container.querySelector('input[aria-label="选择文件夹 产品资料"]')).toBeNull();
+  // 勾选列始终占位（平时宽度为 0），进出多选只改列宽，不改表格结构
+  expect(container.querySelector(".mk-fhead")?.children.length).toBe(5);
+  expect(container.querySelector(".mk-frow-folder > .mk-flead .mk-check")).toBeNull();
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[aria-label="多选"]')!.click();
+  });
+  expect(container.querySelector(".mk-selecting")).not.toBeNull();
+  expect(container.querySelector(".mk-fhead")?.children.length).toBe(5);
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("创建时间");
+  expect(
+    container.querySelector(".mk-frow-folder > .mk-flead .mk-check"),
+  ).not.toBeNull();
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("已选 0 项");
+  const folderCheck = container.querySelector<HTMLInputElement>(
+    'input[aria-label="选择文件夹 产品资料"]',
+  )!;
+  await act(async () => {
+    folderCheck.click();
+  });
+  expect(container.querySelector(".mk-fhead")?.textContent).toContain("已选 1 项");
+  expect(folderCheck.closest(".mk-frow")?.className).toContain("mk-frow-on");
+});

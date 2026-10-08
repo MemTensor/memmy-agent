@@ -62,6 +62,7 @@ describe("Office slim runtime boundary", () => {
     const includedFiles = [
       "dist/runtime/memmy-agent/dist/skills/computer-history/SKILL.md",
       "dist/runtime/memmy-agent/dist/tools/computer-history/mac/human-recorder.swift",
+      "dist/runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1",
       "dist/runtime/memmy-agent/dist/tools/computer-use/open-computer-use-binary.js",
     ];
     for (const [files, expected] of [[excludedFiles, false], [includedFiles, true]] as const) {

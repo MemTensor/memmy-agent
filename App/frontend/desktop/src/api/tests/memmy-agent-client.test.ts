@@ -81,6 +81,32 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it("reads and changes the computer-use MCP setting through authenticated gateway routes", async () => {
+    let enabled = false;
+    const paths: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      paths.push(url.pathname + url.search);
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer agent-token");
+      if (url.pathname.endsWith("/enable")) {
+        expect(init?.method).toBe("POST");
+        enabled = true;
+      }
+      if (url.pathname.endsWith("/remove")) {
+        expect(init?.method).toBe("POST");
+        enabled = false;
+      }
+      return json({ presets: [{ name: "memmy_computer_use", installed: enabled, available: enabled, binary_available: true }] });
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.getComputerUseSetting()).resolves.toMatchObject({ enabled: false, binaryAvailable: true });
+    await expect(client.setComputerUseEnabled(true)).resolves.toMatchObject({ enabled: true });
+    await expect(client.setComputerUseEnabled(false)).resolves.toMatchObject({ enabled: false });
+    expect(paths).toContain("/api/settings/mcp-presets/enable?name=memmy_computer_use");
+    expect(paths).toContain("/api/settings/mcp-presets/remove?name=memmy_computer_use");
+  });
+
   it("syncs the history model and retains its actual model source in the response", async () => {
     const snapshot = {
       observation: { state: "running", startedAt: null, segmentId: null, segmentStartedAt: null, error: null, narrationError: null, modelSource: "byok" },

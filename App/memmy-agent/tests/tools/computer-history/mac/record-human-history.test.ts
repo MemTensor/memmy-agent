@@ -208,6 +208,7 @@ const policy = (
   defaultUrl: ObservationBehavior,
   rules: ObservationRule[] = [],
 ): ObservationSettings => ({
+  memory: { syncEnabled: false },
   observation: { defaultApplicationBehavior: defaultApp, defaultURLBehavior: defaultUrl, rules },
 });
 

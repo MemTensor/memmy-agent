@@ -18,12 +18,14 @@ const functionNames = new Set([
   "watchStartupRenderer", "handleStartupFailure", "handleRendererLoadFailure"
 ]);
 const variableNames = new Set([
-  "mainWindow", "petWindow", "runtimeServices", "runtimeConfig", "isBootReady", "isQuitting",
+  "mainWindow", "memmyPermissionOnboarding", "petWindow", "runtimeServices", "runtimeConfig", "isBootReady", "isQuitting",
   "isQuitCleanupInProgress", "isQuitCleanupComplete", "stopMemoryServiceForCurrentQuit",
   "splashWindow", "splashCloseTimer", "splashTimer", "SPLASH_MAX_VISIBLE_MS", "STARTUP_SLOW_MS",
   "UPDATE_SPLASH_MAX_VISIBLE_MS", "bootStage", "bootStartedAt", "isPetWindowReadyToShow",
   "latestPetWindowLayout", "petMascotScreenAnchor", "startupRendererCleanup", "STARTUP_RENDERER_TIMEOUT_MS",
-  "isStartupFailureReported", "localBackend"
+  "isStartupFailureReported", "localBackend", "computerUseSurfaceWindows", "browserSidebarBridge",
+  "embeddedBrowserHistoryStore", "embeddedBrowserDriver", "browserWebviewDownloads",
+  "browserWebviewExtensions", "disposeBrowserWebviewPermissions"
 ]);
 const selected = source.statements.filter(statement => {
   if (ts.isFunctionDeclaration(statement)) return functionNames.has(statement.name?.text ?? "");
@@ -79,7 +81,10 @@ function setup(options: { delay?: number; error?: Error; apiError?: Error; clean
       if (windows.size === 0) app.emit("window-all-closed");
     }
   }
-  const services = { close: vi.fn(() => options.cleanupHangs ? new Promise<void>(() => {}) : Promise.resolve()) };
+  const services = {
+    agentGateway: { configPath: "test-user-data/agent-config.json" },
+    close: vi.fn(() => options.cleanupHangs ? new Promise<void>(() => {}) : Promise.resolve())
+  };
   const quit = vi.fn(() => {
     events.push("quit");
     const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
@@ -91,13 +96,23 @@ function setup(options: { delay?: number; error?: Error; apiError?: Error; clean
     app, BrowserWindow: FakeWindow, process: { platform: options.platform ?? "win32", env: {}, resourcesPath: "test-resources" },
     console: { warn: vi.fn(), error: vi.fn() }, Date, setTimeout, clearTimeout,
     join: (...parts: string[]) => parts.join("/"),
+    dirname: (path: string) => path.slice(0, path.lastIndexOf("/")),
     writePackagedStartupLog: async (message: string) => { events.push(message); },
     formatStartupError: (error: Error) => error.message,
     showPackagedStartupError: () => { events.push("error-dialog"); },
     resolveCurrentDesktopEdition: () => "cn", initLogger: noop, forceLightWindowChrome: noop,
     installPreparedRequiredUpdateBeforeBoot: async () => false,
     registerIpcHandlers: noop, installBundledCliIfNeeded: async () => {}, startPackagedRendererServerIfNeeded: async () => {},
-    createDesktopScreenCapture: noop, createComputerUseOnboarding: noop,
+    createDesktopScreenCapture: noop, createComputerUseOnboarding: noop, captureComputerUseWindow: noop,
+    createComputerUseSurfaceWindows: () => ({ update: noop, closeAll: noop }),
+    createBrowserSidebarBridge: () => ({ update: noop, clear: noop }),
+    EmbeddedBrowserDriver: class { setHistoryStore() {} },
+    BrowserWebviewDownloads: class { dispose() {} },
+    BrowserWebviewExtensions: class { async restore() {} },
+    session: { fromPartition: () => ({}) },
+    attachBrowserWebviewDownloads: () => noop,
+    attachBrowserWebviewPermissions: () => noop,
+    BrowserHistoryStore: class { constructor(_path: string) {} },
     windowsDataLayout: null,
     startManagedRuntimeServices: async () => {
       if (options.delay) await new Promise(resolve => setTimeout(resolve, options.delay));

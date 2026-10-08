@@ -1282,45 +1282,82 @@ export class Consolidator {
             return;
           }
 
-          let basePromptTokens = 0;
-          try {
-            [basePromptTokens] = this.estimateProjectionTokens(session, {
-              visibleMessageStart: plannedMessageEnd,
-              summaryOverride: null,
-            }, opts);
-          } catch {
-            basePromptTokens = 0;
+          const graph = store.readGraphForHistoryDag();
+          const boundaries = Array.from(new Set([
+            plannedMessageEnd,
+            ...store.listTurns()
+              .filter((turn) => turn.dag_status === "done"
+                && turn.message_end > plannedMessageEnd
+                && turn.message_end <= lastProcessedTurn.message_end
+                && (opts.maxMessageEndExclusive != null || turn.message_end < hardMessageEnd))
+              .map((turn) => turn.message_end),
+          ])).sort((left, right) => left - right);
+          let selected: { messageEnd: number; candidate: ReturnType<typeof buildDagSnapshotText> } | null = null;
+          let lastBasePromptTokens = 0;
+          // First try every eligible boundary against the normal consolidation target.
+          // If none fits, allow the snapshot to use otherwise free model input budget.
+          for (const useAvailableBudget of [false, true]) {
+            for (const messageEnd of boundaries) {
+              let basePromptTokens = 0;
+              try {
+                [basePromptTokens] = this.estimateProjectionTokens(session, {
+                  visibleMessageStart: messageEnd,
+                  summaryOverride: null,
+                }, opts);
+              } catch {
+                basePromptTokens = 0;
+              }
+              if (basePromptTokens <= 0) {
+                error = "Session DAG could not estimate the retained prompt";
+                continue;
+              }
+              lastBasePromptTokens = basePromptTokens;
+              const targetSnapshotBudget = Math.floor(targetPromptTokens - basePromptTokens);
+              const availableSnapshotBudget = Math.floor(effectiveInputTokenBudget - basePromptTokens - 1);
+              const snapshotTokenBudget = useAvailableBudget
+                ? availableSnapshotBudget
+                : Math.min(targetSnapshotBudget, availableSnapshotBudget);
+              if (snapshotTokenBudget <= 0) {
+                error = "Session DAG snapshot has no remaining token budget";
+                continue;
+              }
+              if (useAvailableBudget && snapshotTokenBudget <= targetSnapshotBudget) continue;
+              const candidate = buildDagSnapshotText(graph, snapshotTokenBudget);
+              if (candidate.tokenEstimate > snapshotTokenBudget) {
+                error = "Session DAG active path exceeds the remaining snapshot token budget";
+                continue;
+              }
+              let finalPromptTokens = 0;
+              try {
+                [finalPromptTokens] = this.estimateProjectionTokens(session, {
+                  visibleMessageStart: messageEnd,
+                  summaryOverride: candidate.text,
+                }, opts);
+              } catch {
+                finalPromptTokens = 0;
+              }
+              if (finalPromptTokens <= 0 || finalPromptTokens >= effectiveInputTokenBudget) {
+                error = "Session DAG snapshot does not fit the model input budget";
+                continue;
+              }
+              selected = { messageEnd, candidate };
+              error = null;
+              break;
+            }
+            if (selected) break;
           }
-          if (basePromptTokens <= 0) {
-            error = "Session DAG could not estimate the retained prompt";
+          if (!selected) {
+            console.warn("[session-dag] snapshot did not fit", JSON.stringify({
+              sessionKey,
+              reason: error,
+              boundaryCount: boundaries.length,
+              retainedPromptTokens: lastBasePromptTokens,
+              targetPromptTokens,
+              effectiveInputTokenBudget,
+            }));
             return;
           }
-          const snapshotTokenBudget = Math.floor(targetPromptTokens - basePromptTokens);
-          if (snapshotTokenBudget <= 0) {
-            error = "Session DAG snapshot has no remaining token budget";
-            return;
-          }
-          const candidate = buildDagSnapshotText(
-            store.readGraphForHistoryDag(),
-            snapshotTokenBudget,
-          );
-          if (candidate.tokenEstimate > snapshotTokenBudget) {
-            error = "Session DAG active path exceeds the remaining snapshot token budget";
-            return;
-          }
-          let finalPromptTokens = 0;
-          try {
-            [finalPromptTokens] = this.estimateProjectionTokens(session, {
-              visibleMessageStart: plannedMessageEnd,
-              summaryOverride: candidate.text,
-            }, opts);
-          } catch {
-            finalPromptTokens = 0;
-          }
-          if (finalPromptTokens <= 0 || finalPromptTokens >= effectiveInputTokenBudget) {
-            error = "Session DAG snapshot does not fit the model input budget";
-            return;
-          }
+          const { messageEnd, candidate } = selected;
           const snapshot = store.createSnapshot(
             lastProcessedTurnId,
             candidate.text,
@@ -1333,7 +1370,7 @@ export class Consolidator {
             mode: "dag",
             dagSnapshotId: snapshot.id,
             lastActive: session.updatedAt ?? new Date().toISOString(),
-          }, plannedMessageEnd);
+          }, messageEnd);
           changed = true;
         } finally {
           store.close();

@@ -28,6 +28,10 @@ import {
 } from "../../../../src/core/agent-runtime/tools/browser-preparation-wait.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 import { ToolRegistry } from "../../../../src/core/agent-runtime/tools/registry.js";
+import { BrowserProfileStore } from "../../../../src/core/agent-runtime/tools/browser-profile.js";
+import { BrowserDownloadStore } from "../../../../src/core/agent-runtime/tools/browser-downloads.js";
+import { BrowserAccessApproval } from "../../../../src/core/agent-runtime/tools/browser-access-approval.js";
+import { BrowserCapabilityApproval } from "../../../../src/core/agent-runtime/tools/browser-capability-approval.js";
 
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
@@ -42,16 +46,100 @@ const READ_ONLY_TOOLS = new Set([
 type FakeRuntimeState = {
   launches: number;
   contexts: Array<{ id: number; close: ReturnType<typeof vi.fn> }>;
+  contextOptions: unknown[];
   connections: number;
   connectionConfigs: Array<Record<string, any>>;
   calls: Array<{ contextId: number; name: string; arguments: Record<string, any> }>;
   maxGlobalCalls: number;
   maxCallsByContext: Map<number, number>;
+  pageCreated?: (page: any) => void;
+  routes: Array<(route: any) => Promise<void>>;
 };
 
 const roots: string[] = [];
 const managers: BrowserSessionManager[] = [];
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+
+it('routes a preview click to the isolated page without moving the system pointer', async () => {
+  const manager = new BrowserSessionManager({}, { desktopManaged: false });
+  const page = { isClosed: () => false, viewportSize: () => ({ width: 1000, height: 600 }),
+    mouse: { click: vi.fn(async () => undefined) }, keyboard: { press: vi.fn() } };
+  const scope = { sessionKey: 'session', channel: 'gui', chatId: 'chat' };
+  (manager as any).sessions.set(JSON.stringify([scope.sessionKey, scope.channel, scope.chatId]), {
+    closed: false, scope, context: { pages: () => [page] },
+    mutex: { runExclusive: (work: () => Promise<void>) => work() },
+  });
+  await (manager as any).handleSurfaceAction({ type: 'memmy:computer-use-surface:action',
+    surface: 'browser', ...scope, targetId: 'active-tab', action: 'click', x: 0.25, y: 0.5 });
+  expect(page.mouse.click).toHaveBeenCalledExactlyOnceWith(250, 300);
+});
+
+it('routes user navigation through the same Agent page and serializes it with Agent actions', async () => {
+  const manager = new BrowserSessionManager({}, { desktopManaged: false });
+  const scope = { sessionKey: 'session', channel: 'gui', chatId: 'chat' };
+  const page = { isClosed: () => false, goto: vi.fn(async () => undefined),
+    goBack: vi.fn(async () => undefined), goForward: vi.fn(async () => undefined),
+    reload: vi.fn(async () => undefined) };
+  const session = { closed: false, scope, pendingCalls: 0,
+    context: { pages: () => [page] },
+    mutex: { runExclusive: (work: () => Promise<void>) => work() } };
+  (manager as any).sessions.set(JSON.stringify([scope.sessionKey, scope.channel, scope.chatId]), session);
+  const action = { type: 'memmy:computer-use-surface:action', surface: 'browser',
+    ...scope, targetId: 'active-tab' };
+  for (const command of [
+    { action: 'navigate', url: 'https://example.com/' },
+    { action: 'back' }, { action: 'forward' }, { action: 'reload' },
+  ]) await (manager as any).handleSurfaceAction({ ...action, ...command });
+  expect(page.goto).toHaveBeenCalledExactlyOnceWith('https://example.com/',
+    { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  expect(page.goBack).toHaveBeenCalledOnce();
+  expect(page.goForward).toHaveBeenCalledOnce();
+  expect(page.reload).toHaveBeenCalledOnce();
+  expect(session.pendingCalls).toBe(0);
+});
+
+it('fills a saved credential only into its matching site', async () => {
+  const manager = new BrowserSessionManager({}, { desktopManaged: false });
+  const scope = { sessionKey: 'session', channel: 'gui', chatId: 'chat' };
+  const usernameFill = vi.fn(async () => undefined);
+  const passwordFill = vi.fn(async () => undefined);
+  const page = { isClosed: () => false, url: () => 'https://example.com/login',
+    locator: (selector: string) => ({ first: () => ({ count: async () => 1,
+      fill: selector.includes('password') ? passwordFill : usernameFill }) }) };
+  (manager as any).sessions.set(JSON.stringify([scope.sessionKey, scope.channel, scope.chatId]), {
+    closed: false, scope, pendingCalls: 0, context: { pages: () => [page] },
+    mutex: { runExclusive: (work: () => Promise<void>) => work() },
+  });
+  const base = { type: 'memmy:computer-use-surface:action', surface: 'browser', ...scope,
+    targetId: 'active-tab', action: 'fill-credential' };
+  await (manager as any).handleSurfaceAction({ ...base, autofill: {
+    origin: 'https://other.example', username: 'alice', password: 'secret' } });
+  expect(passwordFill).not.toHaveBeenCalled();
+  await (manager as any).handleSurfaceAction({ ...base, autofill: {
+    origin: 'https://example.com', username: 'alice', password: 'secret' } });
+  expect(usernameFill).toHaveBeenCalledWith('alice');
+  expect(passwordFill).toHaveBeenCalledWith('secret');
+});
+
+it('creates a user-started Agent browser session with only its trusted chat scope', async () => {
+  const manager = new BrowserSessionManager({}, { desktopManaged: false });
+  const page = { isClosed: () => false, goto: vi.fn(async () => undefined) };
+  const session = { pendingCalls: 1, lastUsedAt: 0, context: {
+    pages: () => [], newPage: vi.fn(async () => page),
+  }, mutex: { runExclusive: (work: () => Promise<void>) => work() } };
+  (manager as any).ensureReadyForTool = vi.fn(async () => { (manager as any).capability = 'ready'; });
+  (manager as any).acquireSession = vi.fn(async () => session);
+  await (manager as any).handleSurfaceAction({ type: 'memmy:computer-use-surface:action',
+    surface: 'browser', sessionKey: 's', channel: 'projected-session', chatId: 's',
+    targetId: 'active-tab', action: 'navigate', url: 'https://example.com/' });
+  expect((manager as any).acquireSession).toHaveBeenCalledExactlyOnceWith({
+    sessionKey: 's', channel: 'projected-session', chatId: 's',
+  });
+  expect(session.context.newPage).toHaveBeenCalledOnce();
+  expect(page.goto).toHaveBeenCalledOnce();
+  expect(session.pendingCalls).toBe(0);
+  expect(session.lastUsedAt).toBeGreaterThan(0);
+});
 
 function tmpRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-browser-tool-"));
@@ -94,9 +182,11 @@ function fakeRuntime(
   const state: FakeRuntimeState = {
     launches: 0,
     contexts: [],
+    contextOptions: [],
     connections: 0,
     connectionConfigs: [],
     calls: [],
+    routes: [],
     maxGlobalCalls: 0,
     maxCallsByContext: new Map(),
   };
@@ -113,10 +203,19 @@ function fakeRuntime(
         let disconnected: (() => void) | null = null;
         return {
           isConnected: () => connected,
-          newContext: vi.fn(async () => {
+          newContext: vi.fn(async (options?: unknown) => {
+            state.contextOptions.push(options);
             const context = {
               id: ++nextContextId,
               close: vi.fn(async () => undefined),
+              storageState: vi.fn(async () => ({ cookies: [{ name: 'sid', value: 'fresh', domain: 'example.com', path: '/' }], origins: [] })),
+              on: vi.fn((event: string, callback: (page: any) => void) => {
+                if (event === 'page') state.pageCreated = callback;
+              }),
+              pages: () => [],
+              route: vi.fn(async (_pattern: string, handler: (route: any) => Promise<void>) => {
+                state.routes.push(handler);
+              }),
             };
             state.contexts.push(context);
             return context;
@@ -224,6 +323,110 @@ afterEach(async () => {
 });
 
 describe("BrowserSessionManager", () => {
+  it('asks before a new top-level site and aborts blocked navigation', async () => {
+    const root = tmpRoot();
+    const { runtimeLoader, state } = fakeRuntime(root);
+    const authorize = vi.fn(async (url: string) => url.includes('allow.example'));
+    const manager = new BrowserSessionManager({}, { runtimeLoader, desktopManaged: true,
+      profileStore: null, accessApproval: { authorize } as unknown as BrowserAccessApproval });
+    managers.push(manager);
+    await manager.initialize();
+    await manager.callTool({ sessionKey: 'task', channel: 'projected-session', chatId: 'task' },
+      'browser_snapshot', {});
+    const handler = state.routes[0]!;
+    const makeRoute = (url: string) => ({
+      request: () => ({ isNavigationRequest: () => true, resourceType: () => 'document',
+        frame: () => ({ parentFrame: () => null }), url: () => url }),
+      continue: vi.fn(async () => undefined), abort: vi.fn(async () => undefined),
+    });
+    const blocked = makeRoute('https://blocked.example/page');
+    await handler(blocked);
+    expect(authorize).toHaveBeenCalledWith('https://blocked.example/page', expect.any(Set));
+    expect(blocked.abort).toHaveBeenCalledWith('blockedbyclient');
+    const allowed = makeRoute('https://allow.example/page');
+    await handler(allowed);
+    expect(allowed.continue).toHaveBeenCalledOnce();
+  });
+
+  it('saves downloads from the shared Agent browser page', async () => {
+    const root = tmpRoot();
+    const { runtimeLoader, state } = fakeRuntime(root);
+    const save = vi.fn(async () => undefined);
+    const manager = new BrowserSessionManager({}, { runtimeLoader, desktopManaged: true,
+      profileStore: null, downloadStore: { save } as unknown as BrowserDownloadStore });
+    managers.push(manager);
+    await manager.initialize();
+    await manager.callTool({ sessionKey: 'task', channel: 'projected-session', chatId: 'task' },
+      'browser_navigate', { url: 'https://example.com/' });
+    const handlers = new Map<string, (value: any) => void>();
+    state.pageCreated?.({ url: () => 'https://example.com/page',
+      on: (event: string, callback: (value: any) => void) => handlers.set(event, callback) });
+    const download = { suggestedFilename: () => 'report.txt' };
+    handlers.get('download')?.(download);
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(download, 'https://example.com/page'));
+  });
+
+  it('denies each upload before the Playwright tool call unless the current page is approved', async () => {
+    const root = tmpRoot();
+    const { runtimeLoader, state } = fakeRuntime(root);
+    const authorize = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const manager = new BrowserSessionManager({}, { runtimeLoader, desktopManaged: true,
+      profileStore: null, downloadStore: null, embeddedBridge: null, externalRouter: null,
+      accessApproval: null,
+      capabilityApproval: { authorize, blocked: () => false } as unknown as BrowserCapabilityApproval });
+    managers.push(manager);
+    await manager.initialize();
+    const scope = { sessionKey: 'upload', channel: 'projected-session', chatId: 'upload' };
+    await manager.callTool(scope, 'browser_snapshot', {});
+    let currentUrl = 'https://example.com/form';
+    const page = { isClosed: () => false, url: () => currentUrl };
+    (state.contexts[1] as any).pages = () => [page];
+    const files = [path.join(root, 'report.txt')];
+    fs.writeFileSync(files[0]!, 'sample');
+    const preview = { workspace: root, readonlyRoots: [] };
+    await expect(manager.callTool(scope, 'browser_file_upload', { paths: files }, null, preview)).rejects.toThrow('not approved');
+    expect(state.calls.filter(call => call.name === 'browser_file_upload')).toHaveLength(0);
+    await manager.callTool(scope, 'browser_file_upload', { paths: files }, null, preview);
+    expect(state.calls.filter(call => call.name === 'browser_file_upload')).toHaveLength(1);
+    const staged = state.calls.find(call => call.name === 'browser_file_upload')!.arguments.paths[0];
+    expect(staged).not.toBe(files[0]);
+    expect(fs.existsSync(staged)).toBe(false);
+    await expect(manager.callTool(scope, 'browser_file_upload', { paths: files }, null, preview)).rejects.toThrow('not approved');
+    expect(state.calls.filter(call => call.name === 'browser_file_upload')).toHaveLength(1);
+    expect(authorize).toHaveBeenCalledTimes(3);
+    expect(authorize).toHaveBeenCalledWith('upload', 'https://example.com/form', files);
+    authorize.mockImplementationOnce(async () => { currentUrl = 'https://other.example/form'; return true; });
+    await expect(manager.callTool(scope, 'browser_file_upload', { paths: files }, null, preview))
+      .rejects.toThrow('page changed');
+    expect(state.calls.filter(call => call.name === 'browser_file_upload')).toHaveLength(1);
+  });
+
+  it('acknowledges the browser data clear request only after cleanup resolves', async () => {
+    const manager = new BrowserSessionManager({}, { desktopManaged: false });
+    const clear = vi.spyOn(manager, 'clearBrowsingData').mockResolvedValue(undefined);
+    const reply = vi.spyOn(manager as any, 'replyToProfileClear').mockImplementation(() => undefined);
+    (manager as any).surfaceActionListener({ type: 'memmy:browser-profile:clear', requestId: 'clear-1' });
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith('clear-1', true));
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it('loads the saved browser profile and clears it with live sessions', async () => {
+    const root = tmpRoot();
+    const profile = new BrowserProfileStore(path.join(root, 'profile'));
+    await profile.save({ storageState: async () => ({ cookies: [], origins: [] }) } as any);
+    const { runtimeLoader, state } = fakeRuntime(root);
+    const manager = new BrowserSessionManager({}, { runtimeLoader, desktopManaged: false, profileStore: profile });
+    managers.push(manager);
+    await expect(manager.initialize()).resolves.toBe('ready');
+    const scope = { sessionKey: 'saved-profile', channel: 'projected-session', chatId: 'saved-profile' };
+    await manager.callTool(scope, 'browser_navigate', { url: 'https://example.com/' });
+    expect(state.contextOptions[1]).toEqual({ acceptDownloads: true, storageState: profile.statePath });
+    expect(JSON.parse(fs.readFileSync(profile.statePath, 'utf8')).cookies[0].value).toBe('fresh');
+    await manager.clearBrowsingData();
+    expect(profile.load()).toBeUndefined();
+    expect(state.contexts[1].close).toHaveBeenCalled();
+  });
+
   it("probes once and exposes only narrowed allowlisted schemas", async () => {
     const { manager, state } = await createManager(tmpRoot());
 
@@ -698,7 +901,8 @@ describe("BrowserSessionManager", () => {
       new ToolContext({ browserSessionManager: manager }),
       registry,
     );
-    expect(registry.toolNames).toEqual([...BROWSER_TOOL_NAMES].sort());
+    expect(registry.toolNames).toEqual([...BROWSER_TOOL_NAMES,
+      'browser_cdp_read', 'browser_cdp_events', 'browser_cdp_send', 'browser_auth_request'].sort());
     const tool = registry.get("browser_navigate") as BrowserNavigateTool;
     tool.setContext(new RequestContext({
       sessionKey: "session",

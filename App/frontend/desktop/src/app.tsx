@@ -19,6 +19,7 @@ import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
 import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
+import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
@@ -58,6 +59,7 @@ import {
 } from "./state/app-actions.js";
 import type { AgentState } from "./state/agent-chat-slice.js";
 import { useAppState } from "./state/app-state.js";
+import { useComputerHistoryTrayIndicator } from "./app/computer-history-tray-indicator.js";
 
 /** Handles app. */
 export function App() {
@@ -72,6 +74,7 @@ export function App() {
 function RuntimeApp() {
   const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
+  useComputerHistoryTrayIndicator(clients?.memmyAgent ?? null);
   const historyModelScope = state.agent.currentChatId ?? "draft-new-task";
   useComputerHistoryModelSync({
     client: clients?.memmyAgent ?? null,
@@ -360,6 +363,7 @@ function RuntimeApp() {
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <NotificationCenterProvider>
           <AppRouter onRetry={retry} />
+          <HistoryLaunchPromptHost />
           <CampaignPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />

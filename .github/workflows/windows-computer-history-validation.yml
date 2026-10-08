@@ -1,0 +1,88 @@
+name: Windows 11 Computer History validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-computer-history-validation.yml"
+      - "App/memmy-agent/src/tools/computer-history/**"
+      - "App/memmy-agent/tests/tools/computer-history/**"
+      - "App/memmy-agent/scripts/copy-build-assets.mjs"
+      - "App/shell/desktop/electron-builder.win*.yml"
+      - "scripts/internal/win/build-nsis.sh"
+      - "App/shell/desktop/tests/packaged-runtime-boundary.test.ts"
+      - "tests/computer-history-packaging.test.mjs"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+      - name: Require Windows 11 and an interactive desktop
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = [Environment]::OSVersion.Version.Build
+          if ($build -lt 22000) { throw "Windows 11 build 22000 or later required; found $build" }
+          if (-not [Environment]::UserInteractive) { throw 'UI Automation requires an interactive desktop' }
+          Write-Host "Windows build=$build; session=$((Get-Process -Id $PID).SessionId)"
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Install standalone agent dependencies
+        run: npm ci --prefix App/memmy-agent
+      - name: Build agent and copy History observer into runtime
+        run: npm --prefix App/memmy-agent run build
+      - name: Validate Windows 11 observer and installed app catalog
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'App/memmy-agent/src/tools/computer-history/win/win11-observer.ps1'
+          $staged = 'App/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1'
+          if (-not (Test-Path -LiteralPath $staged)) { throw 'Observer was not copied into the distributable agent' }
+          if ((Get-FileHash $source).Hash -ne (Get-FileHash $staged).Hash) { throw 'Packaged observer differs from source' }
+          $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $probe = & $powershell -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File $staged -SelfTest | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $probe.uia -or -not $probe.passwordRedacted -or $probe.unicode -ne '可见活动记录') {
+            throw 'Native UI Automation probe, password suppression, or UTF-8 output failed'
+          }
+          $apps = & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $staged -List | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($apps).Count -lt 1) { throw 'Windows app catalog is unavailable' }
+          foreach ($app in @($apps)) {
+            if ($app.bundleId -notmatch '^win32\.[a-z0-9._-]+$' -or [string]::IsNullOrWhiteSpace($app.name)) {
+              throw "Invalid app catalog row: $($app | ConvertTo-Json -Compress)"
+            }
+          }
+          Write-Host "Validated $(@($apps).Count) installed or running app entries"
+      - name: Verify packaged observer inclusion and agent platform contracts
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          App/memmy-agent/tests/tools/computer-history/win/win11.test.ts
+          App/memmy-agent/tests/tools/computer-history/platform.test.ts
+          App/memmy-agent/tests/tools/computer-history/mac/summary-writer.test.ts
+          tests/computer-history-packaging.test.mjs
+      - name: Verify installer enforces the unpacked History observer
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          App/shell/desktop/tests/packaged-runtime-boundary.test.ts
+          -t "requires the Windows 11 History observer"
+      - name: Record validation scope
+        if: ${{ always() }}
+        run: |
+          @'
+          Validates the Windows 11 native UI Automation reader against a synthetic desktop window, password suppression, UTF-8 application catalog output, runtime asset copy, and packaging rules.
+          A signed NSIS installer and a representative real-app capture matrix still require installation testing on a Windows 11 machine.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

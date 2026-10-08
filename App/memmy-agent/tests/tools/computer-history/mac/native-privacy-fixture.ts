@@ -9,7 +9,9 @@ export function nativePrivacyFixture(directory: string): Record<string, any> {
   const source = fs.readFileSync(fileURLToPath(new URL(
     "../../../../src/tools/computer-history/mac/human-recorder.swift", import.meta.url,
   )), "utf8");
+  const sourcePolicy = source.slice(source.indexOf("let separatelyAuthorizedSourceBundleIds:"), source.indexOf("func emit("));
   const classifier = source.slice(source.indexOf("let keyNames:"), source.indexOf("func characters("));
+  const weChatConsent = source.slice(source.indexOf("func excludesUnconsentedWeChat("), source.indexOf("func timestamp()"));
   const focus = source.slice(source.indexOf("struct FocusSnapshot"), source.indexOf("func applicationEnvelope("));
   const resolver = source.slice(source.indexOf("func resolveTarget("), source.indexOf("func modifierList("));
   const callback = source.slice(source.indexOf("let callback:"), source.indexOf("// MARK: - Entry point"));
@@ -38,6 +40,7 @@ typealias AXObserverCallback = (Int, AXUIElement, String, Any?) -> Void
 let kAXFocusedUIElementChangedNotification = "focus", kAXSelectedTextChangedNotification = "selection"
 let kAXValueChangedNotification = "value", kAXFocusedWindowChangedNotification = "window"
 let kAXWindowMovedNotification = "move"
+let kAXSubroleAttribute = "subrole"
 enum AXResult { case success }
 func AXUIElementGetPid(_ element: AXUIElement, _ pid: inout pid_t) -> AXResult { pid = 1; return .success }
 func emitSelectionChanged(_ element: AXUIElement) {}
@@ -47,6 +50,12 @@ var observedPid: pid_t? = 1
 var focusedElementCache: AXUIElement? = AXUIElement("Customer ID")
 var focusedElementGeneration: UInt64 = 0
 var frontPid: pid_t = 1
+final class RunningApplication { var processIdentifier: pid_t { frontPid } }
+final class NSWorkspace {
+  static let shared = NSWorkspace()
+  var frontmostApplication: RunningApplication? { RunningApplication() }
+}
+func accessibilityString(_ element: AXUIElement, _ attribute: CFString) -> String? { nil }
 var mutateDuringRead = false
 var nodeReads = 0
 func changeFocus(_ element: AXUIElement?, pid: pid_t? = 1) {
@@ -80,7 +89,9 @@ var lastTreeKey: String?
 var lastTreeAt: Date?
 var fixtureLines: [String] = []
 func axTreeLines(window: AXUIElement) -> [String] { fixtureLines }
+${sourcePolicy}
 ${classifier}
+${weChatConsent}
 ${focus}
 ${resolver}
 ${callback}

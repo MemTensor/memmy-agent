@@ -22,41 +22,44 @@ function fixture(t) {
   const root = fs.mkdtempSync('/private/tmp/ocu-dev-install-test-');
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const packageRoot = path.join(root, 'source package');
-  const source = path.join(packageRoot, 'dist/Open Computer Use.app');
+  const source = path.join(packageRoot, 'dist/Memmy Computer Use.app');
   fs.mkdirSync(path.join(source, 'Contents/MacOS'), { recursive: true });
   fs.mkdirSync(path.join(source, 'Contents/Resources'));
   // A real Mach-O fixture enables codesign verification without launching any app.
-  fs.copyFileSync('/usr/bin/true', path.join(source, 'Contents/MacOS/OpenComputerUse'));
+  fs.copyFileSync('/usr/bin/true', path.join(source, 'Contents/MacOS/MemmyComputerUse'));
   fs.writeFileSync(path.join(source, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>com.ifuryst.opencomputeruse</string>
-<key>CFBundleName</key><string>Open Computer Use</string>
-<key>CFBundleDisplayName</key><string>Open Computer Use</string>
-<key>CFBundleExecutable</key><string>OpenComputerUse</string>
+<key>CFBundleIdentifier</key><string>cn.memtensor.memmy.computeruse</string>
+<key>CFBundleName</key><string>Memmy Computer Use</string>
+<key>CFBundleDisplayName</key><string>Memmy Computer Use</string>
+<key>CFBundleIconFile</key><string>MemmyComputerUse.icns</string>
+<key>CFBundleExecutable</key><string>MemmyComputerUse</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
 </dict></plist>`);
   fs.writeFileSync(path.join(source, 'Contents/Resources/fixture.txt'), 'first version');
+  fs.copyFileSync(path.join(import.meta.dirname, '../App/shell/desktop/build/icon.icns'), path.join(source, 'Contents/Resources/MemmyComputerUse.icns'));
   sign(source);
   const destinationRoot = path.join(root, 'installed apps');
-  const destination = path.join(destinationRoot, 'Open Computer Use.app');
+  const destination = path.join(destinationRoot, 'Memmy Computer Use.app');
   const registrations = [];
   const messages = [];
-  const install = (overrides = {}) => installDevComputerUse({ packageRoot, destinationRoot, running: () => false, register: (app) => registrations.push(app), log: (message) => messages.push(message), ...overrides });
+  const install = (overrides = {}) => installDevComputerUse({ sourceApp: source, destinationRoot, running: () => false, register: (app) => registrations.push(app), log: (message) => messages.push(message), ...overrides });
   return { root, source, destination, install, registrations, messages };
 }
 
-test('dev installation preserves the original display name, identity and signature', macOnly, (t) => {
+test('dev installation brands the system permission identity without changing the native executable', macOnly, (t) => {
   const { source, destination, install, registrations } = fixture(t);
-  const sourceHash = hash(path.join(source, 'Contents/MacOS/OpenComputerUse'));
-  assert.equal(install(), path.join(destination, 'Contents/MacOS/OpenComputerUse'));
-  assert.equal(plist(destination, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
-  assert.equal(plist(destination, 'CFBundleDisplayName'), 'Open Computer Use');
-  assert.equal(plist(destination, 'CFBundleName'), 'Open Computer Use');
-  assert.match(signingDetails(destination), /^Identifier=com\.ifuryst\.opencomputeruse$/m);
-  assert.equal(plist(source, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
-  assert.equal(hash(path.join(source, 'Contents/MacOS/OpenComputerUse')), sourceHash);
+  const sourceHash = hash(path.join(source, 'Contents/MacOS/MemmyComputerUse'));
+  assert.equal(install(), path.join(destination, 'Contents/MacOS/MemmyComputerUse'));
+  assert.equal(plist(destination, 'CFBundleIdentifier'), 'cn.memtensor.memmy.computeruse');
+  assert.equal(plist(destination, 'CFBundleDisplayName'), 'Memmy Computer Use');
+  assert.equal(plist(destination, 'CFBundleName'), 'Memmy Computer Use');
+  assert.equal(plist(destination, 'CFBundleIconFile'), 'MemmyComputerUse.icns');
+  assert.match(signingDetails(destination), /^Identifier=cn\.memtensor\.memmy\.computeruse$/m);
+  assert.equal(plist(source, 'CFBundleIdentifier'), 'cn.memtensor.memmy.computeruse');
+  assert.equal(hash(path.join(source, 'Contents/MacOS/MemmyComputerUse')), sourceHash);
   assert.deepEqual(registrations, [destination]);
   verify(destination);
 });
@@ -105,18 +108,21 @@ test('source updates preserve the published identity and signed contents', macOn
   install();
   fs.writeFileSync(path.join(source, 'Contents/Resources/fixture.txt'), 'second version');
   sign(source);
+  const signedSourceHash = hash(path.join(source, 'Contents/MacOS/MemmyComputerUse'));
   install();
-  assert.equal(hash(path.join(source, 'Contents/MacOS/OpenComputerUse')), hash(path.join(destination, 'Contents/MacOS/OpenComputerUse')));
-  assert.equal(plist(destination, 'CFBundleIdentifier'), 'com.ifuryst.opencomputeruse');
+  // Re-signing changes the Mach-O signature bytes, not the upstream source.
+  assert.equal(hash(path.join(source, 'Contents/MacOS/MemmyComputerUse')), signedSourceHash);
+  assert.equal(fs.readFileSync(path.join(destination, 'Contents/Resources/fixture.txt'), 'utf8'), 'second version');
+  assert.equal(plist(destination, 'CFBundleIdentifier'), 'cn.memtensor.memmy.computeruse');
   assert.doesNotMatch(messages.join('\n'), /tccutil|reset/);
   verify(destination);
 });
 
-test('refuses a patched source identity instead of silently resigning it', macOnly, (t) => {
+test('refuses a patched source identity', macOnly, (t) => {
   const { source, install } = fixture(t);
-  run('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIdentifier cn.memtensor.memmy.computeruse.dev', path.join(source, 'Contents/Info.plist')]);
+  run('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIdentifier com.other.helper', path.join(source, 'Contents/Info.plist')]);
   sign(source);
-  assert.throws(install, /official/);
+  assert.throws(install, /CFBundleIdentifier/);
 });
 
 test('an unsigned source change fails without replacing the previous helper', macOnly, (t) => {

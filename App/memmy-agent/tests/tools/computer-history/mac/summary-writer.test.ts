@@ -272,6 +272,36 @@ describe("segment narrative", () => {
     expect(evidence).toContain("任欣悦: 消息内容");
   });
 
+  it("includes canonical WeChat text once in the ordinary History model evidence", () => {
+    const message = {
+      timestamp: "2026-09-27T12:00:00Z", eventType: "wechat_message",
+      application: { name: "WeChat", bundleId: "com.tencent.xinWeChat" },
+      details: { messageId: "account:chat:server:42", senderId: "friend",
+        text: "明天十点开会" },
+    };
+    const evidence = compactEventEvidence([
+      JSON.stringify(message), JSON.stringify(message),
+      JSON.stringify({ timestamp: "2026-09-27T12:00:10Z", eventType: "accessibility_snapshot",
+        application: { name: "WeChat", bundleId: "com.tencent.xinWeChat" },
+        ax: { mode: "fullTree", text: "AXStaticText|||||明天十点开会" } }),
+    ]);
+    expect(evidence).toContain("WeChat message: friend: 明天十点开会");
+    expect(evidence.match(/明天十点开会/gu)).toHaveLength(1);
+  });
+
+  it("names the chat and whether the user sent the WeChat message", () => {
+    const evidence = compactEventEvidence([JSON.stringify({
+      timestamp: "2026-09-27T12:00:00Z", eventType: "wechat_message",
+      application: { name: "WeChat", bundleId: "com.tencent.xinWeChat" },
+      details: {
+        messageId: "account:chat:server:7", senderId: "wxid_me", senderName: "自己",
+        fromSelf: true, chatKind: "private", chatName: "小王", text: "谢啦",
+      },
+    })]);
+    expect(evidence).toContain("微信私聊「小王」");
+    expect(evidence).toContain("自己：谢啦");
+  });
+
   it("returns nothing for an empty or unparseable stream", () => {
     expect(compactEventEvidence([])).toBe("");
     expect(compactEventEvidence(["", "not json"])).toBe("");
@@ -447,6 +477,22 @@ describe("evidence sent to the model", () => {
     // A diff contributes what came into view, not what left it.
     expect(evidence).toContain("Feed the window text to the model");
     // Controls are chrome, not content.
+    expect(evidence).not.toContain("Close");
+  });
+
+  it("carries Windows 11 UIA text into the same summary evidence", () => {
+    const evidence = compactEventEvidence([JSON.stringify({
+      recordType: "human_event", eventType: "application_changed", timestamp: "2026-09-11T09:20:00Z",
+      application: { name: "Notepad", bundleId: "win32.notepad" },
+      ax: { mode: "fullTree", text: [
+        "ControlType.Window||Notepad|||",
+        "ControlType.Button||Close|||",
+        "ControlType.Text||项目计划|||",
+        "ControlType.Edit||正文|||周五完成 Windows 11 验证",
+      ].join("\n") },
+    })]);
+    expect(evidence).toContain("项目计划");
+    expect(evidence).toContain("周五完成 Windows 11 验证");
     expect(evidence).not.toContain("Close");
   });
 

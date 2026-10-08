@@ -17,9 +17,8 @@ import { HomePage } from "../home-page.js";
 const tokens = readFileSync(resolve(process.cwd(), "src/theme/tokens.css"), "utf8");
 const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8")
   .replace(/^@import[^;]*;\s*/gm, "");
-const appFrameSource = readFileSync(resolve(process.cwd(), "src/pages/app-frame.tsx"), "utf8");
 
-describe("HomePage environment titlebar", () => {
+describe("HomePage thread side panel titlebar", () => {
   let container: HTMLDivElement;
   let root: Root;
   let stylesheet: HTMLStyleElement;
@@ -52,7 +51,7 @@ describe("HomePage environment titlebar", () => {
     { name: "Windows", platform: "win32", fullscreen: false },
     { name: "Mac", platform: "darwin", fullscreen: false },
     { name: "Windows fullscreen", platform: "win32", fullscreen: true }
-  ])("keeps $name environment controls reachable while the sidebar is toggled", ({ platform, fullscreen }) => {
+  ])("keeps $name side panel controls reachable while the sidebar is toggled", ({ platform, fullscreen }) => {
     act(() => {
       root.render(
         <AppProviders>
@@ -66,50 +65,105 @@ describe("HomePage environment titlebar", () => {
     applyWindowPlatformClass(platform);
     applyWindowFullScreenClass(fullscreen);
 
+    const assertReachable = (button: HTMLButtonElement | null, insidePassThroughTopbar = false) => {
+      expect(button).not.toBeNull();
+      expect(button!.disabled).toBe(false);
+      const pointerEvents = window.getComputedStyle(button!).pointerEvents;
+      if (insidePassThroughTopbar) expect(pointerEvents).toBe("auto");
+      else expect(pointerEvents).not.toBe("none");
+      expect(window.getComputedStyle(button!).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+      return button!;
+    };
     const assertToolbarSpacing = () => {
       const toolbar = container.querySelector<HTMLElement>(".app-frame-content-topbar");
       expect(toolbar).not.toBeNull();
-      const content = toolbar!.nextElementSibling as HTMLElement;
       expect(window.getComputedStyle(toolbar!).minHeight).toBe("46px");
       expect(toolbar!.style.top).toBe("");
       if (platform === "win32" && !fullscreen) {
         expect(styles).toMatch(/body\.memmy-platform-windows:not\(\.memmy-window-fullscreen\) \.app-frame-main--windows-titlebar-safe\s*{[^}]*--app-frame-topbar-offset:\s*var\(--codex-toolbar-height\);/s);
         expect(styles).toMatch(/\.app-frame-main--windows-titlebar-safe \.app-frame-content-topbar\s*{[^}]*top:\s*var\(--app-frame-topbar-offset, 0px\);/s);
-        expect(appFrameSource).toContain('paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))"');
-      } else {
-        expect(appFrameSource).toContain('paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))"');
+        expect(styles).toMatch(/\.thread-panel\s*{[^}]*top:\s*var\(--app-frame-topbar-offset, 0px\);/s);
       }
-      const environmentButton = container.querySelector<HTMLButtonElement>("[data-agent-environment-toggle]");
-      expect(environmentButton).not.toBeNull();
-      expect(environmentButton!.disabled).toBe(false);
-      expect(window.getComputedStyle(environmentButton!).pointerEvents).toBe("auto");
-      expect(window.getComputedStyle(environmentButton!).getPropertyValue("-webkit-app-region")).toBe("no-drag");
-      return environmentButton!;
+      expect(styles).toMatch(/\.agent-workspace-layout > \.agent-conversation-panel\s*{[^}]*padding-top:\s*calc\(var\(--codex-toolbar-height\) \+ var\(--app-frame-topbar-offset, 0px\)\);/s);
+      expect(container.querySelector("[data-agent-environment-toggle]")).toBeNull();
     };
+    const openPanelButton = () => container.querySelector<HTMLButtonElement>('.thread-toolbar__button[aria-label="展开右栏"]');
+    const collapsePanelButton = () => container.querySelector<HTMLButtonElement>('.thread-panel__icon-button[aria-label="收起右栏"]');
 
-    const environmentButton = assertToolbarSpacing();
-    expect(container.querySelector(".agent-environment-panel")).toBeNull();
-    act(() => environmentButton.click());
-    expect(environmentButton.getAttribute("aria-pressed")).toBe("true");
-    expect(container.querySelector(".agent-environment-panel")).not.toBeNull();
+    assertToolbarSpacing();
+    expect(container.querySelector(".thread-panel")).toBeNull();
+    act(() => assertReachable(openPanelButton(), true).click());
+    expect(container.querySelector(".thread-panel")).not.toBeNull();
+    expect(openPanelButton()).toBeNull();
 
     const hideSidebarButton = container.querySelector<HTMLButtonElement>(".sidebar-toolbar-button");
     expect(hideSidebarButton).not.toBeNull();
     act(() => hideSidebarButton!.click());
     expect(container.querySelector(".app-frame-sidebar")?.getAttribute("aria-hidden")).toBe("true");
-    expect(container.querySelector(".agent-environment-panel")).not.toBeNull();
+    expect(container.querySelector(".thread-panel")).not.toBeNull();
     assertToolbarSpacing();
+    assertReachable(collapsePanelButton());
 
-    const showSidebarButton = container.querySelector<HTMLButtonElement>(".sidebar-restore-button");
+    const showSidebarButton = container.querySelector<HTMLButtonElement>(
+      platform === "win32" ? ".windows-titlebar__sidebar" : ".sidebar-restore-button"
+    );
     expect(showSidebarButton).not.toBeNull();
+    if (platform === "win32") {
+      expect(showSidebarButton!.getAttribute("aria-label")).toBe("显示侧边栏");
+    }
     act(() => showSidebarButton!.click());
     expect(container.querySelector(".app-frame-sidebar")?.getAttribute("aria-hidden")).toBeNull();
     expect(container.querySelector(".sidebar-restore-button")).toBeNull();
-    expect(container.querySelector(".agent-environment-panel")).not.toBeNull();
-    act(() => assertToolbarSpacing().click());
-    expect(container.querySelector(".agent-environment-panel")).toBeNull();
+    expect(container.querySelector(".thread-panel")).not.toBeNull();
+
+    act(() => assertReachable(collapsePanelButton()).click());
+    expect(container.querySelector(".thread-panel--closing")).not.toBeNull();
+    expect(openPanelButton()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(150));
+    expect(container.querySelector(".thread-panel")?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector<HTMLElement>(".thread-panel")?.style.display).toBe("none");
+    assertToolbarSpacing();
+  });
+
+  it("keeps the project name out of the empty new-task title bar", () => {
+    act(() => {
+      root.render(
+        <AppProviders>
+          <AgentRuntimeBridge>
+            <ProjectDraftSeeder />
+            <HomePage />
+          </AgentRuntimeBridge>
+        </AppProviders>
+      );
+    });
+
+    expect(container.querySelector(".app-frame-project-title")?.textContent).toBe("报告");
+    expect(container.querySelector(".home-empty-screen")).not.toBeNull();
+    expect(container.querySelector(".app-frame-content-topbar .agent-conversation-title")).toBeNull();
   });
 });
+
+function ProjectDraftSeeder() {
+  const { dispatch } = useAppState();
+
+  useEffect(() => {
+    const project = {
+      id: "project-report",
+      name: "报告",
+      rootPath: "/workspace/报告",
+      pinned: false,
+      createdAt: "2026-09-26T00:00:00.000Z"
+    };
+    dispatch(agentActions.sessionSnapshotApplied({
+      projectRegistryState: "ready",
+      projects: [project],
+      sessions: []
+    }));
+    dispatch(agentActions.draftTargetUpdated("draft-0", { kind: "project", projectId: project.id }));
+  }, [dispatch]);
+
+  return null;
+}
 
 function CompletedConversationSeeder() {
   const { dispatch } = useAppState();

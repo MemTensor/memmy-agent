@@ -10,10 +10,13 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { redactSensitive } from "./redaction.js";
-import { ensureNativeHistoryHelper } from "./native-helper.js";
+import { historyNativeCommand } from "./native-helper.js";
+import { WeChatHistoryConsentStore } from "./wechat-consent.js";
+import { isWindows11, windowsObserverCommand } from "../win/win11.js";
 import {
   BROWSER_BUNDLE_IDS,
   DEFAULT_OBSERVATION_SETTINGS,
+  SENSITIVE_MESSAGE_APP_BUNDLE_IDS,
   evaluateObservation,
   parseObservationSettings,
   type ObservationSettings,
@@ -304,7 +307,7 @@ function loadObservationSettings(file: string | undefined): ObservationSettings 
   } catch {
     // An explicit policy that is temporarily unreadable must not revert to
     // recording everything. The next event retries the current file.
-    return { observation: {
+    return { memory: { syncEnabled: false }, observation: {
       defaultApplicationBehavior: "do_not_observe",
       defaultURLBehavior: "do_not_observe",
       rules: [],
@@ -318,6 +321,7 @@ function observationSubject(event: HelperEvent): ObservationSubject {
     browser: event.window?.browser === true,
     url: typeof event.window?.url === "string" ? event.window.url : null,
     privateBrowsing: event.window?.privateBrowsing === true,
+    privateBrowsingUnknown: event.window?.privateBrowsingUnknown === true,
   };
 }
 
@@ -408,12 +412,9 @@ export function recordingStep(onWriteFailure: () => void) {
   };
 }
 
-async function ensureHelper(): Promise<string> {
-  return ensureNativeHistoryHelper(HELPER_SOURCE, "human-history-recorder");
-}
-
-async function helperJson(binary: string, mode: string, extraArgs: string[] = []): Promise<RecorderPermissions> {
-  const { stdout } = await execFileAsync(binary, [mode, ...extraArgs], { timeout: 60_000 });
+async function helperJson(binary: string, mode: string, extraArgs: string[] = [], env?: NodeJS.ProcessEnv): Promise<RecorderPermissions> {
+  const { stdout } = await execFileAsync(binary, [...extraArgs, mode],
+    { timeout: 60_000, ...(env ? { env } : {}) });
   return JSON.parse(stdout.trim());
 }
 
@@ -459,7 +460,7 @@ async function captureScreenshot(file: string, width: number): Promise<string> {
 }
 
 function appendJsonLine(file: string, payload: unknown): void {
-  fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
+  fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 export async function run(
@@ -470,25 +471,38 @@ export async function run(
     usage();
     return null;
   }
-  if (process.platform !== "darwin") throw new Error("the human history recorder currently supports macOS only");
+  const windows = process.platform === "win32";
+  if (windows && !isWindows11()) throw new Error("Computer History requires Windows 11 build 22000 or later");
+  if (!windows && process.platform !== "darwin") throw new Error("Computer History requires macOS or Windows 11");
+  if (windows && args.screenshots) throw new Error("Windows 11 Computer History does not capture screenshots; pass --no-screenshots");
 
-  const binary = await ensureHelper();
-  const permissions = await checkPermissions(binary, { screenshots: args.screenshots });
+  const command = windows
+    ? { ...windowsObserverCommand(), managed: false, env: undefined as NodeJS.ProcessEnv | undefined }
+    : await historyNativeCommand(HELPER_SOURCE);
+  if (!windows && command.managed && args.screenshots) {
+    throw new Error("Packaged Computer History records without screenshots; pass --no-screenshots");
+  }
+  const permissions = windows
+    ? { inputMonitoring: true, screenRecording: false, accessibility: true, mainDisplayWidth: 0, mainDisplayHeight: 0 }
+    : await checkPermissions(command.binary, { screenshots: args.screenshots },
+      (binary, mode, extra = []) => helperJson(binary, mode, [...command.args, ...extra], command.env));
   const recordingId = `human:${crypto.randomUUID()}`;
   const contextUrl = normalizedContextUrl(args.contextUrl);
   const output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
   const recordingDir = path.dirname(output);
   const screenshotDir = path.join(recordingDir, "screenshots");
-  fs.mkdirSync(recordingDir, { recursive: true });
+  fs.mkdirSync(recordingDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(recordingDir, 0o700);
+  if (fs.existsSync(output)) fs.chmodSync(output, 0o600);
 
   const startedAt = new Date().toISOString();
   appendJsonLine(output, {
     recordType: "human_history_metadata",
     schemaVersion: 1,
     recordingId,
-    title: args.title ?? "Human-operated macOS workflow",
+    title: args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`,
     createdAt: startedAt,
-    platform: "macOS",
+    platform: windows ? "Windows 11" : "macOS",
     display: { width: permissions.mainDisplayWidth, height: permissions.mainDisplayHeight },
     captureText: args.captureText,
     captureSearchText: args.captureSearchText,
@@ -501,6 +515,7 @@ export async function run(
   let sequence = 0;
   let lastPageContextUrl: string | null = null;
   let axBaseline: AxBaseline | null = null;
+  const weChatConsent = new WeChatHistoryConsentStore();
   let observationPolicyVersion: string | null = null;
   const canObserve = (subject: ObservationSubject) => {
     const settings = loadObservationSettings(args.observationSettings);
@@ -509,7 +524,11 @@ export async function run(
       axBaseline = null;
       observationPolicyVersion = version;
     }
-    const allowed = shouldObserve(settings, subject);
+    const allowed = shouldObserve(settings, {
+      ...subject,
+      ...(subject.bundleId && SENSITIVE_MESSAGE_APP_BUNDLE_IDS.has(subject.bundleId.toLowerCase())
+        ? { weChatChatAccess: weChatConsent.read().enabled } : {}),
+    });
     if (!allowed) axBaseline = null;
     return allowed;
   };
@@ -628,7 +647,7 @@ export async function run(
         timestamp: event.timestamp,
         application,
         subjects,
-        details: { goal: args.title ?? "Human-operated macOS workflow" },
+        details: { goal: args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow` },
         ax: event.ax,
       }, true);
       return;
@@ -685,7 +704,7 @@ export async function run(
       // Submitting in a browser starts a navigation; give it a moment so the
       // next captured state is the destination rather than the old page.
       const captureAfterNavigation = event.kind === "keyboard.submit"
-        && BROWSER_BUNDLE_IDS.has(application.bundleId ?? "");
+        && BROWSER_BUNDLE_IDS.has((application.bundleId ?? "").toLowerCase());
       if (captureAfterNavigation) {
         await new Promise<void>((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
       }
@@ -784,7 +803,8 @@ export async function run(
     return finishPromise;
   };
 
-  const helper = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
+  const helper = spawn(command.binary, command.args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    ...(command.env ? { env: command.env } : {}) });
   helper.once("close", childClosedResolve);
   const lines = readline.createInterface({ input: helper.stdout });
   lines.on("line", (line: string) => {
@@ -801,7 +821,7 @@ export async function run(
   });
   helper.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 
-  console.log(`[recorder] goal: ${args.title ?? "Human-operated macOS workflow"}`);
+  console.log(`[recorder] goal: ${args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`}`);
   console.log(`[recorder] output: ${output}`);
   console.log("[recorder] recording now; keep the final result visible and press control+option+cmd+r to stop.");
   console.log("[recorder] fallback: return here and press Enter or Ctrl+C.");
@@ -818,7 +838,10 @@ export async function run(
     helper.once("error", reject);
     helper.once("exit", (code, signal) => {
       if (stopping) return;
-      finish(`helper_exit:${code ?? signal ?? "unknown"}`).then(resolve, reject);
+      finish(`helper_exit:${code ?? signal ?? "unknown"}`).then(() => {
+        if (code !== 0) reject(new Error(`history observer exited with ${code ?? signal ?? "unknown"}`));
+        else resolve();
+      }, reject);
     });
   });
   return { output, recordingId, events: sequence };

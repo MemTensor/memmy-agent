@@ -5,16 +5,33 @@ import CoreGraphics
 import Foundation
 
 let emitLock = NSLock()
+// The product runs this recorder inside Memmy Computer Use.app. The CLI keeps
+// stdout output for source builds and standalone diagnostics.
+var historyEventSink: ((String) -> Void)?
+var historySessionId: UInt64 = 0
 
-func emit(_ payload: [String: Any]) {
+let separatelyAuthorizedSourceBundleIds: Set<String> = ["com.tencent.xinwechat", "com.tencent.wechat"]
+
+func isSeparatelyAuthorizedSource(_ application: [String: Any]) -> Bool {
+  excludesUnconsentedWeChat(application)
+}
+
+func emit(_ payload: [String: Any], expectedSession: UInt64? = nil) {
   guard JSONSerialization.isValidJSONObject(payload),
         let data = try? JSONSerialization.data(withJSONObject: payload),
         let line = String(data: data, encoding: .utf8)
   else { return }
   emitLock.lock()
-  print(line)
-  fflush(stdout)
-  emitLock.unlock()
+  defer { emitLock.unlock() }
+  if let expectedSession, expectedSession != historySessionId { return }
+  if let historyEventSink {
+    historyEventSink(line)
+  } else {
+    #if !MEMMY_COMPUTER_USE_APP
+    print(line)
+    fflush(stdout)
+    #endif
+  }
 }
 
 func applicationPayload(_ application: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) -> [String: Any] {
@@ -24,6 +41,28 @@ func applicationPayload(_ application: NSRunningApplication? = NSWorkspace.share
     "bundleId": application.bundleIdentifier ?? "unknown",
     "pid": application.processIdentifier,
   ]
+}
+
+// Both the window observer and the database reader use this one consent file.
+// When it is absent or invalid, stop before querying AX or keyboard focus.
+func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool {
+  guard let bundleId = application["bundleId"] as? String,
+        separatelyAuthorizedSourceBundleIds.contains(bundleId.lowercased())
+  else { return false }
+  let file = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".memmy/computer-history/wechat/consent.json")
+  guard (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+        let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+        let permissions = attributes[.posixPermissions] as? NSNumber,
+        permissions.intValue & 0o77 == 0,
+        let data = try? Data(contentsOf: file),
+        let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        state["version"] as? Int == 1,
+        state["enabled"] as? Bool == true,
+        state["consentId"] as? String != nil,
+        state["consentedAt"] as? String != nil
+  else { return true }
+  return false
 }
 
 func timestamp() -> String {
@@ -79,7 +118,7 @@ func characters(from event: CGEvent) -> String {
   return String(utf16CodeUnits: characters, count: length)
 }
 
-func permissionsPayload(request: Bool, requestInputMonitoring: Bool = false, requestScreenRecording: Bool = false, requestAccessibility: Bool = false) -> [String: Any] {
+public func permissionsPayload(request: Bool, requestInputMonitoring: Bool = false, requestScreenRecording: Bool = false, requestAccessibility: Bool = false) -> [String: Any] {
   let inputMonitoring = (request || requestInputMonitoring) ? CGRequestListenEventAccess() : CGPreflightListenEventAccess()
   let screenRecording = (request || requestScreenRecording) ? CGRequestScreenCaptureAccess() : CGPreflightScreenCaptureAccess()
   let accessibilityOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: (request || requestAccessibility)] as CFDictionary
@@ -234,6 +273,7 @@ let browserBundleIds: Set<String> = [
   "com.apple.SafariTechnologyPreview", "company.thebrowser.Browser",
   "com.microsoft.edgemac", "com.brave.Browser", "org.mozilla.firefox",
   "org.chromium.Chromium", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+  "com.quark.desktop",
 ]
 
 func sanitizedPageUrl(_ raw: String) -> String? {
@@ -287,6 +327,26 @@ func browserPage(window: AXUIElement) -> (url: String?, title: String?) {
   return (nil, title)
 }
 
+// One attribute, then the window's immediate children. Enough to notice a page
+// in a browser that is not on the known list, without walking every Notes window.
+func quickPageUrl(_ window: AXUIElement) -> String? {
+  AXUIElementSetMessagingTimeout(window, 0.05)
+  if let document = accessibilityString(window, "AXDocument" as CFString),
+     let sanitized = sanitizedPageUrl(document) {
+    return sanitized
+  }
+  var childrenRef: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+        let children = childrenRef as? [AXUIElement] else { return nil }
+  for child in children.prefix(12) {
+    AXUIElementSetMessagingTimeout(child, 0.05)
+    if accessibilityString(child, kAXRoleAttribute as CFString) == "AXWebArea" {
+      return webAreaUrl(child)
+    }
+  }
+  return nil
+}
+
 // MARK: - Secure input
 
 // macOS raises secure input mode while a password field owns focus. Recording
@@ -322,39 +382,32 @@ var focusedElementCache: AXUIElement?
 var focusedElementGeneration: UInt64 = 0
 let enrichmentQueue = DispatchQueue(label: "human-recorder.enrichment")
 let enrichmentQueueKey = DispatchSpecificKey<Bool>()
-enrichmentQueue.setSpecific(key: enrichmentQueueKey, value: true)
 // These caches and the AX sampling clock are owned by enrichmentQueue.
 var privacyWindow: AXUIElement?
 var privacyWindowPid: pid_t?
-var privacyWindowValue = false
+var privacyWindowValue: Bool?
 
-// Private windows are excluded from Computer History whatever the rules say,
-// but the recorder can only honor what a browser will tell it. Chrome reports a
-// window's `mode` and Arc an `incognito` flag, both over Apple Events, which
-// macOS puts behind a one-time Automation prompt. Safari exposes nothing, so a
-// private Safari window cannot be told apart and is recorded like any other.
-let privateWindowQueries: [String: String] = [
-  "com.google.Chrome": "mode of front window is \"incognito\"",
-  "company.thebrowser.Browser": "incognito of front window",
+// Private browser windows are identified from the accessibility window title,
+// as in the Codex recorder. Do not query the browser through Apple Events:
+// that path triggers a macOS "Memmy wants to control Google Chrome" prompt
+// every time a user opens Chrome. A title without a private-mode marker is a
+// normal window; the recorder never needs an Automation entitlement.
+let privateWindowTitleMarkers = [
+  "(incognito)", "(private)", "(inprivate)", "(无痕)", "（无痕）", "无痕模式",
+  "无痕浏览", "隐私浏览", "私密浏览", "(シークレット", "シークレット モード",
+  "(プライベート", "private browsing", "private browsing", "navegação privada",
+  "navigation privée", "navigazione privata", "navegación privada", "inkognito",
+  "incognito", "inprivate", "anonym", "privat", "privé", "privado", "prywat",
+  "privatno", "gizli", "súkrom", "частн", "инкогнито", "приват", "приватний",
+  "개인정보 보호", "시크릿", "プライベート",
 ]
 
-// Asked once when focus moves, not per event. This runs on the main run loop
-// the event tap shares, so the timeout bounds a browser that is slow to answer
-// or an Automation prompt still waiting for the user. An unanswered question —
-// refused permission included — is treated as not private: recording Chrome
-// as though it were always private would stop recording it without a word.
-func frontWindowIsPrivate(bundleId: String) -> Bool {
-  guard let condition = privateWindowQueries[bundleId] else { return false }
-  let source = """
-  with timeout of 1 second
-    tell application id "\(bundleId)" to return (\(condition))
-  end timeout
-  """
-  var error: NSDictionary?
-  guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error), error == nil else {
-    return false
-  }
-  return result.booleanValue
+func frontWindowIsPrivate(window: AXUIElement, bundleId: String, pageDetected: Bool = false) -> Bool? {
+  guard pageDetected || browserBundleIds.contains(bundleId),
+        let title = accessibilityString(window, kAXTitleAttribute as CFString)
+  else { return false }
+  let normalized = title.lowercased()
+  return privateWindowTitleMarkers.contains { normalized.contains($0.lowercased()) }
 }
 
 struct FocusSnapshot {
@@ -396,9 +449,14 @@ func applicationEnvelope(_ application: [String: Any]? = nil) -> [String: Any] {
 }
 
 func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
+  emitLock.lock()
+  let session = historySessionId
+  emitLock.unlock()
   let source = application ?? applicationPayload()
+  guard !excludesUnconsentedWeChat(source) else { return }
   let at = timestamp()
   let capture = {
+    guard !excludesUnconsentedWeChat(source) else { return }
     guard let pid = source["pid"] as? pid_t,
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     else { return }
@@ -411,7 +469,9 @@ func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: 
     ]
     // Read the URL from this event's actual window, including same-tab
     // navigation. Never reuse an earlier URL when the lookup fails.
-    if let element = context.element, window["privateBrowsing"] as? Bool != true {
+    if let element = context.element,
+       window["privateBrowsing"] as? Bool != true,
+       window["privateBrowsingUnknown"] as? Bool != true {
       let windowKey = "\(pid):\(CFHash(element)):\(window["url"] as? String ?? "")"
       if let ax = axSnapshot(window: element, windowKey: windowKey) {
         // Navigation during tree traversal must not attach the new page's
@@ -427,7 +487,7 @@ func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: 
     }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
     for (key, value) in extra { payload[key] = value }
-    emit(payload)
+    emit(payload, expectedSession: session)
   }
   if DispatchQueue.getSpecific(key: enrichmentQueueKey) == true { capture() }
   else { enrichmentQueue.async(execute: capture) }
@@ -440,21 +500,29 @@ func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], ele
   if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
     _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &windowRef)
   }
+  let knownBrowser = browserBundleIds.contains(bundleId)
   var payload: [String: Any] = [:]
-  if browserBundleIds.contains(bundleId) { payload["browser"] = true }
+  if knownBrowser { payload["browser"] = true }
   guard let window = axElement(windowRef) else { return (payload, nil) }
   if let title = accessibilityString(window, kAXTitleAttribute as CFString) { payload["title"] = title }
-  if browserBundleIds.contains(bundleId), let url = browserPage(window: window).url {
-    payload["url"] = url
+  let pageUrl = knownBrowser ? browserPage(window: window).url : quickPageUrl(window)
+  if let pageUrl {
+    payload["browser"] = true
+    payload["url"] = pageUrl
   }
+  let treatsAsBrowser = knownBrowser || pageUrl != nil
   if privacyWindowPid != pid || privacyWindow == nil || !CFEqual(privacyWindow, window) {
     privacyWindowPid = pid
     privacyWindow = window
-    privacyWindowValue = privateWindowQueries[bundleId] == nil ? false : DispatchQueue.main.sync {
-      frontWindowIsPrivate(bundleId: bundleId)
+    privacyWindowValue = frontWindowIsPrivate(window: window, bundleId: bundleId, pageDetected: pageUrl != nil)
+  }
+  if treatsAsBrowser {
+    if let isPrivate = privacyWindowValue {
+      if isPrivate { payload["privateBrowsing"] = true }
+    } else {
+      payload["privateBrowsingUnknown"] = true
     }
   }
-  if privacyWindowValue { payload["privateBrowsing"] = true }
   return (payload, window)
 }
 
@@ -548,6 +616,7 @@ func axSnapshot(window: AXUIElement, windowKey: String) -> [String: Any]? {
 }
 
 let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
+  guard !excludesUnconsentedWeChat(applicationPayload()) else { return }
   let name = notification as String
   switch name {
   case kAXFocusedUIElementChangedNotification:
@@ -558,9 +627,18 @@ let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
   case kAXSelectedTextChangedNotification:
     emitSelectionChanged(element)
   case kAXValueChangedNotification:
-    // A background control changing value is not evidence that it owns focus.
-    // Keep unknown focus unknown until a focus notification or focused AX query.
-    break
+    // Only the foreground focused control may trigger a fresh window snapshot.
+    // Background controls and password fields cannot cause their contents to
+    // be captured merely by changing value.
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          !secureInputActive() else { break }
+    let focus = captureFocusSnapshot()
+    guard focus.pid == pid, let focused = focus.element, CFEqual(focused, element),
+          accessibilityString(element, kAXSubroleAttribute as CFString) != "AXSecureTextField"
+    else { break }
+    emitEvent(kind: "accessibility.changed", extra: [:])
   case kAXFocusedWindowChangedNotification, kAXWindowMovedNotification:
     axStateLock.lock()
     if name == kAXFocusedWindowChangedNotification { focusedElementCache = nil }
@@ -579,6 +657,8 @@ let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
 }
 
 func observeApplication(pid: pid_t) {
+  let application = applicationPayload()
+  guard !excludesUnconsentedWeChat(application) else { return }
   axStateLock.lock()
   let alreadyObserved = observedPid == pid
   axStateLock.unlock()
@@ -658,14 +738,19 @@ func modifierList(_ event: CGEvent) -> [String] {
 }
 
 let callback: CGEventTapCallBack = { _, type, event, _ in
+  // WeChat has a separate message-source consent flow. Do not enrich its
+  // keyboard or pointer events through the general screen recorder.
+  if isSeparatelyAuthorizedSource(applicationPayload()) { return Unmanaged.passUnretained(event) }
   switch type {
   case .leftMouseDown, .rightMouseDown:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let point = event.location
     let clickCount = event.getIntegerValueField(.mouseEventClickState)
     let button = type == .rightMouseDown ? "right" : "left"
     let modifiers = modifierList(event)
     let application = applicationPayload()
     enrichmentQueue.async {
+      guard !excludesUnconsentedWeChat(application) else { return }
       var target = resolveTarget(at: point)
       if target.isEmpty { target = ["role": "AXUnknown"] }
       if type == .leftMouseDown { dragOrigin = (point, target) }
@@ -678,9 +763,11 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
       )
     }
   case .leftMouseUp:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let point = event.location
     let application = applicationPayload()
     enrichmentQueue.async {
+      guard !excludesUnconsentedWeChat(application) else { return }
       guard let origin = dragOrigin else { return }
       dragOrigin = nil
       let dx = point.x - origin.point.x
@@ -696,6 +783,7 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
       )
     }
   case .keyDown:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
     let text = characters(from: event)
     let modifiers = modifierList(event)
@@ -703,6 +791,7 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
     let secure = secureInputActive()
     let focus = captureFocusSnapshot()
     enrichmentQueue.async {
+      guard !excludesUnconsentedWeChat(application) else { return }
       let target = keyboardTarget(snapshot: focus, pid: application["pid"] as? pid_t)
       guard let classified = classifiedKeyboard(keyCode: keyCode, text: text, modifiers: modifiers, secure: secure),
             let kind = classified["kind"] as? String,
@@ -720,60 +809,79 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
 }
 
 // MARK: - Entry point
+// The standalone entry point is main.swift; the installed app uses the
+// lifecycle functions below from its own process.
 
-let arguments = Set(CommandLine.arguments.dropFirst())
-if arguments.contains("--permissions") || arguments.contains("--request-permissions") {
-  emit(permissionsPayload(
-    request: arguments.contains("--request-permissions"),
-    requestInputMonitoring: arguments.contains("--request-input-monitoring"),
-    requestScreenRecording: arguments.contains("--request-screen-recording"),
-    requestAccessibility: arguments.contains("--request-accessibility")
-  ))
-  exit(0)
+var historyRunLoopSource: CFRunLoopSource?
+var historyWorkspaceObserver: NSObjectProtocol?
+
+public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
+  guard eventTap == nil else { throw NSError(domain: "MemmyComputerHistory", code: 1,
+    userInfo: [NSLocalizedDescriptionKey: "Computer History is already recording."]) }
+  guard CGPreflightListenEventAccess() else {
+    throw NSError(domain: "MemmyComputerHistory", code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "Input Monitoring permission is required for Memmy Computer Use."])
+  }
+  enrichmentQueue.setSpecific(key: enrichmentQueueKey, value: true)
+  guard let tap = CGEvent.tapCreate(
+    tap: .cgSessionEventTap,
+    place: .headInsertEventTap,
+    options: .listenOnly,
+    eventsOfInterest: CGEventMask(eventMask),
+    callback: callback,
+    userInfo: nil
+  ) else {
+    throw NSError(domain: "MemmyComputerHistory", code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "Unable to create the event tap. Grant Input Monitoring to Memmy Computer Use and restart it."])
+  }
+  emitLock.lock()
+  historySessionId &+= 1
+  historyEventSink = output
+  emitLock.unlock()
+  eventTap = tap
+  historyWorkspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+    forName: NSWorkspace.didActivateApplicationNotification,
+    object: nil,
+    queue: .main
+  ) { notification in
+    let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+    let payload = applicationPayload(application)
+    if !isSeparatelyAuthorizedSource(payload), let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
+    emitEvent(kind: "window.changed", application: payload, extra: [:])
+  }
+  let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+  historyRunLoopSource = source
+  CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+  CGEvent.tapEnable(tap: tap, enable: true)
+  if !isSeparatelyAuthorizedSource(applicationPayload()), let pid = applicationPayload()["pid"] as? pid_t {
+    observeApplication(pid: pid)
+  }
+  emitEvent(kind: "session.started", extra: [:])
 }
 
-guard let tap = CGEvent.tapCreate(
-  tap: .cgSessionEventTap,
-  place: .headInsertEventTap,
-  options: .listenOnly,
-  eventsOfInterest: CGEventMask(eventMask),
-  callback: callback,
-  userInfo: nil
-) else {
-  FileHandle.standardError.write(
-    "Unable to create the event tap. Grant Input Monitoring permission and restart the recorder.\n"
-      .data(using: .utf8)!
-  )
-  exit(2)
+public func stopHistoryRecorder() {
+  guard let tap = eventTap else { return }
+  CGEvent.tapEnable(tap: tap, enable: false)
+  if let source = historyRunLoopSource {
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+    historyRunLoopSource = nil
+  }
+  if let observer = historyWorkspaceObserver {
+    NSWorkspace.shared.notificationCenter.removeObserver(observer)
+    historyWorkspaceObserver = nil
+  }
+  if let observer = observedObserver {
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+  }
+  emitLock.lock()
+  historyEventSink = nil
+  historySessionId &+= 1
+  emitLock.unlock()
+  eventTap = nil
+  dragOrigin = nil
+  axStateLock.lock()
+  focusedElementCache = nil
+  observedPid = nil
+  observedObserver = nil
+  axStateLock.unlock()
 }
-eventTap = tap
-
-let workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-  forName: NSWorkspace.didActivateApplicationNotification,
-  object: nil,
-  queue: .main
-) { notification in
-  let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-  let payload = applicationPayload(application)
-  if let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
-  emitEvent(kind: "window.changed", application: payload, extra: [:])
-}
-
-let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-CGEvent.tapEnable(tap: tap, enable: true)
-
-if let pid = applicationPayload()["pid"] as? pid_t { observeApplication(pid: pid) }
-emitEvent(kind: "session.started", extra: [:])
-
-signal(SIGTERM) { _ in
-  emitEvent(kind: "session.ended", extra: [:])
-  exit(0)
-}
-signal(SIGINT) { _ in
-  emitEvent(kind: "session.ended", extra: [:])
-  exit(0)
-}
-
-CFRunLoopRun()
-NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)

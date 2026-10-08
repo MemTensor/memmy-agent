@@ -318,6 +318,9 @@ describe("lifecycle hooks", () => {
     const p = {
       generation: { maxTokens: 128 },
       getDefaultModel: () => "test-model",
+      // Keep the protected current turn within budget; the consolidation
+      // projection below supplies the over-budget state this test exercises.
+      estimatePromptTokens: vi.fn((): [number, string] => [100, "test"]),
       chatWithRetry: vi.fn(async (args: any) => {
         calls.push(args);
         events.push(`model-${calls.length}`);

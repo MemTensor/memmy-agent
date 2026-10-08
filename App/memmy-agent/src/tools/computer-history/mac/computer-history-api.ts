@@ -5,6 +5,7 @@ import {
 import {
   DEFAULT_OBSERVATION_SETTINGS,
   parseObservationSettings,
+  type ObservationSettings,
 } from "./observation-settings.js";
 import {
   applicationsFromMarkdown,
@@ -34,8 +35,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationIconReader } from "./application-icon.js";
+import { isPersonalWeChatHistorySupported } from "../platform.js";
+import { isWindows11, listWindowsApplications } from "../win/win11.js";
+import { HistoryMemoryAdapter, type HistoryEvidence, type HistorySkillGroup } from "../memory-adapter.js";
 import { summarizeToFile } from "./summarize-history.js";
 import { writeWorkflowCandidate } from "../../computer-use/extract-workflow-candidate.js";
+import { WeChatHistoryConsentStore, defaultWeChatConsentFile } from "./wechat-consent.js";
+import { WeChatMessageBatchReader } from "./wechat-message-batch.js";
+import { appendWeChatMessagesToHistory } from "./wechat-history-ingest.js";
+import { physicalRuntimeAsset } from "./native-helper.js";
 
 export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
@@ -58,6 +66,10 @@ export interface ComputerHistoryEntry {
   summaryWindow: "10min" | "6h" | null;
   /** Exact ten-minute sources verifiable from metadata or citations; empty when unknown. */
   coveredHistoryIds: string[];
+  /** Memory Skill IDs explicitly linked by the optional History adapter. */
+  skillMemoryIds?: string[];
+  /** ID of the synced observation in the separate Memory service, when available. */
+  memoryId?: string;
   /** Whether this entry's raw events are exempt from the retention window. */
   pinned: boolean;
   /** The raw event stream this summary was written from, while it still exists. */
@@ -79,6 +91,7 @@ export interface ComputerHistoryWorkflow {
 }
 
 export interface ComputerHistorySnapshot {
+  memorySync?: { lastSyncedAt: string | null; error: string | null; skillError?: string | null };
   observation: {
     state: ObservationState;
     startedAt: string | null;
@@ -94,6 +107,12 @@ export interface ComputerHistorySnapshot {
 
   histories: ComputerHistoryEntry[];
   workflows: ComputerHistoryWorkflow[];
+  wechat?: {
+    enabled: boolean;
+    connection: "disabled" | "unavailable" | "needs_setup" | "connecting" | "connected" | "error";
+    phase: string | null;
+    error: string | null;
+  };
   privacy: {
     screenshots: false;
     audio: false;
@@ -318,6 +337,8 @@ export class ComputerHistoryDemoService {
   private readonly recorderChildren = new Set<ChildProcessWithoutNullStreams>();
   private readonly recorderExits = new Map<ChildProcessWithoutNullStreams, Promise<void>>();
   private readonly observationSettings: ObservationSettingsStore;
+  private readonly memoryAdapter: HistoryMemoryAdapter;
+  private readonly skillGroupCache = new Map<string, { revision: string; group: HistorySkillGroup | null }>();
   private readonly applicationIcons: ApplicationIconReader;
   private llmRuntime: LLMRuntimeResolver | null = null;
   /** Coalesce only an active pass, so failures remain eligible for retry. */
@@ -340,6 +361,18 @@ export class ComputerHistoryDemoService {
   private permissions: HistoryPermissions | undefined;
   private readonly permissionReader: typeof readHistoryPermissions;
   private permissionStartVersion = 0;
+  private readonly weChatConsent: WeChatHistoryConsentStore;
+  private weChatPollTimer: ReturnType<typeof setInterval> | null = null;
+  private weChatPollInFlight = false;
+  private weChatNeedsBaseline = true;
+  private weChatError: string | null = null;
+  private weChatConnectionChild: ChildProcessWithoutNullStreams | null = null;
+  private weChatPhase: string | null = null;
+  private restorationAttempted = false;
+
+  private get recordingIntentFile(): string {
+    return path.join(this.historyDirectory, "recording-intent.json");
+  }
 
   private get segmentsDirectory(): string {
     return path.join(this.recordingDirectory, SEGMENTS_DIRECTORY_NAME);
@@ -358,16 +391,19 @@ export class ComputerHistoryDemoService {
     recordingDirectory?: string;
     workflowDirectory?: string;
     observationSettingsFile?: string;
+    weChatConsentFile?: string;
     permissionReader?: typeof readHistoryPermissions;
   } = {}) {
     this.recorderScript = input.recorderScript ?? moduleFile("record-human-history.js");
+    const memmyHome = process.env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy");
     this.historyDirectory = path.resolve(input.historyDirectory
-      ?? path.join(os.homedir(), ".memmy", "computer-history", "histories"));
+      ?? path.join(memmyHome, "computer-history", "histories"));
     this.recordingDirectory = path.resolve(input.recordingDirectory
-      ?? path.join(os.homedir(), ".memmy", "computer-history", "recordings"));
+      ?? path.join(memmyHome, "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
-      ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
+      ?? path.join(memmyHome, "computer-history", "workflows"));
     this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
+    this.weChatConsent = new WeChatHistoryConsentStore(input.weChatConsentFile ?? defaultWeChatConsentFile());
     this.applicationIcons = new ApplicationIconReader();
     this.permissionReader = input.permissionReader ?? readHistoryPermissions;
     this.liveSummaryIntervalMs = boundedInterval(
@@ -376,6 +412,245 @@ export class ComputerHistoryDemoService {
       15_000,
       10 * 60_000,
     );
+    this.memoryAdapter = new HistoryMemoryAdapter({
+      historyDirectory: this.historyDirectory,
+      enabled: () => true,
+      listEvidence: () => this.memoryEvidence(),
+      listSkillGroups: () => this.memorySkillGroups(),
+      onSkillCandidate: (group, skillId, previousSkillId) => this.updateSkillGroupLinks(group, skillId, previousSkillId),
+    });
+  }
+
+  /** Restore only a recording explicitly left on before the previous exit. */
+  async restoreObservationOnLaunch(): Promise<void> {
+    if (this.restorationAttempted || this.shuttingDown) return;
+    this.restorationAttempted = true;
+    let intent: "running" | "paused" | "stopped" = "stopped";
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(this.recordingIntentFile, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const state = (parsed as { state?: unknown }).state;
+        if (state === "running" || state === "paused") intent = state;
+      }
+    } catch { /* Missing or damaged intent fails closed. */ }
+    if (intent === "paused") {
+      this.observationState = "paused";
+      return;
+    }
+    if (intent !== "running") return;
+    try { await this.startObservationWithPermissions(); }
+    catch (error) { this.failObservation(error instanceof Error ? error.message : String(error)); }
+  }
+
+  private saveRecordingIntent(state: "running" | "paused" | "stopped"): void {
+    fs.mkdirSync(this.historyDirectory, { recursive: true });
+    // A failed pause/stop write must still revoke the previous running intent.
+    if (state !== "running") fs.rmSync(this.recordingIntentFile, { force: true });
+    const temporary = `${this.recordingIntentFile}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify({ state }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+      fs.renameSync(temporary, this.recordingIntentFile);
+    } finally { fs.rmSync(temporary, { force: true }); }
+  }
+
+  private get weChatStateDirectory(): string {
+    return path.dirname(this.weChatConsent.filePath);
+  }
+
+  private weixinKeyHelper(): string {
+    return physicalRuntimeAsset(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "win", "weixin_keys.py"));
+  }
+
+  private weChatReader(): WeChatMessageBatchReader | null {
+    const directory = this.weChatStateDirectory;
+    const keyFile = path.join(directory, "keys.json");
+    const cursorFile = path.join(directory, "cursor.json");
+    const accountFile = path.join(directory, "account.json");
+    const library = process.platform === "win32" ? "builtin" : this.weChatSqlcipherLibrary;
+    const required = [keyFile, cursorFile, accountFile];
+    if (library !== "builtin") required.push(library);
+    if (!required.every((file) => fs.existsSync(file))) return null;
+    try {
+      const account = JSON.parse(fs.readFileSync(accountFile, "utf8")) as Record<string, unknown>;
+      if (typeof account.databaseRoot !== "string" || path.basename(account.databaseRoot) !== "db_storage") return null;
+      return new WeChatMessageBatchReader({
+        databaseRoot: account.databaseRoot, keyFile, cursorFile,
+        sqlcipherLibrary: library, consent: this.weChatConsent,
+        python: process.platform === "win32" ? "py" : "/usr/bin/python3",
+        pythonArgs: process.platform === "win32" ? ["-3"] : [],
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private get weChatSqlcipherLibrary(): string {
+    if (process.env.MEMMY_SQLCIPHER_LIBRARY) return process.env.MEMMY_SQLCIPHER_LIBRARY;
+    const helper = physicalRuntimeAsset(moduleFile("wechat/read_messages.py"));
+    const marker = `${path.sep}app.asar.unpacked${path.sep}`;
+    const index = helper.indexOf(marker);
+    if (index >= 0) {
+      return path.join(helper.slice(0, index), "native", "sqlcipher", "libsqlcipher.dylib");
+    }
+    return "/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib";
+  }
+
+  private weChatStatus(): NonNullable<ComputerHistorySnapshot["wechat"]> {
+    if (!this.weChatConsent.read().enabled) {
+      return { enabled: false, connection: "disabled", phase: null, error: null };
+    }
+    if (this.weChatConnectionChild) {
+      return { enabled: true, connection: "connecting", phase: this.weChatPhase, error: null };
+    }
+    const windows = process.platform === "win32";
+    const helper = windows
+      ? this.weixinKeyHelper()
+      : physicalRuntimeAsset(moduleFile("wechat/connect.py"));
+    if ((!windows && !fs.existsSync(this.weChatSqlcipherLibrary)) || !fs.existsSync(helper)) {
+      return { enabled: true, connection: "unavailable", phase: null, error: null };
+    }
+    if (this.weChatError) return { enabled: true, connection: "error", phase: null, error: this.weChatError };
+    return { enabled: true, connection: this.weChatReader() ? "connected" : "needs_setup",
+      phase: null, error: null };
+  }
+
+  /** The user's one extra permission gates both the AX recorder and DB reader. */
+  setWeChatChatAccess(enabled: boolean): ComputerHistorySnapshot {
+    this.assertPersonalWeChatHistorySupported();
+    if (enabled) {
+      if (this.segment) {
+        fs.chmodSync(this.segment.directory, 0o700);
+        if (fs.existsSync(this.segment.eventsFile)) fs.chmodSync(this.segment.eventsFile, 0o600);
+      }
+      this.weChatConsent.grant();
+      if (this.observationState === "running") this.startWeChatPolling();
+      if (this.llmRuntime) this.retrySummariesInBackground();
+    } else {
+      this.weChatConsent.revoke();
+      this.clearWeChatPolling();
+      this.weChatNeedsBaseline = true;
+    }
+    this.weChatError = null;
+    return this.snapshot();
+  }
+
+  /** User-initiated setup: the helper reports phases while it restores WeChat. */
+  connectWeChat(): ComputerHistorySnapshot {
+    this.assertPersonalWeChatHistorySupported();
+    if (!this.weChatConsent.read().enabled) {
+      throw new ComputerHistoryApiError(409, "WeChat chat access is disabled");
+    }
+    if (this.weChatConnectionChild) return this.snapshot();
+    const windows = process.platform === "win32";
+    const library = windows ? "builtin" : this.weChatSqlcipherLibrary;
+    const helper = windows ? this.weixinKeyHelper() : physicalRuntimeAsset(moduleFile("wechat/connect.py"));
+    if ((!windows && !fs.existsSync(library)) || !fs.existsSync(helper)) {
+      throw new ComputerHistoryApiError(503, "WeChat local reader is unavailable");
+    }
+    this.weChatError = null;
+    this.weChatPhase = "preparing";
+    const command = windows ? "py" : "/usr/bin/python3";
+    const args = windows
+      ? ["-3", helper, "--output", path.join(this.weChatStateDirectory, "keys.json"),
+        "--consent-file", this.weChatConsent.filePath]
+      : [helper, "--state", this.weChatStateDirectory, "--library", library];
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.end();
+    this.weChatConnectionChild = child;
+    let pending = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      pending += chunk.toString("utf8");
+      if (pending.length > 8_192) pending = pending.slice(-8_192);
+      while (pending.includes("\n")) {
+        const index = pending.indexOf("\n");
+        const line = pending.slice(0, index);
+        pending = pending.slice(index + 1);
+        try {
+          const status = JSON.parse(line) as { event?: unknown; category?: unknown };
+          if (typeof status.event === "string" && /^[a-z_]+$/u.test(status.event)) {
+            this.weChatPhase = status.event;
+          }
+          if ((status.event === "connection_error" || status.event === "capture_error")
+            && typeof status.category === "string") {
+            this.weChatError = status.category;
+          }
+        } catch { /* Status output contains no chat content; ignore malformed lines. */ }
+      }
+    });
+    child.stderr.resume();
+    child.once("error", () => {
+      if (this.weChatConnectionChild === child) {
+        this.weChatConnectionChild = null;
+        this.weChatError = "connection_process_failed";
+      }
+    });
+    child.once("exit", (code) => {
+      if (this.weChatConnectionChild !== child) return;
+      this.weChatConnectionChild = null;
+      this.weChatPhase = null;
+      if (!this.weChatConsent.read().enabled) return;
+      if (code !== 0 || !this.weChatReader()) {
+        this.weChatError ??= "connection_failed";
+      } else {
+        this.weChatError = null;
+        if (this.observationState === "running") {
+          // Mac connect writes a cursor at the current end. Windows connect only
+          // saves keys, so the next poll must baseline and skip existing rows.
+          this.weChatNeedsBaseline = windows;
+          void this.pollWeChatMessages();
+        }
+      }
+    });
+    return this.snapshot();
+  }
+
+  private async pollWeChatMessages(): Promise<void> {
+    if (this.weChatPollInFlight || this.observationState !== "running" || !this.segment
+      || !this.weChatConsent.read().enabled) return;
+    const reader = this.weChatReader();
+    if (!reader) return;
+    this.weChatPollInFlight = true;
+    try {
+      const baseline = this.weChatNeedsBaseline;
+      const batch = await reader.read(baseline ? "baseline" : "poll");
+      const segment = this.segment;
+      if (!segment || this.observationState !== "running"
+        || this.weChatConsent.read().consentId !== batch.consentId) return;
+      if (baseline) {
+        reader.acknowledge(batch.nextCursor, batch.consentId);
+        this.weChatNeedsBaseline = false;
+        this.weChatError = null;
+        return;
+      }
+      const appended = appendWeChatMessagesToHistory(this.segmentsDirectory,
+        segment.eventsFile, batch.messages);
+      reader.acknowledge(batch.nextCursor, batch.consentId);
+      if (appended) this.invalidateSummary(segment.historyFile);
+      this.weChatError = null;
+    } catch (error) {
+      this.weChatError = error instanceof Error ? error.message : "WeChat reader failed";
+    } finally {
+      this.weChatPollInFlight = false;
+    }
+  }
+
+  private assertPersonalWeChatHistorySupported(): void {
+    if (!isPersonalWeChatHistorySupported()) {
+      throw new ComputerHistoryApiError(400, "Personal WeChat History is available on Apple silicon macOS only");
+    }
+  }
+
+  private startWeChatPolling(): void {
+    if (!isPersonalWeChatHistorySupported() || this.weChatPollTimer || !this.weChatConsent.read().enabled) return;
+    void this.pollWeChatMessages();
+    this.weChatPollTimer = setInterval(() => void this.pollWeChatMessages(), 15_000);
+    this.weChatPollTimer.unref();
+  }
+
+  private clearWeChatPolling(): void {
+    if (this.weChatPollTimer) clearInterval(this.weChatPollTimer);
+    this.weChatPollTimer = null;
+    this.weChatNeedsBaseline = true;
   }
 
   /**
@@ -402,12 +677,110 @@ export class ComputerHistoryDemoService {
           return "";
         }
       })
-      .filter((markdown) => markdown && isNarrated(markdown));
+      .filter((markdown) => markdown && isNarrated(markdown)
+        && (this.weChatConsent.read().enabled || !markdown.includes("com.tencent.xinWeChat")));
   }
 
   /** An application's icon for the timeline, as a data URL. */
   applicationIcon(bundleId: string): Promise<string | null> {
     return this.applicationIcons.iconFor(bundleId);
+  }
+
+  listApplications(): Promise<Array<{ bundleId: string; name: string }>> {
+    return isWindows11() ? listWindowsApplications() : this.applicationIcons.listApplications();
+  }
+
+  getObservationSettings(): ObservationSettings {
+    return this.observationSettings.read();
+  }
+
+  updateObservationSettings(input: unknown): ObservationSettings {
+    try {
+      const next = this.observationSettings.write(input);
+      this.memoryAdapter.schedule();
+      return next;
+    } catch (error) {
+      throw new ComputerHistoryApiError(422, error instanceof Error ? error.message : "invalid observation settings");
+    }
+  }
+
+  private memoryEvidence(): HistoryEvidence[] {
+    return this.readMarkdownDirectory(this.historyDirectory)
+      .filter((entry) => isNarrated(entry.markdown) && (
+        (entry.summaryWindow === "10min"
+          && readSourceType(entry.markdown) === "captured"
+          && readFrontmatterValue(entry.markdown, "status") === "completed")
+        || (entry.summaryWindow === "6h"
+          && readSourceType(entry.markdown) === "rollup"
+          && entry.coveredHistoryIds.length > 0
+          && instantFromId(entry.id) !== null
+          && isSixHourWindowClosed(instantFromId(entry.id)!))
+      ))
+      .flatMap((entry) => {
+        const start = instantFromId(entry.id);
+        if (!start) return [];
+        const content = entry.markdown.replace(/^---\n[\s\S]*?\n---\n/u, "").trim().slice(0, 16_000);
+        if (!content) return [];
+        const windowMs = entry.summaryWindow === "6h" ? SIX_HOUR_MS : SEGMENT_DURATION_MS;
+        return [{ id: entry.id, title: entry.title.slice(0, 160), content,
+          revision: fs.statSync(entry.filePath).mtime.toISOString(),
+          startedAt: start.toISOString(), endedAt: new Date(start.getTime() + windowMs).toISOString(),
+          applications: entry.applications,
+          summaryWindow: entry.summaryWindow ?? "10min",
+          parentSourceRecordIds: entry.coveredHistoryIds }];
+      })
+      .sort((left, right) => Number(left.summaryWindow === "6h") - Number(right.summaryWindow === "6h")
+        || left.startedAt.localeCompare(right.startedAt));
+  }
+
+  private memorySkillGroups(): HistorySkillGroup[] {
+    const entries = this.readMarkdownDirectory(this.historyDirectory);
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    return entries.filter((entry) => entry.summaryWindow === "6h"
+      && readSourceType(entry.markdown) === "rollup" && isNarrated(entry.markdown)
+      && entry.coveredHistoryIds.length >= 2)
+      .flatMap((rollup) => {
+        const at = instantFromId(rollup.id);
+        if (!at || !isSixHourWindowClosed(at)) return [];
+        const revision = fs.statSync(rollup.filePath).mtime.toISOString();
+        const cached = this.skillGroupCache.get(rollup.id);
+        if (cached?.revision === revision) return cached.group ? [cached.group] : [];
+        const allSources = rollup.coveredHistoryIds.flatMap((id) => {
+          const entry = byId.get(id);
+          if (!entry || entry.summaryWindow !== "10min" || readSourceType(entry.markdown) !== "captured") return [];
+          // Chat content can inform History/Memory, but a chat window alone is
+          // not evidence of a repeatable computer operation.
+          if (entry.applications.some((application) => ["com.tencent.xinwechat", "com.tencent.wechat",
+            "win32.wechat", "win32.weixin"].includes(application.toLowerCase()))) return [];
+          const steps = this.deriveSteps(id).slice(0, 8);
+          return steps.length >= 2 ? [{ id, steps }] : [];
+        });
+        const sources = allSources.length <= 11 ? allSources : Array.from({ length: 11 }, (_, index) =>
+          allSources[Math.round(index * (allSources.length - 1) / 10)]!);
+        const actions = sources.flatMap((source) => source.steps.map((text) => ({
+          sourceRecordId: source.id, text: text.slice(0, 300)
+        }))).slice(0, 60);
+        const group: HistorySkillGroup | null = sources.length >= 2 && actions.length >= 4
+          ? { id: rollup.id, revision, sourceRecordIds: [rollup.id, ...sources.map((source) => source.id)], actions }
+          : null;
+        this.skillGroupCache.set(rollup.id, { revision, group });
+        return group ? [group] : [];
+      });
+  }
+
+  private updateSkillGroupLinks(group: HistorySkillGroup, skillId: string | null, previousSkillId?: string): void {
+    const links = this.readSkillLinks();
+    let changed = false;
+    for (const id of group.sourceRecordIds) {
+      const existing = links[id] ?? [];
+      const next = existing.filter((candidate) => candidate !== previousSkillId);
+      if (skillId && validSkillMemoryId(skillId)
+        && fs.existsSync(path.join(this.historyDirectory, `${id}.md`)) && !next.includes(skillId)) next.push(skillId);
+      if (next.length) links[id] = next;
+      else delete links[id];
+      if (next.length !== existing.length || next.some((candidate, index) => candidate !== existing[index])) changed = true;
+    }
+    if (changed) atomicWriteText(this.skillLinksFile, JSON.stringify(links));
   }
 
   /** Supplies the model used to narrate finalized segments. */
@@ -527,10 +900,18 @@ export class ComputerHistoryDemoService {
     return written;
   }
 
+  /** Lightweight status for the menu bar; avoids reading summaries and Skill links. */
+  observationStatus(): { state: ObservationState } {
+    return { state: this.observationState };
+  }
+
   snapshot(): ComputerHistorySnapshot {
     this.cleanupExpiredRecordings();
     const snapshotAt = new Date();
+    const historyEntries = this.readMarkdownDirectory(this.historyDirectory);
+    const skillIdsByHistory = this.readSkillLinks();
     return {
+      memorySync: this.memoryAdapter.status(),
       observation: {
         state: this.observationState,
         startedAt: this.observationStartedAt,
@@ -543,10 +924,13 @@ export class ComputerHistoryDemoService {
         ...(this.permissions ? { permissions: this.permissions } : {}),
       },
       histories: [
-        ...this.readMarkdownDirectory(this.historyDirectory).map((entry) => {
+        ...historyEntries.map((entry) => {
           const sourceType = readSourceType(entry.markdown);
           const hasRawEvents = this.segmentDirectoryFor(entry.id) !== null;
-          return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
+          const skillMemoryIds = skillIdsByHistory[entry.id] ?? [];
+          const memoryId = this.memoryAdapter.memoryIdFor(entry.id);
+          return { ...entry, skillMemoryIds, ...(memoryId ? { memoryId } : {}),
+            sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
         }),
       ]
         // An entry appears once it has been written. Showing the placeholder
@@ -580,6 +964,7 @@ export class ComputerHistoryDemoService {
         filePath: entry.filePath,
         sourceHistoryId: nullableFrontmatterValue(entry.markdown, "source_history_id"),
       })),
+      ...(isPersonalWeChatHistorySupported() ? { wechat: this.weChatStatus() } : {}),
       privacy: {
         screenshots: false,
         audio: false,
@@ -588,6 +973,43 @@ export class ComputerHistoryDemoService {
         eventStreamDirectory: this.segmentsDirectory,
       },
     };
+  }
+
+  /** Called by the optional Memory adapter only after a Skill ID is persisted. */
+  setHistorySkillLinks(historyId: string, skillIds: string[]): ComputerHistorySnapshot {
+    const history = this.readMarkdownDirectory(this.historyDirectory).find((entry) => entry.id === historyId);
+    if (!history) throw new ComputerHistoryApiError(404, "history not found");
+    if (!Array.isArray(skillIds) || skillIds.length > 20 || skillIds.some((id) => !validSkillMemoryId(id))) {
+      throw new ComputerHistoryApiError(400, "invalid memory Skill IDs");
+    }
+    const links = this.readSkillLinks();
+    const unique = [...new Set(skillIds)];
+    if (unique.length) links[historyId] = unique;
+    else delete links[historyId];
+    fs.mkdirSync(this.historyDirectory, { recursive: true });
+    atomicWriteText(this.skillLinksFile, JSON.stringify(links));
+    return this.snapshot();
+  }
+
+  private get skillLinksFile(): string {
+    return path.join(this.historyDirectory, "skill-links.json");
+  }
+
+  private readSkillLinks(): Record<string, string[]> {
+    try {
+      if (fs.statSync(this.skillLinksFile).size > 1024 * 1024) return {};
+      const parsed: unknown = JSON.parse(fs.readFileSync(this.skillLinksFile, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      const result: Record<string, string[]> = Object.create(null);
+      for (const [historyId, ids] of Object.entries(parsed)) {
+        if (!Array.isArray(ids)) continue;
+        const valid = [...new Set(ids.filter(validSkillMemoryId))].slice(0, 20);
+        if (valid.length) result[historyId] = valid;
+      }
+      return result;
+    } catch {
+      return {};
+    }
   }
 
   importMarkdown(input: { title?: string; markdown: string; sourceType?: ComputerHistorySourceType }): ComputerHistorySnapshot {
@@ -615,8 +1037,10 @@ export class ComputerHistoryDemoService {
     const now = new Date();
     const id = this.segmentId(now);
     const directory = path.join(this.segmentsDirectory, id);
-    fs.mkdirSync(directory, { recursive: true });
-    fs.mkdirSync(this.historyDirectory, { recursive: true });
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    fs.mkdirSync(this.historyDirectory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(this.historyDirectory, 0o700);
     fs.mkdirSync(this.workflowDirectory, { recursive: true });
     const eventsFile = path.join(directory, "events.jsonl");
     const metadataFile = path.join(directory, "metadata.json");
@@ -633,7 +1057,7 @@ export class ComputerHistoryDemoService {
     fs.writeFileSync(
       metadataFile,
       `${JSON.stringify({ id, startedAt, eventsPath: eventsFile, state: "open" }, null, 2)}\n`,
-      "utf8",
+      { encoding: "utf8", mode: 0o600 },
     );
     return {
       child: null,
@@ -709,6 +1133,7 @@ export class ComputerHistoryDemoService {
     const permission = computerHistoryPermissionError(message);
     this.clearLiveSummaryTimer();
     this.clearRotationTimer();
+    this.clearWeChatPolling();
     if (this.segment) this.segment.child = null;
     if (permission === "accessibility" || permission === "inputMonitoring") {
       // Permission can be revoked between preflight and the event tap startup.
@@ -852,9 +1277,13 @@ export class ComputerHistoryDemoService {
     if (active?.version === version && active.runtime === llmRuntime) return active.promise;
     const markdown = readText(file);
     if (!markdown) return Promise.resolve(false);
+    const containsWeChat = markdown.includes("com.tencent.xinWeChat");
+    const weChatConsentId = this.weChatConsent.read().consentId;
+    if (containsWeChat && !weChatConsentId) return Promise.resolve(false);
     if (window === "6h" && !this.preservesRollupCoverage(destination, markdown)) return Promise.resolve(false);
     const isCurrent = () => !this.shuttingDown
       && this.llmRuntime === llmRuntime
+      && (!containsWeChat || this.weChatConsent.read().consentId === weChatConsentId)
       && (this.summaryVersions.get(destination) ?? 0) === version
       && readText(file) === markdown;
     const promise = this.narratePreparedSummary(
@@ -911,6 +1340,7 @@ export class ComputerHistoryDemoService {
       atomicWriteText(destination, applyNarrative(markdown, narrative));
       if (file !== destination) fs.rmSync(file, { force: true });
       this.setNarrationError(null);
+      if (window === "10min") this.memoryAdapter.schedule();
       return true;
     } catch (error) {
       this.setNarrationError(error instanceof Error ? error.message : String(error));
@@ -1111,19 +1541,27 @@ export class ComputerHistoryDemoService {
       this.failObservation(error instanceof Error ? error.message : String(error));
       throw error;
     }
+    this.saveRecordingIntent("running");
     this.startLiveSummaryTimer();
     this.startRotationTimer();
+    this.startWeChatPolling();
     return this.snapshot();
   }
 
   async checkPermissions(): Promise<HistoryPermissions> {
-    const status = await this.permissionReader();
+    // Windows UI Automation needs a signed-in desktop, but no TCC-style grant.
+    // The app's recording confirmation remains the explicit consent boundary.
+    const status = isWindows11()
+      ? { supported: true, accessibility: true, inputMonitoring: true }
+      : await this.permissionReader();
     this.permissions = status;
     return status;
   }
 
   async openPermission(permission: HistoryPermission, mode: "request" | "settings" = "settings"): Promise<HistoryPermissions> {
-    this.permissions = await openHistoryPermission(permission, mode);
+    this.permissions = isWindows11()
+      ? { supported: true, accessibility: true, inputMonitoring: true }
+      : await openHistoryPermission(permission, mode);
     return this.permissions;
   }
 
@@ -1132,7 +1570,7 @@ export class ComputerHistoryDemoService {
     const version = ++this.permissionStartVersion;
     const status = await this.checkPermissions();
     if (version !== this.permissionStartVersion || this.shuttingDown) return this.snapshot();
-    if (!status.supported) throw new ComputerHistoryApiError(400, "Computer History recording requires macOS");
+    if (!status.supported) throw new ComputerHistoryApiError(400, "Computer History recording requires macOS or Windows 11");
     if (!status.accessibility || !status.inputMonitoring) {
       this.observationError = null;
       if (this.observationState === "failed") {
@@ -1202,6 +1640,7 @@ export class ComputerHistoryDemoService {
     }
     this.clearLiveSummaryTimer();
     this.clearRotationTimer();
+    this.clearWeChatPolling();
     await this.trackRecorderTransition(async () => {
       const segment = this.segment;
       if (segment) await this.detachRecorder(segment);
@@ -1211,6 +1650,7 @@ export class ComputerHistoryDemoService {
         return;
       }
       this.observationState = "paused";
+      this.saveRecordingIntent("paused");
     });
     return this.snapshot();
   }
@@ -1225,9 +1665,11 @@ export class ComputerHistoryDemoService {
   private completeObservationStop(): void {
     this.clearLiveSummaryTimer();
     this.clearRotationTimer();
+    this.clearWeChatPolling();
     this.segment = null;
     this.observationStartedAt = null;
     this.observationState = "stopped";
+    if (!this.shuttingDown) this.saveRecordingIntent("stopped");
   }
 
   async stopObservation(): Promise<ComputerHistorySnapshot> {
@@ -1245,6 +1687,7 @@ export class ComputerHistoryDemoService {
     this.observationState = "stopping";
     this.clearLiveSummaryTimer();
     this.clearRotationTimer();
+    this.clearWeChatPolling();
     await this.trackRecorderTransition(async () => {
       if (segment) {
         await this.detachRecorder(segment);
@@ -1261,6 +1704,8 @@ export class ComputerHistoryDemoService {
   async shutdown(): Promise<void> {
     ++this.permissionStartVersion;
     this.shuttingDown = true;
+    if (this.weChatConnectionChild) this.weChatConsent.revoke();
+    this.clearWeChatPolling();
     if (this.summaryRetryTimer) clearTimeout(this.summaryRetryTimer);
     this.summaryRetryTimer = null;
     try {
@@ -1269,6 +1714,7 @@ export class ComputerHistoryDemoService {
       // Shutdown is best effort; a failed segment must not block app exit.
     }
     await Promise.all([...this.recorderChildren].map((child) => this.stopRecorderChild(child)));
+    await this.memoryAdapter.close();
   }
 
   private startLiveSummaryTimer(): void {
@@ -1524,10 +1970,16 @@ export class ComputerHistoryDemoService {
 
   /** Invalidate first: a model response may already be waiting to commit. */
   private removeStoredHistory(id: string): void {
+    this.memoryAdapter.remove(id);
     const file = path.join(this.historyDirectory, `${id}.md`);
     this.invalidateSummary(file);
     fs.rmSync(file, { force: true });
     fs.rmSync(`${file}.staging`, { force: true });
+    const links = this.readSkillLinks();
+    if (Object.hasOwn(links, id)) {
+      delete links[id];
+      atomicWriteText(this.skillLinksFile, JSON.stringify(links));
+    }
     for (const workflow of this.readMarkdownDirectory(this.workflowDirectory)) {
       if (nullableFrontmatterValue(workflow.markdown, "source_history_id") === id) {
         fs.rmSync(workflow.filePath, { force: true });
@@ -1800,7 +2252,7 @@ function canonicalSegmentId(historyId: string): string | null {
 function atomicWriteText(file: string, text: string): void {
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temporary, text, { encoding: "utf8", flag: "wx" });
+    fs.writeFileSync(temporary, text, { encoding: "utf8", flag: "wx", mode: 0o600 });
     fs.renameSync(temporary, file);
   } finally {
     fs.rmSync(temporary, { force: true });
@@ -1939,9 +2391,9 @@ function buildRecordedExperienceWorkflow(input: {
     "## Execution contract",
     "",
     "1. Start by stating the current request, the source History title, and the safety boundary inferred from the request.",
-    "2. Use only the Open Computer Use MCP tools `mcp_open_computer_use_list_apps`, `mcp_open_computer_use_get_app_state`, `mcp_open_computer_use_click`, `mcp_open_computer_use_type_text`, `mcp_open_computer_use_press_key`, and `mcp_open_computer_use_scroll`. If these tools are unavailable, stop and report the workflow as blocked; never substitute another desktop executor.",
+    "2. Use only the Memmy Computer Use MCP tools `mcp_memmy_computer_use_list_apps`, `mcp_memmy_computer_use_get_app_state`, `mcp_memmy_computer_use_click`, `mcp_memmy_computer_use_type_text`, `mcp_memmy_computer_use_press_key`, and `mcp_memmy_computer_use_scroll`. If these tools are unavailable, stop and report the workflow as blocked; never substitute another desktop executor.",
     "3. Execute the gates below strictly in order. Maintain a visible checklist such as `G1 verified / G2 pending`; never search for a later action while an earlier gate is unresolved.",
-    "4. Start with `list_apps` and `get_app_state`. Open Computer Use action tools return refreshed post-action state; use that result as verification evidence instead of immediately calling `get_app_state` again. Read state again only after an out-of-band UI change or when the action result lacks the evidence needed for the next gate.",
+    "4. Start with `list_apps` and `get_app_state`. Memmy Computer Use action tools return refreshed post-action state; use that result as verification evidence instead of immediately calling `get_app_state` again. Read state again only after an out-of-band UI change or when the action result lacks the evidence needed for the next gate.",
     "5. Element indexes are state-scoped. Use only an `element_index` from the latest returned state, and never reuse an index after a click, key action, scroll, navigation, modal change, or page reload.",
     "6. Recorded scrolls are navigation hints, not workflow gates. If a target is absent, scroll at most one viewport and inspect the state returned by that scroll; stop as soon as the target or its section anchor appears.",
     "7. If the live UI differs from the demonstration, adapt semantic localization but preserve the demonstrated intent and order. Do not guess missing values or choose approximate alternatives.",
@@ -2028,6 +2480,10 @@ function readFrontmatterValue(markdown: string, key: string): string | null {
 function nullableFrontmatterValue(markdown: string, key: string): string | null {
   const value = readFrontmatterValue(markdown, key);
   return value === "null" || value === "~" ? null : value;
+}
+
+function validSkillMemoryId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 200 && /^[\w:.-]+$/u.test(value);
 }
 
 function cleanTitle(value: string): string {

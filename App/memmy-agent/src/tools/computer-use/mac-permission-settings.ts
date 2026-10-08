@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { isMemmyComputerUseServer } from "../../config/computer-use-server.js";
 
 const execFileAsync = promisify(execFile);
 export type MacPermission = "accessibility" | "inputMonitoring" | "screenRecording";
@@ -11,7 +12,7 @@ const PANELS: Record<MacPermission, string> = {
 
 /** Only recognize native permission errors, never arbitrary page/AX text. */
 export function computerUsePermissionError(serverName: string, result: any): MacPermission | null {
-  if (serverName !== "open_computer_use" || result?.isError !== true) return null;
+  if (!isMemmyComputerUseServer(serverName) || result?.isError !== true) return null;
   for (const item of result.content ?? []) {
     if (item?.type !== "text" || typeof item.text !== "string") continue;
     const text = item.text.trim();
@@ -23,6 +24,11 @@ export function computerUsePermissionError(serverName: string, result: any): Mac
 
 /** The recorder emits this prefix only after checking its own native identity. */
 export function computerHistoryPermissionError(message: string): MacPermission | null {
+  // A grant can be revoked between the initial probe and creation of the
+  // in-app event tap. Recognize only the recorder's own prefixed failure.
+  if (/(?:^|\n)human history recording failed: (?:Input Monitoring permission is required for Memmy Computer Use\.|Unable to create the event tap\.)/.test(message)) {
+    return "inputMonitoring";
+  }
   const match = message.match(/(?:^|\n)human history recording failed: missing macOS permission: ([^.]+)\./);
   if (!match) return null;
   const missing = match[1].split(", ").map((name) => name.trim());

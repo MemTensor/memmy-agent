@@ -313,6 +313,9 @@ export class SkillReadModel {
     if (skill.status !== "activated" && skill.status !== "resolving") {
       throw this.deps.createError("conflict", `skill is not invokable in status ${skill.status}`);
     }
+    if (skill.status !== "activated" && skill.properties.internal_info.external_evidence_candidate) {
+      throw this.deps.createError("conflict", "observed Skill candidate requires review before use");
+    }
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     this.deps.assertMemoryInScope(skill, request.namespace);

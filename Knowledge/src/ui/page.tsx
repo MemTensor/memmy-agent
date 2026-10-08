@@ -1,4 +1,7 @@
 import {
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -48,6 +51,11 @@ function sharedAccountLabel(member: KnowledgeMember, zh: boolean) {
   const contact = member.contact?.trim() ?? "";
   if (!contact || contact === member.name.trim()) return member.name;
   return zh ? `${member.name}（${contact}）` : `${member.name} (${contact})`;
+}
+
+/** 当前编辑能力边界：收到的共享库只读；后续写权限接入时从这里扩展。 */
+function canEditKnowledgeBase(base: KnowledgeBase | undefined): boolean {
+  return Boolean(base && !base.shared);
 }
 
 function encodeLocalBody(body: unknown): {
@@ -114,29 +122,47 @@ const IC = {
   edit: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
   move: "M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20",
   open: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3",
+  select: "M3 7l2 2 4-4M3 17l2 2 4-4M13 6h8M13 12h8M13 18h8",
 } as const;
 
-/** 统一默认封面：浅青底 + 深青线性书本。 */
-function Cover({ large }: { large?: boolean }) {
+/** 列表标记：与侧栏「知识库」相同的线框书本，所有知识库共用。 */
+function Cover() {
   return (
-    <span className={large ? "mk-cover mk-cover-lg" : "mk-cover"} aria-hidden="true">
-      <svg viewBox="0 0 24 24">
-        <path
-          d="M5 3.5h9a2 2 0 0 1 2 2V18a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 18V3.5z"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinejoin="round"
-        />
-        <path d="M5 15.5h11" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    <span className="mk-cover" aria-hidden="true">
+      <svg
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 7v14" />
+        <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />
       </svg>
     </span>
   );
 }
 
-function fileExtension(name: string) {
-  const ext = name.includes(".") ? name.split(".").pop() : "";
-  return (ext || "file").toUpperCase().slice(0, 4);
+function formatCreatedAt(value: string | undefined, zh: boolean): string {
+  if (!value) return "—";
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return "—";
+  const date = new Date(time);
+  if (zh) {
+    const hour = String(date.getHours()).padStart(2, "0");
+    const minute = String(date.getMinutes()).padStart(2, "0");
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${hour}:${minute}`;
+  }
+  return new Intl.DateTimeFormat("en", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function highlightName(name: string, query: string): ReactNode {
@@ -167,6 +193,17 @@ function highlightName(name: string, query: string): ReactNode {
     cursor = next;
   }
   return nodes;
+}
+
+function FileNameLabel({ name, query }: { name: string; query: string }) {
+  return (
+    <div className="mk-fname-wrap" aria-label={name}>
+      <div className="mk-fname">{highlightName(name, query)}</div>
+      <span className="mk-fname-tooltip" role="tooltip">
+        {name}
+      </span>
+    </div>
+  );
 }
 
 function NameField({
@@ -207,6 +244,76 @@ function fileStatus(status: string, zh: boolean) {
   return { cls: "", label: status };
 }
 
+const KNOWLEDGE_LIST_WIDTH_KEY = "memmy.knowledge.list-width";
+const KNOWLEDGE_LIST_DEFAULT_WIDTH = 244;
+const KNOWLEDGE_LIST_MIN_WIDTH = 200;
+const KNOWLEDGE_LIST_MAX_WIDTH = 420;
+
+function clampKnowledgeListWidth(width: number): number {
+  return Math.min(KNOWLEDGE_LIST_MAX_WIDTH, Math.max(KNOWLEDGE_LIST_MIN_WIDTH, Math.round(width)));
+}
+
+function readKnowledgeListWidth(): number {
+  if (typeof window === "undefined") return KNOWLEDGE_LIST_DEFAULT_WIDTH;
+  try {
+    const raw = window.localStorage.getItem(KNOWLEDGE_LIST_WIDTH_KEY);
+    const value = raw == null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(value) ? clampKnowledgeListWidth(value) : KNOWLEDGE_LIST_DEFAULT_WIDTH;
+  } catch {
+    return KNOWLEDGE_LIST_DEFAULT_WIDTH;
+  }
+}
+
+/** 知识库列表栏宽度，交互与主侧边栏拖拽条一致。 */
+function useKnowledgeListWidth() {
+  const [width, setWidth] = useState(readKnowledgeListWidth);
+  const [drag, setDrag] = useState<{ startX: number; startWidth: number } | null>(null);
+  const setClampedWidth = useCallback((next: number) => setWidth(clampKnowledgeListWidth(next)), []);
+  const beginResize = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setDrag({ startX: event.clientX, startWidth: width });
+  }, [width]);
+  const resizeBy = useCallback((delta: number) => setClampedWidth(width + delta), [setClampedWidth, width]);
+  const sideStyle = useMemo<CSSProperties>(() => ({
+    width,
+    minWidth: KNOWLEDGE_LIST_MIN_WIDTH,
+    maxWidth: KNOWLEDGE_LIST_MAX_WIDTH,
+    flexBasis: width,
+  }), [width]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(KNOWLEDGE_LIST_WIDTH_KEY, String(width));
+    } catch {
+      // 存储不可用时，这次拖拽仍然生效。
+    }
+  }, [width]);
+
+  useEffect(() => {
+    if (!drag) return;
+    const body = window.document.body;
+    const previousCursor = body.style.cursor;
+    const previousUserSelect = body.style.userSelect;
+    body.style.cursor = "col-resize";
+    body.style.userSelect = "none";
+    const move = (event: PointerEvent) => setClampedWidth(drag.startWidth + event.clientX - drag.startX);
+    const stop = () => setDrag(null);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => {
+      body.style.cursor = previousCursor;
+      body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+  }, [drag, setClampedWidth]);
+
+  return { width, isResizing: Boolean(drag), sideStyle, beginResize, resizeBy };
+}
+
 function Switch({
   on,
   disabled,
@@ -243,6 +350,7 @@ export function KnowledgePage({
 }: KnowledgePageProps) {
   const zh = language.startsWith("zh");
   const t = (cn: string, en: string) => (zh ? cn : en);
+  const listWidth = useKnowledgeListWidth();
   const [settings, setSettings] = useState<KnowledgeSettings | null>(null);
   const [name, setName] = useState("");
   const [activeId, setActiveId] = useState("");
@@ -276,6 +384,7 @@ export function KnowledgePage({
   const [folderDeleteTarget, setFolderDeleteTarget] = useState<KnowledgeFolder | null>(null);
   const [folderDeleteMode, setFolderDeleteMode] = useState<"out" | "all">("out");
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  const [selecting, setSelecting] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -410,6 +519,11 @@ export function KnowledgePage({
     return () => controller.abort();
   }, [api, acceptSettings]);
   useEffect(() => {
+    if (uploadNotice?.kind !== "done" || uploadNotice.failed || uploadNotice.stopped) return;
+    const timer = setTimeout(() => setUploadNotice(null), 4000);
+    return () => clearTimeout(timer);
+  }, [uploadNotice]);
+  useEffect(() => {
     uploadAbort.current?.abort();
     uploadingRef.current = false;
     clearTimeout(refreshTimer.current);
@@ -437,7 +551,13 @@ export function KnowledgePage({
   }, [activeId]);
   useEffect(() => {
     setMembers([]);
-    if (!activeId || settings?.bases.find((base) => base.id === activeId)?.shared) return;
+    if (
+      !activeId ||
+      !canEditKnowledgeBase(
+        settings?.bases.find((base) => base.id === activeId),
+      )
+    )
+      return;
     void api<{ members: KnowledgeMember[] }>(`/bases/${encodeURIComponent(activeId)}/members`).then((value) => setMembers(value.members ?? [])).catch(() => setMembers([]));
   }, [activeId, settings, api]);
   useEffect(() => {
@@ -902,6 +1022,8 @@ export function KnowledgePage({
       : []
     : (listing?.files ?? []);
   const quotaReached = ownedBases.length >= maxBases;
+  const activeCanEdit = canEditKnowledgeBase(active);
+  const isReadOnlyShared = active?.shared === true && !activeCanEdit;
 
   /* ---------- 目录导航与操作 ---------- */
   const folderById = useMemo(
@@ -966,7 +1088,14 @@ export function KnowledgePage({
   const checkedFileCount = checked.size - checkedFolderCount;
   useEffect(() => {
     setChecked(new Set());
+    setSelecting(false);
   }, [folderId, page, fileQuery]);
+  function toggleSelecting() {
+    setSelecting((on) => {
+      if (on) setChecked(new Set());
+      return !on;
+    });
+  }
   function toggleChecked(key: string, on: boolean) {
     setChecked((current) => {
       const next = new Set(current);
@@ -1188,24 +1317,29 @@ export function KnowledgePage({
       <style>{styles}</style>
 
       {/* ============ 二级侧边栏 ============ */}
-      <aside className="mk-side">
+      <aside className="mk-side" style={listWidth.sideStyle}>
         <div className="mk-side-head">
           <h2>{t("知识库", "Knowledge")}</h2>
+          <button
+            type="button"
+            className="mk-new-btn"
+            data-window-drag-exclusion="knowledge-create"
+            disabled={!settings || !settings.serviceAvailable || quotaReached}
+            aria-label={
+              quotaReached
+                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
+                : t("新建知识库", "New knowledge base")
+            }
+            title={
+              quotaReached
+                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
+                : t("新建知识库", "New knowledge base")
+            }
+            onClick={() => setCreateOpen(true)}
+          >
+            <I d={IC.plus} size={16} />
+          </button>
         </div>
-        <button
-          type="button"
-          className="mk-new-btn"
-          disabled={!settings || !settings.serviceAvailable || quotaReached}
-          title={
-            quotaReached
-              ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
-              : t("新建知识库", "New knowledge base")
-          }
-          onClick={() => setCreateOpen(true)}
-        >
-          <I d={IC.plus} size={14} />
-          {t("新建知识库", "New knowledge base")}
-        </button>
         {settings && settings.bases.length > 3 && (
           <div className="mk-side-search">
             <I d={IC.search} size={13} />
@@ -1224,8 +1358,7 @@ export function KnowledgePage({
             <>
               <div className="mk-group">
                 <div className="mk-group-title">
-                  {t("个人知识库", "Personal")}
-                  <span className="mk-group-count">{ownedBases.length}</span>
+                  {t(`个人 (${ownedBases.length})`, `Personal (${ownedBases.length})`)}
                 </div>
                 {visibleOwned.map(kbItem)}
                 {!visibleOwned.length && (
@@ -1235,8 +1368,7 @@ export function KnowledgePage({
               {visibleShared.length > 0 && (
                 <div className="mk-group">
                   <div className="mk-group-title">
-                    {t("共享知识库", "Shared with me")}
-                    <span className="mk-group-count">{sharedBases.length}</span>
+                    {t(`共享 (${sharedBases.length})`, `Shared (${sharedBases.length})`)}
                   </div>
                   {visibleShared.map(kbItem)}
                 </div>
@@ -1252,27 +1384,26 @@ export function KnowledgePage({
           </footer>
         )}
       </aside>
+      <div
+        role="separator"
+        aria-label={t("调整知识库列表宽度", "Resize knowledge list")}
+        aria-orientation="vertical"
+        aria-valuemin={KNOWLEDGE_LIST_MIN_WIDTH}
+        aria-valuemax={KNOWLEDGE_LIST_MAX_WIDTH}
+        aria-valuenow={listWidth.width}
+        tabIndex={0}
+        className={`mk-resize${listWidth.isResizing ? " mk-resize-active" : ""}`}
+        onPointerDown={listWidth.beginResize}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          listWidth.resizeBy(event.key === "ArrowRight" ? 16 : -16);
+        }}
+      />
 
       {/* ============ 主内容区 ============ */}
       <main className="mk-main">
         <fieldset aria-busy={busy}>
-          {error && (
-            <div className="mk-error" role="alert">
-              {error}
-              <button
-                type="button"
-                onClick={() => {
-                  setError("");
-                  setRefresh((value) => value + 1);
-                  void run(async () =>
-                    acceptSettings(await api<KnowledgeSettings>("/settings")),
-                  );
-                }}
-              >
-                {t("重试", "Retry")}
-              </button>
-            </div>
-          )}
           {!settings ? (
             <p aria-live="polite" className="mk-loading">
               {t("正在读取知识库配置…", "Loading knowledge settings…")}
@@ -1335,148 +1466,89 @@ export function KnowledgePage({
           ) : (
             <>
               {/* ---------- 知识库头部 ---------- */}
-              <header className="mk-kbheader">
-                <Cover large />
+              <header className={`mk-kbheader${isReadOnlyShared ? " mk-kbheader-readonly" : ""}`}>
                 <div className="mk-titleblock">
-                  <h1>{active.name}</h1>
-                  <div className="mk-meta">
-                    {active.shared ? (
+                  <h1>
+                    {active.name}
+                    <span className="mk-kind">
+                      {active.shared
+                        ? t("共享", "Shared")
+                        : t("个人", "Personal")}
+                    </span>
+                  </h1>
+                  {active.shared ? (
+                    <div className="mk-meta">
+                      <span>{t(`来自 ${active.ownerName || "其他用户"} · 仅可查看和参与召回`, `From ${active.ownerName || "another user"} · View and recall only`)}</span>
+                    </div>
+                  ) : activeMembers.length > 0 ? (
+                    <div className="mk-meta">
+                      <span>{t(`已共享给 ${activeMembers.length} 位用户`, `Shared with ${activeMembers.length}`)}</span>
+                    </div>
+                  ) : null}
+                </div>
+                {isReadOnlyShared && (
+                  <div
+                    className={`mk-kbheader-actions${fileSearchOpen ? " mk-kbheader-actions-search" : ""}`}
+                    data-window-drag-exclusion="knowledge-readonly-actions"
+                  >
+                    <span className="mk-recall-inline" title={t("开启后，该知识库会参与 Agent 对话召回", "When on, this base participates in Agent recall")}>
+                      {t("参与召回", "Recall")}
+                      <Switch
+                        on={active.selected}
+                        disabled={!settings.serviceAvailable}
+                        label={`${t("参与召回", "Use for recall")}: ${active.name}`}
+                        onChange={(on) => toggleBaseSelected(active, on)}
+                      />
+                    </span>
+                    {fileSearchOpen ? (
                       <>
-                        <span>{t("共享知识库", "Shared knowledge base")}</span>
-                        <span className="mk-meta-dot" />
-                        <span>{t(`来自 ${active.ownerName || "其他用户"} · 仅可查看和参与召回`, `From ${active.ownerName || "another user"} · View and recall only`)}</span>
+                        <div className="mk-fsearch mk-fsearch-full">
+                          <I d={IC.search} size={13} />
+                          <input
+                            ref={fileSearchInput}
+                            type="text"
+                            value={fileQuery}
+                            onChange={(event) => setFileQuery(event.target.value)}
+                            placeholder={t("在知识库中搜索", "Search this knowledge base")}
+                            aria-label={t("在知识库中搜索", "Search this knowledge base")}
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                          {fileQuery ? (
+                            <button
+                              type="button"
+                              className="mk-search-clear"
+                              onClick={() => {
+                                setFileQuery("");
+                                fileSearchInput.current?.focus();
+                              }}
+                            >
+                              {t("清除", "Clear")}
+                            </button>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="mk-icon-btn"
+                          aria-label={t("关闭搜索", "Close search")}
+                          onClick={closeFileSearch}
+                        >
+                          <I d={IC.close} size={14} />
+                        </button>
                       </>
                     ) : (
-                      <>
-                        <span>{t("个人知识库", "Personal knowledge base")}</span>
-                        {activeMembers.length > 0 && (
-                          <>
-                            <span className="mk-meta-dot" />
-                            <span>{t(`已共享给 ${activeMembers.length} 位用户`, `Shared with ${activeMembers.length}`)}</span>
-                          </>
-                        )}
-                      </>
+                      <button
+                        type="button"
+                        className="mk-fsearch"
+                        onClick={openFileSearch}
+                        aria-label={t("搜索文件", "Search files")}
+                      >
+                        <I d={IC.search} size={13} />
+                        <span>{t("搜索文件", "Search files")}</span>
+                      </button>
                     )}
                   </div>
-                </div>
-                <div className="mk-hactions">
-                  <span className="mk-recall-inline" title={t("开启后，该知识库会参与 Agent 对话召回", "When on, this base participates in Agent recall")}>
-                    {t("参与召回", "Recall")}
-                    <Switch
-                      on={active.selected}
-                      disabled={!settings.serviceAvailable}
-                      label={`${t("参与召回", "Use for recall")}: ${active.name}`}
-                      onChange={(on) => toggleBaseSelected(active, on)}
-                    />
-                  </span>
-                  {!active.shared && (
-                    <div className="mk-menu-wrap" ref={menuRef}>
-                      <button
-                        type="button"
-                        className="mk-icon-btn mk-icon-lg"
-                        onClick={() => setMenuOpen((open) => !open)}
-                        aria-label={t("更多操作", "More actions")}
-                        aria-haspopup="menu"
-                        aria-expanded={menuOpen}
-                      >
-                        <I d={IC.dots} size={17} />
-                      </button>
-                      {menuOpen && (
-                        <div className="mk-menu" role="menu">
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              setRenameName(active.name);
-                              setRenameOpen(true);
-                            }}
-                          >
-                            {t("重命名知识库", "Rename")}
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              setShareFailed(false);
-                              setShareOpen(true);
-                            }}
-                          >
-                            {t("共享管理", "Sharing")}
-                            {activeMembers.length > 0 && <span className="mk-menu-count">{activeMembers.length}</span>}
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="mk-menu-danger"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              setDeleteOpen(true);
-                            }}
-                          >
-                            {t("删除知识库", "Delete")}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {!active.shared && (
-                    <div className="mk-menu-wrap" ref={addMenuRef}>
-                      <button
-                        type="button"
-                        className="mk-primary"
-                        onClick={() => setAddMenuOpen((open) => !open)}
-                        aria-haspopup="menu"
-                        aria-expanded={addMenuOpen}
-                      >
-                        <I d={IC.upload} size={13} />
-                        {t("上传", "Upload")}
-                      </button>
-                      {addMenuOpen && (
-                        <div className="mk-menu mk-addmenu" role="menu">
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="mk-am-item"
-                            onClick={() => {
-                              setAddMenuOpen(false);
-                              uploadInput.current?.click();
-                            }}
-                          >
-                            <span className="mk-am-icon"><I d={IC.file} /></span>
-                            <span className="mk-am-name">{t("本地文件", "Local files")}</span>
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="mk-am-item"
-                            onClick={() => {
-                              setAddMenuOpen(false);
-                              folderInput.current?.click();
-                            }}
-                          >
-                            <span className="mk-am-icon"><I d={IC.folder} /></span>
-                            <span className="mk-am-name">{t("本地文件夹", "Folder")}</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {!active.shared && !fileSearchOpen && (
-                    <button
-                      type="button"
-                      className="mk-primary"
-                      onClick={() => {
-                        setCreatingFolder(true);
-                        setNewFolderName(t("新建文件夹", "New folder"));
-                      }}
-                    >
-                      <I d={IC.plus} size={13} />
-                      {t("新建", "New")}
-                    </button>
-                  )}
-                </div>
+                )}
               </header>
               <input
                 ref={uploadInput}
@@ -1569,157 +1641,196 @@ export function KnowledgePage({
               )}
 
               {/* ---------- 工具条 / 搜索页 ---------- */}
-              {fileSearchOpen ? (
-                <div className="mk-search-bar">
-                  <div className="mk-fsearch mk-fsearch-full">
-                    <I d={IC.search} size={13} />
-                    <input
-                      ref={fileSearchInput}
-                      type="text"
-                      value={fileQuery}
-                      onChange={(event) => setFileQuery(event.target.value)}
-                      placeholder={t("在知识库中搜索", "Search this knowledge base")}
-                      aria-label={t("在知识库中搜索", "Search this knowledge base")}
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                    {fileQuery ? (
+              {activeCanEdit && (
+                <div className={fileSearchOpen ? "mk-search-bar" : "mk-toolbar"}>
+                  <div className="mk-hactions">
+                    {activeCanEdit && (
+                    <div className="mk-menu-wrap" ref={addMenuRef}>
                       <button
                         type="button"
-                        className="mk-search-clear"
-                        onClick={() => {
-                          setFileQuery("");
-                          fileSearchInput.current?.focus();
-                        }}
+                        className="mk-primary"
+                        onClick={() => setAddMenuOpen((open) => !open)}
+                        aria-haspopup="menu"
+                        aria-expanded={addMenuOpen}
                       >
-                        {t("清除", "Clear")}
+                        {t("直接上传", "Upload files")}
                       </button>
-                    ) : null}
-                  </div>
-                  <button
-                    type="button"
-                    className="mk-icon-btn"
-                    aria-label={t("关闭搜索", "Close search")}
-                    onClick={closeFileSearch}
-                  >
-                    <I d={IC.close} size={14} />
-                  </button>
-                </div>
-              ) : (
-                <div className="mk-toolbar">
-                  <div className="mk-count">{t("文件", "Files")}</div>
-                  <div className="mk-spacer" />
-                  <button
-                    type="button"
-                    className="mk-fsearch"
-                    onClick={openFileSearch}
-                    aria-label={t("搜索文件", "Search files")}
-                  >
-                    <I d={IC.search} size={13} />
-                    <span>{t("搜索文件", "Search files")}</span>
-                  </button>
-                </div>
-              )}
-              {checked.size > 0 && !active.shared && !fileSearchOpen && (
-                <div className="mk-batchbar" role="toolbar" aria-label={t("批量操作", "Batch actions")}>
-                  <span className="mk-batch-count">
-                    {t(`已选 ${checked.size} 项`, `${checked.size} selected`)}
-                  </span>
-                  <button type="button" className="mk-tool-btn" onClick={toggleCheckAll}>
-                    {allRowsChecked ? t("取消全选", "Deselect all") : t("全选", "Select all")}
-                  </button>
-                  <div className="mk-spacer" />
-                  <button type="button" className="mk-tool-btn" onClick={() => setChecked(new Set())}>
-                    {t("取消选择", "Clear selection")}
-                  </button>
-                  <button type="button" className="mk-danger" onClick={() => setBatchDeleteOpen(true)}>
-                    <I d={IC.trash} size={13} />
-                    {t("删除", "Delete")}
-                  </button>
-                </div>
-              )}
-              {uploadNotice?.baseId === active.id && (
-                <div
-                  className="mk-upload-banner"
-                  role="status"
-                >
-                  {uploadNotice.kind === "progress" ? (
-                    <div className="mk-upload-progress">
-                      <span>
-                        {t(
-                          `正在上传 ${uploadNotice.current}/${uploadNotice.total}：${uploadNotice.name}`,
-                          `Uploading ${uploadNotice.current}/${uploadNotice.total}: ${uploadNotice.name}`,
-                        )}
-                      </span>
-                      <button
-                        type="button"
-                        className="mk-tool-btn"
-                        onClick={() => uploadAbort.current?.abort()}
-                      >
-                        {t("停止上传", "Stop")}
-                      </button>
+                      {addMenuOpen && (
+                        <div className="mk-menu mk-addmenu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="mk-am-item"
+                            onClick={() => {
+                              setAddMenuOpen(false);
+                              uploadInput.current?.click();
+                            }}
+                          >
+                            <span className="mk-am-icon"><I d={IC.file} /></span>
+                            <span className="mk-am-name">{t("本地文件", "Local files")}</span>
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="mk-am-item"
+                            onClick={() => {
+                              setAddMenuOpen(false);
+                              folderInput.current?.click();
+                            }}
+                          >
+                            <span className="mk-am-icon"><I d={IC.folder} /></span>
+                            <span className="mk-am-name">{t("本地文件夹", "Folder")}</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <>
+                    )}
+                    {activeCanEdit && !fileSearchOpen && (
+                    <button
+                      type="button"
+                      className="mk-primary"
+                      onClick={() => {
+                        setCreatingFolder(true);
+                        setNewFolderName(t("新建文件夹", "New folder"));
+                      }}
+                    >
+                      {t("新建文件夹", "New folder")}
+                    </button>
+                    )}
+                    {activeCanEdit && !fileSearchOpen && (
+                    <button
+                      type="button"
+                      className="mk-primary"
+                      onClick={() => {
+                        setShareFailed(false);
+                        setShareOpen(true);
+                      }}
+                    >
+                      {t("共享管理", "Sharing")}
+                    </button>
+                    )}
+                    {activeCanEdit && (
+                    <div className="mk-menu-wrap" ref={menuRef}>
                       <button
                         type="button"
-                        className="mk-icon-btn mk-upload-close"
-                        aria-label={t("关闭", "Close")}
-                        onClick={() => setUploadNotice(null)}
+                        className="mk-icon-btn mk-icon-lg"
+                        onClick={() => setMenuOpen((open) => !open)}
+                        aria-label={t("更多操作", "More actions")}
+                        aria-haspopup="menu"
+                        aria-expanded={menuOpen}
+                      >
+                        <I d={IC.dots} size={17} />
+                      </button>
+                      {menuOpen && (
+                        <div className="mk-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              setRenameName(active.name);
+                              setRenameOpen(true);
+                            }}
+                          >
+                            {t("重命名知识库", "Rename")}
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="mk-menu-danger"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              setDeleteOpen(true);
+                            }}
+                          >
+                            {t("删除知识库", "Delete")}
+                          </button>
+                        </div>
+                      )}
+                      </div>
+                    )}
+                  </div>
+                  {fileSearchOpen ? (
+                    <>
+                      <span className="mk-recall-inline" title={t("开启后，该知识库会参与 Agent 对话召回", "When on, this base participates in Agent recall")}>
+                        {t("参与召回", "Recall")}
+                        <Switch
+                          on={active.selected}
+                          disabled={!settings.serviceAvailable}
+                          label={`${t("参与召回", "Use for recall")}: ${active.name}`}
+                          onChange={(on) => toggleBaseSelected(active, on)}
+                        />
+                      </span>
+                      <div className="mk-fsearch mk-fsearch-full">
+                        <I d={IC.search} size={13} />
+                        <input
+                          ref={fileSearchInput}
+                          type="text"
+                          value={fileQuery}
+                          onChange={(event) => setFileQuery(event.target.value)}
+                          placeholder={t("在知识库中搜索", "Search this knowledge base")}
+                          aria-label={t("在知识库中搜索", "Search this knowledge base")}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        {fileQuery ? (
+                          <button
+                            type="button"
+                            className="mk-search-clear"
+                            onClick={() => {
+                              setFileQuery("");
+                              fileSearchInput.current?.focus();
+                            }}
+                          >
+                            {t("清除", "Clear")}
+                          </button>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        className="mk-icon-btn"
+                        aria-label={t("关闭搜索", "Close search")}
+                        onClick={closeFileSearch}
                       >
                         <I d={IC.close} size={14} />
                       </button>
-                      <p>
-                        {t(
-                          `上传完成：成功 ${uploadNotice.succeeded} 个，失败 ${uploadNotice.failed} 个`,
-                          `Upload complete: ${uploadNotice.succeeded} succeeded, ${uploadNotice.failed} failed`,
-                        )}
-                      </p>
-                      {uploadNotice.stopped && (
-                        <p>
-                          {t("已停止，其余文件未上传。", "Stopped. Remaining files were not uploaded.")}
-                        </p>
-                      )}
-                      {uploadNotice.format > 0 && (
-                        <p>
-                          {t(
-                            `${uploadNotice.format} 个文件格式不支持，已跳过。支持 PDF、Word、TXT、Markdown、JSON、XML`,
-                            `${uploadNotice.format} unsupported file(s) skipped. Supported: PDF, Word, TXT, Markdown, JSON, XML`,
-                          )}
-                        </p>
-                      )}
-                      {uploadNotice.size > 0 && (
-                        <p>
-                          {t(
-                            `${uploadNotice.size} 个文件超过 ${MAX_UPLOAD_MB} MB`,
-                            `${uploadNotice.size} file(s) exceed ${MAX_UPLOAD_MB} MB`,
-                          )}
-                        </p>
-                      )}
-                      {uploadNotice.other > 0 && (
-                        <p>
-                          {t(
-                            `${uploadNotice.other} 个文件未能上传`,
-                            `${uploadNotice.other} file(s) failed to upload`,
-                          )}
-                        </p>
-                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="mk-spacer" />
+                      <span className="mk-recall-inline" title={t("开启后，该知识库会参与 Agent 对话召回", "When on, this base participates in Agent recall")}>
+                        {t("参与召回", "Recall")}
+                        <Switch
+                          on={active.selected}
+                          disabled={!settings.serviceAvailable}
+                          label={`${t("参与召回", "Use for recall")}: ${active.name}`}
+                          onChange={(on) => toggleBaseSelected(active, on)}
+                        />
+                      </span>
+                      <button
+                        type="button"
+                        className="mk-fsearch"
+                        onClick={openFileSearch}
+                        aria-label={t("搜索文件", "Search files")}
+                      >
+                        <I d={IC.search} size={13} />
+                        <span>{t("搜索文件", "Search files")}</span>
+                      </button>
                     </>
                   )}
                 </div>
               )}
-
               {/* ---------- 文件区 ---------- */}
               <div
                 className={`mk-body${dragOver ? " mk-body-drag" : ""}`}
                 onDragOver={(event) => {
-                  if (active.shared || searching) return;
+                  if (!activeCanEdit || searching) return;
                   event.preventDefault();
                   setDragOver(true);
                 }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={(event) => {
-                  if (active.shared || searching) return;
+                  if (!activeCanEdit || searching) return;
                   event.preventDefault();
                   setDragOver(false);
                   void filesFromDrop(event).then((files) =>
@@ -1736,10 +1847,7 @@ export function KnowledgePage({
                         <I d={IC.folder} size={44} />
                       </div>
                       <h3>{t("这个文件夹是空的", "This folder is empty")}</h3>
-                      <p>{t("上传文件到当前目录，或把其他文件移动到这里", "Upload files into this folder, or move existing files here")}</p>
-                      {!active.shared && (
-                        <p className="mk-empty-limit">{t(`也可以直接拖拽文件到这里，同样上传到「${folderPathLabel(folderId)}」`, `You can also drag files here; they upload to "${folderPathLabel(folderId)}"`)}</p>
-                      )}
+                      <p>{t("可拖拽上传文件到当前目录，或把其他文件移动到这里", "Drag files here to upload into this folder, or move existing files here")}</p>
                     </div>
                   ) : (
                   <div className="mk-empty-state">
@@ -1751,16 +1859,74 @@ export function KnowledgePage({
                     <div className="mk-fmts">
                       <span>PDF</span><span>Word</span><span>Markdown</span><span>TXT</span><span>JSON</span><span>XML</span>
                     </div>
-                    {!active.shared && (
+                    {activeCanEdit && (
                       <p className="mk-empty-limit">{t(`可拖拽文件到此处上传，每个文件最多 ${MAX_UPLOAD_MB} MB`, `Drag files here to upload, up to ${MAX_UPLOAD_MB} MB each`)}</p>
                     )}
                   </div>
                   )
                 ) : (
+                  <div className={`mk-ftable${selecting && activeCanEdit && !searching ? " mk-selecting" : ""}`}>
+                    <div className="mk-fhead">
+                      <span className="mk-flead">
+                        {selecting && activeCanEdit && !searching && (
+                          <input
+                            type="checkbox"
+                            className="mk-check"
+                            checked={allRowsChecked}
+                            ref={(node) => {
+                              if (node)
+                                node.indeterminate =
+                                  checked.size > 0 && !allRowsChecked;
+                            }}
+                            aria-label={
+                              allRowsChecked
+                                ? t("取消全选", "Deselect all")
+                                : t("全选", "Select all")
+                            }
+                            onChange={toggleCheckAll}
+                          />
+                        )}
+                      </span>
+                      <span className="mk-fmeta mk-fhead-name">
+                        <span className="mk-fhead-label">
+                          {selecting && activeCanEdit && !searching ? (
+                            <span>{t(`已选 ${checked.size} 项`, `${checked.size} selected`)}</span>
+                          ) : (
+                            <span>{t("名称", "Name")}</span>
+                          )}
+                          {activeCanEdit && !searching && (
+                            <button
+                              type="button"
+                              className="mk-icon-btn mk-select-toggle"
+                              aria-pressed={selecting}
+                              aria-label={t("多选", "Select")}
+                              onClick={toggleSelecting}
+                            >
+                              <I d={IC.select} size={15} />
+                            </button>
+                          )}
+                        </span>
+                      </span>
+                      <span className="mk-fstatus">{t("状态", "Status")}</span>
+                      <span className="mk-ftime">{t("创建时间", "Created")}</span>
+                      {selecting && activeCanEdit && !searching ? (
+                        <button
+                          type="button"
+                          className="mk-icon-btn mk-head-delete"
+                          aria-label={t("删除已选项", "Delete selected")}
+                          title={t("删除已选项", "Delete selected")}
+                          disabled={checked.size === 0}
+                          onClick={() => setBatchDeleteOpen(true)}
+                        >
+                          <I d={IC.trash} size={14} />
+                        </button>
+                      ) : (
+                        <span className="mk-fdel-slot" aria-hidden="true" />
+                      )}
+                    </div>
                   <ul className="mk-flist">
                     {!searching && creatingFolder && (
                       <li className="mk-frow mk-row-create">
-                        <span className="mk-fic mk-fic-folder" aria-hidden="true"><I d={IC.folder} size={17} /></span>
                         <input
                           className="mk-create-input"
                           value={newFolderName}
@@ -1787,7 +1953,6 @@ export function KnowledgePage({
                         : "";
                       return renamingFolder?.id === folder.id ? (
                         <li key={folder.id} className="mk-frow">
-                          <span className="mk-fic mk-fic-folder" aria-hidden="true"><I d={IC.folder} size={17} /></span>
                           <input
                             className="mk-create-input"
                             value={renameFolderName}
@@ -1807,29 +1972,41 @@ export function KnowledgePage({
                       ) : (
                         <li
                           key={folder.id}
-                          className="mk-frow mk-frow-folder"
-                          onClick={() => enterFolder(folder.id)}
+                          className={`mk-frow mk-frow-folder${checked.has(`folder:${folder.id}`) ? " mk-frow-on" : ""}`}
+                          onClick={(event) => {
+                            const target = event.target as HTMLElement;
+                            if (target.closest(".mk-check, button")) return;
+                            if (selecting && activeCanEdit && !searching) {
+                              const key = `folder:${folder.id}`;
+                              toggleChecked(key, !checked.has(key));
+                              return;
+                            }
+                            enterFolder(folder.id);
+                          }}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setRowMenu({ x: event.clientX, y: event.clientY, kind: "folder", id: folder.id });
                           }}
                         >
-                          {!active.shared && !searching && (
-                            <input
-                              type="checkbox"
-                              className="mk-check"
-                              checked={checked.has(`folder:${folder.id}`)}
-                              aria-label={t(`选择文件夹 ${folder.name}`, `Select folder ${folder.name}`)}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={(event) => toggleChecked(`folder:${folder.id}`, event.target.checked)}
-                            />
-                          )}
-                          <span className="mk-fic mk-fic-folder" aria-hidden="true"><I d={IC.folder} size={17} /></span>
+                          <span className="mk-flead">
+                            {selecting && activeCanEdit && !searching && (
+                              <input
+                                type="checkbox"
+                                className="mk-check"
+                                checked={checked.has(`folder:${folder.id}`)}
+                                aria-label={t(`选择文件夹 ${folder.name}`, `Select folder ${folder.name}`)}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={(event) => toggleChecked(`folder:${folder.id}`, event.target.checked)}
+                              />
+                            )}
+                          </span>
                           <div className="mk-fmeta">
-                            <div className="mk-fname">{highlightName(folder.name, fileQuery)}</div>
+                            <FileNameLabel name={folder.name} query={fileQuery} />
                             {path ? <div className="mk-fsub">{path}</div> : null}
                           </div>
-                          {!active.shared && (
+                          <span className="mk-fstatus">{t("文件夹", "Folder")}</span>
+                          <span className="mk-ftime">{formatCreatedAt(folder.createdAt, zh)}</span>
+                          {activeCanEdit && (
                             <button
                               type="button"
                               className="mk-icon-btn mk-fdel"
@@ -1854,36 +2031,46 @@ export function KnowledgePage({
                       return (
                         <li
                           key={file.id}
-                          className="mk-frow"
-                          onClick={
-                            searching
-                              ? () => enterFolder(file.folderId ?? "")
-                              : undefined
-                          }
+                          className={`mk-frow${checked.has(`file:${file.id}`) ? " mk-frow-on" : ""}`}
+                          onClick={(event) => {
+                            const target = event.target as HTMLElement;
+                            if (target.closest(".mk-check, button")) return;
+                            if (searching) {
+                              enterFolder(file.folderId ?? "");
+                              return;
+                            }
+                            if (selecting && activeCanEdit) {
+                              const key = `file:${file.id}`;
+                              toggleChecked(key, !checked.has(key));
+                            }
+                          }}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setRowMenu({ x: event.clientX, y: event.clientY, kind: "file", id: file.id });
                           }}
                         >
-                          {!active.shared && !searching && (
-                            <input
-                              type="checkbox"
-                              className="mk-check"
-                              checked={checked.has(`file:${file.id}`)}
-                              aria-label={t(`选择 ${file.name}`, `Select ${file.name}`)}
-                              onChange={(event) => toggleChecked(`file:${file.id}`, event.target.checked)}
-                            />
-                          )}
-                          <span className="mk-fic" aria-hidden="true">{fileExtension(file.name)}</span>
+                          <span className="mk-flead">
+                            {selecting && activeCanEdit && !searching && (
+                              <input
+                                type="checkbox"
+                                className="mk-check"
+                                checked={checked.has(`file:${file.id}`)}
+                                aria-label={t(`选择 ${file.name}`, `Select ${file.name}`)}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={(event) => toggleChecked(`file:${file.id}`, event.target.checked)}
+                              />
+                            )}
+                          </span>
                           <div className="mk-fmeta">
-                            <div className="mk-fname">{highlightName(file.name, fileQuery)}</div>
+                            <FileNameLabel name={file.name} query={fileQuery} />
                             {path ? <div className="mk-fsub">{path}</div> : file.message ? <div className="mk-fsub">{file.message}</div> : null}
                           </div>
                           <span className={`mk-fstatus ${status.cls}`}>
                             <span className="mk-sdot" />
                             {status.label}
                           </span>
-                          {!active.shared && (
+                          <span className="mk-ftime">{formatCreatedAt(file.createdAt, zh)}</span>
+                          {activeCanEdit && (
                             <button
                               type="button"
                               className="mk-icon-btn mk-fdel"
@@ -1907,6 +2094,7 @@ export function KnowledgePage({
                       </p>
                     )}
                   </ul>
+                  </div>
                 )}
                 {!searching && listing && listing.total > FILES_PAGE_SIZE && (
                   <div className="mk-pagination">
@@ -1952,6 +2140,105 @@ export function KnowledgePage({
             </>
           )}
         </fieldset>
+        {(error || (active && uploadNotice?.baseId === active.id)) && (
+          <div className="mk-toasts">
+            {error && (
+              <div className="mk-toast mk-toast-error mk-error" role="alert">
+                <span className="mk-toast-text">{error}</span>
+                <button
+                  type="button"
+                  className="mk-tool-btn"
+                  onClick={() => {
+                    setError("");
+                    setRefresh((value) => value + 1);
+                    void run(async () =>
+                      acceptSettings(await api<KnowledgeSettings>("/settings")),
+                    );
+                  }}
+                >
+                  {t("重试", "Retry")}
+                </button>
+                <button
+                  type="button"
+                  className="mk-icon-btn"
+                  aria-label={t("关闭", "Close")}
+                  onClick={() => setError("")}
+                >
+                  <I d={IC.close} size={14} />
+                </button>
+              </div>
+            )}
+            {active && uploadNotice?.baseId === active.id && (
+              <div className="mk-toast mk-upload-toast" role="status">
+                {uploadNotice.kind === "progress" ? (
+                  <>
+                    <span className="mk-toast-text mk-toast-ellipsis">
+                      {t(
+                        `正在上传 ${uploadNotice.current}/${uploadNotice.total}：${uploadNotice.name}`,
+                        `Uploading ${uploadNotice.current}/${uploadNotice.total}: ${uploadNotice.name}`,
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      className="mk-tool-btn"
+                      onClick={() => uploadAbort.current?.abort()}
+                    >
+                      {t("停止上传", "Stop")}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="mk-toast-text">
+                      <p>
+                        {t(
+                          `上传完成：成功 ${uploadNotice.succeeded} 个，失败 ${uploadNotice.failed} 个`,
+                          `Upload complete: ${uploadNotice.succeeded} succeeded, ${uploadNotice.failed} failed`,
+                        )}
+                      </p>
+                      {uploadNotice.stopped && (
+                        <p>
+                          {t("已停止，其余文件未上传。", "Stopped. Remaining files were not uploaded.")}
+                        </p>
+                      )}
+                      {uploadNotice.format > 0 && (
+                        <p className="mk-toast-line">
+                          {t(
+                            `${uploadNotice.format} 个文件格式不支持已跳过，支持 PDF、Word、TXT、Markdown、JSON、XML`,
+                            `${uploadNotice.format} unsupported file(s) skipped, supported: PDF, Word, TXT, Markdown, JSON, XML`,
+                          )}
+                        </p>
+                      )}
+                      {uploadNotice.size > 0 && (
+                        <p>
+                          {t(
+                            `${uploadNotice.size} 个文件超过 ${MAX_UPLOAD_MB} MB`,
+                            `${uploadNotice.size} file(s) exceed ${MAX_UPLOAD_MB} MB`,
+                          )}
+                        </p>
+                      )}
+                      {uploadNotice.other > 0 && (
+                        <p>
+                          {t(
+                            `${uploadNotice.other} 个文件未能上传`,
+                            `${uploadNotice.other} file(s) failed to upload`,
+                          )}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="mk-icon-btn"
+                      aria-label={t("关闭", "Close")}
+                      onClick={() => setUploadNotice(null)}
+                    >
+                      <I d={IC.close} size={14} />
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </main>
 
       {/* ============ 创建知识库（仅名称） ============ */}
@@ -1983,13 +2270,13 @@ export function KnowledgePage({
                 {t("打开", "Open")}
               </button>
             )}
-            {!active?.shared && (
+            {activeCanEdit && (
               <button type="button" role="menuitem" onClick={() => { const target = { kind: rowMenu.kind, id: rowMenu.id, name }; setRowMenu(null); openMove(target.kind, target.id, target.name); }}>
                 <I d={IC.move} size={14} />
                 {t("移动到…", "Move to…")}
               </button>
             )}
-            {rowMenu.kind === "folder" && !active?.shared && folder && (
+            {rowMenu.kind === "folder" && activeCanEdit && folder && (
               <button type="button" role="menuitem" onClick={() => { setRowMenu(null); setRenameFolderName(folder.name); setRenamingFolder(folder); }}>
                 <I d={IC.edit} size={14} />
                 {t("重命名", "Rename")}
@@ -2001,7 +2288,7 @@ export function KnowledgePage({
                 {t("删除", "Delete")}
               </button>
             )}
-            {rowMenu.kind === "folder" && !active?.shared && folder && (
+            {rowMenu.kind === "folder" && activeCanEdit && folder && (
               <>
                 <div className="mk-ctx-sep" />
                 <button type="button" role="menuitem" className="mk-menu-danger" onClick={() => { setRowMenu(null); setFolderDeleteMode("out"); setFolderDeleteTarget(folder); }}>
@@ -2016,7 +2303,7 @@ export function KnowledgePage({
       {/* ---------- 移动到目录 ---------- */}
       {moveTarget && (<div className="mk-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMoveTarget(null); }}><div className="mk-action-modal" role="dialog" aria-modal="true" aria-labelledby="mk-move-title"><button className="mk-modal-close" aria-label={t("关闭", "Close")} onClick={() => setMoveTarget(null)}><I d={IC.close} size={14} /></button><h2 id="mk-move-title">{t("移动到…", "Move to…")}</h2><p>{t(`将“${moveTarget.name}”移动到：`, `Move “${moveTarget.name}” to:`)}</p><div className="mk-tree"><div className={`mk-tree-item${moveDest === "" ? " mk-tree-on" : ""}`} role="button" tabIndex={0} onClick={() => setMoveDest("")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(""); } }}><I d={IC.folder} size={14} />{t("文件（根目录）", "Files (root)")}</div>{moveOptions.map(({ folder, depth }) =><div key={folder.id} className={`mk-tree-item${moveDest === folder.id ? " mk-tree-on" : ""}`} style={{ paddingLeft: 10 + depth * 22 }} role="button" tabIndex={0} onClick={() => setMoveDest(folder.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setMoveDest(folder.id); } }}><I d={IC.folder} size={14} />{folder.name}</div>)}</div><div className="mk-modal-note"><I d={IC.book} size={13} /><span>{t("目录结构保存在 Memmy 本地，移动不会重新上传文件。", "Folders are stored in Memmy. Moving does not re-upload files.")}</span></div><div className="mk-modal-actions"><button type="button" onClick={() => setMoveTarget(null)}>{t("取消", "Cancel")}</button><button className="mk-primary" type="button" onClick={commitMove}>{t("移动", "Move")}</button></div></div></div>)}
       {/* ---------- 拖拽上传落点提示 ---------- */}
-      {dragOver && !active?.shared && (
+      {dragOver && activeCanEdit && (
         <div className="mk-drop-mask" aria-hidden="true">
           <div className="mk-drop-card">
             <h3>{t("松开鼠标上传", "Drop to upload")}</h3>
@@ -2060,24 +2347,22 @@ export function KnowledgePage({
 }
 const styles = `
 /* ===== 简约主题：中性灰白 + 单一青绿主色 ===== */
-.memmy-knowledge{--mk-accent:#2fb393;--mk-accent-hover:#25a082;--mk-accent-tint:#e6f4f0;--mk-accent-deep:#3d8570;--mk-side:#f7f9f8;--mk-line:#e9efed;--mk-line-strong:#dfe7e4;--mk-ink:#1b2a27;--mk-sub:#5f716d;--mk-ter:#9aa8a4;--mk-warn:#dfa04a;--mk-err:#e1707e;display:flex;height:100%;min-height:0;position:relative;color:var(--mk-ink);font-size:14px;width:100%;box-sizing:border-box;background:#fff}
+.memmy-knowledge{--mk-accent:#2fb393;--mk-accent-hover:#25a082;--mk-accent-tint:#e6f4f0;--mk-accent-deep:#3d8570;--mk-side:#f7f9f8;--mk-line:#e9efed;--mk-line-strong:#dfe7e4;--mk-ink:#1b2a27;--mk-sub:#5f716d;--mk-ter:#9aa8a4;--mk-warn:#dfa04a;--mk-err:#e1707e;display:flex;height:100%;min-height:0;position:relative;color:var(--mk-ink);font-family:var(--font-sans);font-size:14px;font-weight:400;width:100%;box-sizing:border-box;background:#fff}
 .memmy-knowledge fieldset{border:0;padding:0;margin:0;min-width:0;display:contents}
 .memmy-knowledge p{margin:6px 0;line-height:1.65}
-.memmy-knowledge button{-webkit-appearance:none;appearance:none;border:1px solid var(--mk-line-strong);border-radius:8px;padding:7px 12px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;font-size:13px;font-family:inherit;transform:none;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.memmy-knowledge button{-webkit-appearance:none;appearance:none;border:1px solid var(--mk-line-strong);border-radius:8px;padding:7px 12px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap;font-size:13px;font-family:inherit;font-weight:400;transform:none;transition:background .15s ease,border-color .15s ease,color .15s ease}
 .memmy-knowledge button:hover{background:#f4f7f6}
 .memmy-knowledge button:active{transform:none;filter:none}
 .memmy-knowledge button:disabled,.memmy-knowledge fieldset:disabled{opacity:.55;cursor:default}
-.memmy-knowledge input{border:1px solid var(--mk-line-strong);border-radius:8px;padding:8px 12px;background:#fff;color:inherit;min-width:0;box-sizing:border-box;font-size:13px;font-family:inherit}
+.memmy-knowledge input{border:1px solid var(--mk-line-strong);border-radius:8px;padding:8px 12px;background:#fff;color:inherit;min-width:0;box-sizing:border-box;font-size:13px;font-family:inherit;font-weight:400}
 .memmy-knowledge input:focus-visible{outline:none;border-color:var(--mk-accent);box-shadow:0 0 0 3px rgba(47,179,147,.14)}
 .memmy-knowledge :focus-visible{outline:2px solid var(--mk-accent);outline-offset:2px}
-.memmy-knowledge .mk-primary{display:inline-flex;align-items:center;gap:6px;background:var(--mk-accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-weight:700}
+.memmy-knowledge .mk-primary{display:inline-flex;align-items:center;gap:6px;background:var(--mk-accent);color:#fff;border:0;border-radius:8px;padding:8px 16px;font-weight:400}
 .memmy-knowledge .mk-primary:hover:not(:disabled),.memmy-knowledge .mk-primary:active:not(:disabled){background:var(--mk-accent-hover);transform:none}
 .memmy-knowledge .mk-primary:disabled{opacity:1;background:var(--mk-accent);color:#fff}
 .memmy-knowledge .mk-danger{background:#c05a55;color:#fff;border:0;border-radius:8px;padding:8px 16px}
 .memmy-knowledge .mk-danger:hover{background:#a94c47}
 .memmy-knowledge .mk-loading{padding:40px 0;text-align:center;color:var(--mk-ter);font-size:13px}
-.mk-error{padding:12px 16px;margin:16px 32px 0;border:1px solid #ecc3c1;border-radius:10px;color:#b74b46;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#fdf6f5;font-size:13px}
-
 /* ---------- 开关 ---------- */
 .memmy-knowledge .mk-switch{position:relative;width:32px;height:19px;border-radius:20px;background:#d5dfdc;border:0;padding:0;transition:background .15s ease;flex-shrink:0}
 .memmy-knowledge .mk-switch:hover{background:#c8d4d0}
@@ -2089,33 +2374,35 @@ const styles = `
 /* ---------- 图标按钮 / 封面 ---------- */
 .memmy-knowledge .mk-icon-btn{width:26px;height:26px;min-width:26px;min-height:26px;box-sizing:border-box;border:0;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;color:var(--mk-ter);padding:0;flex:0 0 auto;background:transparent}
 .memmy-knowledge .mk-icon-btn:hover{background:rgba(27,42,39,.05);color:var(--mk-ink)}
-.memmy-knowledge .mk-icon-lg{width:30px;height:30px;min-width:30px;min-height:30px}
-.mk-cover{border-radius:8px;background:var(--mk-accent-tint);color:var(--mk-accent-deep);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:26px;height:26px}
-.mk-cover svg{width:15px;height:15px}
-.mk-cover-lg{width:56px;height:56px;border-radius:14px}
-.mk-cover-lg svg{width:28px;height:28px}
+.memmy-knowledge .mk-icon-lg{width:30px;height:30px;min-width:30px;min-height:30px;color:var(--mk-ink)}
+.memmy-knowledge .mk-icon-lg svg{stroke-width:2.4}
+.mk-cover{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:16px;height:16px;color:var(--mk-ter)}
+.mk-cover svg{display:block;width:16px;height:16px}
 
 /* ---------- 二级侧边栏 ---------- */
-.mk-side{width:244px;flex-shrink:0;background:var(--mk-side);border-right:1px solid var(--mk-line);display:flex;flex-direction:column;min-height:0;padding-top:var(--codex-toolbar-height,46px)}
-.mk-side-head{display:flex;align-items:center;justify-content:space-between;padding:6px 14px 8px}
-.mk-side-head h2{font-size:15px;font-weight:800;margin:0}
-.memmy-knowledge .mk-new-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:calc(100% - 24px);margin:2px 12px 10px;padding:8px 12px;border:1px solid var(--mk-line-strong);border-radius:8px;background:#fff;font-size:13px;font-weight:700;color:var(--mk-sub)}
-.memmy-knowledge .mk-new-btn:hover:not(:disabled){border-color:var(--mk-accent);color:var(--mk-accent-deep);background:var(--mk-accent-tint)}
-.mk-side-search{display:flex;align-items:center;gap:6px;margin:2px 12px 8px;padding:5px 9px;background:#fff;border:1px solid var(--mk-line);border-radius:8px;color:var(--mk-ter)}
+.mk-side{width:244px;flex:0 0 auto;background:var(--mk-side);border-right:var(--codex-sidebar-divider-width,0.8px) solid var(--color-sidebar-divider,var(--mk-line));box-shadow:none;display:flex;flex-direction:column;min-height:0;padding-top:24px}
+.mk-resize{position:relative;z-index:35;align-self:stretch;flex:0 0 8px;width:8px;margin-right:-4px;margin-left:-4px;cursor:col-resize;touch-action:none;background:transparent;outline:none;box-shadow:none}
+.mk-resize::after{position:absolute;top:0;bottom:0;left:3px;width:2px;content:"";background:transparent;box-shadow:none;transition:background .15s ease,box-shadow .15s ease}
+.mk-resize:hover::after,.mk-resize:focus-visible::after,.mk-resize-active::after{background:color-mix(in srgb,var(--color-action-sky,#3d9be9) 62%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--color-action-sky,#3d9be9) 12%,transparent)}
+.mk-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;min-height:32px;padding:0 12px 8px 16px;box-sizing:border-box}
+.mk-side-head h2{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:20px;font-weight:500;line-height:28px;margin:0}
+.memmy-knowledge .mk-new-btn{position:relative;z-index:10000;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;gap:0;width:28px;height:28px;margin:0;padding:0;border:0;border-radius:8px;background:var(--mk-accent);font-size:13px;font-weight:400;line-height:18px;color:#fff;pointer-events:auto;-webkit-app-region:no-drag}
+.memmy-knowledge .mk-new-btn:hover:not(:disabled){background:var(--mk-accent-hover);color:#fff}
+.mk-side-search{display:flex;align-items:center;gap:6px;margin:12px 12px 8px;padding:5px 9px;background:#fff;border:1px solid var(--mk-line);border-radius:8px;color:var(--mk-ter)}
 .mk-side-search input{border:0;padding:2px 0;font-size:12px;background:transparent}
 .mk-side-search input:focus-visible{outline:none;box-shadow:none;border:0}
-.mk-side-scroll{flex:1;overflow-y:auto;padding:0 8px 12px;min-height:0}
-.mk-side-loading{padding:20px 10px;font-size:12px;color:var(--mk-ter)}
-.mk-group{margin-top:6px}
-.mk-group-title{padding:6px 10px;font-size:11.5px;font-weight:700;color:var(--mk-ter)}
-.mk-group-count{margin-left:6px;font-size:10.5px;font-weight:700;color:var(--mk-ter);background:rgba(27,42,39,.06);padding:1px 6px;border-radius:999px}
+.mk-side-scroll{flex:1;overflow-y:auto;padding:0 12px 12px;min-height:0}
+.mk-side-loading{padding:20px 8px;font-size:12px;color:var(--mk-ter)}
+.mk-group{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.mk-group + .mk-group{margin-top:36px}
+.mk-group-title{display:flex;align-items:center;gap:6px;margin:0 0 2px;padding:4px 8px;font-size:12px;font-weight:500;line-height:20px;color:var(--mk-ter)}
 .mk-group-empty{padding:8px 10px;font-size:12px;color:var(--mk-ter)}
-.mk-kb{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:8px;cursor:pointer;transition:background .15s ease}
+.mk-kb{display:flex;align-items:center;gap:8px;min-height:32px;padding:5px 8px;border-radius:8px;cursor:pointer;transition:background .15s ease}
 .mk-kb:hover{background:rgba(27,42,39,.04)}
 .mk-kb-active{background:var(--mk-accent-tint)}
 .mk-kb-active .mk-kb-name{color:var(--mk-accent-deep)}
 .mk-kb-meta{flex:1;min-width:0}
-.mk-kb-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mk-kb-name{font-size:13.5px;font-weight:400;line-height:20px;letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mk-kb-sub{font-size:11px;color:var(--mk-ter);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mk-recall-dot{width:5px;height:5px;border-radius:50%;background:var(--mk-accent);flex-shrink:0}
 .mk-side-foot{padding:10px 16px}
@@ -2123,74 +2410,108 @@ const styles = `
 
 /* ---------- 主内容区 ---------- */
 .mk-main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto;padding-top:var(--codex-toolbar-height,46px)}
-.mk-kbheader{display:flex;align-items:flex-start;gap:16px;padding:10px 32px 0;flex-wrap:wrap}
-.mk-titleblock{flex:1;min-width:0}
-.mk-titleblock h1{font-size:20px;font-weight:800;margin:0;letter-spacing:.01em}
-.mk-meta{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:12px;color:var(--mk-ter);font-weight:600;flex-wrap:wrap;row-gap:3px}
-.mk-meta-dot{width:3px;height:3px;border-radius:50%;background:var(--mk-line-strong)}
-.mk-hactions{display:flex;align-items:center;gap:12px;padding-top:6px}
-.mk-recall-inline{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;color:var(--mk-sub)}
+.mk-kbheader{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-top:calc(24px - var(--codex-toolbar-height,46px));padding:0 32px;flex-wrap:wrap;position:relative;z-index:10000}
+.mk-titleblock{flex:0 1 auto;min-width:0;max-width:min(560px,100%);display:flex;flex-direction:column;align-items:flex-start;text-align:left}
+.mk-kbheader-readonly .mk-titleblock{flex:1 1 180px}
+.mk-kbheader-actions{position:relative;z-index:10000;display:flex;align-items:center;align-self:flex-start;gap:10px;min-width:0;min-height:30px;margin-left:auto;pointer-events:auto;-webkit-app-region:no-drag}
+.mk-kbheader-actions-search{flex:0 1 360px;min-width:270px}
+.mk-kbheader-actions-search .mk-fsearch-full{min-width:0}
+.mk-titleblock h1{font-size:20px;font-weight:500;line-height:28px;letter-spacing:0;margin:0;text-align:left}
+.mk-kind{display:inline-flex;align-items:center;margin-left:8px;padding:1px 8px;border-radius:999px;background:var(--mk-accent-tint);color:var(--mk-accent-deep);font-size:11px;font-weight:400;line-height:18px;letter-spacing:0;vertical-align:2px;white-space:nowrap}
+.mk-meta{display:flex;align-items:center;justify-content:flex-start;width:100%;gap:10px;margin-top:6px;font-size:12px;color:var(--mk-ter);font-weight:400;flex-wrap:wrap;row-gap:3px}
+.mk-hactions{display:flex;align-items:center;gap:12px;padding-top:0;-webkit-app-region:no-drag}
+.mk-toolbar .mk-hactions>.mk-menu-wrap:first-child+.mk-primary,.mk-toolbar .mk-hactions>.mk-primary+.mk-primary{margin-left:calc(12px * -0.3)}
+.mk-recall-inline{display:inline-flex;align-items:center;gap:8px;flex-shrink:0;white-space:nowrap;font-size:12.5px;font-weight:400;color:var(--mk-sub)}
 .mk-menu-wrap{position:relative}
-.mk-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;background:#fff;border:1px solid var(--mk-line);border-radius:12px;box-shadow:0 16px 48px rgba(27,42,39,.14);padding:6px;min-width:170px}
+.mk-menu{position:absolute;left:0;top:calc(100% + 6px);z-index:30;background:#fff;border:1px solid var(--mk-line);border-radius:12px;box-shadow:0 16px 48px rgba(27,42,39,.14);padding:6px;min-width:170px}
 .memmy-knowledge .mk-menu button{display:flex;align-items:center;width:100%;border:0;border-radius:8px;padding:8px 10px;text-align:left;font-size:13px;background:transparent}
 .memmy-knowledge .mk-menu button:hover{background:#f4f7f6}
-.mk-menu-count{margin-left:auto;font-size:11px;color:var(--mk-ter)}
 .memmy-knowledge .mk-menu .mk-menu-danger{color:#c05a55}
 .memmy-knowledge .mk-menu .mk-menu-danger:hover{background:#faf0ef}
 .mk-addmenu{width:216px}
 .memmy-knowledge .mk-am-item{gap:11px}
 .mk-am-item .mk-am-icon{width:28px;height:28px;border-radius:7px;background:#f2f5f4;color:var(--mk-sub);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
-.mk-am-name{display:block;font-size:13px;font-weight:700}
+.mk-am-name{display:block;font-size:13px;font-weight:400}
 .mk-am-sub{display:block;font-size:10.5px;color:var(--mk-ter);margin-top:1px}
-.mk-am-soon{margin-left:auto;font-size:10px;font-weight:700;color:var(--mk-ter);background:rgba(27,42,39,.06);padding:2px 7px;border-radius:999px}
+.mk-am-soon{margin-left:auto;font-size:10px;font-weight:400;color:var(--mk-ter);background:rgba(27,42,39,.06);padding:2px 7px;border-radius:999px}
 .mk-am-disabled{opacity:.55;cursor:default;display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:8px}
 .mk-am-divider{height:1px;background:var(--mk-line);margin:5px 10px}
 
 /* ---------- 工具条 ---------- */
-.mk-toolbar{display:flex;align-items:center;gap:10px;padding:22px 32px 14px}
-.mk-count{font-size:13px;font-weight:800}
-.mk-count em{font-style:normal;color:var(--mk-ter);font-weight:700;margin-left:2px}
+.mk-toolbar,.mk-search-bar{position:relative;z-index:20;display:flex;align-items:center;gap:10px;padding:22px 32px 14px}
+.mk-toolbar .mk-hactions,.mk-search-bar .mk-hactions{flex:0 0 auto}
 .mk-spacer{flex:1}
-.mk-search-bar{display:flex;align-items:center;gap:8px;padding:22px 32px 14px}
 .mk-fsearch{display:flex;align-items:center;gap:7px;background:#f6f8f8;border:1px solid transparent;border-radius:8px;padding:5px 11px;width:180px;color:var(--mk-ter)}
 .memmy-knowledge button.mk-fsearch{justify-content:flex-start;font-weight:400;text-align:left}
+.memmy-knowledge button.mk-fsearch span{color:var(--mk-ter);font-weight:400}
 .mk-fsearch:focus-within,.memmy-knowledge button.mk-fsearch:hover{background:#fff;border-color:var(--mk-accent)}
 .mk-fsearch-full{flex:1;width:auto;border-radius:999px;background:#fff;border-color:var(--mk-accent);padding:7px 14px}
 .mk-fsearch input{border:0;background:transparent;padding:1px 0;font-size:12.5px;width:100%;color:var(--mk-ink)}
 .mk-fsearch input::placeholder{color:var(--mk-ter)}
 .mk-fsearch input:focus-visible{outline:none;box-shadow:none;border:0}
-.memmy-knowledge .mk-search-clear{border:0;background:transparent;padding:0 2px;font-size:13px;font-weight:600;color:var(--mk-sub);flex-shrink:0}
+.memmy-knowledge .mk-search-clear{border:0;background:transparent;padding:0 2px;font-size:13px;font-weight:400;color:var(--mk-sub);flex-shrink:0}
 .memmy-knowledge .mk-search-clear:hover{background:transparent;color:var(--mk-ink)}
-.memmy-knowledge .mk-tool-btn{display:inline-flex;align-items:center;gap:5px;border:0;padding:6px 9px;font-size:12px;font-weight:700;color:var(--mk-sub);background:transparent}
+.memmy-knowledge .mk-tool-btn{display:inline-flex;align-items:center;gap:5px;border:0;padding:6px 9px;font-size:12px;font-weight:400;color:var(--mk-sub);background:transparent}
 .memmy-knowledge .mk-tool-btn:hover{color:var(--mk-ink);background:rgba(27,42,39,.05)}
 .memmy-knowledge .mk-tool-on{color:var(--mk-accent-deep);background:var(--mk-accent-tint)}
-.mk-upload-banner{position:relative;margin:0 32px 12px;padding:10px 36px 10px 14px;border-radius:10px;background:#f7faf9;color:var(--mk-accent-deep);font-size:12.5px;line-height:1.65}
-.mk-upload-banner p{margin:0}
-.mk-upload-banner p+p{margin-top:4px}
-.mk-upload-progress{display:flex;align-items:center;gap:10px;padding-right:0}
-.mk-upload-progress span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
-.memmy-knowledge .mk-upload-close{position:absolute;right:8px;top:8px}
+.mk-toasts{position:sticky;bottom:24px;flex:0 0 0;height:0;min-height:0;margin-top:auto;z-index:50;pointer-events:none;display:flex;flex-direction:column-reverse;align-items:center;justify-content:flex-start;gap:8px;padding:0 32px}
+.mk-toast{display:flex;align-items:flex-start;gap:8px;box-sizing:border-box;width:max-content;max-width:min(720px,100%);padding:9px 8px 9px 14px;border:1px solid var(--mk-line);border-radius:10px;background:#fff;box-shadow:0 8px 24px rgba(27,42,39,.12);color:var(--mk-accent-deep);font-size:12.5px;line-height:1.65;pointer-events:auto;animation:mk-toast-in .18s ease both}
+.mk-toast-error{border-color:#ecc3c1;background:#fdf6f5;color:#b74b46}
+.mk-toast-text{flex:1;min-width:0;padding-top:2px}
+.mk-toast-text p{margin:0}
+.mk-toast-text p+p{margin-top:2px}
+.mk-toast-line{white-space:nowrap}
+.mk-toast-ellipsis{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.memmy-knowledge .mk-toast .mk-tool-btn{flex-shrink:0;padding:3px 8px}
+@keyframes mk-toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.mk-toast{animation:none}}
 
 /* ---------- 文件区 ---------- */
-.mk-body{flex:1;padding:0 32px 28px;min-height:0}
+.mk-body{flex:1;padding:22px 32px 28px;min-height:0}
 .mk-body-drag .mk-flist,.mk-body-drag .mk-empty-state{outline:1.5px dashed var(--mk-accent);outline-offset:8px;border-radius:12px}
 .mk-drop-mask{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(230,244,240,.72);pointer-events:none}
 .mk-drop-card{background:#fff;border:1.5px dashed var(--mk-accent);border-radius:16px;padding:26px 40px;text-align:center;box-shadow:0 16px 48px rgba(27,42,39,.14)}
-.mk-drop-card h3{margin:0 0 6px;font-size:15px;font-weight:800;color:var(--mk-accent-deep)}
+.mk-drop-card h3{margin:0 0 6px;font-size:15px;font-weight:500;color:var(--mk-accent-deep)}
 .mk-drop-card p{margin:0;font-size:12.5px;color:var(--mk-sub)}
+.mk-ftable{--mk-lead:0px}
+.mk-ftable.mk-selecting{--mk-lead:28px}
 .mk-flist{list-style:none;padding:0;margin:0}
-.mk-check{width:15px;height:15px;accent-color:var(--mk-accent);flex-shrink:0;cursor:pointer;margin:0}
-.mk-batchbar{display:flex;align-items:center;gap:10px;padding:0 32px 10px;font-size:12.5px}
-.mk-batch-count{font-weight:700;color:var(--mk-sub)}
-.mk-batchbar .mk-danger{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;font-size:12.5px}
-.mk-frow{display:flex;align-items:center;gap:13px;border:1px solid var(--mk-line);border-radius:10px;padding:12px 16px;margin-bottom:8px;transition:border-color .15s ease,box-shadow .15s ease}
-.mk-frow:hover{border-color:var(--mk-line-strong);box-shadow:0 6px 20px rgba(27,42,39,.06)}
-.mk-fic{width:36px;height:36px;border-radius:9px;background:#f2f5f4;color:#7d8d88;display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:800;letter-spacing:.02em;flex-shrink:0}
-.mk-fmeta{flex:1;min-width:0}
-.mk-fname{font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mk-fhead,.mk-frow{display:grid;grid-template-columns:var(--mk-lead) minmax(0,1fr) 100px 180px 32px;align-items:center;column-gap:0;transition:grid-template-columns .2s ease,background .15s ease}
+.mk-fhead>.mk-fstatus,.mk-fhead>.mk-ftime,.mk-frow>.mk-fstatus,.mk-frow>.mk-ftime{padding-left:12px;box-sizing:border-box}
+.mk-fhead{padding:0 8px 8px;border-bottom:1px solid var(--mk-line);font-size:12px;font-weight:400;color:var(--mk-ter);height:37px;box-sizing:border-box}
+.mk-fhead-name{display:flex;align-items:center;min-width:0;height:28px}
+.mk-fhead-label{display:inline-flex;align-items:center;gap:4px;height:28px;line-height:20px;white-space:nowrap}
+.mk-fhead-label>span{line-height:20px;font-variant-numeric:tabular-nums}
+.memmy-knowledge .mk-head-delete{justify-self:center;color:#c05a55}
+.memmy-knowledge .mk-head-delete:disabled{color:var(--mk-line-strong);background:transparent;cursor:default}
+.memmy-knowledge .mk-head-delete:hover:not(:disabled){background:#faf0ef;color:#c05a55}
+.mk-flead{min-width:0;height:20px;padding-left:2px;box-sizing:border-box;overflow:hidden;display:flex;align-items:center}
+.memmy-knowledge .mk-flead .mk-check:focus-visible{outline-offset:0}
+.mk-flead .mk-check{animation:mk-fade-in .2s ease}
+@keyframes mk-fade-in{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.mk-fhead,.mk-frow{transition:none}.mk-flead .mk-check{animation:none}}.memmy-knowledge .mk-check{-webkit-appearance:none;appearance:none;width:16px;height:16px;border:1.5px solid #c5d1cd;border-radius:4px;background:#fff center / 10px 10px no-repeat;flex-shrink:0;cursor:pointer;margin:0;padding:0}
+.memmy-knowledge .mk-check:checked{background-color:var(--mk-accent);border-color:var(--mk-accent);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.2 6.2 4.8 8.8 9.8 3.2' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
+.memmy-knowledge .mk-check:focus-visible{outline:2px solid var(--mk-accent);outline-offset:2px}
+.memmy-knowledge .mk-check:indeterminate{background-color:var(--mk-accent);border-color:var(--mk-accent);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6h7' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E")}
+.mk-frow{border:0;border-bottom:1px solid var(--mk-line);border-radius:0;padding:13px 8px;margin:0}
+.mk-frow:hover{background:rgba(27,42,39,.035)}
+.mk-frow-on{background:var(--mk-accent-tint)}
+.mk-frow-on:hover{background:var(--mk-accent-tint)}
+.mk-fic{width:22px;height:22px;border-radius:6px;background:#f2f5f4;color:#7d8d88;display:inline-flex;align-items:center;justify-content:center;font-size:8px;font-weight:400;letter-spacing:.02em;flex-shrink:0}
+.mk-ftime{justify-self:start;text-align:left;font-size:13px;font-weight:400;color:var(--mk-ter);white-space:nowrap}
+.mk-fdel-slot{width:26px;height:26px;justify-self:center}
+.memmy-knowledge .mk-fdel{justify-self:center}
+.mk-selecting .mk-frow{cursor:pointer}
+.mk-fmeta{width:100%;max-width:100%;min-width:0;justify-self:stretch;text-align:left}
+.mk-fname-wrap{position:relative;width:100%;max-width:100%;min-width:0;padding-right:8px;box-sizing:border-box}
+.mk-fname{display:block;width:100%;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px;font-weight:400}
+.mk-fname-tooltip{position:absolute;left:0;top:calc(100% + 8px);z-index:80;width:max-content;max-width:min(420px,calc(100vw - 64px));padding:7px 10px;border-radius:8px;background:var(--mk-ink);box-shadow:0 8px 24px rgba(27,42,39,.18);color:#fff;font-size:12px;font-weight:400;line-height:1.55;white-space:normal;overflow-wrap:anywhere;pointer-events:none;opacity:0;visibility:hidden;transform:translateY(-2px);transition:opacity .12s ease,transform .12s ease,visibility 0s linear .12s}
+.mk-fname-wrap:hover{z-index:81}
+.mk-fname-wrap:hover .mk-fname-tooltip{opacity:1;visibility:visible;transform:translateY(0);transition-delay:.28s}
 .memmy-knowledge .mk-fname .mk-hit{font:inherit;color:var(--mk-accent-deep);background:var(--mk-accent-tint);border-radius:3px;padding:0 1px;-webkit-box-decoration-break:clone;box-decoration-break:clone}
-.mk-fsub{font-size:11.5px;color:var(--mk-ter);font-weight:600;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mk-fstatus{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--mk-sub);flex-shrink:0}
+.mk-fsub{font-size:11.5px;color:var(--mk-ter);font-weight:400;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mk-fstatus{display:inline-flex;align-items:center;justify-content:flex-start;justify-self:start;text-align:left;gap:6px;font-size:13px;font-weight:400;color:var(--mk-ter);flex-shrink:0}
+.mk-fhead .mk-fstatus,.mk-fhead .mk-ftime{font-weight:400;color:var(--mk-ter)}
 .mk-sdot{width:6px;height:6px;border-radius:50%;background:var(--mk-line-strong)}
 .mk-dot-ok .mk-sdot{background:var(--mk-accent)}
 .mk-dot-busy .mk-sdot{background:var(--mk-warn);animation:mk-pulse 1.2s infinite}
@@ -2204,7 +2525,7 @@ const styles = `
 .mk-pagination>span:first-child{margin-right:auto}
 .memmy-knowledge .mk-pagination button{min-width:28px;padding:5px 8px;border:0;background:transparent}
 .memmy-knowledge .mk-pagination button:hover:not(:disabled){background:#f4f7f6}
-.memmy-knowledge .mk-pagination .mk-page-on{background:var(--mk-accent-tint);color:var(--mk-accent-deep);font-weight:700}
+.memmy-knowledge .mk-pagination .mk-page-on{background:var(--mk-accent-tint);color:var(--mk-accent-deep);font-weight:400}
 .mk-page-gap{padding:0 4px}
 
 /* ---------- 空状态 ---------- */
@@ -2215,55 +2536,55 @@ const styles = `
 .mk-illust-warn{background:#fff3e8;color:#c47a3d}
 .mk-illust-warn::after{border-color:rgba(245,158,107,.4)}
 .mk-illust-badge{position:absolute;right:-6px;bottom:-6px;width:28px;height:28px;border-radius:9px;background:#fff;color:var(--mk-accent-deep);border:1px solid var(--mk-line);display:grid;place-items:center;z-index:1}
-.mk-empty-state h3{font-size:16px;font-weight:800;margin:0 0 8px}
+.mk-empty-state h3{font-size:16px;font-weight:500;margin:0 0 8px}
 .mk-empty-state h3 + button{margin-top:12px}
 .mk-empty-state p{font-size:13px;color:var(--mk-ter);margin:0 0 20px}
-.memmy-knowledge .mk-retry{display:inline-flex;align-items:center;gap:6px;background:#fff;color:#c47a3d;border:1px solid #f0d2b4;border-radius:8px;padding:8px 16px;font-weight:700}
+.memmy-knowledge .mk-retry{display:inline-flex;align-items:center;gap:6px;background:#fff;color:#c47a3d;border:1px solid #f0d2b4;border-radius:8px;padding:8px 16px;font-weight:400}
 .mk-empty-cta{margin-bottom:4px}
 .mk-fmts{display:flex;gap:8px;margin-top:18px}
-.mk-fmts span{font-size:11px;font-weight:700;color:var(--mk-sub);background:#f4f7f6;padding:4px 11px;border-radius:999px}
+.mk-fmts span{font-size:11px;font-weight:400;color:var(--mk-sub);background:#f4f7f6;padding:4px 11px;border-radius:999px}
 .mk-empty-limit{font-size:11.5px;color:var(--mk-ter);margin-top:14px!important}
 
 /* ---------- 共享弹窗 ---------- */
 .mk-share-modal{width:440px}
-.mk-share-hint{font-size:12px;color:var(--mk-ter);line-height:1.7;margin:0 0 14px!important}
-.mk-share-form{display:flex;gap:10px}
-.mk-share-form input{flex:1}
-.mk-share-form .mk-primary{flex-shrink:0;padding:8px 18px}
+.mk-share-modal .mk-share-hint{font-size:12.5px;color:var(--mk-sub);line-height:1.7;margin:0 0 14px!important;white-space:nowrap}
+.mk-share-modal .mk-share-form{display:flex;flex-direction:row;align-items:center;justify-content:flex-start;gap:8px;width:fit-content;max-width:100%}
+.mk-share-modal .mk-share-form input{flex:0 1 220px;width:220px}
+.mk-share-modal .mk-share-form .mk-primary{flex:0 0 auto;width:auto;padding:8px 16px}
 .mk-members{list-style:none;padding:0;margin:14px 0 0;max-height:260px;overflow-y:auto}
 .mk-members li{display:flex;align-items:center;gap:12px;padding:10px 4px;border-radius:8px}
 .mk-members li:hover{background:#f7faf9}
 .mk-members li+li{border-top:1px solid var(--mk-line)}
-.mk-member-avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#37b795,#1f8f74);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.mk-member-avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#37b795,#1f8f74);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:400;flex-shrink:0}
 .mk-member-meta{min-width:0;flex:1}
 .mk-member-meta strong,.mk-member-meta small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mk-member-meta strong{font-size:13px;font-weight:600}
+.mk-member-meta strong{font-size:13px;font-weight:400}
 .mk-member-meta small{font-size:11px;color:var(--mk-ter);margin-top:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .memmy-knowledge .mk-member-revoke{border:0;background:transparent;font-size:12px;color:var(--mk-ter);padding:5px 8px;border-radius:7px}
 .memmy-knowledge .mk-member-revoke:hover{color:#c05a55;background:#faf0ef}
 .mk-share-modal .mk-share-error{font-size:12px;color:#c05a55;margin:8px 0 0}
 .mk-share-empty{font-size:12px;color:var(--mk-ter);margin:14px 0 0!important}
-@media(max-width:560px){.mk-share-form{flex-wrap:wrap}.mk-share-form .mk-primary{width:100%}}
+@media(max-width:560px){.mk-share-modal .mk-share-form{flex-wrap:nowrap;width:100%}.mk-share-modal .mk-share-form input{flex:1 1 auto;width:auto;min-width:0}.mk-share-modal .mk-share-form .mk-primary{width:auto}}
 
 /* ---------- 弹窗 ---------- */
 .mk-modal-backdrop{position:fixed;inset:0;background:rgba(27,42,39,.26);backdrop-filter:blur(2px);z-index:10002;display:grid;place-items:center}
 .mk-action-modal{position:relative;width:400px;max-width:calc(100vw - 48px);background:#fff;border-radius:16px;padding:24px 26px 20px;box-shadow:0 16px 48px rgba(27,42,39,.18)}
-.mk-action-modal h2{font-size:15.5px;font-weight:800;margin:0 0 16px}
+.mk-action-modal h2{font-size:15.5px;font-weight:500;margin:0 0 16px}
 .mk-action-modal>p{font-size:12.5px;color:var(--mk-sub);margin:0 0 18px;line-height:1.65}
 .mk-action-modal form{display:grid;gap:12px}
-.mk-action-modal label{display:grid;gap:7px;font-size:12.5px;font-weight:700}
+.mk-action-modal label{display:grid;gap:7px;font-size:12.5px;font-weight:400}
 .mk-name-field{position:relative;display:block}
 .mk-name-field input{width:100%;padding-right:52px}
-.mk-name-count{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:var(--mk-ter);pointer-events:none}
+.mk-name-count{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:400;color:var(--mk-ter);pointer-events:none}
 .memmy-knowledge .mk-modal-close{position:absolute;right:14px;top:14px;border:0;padding:4px;color:var(--mk-ter);background:transparent;border-radius:7px;display:inline-flex}
 .memmy-knowledge .mk-modal-close:hover{background:#f4f7f6;color:var(--mk-ink)}
 .mk-modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
 /* ---------- 目录导航 ---------- */
 .mk-nav{display:flex;align-items:center;gap:8px;padding:18px 32px 0}
-.mk-nav-arrow{border:0;background:transparent;padding:2px 7px;font-size:17px;font-weight:600;line-height:1;color:var(--mk-ink);border-radius:6px}
+.mk-nav-arrow{border:0;background:transparent;padding:2px 7px;font-size:17px;font-weight:400;line-height:1;color:var(--mk-ink);border-radius:6px}
 .mk-nav-arrow:hover:not(:disabled){background:rgba(27,42,39,.06)}
 .mk-nav-arrow:disabled{color:var(--mk-ter);cursor:default}
-.mk-crumb{display:flex;align-items:center;gap:2px;font-size:13px;font-weight:700;min-width:0;flex-wrap:wrap}
+.mk-crumb{display:flex;align-items:center;gap:2px;font-size:13px;font-weight:400;min-width:0;flex-wrap:wrap}
 .mk-crumb a{color:var(--mk-accent-deep);cursor:pointer;border-radius:6px;padding:3px 6px}
 .mk-crumb a:hover{background:var(--mk-accent-tint)}
 .mk-crumb-item{display:inline-flex;align-items:center;gap:2px;min-width:0}
@@ -2272,8 +2593,7 @@ const styles = `
 
 /* ---------- 目录行 / 行内编辑 ---------- */
 .mk-frow-folder{cursor:pointer}
-.mk-fic-folder{background:var(--mk-accent-tint);color:var(--mk-accent-deep)}
-.mk-row-create{border-style:dashed;border-color:var(--mk-accent);background:var(--mk-accent-tint)}
+.mk-row-create,.mk-frow:has(.mk-create-input){display:flex;grid-template-columns:none;gap:8px;border-bottom:1px dashed var(--mk-accent);background:var(--mk-accent-tint)}
 .mk-create-input{flex:1;min-width:0;padding:7px 11px;font-size:13px}
 
 /* ---------- 行右键菜单 ---------- */
@@ -2287,13 +2607,13 @@ const styles = `
 
 /* ---------- 移动到弹窗 ---------- */
 .mk-tree{max-height:260px;overflow-y:auto;border:1px solid var(--mk-line);border-radius:10px;padding:6px;margin:4px 0 12px}
-.mk-tree-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--mk-sub)}
+.mk-tree-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:400;color:var(--mk-sub)}
 .mk-tree-item:hover{background:#f4f7f6}
 .mk-tree-item.mk-tree-on{background:var(--mk-accent-tint);color:var(--mk-accent-deep)}
 .mk-tree-item svg{flex-shrink:0}
 .mk-modal-note{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--mk-ter);background:#f7faf9;border-radius:10px;padding:10px 12px;line-height:1.6;margin-top:4px}
 .mk-modal-note svg{flex-shrink:0;margin-top:2px}
-.mk-radio{display:flex!important;align-items:flex-start;gap:8px;font-size:13px;font-weight:600;padding:6px 0;cursor:pointer;line-height:1.5}
+.mk-radio{display:flex!important;align-items:flex-start;gap:8px;font-size:13px;font-weight:400;padding:6px 0;cursor:pointer;line-height:1.5}
 .mk-radio input{margin-top:2px;accent-color:var(--mk-accent)}
-@media(max-width:850px){.mk-side{width:210px}.mk-kbheader,.mk-toolbar,.mk-search-bar,.mk-body,.mk-nav{padding-left:20px;padding-right:20px}}
+@media(max-width:850px){.mk-kbheader,.mk-toolbar,.mk-search-bar,.mk-body,.mk-nav{padding-left:20px;padding-right:20px}}
 `;

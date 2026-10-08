@@ -158,9 +158,9 @@ function makeInstallerFixture(root) {
   writeFileSync(path.join(model, "tokenizer.json"), "{}\n");
   writeFileSync(path.join(model, "tokenizer_config.json"), "{}\n");
   writeFileSync(path.join(model, "onnx", "model_quantized.onnx"), "fixture\n");
-  const ocu = path.join(agent, "node_modules", "open-computer-use", "dist", "linux", "amd64", "open-computer-use");
+  const ocu = path.join(agent, "dist", "native-computer-use", "linux", "amd64", "memmy-computer-use");
   mkdirSync(path.dirname(ocu), { recursive: true });
-  writeFileSync(ocu, "#!/bin/sh\necho 0.3.5\n");
+  writeFileSync(ocu, `#!/bin/sh\necho ${JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version}\n`);
   chmodSync(ocu, 0o755);
   const tar = spawnSync("tar", ["-czf", archive, "-C", payload, "."], { encoding: "utf8" });
   expect(tar.status, tar.stderr).toBe(0);
@@ -310,7 +310,8 @@ describe("Linux CLI package boundary", () => {
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
     expect(listing.stdout).toContain("scripts/internal/linux/install-computer-use-deps.sh");
-    expect(listing.stdout).toMatch(/App\/memmy-agent\/vendor\/open-computer-use-[^/]+-linux\.tgz/);
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/amd64/memmy-computer-use");
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/arm64/memmy-computer-use");
     expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");

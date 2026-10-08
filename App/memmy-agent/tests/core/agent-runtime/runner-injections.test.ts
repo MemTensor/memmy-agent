@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHook, AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentLoop, UNIFIED_SESSION_KEY } from "../../../src/core/agent-runtime/loop.js";
+import { Config } from "../../../src/config/schema.js";
 import {
   AgentRunner,
   AgentRunSpec,
@@ -43,6 +44,10 @@ function makeProvider(handler: (args: any) => Promise<LLMResponse> | LLMResponse
     getDefaultModel: () => "test-model",
     chatWithRetry: vi.fn(handler),
   };
+}
+
+function isolatedLoopConfig(): Config {
+  return new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } });
 }
 
 function drainArray(items: any[]): ({ limit }?: { limit?: number }) => any[] {
@@ -269,7 +274,7 @@ describe("AgentRunner injection checkpoints", () => {
       captured.push(messages.map((msg: any) => ({ ...msg })));
       return new LLMResponse({ content: calls === 1 ? "first answer" : "second answer" });
     });
-    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "gpt-4.1" });
+    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "gpt-4.1", config: isolatedLoopConfig() });
     loop.tools.getDefinitions = vi.fn(() => []);
     const pending = new AsyncQueue<InboundMessage>();
     pending.put(inbound("", { media: [imagePath] }));
@@ -344,7 +349,13 @@ describe("AgentLoop pending queues", () => {
   it("cleans up pending queues after dispatch", async () => {
     const root = tmpRoot();
     const provider = makeProvider(async () => new LLMResponse({ content: "done" }));
-    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "test-model" });
+    const loop = new AgentLoop({
+      bus: new MessageBus(),
+      provider,
+      workspace: root,
+      model: "test-model",
+      config: isolatedLoopConfig(),
+    });
     loop.tools.getDefinitions = vi.fn(() => []);
     const msg = inbound("hello");
 
@@ -356,7 +367,7 @@ describe("AgentLoop pending queues", () => {
   it("keeps default unified-session input out of a direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
-    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
+    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model", config: isolatedLoopConfig() });
     loop.unifiedSession = true;
     loop.processMessageInternal = vi.fn(async () => null) as any;
     const pending = new AsyncQueue<InboundMessage>();
@@ -384,7 +395,7 @@ describe("AgentLoop pending queues", () => {
       captured.push(messages.map((msg: any) => ({ ...msg })));
       return new LLMResponse({ content: `answer-${calls}` });
     });
-    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "test-model" });
+    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "test-model", config: isolatedLoopConfig() });
     loop.tools.getDefinitions = vi.fn(() => []);
     const pending = new AsyncQueue<InboundMessage>();
     const total = MAX_INJECTIONS_PER_TURN + 2;
@@ -403,7 +414,7 @@ describe("AgentLoop pending queues", () => {
   it("does not put default input into an active direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
-    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
+    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model", config: isolatedLoopConfig() });
     loop.processMessageInternal = vi.fn(async () => null) as any;
     loop.pendingQueues.set("cli:c", { put: () => { throw new Error("full"); } } as any);
 
@@ -419,7 +430,7 @@ describe("AgentLoop pending queues", () => {
   it("re-publishes leftover pending queue messages after dispatch cleanup", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
-    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
+    const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model", config: isolatedLoopConfig() });
     (loop as any).processMessageInternal = vi.fn(async () => {
       const queue = loop.pendingQueues.get("cli:c")!;
       queue.put(inbound("leftover-1"));

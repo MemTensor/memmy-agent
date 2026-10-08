@@ -80,9 +80,9 @@ function Stop-Installation([string]$Reason) {
 function ConvertTo-ComparableVersion([string]$Version, [bool]$AllowMetadata) {
   if (-not $Version) { throw "installed version metadata is missing" }
   $pattern = if ($AllowMetadata) {
-    '^\s*(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:\s.*)?$'
+    '^\s*(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]+)?(?:\s.*)?$'
   } else {
-    '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$'
+    '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]+)?$'
   }
   $match = [regex]::Match($Version, $pattern)
   if (-not $match.Success) { throw "version metadata is not numeric and compatible: $Version" }

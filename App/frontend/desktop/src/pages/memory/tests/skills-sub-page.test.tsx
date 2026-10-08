@@ -7,6 +7,21 @@ import { demoSkillDetail, demoSkillPanelItems, demoSkillTimeline, isSkillsDemoEn
 import { createMemoryRuntimeClientStub, panelItemsOutput, skillPanelDetailFixture, skillPanelItemsFixture } from "./fixtures.js";
 
 describe("SkillsSubPage", () => {
+  it("shows review before an observed History Skill can be enabled", () => {
+    const detail = { ...skillPanelDetailFixture, item: {
+      ...skillPanelDetailFixture.item, status: "resolving" as const,
+      sourceMemoryIds: ["history-memory-1", "history-memory-2"],
+      metadata: { properties: { internal_info: { external_evidence_candidate: { source: "computer_history" } } } }
+    } };
+    const html = renderToString(<I18nProvider language="zh-CN"><SkillsSubPageView
+      state={{ status: "ready", data: skillPanelItemsFixture, detail: { status: "ready", data: { detail, timeline: [] } } }}
+      query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()}
+      onRefresh={vi.fn()} onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)}
+      onApproveObservedSkill={vi.fn(async () => undefined)} onCloseSkill={vi.fn()}
+      onOpenMemoryReference={vi.fn()} /></I18nProvider>);
+    expect(html).toContain("确认并启用这个 Skill");
+    expect(html).toContain("history-memory-1");
+  });
   it("从 panel items/detail 读取技能数据", async () => {
     const client = createMemoryRuntimeClientStub({
       listPanelItems: vi.fn(async () => skillPanelItemsFixture),

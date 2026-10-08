@@ -7,10 +7,12 @@ import { clearDeferredGuidanceStep, writeDeferredGuidanceStep, writeGuidanceComp
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CampaignPromptHost } from "../campaign-prompt-host.js";
 import { CampaignPrompt } from "../campaign-prompt.js";
+import { setHistoryLaunchPromptOpen } from "../../app/history-launch-prompt-state.js";
 import { NotificationToast } from "../notification-toast.js";
 
 const mocks = vi.hoisted(() => ({
   openExternalUrl: vi.fn(),
+  appVersion: "1.1.8",
   appState: {
     state: {
       startup: { status: "ready" },
@@ -46,6 +48,10 @@ vi.mock("../../utils/open-url.js", () => ({
   openExternalUrl: mocks.openExternalUrl
 }));
 
+vi.mock("../../app/update-coordinator.js", () => ({
+  useOptionalUpdateCoordinator: () => ({ appVersion: mocks.appVersion })
+}));
+
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("campaign and token credit prompts", () => {
@@ -56,6 +62,7 @@ describe("campaign and token credit prompts", () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     mocks.openExternalUrl.mockClear();
+    mocks.appVersion = "1.1.8";
     mocks.appState.state.startup.status = "ready";
     mocks.appState.state.navigation.currentPath = "/main";
     mocks.appState.state.bootstrap.app.userMode = "account";
@@ -70,8 +77,28 @@ describe("campaign and token credit prompts", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    setHistoryLaunchPromptOpen(false);
     document.body.replaceChildren();
     vi.unstubAllEnvs();
+  });
+
+  it("waits until the History launch notice closes before offering the campaign", async () => {
+    setHistoryLaunchPromptOpen(true);
+    await act(async () => {
+      root.render(<I18nProvider language="zh-CN"><CampaignPromptHost /></I18nProvider>);
+    });
+    expect(document.body.textContent).not.toContain("中秋弹幕活动开始了");
+    await act(async () => setHistoryLaunchPromptOpen(false));
+    expect(document.body.textContent).toContain("中秋弹幕活动开始了");
+  });
+
+  it("waits for the installed app version before competing with the History notice", async () => {
+    mocks.appVersion = "0.0.0";
+    await act(async () => root.render(<I18nProvider language="zh-CN"><CampaignPromptHost /></I18nProvider>));
+    expect(document.body.textContent).not.toContain("中秋弹幕活动开始了");
+    mocks.appVersion = "1.1.8";
+    await act(async () => root.render(<I18nProvider language="zh-CN"><CampaignPromptHost /></I18nProvider>));
+    expect(document.body.textContent).toContain("中秋弹幕活动开始了");
   });
 
   it("uses remote status only for eligibility and keeps the project activity URL", async () => {

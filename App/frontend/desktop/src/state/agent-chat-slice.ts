@@ -292,6 +292,7 @@ export type AgentAction =
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
+  | { type: "agent/optimisticMessageRejected"; chatId: string; clientRequestId: string }
   | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }
   | { type: "agent/queueItemRemoveStarted"; chatId: string; clientRequestId: string }
   | { type: "agent/queueItemRemoveFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
@@ -578,6 +579,8 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return switchCurrentChat({ ...state, blankDraftActive: false }, action.chatId, chatIdToSessionKey(action.chatId));
     case "agent/transientSendFailed":
       return clearTransientSend(state, action.chatId);
+    case "agent/optimisticMessageRejected":
+      return clearOptimisticSend(state, action.chatId, action.clientRequestId);
     case "agent/userMessageQueued":
       return queueOptimisticUserMessage(state, action);
     case "agent/queueItemRemoveStarted":
@@ -2287,11 +2290,12 @@ function finishActivityProgressForTurnEnd(message: AgentChatMessage): AgentChatM
   };
 }
 
-function finishStreamingMessages(messages: AgentChatMessage[], latencyMs?: number): AgentChatMessage[] {
+function finishStreamingMessages(messages: AgentChatMessage[], latencyMs?: number, finishedAt?: number): AgentChatMessage[] {
   let lastAssistantIndex = -1;
-  if (latencyMs != null) {
+  if (latencyMs != null || finishedAt != null) {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index]?.role === "assistant") {
+      const message = messages[index];
+      if (message?.role === "assistant" && message.kind !== "trace" && message.kind !== "narration") {
         lastAssistantIndex = index;
         break;
       }
@@ -2302,8 +2306,9 @@ function finishStreamingMessages(messages: AgentChatMessage[], latencyMs?: numbe
   const nextMessages = messages.map((message, index) => {
     const finishedMessage = finishActivityProgressForTurnEnd(message);
     const shouldFinishStreaming = Boolean(message.isStreaming || message.reasoningStreaming);
-    const shouldSetLatency = index === lastAssistantIndex;
-    if (finishedMessage === message && !shouldFinishStreaming && !shouldSetLatency) {
+    const shouldSetLatency = latencyMs != null && index === lastAssistantIndex;
+    const shouldStampFinishedAt = finishedAt != null && index === lastAssistantIndex && message.createdAt !== finishedAt;
+    if (finishedMessage === message && !shouldFinishStreaming && !shouldSetLatency && !shouldStampFinishedAt) {
       return message;
     }
 
@@ -2311,20 +2316,21 @@ function finishStreamingMessages(messages: AgentChatMessage[], latencyMs?: numbe
     return {
       ...finishedMessage,
       ...(shouldFinishStreaming ? { isStreaming: false, reasoningStreaming: false } : {}),
-      ...(shouldSetLatency ? { latencyMs } : {})
+      ...(shouldSetLatency ? { latencyMs } : {}),
+      ...(shouldStampFinishedAt ? { createdAt: finishedAt } : {})
     };
   });
 
   return changed ? nextMessages : messages;
 }
 
-function finishChatStreaming(state: AgentState, chatId: string, latencyMs?: number): AgentState {
+function finishChatStreaming(state: AgentState, chatId: string, latencyMs?: number, finishedAt?: number): AgentState {
   const messages = state.currentChatId === chatId ? state.messages : state.messagesByChatId[chatId];
   if (!messages) {
     return state;
   }
 
-  const finishedMessages = finishStreamingMessages(messages, latencyMs);
+  const finishedMessages = finishStreamingMessages(messages, latencyMs, finishedAt);
   if (finishedMessages === messages) {
     return state;
   }
@@ -2591,20 +2597,7 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       const item = queuedMessageFromWire(event.item);
       if (!item) return state;
       return applyQueueIncrement(state, event, (currentState) => {
-        const currentMessages = chatMessagesForId(currentState, event.chat_id!);
-        const withoutSteerPending = currentMessages.filter((message) => !(
-          message.clientRequestId === item.clientRequestId
-          && message.queueSteerPending === true
-        ));
-        if (withoutSteerPending.length !== currentMessages.length) {
-          currentState = syncCurrentMessages({
-            ...currentState,
-            messagesByChatId: {
-              ...currentState.messagesByChatId,
-              [event.chat_id!]: withoutSteerPending
-            }
-          });
-        }
+        currentState = clearOptimisticSend(currentState, event.chat_id!, item.clientRequestId);
         const current = currentState.queuedMessagesByChatId[event.chat_id!] ?? [];
         const index = current.findIndex(
           (candidate) => candidate.clientRequestId === item.clientRequestId
@@ -2880,15 +2873,39 @@ function appendExternalUserMessage(
   event: MemmyAgentWsEvent
 ): AgentState {
   const turnId = eventTurnId(event);
-  if (turnId && state.messages.some((message) => message.role === "user" && message.turnId === turnId)) {
-    return state;
-  }
   const content = typeof event.text === "string"
     ? event.text
     : typeof event.content === "string"
       ? event.content
       : "";
   const normalizedMedia = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : [];
+  const clientRequestId = typeof event.client_request_id === "string" ? event.client_request_id : null;
+  const optimisticIndex = clientRequestId
+    ? state.messages.findIndex((message) => (
+        message.role === "user"
+        && message.clientRequestId === clientRequestId
+      ))
+    : -1;
+  if (optimisticIndex >= 0) {
+    const messages = [...state.messages];
+    messages[optimisticIndex] = {
+      ...messages[optimisticIndex]!,
+      content: content || messages[optimisticIndex]!.content,
+      ...(turnId ? { turnId } : {}),
+      ...(normalizedMedia.length ? { media: normalizedMedia } : {})
+    };
+    return {
+      ...state,
+      messages,
+      messagesByChatId: {
+        ...state.messagesByChatId,
+        [chatId]: messages
+      }
+    };
+  }
+  if (turnId && state.messages.some((message) => message.role === "user" && message.turnId === turnId)) {
+    return state;
+  }
   const message: AgentChatMessage = {
     id: nextMessageId(state.messages, "user"),
     role: "user",
@@ -2992,7 +3009,7 @@ function handleTransportMessageTooBig(state: AgentState, event: MemmyAgentWsEven
   if (!chatId) {
     return setOperationError(state, "chat", operationErrorForChat("home.media.error.messageTooBig", undefined, "send"));
   }
-  const nextState = clearRejectedOptimisticSend(state, chatId);
+  const nextState = clearOptimisticSend(state, chatId, event.client_request_id);
   return setOperationError(nextState, "chat", operationErrorForChat("home.media.error.messageTooBig", chatId, "send"));
 }
 
@@ -3003,7 +3020,7 @@ function handleMediaRejected(state: AgentState, event: MemmyAgentWsEvent): Agent
   }
 
   return setOperationError(
-    clearRejectedOptimisticSend(state, chatId),
+    clearOptimisticSend(state, chatId, event.client_request_id),
     "chat",
     operationErrorForChat(mediaRejectedMessageKey(event.reason), chatId, "send")
   );
@@ -3011,7 +3028,7 @@ function handleMediaRejected(state: AgentState, event: MemmyAgentWsEvent): Agent
 
 function handleMissingContent(state: AgentState, event: MemmyAgentWsEvent): AgentState {
   const chatId = event.chat_id;
-  const nextState = chatId ? clearRejectedOptimisticSend(state, chatId) : state;
+  const nextState = chatId ? clearOptimisticSend(state, chatId, event.client_request_id) : state;
   return setOperationError(nextState, "chat", operationErrorFromEvent(event, "send"));
 }
 
@@ -3023,15 +3040,22 @@ function handleStopFailed(state: AgentState, event: MemmyAgentWsEvent): AgentSta
   return setOperationError(nextState, "chat", operationErrorFromEvent(event, "gateway-command"));
 }
 
-function clearRejectedOptimisticSend(state: AgentState, chatId: string): AgentState {
-  if (!state.optimisticSendingByChatId[chatId]) {
+function clearOptimisticSend(state: AgentState, chatId: string, clientRequestId?: string): AgentState {
+  const currentMessages = chatMessagesForId(state, chatId);
+  const messages = clientRequestId
+    ? currentMessages.filter((message) => message.clientRequestId !== clientRequestId)
+    : removeLatestOptimisticUser(currentMessages);
+  const removedMessage = messages.length !== currentMessages.length;
+  if (
+    (clientRequestId && !removedMessage)
+    || (!clientRequestId && !state.optimisticSendingByChatId[chatId])
+  ) {
     return state;
   }
   const optimisticSendingByChatId = clearChatMapValue(state.optimisticSendingByChatId, chatId);
   const optimisticTasksByChatId = hasCanonicalSession(state, chatId)
     ? state.optimisticTasksByChatId
     : clearChatMapValue(state.optimisticTasksByChatId, chatId);
-  const messages = removeLatestOptimisticUser(chatMessagesForId(state, chatId));
   return deriveTasks({
     ...state,
     optimisticSendingByChatId,
@@ -4255,7 +4279,12 @@ function markChatIdle(state: AgentState, chatId: string, options: {
   const wasBusy = isChatBusy(state, chatId) || Boolean(state.stopInFlightByChatId[chatId]);
   const countsAsCompletion = options.countsAsCompletion ?? true;
   const finishedState = shouldClearStreamingFlags(options.source)
-    ? finishChatStreaming(state, chatId, latencyForSource(options.source, options.latencyMs))
+    ? finishChatStreaming(
+        state,
+        chatId,
+        latencyForSource(options.source, options.latencyMs),
+        options.source === "turn_end" ? Date.now() : undefined
+      )
     : state;
   const retryFinishedState = finishRetryWaitStatusForTurn(finishedState, chatId, options.turnId ?? null);
   const optimisticSendingByChatId = { ...state.optimisticSendingByChatId };

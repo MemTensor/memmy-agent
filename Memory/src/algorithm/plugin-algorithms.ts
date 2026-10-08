@@ -5088,6 +5088,8 @@ interface RankedMemoryCandidate {
 
 export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (memory.status === "deleted" || memory.status === "archived") return false;
+  if (memory.memoryLayer === "Skill" && memory.status !== "activated"
+    && memory.properties.internal_info.external_evidence_candidate) return false;
   const evidenceStatus = memory.properties.internal_info.evidence_status;
   if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
   const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;

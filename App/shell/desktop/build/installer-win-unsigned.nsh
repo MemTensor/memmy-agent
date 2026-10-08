@@ -489,16 +489,17 @@ Function MemmyPrepareDirectDataMigration
     Pop $0
     Pop $1
     StrCmp $0 "0" memmy_direct_prepare_succeeded
-    DetailPrint "Memmy data migration was skipped after a safe rollback; installation will continue."
-    RMDir /r "$MemmyMigrationLockPath"
-    Goto memmy_direct_prepare_skipped
+    StrCpy $R8 "Memmy data migration could not be prepared. The existing data was left in place; close Memmy and retry the upgrade. Installation will not continue."
+    DetailPrint "$R8"
+    Goto memmy_direct_prepare_failed
 
   memmy_direct_prepare_failed:
-    DetailPrint "Memmy data migration helper is unavailable; installation will continue without automatic migration."
+    StrCpy $R8 "Memmy data migration helper is unavailable. The existing data was left in place; retry the upgrade after repairing the installation. Installation will not continue."
+    DetailPrint "$R8"
 
   memmy_direct_prepare_skipped:
     StrCpy $MemmyDirectMigrationPrepared "0"
-    Push "1"
+    Push "0"
     Return
 
   memmy_direct_prepare_succeeded:

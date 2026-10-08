@@ -1,0 +1,120 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>html,body{margin:0;width:100%;height:100%;background:#17191d;color:#e6e8ed;font:12px system-ui,sans-serif}
+body{display:flex;flex-direction:column}header{padding:6px 10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex:none;display:flex;gap:8px;align-items:center}
+#title{overflow:hidden;text-overflow:ellipsis;flex:1}#mode{display:none}#open{display:none;background:#313b55;border:0;border-radius:5px;color:#fff;padding:3px 8px;cursor:pointer}
+#mode{font-size:10px;color:#a9b1bd}
+body[data-surface] #open{display:block}
+img,video{display:block;width:100%;height:100%;object-fit:contain;background:#0c0d0f;cursor:pointer}
+#frame[hidden]{display:none}
+#viewport{position:relative;flex:1;min-height:0}
+#status,#drag,#hide,#expand,#interrupt{display:none}
+body[data-surface=computer][data-interruptible=true]:not([data-native-pip]) #interrupt{display:block;background:#7e2630;border:0;border-radius:5px;color:#fff;padding:3px 8px;cursor:pointer}
+video{display:none}
+body[data-native-pip]{background:#000}body[data-native-pip] header{display:none}
+body[data-native-pip] img,body[data-native-pip] video{cursor:default}
+body[data-window-pip]{box-sizing:border-box;padding:12px;background:transparent;-webkit-app-region:drag}
+body[data-window-pip] #viewport{height:100%;flex:none;border-radius:8px;overflow:hidden;
+  box-shadow:0 6px 10px rgba(0,0,0,.16);background:#0c0d0f;-webkit-app-region:no-drag}
+body[data-window-pip] header{position:absolute;z-index:2;right:16px;top:4px;padding:3px;
+  height:24px;gap:2px;background:rgba(26,27,30,.88);border-radius:16px;
+  opacity:0;pointer-events:none;transition:opacity .14s ease}
+body[data-window-pip]:hover header{opacity:1;pointer-events:auto}
+body[data-window-pip] #title,body[data-window-pip] #mode{display:none}
+body[data-window-pip] #drag{display:grid;place-items:center;width:24px;height:24px;
+  color:#dadce2;-webkit-app-region:drag;cursor:move;font-size:13px}
+body[data-window-pip] #hide,body[data-window-pip] #expand,body[data-window-pip][data-interruptible=true] #interrupt{display:grid;place-items:center;
+  width:24px;height:24px;padding:0;background:transparent;border:0;border-radius:12px;
+  color:#f4f4f5;font-size:17px;cursor:pointer;-webkit-app-region:no-drag}
+body[data-window-pip] #open{background:transparent;padding:2px 7px;font-size:11px;
+  -webkit-app-region:no-drag}
+body[data-window-pip] #hide:hover,body[data-window-pip] #expand:hover,body[data-window-pip] #interrupt:hover,
+body[data-window-pip] #open:hover{background:rgba(255,255,255,.16)}
+</style></head>
+<body data-live="false"><header><span id="title">Computer Use</span><span id="mode">快照</span>
+<span id="drag" aria-label="拖动小窗">⋮⋮</span><button id="hide" type="button" aria-label="隐藏小窗">×</button>
+<button id="expand" type="button" aria-label="放大小窗">⤢</button><button id="interrupt" type="button" aria-label="停止本回合电脑操作" title="停止本回合电脑操作">停止</button><button id="open" type="button">打开标签页</button></header>
+<div id="viewport"><img id="frame" alt="" hidden><video id="live" autoplay muted playsinline></video>
+<span id="status">正在连接实时画面</span></div>
+<script>if(typeof location!=='undefined'){
+const params=new URLSearchParams(location.search);
+if(params.has('nativePip'))document.body.dataset.nativePip='1';
+if(params.has('windowPip'))document.body.dataset.windowPip='1';}
+let liveStream=null;let liveSource=null;let liveEpoch=null;let liveGeneration=0;
+window.__memmySetSurface=async function(title,image,surface,source,epoch,interruptible){
+document.getElementById('title').textContent=title;
+document.body.dataset.surface=surface;
+document.body.dataset.interruptible=surface==='computer'&&interruptible?'true':'false';
+const modeLabel=value=>surface==='computer'?'正在使用电脑 · '+value:value;
+document.getElementById('mode').textContent=modeLabel(document.body.dataset.live==='true'?'实时':'快照');
+document.getElementById('open').textContent=surface==='computer'?'打开应用':'打开标签页';
+const frame=document.getElementById('frame');
+const hasImage=typeof image==='string'&&/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(image);
+if(hasImage){frame.src=image;frame.hidden=false;}else{frame.removeAttribute?.('src');frame.hidden=true;}
+if(source&&source===liveSource&&epoch===liveEpoch)return;
+const generation=++liveGeneration;
+if(!source&&!liveSource){document.body.dataset.live='false';
+document.getElementById('status').textContent='';return;}
+if(liveStream){for(const track of liveStream.getTracks())track.stop();liveStream=null;}
+liveSource=null;liveEpoch=null;const video=document.getElementById('live'),mode=document.getElementById('mode');
+mode.textContent=modeLabel('快照');
+document.body.dataset.live='false';
+document.getElementById('status').textContent=source?'正在连接实时画面':'实时画面不可用';
+video.style.display='none';frame.style.display='block';
+if(!source)return;
+try{const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+if(generation!==liveGeneration){for(const track of stream.getTracks())track.stop();return;}
+liveStream=stream;liveSource=source;liveEpoch=epoch;video.srcObject=stream;video.style.display='block';frame.style.display='none';mode.textContent=modeLabel('实时');
+document.body.dataset.live='true';
+window.memmySurfaceControl.captureReady?.(source,epoch);
+stream.getVideoTracks()[0].addEventListener('ended',()=>{if(generation!==liveGeneration)return;
+liveStream=null;liveSource=null;liveEpoch=null;video.srcObject=null;
+video.style.display='none';frame.style.display='block';mode.textContent=modeLabel('快照');
+document.body.dataset.live='false';document.getElementById('status').textContent='实时画面已中断';window.memmySurfaceControl.captureEnded(source,epoch);});
+}catch{if(generation!==liveGeneration)return;
+if(liveStream){for(const track of liveStream.getTracks())track.stop();liveStream=null;}
+liveSource=null;liveEpoch=null;video.style.display='none';frame.style.display='block';mode.textContent=modeLabel('快照');
+document.body.dataset.live='false';document.getElementById('status').textContent='实时画面不可用';
+window.memmySurfaceControl.captureEnded?.(source,epoch);}};
+document.getElementById('open').addEventListener('click',()=>window.memmySurfaceControl.send({action:'open'}));
+document.getElementById('interrupt').addEventListener('click',()=>window.memmySurfaceControl.send({action:'interrupt'}));
+document.getElementById('hide').addEventListener('click',()=>window.memmySurfaceControl.hide());
+document.getElementById('expand').addEventListener('click',()=>window.memmySurfaceControl.expand());
+const frame=document.getElementById('frame'),video=document.getElementById('live');
+function visualPoint(event,visual){
+const naturalWidth=visual===video?video.videoWidth:frame.naturalWidth;
+const naturalHeight=visual===video?video.videoHeight:frame.naturalHeight;
+const bounds=visual.getBoundingClientRect();if(!naturalWidth||!naturalHeight)return null;
+const scale=Math.min(bounds.width/naturalWidth,bounds.height/naturalHeight);
+const width=naturalWidth*scale,height=naturalHeight*scale;
+const clientX=Number.isFinite(event.clientX)?event.clientX:bounds.left+bounds.width/2;
+const clientY=Number.isFinite(event.clientY)?event.clientY:bounds.top+bounds.height/2;
+const x=(clientX-(bounds.left+(bounds.width-width)/2))/width;
+const y=(clientY-(bounds.top+(bounds.height-height)/2))/height;
+return x>=0&&x<=1&&y>=0&&y<=1?{x,y,naturalWidth,naturalHeight}:null;}
+window.__memmyResolvePipPoint=function(x,y){
+if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||x>1||y<0||y>1)return null;
+const live=document.body.dataset.live==='true'&&video.style.display==='block';
+const visual=live?video:frame,bounds=visual.getBoundingClientRect();
+const point=visualPoint({clientX:bounds.left+x*bounds.width,clientY:bounds.top+y*bounds.height},visual);
+if(!point)return null;
+return {x:point.x,y:point.y,...(live?{frameMode:'live',frameWidth:point.naturalWidth,frameHeight:point.naturalHeight}:{})};};
+function forwardClick(){window.memmySurfaceControl.send({action:'open'});}
+frame.addEventListener('click',forwardClick);video.addEventListener('click',forwardClick);
+function forwardWheel(event){event.preventDefault();
+const point=visualPoint(event,event.currentTarget);if(!point)return;
+window.memmySurfaceControl.send({action:'scroll',deltaY:Math.max(-1000,Math.min(1000,event.deltaY)),
+  ...(document.body.dataset.surface==='computer'?{x:point.x,y:point.y}:{}),
+...(event.currentTarget===video&&document.body.dataset.surface==='computer'
+?{frameMode:'live',frameWidth:point.naturalWidth,frameHeight:point.naturalHeight}:{})});}
+frame.addEventListener('wheel',forwardWheel,{passive:false});
+video.addEventListener('wheel',forwardWheel,{passive:false});
+window.addEventListener('keydown',event=>{if(['Meta','Control','Alt','Shift'].includes(event.key))return;
+if(event.key==='Escape'&&document.body.dataset.surface==='computer'&&document.body.dataset.interruptible==='true'){
+window.memmySurfaceControl.send({action:'interrupt'});event.preventDefault();return;}
+if(document.body.dataset.surface==='computer'&&document.body.dataset.live!=='true')return;
+const parts=[];if(event.metaKey)parts.push('Meta');if(event.ctrlKey)parts.push('Control');
+if(event.altKey)parts.push('Alt');if(event.shiftKey)parts.push('Shift');
+parts.push(event.key===' '?'Space':event.key);
+window.memmySurfaceControl.send({action:'key',key:parts.join('+'),
+...(document.body.dataset.surface==='computer'?{frameMode:'live'}:{})});event.preventDefault();});</script></body></html>

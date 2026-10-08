@@ -21,6 +21,8 @@ export interface Task {
   goalId?: string;
   dismissed?: boolean;
   readAt?: number;
+  /** Explicit unread completion. Historical tasks without this flag are not unread. */
+  unseen?: boolean;
 }
 
 export interface TaskBusSnapshot {
@@ -54,6 +56,8 @@ export interface SyncAgentConversationInput {
 export interface TaskBusAgentTaskStatus {
   sessionIds: string[];
   isRunning: boolean;
+  /** Sidebar unread dot. When present, it is the source of truth for that session's pet badge. */
+  completedUnseen?: boolean;
 }
 
 export interface SyncAgentTaskStatusesInput {
@@ -138,7 +142,8 @@ export function completeTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string
             finishedAt: now,
             updatedAt: now,
             streamingChunks: [finalText],
-            readAt: undefined
+            readAt: undefined,
+            unseen: true
           }
         : task
     )
@@ -156,7 +161,8 @@ export function errorTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, m
             lastAgentMessage: message,
             finishedAt: now,
             updatedAt: now,
-            readAt: undefined
+            readAt: undefined,
+            unseen: true
           }
         : task
     )
@@ -172,7 +178,8 @@ export function cancelTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, 
             ...task,
             status: "cancelled",
             finishedAt: now,
-            updatedAt: now
+            updatedAt: now,
+            unseen: false
           }
         : task
     )
@@ -219,7 +226,7 @@ export function dismissTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string,
 export function markTaskReadInSnapshot(snapshot: TaskBusSnapshot, taskId: string, now = Date.now()): TaskBusSnapshot {
   return {
     ...snapshot,
-    tasks: snapshot.tasks.map((task) => (task.id === taskId && isTaskTerminalStatus(task.status) ? { ...task, readAt: now } : task))
+    tasks: snapshot.tasks.map((task) => (task.id === taskId && isTaskTerminalStatus(task.status) ? { ...task, readAt: now, unseen: false } : task))
   };
 }
 
@@ -314,7 +321,7 @@ export function syncAgentTaskStatusesToSnapshot(snapshot: TaskBusSnapshot, input
   const now = input.now ?? Date.now();
   const runningRepresentativeTaskIds = findRunningRepresentativeTaskIds(snapshot.tasks, statusBySessionId);
   let changed = false;
-  const tasks = snapshot.tasks.map((task) => {
+  const statusTasks = snapshot.tasks.map((task) => {
     const isRunning = statusBySessionId.get(task.sessionId);
     if (isRunning == null) {
       return task;
@@ -334,6 +341,8 @@ export function syncAgentTaskStatusesToSnapshot(snapshot: TaskBusSnapshot, input
     changed = changed || nextTask !== task;
     return nextTask;
   });
+  const tasks = applyCompletedUnseenToTasks(statusTasks, input.tasks, now);
+  changed = changed || tasks !== statusTasks;
 
   return changed ? { ...snapshot, tasks } : snapshot;
 }
@@ -580,6 +589,7 @@ function applyTaskAnswerSnapshot(task: Task, text: string, status: TaskStatus, n
   const taskWithoutFinishedAt = { ...task };
   delete taskWithoutFinishedAt.finishedAt;
   delete taskWithoutFinishedAt.readAt;
+  delete taskWithoutFinishedAt.unseen;
   const nextTask: Task = status === "done"
     ? {
         ...task,
@@ -588,7 +598,8 @@ function applyTaskAnswerSnapshot(task: Task, text: string, status: TaskStatus, n
         updatedAt: now,
         streamingChunks,
         finishedAt: task.finishedAt ?? now,
-        readAt: undefined
+        readAt: undefined,
+        unseen: true
       }
     : {
         ...taskWithoutFinishedAt,
@@ -622,6 +633,7 @@ function markTaskRunningFromAgentStatus(task: Task, now: number): Task {
   const taskWithoutFinishedAt = { ...task };
   delete taskWithoutFinishedAt.finishedAt;
   delete taskWithoutFinishedAt.readAt;
+  delete taskWithoutFinishedAt.unseen;
   return {
     ...taskWithoutFinishedAt,
     status: "processing",
@@ -645,7 +657,8 @@ function finishTaskFromAgentStatus(task: Task, now: number): Task {
     ...(text ? { lastAgentMessage: text, streamingChunks: [text] } : {}),
     updatedAt: now,
     finishedAt: task.finishedAt ?? now,
-    readAt: undefined
+    readAt: undefined,
+    unseen: true
   };
 }
 
@@ -853,7 +866,9 @@ function isTaskTerminalStatus(status: TaskStatus): boolean {
 }
 
 function markTaskDismissed(task: Task, now: number): Task {
-  return isTaskTerminalStatus(task.status) ? { ...task, dismissed: true, readAt: task.readAt ?? now } : { ...task, dismissed: true };
+  return isTaskTerminalStatus(task.status)
+    ? { ...task, dismissed: true, readAt: task.readAt ?? now, unseen: false }
+    : { ...task, dismissed: true, unseen: false };
 }
 
 /**
@@ -916,6 +931,58 @@ function expandSessionIds(sessionIds: string[]): Set<string> {
 /**
  * Builds a map of full-mode session running states, compatible with the websocket: prefix.
  */
+/**
+ * Applies the main window's per-session unread dots onto terminal pet tasks.
+ *
+ * Sessions the user has already opened are marked read. Sessions with a completion
+ * they have not opened become one unread session, regardless of how many tasks they contain.
+ */
+function applyCompletedUnseenToTasks(tasks: Task[], statuses: TaskBusAgentTaskStatus[], now: number): Task[] {
+  const unseenBySession = new Map<string, boolean>();
+  for (const status of statuses) {
+    if (typeof status.completedUnseen !== "boolean") {
+      continue;
+    }
+
+    for (const sessionId of status.sessionIds) {
+      const canonical = canonicalTaskSessionId(sessionId);
+      if (!canonical) {
+        continue;
+      }
+      unseenBySession.set(canonical, unseenBySession.get(canonical) === true || status.completedUnseen);
+    }
+  }
+  if (unseenBySession.size === 0) {
+    return tasks;
+  }
+
+  let changed = false;
+  const nextTasks = tasks.map((task) => {
+    const unseen = unseenBySession.get(canonicalTaskSessionId(task.sessionId));
+    if (unseen == null || !isTaskTerminalStatus(task.status)) {
+      return task;
+    }
+
+    if (unseen) {
+      // Only tasks that have never been classified get the sidebar dot.
+      // An explicit pet read (unseen false / readAt) stays read.
+      if (task.readAt != null || task.unseen != null) {
+        return task;
+      }
+      changed = true;
+      return { ...task, unseen: true };
+    }
+
+    if (task.unseen === false && task.readAt != null) {
+      return task;
+    }
+    changed = true;
+    return { ...task, unseen: false, readAt: task.readAt ?? now };
+  });
+
+  return changed ? nextTasks : tasks;
+}
+
 function createAgentTaskStatusMap(tasks: TaskBusAgentTaskStatus[]): Map<string, boolean> {
   const statusBySessionId = new Map<string, boolean>();
   for (const task of tasks) {

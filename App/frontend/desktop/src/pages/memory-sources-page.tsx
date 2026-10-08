@@ -103,7 +103,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const scanTargetSourceId = scanProgress?.sourceId ?? state.agentSources.activeScanSourceId;
   const recentlyCompletedSourceIds = new Set(state.agentSources.recentScanCompletions.map((item) => item.sourceId));
   const scanStopped = scanProgress?.phase === "stopped";
-  const showScanProgress = isScanning || scanStopped;
+  const scanCancelling = Boolean(state.agentSources.cancellingScanJobId);
+  const showScanProgress = isScanning || scanStopped || scanCancelling;
   const hasDeterminateScanProgress = Boolean(scanProgress && scanProgress.phase !== "scan" && scanProgress.phase !== "stopped" && scanProgress.total > 0);
   const memoryUnavailable = memoryServiceStatus === "unavailable";
   const visibleSources = visibleAgentSources(state.agentSources.items);
@@ -348,7 +349,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
    * Triggers an automatic scan.
    */
   function scanSources(sourceId = "all", mode?: AgentSourceScanMode) {
-    if (!clients || isScanning || recentlyCompletedSourceIds.has(sourceId)) {
+    if (!clients || isScanning || scanCancelling || recentlyCompletedSourceIds.has(sourceId)) {
       return;
     }
 
@@ -409,7 +410,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   function stopScan() {
-    if (!clients || !isScanning) {
+    if (!clients || !isScanning || scanCancelling) {
       return;
     }
 
@@ -428,17 +429,21 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   function cancelScan() {
-    if (!clients || !showScanProgress) {
+    if (!clients || !showScanProgress || scanCancelling) {
       return;
     }
 
+    const jobId = scanProgress?.jobId;
+    if (jobId) {
+      dispatch(appActions.agentSourceScanCancelRequested(jobId));
+    }
     void clients.agentSources
       .cancelScan()
       .then(() => {
         dispatch(appActions.agentSourceScanCompleted());
         reloadSources();
       })
-      .catch((error) => dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error))));
+      .catch((error) => dispatch(appActions.agentSourceScanCancelFailed(error instanceof Error ? error.message : String(error))));
   }
 
   /**
@@ -748,12 +753,12 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       </div>
 
       {showScanProgress && (
-        <div className="mb-5 bg-background-paper border border-action-sky/20 rounded-card-lg p-5 animate-in fade-in" aria-busy="true">
+        <div className="mb-5 bg-background-paper border border-action-sky/20 rounded-card-lg p-5 animate-in fade-in" aria-busy={isScanning && !scanCancelling}>
           <div className="flex items-start justify-between gap-3 mb-4">
             <div className="flex items-center gap-3 min-w-0">
               <div className="relative">
-                <Radar size={20} className={isScanning ? "text-action-sky animate-spin" : "text-text-ink/45"} />
-                {isScanning && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-action-sky rounded-full animate-ping" />}
+                <Radar size={20} className={isScanning && !scanCancelling ? "text-action-sky animate-spin" : "text-text-ink/45"} />
+                {isScanning && !scanCancelling && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-action-sky rounded-full animate-ping" />}
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-medium text-text-ink">{t(formatScanProgressTitleKey(scanProgress?.phase ?? "scan"))}</div>
@@ -777,7 +782,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={isScanning ? stopScan : continueScan}
-              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/12 hover:border-action-sky/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all"
+              disabled={scanCancelling}
+              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/12 hover:border-action-sky/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-action-sky/8 disabled:hover:border-action-sky/30 disabled:active:scale-100"
               title={t(isScanning ? "memory.scanPause" : "memory.scanContinue")}
               aria-label={t(isScanning ? "memory.scanPause" : "memory.scanContinue")}
             >
@@ -787,12 +793,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={cancelScan}
-              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-status-error/30 text-status-error bg-status-error-soft/50 hover:bg-status-error-soft hover:border-status-error/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all"
-              title={t("memory.scanStop")}
-              aria-label={t("memory.scanStop")}
+              disabled={scanCancelling}
+              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-status-error/30 text-status-error bg-status-error-soft/50 hover:bg-status-error-soft hover:border-status-error/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-status-error-soft/50 disabled:hover:border-status-error/30 disabled:active:scale-100"
+              title={t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
+              aria-label={t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
             >
               <X size={14} />
-              {t("memory.scanStop")}
+              {t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
             </button>
           </div>
           <div className="flex justify-between mt-2">
@@ -814,7 +821,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <button
             type="button"
             onClick={scanStopped ? continueScan : () => scanSources()}
-            disabled={isScanning || recentlyCompletedSourceIds.has("all")}
+            disabled={isScanning || scanCancelling || recentlyCompletedSourceIds.has("all")}
             className={`inline-flex h-8 items-center gap-2 rounded-btn px-3.5 text-xs font-normal text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed ${
               recentlyCompletedSourceIds.has("all")
                 ? "bg-status-success"
@@ -843,7 +850,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           );
           const connectionAction = resolveAgentSourceConnectionAction(source);
           const connectionActionDisabled = isAgentSourceConnectionActionDisabled(source, connectionAction);
-          const sourceScanDisabled = isScanning || sourceScanButtonState === "completed" || !source.available;
+          const sourceScanDisabled = isScanning || scanCancelling || sourceScanButtonState === "completed" || !source.available;
           const managedSyncReady = !source.builtin && source.syncReady === true;
           const managedSyncButtonState = resolveManagedAgentSourceSyncButtonState(
             source.sourceId,
@@ -899,7 +906,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                       onClick={() => managedSyncReady
                         ? syncManagedSource(source)
                         : launchManagedAgentTask(source, "connect")}
-                      disabled={isScanning || Boolean(managedSyncingSourceId) || managedSyncButtonState === "completed"}
+                      disabled={isScanning || scanCancelling || Boolean(managedSyncingSourceId) || managedSyncButtonState === "completed"}
                       busy={managedSyncButtonState === "running"}
                       completed={managedSyncButtonState === "completed"}
                     />
@@ -935,7 +942,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={openFullScanConfirm}
-              disabled={isScanning}
+              disabled={isScanning || scanCancelling}
               className="flex items-start gap-3 rounded-card border-content-panel bg-background-paper/70 p-3 text-left transition-all hover:bg-background-paper disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
             >
               <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-btn bg-background-paper/80 text-status-error">
@@ -1155,7 +1162,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                 <button
                   type="button"
                   onClick={startFullScan}
-                  disabled={!fullScanTargetSourceId || isScanning}
+                  disabled={!fullScanTargetSourceId || isScanning || scanCancelling}
                   className="px-4 py-2 text-sm text-white bg-status-error rounded-btn hover:bg-status-error/85 transition-all cursor-pointer shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   <Radar size={14} />

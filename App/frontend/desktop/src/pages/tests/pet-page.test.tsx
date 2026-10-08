@@ -28,6 +28,7 @@ import {
   resolvePetFullRoute,
   resolvePetMainRouteSessionId,
   resolvePetMainRouteTarget,
+  countUnreadPetSessions,
   selectMiniTaskListItems,
   shouldSubmitPetInputOnKeyDown,
   PetPageView
@@ -371,17 +372,17 @@ describe("PetPage helpers", () => {
 
   it("mini 任务列表按 session 展示 processing 加最近少量完成任务，按最近活动倒序且最多 6 条", () => {
     const items = selectMiniTaskListItems([
-      task({ id: "done-old", sessionId: "session-old", status: "done", startedAt: 1_000, updatedAt: 1_000, finishedAt: 1_100 }),
-      task({ id: "run-new-older-query", sessionId: "session-run-new", title: "旧问题", status: "done", startedAt: 8_000, updatedAt: 8_200, finishedAt: 8_200 }),
+      task({ id: "done-old", sessionId: "session-old", status: "done", unseen: true, startedAt: 1_000, updatedAt: 1_000, finishedAt: 1_100 }),
+      task({ id: "run-new-older-query", sessionId: "session-run-new", title: "旧问题", status: "done", unseen: true, startedAt: 8_000, updatedAt: 8_200, finishedAt: 8_200 }),
       task({ id: "run-new", sessionId: "session-run-new", title: "新问题", status: "processing", startedAt: 9_000, updatedAt: 9_100 }),
       task({ id: "answering-new", sessionId: "session-answering-new", status: "answering", startedAt: 9_500, updatedAt: 9_600 }),
       task({ id: "cancelled-new", sessionId: "session-cancelled-new", status: "cancelled", startedAt: 10_000, updatedAt: 10_000 }),
-      task({ id: "done-4", sessionId: "session-done-4", status: "done", startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100 }),
-      task({ id: "error-8", sessionId: "session-error-8", status: "error", startedAt: 8_000, updatedAt: 8_000, finishedAt: 8_100 }),
-      task({ id: "done-7", sessionId: "session-done-7", status: "done", startedAt: 7_000, updatedAt: 7_000, finishedAt: 7_100 }),
+      task({ id: "done-4", sessionId: "session-done-4", status: "done", unseen: true, startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100 }),
+      task({ id: "error-8", sessionId: "session-error-8", status: "error", unseen: true, startedAt: 8_000, updatedAt: 8_000, finishedAt: 8_100 }),
+      task({ id: "done-7", sessionId: "session-done-7", status: "done", unseen: true, startedAt: 7_000, updatedAt: 7_000, finishedAt: 7_100 }),
       task({ id: "run-mid", sessionId: "session-run-mid", status: "processing", startedAt: 6_000, updatedAt: 6_100 }),
-      task({ id: "done-5", sessionId: "session-done-5", status: "done", startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
-      task({ id: "done-3", sessionId: "session-done-3", status: "done", startedAt: 3_000, updatedAt: 3_000, finishedAt: 3_100 })
+      task({ id: "done-5", sessionId: "session-done-5", status: "done", unseen: true, startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
+      task({ id: "done-3", sessionId: "session-done-3", status: "done", unseen: true, startedAt: 3_000, updatedAt: 3_000, finishedAt: 3_100 })
     ]);
 
     expect(items.map((item) => item.sessionId)).toEqual(["session-answering-new", "session-run-new", "session-error-8", "session-done-7", "session-run-mid", "session-done-5"]);
@@ -394,13 +395,13 @@ describe("PetPage helpers", () => {
 
   it("mini 任务列表全部为完成态时也最多展示 6 个 session", () => {
     const items = selectMiniTaskListItems([
-      task({ id: "done-7", sessionId: "session-done-7", status: "done", startedAt: 7_000, updatedAt: 7_000, finishedAt: 7_100 }),
-      task({ id: "error-6", sessionId: "session-error-6", status: "error", startedAt: 6_000, updatedAt: 6_000, finishedAt: 6_100 }),
-      task({ id: "done-5", sessionId: "session-done-5", status: "done", startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
-      task({ id: "done-4", sessionId: "session-done-4", status: "done", startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100 }),
-      task({ id: "done-3", sessionId: "session-done-3", status: "done", startedAt: 3_000, updatedAt: 3_000, finishedAt: 3_100 }),
-      task({ id: "done-2", sessionId: "session-done-2", status: "done", startedAt: 2_000, updatedAt: 2_000, finishedAt: 2_100 }),
-      task({ id: "done-1", sessionId: "session-done-1", status: "done", startedAt: 1_000, updatedAt: 1_000, finishedAt: 1_100 })
+      task({ id: "done-7", sessionId: "session-done-7", status: "done", unseen: true, startedAt: 7_000, updatedAt: 7_000, finishedAt: 7_100 }),
+      task({ id: "error-6", sessionId: "session-error-6", status: "error", unseen: true, startedAt: 6_000, updatedAt: 6_000, finishedAt: 6_100 }),
+      task({ id: "done-5", sessionId: "session-done-5", status: "done", unseen: true, startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
+      task({ id: "done-4", sessionId: "session-done-4", status: "done", unseen: true, startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100 }),
+      task({ id: "done-3", sessionId: "session-done-3", status: "done", unseen: true, startedAt: 3_000, updatedAt: 3_000, finishedAt: 3_100 }),
+      task({ id: "done-2", sessionId: "session-done-2", status: "done", unseen: true, startedAt: 2_000, updatedAt: 2_000, finishedAt: 2_100 }),
+      task({ id: "done-1", sessionId: "session-done-1", status: "done", unseen: true, startedAt: 1_000, updatedAt: 1_000, finishedAt: 1_100 })
     ]);
 
     expect(items.map((item) => item.sessionId)).toEqual([
@@ -416,7 +417,7 @@ describe("PetPage helpers", () => {
   it("mini 任务列表以 session 最新有效任务状态为准，避免旧 query 残留转圈", () => {
     const items = selectMiniTaskListItems([
       task({ id: "stale-answering", sessionId: "session-same", title: "旧问题", status: "answering", startedAt: 1_000, updatedAt: 1_500, lastAgentMessage: "旧回答片段" }),
-      task({ id: "latest-done", sessionId: "session-same", title: "新问题", status: "done", startedAt: 2_000, updatedAt: 3_000, finishedAt: 3_000, lastAgentMessage: "新回答完成" }),
+      task({ id: "latest-done", sessionId: "session-same", title: "新问题", status: "done", unseen: true, startedAt: 2_000, updatedAt: 3_000, finishedAt: 3_000, lastAgentMessage: "新回答完成" }),
       task({ id: "other-running", sessionId: "session-running", title: "其他运行任务", status: "processing", startedAt: 2_500, updatedAt: 2_600 })
     ]);
 
@@ -435,12 +436,26 @@ describe("PetPage helpers", () => {
       task({ id: "same-read-done", sessionId: "session-same", title: "已读完成", status: "done", startedAt: 2_000, updatedAt: 3_000, finishedAt: 3_000, readAt: 3_100, lastAgentMessage: "已读回答" }),
       task({ id: "read-done", sessionId: "session-read", title: "另一个已读完成", status: "done", startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100, readAt: 4_200 }),
       task({ id: "dismissed-done", sessionId: "session-dismissed", title: "老数据已收起完成", status: "done", startedAt: 4_500, updatedAt: 4_500, finishedAt: 4_600, dismissed: true }),
-      task({ id: "unread-done", sessionId: "session-unread", title: "未读完成", status: "done", startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
+      task({ id: "unread-done", sessionId: "session-unread", title: "未读完成", status: "done", unseen: true, startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
       task({ id: "running", sessionId: "session-running", title: "运行中", status: "processing", startedAt: 6_000, updatedAt: 6_100 })
     ]);
 
     expect(items.map((item) => item.sessionId)).toEqual(["session-running", "session-unread"]);
     expect(items.map((item) => item.title)).toEqual(["运行中", "未读完成"]);
+  });
+
+  it("未读角标按 session 计一次，chatId 与 websocket 前缀合并，已读和运行中不计", () => {
+    const tasks = [
+      task({ id: "old", sessionId: "chat-1", status: "done", unseen: true, startedAt: 1_000, updatedAt: 1_000, finishedAt: 1_100 }),
+      task({ id: "latest", sessionId: "websocket:chat-1", status: "done", unseen: true, startedAt: 2_000, updatedAt: 2_000, finishedAt: 2_100 }),
+      task({ id: "other", sessionId: "chat-2", status: "error", unseen: true, startedAt: 3_000, updatedAt: 3_000, finishedAt: 3_100 }),
+      task({ id: "historical", sessionId: "chat-3", status: "done", startedAt: 4_000, updatedAt: 4_000, finishedAt: 4_100 }),
+      task({ id: "read", sessionId: "chat-4", status: "done", unseen: false, readAt: 5_200, startedAt: 5_000, updatedAt: 5_000, finishedAt: 5_100 }),
+      task({ id: "running", sessionId: "chat-5", status: "processing", startedAt: 6_000, updatedAt: 6_100 })
+    ];
+
+    expect(countUnreadPetSessions(tasks)).toBe(2);
+    expect(selectMiniTaskListItems(tasks).filter((item) => item.status === "done" || item.status === "error").map((item) => item.sessionId)).toEqual(["chat-2", "chat-1"]);
   });
 
   it("桌宠运行中 session 校准目标兼容 chatId/sessionKey，并按 WebUI run_started_at 判定运行态", () => {
@@ -501,7 +516,7 @@ describe("PetPageView SSR", () => {
 
     expect(html).toContain('data-display-state="processing"');
     expect(html).toContain("正在处理");
-    expect(html).toContain("2");
+    expect(html).not.toContain("data-unread-session-count");
     expect(html).toContain("新对话");
     expect(html).toContain("停止");
     expect(html).toContain('data-icon="loader-2"');
@@ -536,11 +551,11 @@ describe("PetPageView SSR", () => {
 
     expect(html).toContain('data-display-state="idle"');
     expect(html).toContain("1 个任务进行中");
-    expect(html).toContain('data-task-count="1"');
+    expect(html).not.toContain("data-unread-session-count");
 
     const source = readFileSync(petPageSourcePath, "utf8");
     expect(source).toContain("style={{ minWidth: 156, maxWidth: PET_CANVAS.answerBubbleWidth }}");
-    expect(source).toContain("const hasTaskHistorySwitcher = miniTaskListItems.length > 0;");
+    expect(source).toContain("const unreadSessionCount = useMemo(() => countUnreadPetSessions(tasks), [tasks]);");
     expect(source).toContain("text-center leading-snug whitespace-normal break-words");
     expect(source).not.toContain("splitRunningSummaryLabel");
   });
@@ -615,25 +630,34 @@ describe("PetPageView SSR", () => {
     expect(html).toContain('data-icon="loader-2"');
   });
 
-  it("所有 session 完成后仍保留 mini 任务列表入口，方便切回其他会话", () => {
-    const first = task({ id: "done-1", sessionId: "session-first", status: "done", lastAgentMessage: "第一条完成", finishedAt: 2_000 });
-    const second = task({ id: "done-2", sessionId: "session-second", status: "done", lastAgentMessage: "第二条完成", finishedAt: 3_000 });
-    const bus = createBus({ tasks: [second, first], focusedTask: second, runningTasks: [] });
-    const html = renderToString(
+  it("已读或历史完成任务不显示未读角标，未读角标按 session 而不是任务条数", () => {
+    const historical = [
+      task({ id: "done-1", sessionId: "session-first", status: "done", lastAgentMessage: "第一条完成", finishedAt: 2_000 }),
+      task({ id: "done-2", sessionId: "session-first", status: "done", lastAgentMessage: "第二条完成", finishedAt: 3_000 }),
+      task({ id: "done-3", sessionId: "session-second", status: "done", lastAgentMessage: "另一会话", finishedAt: 4_000 })
+    ];
+    const historicalHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <PetPageView bus={bus} onNavigate={() => undefined} onPetWindowChange={() => undefined} />
+        <PetPageView bus={createBus({ tasks: historical, focusedTask: historical[1], runningTasks: [] })} onNavigate={() => undefined} onPetWindowChange={() => undefined} />
       </I18nProvider>
     );
+    expect(historicalHtml).not.toContain("data-unread-session-count");
 
-    expect(html).toContain("第二条完成");
-    expect(html).toContain("data-task-count=\"2\"");
-    expect(html).toContain("切换任务");
+    const unread = historical.map((item, index) => index === 0 ? item : { ...item, unseen: true });
+    const unreadHtml = renderToString(
+      <I18nProvider language="zh-CN">
+        <PetPageView bus={createBus({ tasks: unread, focusedTask: unread[2], runningTasks: [] })} onNavigate={() => undefined} onPetWindowChange={() => undefined} />
+      </I18nProvider>
+    );
+    expect(unreadHtml).toContain("data-unread-session-count=\"2\"");
+    expect(unreadHtml).toContain("2 个未读会话");
+    expect(unreadHtml).not.toContain("data-unread-session-count=\"3\"");
   });
 
   it("同 session 最新任务已完成时 mini 列表不再被旧 query 残留 answering 计为运行中", () => {
     const stale = task({ id: "stale-answering", sessionId: "session-same", title: "旧问题", status: "answering", startedAt: 1_000, updatedAt: 1_500, lastAgentMessage: "旧回答片段" });
-    const done = task({ id: "latest-done", sessionId: "session-same", title: "新问题", status: "done", startedAt: 2_000, updatedAt: 3_000, finishedAt: 3_000, lastAgentMessage: "新回答完成" });
-    const other = task({ id: "other-done", sessionId: "session-other", title: "其他完成", status: "done", startedAt: 2_500, updatedAt: 2_700, finishedAt: 2_700, lastAgentMessage: "其他回答完成" });
+    const done = task({ id: "latest-done", sessionId: "session-same", title: "新问题", status: "done", unseen: true, startedAt: 2_000, updatedAt: 3_000, finishedAt: 3_000, lastAgentMessage: "新回答完成" });
+    const other = task({ id: "other-done", sessionId: "session-other", title: "其他完成", status: "done", unseen: true, startedAt: 2_500, updatedAt: 2_700, finishedAt: 2_700, lastAgentMessage: "其他回答完成" });
     const bus = createBus({ tasks: [done, other, stale], focusedTask: done, runningTasks: [stale] });
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -641,15 +665,15 @@ describe("PetPageView SSR", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain('data-task-count="2"');
-    expect(html).toContain('title="切换任务"');
+    expect(html).toContain('data-unread-session-count="2"');
+    expect(html).toContain('title="2 个未读会话"');
     expect(html).not.toContain("1 个任务进行中");
     expect(html).not.toContain('data-icon="loader-2"');
     expect(html).toContain('data-icon="check-circle-2"');
   });
 
   it("只有一个已完成但未读任务且没有运行中任务时也展示数字角标", () => {
-    const done = task({ id: "done-unread", sessionId: "session-unread", title: "未读完成任务", status: "done", startedAt: 2_000, updatedAt: 2_000, finishedAt: 2_100 });
+    const done = task({ id: "done-unread", sessionId: "session-unread", title: "未读完成任务", status: "done", unseen: true, startedAt: 2_000, updatedAt: 2_000, finishedAt: 2_100 });
     const bus = createBus({ tasks: [done], focusedTask: null, runningTasks: [] });
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -658,16 +682,17 @@ describe("PetPageView SSR", () => {
     );
 
     expect(html).toContain('data-display-state="idle"');
-    expect(html).toContain('data-task-count="1"');
-    expect(html).toContain('title="切换任务"');
+    expect(html).toContain('data-unread-session-count="1"');
+    expect(html).toContain('title="1 个未读会话"');
   });
 
-  it("mini 任务列表行展示状态图标、单行标题和短相对时间，并使用可见条数作为徽标数字", () => {
+  it("mini 任务列表行展示状态图标、单行标题和短相对时间，角标只统计未读 session", () => {
     const now = Date.now();
     const tasks = [
       task({ id: "run-1", sessionId: "session-run", title: "正在跑的任务", status: "processing", startedAt: now - 30_000 }),
-      task({ id: "error-1", sessionId: "session-error", title: "失败任务", status: "error", startedAt: now - 5 * 60_000 }),
-      task({ id: "done-1", sessionId: "session-done", title: "完成任务", status: "done", startedAt: now - 2 * 60_000 }),
+      task({ id: "error-1", sessionId: "session-error", title: "失败任务", status: "error", unseen: true, startedAt: now - 5 * 60_000 }),
+      task({ id: "done-1", sessionId: "session-done", title: "完成任务", status: "done", unseen: true, startedAt: now - 2 * 60_000 }),
+      task({ id: "done-same", sessionId: "session-done", title: "同一会话的另一条任务", status: "done", unseen: true, startedAt: now - 90_000 }),
       task({ id: "done-read", sessionId: "session-read", title: "读过的完成任务", status: "done", readAt: now - 3 * 60_000, startedAt: now - 3 * 60_000 }),
       task({ id: "cancel-1", sessionId: "session-cancel", title: "取消任务", status: "cancelled", startedAt: now - 60_000 })
     ];
@@ -678,8 +703,9 @@ describe("PetPageView SSR", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain('data-task-count="3"');
-    expect(html).not.toContain('data-task-count="4"');
+    expect(html).toContain('data-unread-session-count="2"');
+    expect(html).not.toContain('data-unread-session-count="3"');
+    expect(html).not.toContain('data-unread-session-count="4"');
     expect(html).not.toContain("读过的完成任务");
 
     const source = readFileSync(petPageSourcePath, "utf8");
@@ -702,7 +728,7 @@ describe("PetPageView SSR", () => {
     expect(source).toContain("bus.markTaskRead(item.taskId);");
     expect(markReadIndex).toBeGreaterThan(-1);
     expect(focusIndex).toBeGreaterThan(markReadIndex);
-    expect(source).toContain("const hasTaskHistorySwitcher = miniTaskListItems.length > 0;");
+    expect(source).toContain("unreadSessionCount > 0 && (");
   });
 
   it("声明桌宠透明根背景样式，避免透明 Electron 窗口绘制桌面面板", () => {

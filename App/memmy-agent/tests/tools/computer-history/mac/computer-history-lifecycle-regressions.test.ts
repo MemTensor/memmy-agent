@@ -279,7 +279,8 @@ describe("deletion and complete collection clearing", () => {
     await pending;
     expect(service.snapshot().histories).toHaveLength(0);
     expect(fs.existsSync(segment.directory)).toBe(false);
-    expect(fs.readdirSync(path.join(root, "histories"))).toEqual([]);
+    // Memory sync may retain deletion receipts in the history directory.
+    expect(fs.readdirSync(path.join(root, "histories")).filter(name => /\.md(?:\.staging)?$/u.test(name))).toEqual([]);
   });
 
   it("deletes pending summaries and removes rollups containing deleted evidence", () => {
@@ -314,7 +315,7 @@ describe("deletion and complete collection clearing", () => {
     }
     model.resolve(response("Must not return"));
     await pending;
-    expect(fs.readdirSync(path.join(root, "histories"))).toEqual([]);
+    expect(fs.readdirSync(path.join(root, "histories")).filter(name => /\.md(?:\.staging)?$/u.test(name))).toEqual([]);
   });
 
   it("clear today retains previous days while deleting pending records for today", async () => {

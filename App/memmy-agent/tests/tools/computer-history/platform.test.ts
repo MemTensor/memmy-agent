@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToolLoader } from "../../../src/core/agent-runtime/tools/loader.js";
-import { isComputerHistorySupported } from "../../../src/tools/computer-history/platform.js";
+import { isComputerHistorySupported, isPersonalWeChatHistorySupported } from "../../../src/tools/computer-history/platform.js";
 import { ComputerHistoryTool } from "../../../src/tools/computer-history/mac/computer-history.js";
 import {
   ComputerHistoryGetSettingsTool,
@@ -35,6 +35,16 @@ describe.each(["win32", "linux"] as const)("Computer History unavailable on %s",
       await expect(registry.execute(name, {})).resolves.toContain(`Tool '${name}' not found`);
     }
     expect(service.get).not.toHaveBeenCalled();
+  });
+});
+
+describe("Personal WeChat History availability", () => {
+  it("exists only on Apple silicon macOS", () => {
+    expect(isPersonalWeChatHistorySupported("darwin", "arm64")).toBe(true);
+    expect(isPersonalWeChatHistorySupported("darwin", "x64")).toBe(false);
+    expect(isPersonalWeChatHistorySupported("win32", "x64", "10.0.26200")).toBe(true);
+    expect(isPersonalWeChatHistorySupported("win32", "arm64", "10.0.26200")).toBe(true);
+    expect(isPersonalWeChatHistorySupported("win32", "x64", "10.0.19045")).toBe(false);
   });
 });
 

@@ -1,13 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { expect, it, vi } from 'vitest';
 import { DesktopScreenClient, DesktopScreenCaptureTool, desktopScreenClient, screenCaptureEnabled } from '../../../src/tools/computer-use/desktop-screen-capture.js';
-import { isManagedOcuConfig, managedOcuEnvironment } from '../../../src/tools/computer-use/open-computer-use-binary.js';
+import { isManagedOcuConfig, managedOcuEnvironment, resolveOpenComputerUseCommand } from '../../../src/tools/computer-use/open-computer-use-binary.js';
 import { ToolLoader } from '../../../src/core/agent-runtime/tools/loader.js';
 import { Config } from '../../../src/config/schema.js';
 
 it.skipIf(process.platform !== 'darwin')('registers passive capture through the real builtin loader after desktop handshake', () => {
   const available = desktopScreenClient.available;
-  const ctx = { config: new Config().tools, runtimeState: { mcpServers: { open_computer_use: { command: 'open-computer-use', args: ['mcp'] } } } };
+  const ctx = { config: new Config().tools, runtimeState: { mcpServers: { memmy_computer_use: { command: 'open-computer-use', args: ['mcp'] } } } };
   try {
     desktopScreenClient.available = true;
     const registry = new ToolLoader({ ctx: ctx as any }).loadRegistry();
@@ -20,17 +20,25 @@ it.skipIf(process.platform !== 'darwin')('registers passive capture through the 
 
 it('exposes passive capture only to supported, enabled desktop presets', () => {
   const cfg = { command: 'open-computer-use', args: ['mcp'] };
-  const config = { mcpServers: { open_computer_use: cfg } };
+  const config = { mcpServers: { memmy_computer_use: cfg } };
   expect(screenCaptureEnabled(config, 'darwin', true)).toBe(true);
   expect(screenCaptureEnabled(config, 'darwin', false)).toBe(false);
   expect(screenCaptureEnabled(config, 'win32', true)).toBe(false);
   expect(screenCaptureEnabled(config, 'linux', true)).toBe(false);
   expect(screenCaptureEnabled({ mcpServers: {} }, 'darwin', true)).toBe(false);
-  expect(screenCaptureEnabled({ mcpServers: { open_computer_use: { ...cfg, enabledTools: ['click'] } } }, 'darwin', true)).toBe(false);
+  expect(screenCaptureEnabled({ mcpServers: { memmy_computer_use: { ...cfg, enabledTools: ['click'] } } }, 'darwin', true)).toBe(false);
+  expect(screenCaptureEnabled({ mcpServers: { memmy_computer_use: { ...cfg, enabledTools: ['mcp_memmy_computer_use_get_screen_state'] } } }, 'darwin', true)).toBe(true);
+  expect(screenCaptureEnabled({ mcpServers: { open_computer_use: cfg } }, 'darwin', true)).toBe(true);
   expect(screenCaptureEnabled({ mcpServers: { open_computer_use: { ...cfg, enabledTools: ['mcp_open_computer_use_get_screen_state'] } } }, 'darwin', true)).toBe(true);
-  expect(isManagedOcuConfig('open_computer_use', { ...cfg, env: { OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE: 'custom' } }, 'darwin')).toBe(false);
+  expect(isManagedOcuConfig('memmy_computer_use', { ...cfg, env: { OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE: 'custom' } }, 'darwin')).toBe(false);
   expect(isManagedOcuConfig('other', cfg, 'darwin')).toBe(false);
   expect(() => managedOcuEnvironment('open-computer-use', null)).toThrow(/missing/);
+});
+it.skipIf(process.platform !== 'darwin')('keeps the physical pointer fallback disabled by default', () => {
+  const binary = resolveOpenComputerUseCommand('open-computer-use');
+  expect(managedOcuEnvironment(binary, null).OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS).toBe('0');
+  expect(managedOcuEnvironment(binary, { OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS: '1' })
+    .OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS).toBe('1');
 });
 it('handshakes and correlates replies on the private parent channel', async () => {
   const ipc = Object.assign(new EventEmitter(), { connected: true, send: vi.fn((message: any, cb: any) => {

@@ -9,11 +9,11 @@ on:
       - "scripts/install.sh"
       - "scripts/internal/linux/**"
       - "App/memmy-agent/**"
+      - "App/native-computer-use/**"
       - "Memory/**"
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
-      - "tests/linux-open-computer-use-bundle.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
@@ -25,11 +25,11 @@ on:
       - "scripts/install.sh"
       - "scripts/internal/linux/**"
       - "App/memmy-agent/**"
+      - "App/native-computer-use/**"
       - "Memory/**"
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
-      - "tests/linux-open-computer-use-bundle.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
@@ -63,6 +63,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
       - run: npm ci
       - run: npm ci --prefix App/memmy-agent
       - name: Resolve and verify version
@@ -143,7 +146,7 @@ jobs:
           ocu_arch="$EXPECTED_ARCH"
           [[ "$ocu_arch" != "x64" ]] || ocu_arch="amd64"
           node scripts/internal/shared/check-open-computer-use.mjs \
-            "$MEMMY_INSTALL_ROOT/current/App/memmy-agent/node_modules/open-computer-use/dist/linux/$ocu_arch/open-computer-use"
+            "$MEMMY_INSTALL_ROOT/current/App/memmy-agent/dist/native-computer-use/linux/$ocu_arch/memmy-computer-use"
           "$MEMMY_BIN_DIR/memmy" --version
           "$MEMMY_BIN_DIR/memmy" --help >/dev/null
           "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null

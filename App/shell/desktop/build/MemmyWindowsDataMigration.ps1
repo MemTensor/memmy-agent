@@ -414,8 +414,8 @@ function Test-CompatibleRecordedVersion {
     [Parameter(Mandatory = $true)][string]$InstalledVersion
   )
 
-  $recordedMatch = [Regex]::Match($RecordedVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)$')
-  $installedMatch = [Regex]::Match($InstalledVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:\s.*)?$')
+  $recordedMatch = [Regex]::Match($RecordedVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.-]+)?$')
+  $installedMatch = [Regex]::Match($InstalledVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.-]+)?(?:\s.*)?$')
   if (-not $recordedMatch.Success -or -not $installedMatch.Success) { return $false }
   try {
     return ([Version]$recordedMatch.Groups['version'].Value) -eq

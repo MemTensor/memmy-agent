@@ -445,9 +445,12 @@ describe("BYOK setup save feedback", () => {
       .mockResolvedValueOnce(savedModelConfig());
     mocks.clients = createClients(saveModelCatalog);
     await render(<ModelPage />);
+    await click(button("apiKey.modelPage.reuseAgentChat"));
+    await click(button("apiKey.modelPage.reuseEvolution"));
     const nextButton = button("apiKey.next");
 
     await click(nextButton);
+    expect(saveModelCatalog).toHaveBeenCalledTimes(1);
     expect(nextButton.disabled).toBe(true);
 
     await reject(firstSave, new Error("middle step offline"));

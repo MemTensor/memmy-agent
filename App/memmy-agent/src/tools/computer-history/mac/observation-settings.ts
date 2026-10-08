@@ -3,8 +3,9 @@
 // The model has two orthogonal axes rather than one list: an application axis
 // keyed by bundle identifier, and a website axis keyed by bare domain. Each axis
 // carries its own default, so "record everything except my bank" and "record
-// nothing except my IDE" are both expressible, and a browser record has to
-// satisfy both axes before it is kept.
+// nothing except my IDE" are both expressible. A browser page with a readable
+// host has to satisfy both axes. A website block rule matches only that host:
+// an unreadable address is not treated as every excluded domain.
 
 export type ObservationBehavior = "observe" | "do_not_observe";
 
@@ -24,6 +25,7 @@ export interface UrlRule {
 export type ObservationRule = ApplicationRule | UrlRule;
 
 export interface ObservationSettings {
+  memory: { syncEnabled: boolean };
   observation: {
     defaultApplicationBehavior: ObservationBehavior;
     defaultURLBehavior: ObservationBehavior;
@@ -33,15 +35,16 @@ export interface ObservationSettings {
 
 export interface ObservationSubject {
   bundleId?: string | null;
+  /** Extra, explicit user consent for personal WeChat chat content. */
+  weChatChatAccess?: boolean;
   /** The native recorder recognizes a browser even when URL lookup failed. */
   browser?: boolean;
   /** Absolute URL of the focused page, when the record has a usable one. */
   url?: string | null;
-  /**
-   * A private window is excluded whatever the rules say. Set only for
-   * browsers that report it — Chrome and Arc; never for Safari.
-   */
+  /** A verified private browser window is excluded whatever the rules say. */
   privateBrowsing?: boolean;
+  /** Windows browser privacy state is not yet verifiable per window. */
+  privateBrowsingUnknown?: boolean;
 }
 
 export interface ObservationDecision {
@@ -50,7 +53,9 @@ export interface ObservationDecision {
   reason:
     | "observed"
     | "private_browsing"
+    | "separate_source_consent"
     | "system_surface"
+    | "wechat_consent_required"
     | "application_blocked"
     | "application_not_allowed"
     | "url_blocked"
@@ -66,10 +71,10 @@ export interface ObservationDecision {
 // windows, secure-input suppression, local-only storage and the retention
 // window — none of which depend on which way this default points.
 //
-// The private-window exclusion is only as good as a browser's willingness to
-// say which windows are private: Chrome and Arc do, Safari does not. A private
-// Safari window is recorded unless Safari is blocked outright.
+// Browser windows with an unknown private state are also excluded by the
+// recorder, even when the application default is otherwise permissive.
 export const DEFAULT_OBSERVATION_SETTINGS: ObservationSettings = {
+  memory: { syncEnabled: true },
   observation: {
     defaultApplicationBehavior: "observe",
     defaultURLBehavior: "observe",
@@ -82,11 +87,21 @@ export const DEFAULT_OBSERVATION_SETTINGS: ObservationSettings = {
 // for every window of the night.
 const SYSTEM_SURFACE_BUNDLE_IDS = new Set(["com.apple.loginwindow", "com.apple.ScreenSaver.Engine"]);
 
+// The same consent gates both native UI observation and the database reader.
+export const SENSITIVE_MESSAGE_APP_BUNDLE_IDS = new Set([
+  "com.tencent.xinwechat", "com.tencent.wechat",
+  "win32.wechat", "win32.weixin",
+]);
+
 export const BROWSER_BUNDLE_IDS = new Set([
-  "com.google.Chrome", "com.google.Chrome.canary", "com.apple.Safari",
-  "com.apple.SafariTechnologyPreview", "company.thebrowser.Browser",
-  "com.microsoft.edgemac", "com.brave.Browser", "org.mozilla.firefox",
-  "org.chromium.Chromium", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+  "com.google.chrome", "com.google.chrome.canary", "com.apple.safari",
+  "com.apple.safaritechnologypreview", "company.thebrowser.browser",
+  "com.microsoft.edgemac", "com.brave.browser", "org.mozilla.firefox",
+  "org.chromium.chromium", "com.operasoftware.opera", "com.vivaldi.vivaldi",
+  "com.quark.desktop",
+  // Windows process ids use the same lowercased form the observer emits.
+  "win32.chrome", "win32.msedge", "win32.firefox", "win32.brave",
+  "win32.vivaldi", "win32.opera", "win32.chromium", "win32.arc", "win32.quark",
 ]);
 
 function normalizeDomain(value: string): string {
@@ -105,10 +120,27 @@ export function hostFromUrl(url: string): string | null {
   }
 }
 
+function withoutWww(host: string): string {
+  return host.startsWith("www.") ? host.slice(4) : host;
+}
+
 function domainMatches(host: string, domain: string): boolean {
-  const normalized = normalizeDomain(domain);
-  if (!normalized) return false;
-  return host === normalized || host.endsWith(`.${normalized}`);
+  const left = withoutWww(normalizeDomain(host));
+  const right = withoutWww(normalizeDomain(domain));
+  if (!left || !right) return false;
+  return left === right || left.endsWith(`.${right}`);
+}
+
+// Bundle ids are compared without case: macOS sometimes differs only by case,
+// and Windows ids are already lowercased. A helper bundled inside an excluded
+// app (…ScreenShotHelper) follows the app the user actually picked.
+function sameApplication(ruleId: string, subjectId: string): boolean {
+  const rule = ruleId.trim().toLowerCase();
+  const subject = subjectId.trim().toLowerCase();
+  if (!rule || !subject) return false;
+  if (rule === subject) return true;
+  if (!subject.startsWith(`${rule}.`)) return false;
+  return /(helper|agent|service|xpc|renderer|crash|gpu|plugin|screenshot)/iu.test(subject.slice(rule.length + 1));
 }
 
 // A block rule always wins inside its own axis, so an allowlist entry can never
@@ -126,7 +158,11 @@ export function evaluateObservation(
   settings: ObservationSettings,
   subject: ObservationSubject,
 ): ObservationDecision {
-  if (subject.privateBrowsing) return { observe: false, reason: "private_browsing" };
+  if (subject.bundleId && SENSITIVE_MESSAGE_APP_BUNDLE_IDS.has(subject.bundleId.toLowerCase())
+    && subject.weChatChatAccess !== true) {
+    return { observe: false, reason: "wechat_consent_required" };
+  }
+  if (subject.privateBrowsing || subject.privateBrowsingUnknown) return { observe: false, reason: "private_browsing" };
   if (subject.bundleId && SYSTEM_SURFACE_BUNDLE_IDS.has(subject.bundleId)) {
     return { observe: false, reason: "system_surface" };
   }
@@ -135,7 +171,7 @@ export function evaluateObservation(
 
   const appRules = rules.filter(
     (rule): rule is ApplicationRule =>
-      rule.scope === "app" && Boolean(subject.bundleId) && rule.bundleID === subject.bundleId,
+      rule.scope === "app" && Boolean(subject.bundleId) && sameApplication(rule.bundleID, subject.bundleId!),
   );
   const appBehavior = resolveAxis(appRules, defaultApplicationBehavior);
   if (appBehavior === "do_not_observe") {
@@ -145,14 +181,15 @@ export function evaluateObservation(
     };
   }
 
-  // Native apps have no website axis. A browser with an unknown URL cannot
-  // prove that it is outside a blocked site (or inside a website allowlist).
+  // Native apps have no website axis. A block rule can drop only a host it
+  // matches, so a browser whose address bar was not read stays when the
+  // website default is to observe. An allowlist default is the other case:
+  // without a host the page cannot be shown to be one of the sites the user
+  // chose to keep.
   const host = subject.url ? hostFromUrl(subject.url) : null;
   if (!host) {
-    const browser = subject.browser || BROWSER_BUNDLE_IDS.has(subject.bundleId ?? "");
-    const restrictsWebsites = defaultURLBehavior === "do_not_observe"
-      || rules.some((rule) => rule.scope === "url" && rule.behavior === "do_not_observe");
-    return browser && restrictsWebsites
+    const browser = subject.browser || BROWSER_BUNDLE_IDS.has((subject.bundleId ?? "").toLowerCase());
+    return browser && defaultURLBehavior === "do_not_observe"
       ? { observe: false, reason: "url_not_allowed" }
       : { observe: true, reason: "observed" };
   }
@@ -226,7 +263,9 @@ export function parseObservationSettings(input: unknown): ObservationSettings {
     throw new ObservationSettingsError(`rules[${index}].scope must be "app" or "url"`);
   });
 
+  const memorySyncEnabled = (input as { memory?: { syncEnabled?: unknown } }).memory?.syncEnabled;
   return {
+    memory: { syncEnabled: memorySyncEnabled === undefined || memorySyncEnabled === true },
     observation: {
       defaultApplicationBehavior: assertBehavior(
         source.defaultApplicationBehavior,

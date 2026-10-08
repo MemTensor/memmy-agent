@@ -33,7 +33,7 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.status).toBe("ready");
-    expect(report.reportMarkdown).toContain("Hi");
+    expect(report.reportMarkdown).toContain("我是 Memmy");
     expect(report.reportMarkdown).toContain("先把方案");
     expect(report.reportMarkdown).not.toContain("轻量样本");
     expect(report.reportMarkdown).not.toContain("用户 query");
@@ -61,7 +61,7 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.reportMarkdown.split("\n")[0]).not.toContain("Grace江");
-    expect(report.reportMarkdown).toContain("Hi");
+    expect(report.reportMarkdown).toContain("我是 Memmy");
   });
 
   it("does not treat ordinary Chinese task phrases after 我是 as a name", async () => {
@@ -78,7 +78,39 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.reportMarkdown.split("\n")[0]).not.toContain("部署在云服务器上使用的");
-    expect(report.reportMarkdown).toContain("Hi");
+    expect(report.reportMarkdown).toContain("我是 Memmy");
+  });
+
+  it("answers the first greeting without inventing a project or todo from casual history", async () => {
+    const service = createOnboardingInsightService({
+      samplers: [sampler("cursor", "Cursor", [query("cursor", "1", "今天心情不错，想随便聊聊")])],
+      reportGenerator: null,
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+
+    expect(report.reportMarkdown).toContain("我是 Memmy。我可以陪你讨论问题、整理信息和计划");
+    expect(report.reportMarkdown).toContain("你可以直接从眼前想聊的事开始");
+    expect(report.reportMarkdown).not.toContain("## 最近聊到的事");
+    expect(report.reportMarkdown).not.toContain("## 如果想接着做");
+  });
+
+  it("keeps a non-coding request available for a useful first follow-up", async () => {
+    const service = createOnboardingInsightService({
+      samplers: [sampler("cursor", "Cursor", [{
+        ...query("cursor", "1", "帮我写一封生日祝福信"),
+        workspacePath: null
+      }])],
+      reportGenerator: null,
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+
+    expect(report.reportMarkdown).toContain("我是 Memmy");
+    expect(report.reportMarkdown).toContain("帮我写一封生日祝福信");
+    expect(report.reportMarkdown).toContain("## 如果想接着做");
   });
 
   it("acknowledges detected agents when they have no sampled memory", async () => {
@@ -96,10 +128,9 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.status).toBe("ready");
-    expect(report.reportMarkdown).toBe([
-      "Memmy 已识别到这台设备上的 Codex，但首次轻量扫描暂时没有读到可用的对话历史。",
-      "之后用 Memmy 处理真实任务时，它会记住有用的背景、决策和下一步，方便新对话或其他 Agent 继续。"
-    ].join("\n\n"));
+    expect(report.reportMarkdown).toContain("嗨，我是 Memmy。我可以陪你讨论问题、整理信息和计划");
+    expect(report.reportMarkdown).toContain("我没能通过扫描获得足够的线索来了解你的近况");
+    expect(report.reportMarkdown).not.toContain("Codex");
     expect(report.reportMarkdown).not.toContain("not enough recent user messages");
     expect(report.diagnostics).toMatchObject({
       discoveredAgentCount: 1,
@@ -129,10 +160,8 @@ describe("onboarding insight service", () => {
     const events = await collectStreamEvents(service.streamReport({ locale: "en-US" }));
 
     expect(report.status).toBe("ready");
-    expect(report.reportMarkdown).toBe([
-      "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
-      "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."
-    ].join("\n\n"));
+    expect(report.reportMarkdown).toContain("Hi, I'm Memmy. I can help you think through questions");
+    expect(report.reportMarkdown).toContain("I couldn't find enough from this scan to get a sense of what you've been up to");
     expect(report.reportMarkdown).not.toContain("我没有在本机扫描到");
     expect(events).toEqual([
       {
@@ -151,7 +180,7 @@ describe("onboarding insight service", () => {
         type: "done",
         response: expect.objectContaining({
           status: "ready",
-          reportMarkdown: expect.stringContaining("There is no readable Agent history on this device yet"),
+          reportMarkdown: expect.stringContaining("Hi, I'm Memmy."),
           diagnostics: expect.objectContaining({
             discoveredAgentCount: 0,
             sampledQueryCount: 0,
@@ -1000,7 +1029,7 @@ describe("onboarding insight service", () => {
 
     const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
     expect(body.stream).toBe(true);
-    expect(body.messages[0].content).toContain("最近项目记忆");
+    expect(body.messages[0].content).toContain("最近聊到的事");
     expect(body.messages[0].content).toContain("接下来可以做");
     expect(body.messages[1].content).toContain('"role": "tool"');
     expect(body.messages[1].content).toContain("npm test: success");
@@ -1069,36 +1098,26 @@ describe("onboarding insight service", () => {
     expect(body.messages[0].content).toContain("偏好结论的唯一原始证据是 preferenceEvidence 中由用户本人发送的消息");
     expect(body.messages[0].content).toContain("严禁使用 assistant、tool 或 latestConversation 推断偏好");
     expect(body.messages[0].content).not.toContain("我对你的工作偏好");
-    expect(body.messages[0].content).toContain("根据 profile.nameHints 综合判断");
-    expect(body.messages[0].content).toContain("默认优先使用 homePathName");
-    expect(body.messages[0].content).toContain("admin、administrator、root、ubuntu");
-    expect(body.messages[0].content).toContain("不得把名字替换成“这个线索”");
-    expect(body.messages[0].content).toContain("有值时要自然说明用户最近更常用中文还是英文");
+    expect(body.messages[0].content).toContain("只有 profile.nameHints.selfDeclaredNames 中存在可信的用户自称时才使用名字");
+    expect(body.messages[0].content).toContain("不猜本机用户名或路径名");
+    expect(body.messages[0].content).toContain("不要假定每个人都有项目或 Bug");
     expect(body.messages[0].content).toContain("不要生成按钮、行动卡片、CTA");
     expect(body.messages[0].content).toContain("不得包含任何原始 HTML 标签或样式");
     expect(body.messages[0].content).toContain("不要输出思考过程、执行计划、要求确认、Prompt 复述或起草说明");
     expect(body.messages[0].content).not.toContain("[MEMMY_ACTIONS_JSON]");
     const userPayload = JSON.parse(String(body.messages[1].content));
-    expect(userPayload.reportGoal.primary).toBe("user_preferences_latest_project_memory_and_actionable_todos");
-    expect(userPayload.reportGoal.lengthConstraint).toContain("300-500 Chinese characters");
-    expect(userPayload.reportGoal.requiredSections).toContain("latest_project_memory");
-    expect(userPayload.reportGoal.requiredSections).toContain("user_preferences");
+    expect(userPayload.openingUserMessage).toBe("嗨，第一次见面，你有什么可以为我做的吗？");
+    expect(userPayload.reportGoal.primary).toBe("answer_the_opening_question_with_capabilities_and_evidence_based_context");
+    expect(userPayload.reportGoal.lengthConstraint).toContain("120-300 Chinese characters");
+    expect(userPayload.reportGoal.requiredSections).toContain("friendly_greeting_and_capabilities");
+    expect(userPayload.reportGoal.requiredSections).toContain("recent_context_and_open_todos_when_supported");
     expect(userPayload.reportGoal.outputEnvelope.taskContextFields).toContain("trajectorySummary");
-    expect(userPayload.profile.nameHints).toMatchObject({
-      selfDeclaredNames: ["Grace"],
-      homePathName: "jiang",
-      computerUserName: "jiang",
-      homeAndComputerMatch: true
-    });
+    expect(userPayload.profile.nameHints).toEqual({ selfDeclaredNames: ["Grace"] });
     expect(JSON.stringify(userPayload.profile)).not.toContain("conversationId");
     expect(JSON.stringify(userPayload.profile)).not.toContain("messageId");
     expect(JSON.stringify(userPayload.profile)).not.toContain("internal-conversation-id");
     expect(JSON.stringify(userPayload.profile)).not.toContain("internal-message-id");
-    expect(userPayload.nameDecisionRequirement).toMatchObject({
-      mustInferDisplayName: true,
-      mustIncludeDisplayNameInFirstSentence: true,
-      defaultPriority: "homePathName"
-    });
+    expect(userPayload).not.toHaveProperty("nameDecisionRequirement");
     expect(userPayload.preferenceEvidence).toEqual([expect.objectContaining({
       agentSource: "Codex",
       text: "Continue the first report."

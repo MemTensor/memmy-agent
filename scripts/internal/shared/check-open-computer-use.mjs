@@ -2,19 +2,19 @@
 import { spawn, spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { realpathSync } from 'node:fs';
-import { bundleManifest, verifyOfficialBundle } from '../mac/install-dev-computer-use.mjs';
+import { bundleManifest, verifyMemmyComputerUse } from '../mac/verify-memmy-computer-use.mjs';
 import { createInterface } from "node:readline";
 
 const binary = resolve(process.argv[2] ?? "");
 if (!process.argv[2]) throw new Error("Usage: check-open-computer-use.mjs BINARY [--list-apps]");
 if (process.platform === 'darwin') {
   const app = dirname(dirname(dirname(binary)));
-  verifyOfficialBundle(app);
+  verifyMemmyComputerUse(app);
   const expectedIndex = process.argv.indexOf('--expected-app');
   if (expectedIndex !== -1) {
     const expected = process.argv[expectedIndex + 1];
     if (!expected || JSON.stringify(bundleManifest(app)) !== JSON.stringify(bundleManifest(expected))) {
-      throw new Error('Packaged Open Computer Use was modified or re-signed');
+      throw new Error('Packaged Memmy Computer Use was modified or re-signed');
     }
   }
 }
@@ -36,7 +36,7 @@ const rejectAll = (error) => {
   pending.clear();
 };
 child.on("error", rejectAll);
-child.on("exit", (code) => rejectAll(new Error(`OCU exited before responding (${code})`)));
+child.on("exit", (code, signal) => rejectAll(new Error(`Computer Use exited before responding (code=${code}, signal=${signal})`)));
 const lines = createInterface({ input: child.stdout });
 lines.on("line", (line) => {
   let message;

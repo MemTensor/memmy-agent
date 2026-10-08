@@ -76,6 +76,7 @@ test.runIf(process.platform === "darwin")("native mouse targets use hit tests an
   const source = fs.readFileSync(fileURLToPath(new URL(
     "../../../../src/tools/computer-history/mac/human-recorder.swift", import.meta.url,
   )), "utf8");
+  const sourcePolicy = source.slice(source.indexOf("let separatelyAuthorizedSourceBundleIds:"), source.indexOf("func emit("));
   const classifier = source.slice(source.indexOf("let keyNames:"), source.indexOf("func characters("));
   const resolveTarget = source.slice(source.indexOf("func resolveTarget("), source.indexOf("func modifierList("));
   const callback = source.slice(source.indexOf("let callback:"), source.indexOf("// MARK: - Entry point"));
@@ -125,6 +126,8 @@ func characters(from event: CGEvent) -> String { event.text }
 func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
   var payload = extra; payload["kind"] = kind; emitted.append(payload)
 }
+${sourcePolicy}
+func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool { false }
 ${classifier}
 ${focus}
 ${resolveTarget}

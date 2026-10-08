@@ -53,8 +53,12 @@
   --color-role-assistant: #8ba1f3;
   --color-role-assistant-soft: #e2e8fc;
 
-  /* Font sans stack. */
-  --font-sans: "Nunito", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  /* Markdown sizes are em-relative to this root so body copy lands on 15px. */
+  --chat-md-root: calc(15px / 0.875);
+
+  /* Default UI font. Latin and CJK share one system stack so English does not
+     switch to Nunito beside Chinese. The login wordmark sets Nunito itself. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   /* Font chat stack. */
   --font-chat: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   /* Font mono stack. */
@@ -66,7 +70,7 @@
   /* Codex window control inset color token. */
   --codex-window-control-inset: 84px;
   --codex-sidebar-hidden-topbar-padding: 124px;
-  --codex-sidebar-width: 250px;
+  --codex-sidebar-width: 264px;
   --codex-sidebar-min-width: 240px;
   --codex-sidebar-max-width: 520px;
   --codex-text-xs: 11px;

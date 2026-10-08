@@ -1,6 +1,7 @@
 /** Hosts the GitHub star prompt across all routes after agent turn completion. */
 import { useEffect, useRef, useState } from "react";
 import { isCampaignPromptOpen } from "../app/campaign-prompt-state.js";
+import { areOtherPromptsDeferredForHistoryLaunch, isHistoryLaunchPromptOpen } from "../app/history-launch-prompt-state.js";
 import {
   markGithubStarPromptActioned,
   markGithubStarPromptDismissed,
@@ -30,7 +31,8 @@ export function GithubStarPromptHost() {
     }
     lastHandledCompletionAt.current = completion.at;
 
-    if (open || isCampaignPromptOpen()) {
+    if (open || isCampaignPromptOpen() || isHistoryLaunchPromptOpen()
+      || areOtherPromptsDeferredForHistoryLaunch(typeof window === "undefined" ? undefined : window.sessionStorage)) {
       return;
     }
 

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { Config } from "../../../src/config/schema.js";
 import { AgentRunner, AgentRunSpec, BACKFILL_CONTENT, MICROCOMPACT_KEEP_RECENT } from "../../../src/core/agent-runtime/runner.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/index.js";
 import { LLMProvider, LLMResponse } from "../../../src/providers/base.js";
@@ -259,7 +260,12 @@ describe("AgentRunner governance", () => {
   it("repairs model context without shifting the AgentLoop save boundary", async () => {
     const workspace = tmpWorkspace();
     const provider = new CaptureProvider([new LLMResponse({ content: "new answer" })]);
-    const loop = new AgentLoop({ provider, workspace, model: "test-model" });
+    const loop = new AgentLoop({
+      provider,
+      workspace,
+      model: "test-model",
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
+    });
     loop.tools.getDefinitions = () => [];
     (loop.consolidator as any).maybeConsolidateByTokens = async () => false;
 

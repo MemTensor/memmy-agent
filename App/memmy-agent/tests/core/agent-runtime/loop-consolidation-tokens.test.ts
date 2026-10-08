@@ -259,6 +259,36 @@ describe("AgentLoop replay token budget", () => {
     ))).toBe(true);
   });
 
+  it("skips mid-turn compaction when the protected current turn alone exceeds the input budget", async () => {
+    const loop = makeLoop({ estimatedTokens: 20_000, contextWindowTokens: 10_000 });
+    const session = addMessages(loop, "cli:test", ["old user", "old answer"]);
+    let modelCalls = 0;
+    (loop.provider as any).chatWithRetry = vi.fn(async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return new LLMResponse({
+          content: "checking",
+          toolCalls: [new ToolCallRequest({ id: "goal-1", name: "get_goal", arguments: {} })],
+        });
+      }
+      return new LLMResponse({ content: "done" });
+    });
+    loop.consolidator.maybeConsolidateByTokens = vi.fn(async () => ({
+      kind: "token" as const,
+      replayMaxMessages: loop.maxMessages,
+      changed: false,
+      summary: null,
+      error: null,
+      started: false,
+    }));
+
+    const result = await loop.processDirect("current user", { sessionKey: session.key });
+
+    expect(result?.content).toBe("done");
+    expect(modelCalls).toBe(2);
+    expect(loop.consolidator.maybeConsolidateByTokens).toHaveBeenCalledTimes(1);
+  });
+
   it("continues the active turn when mid-turn compaction fails", async () => {
     const loop = makeLoop({ estimatedTokens: 100, contextWindowTokens: 10_000 });
     const session = addMessages(loop, "cli:test", ["old user", "old answer"]);

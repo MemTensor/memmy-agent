@@ -6,7 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
-const history = vi.hoisted(() => ({ snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn(), applicationIcon: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
+const history = vi.hoisted(() => ({ snapshot: vi.fn(), observationStatus: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), setWeChatChatAccess: vi.fn(), connectWeChat: vi.fn(), startObservationWithPermissions: vi.fn(), restoreObservationOnLaunch: vi.fn(), applicationIcon: vi.fn(), listApplications: vi.fn(), getObservationSettings: vi.fn(), updateObservationSettings: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -19,6 +19,7 @@ vi.mock("../../../src/tools/computer-history/mac/computer-history-api.js", async
 beforeEach(() => { vi.spyOn(process, "platform", "get").mockReturnValue("darwin"); });
 afterEach(() => {
   for (const method of Object.values(history)) method.mockReset();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -46,6 +47,52 @@ describe("Computer History pin HTTP boundary", () => {
       await service.shutdown();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Computer History source policy HTTP boundary", () => {
+  it("persists an application exclusion through the authenticated route", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-source-http-"));
+    const service = new ComputerHistoryDemoService({ historyDirectory: path.join(root, "histories"),
+      recordingDirectory: path.join(root, "recordings"), workflowDirectory: path.join(root, "workflows"),
+      observationSettingsFile: path.join(root, "settings.json"),
+    });
+    history.getObservationSettings.mockImplementation(service.getObservationSettings.bind(service));
+    history.updateObservationSettings.mockImplementation(service.updateObservationSettings.bind(service));
+    const settings = { memory: { syncEnabled: false }, observation: { defaultApplicationBehavior: "observe", defaultURLBehavior: "observe",
+      rules: [{ scope: "app", bundleID: "com.example.Notes", behavior: "do_not_observe" }] } };
+    try {
+      expect((await channel().dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/settings", headers: {} })))?.status).toBe(401);
+      const updated = await channel().dispatchHttp({}, request({ path: "/api/computer-history/settings", body: JSON.stringify({ settings }) }));
+      expect(updated?.status).toBe(200);
+      expect(JSON.parse(String(updated?.body))).toEqual(settings);
+      const read = await channel().dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/settings" }));
+      expect(JSON.parse(String(read?.body))).toEqual(settings);
+      expect(JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8"))).toEqual(settings);
+      const invalid = await channel().dispatchHttp({}, request({ path: "/api/computer-history/settings",
+        body: JSON.stringify({ settings: { observation: { ...settings.observation, defaultURLBehavior: "anything" } } }),
+      }));
+      expect(invalid?.status).toBe(422);
+      expect(service.getObservationSettings()).toEqual(settings);
+    } finally {
+      await service.shutdown();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Computer History observation status HTTP boundary", () => {
+  it("returns only the live recorder state without reading the full History snapshot", async () => {
+    history.observationStatus.mockReturnValue({ state: "running" });
+    const response = await channel().dispatchHttp({}, request({
+      method: "GET", path: "/api/computer-history/observation/status",
+    }));
+    expect(response?.status).toBe(200);
+    expect(JSON.parse(String(response?.body))).toEqual({ state: "running" });
+    expect(history.snapshot).not.toHaveBeenCalled();
+    expect((await channel().dispatchHttp({}, request({
+      method: "POST", path: "/api/computer-history/observation/status",
+    })))?.status).toBe(405);
   });
 });
 
@@ -91,16 +138,48 @@ function snapshot(): ComputerHistorySnapshot {
   };
 }
 
+describe("personal WeChat History HTTP boundary", () => {
+  it("requires authenticated, explicit boolean consent before delegating", async () => {
+    const enabled = { ...snapshot(), wechat: { enabled: true as const,
+      connection: "needs_setup" as const, phase: null, error: null } };
+    history.setWeChatChatAccess.mockReturnValue(enabled);
+    const route = "/api/computer-history/wechat/consent";
+    const unauthorized = await channel().dispatchHttp({}, request({ path: route,
+      headers: {}, body: JSON.stringify({ enabled: true }) }));
+    expect(unauthorized?.status).toBe(401);
+    const invalid = await channel().dispatchHttp({}, request({ path: route,
+      body: JSON.stringify({ enabled: "true" }) }));
+    expect(invalid?.status).toBe(422);
+    expect(history.setWeChatChatAccess).not.toHaveBeenCalled();
+    const allowed = await channel().dispatchHttp({}, request({ path: route,
+      body: JSON.stringify({ enabled: true }) }));
+    expect(allowed?.status).toBe(200);
+    expect(history.setWeChatChatAccess).toHaveBeenCalledWith(true);
+  });
+
+  it("starts connection only from its separate user action", async () => {
+    history.connectWeChat.mockReturnValue(snapshot());
+    const response = await channel().dispatchHttp({}, request({ path: "/api/computer-history/wechat/connect",
+      body: "{}" }));
+    expect(response?.status).toBe(200);
+    expect(history.connectWeChat).toHaveBeenCalledOnce();
+  });
+});
+
 describe.each(["win32", "linux"] as const)("Computer History unsupported platform %s", (platform) => {
   it.each([undefined, "1"])("blocks all HTTP entry points even with MEMMY_COMPUTER_HISTORY=%s", async (enabled) => {
     vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    if (platform === "win32") vi.spyOn(os, "release").mockReturnValue("10.0.19045");
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", enabled);
     const instance = channel();
     instance.modelSelectionResolver = vi.fn();
     const routes = [
       ["GET", "/api/computer-history"],
+      ["GET", "/api/computer-history/settings"],
+      ["POST", "/api/computer-history/settings"],
+      ["GET", "/api/computer-history/apps"],
       ["GET", "/api/computer-history/app-icon?bundle_id=com.example.app"],
-      ...["permissions/check", "permissions/open", "model", "delete", "clear", "pin", "import",
+      ...["permissions/check", "permissions/open", "wechat/consent", "wechat/connect", "model", "delete", "clear", "pin", "import",
         "observation/start", "observation/pause", "observation/resume", "observation/stop", "workflows/create"]
         .map((suffix) => ["POST", `/api/computer-history/${suffix}`]),
     ];
@@ -108,7 +187,7 @@ describe.each(["win32", "linux"] as const)("Computer History unsupported platfor
     for (const [method, route] of routes) {
       const response = await instance.dispatchHttp({}, request({ method, path: route, body: "{}" }));
       expect(response?.status, route).toBe(400);
-      expect(String(response?.body), route).toContain("available only on macOS");
+      expect(String(response?.body), route).toContain("requires macOS or Windows 11");
     }
     for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();

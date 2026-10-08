@@ -27,6 +27,7 @@ export const MEMORY_AGENT_SOURCE_VALUES = [
 const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   memmy: "Memmy",
   memmy_agent: "Memmy",
+  computer_history: "Computer History",
   cursor: "Cursor",
   claude_code: "Claude Code",
   codex: "Codex",
@@ -51,7 +52,8 @@ export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   pi: piLogoUrl,
   qwenwork: qwenworkLogoUrl,
   memmy: memmyRiceLogoUrl,
-  memmy_agent: memmyRiceLogoUrl
+  memmy_agent: memmyRiceLogoUrl,
+  computer_history: memmyRiceLogoUrl
 };
 
 export function normalizeAgentSourceId(value: string): string {

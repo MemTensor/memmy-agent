@@ -56,7 +56,7 @@ function loop(p = provider(), extra: Record<string, any> = {}): AgentLoop {
     model: "test-model",
     contextWindowTokens: 4096,
     sessionDir: path.join(root, "sessions"),
-    config: new Config({ memmyMemory: { enabled: false } }),
+    config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     ...extra,
   });
 }
@@ -160,7 +160,7 @@ describe("AgentLoop direct processing", () => {
       contextWindowTokens: 4096,
       sessionDir: sessions.root,
       sessionManager: sessions,
-      config: new Config({ memmyMemory: { enabled: false } }),
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     });
     agent.guiTranscriptMirror = new GuiTranscriptMirror(sessions, canonicalWorkspace);
 
@@ -601,6 +601,7 @@ describe("AgentLoop direct processing", () => {
       model: "gpt-4.1",
       contextWindowTokens: 4096,
       sessionDir: path.join(root, "sessions"),
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     });
 
     await agent.processDirect("summarize", { sessionKey: "cli:test", media: [note, png] });
@@ -639,7 +640,11 @@ describe("AgentLoop direct processing", () => {
   it("can be constructed from config with the existing facade path", async () => {
     const p = provider(["ok"]);
     const root = workspace();
-    const config = new Config({ agents: { defaults: { workspace: root, provider: "custom", model: "test-model" } } });
+    const config = new Config({
+      agents: { defaults: { workspace: root, provider: "custom", model: "test-model" } },
+      tools: { mcpServers: {} },
+      memmyMemory: { enabled: false },
+    });
     const agent = AgentLoop.fromConfig(config, undefined as any, { provider: p, sessionDir: path.join(root, "sessions") });
 
     const outbound = await agent.processMessage({ channel: "cli", chatId: "direct", sessionKey: "cli:direct", content: "hi", media: [], metadata: {}, senderId: "user" } as any);

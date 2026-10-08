@@ -328,10 +328,16 @@ export function hydrateModelConfigForm(
     imageGenApiKey,
     imageGenApiKeyMasked
   );
-  const skillModel = hydrateRoleModelConfig(saved.memmyMemory?.evolution, primary);
+  const byokAssignments = saved.catalog?.modelAssignments.byok;
+  const skillModel = hydrateRoleModelConfig(
+    saved.memmyMemory?.evolution,
+    primary,
+    Boolean(byokAssignments?.memoryEvolution)
+  );
   const memoryModel = hydrateRoleModelConfig(
     saved.memmyMemory?.summary,
-    modelFormValuesAsPrimary(createModelFormValues(skillModel, primary))
+    modelFormValuesAsPrimary(createModelFormValues(skillModel, primary)),
+    Boolean(byokAssignments?.memorySummary)
   );
 
   return {
@@ -490,9 +496,17 @@ function toRoleModelProviderConfig(values: ModelConfigFormValues): RoleModelProv
   };
 }
 
-function hydrateRoleModelConfig(role: RoleModelProviderConfig | undefined, primary: PrimaryModelValues): ModelConfig {
-  if (!role || role.mode === "follow" || (!role.configured && !role.apiKeyMasked)) {
+function hydrateRoleModelConfig(
+  role: RoleModelProviderConfig | undefined,
+  primary: PrimaryModelValues,
+  inherited = false
+): ModelConfig {
+  if (role?.mode === "follow" && inherited) {
     return createModelConfig(primary.protocol);
+  }
+
+  if (!role || role.mode === "follow" || (!role.configured && !role.apiKeyMasked)) {
+    return { ...createModelConfig(primary.protocol), reuse: false };
   }
 
   if (isReusingPrimaryModel(role, primary)) {

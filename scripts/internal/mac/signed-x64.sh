@@ -31,8 +31,12 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
     ;;
 esac
 
-DMG="$ROOT_DIR/App/shell/desktop/release/Memmy-$DESKTOP_VERSION-darwin-x64-$PACKAGE_EDITION-signed.dmg"
-ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-darwin-x64-$PACKAGE_EDITION-signed.\${ext}"
+PACKAGE_SUFFIX="signed"
+if [ "${MEMMY_SIGNED_LOCAL_TEST_BUILD:-}" = "1" ]; then
+  PACKAGE_SUFFIX="signed-local"
+fi
+DMG="$ROOT_DIR/App/shell/desktop/release/Memmy-$DESKTOP_VERSION-darwin-x64-$PACKAGE_EDITION-$PACKAGE_SUFFIX.dmg"
+ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-darwin-x64-$PACKAGE_EDITION-$PACKAGE_SUFFIX.\${ext}"
 
 log() {
   package_step_start "$*"
@@ -153,6 +157,7 @@ main() {
 
   log "Building signed x64 app and DMG"
   export CSC_NAME
+  export CODESIGN_IDENTITY
   export CSC_KEYCHAIN="$KEYCHAIN"
   export APPLE_API_KEY
   export APPLE_API_KEY_ID

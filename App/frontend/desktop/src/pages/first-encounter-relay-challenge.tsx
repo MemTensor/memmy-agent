@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSourceStatus, ScanPermission } from "@memmy/local-api-contracts";
-import { ArrowRight, ArrowRightLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
+import { ArrowRightLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { agentSourceDisplayName, agentSourceLogoUrl, normalizeAgentSourceId } from "./agent-source-logos.js";
@@ -214,10 +214,9 @@ export function FirstEncounterRelayOptIn(props: FirstEncounterRelayOptInProps) {
           <button
             type="button"
             onClick={props.onOpenConnections}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-action-sky px-3 text-[11px] font-semibold text-white transition-colors hover:bg-action-sky-hover"
+            className="inline-flex h-8 shrink-0 items-center rounded-lg bg-action-sky px-3 text-[11px] font-semibold text-white transition-colors hover:bg-action-sky-hover"
           >
             {t("onboarding.relay.optInAction")}
-            <ArrowRight size={13} aria-hidden="true" />
           </button>
         ) : null}
       </div>

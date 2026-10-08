@@ -526,6 +526,7 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
                 {summaryText ? <div className="memory-card__summary">{summaryText}</div> : null}
                 <div className="memory-card__meta">
                   <MemoryAgentSourceTag sourceAgent={memoryDisplaySource(item)} label={t("memory.memories.source")} />
+                  {item.kind === "observed_activity" && <span className="memory-pill">{t("memory.memories.observedActivity")}</span>}
                   <span>{formatDateTime(item.createdAt)}</span>
                   <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>
                   {processingStatus && (
@@ -677,6 +678,11 @@ function MemoryDetailBody(props: {
 
   return (
     <>
+      {item.kind === "observed_activity" && (
+        <section className="memory-detail-card">
+          <p>{t("memory.memories.observedActivityNotice")}</p>
+        </section>
+      )}
       <MemoryProcessingFailureCard
         item={item}
         onRetryProcessing={props.onRetryProcessing}

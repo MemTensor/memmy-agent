@@ -8,6 +8,28 @@ export const ComputerHistoryPermissionsSchema = z.object({
 export type ComputerHistoryPermissions = z.infer<typeof ComputerHistoryPermissionsSchema>;
 export type ComputerHistoryPermission = "accessibility" | "inputMonitoring";
 
+const ObservationBehaviorSchema = z.enum(["observe", "do_not_observe"]);
+export const ComputerHistoryObservationSettingsSchema = z.object({
+  memory: z.object({ syncEnabled: z.boolean() }).strict().optional(),
+  observation: z.object({
+    defaultApplicationBehavior: ObservationBehaviorSchema,
+    defaultURLBehavior: ObservationBehaviorSchema,
+    rules: z.array(z.discriminatedUnion("scope", [
+      z.object({ scope: z.literal("app"), bundleID: z.string().min(1), behavior: ObservationBehaviorSchema }).strict(),
+      z.object({ scope: z.literal("url"), urlDomain: z.string().min(1), behavior: ObservationBehaviorSchema }).strict(),
+    ])),
+  }).strict(),
+}).strict();
+export type ComputerHistoryObservationSettings = z.infer<typeof ComputerHistoryObservationSettingsSchema>;
+
+export const ComputerHistoryApplicationsSchema = z.object({
+  applications: z.array(z.object({ bundleId: z.string(), name: z.string() }).strict()),
+}).strict();
+
+export const ComputerHistoryObservationStatusSchema = z.object({
+  state: z.enum(["running", "paused", "stopped", "stopping", "failed"]),
+}).strict();
+
 // The Computer History snapshot contract.
 //
 // This lives on its own, free of any browser dependency, so the agent that
@@ -24,6 +46,9 @@ export const ComputerHistoryEntrySchema = z.object({
   summaryWindow: z.enum(["10min", "6h"]).nullable(),
   // Keep segments visible when neither metadata nor legacy citations prove coverage.
   coveredHistoryIds: z.array(z.string()).default([]),
+  skillMemoryIds: z.array(z.string()).optional(),
+  // Linked Memory observation. Absent until optional sync succeeds.
+  memoryId: z.string().optional(),
   pinned: z.boolean(),
   eventStreamPath: z.string().nullable(),
   sourceType: z.enum(["captured", "rollup", "imported", "demo_fixture"]),
@@ -55,6 +80,13 @@ export const ComputerHistoryWorkflowSchema = z.object({
 // this client enforces. The schema is strict, so a field added on one side and
 // not the other breaks the page rather than being ignored.
 export const ComputerHistorySnapshotSchema = z.object({
+  memorySync: z.object({
+    lastSyncedAt: z.string().nullable(),
+    error: z.string().nullable(),
+    // Older agents omit the Skill status; new agents always return it.
+    skillError: z.string().nullable().optional(),
+    pendingDeletionCount: z.number().int().nonnegative().optional(),
+  }).strict().optional(),
   observation: z.object({
     state: z.enum(["running", "paused", "stopped", "stopping", "failed"]),
     startedAt: z.string().nullable(),
@@ -68,6 +100,12 @@ export const ComputerHistorySnapshotSchema = z.object({
   }).strict(),
   histories: z.array(ComputerHistoryEntrySchema),
   workflows: z.array(ComputerHistoryWorkflowSchema),
+  wechat: z.object({
+    enabled: z.boolean(),
+    connection: z.enum(["disabled", "unavailable", "needs_setup", "connecting", "connected", "error"]),
+    phase: z.string().nullable(),
+    error: z.string().nullable(),
+  }).strict().optional(),
   privacy: z.object({
     screenshots: z.literal(false),
     audio: z.literal(false),

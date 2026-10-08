@@ -437,3 +437,66 @@ it("distinguishes a timed-out cloud request from a user abort", async () => {
     ),
   ).rejects.toThrow(/abort/i);
 });
+it("passes created time through for files and folders", async () => {
+  const app = Fastify();
+  const fetcher = vi.fn(async (url: unknown) =>
+    String(url).includes("/folders")
+      ? reply({
+          folders: [
+            {
+              id: "f1",
+              parentId: "",
+              name: "资料",
+              created_at: "2026-08-26T07:15:00.000Z",
+              ownerId: "secret-user",
+            },
+          ],
+        })
+      : reply({
+          files: [
+            {
+              id: "a1",
+              name: "指南.pdf",
+              status: "AVAILABLE",
+              message: "",
+              createTime: 1787727840000,
+              apiKey: "server-secret",
+            },
+          ],
+          total: 1,
+          page: 1,
+        }),
+  );
+  registerKnowledgeRoutes(app, {
+    baseUrl: "https://cloud.example",
+    getSession: () => session,
+    fetcher,
+    authenticate: async () => undefined,
+  });
+  try {
+    const headers = { "x-memmy-local-token": "local" };
+    const files = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/bases/owned/files?page=1",
+      headers,
+    });
+    expect(files.json().files[0]).toMatchObject({
+      id: "a1",
+      createdAt: "2026-08-26T07:04:00.000Z",
+    });
+    expect(JSON.stringify(files.json())).not.toContain("server-secret");
+    const foldersResponse = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/bases/owned/folders",
+      headers,
+    });
+    expect(foldersResponse.json().folders[0]).toEqual({
+      id: "f1",
+      parentId: "",
+      name: "资料",
+      createdAt: "2026-08-26T07:15:00.000Z",
+    });
+  } finally {
+    await app.close();
+  }
+});

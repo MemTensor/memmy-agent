@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { extractFile, listPackage } from "@electron/asar";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const semanticVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const assertSemanticVersion = (version, label) => {
@@ -13,6 +15,7 @@ const {
   asarPath,
   expected: expectedDesktop,
   expectedMemory,
+  memoryRoot,
   platform,
   arch,
 } = parseArgs(process.argv.slice(2));
@@ -24,6 +27,8 @@ if (entries.some((entry) => /(^|\/)\.env(?:$|\.)/u.test(entry))) {
   throw new Error("Packaged ASAR contains a forbidden environment file");
 }
 
+const entrySet = new Set(entries);
+const memoryInAsar = entrySet.has("dist/runtime/memory/package.json");
 const requiredFiles = [
   "dist/main/desktop-edition.json",
   "package.json",
@@ -34,17 +39,61 @@ const requiredFiles = [
 ];
 if (platform === "win32") {
   requiredFiles.push(
-    "dist/runtime/memory/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
+    "dist/main/browser-sidebar-bridge.js",
+    "dist/main/browser-history-store.js",
+    "dist/main/browser-download-catalog.js",
+    "dist/main/browser-site-permissions.js",
+    "dist/main/browser-access-store.js",
+    "dist/main/browser-download-settings.js",
+    "dist/main/browser-autofill-vault.js",
+    "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-profile.js",
+    "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-downloads.js",
+    "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-site-permissions.js",
+    "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-access-approval.js",
+    "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-window-visibility.js",
     "dist/runtime/memmy-agent/dist/main.js.map",
   );
+  if (memoryInAsar) {
+    requiredFiles.push(
+      "dist/runtime/memory/package.json",
+      "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json",
+      "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
+      `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
+      `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
+    );
+  } else {
+    if (!memoryRoot) throw new Error("--memory-root is required when Windows Memory is outside the ASAR");
+    for (const file of [
+      "package.json",
+      "node_modules/@memmy/agent-source-core/package.json",
+      "node_modules/@memmy/agent-source-core/dist/src/index.js",
+      `node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
+      `node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
+    ]) {
+      if (!existsSync(join(memoryRoot, file))) throw new Error(`Packaged Memory resource is missing: ${file}`);
+    }
+    const externalMemory = JSON.parse(readFileSync(join(memoryRoot, "package.json"), "utf8"));
+    if (externalMemory.version !== expectedMemory) {
+      throw new Error("Packaged Memory resource version does not match the requested version");
+    }
+  }
 }
-const entrySet = new Set(entries);
 for (const file of requiredFiles) {
   if (!entrySet.has(file)) throw new Error(`Packaged ASAR is missing required runtime file: ${file}`);
+}
+
+// Renderer files are deliberately unpacked. Checking the archive index alone
+// misses a mixed app.asar/app.asar.unpacked pair, which opens a blank window.
+const rendererArchiveIndex = process.platform === "win32" ? "dist\\renderer\\index.html" : "dist/renderer/index.html";
+const rendererHtml = extractFile(asarPath, rendererArchiveIndex).toString("utf8");
+const rendererAssets = [...rendererHtml.matchAll(/(?:src|href)="\.\/(assets\/[^"?#]+)"/gu)]
+  .map((match) => match[1]);
+if (!rendererAssets.length) throw new Error("Packaged renderer index has no local entry assets");
+for (const asset of rendererAssets) {
+  const archivePath = `dist/renderer/${asset}`;
+  if (!entrySet.has(archivePath) || !existsSync(join(`${asarPath}.unpacked`, archivePath))) {
+    throw new Error(`Packaged renderer entry asset is missing: ${archivePath}`);
+  }
 }
 
 if (platform === "win32") {
@@ -75,7 +124,7 @@ const versionedFiles = [
   ["dist/runtime/memmy-agent/package.json", false, expectedDesktop],
   ["dist/runtime/memmy-agent/package-lock.json", true, expectedDesktop],
 ];
-if (platform === "win32") {
+if (platform === "win32" && memoryInAsar) {
   versionedFiles.splice(1, 0,
     ["dist/runtime/memory/package.json", false, expectedMemory],
     ["dist/runtime/memory/package-lock.json", true, expectedMemory],
@@ -118,10 +167,10 @@ function parseArgs(args) {
     const flag = args[index];
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> [--expected-memory <version>] --platform <platform> --arch <arch>");
+      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> [--expected-memory <version>] [--memory-root <path>] --platform <platform> --arch <arch>");
     }
     const key = flag.slice(2);
-    if (!new Set(["asar", "expected", "expected-memory", "platform", "arch"]).has(key)
+    if (!new Set(["asar", "expected", "expected-memory", "memory-root", "platform", "arch"]).has(key)
       || Object.hasOwn(parsed, key)) {
       throw new Error(`Unknown or duplicate option: ${flag}`);
     }
@@ -143,10 +192,14 @@ function parseArgs(args) {
   if (parsed.platform !== "win32" && hasExpectedMemory) {
     throw new Error("--expected-memory is only supported for win32 packages");
   }
+  if (parsed.platform !== "win32" && Object.hasOwn(parsed, "memory-root")) {
+    throw new Error("--memory-root is only supported for win32 packages");
+  }
   return {
     asarPath: parsed.asar,
     expected: parsed.expected,
     expectedMemory: parsed["expected-memory"],
+    memoryRoot: parsed["memory-root"],
     platform: parsed.platform,
     arch: parsed.arch,
   };

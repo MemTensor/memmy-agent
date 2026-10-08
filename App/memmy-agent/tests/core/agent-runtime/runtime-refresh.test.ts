@@ -113,6 +113,7 @@ describe("runtime refresh", () => {
       workspace: "/tmp/memmy-runtime-refresh-process",
       model: "old-model",
       contextWindowTokens: 1000,
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
       providerSnapshotLoader: () => ({
         provider: newProvider,
         model: "new-model",

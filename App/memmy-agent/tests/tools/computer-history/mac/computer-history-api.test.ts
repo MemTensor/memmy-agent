@@ -13,6 +13,26 @@ afterEach(() => {
 });
 
 describe("ComputerHistoryDemoService", () => {
+  it("keeps explicit Skill links across snapshots and removes them with their History", () => {
+    const { service, root } = createService();
+    const history = service.importMarkdown({ title: "Skill source", markdown: "# Work\n\nSteps." }).histories[0]!;
+    const secondHistory = service.importMarkdown({ title: "Second source", markdown: "# Work\n\nMore steps." })
+      .histories.find((entry) => entry.title === "Second source")!;
+
+    const linked = service.setHistorySkillLinks(history.id, ["skill-memory-1", "skill-memory-1"]);
+    expect(linked.histories.find((entry) => entry.id === history.id)?.skillMemoryIds).toEqual(["skill-memory-1"]);
+    service.setHistorySkillLinks(secondHistory.id, ["skill-memory-1"]);
+    expect(service.snapshot().histories.filter((entry) => entry.skillMemoryIds?.includes("skill-memory-1"))).toHaveLength(2);
+    expect(fs.existsSync(path.join(root, "histories", "skill-links.json"))).toBe(true);
+
+    service.deleteHistory(history.id);
+    expect(service.snapshot().histories.find((entry) => entry.id === secondHistory.id)?.skillMemoryIds).toEqual(["skill-memory-1"]);
+    expect(JSON.parse(fs.readFileSync(path.join(root, "histories", "skill-links.json"), "utf8"))).toEqual({
+      [secondHistory.id]: ["skill-memory-1"],
+    });
+    expect(() => service.setHistorySkillLinks(history.id, ["skill-memory-1"])).toThrow("history not found");
+  });
+
   it("keeps imported context distinguishable from captured history", () => {
     const { service } = createService();
     const snapshot = service.importMarkdown({
@@ -112,8 +132,8 @@ describe("ComputerHistoryDemoService", () => {
 
     expect(workflow.sourceHistoryId).toBe(history.id);
     expect(workflow.markdown).toContain("generated_from: recorded_operation_experience");
-    expect(workflow.markdown).toContain("Use only the Open Computer Use MCP tools");
-    expect(workflow.markdown).toContain("mcp_open_computer_use_get_app_state");
+    expect(workflow.markdown).toContain("Use only the Memmy Computer Use MCP tools");
+    expect(workflow.markdown).toContain("mcp_memmy_computer_use_get_app_state");
     expect(workflow.markdown).not.toContain("mcp_cua_");
     expect(workflow.markdown).not.toContain("built-in `computer_*`");
     expect(workflow.markdown).toContain("银色");

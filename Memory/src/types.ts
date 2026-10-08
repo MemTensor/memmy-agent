@@ -29,7 +29,7 @@ export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
 export type RecallMemoryLayer = MemoryLayer | "UserMemory";
-export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill" | "work_memory";
+export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill" | "work_memory" | "observed_activity";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type RetrievalMode =
   | "search"
@@ -515,6 +515,38 @@ export interface MemoryAddRequest extends RequestEnvelope {
   sourceSkillPath?: string;
   sourceSkillVersion?: string;
   sourceContentHash?: string;
+}
+
+/** Passive source evidence. This is deliberately not an agent conversation. */
+export interface ExternalEvidenceSyncRequest extends RequestEnvelope {
+  action: "upsert" | "delete";
+  source: string;
+  sourceRecordId: string;
+  /** ISO instant; older revisions cannot replace newer evidence. */
+  revision: string;
+  title?: string;
+  content?: string;
+  startedAt?: string;
+  endedAt?: string;
+  provenance?: Record<string, unknown>;
+  parentSourceRecordIds?: string[];
+}
+
+/** Read-only reconciliation for an optional external evidence producer. */
+export interface ExternalEvidenceStatusRequest extends RequestEnvelope {
+  source: string;
+  sourceRecordIds: string[];
+  skillIds?: string[];
+}
+
+/** Candidate-only Skill proposal grounded in several passive evidence records. */
+export interface ExternalEvidenceSkillSuggestionRequest extends RequestEnvelope {
+  source: string;
+  groupId: string;
+  revision: string;
+  sourceRecordIds: string[];
+  /** Semantic actions observed locally; each action retains its source record. */
+  actions: Array<{ sourceRecordId: string; text: string }>;
 }
 
 export interface FeedbackTarget {

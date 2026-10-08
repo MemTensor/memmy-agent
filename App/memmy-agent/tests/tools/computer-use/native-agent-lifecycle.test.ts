@@ -11,8 +11,8 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 function fixture() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'ocu-life-')));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const bundle = path.join(root, 'Open Computer Use.app');
-  const binary = path.join(bundle, 'Contents/MacOS/OpenComputerUse');
+  const bundle = path.join(root, 'Memmy Computer Use.app');
+  const binary = path.join(bundle, 'Contents/MacOS/MemmyComputerUse');
   mkdirSync(path.dirname(binary), { recursive: true }); writeFileSync(binary, 'fixture');
   // Keep the Unix socket path short on macOS.
   const directory = '/tmp';
@@ -35,10 +35,10 @@ async function agent(f: ReturnType<typeof fixture>, respond: (request: any, sock
   server.listen(nativeAgentSocketPath(f.namespace, f.directory)); await once(server, 'listening');
   cleanups.push(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
 }
-const info = (f: ReturnType<typeof fixture>) => ({ bundleIdentifier: 'com.ifuryst.opencomputeruse', bundleURL: f.bundle, executableURL: f.binary });
+const info = (f: ReturnType<typeof fixture>) => ({ bundleIdentifier: 'cn.memtensor.memmy.computeruse', bundleURL: f.bundle, executableURL: f.binary });
 
 it('matches the native namespace hash and never falls back to the shared socket', () => {
-  expect(nativeAgentSocketPath('memmy:/Users/yicheng/Applications/Memmy Development/Open Computer Use.app', '/tmp')).toBe('/tmp/open-computer-use-agent-8f6a862c735ba596.sock');
+  expect(nativeAgentSocketPath('memmy:/Users/yicheng/Applications/Memmy Development/Memmy Computer Use.app', '/tmp')).toBe('/tmp/memmy-computer-use-agent-ec45c38a29e04f38.sock');
 });
 it('verifies both paths, requests native termination, and waits for closure rather than just an ack', async () => {
   const f = fixture(); const requests: string[] = []; let close!: () => void;

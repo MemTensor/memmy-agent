@@ -211,7 +211,7 @@ export function WelcomePage() {
             <div className="welcome-brand-mascot flex justify-center">
               <Memmy pose="wave" size={176} className="memmy-wave" />
             </div>
-            <span className="text-3xl font-extrabold tracking-tight text-text-ink">{t("brand.name")}</span>
+            <span className="welcome-brand-name text-3xl font-extrabold tracking-tight text-text-ink">{t("brand.name")}</span>
             <p className="welcome-brand-subtitle text-base text-text-ink/50">{t("brand.subtitle")}</p>
           </div>
 

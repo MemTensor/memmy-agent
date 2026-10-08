@@ -17,6 +17,7 @@ beforeEach(() => {
   saveHistoryPermissionSetup("start", "current-app");
   window.memmy = {
     getComputerHistoryPermissionSessionId: vi.fn().mockResolvedValue("current-app"),
+    guideMemmyPermission: vi.fn().mockResolvedValue(true),
     restartForComputerHistoryPermissions: vi.fn().mockResolvedValue(undefined),
   } as unknown as NonNullable<Window["memmy"]>;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -47,29 +48,34 @@ describe("Computer History permission dialog", () => {
     expect(dialog().textContent).toContain("辅助功能"); expect(dialog().textContent).toContain("输入监控");
     expect(dialog().textContent).not.toMatch(/检查并开始|重新检测|重启 Memmy|屏幕录制/);
     expect(client.openComputerHistoryPermission).not.toHaveBeenCalled();
-    await click("去开启"); expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "settings");
+    expect(window.memmy!.guideMemmyPermission).not.toHaveBeenCalled();
+    await click("去开启"); expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledExactlyOnceWith("accessibility");
+    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "request");
     const half = { ...denied, accessibility: true };
     client.checkComputerHistoryPermissions.mockResolvedValue(half); client.openComputerHistoryPermission.mockResolvedValue(half);
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(1);
     expect(dialog().textContent).not.toContain("退出并重启");
-    await click("去开启"); expect(client.openComputerHistoryPermission).toHaveBeenLastCalledWith("inputMonitoring", "settings");
+    await click("去开启"); expect(window.memmy!.guideMemmyPermission).toHaveBeenLastCalledWith("inputMonitoring");
+    expect(client.openComputerHistoryPermission).toHaveBeenLastCalledWith("inputMonitoring", "request");
     expect(onStart).not.toHaveBeenCalled();
   });
   it("opens settings directly on every click and never navigates again on focus", async () => {
     const { client } = await render();
     await click("去开启");
-    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "settings");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledExactlyOnceWith("accessibility");
+    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "request");
     await act(async () => window.dispatchEvent(new Event("focus")));
-    expect(client.openComputerHistoryPermission).toHaveBeenCalledTimes(1);
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledTimes(1);
     await click("去开启");
-    expect(client.openComputerHistoryPermission).toHaveBeenLastCalledWith("accessibility", "settings");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenLastCalledWith("accessibility");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledTimes(2);
     expect(client.openComputerHistoryPermission).toHaveBeenCalledTimes(2);
   });
   it("preserves the close button while opening settings and prevents dismissal until complete", async () => {
     const { client, onCancel } = await render();
     let finish!: (value: typeof denied) => void;
-    client.openComputerHistoryPermission.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const closeButton = dialog().querySelector<HTMLButtonElement>(".modal-header button")!;
     expect(closeButton.disabled).toBe(false);
     await click("去开启");
@@ -87,10 +93,41 @@ describe("Computer History permission dialog", () => {
     await act(async () => closeButton.click());
     expect(onCancel).toHaveBeenCalledOnce();
   });
+  it("refreshes grants on focus while the native settings guide is still open", async () => {
+    const { client, onStart } = await render();
+    let closeGuide!: (value: boolean) => void;
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise<boolean>((resolve) => { closeGuide = resolve; }));
+    await click("去开启");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledOnce();
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledOnce();
+    client.checkComputerHistoryPermissions.mockResolvedValue(granted);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(2);
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledTimes(2);
+    const restart = Array.from(dialog().querySelectorAll("button")).find(button => button.textContent === "退出并重启")!;
+    expect(restart.disabled).toBe(true);
+    expect(onStart).not.toHaveBeenCalled();
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledOnce();
+    await act(async () => closeGuide(false));
+    expect(restart.disabled).toBe(false);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+  it("ignores a settings guide completion after the dialog unmounts", async () => {
+    const { client, onStart, onCancel } = await render();
+    let closeGuide!: (value: boolean) => void;
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise<boolean>((resolve) => { closeGuide = resolve; }));
+    await click("去开启");
+    await act(async () => root.render(null));
+    client.checkComputerHistoryPermissions.mockResolvedValue(granted);
+    await act(async () => closeGuide(true));
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledOnce();
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
   it("shows Quit & Reopen when both grants are ready, without starting before restart", async () => {
     const { client, onStart } = await render(granted);
     expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(2);
-    expect(dialog().textContent).not.toContain("去开启");
+    expect(dialog().querySelectorAll('.ch__permission-open')).toHaveLength(0);
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).not.toHaveBeenCalled();
     await click("退出并重启");

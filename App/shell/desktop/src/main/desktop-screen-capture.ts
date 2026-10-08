@@ -1,13 +1,20 @@
 import { SCREEN_CAPTURE_PREFIX, SCREEN_CAPTURE_PROTOCOL, isScreenCaptureMessage, isScreenCaptureRequest, SCREEN_CAPTURE_MAX_BYTES, SCREEN_CAPTURE_MAX_EDGE, type ScreenCaptureResult } from '@memmy/local-api-contracts';
 
-type Image = { isEmpty(): boolean; getSize(): { width: number; height: number }; toPNG(): Buffer; resize(size: { width: number; height: number }): Image };
 type Display = { id: number; bounds: { x: number; y: number; width: number; height: number } };
 export type ScreenCaptureHandler = (displayId?: string, signal?: AbortSignal) => Promise<ScreenCaptureResult>;
+export type HelperScreenShot = { ok: true; png: Buffer; width: number; height: number; displayId: string }
+  | { ok: false; code: 'permission_required' | 'capture_failed' | 'unavailable' };
+export const memmyPermissionMessage = [
+  'Memmy 需要同一套权限才能查看屏幕并操作其他应用。',
+  '请在引导里把 **Memmy** 拖进系统设置并打开开关：\n**系统设置 → 隐私与安全性 → 屏幕与系统音频录制（屏幕录制）**\n如果辅助功能还没打开，也请一并打开。',
+  '不需要再单独授权另一个程序。完成后请重新发送消息。此次没有向模型返回屏幕图片。',
+].join('\n\n');
+
+/** Seeing the screen and operating other apps use one Memmy permission. */
 export function createDesktopScreenCapture(deps: {
-  getStatus(): string;
-  getSources(options: { types: ('screen')[]; thumbnailSize: { width: number; height: number }; fetchWindowIcons: boolean }): Promise<Array<{ display_id: string; thumbnail: Image }>>;
+  capture(displayId: string | undefined, signal?: AbortSignal): Promise<HelperScreenShot>;
+  guide(): Promise<void>;
   getDisplays(): Display[]; getPrimaryDisplay(): Display;
-  openSettings(): Promise<unknown>;
 }): ScreenCaptureHandler {
   let guidanceShown = false;
   let busy = false;
@@ -17,40 +24,23 @@ export function createDesktopScreenCapture(deps: {
     if (signal?.aborted) return failed('cancelled', '屏幕请求已取消。');
     busy = true;
     try {
-      const status = deps.getStatus();
-      const options = { types: ['screen'] as ('screen')[], thumbnailSize: { width: SCREEN_CAPTURE_MAX_EDGE, height: SCREEN_CAPTURE_MAX_EDGE }, fetchWindowIcons: false };
-      if (status === 'not-determined' || status === 'denied') {
+      const shot = await deps.capture(displayId, signal);
+      if (signal?.aborted) return failed('cancelled', '屏幕请求已取消。');
+      if (!shot.ok) {
+        if (shot.code === 'capture_failed') return failed('capture_failed', '未取得屏幕图片。');
         if (!guidanceShown) {
           guidanceShown = true;
-          if (status === 'not-determined') await deps.getSources(options).catch(() => undefined);
-          else await deps.openSettings();
+          void deps.guide().catch(() => undefined);
         }
-        return { ok: false, code: 'permission_required', message: [
-          '目前还没有获得 Memmy 的屏幕录制权限，暂时无法查看屏幕内容。',
-          '请在弹出的系统授权提示或系统设置中开启：\n**系统设置 → 隐私与安全性 → 屏幕与系统音频录制（屏幕录制）**\n找到 **Memmy** 并打开开关；开发版可能显示为 **Electron**。',
-          '这次需要授权的是 Memmy 本身，不是 Open Computer Use。如果系统提示「退出并重新打开」，请按提示重启 Memmy，然后重新发送“帮我看下屏幕内容”。此次没有向模型返回屏幕图片。',
-        ].join('\n\n') };
+        return { ok: false, code: 'permission_required', message: memmyPermissionMessage };
       }
-      if (status !== 'granted') return failed('unavailable', '无法确认 Memmy 的屏幕录制权限，或权限受系统限制。此次未截图。');
       guidanceShown = false;
-      const display = displayId ? deps.getDisplays().find(d => String(d.id) === displayId) : deps.getPrimaryDisplay();
+      const display = deps.getDisplays().find(item => String(item.id) === shot.displayId) ?? (displayId ? undefined : deps.getPrimaryDisplay());
       if (!display) return failed('capture_failed', '指定显示器不存在。');
-      const sources = await deps.getSources(options);
-      if (signal?.aborted) return failed('cancelled', '屏幕请求已取消。');
-      if (deps.getStatus() !== 'granted') return { ok: false, code: 'permission_required', message: 'Memmy 的屏幕录制权限已改变，请完成授权后重新发送消息。此次未返回屏幕图片。' };
-      let image = sources.find(s => s.display_id === String(display.id))?.thumbnail;
-      if (!image || image.isEmpty()) return failed('capture_failed', '未取得所选屏幕的有效图片。');
-      for (let attempt = 0; attempt < 10; attempt++) {
-        let { width, height } = image.getSize();
-        const scale = Math.min(1, SCREEN_CAPTURE_MAX_EDGE / Math.max(width, height));
-        if (scale < 1) image = image.resize({ width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)) });
-        ({ width, height } = image.getSize());
-        const png = image.toPNG();
-        if (png.length && png.length <= SCREEN_CAPTURE_MAX_BYTES) return { ok: true, pngBase64: png.toString('base64'), displayId: String(display.id), bounds: display.bounds, width, height };
-        if (Math.min(width, height) <= 64) break;
-        image = image.resize({ width: Math.floor(width * 0.75), height: Math.floor(height * 0.75) });
+      if (!shot.png.length || shot.png.length > SCREEN_CAPTURE_MAX_BYTES || shot.width > SCREEN_CAPTURE_MAX_EDGE || shot.height > SCREEN_CAPTURE_MAX_EDGE || shot.width < 1 || shot.height < 1) {
+        return failed('capture_failed', '屏幕图片超过传输限制。');
       }
-      return failed('capture_failed', '屏幕图片超过传输限制。');
+      return { ok: true, pngBase64: shot.png.toString('base64'), displayId: shot.displayId, bounds: display.bounds, width: shot.width, height: shot.height };
     } catch {
       return failed('capture_failed', '屏幕读取失败，请检查系统权限并重新发送消息。');
     } finally { busy = false; }

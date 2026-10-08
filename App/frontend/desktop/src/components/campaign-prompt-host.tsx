@@ -14,7 +14,9 @@ import {
   shouldOfferCampaignPrompt
 } from "../app/campaign-prompt-state.js";
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
+import { HISTORY_LAUNCH_VISIBILITY_EVENT, areOtherPromptsDeferredForHistoryLaunch, isHistoryLaunchPromptOpen } from "../app/history-launch-prompt-state.js";
 import { readDeferredGuidanceStep, readGuidanceCompleted } from "../app/routes.js";
+import { useOptionalUpdateCoordinator } from "../app/update-coordinator.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { useAppState } from "../state/app-state.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -27,8 +29,10 @@ function browserStorage(): Storage | undefined {
 /** Shows the campaign reminder after the user enters a workspace with guidance settled. */
 export function CampaignPromptHost() {
   const { state } = useAppState();
+  const appVersion = useOptionalUpdateCoordinator()?.appVersion;
   const { language } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [historyVisibilityRevision, setHistoryVisibilityRevision] = useState(0);
   const offeredRef = useRef(false);
   const preview = isDesktopPromptPreview("campaign");
   const surfaceReady = isCampaignPromptSurfaceReady({
@@ -47,6 +51,12 @@ export function CampaignPromptHost() {
   });
 
   useEffect(() => {
+    const changed = () => setHistoryVisibilityRevision((revision) => revision + 1);
+    window.addEventListener(HISTORY_LAUNCH_VISIBILITY_EVENT, changed);
+    return () => window.removeEventListener(HISTORY_LAUNCH_VISIBILITY_EVENT, changed);
+  }, []);
+
+  useEffect(() => {
     if (open === isCampaignPromptOpen()) {
       return;
     }
@@ -59,7 +69,8 @@ export function CampaignPromptHost() {
   }, [open]);
 
   useEffect(() => {
-    if (open || offeredRef.current) {
+    if (open || offeredRef.current || appVersion === "0.0.0" || isHistoryLaunchPromptOpen()
+      || areOtherPromptsDeferredForHistoryLaunch(typeof window === "undefined" ? undefined : window.sessionStorage)) {
       return;
     }
 
@@ -83,7 +94,7 @@ export function CampaignPromptHost() {
     offeredRef.current = true;
     markCampaignPromptShown(storage);
     setOpen(true);
-  }, [open, preview, sessionReady, state.bootstrap?.lotteryStatus, surfaceReady]);
+  }, [appVersion, historyVisibilityRevision, open, preview, sessionReady, state.bootstrap?.lotteryStatus, surfaceReady]);
 
   if (!open) {
     return null;

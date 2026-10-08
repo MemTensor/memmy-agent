@@ -6,13 +6,13 @@ import { FOCUSED_AGENT_CHAT_STORAGE_KEY, readGuidanceCompleted, resolveInitialVi
 import type { MemmyAgentClient, MemmyAgentSessionSummary, MemmyAgentUnsubscribe, MemmyAgentWebSocketConnection, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
 import type { AsrClient } from "../api/asr-client.js";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
+import { PetIdleAnimation } from "../components/mascot/pet-idle/pet-idle-animation.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { useTaskBus, type Task, type TaskBusAgentMessage, type TaskBusValue } from "../lib/task-bus.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
-import memoIdleUrl from "../assets/mascot/memo-idle-alpha.webm";
 import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Maximize, Maximize2, Mic, Pause, Send, StopSquare, X } from "./memory/memory-prototype-icons.js";
 import { MicrophonePermissionError, microphonePermissionDeniedMessageKey, useAsrRecorder } from "./asr-recorder.js";
 import { createPetAgentBridge, PetReconnectRecoveryTracker } from "./pet-agent-bridge.js";
@@ -400,13 +400,50 @@ export function hasPetThreadLatestAnswer(messages: TaskBusAgentMessage[]): boole
   return false;
 }
 
+/**
+ * Counts sessions that have an explicit unread completion.
+ *
+ * Running tasks and historical tasks that were never marked unseen do not count.
+ * Several tasks inside one session count once. chatId and websocket:chatId are the same session.
+ */
+export function countUnreadPetSessions(tasks: Task[]): number {
+  const representativeBySession = new Map<string, Task>();
+  for (const task of tasks) {
+    if (task.status === "cancelled") {
+      continue;
+    }
+
+    const sessionId = canonicalPetSessionId(task.sessionId);
+    if (!sessionId) {
+      continue;
+    }
+
+    const current = representativeBySession.get(sessionId);
+    if (!current || miniTaskActivityAt(task) > miniTaskActivityAt(current)) {
+      representativeBySession.set(sessionId, task);
+    }
+  }
+
+  let count = 0;
+  for (const task of representativeBySession.values()) {
+    if (isUnreadPetSessionTask(task)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** Handles group mini task list sessions. */
 function groupMiniTaskListSessions(tasks: Task[]): MiniTaskListItem[] {
   const sessions = new Map<string, Task[]>();
   for (const task of tasks) {
-    const sessionTasks = sessions.get(task.sessionId) ?? [];
+    const sessionId = canonicalPetSessionId(task.sessionId);
+    if (!sessionId) {
+      continue;
+    }
+    const sessionTasks = sessions.get(sessionId) ?? [];
     sessionTasks.push(task);
-    sessions.set(task.sessionId, sessionTasks);
+    sessions.set(sessionId, sessionTasks);
   }
 
   return Array.from(sessions.entries()).flatMap(([sessionId, sessionTasks]) => {
@@ -437,7 +474,20 @@ function shouldShowMiniTaskListRepresentative(task: Task): boolean {
     return true;
   }
 
-  return task.readAt == null && task.dismissed !== true;
+  return isUnreadPetSessionTask(task);
+}
+
+function isUnreadPetSessionTask(task: Task): boolean {
+  return (task.status === "done" || task.status === "error") && task.unseen === true && task.readAt == null && task.dismissed !== true;
+}
+
+function canonicalPetSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith("websocket:") ? trimmed.slice("websocket:".length) : trimmed;
+}
+
+function miniTaskActivityAt(task: Task): number {
+  return Math.max(task.startedAt, task.updatedAt, task.finishedAt ?? 0);
 }
 
 /** Normalizes normalize pet task chat id. */
@@ -1070,6 +1120,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     [focusedTask, hasUndismissedAnswer, isActive, isActiveSuppressed, isInHotzone]
   );
   const miniTaskListItems = useMemo(() => selectMiniTaskListItems(tasks), [tasks]);
+  const unreadSessionCount = useMemo(() => countUnreadPetSessions(tasks), [tasks]);
   const runningSessionItems = useMemo(() => miniTaskListItems.filter((item) => item.status === "processing" || item.status === "answering"), [miniTaskListItems]);
   const runningSessionCount = runningSessionItems.length;
   const runningSessionReconcileKey = useMemo(
@@ -1082,7 +1133,6 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
   const hasLiveInputActivity = derivePetInputActivity({ isTextInputFocused, textInput, isRecording, hasInteracted });
   const hasHoverBlockingActivity = hasLiveInputActivity || displayState === "processing" || displayState === "answering";
   const focusedAgentText = focusedTask?.lastAgentMessage ?? focusedTask?.streamingChunks?.join("") ?? "";
-  const hasTaskHistorySwitcher = miniTaskListItems.length > 0;
   const showIdle = displayState === "idle" && runningSessionCount === 0 && !isDragging;
   const memmyPose = resolveMemmyPose(displayState, focusedTask, isSleeping);
 
@@ -1916,20 +1966,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
               filter: "drop-shadow(0 8px 16px rgba(17, 29, 28, 0.18))"
             }}
           >
-            <video
-              src={memoIdleUrl}
-              autoPlay
-              loop
-              muted
-              playsInline
-              className="drop-shadow-[0_8px_16px_rgba(17,29,28,0.18)]"
-              style={{
-                width: PET_TIMING.mascotSize,
-                height: PET_TIMING.mascotSize,
-                objectFit: "cover",
-                display: "block"
-              }}
-            />
+            <PetIdleAnimation size={PET_TIMING.mascotSize} playing={showIdle} />
           </div>
           <div className="absolute inset-0 transition-opacity duration-200" style={{ opacity: showIdle ? 0 : 1, pointerEvents: "none" }}>
             <Memmy pose={memmyPose} size={PET_TIMING.mascotSize} className={`drop-shadow-[0_8px_16px_rgba(17,29,28,0.18)] ${displayState === "processing" ? "memmy-bob" : ""}`} />
@@ -1938,11 +1975,11 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
 
         {displayState !== "idle" && <ChatWavesProp />}
 
-        {hasTaskHistorySwitcher && (
+        {unreadSessionCount > 0 && (
           <MultiTaskBadge
             registerRef={registerHotzone("badge")}
-            count={miniTaskListItems.length}
-            title={runningSessionCount > 0 ? t("pet.runningTasks", { count: runningSessionCount }) : t("pet.list.switch")}
+            count={unreadSessionCount}
+            title={t("pet.unreadSessions", { count: unreadSessionCount })}
             onClick={(event) => {
               event.stopPropagation();
               setTaskListOpen((open) => !open);
@@ -2422,7 +2459,7 @@ interface MultiTaskBadgeProps {
  */
 function MultiTaskBadge({ registerRef, count, title, onClick }: MultiTaskBadgeProps) {
   return (
-    <button ref={registerRef} type="button" onClick={onClick} className="absolute min-w-[20px] h-5 px-1.5 rounded-full bg-icon-ember text-white text-[10px] font-bold flex items-center justify-center shadow-md ring-2 ring-canvas-oat hover:scale-110 transition-transform cursor-pointer animate-in zoom-in-50 duration-200" style={{ top: -4, right: -12 }} title={title} data-task-count={count}>
+    <button ref={registerRef} type="button" onClick={onClick} className="absolute min-w-[20px] h-5 px-1.5 rounded-full bg-icon-ember text-white text-[10px] font-bold flex items-center justify-center shadow-md ring-2 ring-canvas-oat hover:scale-110 transition-transform cursor-pointer animate-in zoom-in-50 duration-200" style={{ top: -4, right: -12 }} title={title} data-unread-session-count={count}>
       {count}
     </button>
   );

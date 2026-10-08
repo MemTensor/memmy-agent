@@ -6,6 +6,9 @@ import { AgentLoop, UNIFIED_SESSION_KEY } from "../../../src/core/agent-runtime/
 import { Config } from "../../../src/config/schema.js";
 import { InboundMessage, MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
+import { RequestContext } from "../../../src/core/agent-runtime/tools/context.js";
+import { ManagedOcuSession, OCU_TOOLS, OcuBlocked } from "../../../src/tools/computer-use/managed-ocu-session.js";
+import { activeComputerUseTurnId } from "../../../src/tools/computer-use/surface-preview.js";
 
 const roots: string[] = [];
 
@@ -1206,6 +1209,49 @@ describe("AgentLoop Turn admission", () => {
     await waitUntil(() => !loop.isSessionBusy(sessionKey));
     loop.stop();
     await running;
+  });
+
+  it("binds a GUI Computer Use stop to its active turn and prevents the next native action", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:computer-stop";
+    const chatId = "computer-stop";
+    const scope = { sessionKey, channel: "websocket", chatId };
+    const session = { ping: vi.fn(async () => undefined),
+      listTools: vi.fn(async () => ({ tools: [...OCU_TOOLS].map(name => ({ name, inputSchema: {} })) })),
+      callTool: vi.fn(async (_name: string) => ({ content: [] })) };
+    const managed = new ManagedOcuSession(async () => ({ session, close: async () => undefined }),
+      async () => ({ state: "granted" }), undefined, undefined, { appApprovals: null, platform: "linux" });
+    let blockedNext = false;
+    loop.processMessageInternal = vi.fn(async (_message: InboundMessage, _key, options: any) => {
+      const context = new RequestContext({ ...scope, messageId: "current-user-message" });
+      await managed.invoke("get_app_state", { app: "Notes" }, 30, context, options.abortSignal);
+      await new Promise<void>(resolve => {
+        if (options.abortSignal.aborted) resolve();
+        else options.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      try {
+        await managed.invoke("click", { app: "Notes", x: 10, y: 10 }, 30, context, options.abortSignal);
+      } catch (error) {
+        blockedNext = error instanceof OcuBlocked;
+      }
+      return null;
+    }) as any;
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket", chatId, content: "Use Notes",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(() => session.callTool.mock.calls.length === 1);
+    const turnId = activeComputerUseTurnId(scope);
+    expect(turnId).toBeTruthy();
+    await expect(loop.stopExpectedTurn(sessionKey, turnId!, "gui")).resolves.toBe("stopped");
+    expect(blockedNext).toBe(true);
+    expect(session.callTool.mock.calls.map(call => call[0])).toEqual(["get_app_state"]);
+    expect(activeComputerUseTurnId(scope)).toBeUndefined();
+    loop.stop();
+    await running;
+    await managed.close();
   });
 
   it("persists a TUI command response with its source and Turn identity", async () => {

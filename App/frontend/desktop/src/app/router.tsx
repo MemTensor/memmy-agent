@@ -48,10 +48,15 @@ import { appActions } from "../state/app-actions.js";
 import { NicknameModal } from "../components/nickname-modal.js";
 import { randomNickname } from "../lib/nickname.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import {
+  resolveWindowDragExclusionSelector,
+  WindowDragRegion
+} from "./window-drag-region.js";
 import { ApiKeyPage } from "../pages/api-key-page.js";
 import { ApiKeyOptionalPage } from "../pages/api-key-optional-page.js";
 import { ModelPage } from "../pages/model-page.js";
 import { HomePage } from "../pages/home-page.js";
+import { hasMountedBrowserPanel, MEMMY_BROWSER_MOUNTED_EVENT, requestBrowserNewTab } from "../pages/browser-panel.js";
 import { LoginPage } from "../pages/login-page.js";
 import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
 import { KnowledgePage } from "../pages/knowledge-page.js";
@@ -80,8 +85,13 @@ export function AppRouter(props: { onRetry: () => void }) {
   );
   const [deferredNickname, setDeferredNickname] = useState("");
   const [petGuideRequest, setPetGuideRequest] = useState<MainWindowActionRequest | null>(null);
+  const [preserveHomeBrowser, setPreserveHomeBrowser] = useState(false);
   const isPetWindowContext = isPetWindow(state.navigation.currentPath);
-  const windowDragRegion = !isPetWindowContext ? <WindowDragRegion /> : null;
+  const windowDragRegion = !isPetWindowContext ? (
+    <WindowDragRegion
+      dynamicExclusionSelector={resolveWindowDragExclusionSelector(state.navigation.currentPath)}
+    />
+  ) : null;
 
   const completeMainWindowAction = useCallback(
     (request: MainWindowActionRequest, resolution: MainWindowActionResolution) => {
@@ -145,6 +155,19 @@ export function AppRouter(props: { onRetry: () => void }) {
   }, [state.navigation.currentPath, state.startup.status]);
 
   const currentPath = state.navigation.currentPath;
+  useEffect(() => {
+    const preserve = () => setPreserveHomeBrowser(true);
+    window.addEventListener(MEMMY_BROWSER_MOUNTED_EVENT, preserve);
+    if (hasMountedBrowserPanel()) preserve();
+    return () => window.removeEventListener(MEMMY_BROWSER_MOUNTED_EVENT, preserve);
+  }, []);
+  useEffect(() => window.memmy?.onEmbeddedBrowserOpen?.((url) => {
+    requestBrowserNewTab(url);
+    setPreserveHomeBrowser(true);
+  }), []);
+  useEffect(() => {
+    if (resolveMainWindowActionRoute(currentPath) === "auth") setPreserveHomeBrowser(false);
+  }, [currentPath]);
   useEffect(() => {
     // Memory/Tools pages are not always wrapped by AppFrame; keep the product tour mounted at router level.
     const step = readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage);
@@ -231,7 +254,17 @@ export function AppRouter(props: { onRetry: () => void }) {
 
   return (
     <>
-      {renderRoute(state.navigation.currentPath)}
+      {(currentPath === "/main" || (preserveHomeBrowser
+        && resolveMainWindowActionRoute(currentPath) === "workspace")) && (
+        <div style={currentPath === "/main" ? { display: "contents" } : {
+          position: "fixed", left: -10_000, top: 0, width: 800, height: 600,
+          opacity: 0, pointerEvents: "none",
+        }}
+          aria-hidden={currentPath !== "/main"}>
+          <HomePage />
+        </div>
+      )}
+      {currentPath === "/main" ? null : renderRoute(currentPath)}
       {windowDragRegion}
       {workspaceGuidanceStep === "product_tour" && (
         <ProductTourGuide
@@ -274,16 +307,6 @@ export function AppRouter(props: { onRetry: () => void }) {
           || workspaceGuidanceStep === "nickname"
         }
       />
-    </>
-  );
-}
-
-function WindowDragRegion() {
-  return (
-    <>
-      <div aria-hidden="true" className="window-drag-region" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--sidebar-toggle" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--lang-toggle" />
     </>
   );
 }

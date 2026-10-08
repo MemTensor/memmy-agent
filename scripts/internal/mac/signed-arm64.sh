@@ -4,11 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 CERT_DIR="${MEMMY_MAC_CERT_DIR:-$ROOT_DIR/Mac软件打包}"
+if [ -z "${MEMMY_MAC_CERT_DIR:-}" ] && [ -d "$CERT_DIR/Mac软件打包" ]; then
+  CERT_DIR="$CERT_DIR/Mac软件打包"
+fi
 SIGNING_DIR="$ROOT_DIR/.signing-local"
-KEYCHAIN="${CSC_KEYCHAIN:-/private/tmp/memmy-build-arm64.keychain-db}"
+KEYCHAIN="${CSC_KEYCHAIN:-/private/tmp/memmy-build-arm64-$$.keychain-db}"
 KEYCHAIN_PASSWORD_FILE="${MEMMY_KEYCHAIN_PASSWORD_FILE:-$SIGNING_DIR/keychain-password-arm64.txt}"
 FALLBACK_KEYCHAIN_PASSWORD_FILE="$SIGNING_DIR/keychain-password.txt"
-P12_FILE="${MEMMY_P12_FILE:-$CERT_DIR/证书.p12}"
+DEFAULT_P12_FILE="$CERT_DIR/证书.p12"
+if [ ! -f "$DEFAULT_P12_FILE" ] && [ -f "$CERT_DIR/Memmy-Developer-ID-20260918.p12" ]; then
+  DEFAULT_P12_FILE="$CERT_DIR/Memmy-Developer-ID-20260918.p12"
+fi
+P12_FILE="${MEMMY_P12_FILE:-$DEFAULT_P12_FILE}"
 P12_PASSWORD_FILE="${MEMMY_P12_PASSWORD_FILE:-$SIGNING_DIR/p12-password.txt}"
 FALLBACK_P12_PASSWORD_FILE="$CERT_DIR/证书密码.txt"
 APPLE_API_KEY="${APPLE_API_KEY:-$CERT_DIR/AuthKey_CUARD5SC47.p8}"
@@ -17,6 +24,17 @@ APPLE_API_ISSUER="${APPLE_API_ISSUER:-5ed1f28c-0bb2-4369-89fe-d04023d48d45}"
 CSC_NAME="${CSC_NAME:-XINYUE REN (S7NLXHGBJ2)}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: XINYUE REN (S7NLXHGBJ2)}"
 DESKTOP_VERSION="${MEMMY_DESKTOP_VERSION:-$(node -p "require('$ROOT_DIR/App/shell/desktop/package.json').version")}"
+ORIGINAL_USER_KEYCHAINS=()
+CREATED_KEYCHAIN=0
+
+restore_keychains() {
+  if [ "${#ORIGINAL_USER_KEYCHAINS[@]}" -gt 0 ]; then
+    security list-keychains -d user -s "${ORIGINAL_USER_KEYCHAINS[@]}" || true
+  fi
+  if [ "$CREATED_KEYCHAIN" -eq 1 ]; then
+    security delete-keychain "$KEYCHAIN" || true
+  fi
+}
 
 case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
   email)
@@ -31,8 +49,12 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
     ;;
 esac
 
-DMG="$ROOT_DIR/App/shell/desktop/release/Memmy-$DESKTOP_VERSION-darwin-arm64-$PACKAGE_EDITION-signed.dmg"
-ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-darwin-arm64-$PACKAGE_EDITION-signed.\${ext}"
+PACKAGE_SUFFIX="signed"
+if [ "${MEMMY_SIGNED_LOCAL_TEST_BUILD:-}" = "1" ]; then
+  PACKAGE_SUFFIX="signed-local"
+fi
+DMG="$ROOT_DIR/App/shell/desktop/release/Memmy-$DESKTOP_VERSION-darwin-arm64-$PACKAGE_EDITION-$PACKAGE_SUFFIX.dmg"
+ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-darwin-arm64-$PACKAGE_EDITION-$PACKAGE_SUFFIX.\${ext}"
 
 log() {
   package_step_start "$*"
@@ -96,7 +118,19 @@ prepare_keychain() {
   p12_password="$(cat "$p12_password_file")"
 
   log "Preparing temporary signing keychain"
-  rm -f "$KEYCHAIN"
+  if [ -e "$KEYCHAIN" ]; then
+    echo "Temporary signing keychain already exists: $KEYCHAIN" >&2
+    exit 1
+  fi
+  while IFS= read -r keychain_path; do
+    # security indents each quoted path; trim indentation before the quotes.
+    keychain_path="${keychain_path#"${keychain_path%%[![:space:]]*}"}"
+    keychain_path="${keychain_path#\"}"
+    keychain_path="${keychain_path%\"}"
+    ORIGINAL_USER_KEYCHAINS+=("$keychain_path")
+  done < <(security list-keychains -d user)
+  trap restore_keychains EXIT
+  CREATED_KEYCHAIN=1
   security create-keychain -p "$keychain_password" "$KEYCHAIN"
   security set-keychain-settings -lut 21600 "$KEYCHAIN"
   security unlock-keychain -p "$keychain_password" "$KEYCHAIN"
@@ -153,6 +187,7 @@ main() {
 
   log "Building signed arm64 app and DMG"
   export CSC_NAME
+  export CODESIGN_IDENTITY
   export CSC_KEYCHAIN="$KEYCHAIN"
   export APPLE_API_KEY
   export APPLE_API_KEY_ID

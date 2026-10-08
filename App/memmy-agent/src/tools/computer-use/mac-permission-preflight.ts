@@ -18,13 +18,12 @@ export function parsePermissionDoctor(stdout: string): PermissionPreflight {
 }
 
 /** Uses the same launcher, arguments, environment and native app identity as MCP.
- * doctor never receives the target app. The pinned native runtime presents its
- * own onboarding when permissions are missing, without opening the target.
+ * doctor never receives the target app and only reads permission status.
  */
 export function nativePermissionDoctor(options: {
   command: string; args: string[]; env: Record<string, string> | null; cwd: string | null;
-}): () => Promise<PermissionPreflight> {
-  return async () => {
+}): (signal?: AbortSignal) => Promise<PermissionPreflight> {
+  return async signal => {
     if (options.args.at(-1) !== "mcp") return { state: "unknown" };
     try {
       const { stdout } = await execFileAsync(options.command, [...options.args.slice(0, -1), "doctor"], {
@@ -32,6 +31,7 @@ export function nativePermissionDoctor(options: {
         ...(options.cwd ? { cwd: options.cwd } : {}),
         timeout: 15_000,
         maxBuffer: 64 * 1024,
+        signal,
       });
       return parsePermissionDoctor(stdout);
     } catch {

@@ -108,6 +108,94 @@ describe("agent chat slice", () => {
     expect(next).toBe(state);
   });
 
+  it("moves an optimistic composer message into the visible queue projection", () => {
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "停止后继续",
+      clientRequestId
+    });
+
+    expect(state.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: "停止后继续",
+      clientRequestId
+    });
+    expect(state.optimisticSendingByChatId["chat-1"]).toBe(true);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: clientRequestId,
+        item: {
+          ...queuedWire(clientRequestId, "停止后继续", "2026-08-09T12:00:00.000Z"),
+          queue_surface: "chat_composer"
+        }
+      }
+    });
+
+    expect(state.messages.some((message) => message.clientRequestId === clientRequestId)).toBe(false);
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]).toMatchObject({
+      clientRequestId,
+      content: "停止后继续",
+      queueSurface: "chat_composer"
+    });
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("removes the exact optimistic message when its confirmation is rejected", () => {
+    const clientRequestId = "22222222-2222-4222-8222-222222222222";
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "待确认消息",
+      clientRequestId
+    });
+    state = agentReducer(state, {
+      type: "agent/optimisticMessageRejected",
+      chatId: "chat-1",
+      clientRequestId
+    });
+
+    expect(state.messages.some((message) => message.clientRequestId === clientRequestId)).toBe(false);
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.isSending).toBe(false);
+  });
+
+  it("reconciles the canonical user event into the optimistic message without duplication", () => {
+    const clientRequestId = "33333333-3333-4333-8333-333333333333";
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "立即显示",
+      clientRequestId
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        client_request_id: clientRequestId,
+        turn_id: "turn-optimistic",
+        text: "立即显示"
+      }
+    });
+
+    const matching = state.messages.filter((message) => message.clientRequestId === clientRequestId);
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({
+      role: "user",
+      content: "立即显示",
+      turnId: "turn-optimistic"
+    });
+  });
+
   it("projects only visible queued items without changing messages or task state", () => {
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     const first = queuedWire("queue-1", "第一条", "2026-08-09T12:00:00.000Z");

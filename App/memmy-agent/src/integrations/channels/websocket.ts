@@ -4,6 +4,11 @@ import * as childProcess from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { excelBridge } from "../../tools/computer-use/excel-bridge.js";
+import { enableLocalExcelAddin, excelAddinServer, startConfiguredExcelAddinServer } from "../../tools/computer-use/excel-addin-server.js";
+import { excelSetupFailureMessage, readExcelManualInstallPath, readLocalExcelTls, revealExcelManifestFile, setLocalExcelAddinEnabled } from "../../tools/computer-use/excel-addin-setup.js";
+import { nativeAppApprovalStore } from "../../tools/computer-use/native-app-approvals.js";
+import { externalBrowserBridge } from "../../core/agent-runtime/tools/external-browser-bridge.js";
 import os from "node:os";
 import path from "node:path";
 import { lookup as lookupMime } from "mime-types";
@@ -38,7 +43,7 @@ import type {
   WebuiQueueMessageDescriptor,
   WebuiQueueSnapshotDescriptor,
 } from "../../core/agent-runtime/loop.js";
-import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
+import { getMediaDir, getStandaloneTaskWorkspacesDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
 import {
@@ -51,6 +56,7 @@ import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../c
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
 import { visibleWebuiUserContent } from "../../core/session/webui-user-content.js";
 import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
+import { createStandaloneTaskWorkspace } from "../../core/session/standalone-task-workspace.js";
 import {
   createOrCheckoutWorkspaceBranch,
   readWorkspaceEnvironment,
@@ -196,6 +202,7 @@ type WebSocketChannelOptions = {
   projectStore?: ProjectStore | null;
   staticDistPath?: string | null;
   workspacePath?: string | null;
+  standaloneTaskRoot?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
   runtimeToolNames?: RuntimeToolNamesResolver;
   modelSelectionResolver?: ((input: ModelSelectionInput) => ResolvedModelSelection | null) | null;
@@ -682,6 +689,7 @@ export class WebSocketChannel extends BaseChannel {
   private computerHistoryModelSignature: string | null = null;
   modelSelectionResolver: WebSocketChannelOptions["modelSelectionResolver"] = null;
   workspacePath: string;
+  readonly standaloneTaskRoot: string | null;
   readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   sessionTurnBarrier: (<T>(sessionKey: string, operation: () => Promise<T>) => Promise<T>) | null = null;
@@ -743,7 +751,12 @@ export class WebSocketChannel extends BaseChannel {
     this.stopExpectedTurn = options.stopExpectedTurn ?? config?.stopExpectedTurn;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
+    const standaloneTaskRoot = options.standaloneTaskRoot ?? config?.standaloneTaskRoot ?? null;
+    this.standaloneTaskRoot = standaloneTaskRoot ? path.resolve(String(standaloneTaskRoot)) : null;
     this.computerHistory = getComputerHistoryDemoService();
+    if (process.env.MEMMY_COMPUTER_HISTORY !== "0" && isComputerHistorySupported()) {
+      void this.computerHistory.restoreObservationOnLaunch();
+    }
   }
 
   setChannelAdmin(admin: ChannelAdminApi | null): void {
@@ -1126,9 +1139,10 @@ export class WebSocketChannel extends BaseChannel {
     }
     let binding: { projectId: string | null; cwd: string };
     if (target.kind === "standalone") {
+      const reserved = this.sessionManager.peekWebuiSessionBindingReservation?.(sessionKey) ?? null;
       binding = {
         projectId: null,
-        cwd: assertWebuiWorkspaceAvailable(this.workspacePath),
+        cwd: reserved?.cwd ?? this.createStandaloneTaskCwd(),
       };
     } else {
       const store = this.requireProjectStore();
@@ -1156,6 +1170,16 @@ export class WebSocketChannel extends BaseChannel {
       binding: this.sessionManager.reserveWebuiSessionBinding(sessionKey, binding),
       created: true,
     };
+  }
+
+  private createStandaloneTaskCwd(): string {
+    const root = this.standaloneTaskRoot ?? getStandaloneTaskWorkspacesDir();
+    try {
+      return assertWebuiWorkspaceAvailable(createStandaloneTaskWorkspace(root));
+    } catch (error) {
+      console.warn("[websocket] task workspace unavailable; using the profile workspace", { root, error });
+      return assertWebuiWorkspaceAvailable(this.workspacePath);
+    }
   }
 
   async maybePushActiveGoalState(chatId: string): Promise<void> {
@@ -1465,7 +1489,7 @@ export class WebSocketChannel extends BaseChannel {
 
     let cwd: string;
     try {
-      cwd = assertWebuiWorkspaceAvailable(this.workspacePath);
+      cwd = this.createStandaloneTaskCwd();
     } catch {
       return httpError(422, "workspace_unavailable");
     }
@@ -1815,6 +1839,106 @@ export class WebSocketChannel extends BaseChannel {
       const message = error?.message ?? String(error);
       const status = error?.status ?? (message.includes("MCP settings payload") ? 400 : 500);
       return httpError(status, message);
+    }
+  }
+
+  async handleExcelAddinStatus(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const method = String(request?.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "POST") return httpError(405, "Method Not Allowed");
+    if (method === "POST") {
+      // Require the app's bearer token. A token in a query URL must not install a trusted certificate.
+      if (!bearerToken(request?.headers)) return httpError(401, "Unauthorized");
+      let enabled = true;
+      let reveal = false;
+      const body = requestBodyText(request).trim();
+      if (body) {
+        try {
+          const parsed = JSON.parse(body) as { enabled?: unknown; reveal?: unknown };
+          if (typeof parsed.enabled === "boolean") enabled = parsed.enabled;
+          reveal = parsed.reveal === true;
+        } catch {
+          return httpError(400, "Invalid Excel add-in settings payload");
+        }
+      }
+      if (reveal) {
+        await revealExcelManifestFile().catch(() => undefined);
+        return httpJsonResponse({
+          ...excelBridge.status(),
+          setupCompleted: (await readLocalExcelTls()) !== null,
+          manifestUrl: excelAddinServer.running
+            ? `https://localhost:${Number(process.env.MEMMY_EXCEL_ADDIN_PORT || 32177)}/manifest.xml` : null,
+          manualInstallPath: await readExcelManualInstallPath(),
+          lockedUse: { supported: false, reason: "nativeLockGuardianUnavailable" },
+        });
+      }
+      if (!enabled) {
+        await excelAddinServer.stop();
+        await setLocalExcelAddinEnabled(false);
+        return httpJsonResponse({
+          ...excelBridge.status(),
+          setupCompleted: (await readLocalExcelTls()) !== null,
+          manifestUrl: null,
+          manualInstallPath: null,
+          lockedUse: { supported: false, reason: "nativeLockGuardianUnavailable" },
+        });
+      }
+      try {
+        await enableLocalExcelAddin();
+      } catch (error) {
+        return httpJsonResponse({ error: excelSetupFailureMessage(error) }, { status: 503 });
+      }
+    }
+    return httpJsonResponse({
+      ...excelBridge.status(),
+      setupCompleted: (await readLocalExcelTls()) !== null,
+      manifestUrl: excelAddinServer.running
+        ? `https://localhost:${Number(process.env.MEMMY_EXCEL_ADDIN_PORT || 32177)}/manifest.xml` : null,
+      manualInstallPath: await readExcelManualInstallPath(),
+      lockedUse: { supported: false, reason: "nativeLockGuardianUnavailable" },
+    });
+  }
+
+  handleNativeAppApprovals(request: any): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const method = String(request?.method ?? "GET").toUpperCase();
+    try {
+      if (method === "GET") {
+        const response = httpJsonResponse({ apps: nativeAppApprovalStore.list() });
+        response.headers["cache-control"] = "no-store";
+        return response;
+      }
+      if (method !== "POST") return httpError(405, "Method Not Allowed");
+      // A query-string bootstrap token must not be enough to change approvals.
+      if (!bearerToken(request?.headers)) return httpError(401, "Unauthorized");
+      const query = parseQuery(String(request?.path ?? "/"));
+      const platform = queryFirst(query, "platform");
+      const appId = queryFirst(query, "app_id");
+      if ((platform !== "darwin" && platform !== "win32") || !appId) return httpError(400, "Invalid app identity");
+      const response = httpJsonResponse({ apps: nativeAppApprovalStore.remove(platform, appId) });
+      response.headers["cache-control"] = "no-store";
+      return response;
+    } catch {
+      return httpError(400, "Invalid app identity");
+    }
+  }
+
+  async handleExternalBrowserStatus(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (String(request?.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "Method Not Allowed");
+    if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY !== "1") return httpError(503, "Desktop browser bridge unavailable");
+    try {
+      await externalBrowserBridge.start();
+      const response = httpJsonResponse({
+        connected: externalBrowserBridge.listConnected(),
+        claims: externalBrowserBridge.listClaims().map(
+          ({ browser, title, url }) => ({ browser, title, url }),
+        ),
+      });
+      response.headers["cache-control"] = "no-store";
+      return response;
+    } catch {
+      return httpError(503, "External browser bridge unavailable");
     }
   }
 
@@ -2554,8 +2678,18 @@ export class WebSocketChannel extends BaseChannel {
     try {
       const mediaDir = getMediaDir("websocket");
       fs.mkdirSync(mediaDir, { recursive: true });
-      const staged = path.join(mediaDir, `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeFilename(path.basename(resolved)) || "artifact"}`);
-      fs.copyFileSync(resolved, staged);
+      const fingerprint = crypto.createHash("sha256")
+        .update(`${resolved}\0${stat.size}\0${stat.mtimeMs}`)
+        .digest("hex")
+        .slice(0, 12);
+      const staged = path.join(mediaDir, `${fingerprint}-${safeFilename(path.basename(resolved)) || "artifact"}`);
+      if (!isStagedCopyCurrent(staged, stat.size)) {
+        try {
+          copyFileAtomically(resolved, staged);
+        } catch (error) {
+          if (!isStagedCopyCurrent(staged, stat.size)) throw error;
+        }
+      }
       const stagedReal = fs.realpathSync(staged);
       const url = this.signMediaPath(stagedReal);
       return url ? { url, name: path.basename(resolved), path: stagedReal } : null;
@@ -2747,8 +2881,13 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
+    if (got === "/api/computer-history/observation/status") return this.handleComputerHistory(request, "observation-status");
+    if (got === "/api/computer-history/settings") return this.handleComputerHistory(request, "settings");
+    if (got === "/api/computer-history/apps") return this.handleComputerHistory(request, "apps");
     if (got === "/api/computer-history/permissions/check") return this.handleComputerHistory(request, "permissions-check");
     if (got === "/api/computer-history/permissions/open") return this.handleComputerHistory(request, "permissions-open");
+    if (got === "/api/computer-history/wechat/consent") return this.handleComputerHistory(request, "wechat-consent");
+    if (got === "/api/computer-history/wechat/connect") return this.handleComputerHistory(request, "wechat-connect");
     if (got === "/api/computer-history/delete") return this.handleComputerHistory(request, "history-delete");
     if (got === "/api/computer-history/model") return this.handleComputerHistory(request, "model-select");
     if (got === "/api/computer-history/clear") return this.handleComputerHistory(request, "history-clear");
@@ -2773,6 +2912,9 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/settings/web-search/update") return this.handleSettingsWebSearchUpdate(request);
     if (got === "/api/settings/image-generation/update") return this.handleSettingsImageGenerationUpdate(request);
     if (got === "/api/settings/mcp-presets") return this.handleSettingsMcpPresets(request);
+    if (got === "/api/settings/computer-use/excel") return this.handleExcelAddinStatus(request);
+    if (got === "/api/settings/computer-use/apps") return this.handleNativeAppApprovals(request);
+    if (got === "/api/settings/computer-use/browsers") return this.handleExternalBrowserStatus(request);
     if (MCP_PRESET_ACTIONS_BY_PATH[got]) return this.handleSettingsMcpPresets(request, MCP_PRESET_ACTIONS_BY_PATH[got]);
     let match = got.match(/^\/api\/sessions\/([^/]+)\/messages$/);
     if (match) return this.handleSessionMessages(request, match[1]);
@@ -2821,6 +2963,9 @@ export class WebSocketChannel extends BaseChannel {
 
   override async start(): Promise<void> {
     this.running = true;
+    await startConfiguredExcelAddinServer().catch(error => {
+      console.warn(`Excel add-in bridge unavailable: ${String(error?.message ?? error)}`);
+    });
     const factory = this.config.serverFactory;
     if (factory) {
       this.server = await factory(this);
@@ -2871,6 +3016,7 @@ export class WebSocketChannel extends BaseChannel {
   override async stop(): Promise<void> {
     if (!this.running && !this.server) return;
     this.running = false;
+    await excelAddinServer.stop();
     // Recording is scoped to the app: closing it finalizes the open segment
     // rather than leaving a recorder running behind the user's back.
     await this.computerHistory.shutdown();
@@ -2904,7 +3050,7 @@ export class WebSocketChannel extends BaseChannel {
    */
   async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     // The router carries the path, query and all, on `request.path`; there is
     // no `request.url` here, and reading one silently loses every parameter.
@@ -2920,15 +3066,31 @@ export class WebSocketChannel extends BaseChannel {
 
   async handleComputerHistory(
     request: any,
-    action: "snapshot" | "model-select" | "permissions-check" | "permissions-open" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
+    action: "snapshot" | "observation-status" | "settings" | "apps" | "model-select" | "permissions-check" | "permissions-open" | "wechat-consent" | "wechat-connect" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
     const method = (request.method ?? "GET").toUpperCase();
     if (action === "snapshot") {
       return method === "GET"
         ? httpJsonResponse(clientSnapshot(this.computerHistory.snapshot()) as unknown as Record<string, any>)
         : httpError(405, "method not allowed");
+    }
+    if (action === "observation-status") {
+      return method === "GET"
+        ? httpJsonResponse(this.computerHistory.observationStatus())
+        : httpError(405, "method not allowed");
+    }
+    if (action === "apps") {
+      if (method !== "GET") return httpError(405, "method not allowed");
+      try {
+        return httpJsonResponse({ applications: await this.computerHistory.listApplications() });
+      } catch (error) {
+        return httpError(500, error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (action === "settings" && method === "GET") {
+      return httpJsonResponse(this.computerHistory.getObservationSettings() as unknown as Record<string, any>);
     }
     if (method !== "POST") return httpError(405, "method not allowed");
 
@@ -2948,6 +3110,17 @@ export class WebSocketChannel extends BaseChannel {
     try {
       let snapshot;
       switch (action) {
+        case "wechat-consent":
+          if (typeof body.enabled !== "boolean") {
+            throw new ComputerHistoryApiError(422, "enabled must be a boolean");
+          }
+          snapshot = this.computerHistory.setWeChatChatAccess(body.enabled);
+          break;
+        case "wechat-connect":
+          snapshot = this.computerHistory.connectWeChat();
+          break;
+        case "settings":
+          return httpJsonResponse(this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
         case "model-select": {
           if (body.model_preset !== null && (typeof body.model_preset !== "string" || !body.model_preset.trim())) {
             throw new ComputerHistoryApiError(422, "model_preset must be a preset ID or null");
@@ -5053,6 +5226,25 @@ function boundedNumber(value: any, min: number, max: number, field: string): num
 function safeFilename(name: string): string {
   const base = path.basename(name || "attachment").replace(UNSAFE_FILENAME_CHARS, "_").trim();
   return base && base !== "." && base !== ".." ? base : "attachment";
+}
+
+function isStagedCopyCurrent(stagedPath: string, size: number): boolean {
+  try {
+    const stat = fs.statSync(stagedPath);
+    return stat.isFile() && stat.size === size;
+  } catch {
+    return false;
+  }
+}
+
+function copyFileAtomically(source: string, target: string): void {
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.copyFileSync(source, temporary);
+    fs.renameSync(temporary, target);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 function extensionForImageMime(mime: string): string {

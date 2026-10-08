@@ -99,3 +99,12 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
         : configPath ?? "default",
   };
 }
+
+/** Keep passive History evidence in the same Memory user scope as the agent hook. */
+export function discoverMemmyMemoryUserId(options: MemmyMemoryDiscoveryOptions = {}): string {
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const configPath = memmyMemoryConfigPaths({ env, homeDir }).find((candidate) => fs.existsSync(candidate));
+  const value = configPath ? parseConfigFile(configPath).memmyMemory?.userId : undefined;
+  return typeof value === "string" && value.trim() ? value.trim() : "local-user";
+}

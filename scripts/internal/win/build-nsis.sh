@@ -341,7 +341,7 @@ create_memory_runtime_lock() {
 
 create_windows_cli_launcher() {
   local output_path="$1"
-  local asar_entry="$2"
+  local resources_entry="$2"
 
   cat > "$output_path" <<EOF
 @echo off
@@ -351,7 +351,7 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "RESOURCES_DIR=%%~fI"
 for %%I in ("%RESOURCES_DIR%\..") do set "APP_DIR=%%~fI"
 set "APP_EXEC=%APP_DIR%\Memmy.exe"
-set "ENTRY=%RESOURCES_DIR%\app.asar\\$asar_entry"
+set "ENTRY=%RESOURCES_DIR%\\$resources_entry"
 
 if not exist "%APP_EXEC%" (
   echo Cannot find Memmy executable: "%APP_EXEC%" 1>&2
@@ -443,11 +443,26 @@ verify_windows_x64_native_module() {
   esac
 }
 
+verify_windows_ocu_binary() {
+  local binary="$1"
+  if [ "${MEMMY_WINDOWS_CROSS_BUILD:-0}" = "1" ] && [ "$(node -p 'process.platform')" != "win32" ]; then
+    verify_windows_x64_native_module "$binary" "Memmy Computer Use executable"
+    echo "Cross-build: Memmy Computer Use MCP smoke test requires a Windows guest."
+    return
+  fi
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" "$binary"
+}
+
 verify_windows_better_sqlite3_runtime() {
   local runtime_dir="$1"
   local electron_executable="$DESKTOP_DIR/node_modules/electron/dist/electron.exe"
   local node_runtime_dir
   node_runtime_dir="$(to_node_readable_path "$runtime_dir")"
+
+  if [ "${MEMMY_WINDOWS_CROSS_BUILD:-0}" = "1" ] && [ "$(node -p 'process.platform')" != "win32" ]; then
+    echo "Cross-build: Windows Electron SQLite smoke test requires a Windows guest; native PE files are verified separately."
+    return
+  fi
 
   require_packaged_runtime_file "$electron_executable"
   MEMMY_BETTER_SQLITE_RUNTIME_DIR="$node_runtime_dir" \
@@ -534,9 +549,14 @@ verify_windows_agent_native_artifacts() {
   local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64"
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
-  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
-  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-profile.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-downloads.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-site-permissions.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-access-approval.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-window-visibility.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  verify_windows_ocu_binary \
+    "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
     exit 1
@@ -599,34 +619,51 @@ verify_packaged_windows_unpacked_artifacts() {
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  if ! grep -Fq 'set "ENTRY=%RESOURCES_DIR%\memory-runtime\dist\src\cli\index.js"' \
+    "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"; then
+    echo "Packaged Memory CLI launcher points outside the external Memory runtime." >&2
+    exit 1
+  fi
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
   require_packaged_runtime_file "$packaged_agent_source_core/package.json"
   require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  for manifest in package.json package-lock.json memory-runtime.json; do
+    verify_packaged_file_matches_runtime \
+      "$RUNTIME_DIR/memory/$manifest" \
+      "$packaged_memory_runtime/$manifest" \
+      "Memory $manifest"
+  done
   if [ -L "$packaged_agent_source_core" ]; then
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
     "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "memmy-agent better-sqlite3 module"
-  require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
-  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  verify_windows_ocu_binary \
+    "$unpacked_runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1" \
+    "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1" \
+    "Windows 11 Computer History observer"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
     "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
@@ -655,6 +692,7 @@ verify_packaged_runtime_config_boundary() {
     --asar "$(to_node_readable_path "$asar_file")" \
     --expected "$DESKTOP_VERSION" \
     --expected-memory "$MEMORY_VERSION" \
+    --memory-root "$(to_node_readable_path "$resources_root/memory-runtime")" \
     --platform win32 \
     --arch "$PACKAGE_ARCH"
 }
@@ -756,6 +794,9 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
+package_step_start "Build Memmy Computer Use for Windows from source"
+bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-use.sh" \
+  "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" amd64
 package_step_start "Stage Windows memmy-agent workspace runtime packages"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -852,8 +893,8 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
 package_step_start "Create Windows CLI launchers and embedding model"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 

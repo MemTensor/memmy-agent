@@ -1,0 +1,8 @@
+.memmy-browser-extensions > button { margin: 8px 0 4px; }
+.memmy-browser-settings-row.memmy-browser-extensions-entry { align-items: flex-start; }
+.memmy-browser-extensions-entry__text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; padding: 2px 0; }
+.memmy-browser-extensions-entry__title { display: flex; align-items: baseline; gap: 8px; max-width: 100%; }
+.memmy-browser-extensions-entry__title small,
+.memmy-browser-extensions-entry__text > small { color: var(--color-text-secondary, #777); font-size: 12px; line-height: 1.4; }
+.memmy-browser-extensions-entry__path { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memmy-browser-extensions-reapproval { color: var(--color-warning, #a14f00) !important; }

@@ -96,6 +96,8 @@ export type AppAction =
   | { type: "agentSources/error"; message: string }
   | { type: "agentSources/scanStarted"; sourceId: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
+  | { type: "agentSources/scanCancelRequested"; jobId: string }
+  | { type: "agentSources/scanCancelFailed"; message: string }
   | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
   | { type: "agentSources/scanCompletionExpired"; jobId: string }
   | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
@@ -188,6 +190,16 @@ export const appActions = {
   /** Handles agent source scan progress received. */
   agentSourceScanProgressReceived(progress: AgentSourceScanProgress): AppAction {
     return { type: "agentSources/scanProgress", progress };
+  },
+
+  /** Marks a scan as cancelling so late progress cannot restore the running card. */
+  agentSourceScanCancelRequested(jobId: string): AppAction {
+    return { type: "agentSources/scanCancelRequested", jobId };
+  },
+
+  /** Restores the scan controls after a cancel request fails. */
+  agentSourceScanCancelFailed(message: string): AppAction {
+    return { type: "agentSources/scanCancelFailed", message };
   },
 
   /** Handles agent source scan completed. */
@@ -392,6 +404,10 @@ export const agentActions = {
 
   transientSendFailed(chatId: string): AppAction {
     return { type: "agent/transientSendFailed", chatId };
+  },
+
+  optimisticMessageRejected(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/optimisticMessageRejected", chatId, clientRequestId };
   },
 
   userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }): AppAction {

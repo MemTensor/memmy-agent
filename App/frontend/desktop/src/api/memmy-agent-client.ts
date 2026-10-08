@@ -10,6 +10,10 @@ import {
   ApplicationIconSchema,
   ComputerHistorySnapshotSchema,
   ComputerHistoryPermissionsSchema,
+  ComputerHistoryObservationSettingsSchema,
+  ComputerHistoryApplicationsSchema,
+  ComputerHistoryObservationStatusSchema,
+  type ComputerHistoryObservationSettings,
   type ComputerHistoryPermission,
   type ComputerHistoryPermissions,
 } from "./computer-history-contract.js";
@@ -67,6 +71,10 @@ export type ComputerHistoryEntry = {
   applications: string[];
   summaryWindow: "10min" | "6h" | null;
   coveredHistoryIds: string[];
+  /** IDs of Memory Skills linked by the optional History adapter. */
+  skillMemoryIds?: string[];
+  /** Linked Memory observation, available after optional sync succeeds. */
+  memoryId?: string;
   pinned: boolean;
   eventStreamPath: string | null;
   id: string;
@@ -89,6 +97,7 @@ export type ComputerHistoryWorkflow = {
 };
 
 export type ComputerHistorySnapshot = {
+  memorySync?: { lastSyncedAt: string | null; error: string | null; skillError?: string | null };
   observation: {
     state: "running" | "paused" | "stopped" | "stopping" | "failed";
     startedAt: string | null;
@@ -102,6 +111,12 @@ export type ComputerHistorySnapshot = {
   };
   histories: ComputerHistoryEntry[];
   workflows: ComputerHistoryWorkflow[];
+  wechat?: {
+    enabled: boolean;
+    connection: "disabled" | "unavailable" | "needs_setup" | "connecting" | "connected" | "error";
+    phase: string | null;
+    error: string | null;
+  };
   privacy: {
     screenshots: false;
     audio: false;
@@ -705,13 +720,49 @@ export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
   chat_id: string;
 };
 
+export type NativeAppApproval = {
+  platform: 'darwin' | 'win32';
+  appId: string;
+  displayName: string;
+  allowedAt: string;
+};
+
+const NativeAppApprovalsSchema = z.object({ apps: z.array(z.object({
+  platform: z.enum(['darwin', 'win32']), appId: z.string(), displayName: z.string(),
+  allowedAt: z.string(),
+})) });
+
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
   getSettings(): Promise<MemmyAgentSettings>;
+  getComputerUseSetting(): Promise<{ enabled: boolean; available: boolean; binaryAvailable: boolean }>;
+  setComputerUseEnabled(enabled: boolean): Promise<{ enabled: boolean; available: boolean; binaryAvailable: boolean; restartRequired?: boolean }>;
+  getNativeAppApprovals(): Promise<NativeAppApproval[]>;
+  revokeNativeAppApproval(platform: 'darwin' | 'win32', appId: string): Promise<NativeAppApproval[]>;
+  getExternalBrowserStatus(): Promise<{ connected: Array<"chrome" | "edge">;
+    claims: Array<{ browser: "chrome" | "edge"; title: string; url: string }> }>;
+  getExcelAddinStatus(): Promise<{ configured: boolean; connected: boolean; connectionCount: number; setupCompleted: boolean; manifestUrl: string | null;
+    manualInstallPath?: string | null;
+    lockedUse: { supported: boolean; reason: string } }>;
+  enableExcelAddin(): Promise<{ configured: boolean; connected: boolean; connectionCount: number; setupCompleted: boolean; manifestUrl: string | null;
+    manualInstallPath?: string | null;
+    lockedUse: { supported: boolean; reason: string } }>;
+  setExcelAddinEnabled(enabled: boolean): Promise<{ configured: boolean; connected: boolean; connectionCount: number; setupCompleted: boolean; manifestUrl: string | null;
+    manualInstallPath?: string | null;
+    lockedUse: { supported: boolean; reason: string } }>;
+  revealExcelAddin(): Promise<{ configured: boolean; connected: boolean; connectionCount: number; setupCompleted: boolean; manifestUrl: string | null;
+    manualInstallPath?: string | null;
+    lockedUse: { supported: boolean; reason: string } }>;
   getComputerHistory(): Promise<ComputerHistorySnapshot>;
+  getComputerHistoryObservationStatus(): Promise<{ state: ComputerHistorySnapshot["observation"]["state"] }>;
+  getComputerHistorySettings(): Promise<ComputerHistoryObservationSettings>;
+  updateComputerHistorySettings(settings: ComputerHistoryObservationSettings): Promise<ComputerHistoryObservationSettings>;
+  listComputerHistoryApplications(): Promise<Array<{ bundleId: string; name: string }>>;
   setComputerHistoryModel(preset: string | null): Promise<ComputerHistorySnapshot>;
   checkComputerHistoryPermissions(): Promise<ComputerHistoryPermissions>;
   openComputerHistoryPermission(permission: ComputerHistoryPermission, mode?: "request" | "settings"): Promise<ComputerHistoryPermissions>;
+  setComputerHistoryWeChatAccess(enabled: boolean): Promise<ComputerHistorySnapshot>;
+  connectComputerHistoryWeChat(): Promise<ComputerHistorySnapshot>;
   deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot>;
   clearComputerHistories(scope: "today" | "all"): Promise<ComputerHistorySnapshot>;
   pinComputerHistory(historyId: string, pinned: boolean): Promise<ComputerHistorySnapshot>;
@@ -1061,6 +1112,83 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request("/api/settings", AgentSettingsSchema);
   }
 
+  async getComputerUseSetting(): Promise<{ enabled: boolean; available: boolean; binaryAvailable: boolean }> {
+    const payload = await this.request("/api/settings/mcp-presets", z.object({
+      presets: z.array(z.object({
+        name: z.string(), installed: z.boolean(), available: z.boolean(), binary_available: z.boolean().optional()
+      }).passthrough())
+    }).passthrough());
+    const preset = payload.presets.find((entry) => entry.name === "memmy_computer_use");
+    return { enabled: preset?.installed === true, available: preset?.available === true, binaryAvailable: preset?.binary_available === true };
+  }
+
+  async setComputerUseEnabled(enabled: boolean): Promise<{ enabled: boolean; available: boolean; binaryAvailable: boolean; restartRequired?: boolean }> {
+    const changed = await this.request(
+      `/api/settings/mcp-presets/${enabled ? "enable" : "remove"}?name=memmy_computer_use`,
+      z.object({ presets: z.array(z.unknown()), requires_restart: z.boolean().optional() }).passthrough(),
+      { method: "POST" }
+    );
+    return { ...await this.getComputerUseSetting(), restartRequired: changed.requires_restart === true };
+  }
+
+  async getNativeAppApprovals(): Promise<NativeAppApproval[]> {
+    return (await this.request('/api/settings/computer-use/apps', NativeAppApprovalsSchema)).apps;
+  }
+
+  async revokeNativeAppApproval(platform: 'darwin' | 'win32', appId: string): Promise<NativeAppApproval[]> {
+    const params = new URLSearchParams({ platform, app_id: appId });
+    return (await this.request(`/api/settings/computer-use/apps?${params}`, NativeAppApprovalsSchema,
+      { method: 'POST' })).apps;
+  }
+
+  async getExternalBrowserStatus(): Promise<{ connected: Array<"chrome" | "edge">;
+    claims: Array<{ browser: "chrome" | "edge"; title: string; url: string }> }> {
+    return this.request("/api/settings/computer-use/browsers", z.object({
+      connected: z.array(z.enum(["chrome", "edge"])),
+      claims: z.array(z.object({
+        browser: z.enum(["chrome", "edge"]), title: z.string(), url: z.string().url(),
+      })),
+    }));
+  }
+
+  async getExcelAddinStatus(): Promise<{ configured: boolean; connected: boolean; connectionCount: number; setupCompleted: boolean; manifestUrl: string | null;
+    lockedUse: { supported: boolean; reason: string } }> {
+    return this.request("/api/settings/computer-use/excel", z.object({
+      configured: z.boolean(), connected: z.boolean(), connectionCount: z.number().int(),
+      setupCompleted: z.boolean(),
+      manifestUrl: z.string().url().nullable(),
+      manualInstallPath: z.string().min(1).nullable().optional(),
+      lockedUse: z.object({ supported: z.boolean(), reason: z.string() }),
+    }));
+  }
+
+  async enableExcelAddin(): ReturnType<MemmyAgentClient["getExcelAddinStatus"]> {
+    return this.request("/api/settings/computer-use/excel", z.object({
+      configured: z.boolean(), connected: z.boolean(), connectionCount: z.number().int(),
+      setupCompleted: z.boolean(), manifestUrl: z.string().url().nullable(),
+      manualInstallPath: z.string().min(1).nullable().optional(),
+      lockedUse: z.object({ supported: z.boolean(), reason: z.string() }),
+    }), { method: "POST" });
+  }
+
+  async setExcelAddinEnabled(enabled: boolean): ReturnType<MemmyAgentClient["getExcelAddinStatus"]> {
+    return this.request("/api/settings/computer-use/excel", z.object({
+      configured: z.boolean(), connected: z.boolean(), connectionCount: z.number().int(),
+      setupCompleted: z.boolean(), manifestUrl: z.string().url().nullable(),
+      manualInstallPath: z.string().min(1).nullable().optional(),
+      lockedUse: z.object({ supported: z.boolean(), reason: z.string() }),
+    }), { method: "POST", body: { enabled } });
+  }
+
+  async revealExcelAddin(): ReturnType<MemmyAgentClient["getExcelAddinStatus"]> {
+    return this.request("/api/settings/computer-use/excel", z.object({
+      configured: z.boolean(), connected: z.boolean(), connectionCount: z.number().int(),
+      setupCompleted: z.boolean(), manifestUrl: z.string().url().nullable(),
+      manualInstallPath: z.string().min(1).nullable().optional(),
+      lockedUse: z.object({ supported: z.boolean(), reason: z.string() }),
+    }), { method: "POST", body: { reveal: true } });
+  }
+
   async setComputerHistoryModel(preset: string | null): Promise<ComputerHistorySnapshot> {
     return this.request("/api/computer-history/model", ComputerHistorySnapshotSchema, {
       method: "POST", body: { model_preset: preset },
@@ -1069,6 +1197,37 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async getComputerHistory(): Promise<ComputerHistorySnapshot> {
     return this.request("/api/computer-history", ComputerHistorySnapshotSchema);
+  }
+
+  async getComputerHistoryObservationStatus(): Promise<{ state: ComputerHistorySnapshot["observation"]["state"] }> {
+    return this.request("/api/computer-history/observation/status", ComputerHistoryObservationStatusSchema);
+  }
+
+  async setComputerHistoryWeChatAccess(enabled: boolean): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/wechat/consent", ComputerHistorySnapshotSchema, {
+      method: "POST", body: { enabled },
+    });
+  }
+
+  async connectComputerHistoryWeChat(): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/wechat/connect", ComputerHistorySnapshotSchema, {
+      method: "POST", body: {},
+    });
+  }
+
+  async getComputerHistorySettings(): Promise<ComputerHistoryObservationSettings> {
+    return this.request("/api/computer-history/settings", ComputerHistoryObservationSettingsSchema);
+  }
+
+  async updateComputerHistorySettings(settings: ComputerHistoryObservationSettings): Promise<ComputerHistoryObservationSettings> {
+    return this.request("/api/computer-history/settings", ComputerHistoryObservationSettingsSchema, {
+      method: "POST", body: { settings },
+    });
+  }
+
+  async listComputerHistoryApplications(): Promise<Array<{ bundleId: string; name: string }>> {
+    const result = await this.request("/api/computer-history/apps", ComputerHistoryApplicationsSchema);
+    return result.applications;
   }
 
   async deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot> {

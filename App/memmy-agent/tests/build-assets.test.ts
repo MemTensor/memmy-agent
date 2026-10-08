@@ -31,6 +31,7 @@ describe("build runtime assets", () => {
       write("src/skills/skill-creator/SKILL.md", "retained skill creator");
       write("src/templates/agent/example.md", "retained template");
       write("src/tools/computer-history/mac/human-recorder.swift", "retained helper");
+      write("src/tools/computer-history/win/win11-observer.ps1", "retained Windows helper");
       write("dist/extra-dependencies/office-rendering/linux-x64/bin/soffice", "stale renderer");
       write("dist/extra-dependencies/docx-rendering/bin/soffice", "stale legacy renderer");
 
@@ -51,6 +52,7 @@ describe("build runtime assets", () => {
       for (const retained of [
         "skills/computer-history/SKILL.md", "skills/skill-creator/SKILL.md",
         "templates/agent/example.md", "tools/computer-history/mac/human-recorder.swift",
+        "tools/computer-history/win/win11-observer.ps1",
       ]) expect(fs.existsSync(path.join(fixture, "dist", retained))).toBe(true);
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true });

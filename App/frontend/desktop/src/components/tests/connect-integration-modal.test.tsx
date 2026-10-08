@@ -241,10 +241,12 @@ describe("ConnectIntegrationModal", () => {
       onPhase: (phase) => phases.push(phase)
     });
 
-    expect(result).toEqual({ phase: "error", errorCode: "service_unavailable" });
+    expect(result.phase).toBe("error");
+    expect(result.errorCode).toBe("service_unavailable");
     expect(phases).toEqual(["authorizing", "error"]);
     expect(openUrl).not.toHaveBeenCalled();
     expect(String(result.error)).not.toContain("尚未配置 Composio 鉴权服务");
+    expect(String(result.error)).toContain("integration_setup_unavailable");
     expect(warn).toHaveBeenCalledWith(
       "[tools] integration setup diagnostic hidden from product UI:",
       expect.objectContaining({ code: "composio_not_configured" })

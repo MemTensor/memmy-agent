@@ -29,6 +29,7 @@ import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
+import { ComputerUseSettings } from "./computer-use-settings.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -257,6 +258,7 @@ export function SettingsPage() {
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
+        computerUseClient={clients?.memmyAgent}
         update={update}
         track={track}
         activeTab={activeTab}
@@ -287,6 +289,7 @@ export interface SettingsPageViewProps {
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
+  computerUseClient?: import("../api/memmy-agent-client.js").MemmyAgentClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   activeTab?: SettingsTabId;
@@ -1415,7 +1418,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     <div
       className="settings-page h-full overflow-y-auto"
     >
-      <div className="app-frame-page-content max-w-2xl mx-auto py-8">
+      <div className={`app-frame-page-content ${activeTab === "computer-use" ? "max-w-4xl" : "max-w-2xl"} mx-auto py-8`}>
         <div
           id="settings-panel-account"
           role="tabpanel"
@@ -1817,6 +1820,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             <ToggleRow label={t("settings.notifications.sound")} description={t("settings.notifications.soundDesc")} checked={notificationSoundEnabled} onChange={(checked) => persistSettings({ notificationSoundEnabled: checked })} />
           </div>
         </Section>
+        </div>
+
+        <div
+          id="settings-panel-computer-use"
+          role="tabpanel"
+          aria-labelledby="settings-tab-computer-use"
+          hidden={activeTab !== "computer-use"}
+        >
+          {activeTab === "computer-use" && <ComputerUseSettings client={props.computerUseClient} platform={platform} />}
         </div>
 
         <div

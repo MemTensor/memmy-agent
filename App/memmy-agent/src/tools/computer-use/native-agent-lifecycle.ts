@@ -4,18 +4,26 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-/** The pinned, unmodified 0.3.5 app agent already exposes agentInfo/terminate.
+const MEMMY_COMPUTER_USE_BUNDLE_IDS = new Set([
+  'cn.memtensor.memmy',
+  // Accept an already-running pre-unification helper during upgrade so it
+  // can be shut down before the main-identity helper starts.
+  'cn.memtensor.memmy.computeruse',
+  'cn.memtensor.memmy.computeruse.dev',
+]);
+
+/** The Memmy native app agent exposes agentInfo/terminate.
  * Never use a bundle-ID launch/kill: another installed copy can have that ID.
  */
 export function nativeAgentSocketPath(namespace: string, directory = os.tmpdir()): string {
   const hash = createHash('sha256').update(namespace).digest('hex').slice(0, 16);
-  return path.join(directory, `open-computer-use-agent-${hash}.sock`);
+  return path.join(directory, `memmy-computer-use-agent-${hash}.sock`);
 }
 
 export async function stopOwnedNativeAgent(binary: string, namespace: string, directory = os.tmpdir()): Promise<void> {
   const executable = realpathSync(binary);
   const bundle = path.dirname(path.dirname(path.dirname(executable)));
-  if (!executable.endsWith('/Open Computer Use.app/Contents/MacOS/OpenComputerUse') || namespace !== `memmy:${bundle}`) {
+  if (!executable.endsWith('/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse') || namespace !== `memmy:${bundle}`) {
     throw new Error('Cannot stop an unowned Computer Use agent');
   }
   await new Promise<void>((resolve, reject) => {
@@ -44,7 +52,7 @@ export async function stopOwnedNativeAgent(binary: string, namespace: string, di
         try {
           const reply = JSON.parse(line);
           if (!verified) {
-            if (reply.bundleIdentifier !== 'com.ifuryst.opencomputeruse'
+            if (!MEMMY_COMPUTER_USE_BUNDLE_IDS.has(reply.bundleIdentifier)
               || realpathSync(reply.bundleURL) !== bundle || realpathSync(reply.executableURL) !== executable) {
               throw new Error('Computer Use agent identity does not match this installation');
             }

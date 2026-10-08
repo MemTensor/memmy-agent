@@ -430,7 +430,7 @@ describe("packaged desktop runtime config", () => {
     expect(config).toMatchObject({
       tools: {
         mcpServers: {
-          open_computer_use: {
+          memmy_computer_use: {
             type: "stdio",
             command: "open-computer-use",
             args: ["mcp"]
@@ -976,6 +976,109 @@ describe("AgentGatewaySupervisor", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('binds a surface action to the live child that produced its frame', async () => {
+    const harness = createSupervisorHarness();
+    const received = vi.fn();
+    (harness.supervisor as any).options.onComputerUseSurface = received;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const frame = { type: 'memmy:computer-use-surface:update', surface: 'browser',
+      sessionKey: 's', channel: 'gui', chatId: 'c', targetId: 'active-tab', title: 'Page' };
+    child.process.emit('message', frame);
+    expect(received).toHaveBeenCalledOnce();
+    const action = { type: 'memmy:computer-use-surface:action', surface: 'browser',
+      sessionKey: 's', channel: 'gui', chatId: 'c', targetId: 'active-tab',
+      action: 'click', x: 0.5, y: 0.5 };
+    received.mock.calls[0][1](action);
+    expect(send).toHaveBeenCalledWith(action, expect.any(Function));
+    await harness.supervisor.close();
+  });
+
+  it('relays embedded browser commands only for the live Agent child', async () => {
+    const harness = createSupervisorHarness();
+    const handle = vi.fn(async () => ({ tabId: 27, url: 'https://example.com/' }));
+    (harness.supervisor as any).options.handleEmbeddedBrowserRequest = handle;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const request = { type: 'memmy:embedded-browser:request',
+      requestId: '98df6655-c97f-4907-8488-01fd87ccce62', command: 'probe', args: {} };
+    child.process.emit('message', request);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({
+      type: 'memmy:embedded-browser:result', requestId: request.requestId,
+      ok: true, result: { tabId: 27, url: 'https://example.com/' },
+    }, expect.any(Function)));
+    child.process.emit('message', { ...request, command: 'not-a-browser-command' });
+    expect(handle).toHaveBeenCalledTimes(1);
+    await harness.supervisor.close();
+  });
+
+  it('invalidates an embedded upload when the Agent cancels its request', async () => {
+    const harness = createSupervisorHarness();
+    let finish!: (value: unknown) => void;
+    let current!: () => boolean;
+    (harness.supervisor as any).options.handleEmbeddedBrowserRequest = vi.fn((_request, isCurrentChild) => {
+      current = isCurrentChild;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const requestId = '98df6655-c97f-4907-8488-01fd87ccce62';
+    child.process.emit('message', { type: 'memmy:embedded-browser:request', requestId,
+      command: 'upload', tabId: 27, args: { paths: ['/workspace/report.txt'], target: 'ax-7' } });
+    expect(current()).toBe(true);
+    child.process.emit('message', { type: 'memmy:embedded-browser:cancel', requestId });
+    expect(current()).toBe(false);
+    finish({ uploaded: 1 });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(send).not.toHaveBeenCalled();
+    await harness.supervisor.close();
+  });
+
+  it('relays a validated native app approval only to the live Agent child', async () => {
+    const harness = createSupervisorHarness();
+    const approve = vi.fn().mockResolvedValue('allow-once');
+    (harness.supervisor as any).options.approveNativeAppAccess = approve;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const request = { type: 'memmy:native-app-access:request',
+      requestId: 'fe6181d5-3d95-4a11-b3fa-4586c5c5bdad', platform: 'darwin',
+      appId: 'com.apple.calculator', displayName: 'Calculator' };
+    child.process.emit('message', request);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({
+      type: 'memmy:native-app-access:result', requestId: request.requestId, decision: 'allow-once',
+    }, expect.any(Function)));
+    expect(approve).toHaveBeenCalledWith(request);
+    child.process.emit('message', { ...request, requestId: 'bad', appId: 'com.apple.Terminal' });
+    expect(approve).toHaveBeenCalledTimes(1);
+    await harness.supervisor.close();
+    child.process.emit('message', { ...request, requestId: 'f664df4b-68b7-4390-b3f3-9e68106b0988' });
+    expect(approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the Agent to finish clearing browser data', async () => {
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn((request: any, callback: (error?: Error) => void) => {
+      callback();
+      queueMicrotask(() => child.process.emit('message', {
+        type: 'memmy:browser-profile:clear-result', requestId: request.requestId, ok: true,
+      }));
+    });
+    Object.assign(child.process, { connected: true, send });
+    await expect(harness.supervisor.clearBrowserData()).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'memmy:browser-profile:clear' }), expect.any(Function));
+    await harness.supervisor.close();
   });
 
   it("uses one in-flight startup and leaves an already-running external gateway alone", async () => {

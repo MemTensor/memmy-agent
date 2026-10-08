@@ -16,24 +16,21 @@ it.each([
   ["electron-builder.unsigned.yml", "darwin"],
   ["electron-builder.win.yml", "win32"],
   ["electron-builder.win.unsigned.yml", "win32"],
-])("%s packages only the target OCU runtime and unpacks its native files", async (filename, platform) => {
+])("%s packages only Memmy's source-built Computer Use runtime", async (filename, platform) => {
   const config = parse(readFileSync(new URL(`../App/shell/desktop/${filename}`, import.meta.url), "utf8"));
   const root = mkdtempSync(join(tmpdir(), "memmy-ocu-package-"));
   roots.push(root);
   const source = join(root, "source");
   const staged = join(root, "staged");
   const archive = join(root, "app.asar");
-  const prefix = "dist/runtime/memmy-agent/node_modules/open-computer-use/";
+  const prefix = "dist/runtime/memmy-agent/dist/native-computer-use/";
   const files = [
-    ["package.json", true],
-    ["LICENSE", true],
-    ["dist/Open Computer Use.app/Contents/Info.plist", platform === "darwin"],
-    ["dist/Open Computer Use.app/Contents/Resources/AppIcon.icns", platform === "darwin"],
-    ["dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse", platform === "darwin"],
-    ["dist/windows/amd64/open-computer-use.exe", platform === "win32"],
-    ["dist/windows/arm64/open-computer-use.exe", false],
-    ["dist/linux/amd64/open-computer-use", false],
-    ["dist/linux/arm64/open-computer-use", false],
+    ["Memmy Computer Use.app/Contents/Info.plist", platform === "darwin"],
+    ["Memmy Computer Use.app/Contents/Resources/MemmyComputerUse.icns", platform === "darwin"],
+    ["Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse", platform === "darwin"],
+    ["windows/amd64/memmy-computer-use.exe", platform === "win32"],
+    ["windows/arm64/memmy-computer-use.exe", false],
+    ["linux/amd64/memmy-computer-use", false],
   ];
   const include = new FileMatcher(source, staged, (value) => value, config.files).createFilter();
   for (const [relative, expected] of files) {
@@ -47,20 +44,23 @@ it.each([
       cpSync(file, target);
     }
   }
-  const unpack = config.asarUnpack.find((pattern) => pattern.includes("open-computer-use"));
+  const upstream = join(source, 'dist/runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe');
+  mkdirSync(dirname(upstream), { recursive: true }); writeFileSync(upstream, 'upstream');
+  expect(include(upstream, lstatSync(upstream))).toBe(false);
+  const unpack = config.asarUnpack.find((pattern) => pattern.includes("native-computer-use"));
   expect(unpack).toBeTruthy();
   await createPackageWithOptions(staged, archive, { unpack });
-  for (const [relative, expected] of files.filter(([relative]) => relative.startsWith("dist/"))) {
+  for (const [relative, expected] of files) {
     expect(existsSync(join(`${archive}.unpacked`, prefix, relative)), relative).toBe(expected);
   }
 });
 
-it.each(['electron-builder.yml', 'electron-builder.unsigned.yml'])('%s preserves only the official OCU signature', filename => {
+it.each(['electron-builder.yml', 'electron-builder.unsigned.yml'])('%s preserves only Memmy Computer Use signature', filename => {
   const config = parse(readFileSync(new URL(`../App/shell/desktop/${filename}`, import.meta.url), 'utf8'));
   const ignored = file => config.mac.signIgnore.some(pattern => new RegExp(pattern).test(file));
-  const app = '/Applications/Memmy.app/Contents/Resources/app.asar.unpacked/dist/runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app';
+  const app = '/Applications/Memmy.app/Contents/Resources/app.asar.unpacked/dist/runtime/memmy-agent/dist/native-computer-use/Memmy Computer Use.app';
   expect(ignored(app)).toBe(true);
-  expect(ignored(`${app}/Contents/MacOS/OpenComputerUse`)).toBe(true);
+  expect(ignored(`${app}/Contents/MacOS/MemmyComputerUse`)).toBe(true);
   expect(ignored('/Applications/Memmy.app/Contents/MacOS/Memmy')).toBe(false);
   expect(ignored(`${app}-other/Contents/MacOS/helper`)).toBe(false);
 });

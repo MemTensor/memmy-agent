@@ -5,7 +5,13 @@ import {
   type ManagedKnowledgeOptions,
 } from "./client.js";
 import { describeKnowledgeRouteError, knowledgeLog } from "./log.js";
-import { KnowledgeError, MAX_UPLOAD_REQUEST_BYTES, record, text } from "./types.js";
+import {
+  createdAtText,
+  KnowledgeError,
+  MAX_UPLOAD_REQUEST_BYTES,
+  record,
+  text,
+} from "./types.js";
 
 export function registerKnowledgeRoutes(
   app: FastifyInstance,
@@ -134,6 +140,7 @@ export function registerKnowledgeRoutes(
               status: text(file.status),
               message: text(file.message),
               folderId: text(file.folderId),
+              createdAt: createdAtText(file),
             };
           }),
           total: typeof data.total === "number" ? data.total : 0,
@@ -191,6 +198,7 @@ export function registerKnowledgeRoutes(
               id: text(folder.id),
               parentId: text(folder.parentId),
               name: text(folder.name),
+              createdAt: createdAtText(folder),
             };
           }),
         };

@@ -4,12 +4,43 @@ import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../../theme/window-controls-overlay.js";
 import { AttachmentActionError, emailAddressFromMailtoHref, estimateDeferredMarkdownHeight, isLikelyExpensiveAgentMarkdown, isMailtoHref, localArtifactPathFromHref, runAttachmentAction } from "../agent-message-content.js";
-import { AgentThreadMessages, buildAgentDisplayUnits, CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS, CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS, copyImageToClipboard, resolveAgentMessageDisplayContent, saveImageToFile } from "../agent-thread-messages.js";
+import { AgentThreadMessages, buildAgentDisplayUnits, CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS, CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS, copyImageToClipboard, deliveredFileSaveName, resolveAgentMessageDisplayContent, runDeliveredFileMenuAction, saveImageToFile } from "../agent-thread-messages.js";
 
 const agentThreadMessagesSourceUrl = new URL("../agent-thread-messages.tsx", import.meta.url);
 const agentMessageContentSourceUrl = new URL("../agent-message-content.tsx", import.meta.url);
 const stylesSourceUrl = new URL("../../styles.css", import.meta.url);
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
+
+describe("delivered file save names", () => {
+  it("uses the name shown on the card instead of a media token", () => {
+    const token = Buffer.from("websocket/624ee01a9b73-00_README_交付物总览.md", "utf8").toString("base64url");
+    expect(deliveredFileSaveName("00_README_交付物总览.md", token, "/tmp/00_README_交付物总览.md", `http://127.0.0.1/api/media/sig/${token}`)).toBe("00_README_交付物总览.md");
+    expect(deliveredFileSaveName(token, token, undefined, `http://127.0.0.1/api/media/sig/${token}`)).toBe("00_README_交付物总览.md");
+  });
+
+  it("uses the desktop save bridge when renderer fetch cannot read cross-origin media", async () => {
+    const token = Buffer.from("websocket/624ee01a9b73-00_README_交付物总览.md", "utf8").toString("base64url");
+    const url = `http://127.0.0.1:18980/api/media/sig/${token}`;
+    const saveFile = vi.fn(async () => ({ canceled: true as const }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.stubGlobal("window", { memmy: { saveFile } });
+
+    try {
+      await expect(runDeliveredFileMenuAction({
+        action: "save",
+        item: { kind: "file", url, name: token },
+        label: "00_README_交付物总览.md"
+      })).resolves.toBe(true);
+      expect(saveFile).toHaveBeenCalledWith({
+        url,
+        name: "00_README_交付物总览.md"
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("AgentThreadMessages", () => {
   it("shows a per-answer control for inspecting injected memories", () => {
@@ -63,7 +94,7 @@ describe("AgentThreadMessages", () => {
       /function areSingleMessagePropsEqual\(previous: SingleMessageProps, next: SingleMessageProps\): boolean \{[\s\S]*previous\.message === next\.message[\s\S]*previous\.artifactClient === next\.artifactClient[\s\S]*previous\.chatScopeKey === next\.chatScopeKey[\s\S]*previous\.unitIndex === next\.unitIndex/u,
     );
 
-    expect(contentSource).toContain("import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from \"react\";");
+    expect(contentSource).toContain("import { Children, isValidElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from \"react\";");
     expect(contentSource).toContain("import { Prism as SyntaxHighlighter, type SyntaxHighlighterProps } from \"react-syntax-highlighter\";");
     expect(contentSource).toContain("export const AgentMessageContent = memo(function AgentMessageContent(props: AgentMessageContentProps) {");
     expect(contentSource).toContain("}, areAgentMessageContentPropsEqual);");
@@ -633,11 +664,11 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("agent-activity-segment--narration");
     expect(html).toContain(draft);
     expect(html).not.toContain("agent-narration-block__preview");
-    expect(html).toContain("简短思考");
+    expect(html).toContain("思考一下");
     expect(html).not.toContain("先规划三轮循环。");
     expect(html).not.toContain("agent-chat-bubble--assistant");
     expect(html).not.toContain("agent-message-copy-button--left");
-    expect(html.indexOf("简短思考")).toBeLessThan(html.indexOf("我来帮你规划国庆出行方案"));
+    expect(html.indexOf("思考一下")).toBeLessThan(html.indexOf("我来帮你规划国庆出行方案"));
   });
 
   it("counts every row in the group label — web search plus grep reads 浏览了 2 处", () => {
@@ -668,21 +699,24 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("浏览了 1 处");
   });
 
-  it("de-emphasizes a tool validation error after the same tool succeeds on retry", () => {
+  it("keeps a process tool error neutral and folded into details", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
-          chatScopeKey="chat-recovered-tool-error"
+          chatScopeKey="chat-process-tool-error"
           messages={[{
             id: "trace",
             role: "tool",
             kind: "trace",
             content: "",
             traces: [],
-            toolEvents: [
-              { phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" },
-              { phase: "end", call_id: "call-valid", name: "review_update_spec", result: JSON.stringify({ ok: true }) }
-            ],
+            toolEvents: [{
+              phase: "error",
+              call_id: "call-shell",
+              name: "exec",
+              arguments: { command: "python3 -c \"import pdfplumber\"" },
+              error: "Error: command exited with 1 ModuleNotFoundError: No module named 'pdfplumber'"
+            }],
             stoppedByUser: true
           }]}
         />
@@ -691,29 +725,18 @@ describe("AgentThreadMessages", () => {
 
     expect(html).not.toContain("agent-activity-timeline-item--error");
     expect(html).not.toContain("agent-activity-timeline-item__error");
-    expect(html).toContain("Invalid outputFormats");
+    expect(html).not.toContain("agent-activity-tool-card__section--error");
+    expect(html).toContain("agent-activity-tool-details");
+    expect(html.replaceAll("&#x27;", "'")).toContain("No module named 'pdfplumber'");
   });
 
-  it("keeps an unrecovered tool error visibly red", () => {
-    const html = renderToString(
-      <I18nProvider language="zh-CN">
-        <AgentThreadMessages
-          chatScopeKey="chat-unrecovered-tool-error"
-          messages={[{
-            id: "trace",
-            role: "tool",
-            kind: "trace",
-            content: "",
-            traces: [],
-            toolEvents: [{ phase: "error", call_id: "call-invalid", name: "review_update_spec", error: "Invalid outputFormats" }],
-            stoppedByUser: true
-          }]}
-        />
-      </I18nProvider>
-    );
-
-    expect(html).toContain("agent-activity-timeline-item--error");
-    expect(html).toContain("agent-activity-timeline-item__error");
+  it("does not style process-timeline failures with the alarm color", () => {
+    const css = readFileSync(stylesSourceUrl, "utf8");
+    const timelineRules = css.match(/\.agent-activity-(?:timeline-item|tool-card)[^{]*\{[^}]*\}/gu) ?? [];
+    const alarmRules = timelineRules.filter((rule) => (
+      rule.includes("--color-status-error") && !rule.startsWith(".agent-activity-timeline-item--delete ")
+    ));
+    expect(alarmRules).toEqual([]);
   });
 
   it("folds the whole finished run — thoughts, tools, drafts — behind one worked-for header", () => {
@@ -1055,7 +1078,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("工作中");
     // The thought was superseded by the tool step, so it folds to its
     // one-line label; the prose re-appears on demand, not by default.
-    expect(html).toContain("简短思考");
+    expect(html).toContain("思考一下");
     expect(html).not.toContain("先判断要不要查资料。");
     expect(html).toContain("准备读取本地说明。");
     expect(html).not.toContain("正在执行 2 个步骤");
@@ -1097,7 +1120,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("Keep markdown lists compact.");
     expect(html).toContain("<strong>Decision</strong>");
     expect(html).not.toContain("The user wants a detailed introduction<br");
-    expect(html).not.toContain("简短思考</span>");
+    expect(html).not.toContain("思考一下</span>");
   });
 
   it("renders the complete decoded Windows error in tool details", () => {
@@ -1128,7 +1151,7 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html.replaceAll("&#x27;", "'")).toContain(WINDOWS_COMMAND_ERROR);
-    expect(html).toContain("agent-activity-timeline-item__error");
+    expect(html).not.toContain("agent-activity-timeline-item__error");
     expect(html).not.toContain("����");
   });
 
@@ -1581,7 +1604,7 @@ describe("AgentThreadMessages", () => {
     // header, separate from the always-visible final answer bubble below it.
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('data-icon="chevron-right"');
-    expect(html).toContain("简短思考");
+    expect(html).toContain("思考一下");
     expect(html).not.toContain("data-reasoning-key=");
     expect(html).toContain("最终回答");
     // Reasoning body is only rendered when the user expands the collapsed cluster.
@@ -1633,7 +1656,7 @@ describe("AgentThreadMessages", () => {
     // Reasoning finished but answer is still streaming → cluster collapses (reasoning not running).
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('data-icon="chevron-right"');
-    expect(html).toContain("简短思考");
+    expect(html).toContain("思考一下");
     expect(html).not.toContain("data-reasoning-key=");
     expect(html).toContain("正在回答");
     // Reasoning body is only rendered when the user expands the collapsed cluster.
@@ -1663,7 +1686,7 @@ describe("AgentThreadMessages", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("简短思考");
+    expect(html).toContain("思考一下");
     expect(html).toContain("data-activity-key=");
     expect(html).toContain("完成。");
     expect(html).not.toContain("data-reasoning-key=");
@@ -1728,13 +1751,13 @@ describe("AgentThreadMessages", () => {
       );
 
       expect(html.match(/agent-message-time-label/g) ?? []).toHaveLength(5);
-      expect(html).toContain("09:07");
-      expect(html).toContain("15:16");
+      expect(html).toContain("2026/6/23 09:07");
+      expect(html).toContain("2026/6/23 15:16");
       expect(html).toContain("agent-message-copy-cluster--left");
-      expect(html).toContain("星期六 08:09");
-      expect(html).toContain("5月2日 10:11");
-      expect(html).toContain("2025年5月1日 12:13");
-      expect(html).not.toContain("6月20日 08:09");
+      expect(html).toContain("2026/6/20 08:09");
+      expect(html).toContain("2026/5/2 10:11");
+      expect(html).toContain("2025/5/1 12:13");
+      expect(html).not.toContain("星期六");
     } finally {
       vi.useRealTimers();
     }
@@ -1758,12 +1781,12 @@ describe("AgentThreadMessages", () => {
         </I18nProvider>
       );
 
-      expect(html).toContain("09:07");
-      expect(html).toContain("Saturday 08:09");
-      expect(html).toContain("5/2, 10:11");
-      expect(html).toContain("5/1/2025, 12:13");
+      expect(html).toContain("2026/6/23 09:07");
+      expect(html).toContain("2026/6/20 08:09");
+      expect(html).toContain("2026/5/2 10:11");
+      expect(html).toContain("2025/5/1 12:13");
+      expect(html).not.toContain("Saturday");
       expect(html).not.toContain("星期六");
-      expect(html).not.toContain("月");
     } finally {
       vi.useRealTimers();
     }
@@ -1934,14 +1957,11 @@ describe("AgentThreadMessages", () => {
     expect(stylesSource).toContain(".agent-conversation-panel .agent-activity-cluster__separator");
     expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__separator");
     expect(stylesSource).toContain("background: var(--agent-conversation-muted-separator);");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__code-block");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__code-header");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__pre");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__table-scroll");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__table");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__th");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__td");
-    expect(stylesSource).toContain(".agent-conversation-panel .agent-message-content__table tbody tr:nth-child(even)");
+    expect(stylesSource).toMatch(/\.agent-message-content__table-frame\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*100%;[^}]*border-radius:\s*12px;/s);
+    expect(stylesSource).toContain(".agent-message-content__th + .agent-message-content__th,\n.agent-message-content__td + .agent-message-content__td {");
+    expect(stylesSource).toMatch(/\.agent-message-content__code-block\s*\{[^}]*border-radius:\s*16px;/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__code-header\s*\{[^}]*height:\s*36px;/s);
+    expect(stylesSource).not.toContain("tbody tr:nth-child(even)");
     expect(stylesSource).toContain("border-radius: 8px;");
     expect(stylesSource).toContain("var(--color-background-paper)");
     expect(stylesSource).toContain("var(--color-canvas-oat)");
@@ -2128,7 +2148,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('data-testid="user-file-attachment"');
     expect(html).toContain('data-testid="agent-file-icon-pdf"');
     expect(html).toContain(">shot<");
-    expect(html).toContain(">report<");
+    expect(html).toContain(">report.pdf<");
     expect(html).toContain('title="report.pdf"');
     expect(html).toContain(">PNG<");
     expect(html).toContain(">PDF<");
@@ -2184,7 +2204,7 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html).toContain("flex min-w-0 justify-end");
-    expect(html).toContain("flex min-w-0 max-w-[75%] flex-col");
+    expect(html).toContain("agent-user-turn__stack flex min-w-0 flex-col");
     expect(html).toContain("flex min-w-0 max-w-full flex-wrap");
     expect(html).toContain("inline-flex max-w-full min-w-0 flex-col items-end");
     expect(html).toContain("agent-attachment-card");
@@ -2262,6 +2282,21 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("agent-chat-bubble--user");
     expect(html).toContain("break-words [overflow-wrap:anywhere]");
     expect(html).toContain(longPath);
+  });
+
+  it("caps long user messages behind a themed vertical scrollbar", () => {
+    const stylesSource = readFileSync(stylesSourceUrl, "utf8");
+    const userBubbleRule = stylesSource.match(/\.agent-chat-bubble--user\s*\{[^}]*\}/)?.[0] ?? "";
+    const scrollbarRule = stylesSource.match(/\.agent-chat-bubble--user::-webkit-scrollbar\s*\{[^}]*\}/)?.[0] ?? "";
+    const scrollbarThumbRule = stylesSource.match(/\.agent-chat-bubble--user::-webkit-scrollbar-thumb\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(userBubbleRule).toContain("max-height: 310px;");
+    expect(userBubbleRule).toContain("overflow-y: auto;");
+    expect(userBubbleRule).toContain("scrollbar-width: thin;");
+    expect(userBubbleRule).toContain("scrollbar-color: var(--codex-scrollbar-thumb) transparent;");
+    expect(scrollbarRule).toContain("display: block;");
+    expect(scrollbarRule).toContain("width: 4px;");
+    expect(scrollbarThumbRule).toContain("background: var(--codex-scrollbar-thumb);");
   });
 
   it("wraps long Windows PowerShell commands inside the assistant answer content", () => {
@@ -2470,7 +2505,8 @@ describe("AgentThreadMessages", () => {
 
     expect(html).toContain("<button");
     expect(html).toContain('title="/Users/yuan/deck.pptx"');
-    expect(html).toContain(">deck<");
+    expect(html).toContain(">deck.pptx<");
+    expect(html).toContain("agent-delivered-files");
     expect(html).toContain(">PPTX<");
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
     expect(html).toContain('data-testid="agent-attachment-card-file"');
@@ -2560,6 +2596,41 @@ describe("AgentThreadMessages", () => {
       "reveal:/Users/yuan/fresh-deck.pptx",
       "download:http://127.0.0.1:18980/api/media/fresh:fresh-deck.pptx"
     ]);
+  });
+
+  it("previews markdown inside the app and still opens other files with the system app", async () => {
+    const openArtifact = vi.fn(async () => undefined);
+    const previewInApp = vi.fn(() => true);
+    const artifactClient = {
+      resolveArtifact: async () => fileArtifact("/work/年报.md", "年报.md", "http://127.0.0.1/api/media/report"),
+      openArtifact,
+      revealArtifact: async () => undefined
+    };
+
+    await expect(runAttachmentAction({
+      path: "/work/年报.md",
+      label: "年报.md",
+      artifactClient,
+      previewInApp
+    })).resolves.toBe("opened");
+    expect(previewInApp).toHaveBeenCalledWith({
+      name: "年报.md",
+      path: "/work/年报.md",
+      url: "http://127.0.0.1/api/media/report"
+    });
+    expect(openArtifact).not.toHaveBeenCalled();
+
+    previewInApp.mockReturnValue(false);
+    await expect(runAttachmentAction({
+      path: "/work/交付物.xlsx",
+      label: "交付物.xlsx",
+      artifactClient: {
+        ...artifactClient,
+        resolveArtifact: async () => fileArtifact("/work/交付物.xlsx", "交付物.xlsx")
+      },
+      previewInApp
+    })).resolves.toBe("opened");
+    expect(openArtifact).toHaveBeenCalledWith("/work/交付物.xlsx");
   });
 
   it("keeps old fallback order when fresh resolve fails", async () => {

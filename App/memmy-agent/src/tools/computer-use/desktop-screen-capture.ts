@@ -3,6 +3,12 @@ import { SCREEN_CAPTURE_PREFIX as PREFIX, SCREEN_CAPTURE_PROTOCOL, SCREEN_CAPTUR
 import { Tool, type ToolExecutionContext } from '../../core/agent-runtime/tools/base.js';
 import { convertMcpToolContent } from '../../core/agent-runtime/tools/mcp.js';
 import { isManagedOcuConfig } from './open-computer-use-binary.js';
+import {
+  LEGACY_COMPUTER_USE_MCP_SERVER,
+  MEMMY_COMPUTER_USE_MCP_SERVER,
+  legacyComputerUseToolName,
+  memmyComputerUseToolName,
+} from '../../config/computer-use-server.js';
 
 type IpcProcess = Pick<NodeJS.Process, 'send' | 'connected' | 'on' | 'removeListener'>;
 export class DesktopScreenClient {
@@ -69,11 +75,20 @@ export const desktopScreenClient = new DesktopScreenClient();
 export async function initializeDesktopScreenCapture(): Promise<void> {
   if (process.platform === 'darwin' && process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1') await desktopScreenClient.initialize();
 }
+function computerUseServer(config: any): { name: string; cfg: any } | null {
+  const layers = [config?.mcpServers, config?.tools?.mcpServers, config?.tools?.mcp_servers];
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object') continue;
+    if (layer[MEMMY_COMPUTER_USE_MCP_SERVER]) return { name: MEMMY_COMPUTER_USE_MCP_SERVER, cfg: layer[MEMMY_COMPUTER_USE_MCP_SERVER] };
+    if (layer[LEGACY_COMPUTER_USE_MCP_SERVER]) return { name: LEGACY_COMPUTER_USE_MCP_SERVER, cfg: layer[LEGACY_COMPUTER_USE_MCP_SERVER] };
+  }
+  return null;
+}
 export function screenCaptureEnabled(config: any, platform = process.platform, available = desktopScreenClient.available): boolean {
-  const cfg = config?.mcpServers?.open_computer_use ?? config?.tools?.mcpServers?.open_computer_use ?? config?.tools?.mcp_servers?.open_computer_use;
-  if (!cfg || cfg.enabled === false || !available || !isManagedOcuConfig('open_computer_use', cfg, platform)) return false;
-  const enabled = cfg.enabledTools ?? cfg.enabled_tools ?? ['*'];
-  return enabled.some((name: string) => ['*', 'get_screen_state', 'mcp_open_computer_use_get_screen_state'].includes(name));
+  const server = computerUseServer(config);
+  if (platform !== 'darwin' || !server || server.cfg.enabled === false || !available || !isManagedOcuConfig(server.name, server.cfg, platform)) return false;
+  const enabled = server.cfg.enabledTools ?? server.cfg.enabled_tools ?? ['*'];
+  return enabled.some((name: string) => ['*', 'get_screen_state', memmyComputerUseToolName('get_screen_state'), legacyComputerUseToolName('get_screen_state')].includes(name));
 }
 export class DesktopScreenCaptureTool extends Tool {
   static enabled(ctx: any): boolean { return screenCaptureEnabled(ctx.runtimeState ? { mcpServers: ctx.runtimeState.mcpServers } : ctx.config); }

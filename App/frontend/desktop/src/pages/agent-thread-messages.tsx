@@ -38,18 +38,23 @@ import {
   type AgentArtifactClient,
   type AttachmentDownloadStarter,
   type AttachmentCopyTarget,
+  type InAppFilePreviewHandler,
 } from "./agent-message-content.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { userTimeZone } from "../lib/user-time-zone.js";
 import type { MessageKey, MessageValues, ResolvedLanguage } from "../i18n/messages.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../theme/window-controls-overlay.js";
 import type { AgentChatMediaAttachment, AgentChatMessage, AgentCompactionStatus, AgentRetryWaitStatus } from "../state/agent-chat-slice.js";
 import type { RecallEvidenceOutput, RecallHit } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../api/memory-runtime-client.js";
 import {
+  activityPreviewFileFromEdit,
+  activityPreviewFileFromToolEvent,
   formatToolCallTrace,
   summarizeToolCall,
+  type ActivityPreviewFile,
   type AgentFileEdit,
   type AgentToolProgressEvent,
   type ToolTraceSummary,
@@ -72,6 +77,8 @@ interface AgentThreadMessagesProps {
   forceMessageActionsForMessageId?: string | null;
   retryWaitStatus?: AgentRetryWaitStatus | null;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
+  onOpenActivityFile?: (file: ActivityPreviewFile) => void;
   chatScopeKey: string;
   historyVersion?: number;
   isSending?: boolean;
@@ -101,8 +108,6 @@ const MESSAGE_COPY_RESET_MS = 1200;
 const AGENT_IMMEDIATE_RENDER_UNIT_COUNT = 4;
 const AGENT_DEFERRED_RENDER_STEP_MS = 90;
 const AGENT_DEFERRED_RENDER_START_MS = 120;
-const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const ACTIVITY_CONTEXT_LINE_CLASS = "mb-0.5 min-w-0 break-words px-0 py-0.5 text-[13px] leading-[1.55] text-text-ink/55";
 export const CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS = "absolute right-4 z-10 inline-flex h-9 w-9 items-center justify-center rounded-full bg-background-paper text-text-ink shadow-lg transition-all hover:bg-canvas-oat focus:outline-none focus:ring-2 focus:ring-action-sky/40";
 export const CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS = "absolute top-1/2 z-10 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-background-paper text-text-ink shadow-lg transition-all hover:bg-canvas-oat focus:outline-none focus:ring-2 focus:ring-action-sky/40";
@@ -204,6 +209,8 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
                 open={open}
                 onToggle={() => setManualOpenByActivityKey((current) => ({ ...current, [unit.activityKey]: !open }))}
                 artifactClient={props.artifactClient}
+                onPreviewFile={props.onPreviewFile}
+                onOpenActivityFile={props.onOpenActivityFile}
               />
               {unit.messages.some((message) => message.id === props.afterMessageId) ? props.afterMessageContent : null}
             </Fragment>
@@ -215,6 +222,8 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
             <SingleMessage
               message={unit.message}
               artifactClient={props.artifactClient}
+              onPreviewFile={props.onPreviewFile}
+              onOpenActivityFile={props.onOpenActivityFile}
               chatScopeKey={props.chatScopeKey}
               unitIndex={index}
               isFinalAssistantAnswer={index === finalAssistantAnswerIndex}
@@ -242,6 +251,8 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.afterMessageContent === next.afterMessageContent
     && previous.forceMessageActionsForMessageId === next.forceMessageActionsForMessageId
     && previous.artifactClient === next.artifactClient
+    && previous.onPreviewFile === next.onPreviewFile
+    && previous.onOpenActivityFile === next.onOpenActivityFile
     && previous.chatScopeKey === next.chatScopeKey
     && previous.historyVersion === next.historyVersion
     && previous.isSending === next.isSending
@@ -427,6 +438,8 @@ function findRecallEvidenceUserAnchors(
 interface SingleMessageProps {
   message: AgentChatMessage;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
+  onOpenActivityFile?: (file: ActivityPreviewFile) => void;
   chatScopeKey: string;
   unitIndex: number;
   isFinalAssistantAnswer?: boolean;
@@ -440,24 +453,27 @@ interface SingleMessageProps {
 
 const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
   const { message } = props;
-  const { language, t } = useTranslation();
+  const { t } = useTranslation();
   if (message.kind === "context_compaction") {
     return <ContextCompactionDivider message={message} />;
   }
 
   if (message.role === "user") {
     const hasContent = message.content.trim().length > 0;
-    const timestamp = messageTimestamp(message.createdAt, language, t);
+    const timestamp = messageTimestamp(message.createdAt);
     const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;
     return (
-      <div className="agent-user-turn flex min-w-0 justify-end">
-        <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-2 w-full">
+      <div className="agent-user-turn flex min-w-0 justify-end" data-agent-message-id={message.id || undefined}>
+        <div className="agent-user-turn__stack flex min-w-0 flex-col items-end gap-2 w-full">
           {message.media?.length ? (
-            <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} />
+            <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
           ) : null}
           {hasContent ? (
             <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user w-full max-w-full min-w-0">
-              <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+              <div
+                className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+                data-agent-search-root=""
+              >
                 {message.content}
               </div>
               {props.recallEvidenceTurnId && props.memoryRuntimeClient ? (
@@ -491,6 +507,8 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
         open={Boolean(isActivityMessageRunningForDisplay(message) || message.stoppedByUser)}
         onToggle={() => undefined}
         artifactClient={props.artifactClient}
+        onPreviewFile={props.onPreviewFile}
+        onOpenActivityFile={props.onOpenActivityFile}
       />
     );
   }
@@ -515,14 +533,14 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     sanitizePlatformApiErrors: props.sanitizePlatformApiErrors === true,
     fallback: t("home.agent.platformApiFallback")
   });
-  const timestamp = assistantCopyReady ? messageTimestamp(message.createdAt, language, t) : null;
+  const timestamp = assistantCopyReady ? messageTimestamp(message.createdAt) : null;
   const reasoningKey = assistantReasoningUiKey({
     chatScopeKey: props.chatScopeKey,
     unitIndex: props.unitIndex,
     messageId: message.id || null
   });
   return (
-    <div className="flex min-w-0 justify-start">
+    <div className="flex min-w-0 justify-start" data-agent-message-id={message.id || undefined}>
       <div className="min-w-0 w-full space-y-2">
         {message.reasoning ? (
           <AssistantReasoningPanel
@@ -533,16 +551,17 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
           />
         ) : null}
         <div className="agent-chat-bubble-frame agent-chat-bubble-frame--assistant max-w-full min-w-0">
-          <div className="agent-chat-bubble agent-chat-bubble--assistant w-full max-w-full min-w-0 overflow-hidden">
+          <div className="agent-chat-bubble agent-chat-bubble--assistant w-full max-w-full min-w-0 overflow-hidden" data-agent-search-root="">
             <AgentMessageContent
               content={displayedContent}
               isStreaming={message.isStreaming}
               artifactClient={props.artifactClient}
+              onPreviewFile={props.onPreviewFile}
               deferRender={props.deferContentRender}
               deferredRevealDelayMs={props.deferredRevealDelayMs}
             />
             {message.media?.length ? (
-              <AssistantMediaAttachmentList media={message.media} artifactClient={props.artifactClient} />
+              <AssistantMediaAttachmentList media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
             ) : null}
           </div>
           <MessageBubbleCopyButton text={displayedContent} align="left" available={assistantCopyReady} timestamp={timestamp} />
@@ -899,7 +918,7 @@ interface MessageTimestamp {
 
 type Translate = (key: MessageKey, values?: MessageValues) => string;
 
-function messageTimestamp(createdAt: number | undefined, language: ResolvedLanguage, t: Translate, now = new Date()): MessageTimestamp | null {
+function messageTimestamp(createdAt: number | undefined): MessageTimestamp | null {
   if (createdAt == null) {
     return null;
   }
@@ -908,51 +927,30 @@ function messageTimestamp(createdAt: number | undefined, language: ResolvedLangu
     return null;
   }
   return {
-    label: formatMessageTimestamp(date, now, language, t),
+    label: formatMessageTimestamp(date),
     dateTime: date.toISOString()
   };
 }
 
-function formatMessageTimestamp(date: Date, now: Date, language: ResolvedLanguage, t: Translate): string {
-  const time = `${padTimePart(date.getHours())}:${padTimePart(date.getMinutes())}`;
-  if (isSameLocalDay(date, now)) {
-    return time;
-  }
-  const ageMs = now.getTime() - date.getTime();
-  if (ageMs < ONE_WEEK_MS) {
-    return t("agent.message.time.weekday", {
-      weekday: new Intl.DateTimeFormat(language, { weekday: "long" }).format(date),
-      time
-    });
-  }
-  if (ageMs >= ONE_YEAR_MS) {
-    return t("agent.message.time.yearMonthDay", {
-      year: date.getFullYear(),
-      month: date.getMonth() + 1,
-      day: date.getDate(),
-      time
-    });
-  }
-  return t("agent.message.time.monthDay", {
-    month: date.getMonth() + 1,
-    day: date.getDate(),
-    time
-  });
-}
-
-function padTimePart(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function isSameLocalDay(left: Date, right: Date): boolean {
-  return left.getFullYear() === right.getFullYear()
-    && left.getMonth() === right.getMonth()
-    && left.getDate() === right.getDate();
+function formatMessageTimestamp(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: userTimeZone(),
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}/${Number(part("month"))}/${Number(part("day"))} ${part("hour")}:${part("minute")}`;
 }
 
 function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMessageProps): boolean {
   return previous.message === next.message
     && previous.artifactClient === next.artifactClient
+    && previous.onPreviewFile === next.onPreviewFile
+    && previous.onOpenActivityFile === next.onOpenActivityFile
     && previous.chatScopeKey === next.chatScopeKey
     && previous.unitIndex === next.unitIndex
     && previous.isFinalAssistantAnswer === next.isFinalAssistantAnswer
@@ -1328,6 +1326,12 @@ function findLastMessageIndex(messages: AgentChatMessage[], role: AgentChatMessa
   return -1;
 }
 
+function fileMedia(media: AgentChatMediaAttachment[]): Array<{ item: AgentChatMediaAttachment; index: number }> {
+  return media.flatMap((item, index) => (
+    item.kind === "image" || (item.kind === "video" && item.url) ? [] : [{ item, index }]
+  ));
+}
+
 function mediaAttachmentKey(item: AgentChatMediaAttachment, index: number): string {
   return item.path ?? item.url ?? item.name ?? `${item.kind}-${index}`;
 }
@@ -1341,6 +1345,7 @@ function attachmentDisplayName(item: AgentChatMediaAttachment): string {
 function UserMediaPreviewGrid(props: {
   media: AgentChatMediaAttachment[];
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
 }) {
   const images = props.media.filter((item) => item.kind === "image" && item.url);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -1365,6 +1370,7 @@ function UserMediaPreviewGrid(props: {
             key={mediaAttachmentKey(item, index)}
             item={item}
             artifactClient={props.artifactClient}
+            onPreviewFile={props.onPreviewFile}
           />
         );
       })}
@@ -1390,6 +1396,7 @@ function UserMediaPreviewGrid(props: {
 function UserFileAttachmentCell(props: {
   item: AgentChatMediaAttachment;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
 }) {
   const [actionState, setActionState] = useState<"idle" | "working" | "error">("idle");
   const [copiedTarget, setCopiedTarget] = useState<AttachmentCopyTarget | null>(null);
@@ -1407,6 +1414,7 @@ function UserFileAttachmentCell(props: {
       name: props.item.name,
       label,
       artifactClient: props.artifactClient,
+      previewInApp: props.onPreviewFile,
     });
     setActionState(result === "failed" ? "error" : "idle");
   };
@@ -1460,6 +1468,7 @@ function UserImageCell(props: {
 function AssistantMediaAttachmentList(props: {
   media: AgentChatMediaAttachment[];
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
 }) {
   const images = props.media.filter((item) => item.kind === "image" && item.url);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -1479,12 +1488,16 @@ function AssistantMediaAttachmentList(props: {
         </div>
       ) : null}
       {props.media.map((item, index) => {
-        if (item.kind === "image" && item.url) return null;
-        if (item.kind === "video" && item.url) {
-          return <AssistantVideoCell key={mediaAttachmentKey(item, index)} item={item} />;
-        }
-        return <StructuredMediaAttachment key={mediaAttachmentKey(item, index)} item={item} artifactClient={props.artifactClient} />;
+        if (item.kind !== "video" || !item.url) return null;
+        return <AssistantVideoCell key={mediaAttachmentKey(item, index)} item={item} />;
       })}
+      {fileMedia(props.media).length ? (
+        <div className="agent-delivered-files">
+          {fileMedia(props.media).map(({ item, index }) => (
+            <StructuredMediaAttachment key={mediaAttachmentKey(item, index)} item={item} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
+          ))}
+        </div>
+      ) : null}
       {lightboxIndex == null ? null : (
         <ChatImageLightbox
           images={images.map((item) => ({ url: item.url!, name: item.name }))}
@@ -1898,6 +1911,18 @@ function imageMimeFromName(name: string | undefined): string | null {
   return `image/${extension}`;
 }
 
+function deliveredFileMenuPosition(menu: { x: number; y: number }): { left: number; top: number } {
+  const width = 160;
+  const height = 132;
+  if (typeof window === "undefined") {
+    return { left: menu.x, top: menu.y };
+  }
+  return {
+    left: Math.max(IMAGE_CONTEXT_MENU_MARGIN, Math.min(menu.x, window.innerWidth - width - IMAGE_CONTEXT_MENU_MARGIN)),
+    top: Math.max(IMAGE_CONTEXT_MENU_MARGIN, Math.min(menu.y, window.innerHeight - height - IMAGE_CONTEXT_MENU_MARGIN))
+  };
+}
+
 function contextMenuPosition(menu: ChatImageContextMenuState): { left: number; top: number } {
   if (typeof window === "undefined") {
     return { left: menu.x, top: menu.y };
@@ -1931,10 +1956,12 @@ function hasSelectedText(): boolean {
 function StructuredMediaAttachment(props: {
   item: AgentChatMediaAttachment;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
   tone?: "assistant" | "user";
 }) {
   const [actionState, setActionState] = useState<"idle" | "working" | "error">("idle");
   const [copiedTarget, setCopiedTarget] = useState<AttachmentCopyTarget | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const { t } = useTranslation();
   const label = attachmentDisplayName(props.item);
   const extensionLabel = splitAgentAttachmentName(label).extensionLabel;
@@ -1948,6 +1975,7 @@ function StructuredMediaAttachment(props: {
       name: props.item.name,
       label,
       artifactClient: props.artifactClient,
+      previewInApp: props.onPreviewFile,
     });
     setActionState(result === "failed" ? "error" : "idle");
   };
@@ -1958,23 +1986,216 @@ function StructuredMediaAttachment(props: {
   };
 
   return (
-    <span className="inline-flex max-w-full min-w-0 flex-col items-start overflow-hidden">
+    <span className="agent-delivered-file">
       <AgentAttachmentCard
         kind="file"
         name={label}
         subline={extensionLabel}
         title={props.item.path ?? props.item.name ?? props.item.url ?? undefined}
         onClick={() => void handleAttachmentAction()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
         disabled={actionState === "working"}
         busyLabel={t("agent.attachment.opening")}
         error={actionState === "error"}
         align={props.tone === "user" ? "right" : "left"}
       />
+      {menu ? (
+        <DeliveredFileContextMenu
+          menu={menu}
+          item={props.item}
+          label={label}
+          artifactClient={props.artifactClient}
+          onClose={() => setMenu(null)}
+          onError={() => setActionState("error")}
+        />
+      ) : null}
       {actionState === "error" ? (
         <AttachmentActionError path={props.item.path} url={props.item.url} copiedTarget={copiedTarget} onCopy={(target, value) => void handleCopy(target, value)} />
       ) : null}
     </span>
   );
+}
+
+function DeliveredFileContextMenu(props: {
+  menu: { x: number; y: number };
+  item: AgentChatMediaAttachment;
+  label: string;
+  artifactClient?: AgentArtifactClient | null;
+  onClose: () => void;
+  onError: () => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const close = () => props.onClose();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [props]);
+
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  const position = deliveredFileMenuPosition(props.menu);
+
+  const run = async (action: "open" | "reveal" | "save") => {
+    if (busy) return;
+    setBusy(true);
+    const ok = await runDeliveredFileMenuAction({
+      action,
+      item: props.item,
+      label: props.label,
+      artifactClient: props.artifactClient
+    });
+    setBusy(false);
+    if (!ok) {
+      props.onError();
+    }
+    props.onClose();
+  };
+
+  return createPortal(
+    <div
+      role="menu"
+      aria-label={t("agent.attachment.menu")}
+      className="agent-image-context-menu agent-file-context-menu"
+      style={{ left: position.left, top: position.top }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <button type="button" role="menuitem" className="agent-image-context-menu__item" disabled={busy} onClick={() => void run("open")}>{t("agent.attachment.open")}</button>
+      <button type="button" role="menuitem" className="agent-image-context-menu__item" disabled={busy || !props.item.path} onClick={() => void run("reveal")}>{t("agent.attachment.reveal")}</button>
+      <button type="button" role="menuitem" className="agent-image-context-menu__item" disabled={busy} onClick={() => void run("save")}>{t("agent.attachment.saveAs")}</button>
+    </div>,
+    document.body
+  );
+}
+
+export async function runDeliveredFileMenuAction(input: {
+  action: "open" | "reveal" | "save";
+  item: AgentChatMediaAttachment;
+  label: string;
+  artifactClient?: AgentArtifactClient | null;
+}): Promise<boolean> {
+  let path = input.item.path;
+  let url = input.item.url;
+  let name = input.item.name ?? input.label;
+  if (path && input.artifactClient) {
+    try {
+      const fresh = await input.artifactClient.resolveArtifact(path);
+      path = fresh.path;
+      url = fresh.media_url ?? url;
+      name = fresh.name ?? name;
+    } catch {
+      // Keep the original path and continue with the requested action.
+    }
+  }
+
+  if (input.action === "open") {
+    if (path && input.artifactClient) {
+      try {
+        await input.artifactClient.openArtifact(path);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    const result = await runAttachmentAction({
+      path,
+      url,
+      name,
+      label: input.label,
+      artifactClient: input.artifactClient
+    });
+    return result !== "failed";
+  }
+
+  if (input.action === "reveal") {
+    if (!path || !input.artifactClient) return false;
+    try {
+      await input.artifactClient.revealArtifact(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const saveName = deliveredFileSaveName(input.label, name, path, url);
+  if (!url) return false;
+  const saveFile = typeof window !== "undefined" ? window.memmy?.saveFile : undefined;
+  if (saveFile) {
+    const bytes = await fetchAttachmentBytes(url);
+    try {
+      await saveFile(bytes
+        ? { url, name: saveName, data: bytes.data, mime: bytes.mime }
+        : { url, name: saveName });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return startBrowserDownload(url, saveName);
+}
+
+export function deliveredFileSaveName(visibleName: string, itemName?: string, resolvedPath?: string, mediaUrl?: string): string {
+  const candidates = [visibleName, itemName, resolvedPath, mediaUrl].map(fileNameCandidate).filter(Boolean);
+  const readable = candidates.find((name) => !isOpaqueFileToken(name));
+  const chosen = readable || humanNameFromMediaToken(candidates.find(isOpaqueFileToken) ?? "") || "download";
+  if (/\.[A-Za-z0-9]{1,8}$/u.test(chosen)) return chosen;
+  const extension = candidates.map((name) => name.match(/(\.[A-Za-z0-9]{1,8})$/u)?.[1] ?? "").find(Boolean) ?? "";
+  return `${chosen}${extension}`;
+}
+
+function fileNameCandidate(value: string | undefined): string {
+  return value?.split(/[?#]/u)[0]?.split(/[\\/]/u).pop()?.trim() || "";
+}
+
+function isOpaqueFileToken(value: string): boolean {
+  return /^[A-Za-z0-9_-]{16,}$/u.test(value.replace(/\.[A-Za-z0-9]{1,8}$/u, ""));
+}
+
+function humanNameFromMediaToken(value: string): string {
+  const token = value.replace(/\.[A-Za-z0-9]{1,8}$/u, "");
+  if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return "";
+  try {
+    const normalized = token.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, "=");
+    const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+    const text = new TextDecoder().decode(bytes);
+    const file = text.split(/[\\/]/u).pop()?.trim().replace(/^[0-9a-f]{6,}-/iu, "") ?? "";
+    return file.includes("\u0000") ? "" : file;
+  } catch {
+    return "";
+  }
+}
+
+async function fetchAttachmentBytes(url: string): Promise<{ data: Uint8Array; mime?: string } | null> {
+  if (typeof fetch !== "function" || !url) return null;
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) return null;
+    const buffer = await response.arrayBuffer();
+    if (!buffer.byteLength) return null;
+    return {
+      data: new Uint8Array(buffer),
+      mime: response.headers.get("content-type")?.split(";")[0]?.trim() || undefined
+    };
+  } catch {
+    return null;
+  }
 }
 
 function AgentActivityCluster(props: {
@@ -1986,6 +2207,8 @@ function AgentActivityCluster(props: {
   open: boolean;
   onToggle: () => void;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
+  onOpenActivityFile?: (file: ActivityPreviewFile) => void;
 }) {
   const { t } = useTranslation();
   const segments = useMemo(() => buildActivitySegments(props.messages, t), [props.messages, t]);
@@ -2001,10 +2224,10 @@ function AgentActivityCluster(props: {
           aria-controls={props.bodyId}
           data-activity-key={props.activityKey}
           onClick={props.onToggle}
-          className="agent-activity-cluster__toggle inline-flex max-w-full min-w-0 cursor-pointer list-none items-center gap-1.5 text-left text-[13px] font-normal text-text-ink/55"
+          className="agent-activity-cluster__toggle inline-flex max-w-full min-w-0 cursor-pointer list-none items-center text-left"
         >
           <span className="min-w-0 truncate">{headerLabel}</span>
-          <Chevron data-icon={props.open ? "chevron-down" : "chevron-right"} size={12} className="shrink-0 text-text-ink/40" />
+          <Chevron data-icon={props.open ? "chevron-down" : "chevron-right"} size={12} className="shrink-0" />
         </button>
         {props.open && (
           <div id={props.bodyId} className="agent-activity-cluster__body min-w-0">
@@ -2024,6 +2247,8 @@ function AgentActivityCluster(props: {
                 isLive={props.isRunning && index === segments.length - 1}
                 isOnlySegment={segments.length === 1}
                 artifactClient={props.artifactClient}
+                onPreviewFile={props.onPreviewFile}
+                onOpenActivityFile={props.onOpenActivityFile}
               />
             ))}
           </div>
@@ -2039,15 +2264,17 @@ function ActivitySegmentBlock(props: {
   isLive?: boolean;
   isOnlySegment?: boolean;
   artifactClient?: AgentArtifactClient | null;
+  onPreviewFile?: InAppFilePreviewHandler;
+  onOpenActivityFile?: (file: ActivityPreviewFile) => void;
 }) {
   const { segment } = props;
   if (segment.type === "thought") {
     return <ThoughtSegmentBlock text={segment.text} isLive={props.isLive === true} isOnlySegment={props.isOnlySegment === true} t={props.t} />;
   }
   if (segment.type === "narration") {
-    return <NarrationSegmentBlock text={segment.text} isLive={props.isLive === true} artifactClient={props.artifactClient} />;
+    return <NarrationSegmentBlock text={segment.text} isLive={props.isLive === true} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
   }
-  return <ToolGroupSegmentBlock segment={segment} t={props.t} isLive={props.isLive === true} />;
+  return <ToolGroupSegmentBlock segment={segment} t={props.t} isLive={props.isLive === true} onOpenActivityFile={props.onOpenActivityFile} />;
 }
 
 /**
@@ -2130,7 +2357,7 @@ function isLongNarration(text: string): boolean {
  * fold row is nothing but the draft's own first line: no badges, no meta
  * commentary — the content speaks for itself.
  */
-function NarrationSegmentBlock(props: { text: string; isLive: boolean; artifactClient?: AgentArtifactClient | null }) {
+function NarrationSegmentBlock(props: { text: string; isLive: boolean; artifactClient?: AgentArtifactClient | null; onPreviewFile?: InAppFilePreviewHandler }) {
   const { open: followOpen, onToggle } = useFollowAlongOpen(props.isLive);
   const long = isLongNarration(props.text);
   const open = !long || followOpen;
@@ -2151,7 +2378,7 @@ function NarrationSegmentBlock(props: { text: string; isLive: boolean; artifactC
         </button>
       ) : null}
       {open ? (
-        <AgentMessageContent content={props.text} artifactClient={props.artifactClient} />
+        <AgentMessageContent content={props.text} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
       ) : null}
     </div>
   );
@@ -2163,7 +2390,7 @@ function narrationPreviewLine(text: string): string {
   return plain || "…";
 }
 
-function ToolGroupSegmentBlock(props: { segment: ActivityToolGroupSegment; t: Translate; isLive: boolean }) {
+function ToolGroupSegmentBlock(props: { segment: ActivityToolGroupSegment; t: Translate; isLive: boolean; onOpenActivityFile?: (file: ActivityPreviewFile) => void }) {
   const { segment } = props;
   const { open, onToggle } = useFollowAlongOpen(props.isLive);
   const content = (
@@ -2173,9 +2400,9 @@ function ToolGroupSegmentBlock(props: { segment: ActivityToolGroupSegment; t: Tr
           return <ActivityContextLine key={item.key} text={item.text} />;
         }
         if (item.type === "toolStep") {
-          return <TraceLine key={item.key} item={item} t={props.t} />;
+          return <TraceLine key={item.key} item={item} t={props.t} onOpenActivityFile={props.onOpenActivityFile} />;
         }
-        return <FileEditLine key={item.key} edit={item.edit} t={props.t} />;
+        return <FileEditLine key={item.key} edit={item.edit} t={props.t} onOpenActivityFile={props.onOpenActivityFile} />;
       })}
     </div>
   );
@@ -2234,7 +2461,7 @@ function ToolGroupSegmentLabel(props: { segment: ActivityToolGroupSegment }) {
 /**
  * Expanded tool payload. The clickable row above is already the summary, so
  * the card only shows raw input/output as one bordered code card — arguments
- * dimmed, result normal, errors tinted — with no form labels. This single
+ * dimmed, result normal — with no form labels. This single
  * generic shape works for any tool, however exotic its payload.
  */
 function ToolDetailRows(props: { item: ActivityToolStepItem }) {
@@ -2248,7 +2475,7 @@ function ToolDetailRows(props: { item: ActivityToolStepItem }) {
         <div
           key={`${detail.label}:${index}`}
           data-detail={detail.label.toLowerCase()}
-          className={`agent-activity-tool-card__section${detail.tone === "error" ? " agent-activity-tool-card__section--error" : ""}`}
+          className="agent-activity-tool-card__section"
         >
           <pre className="agent-activity-tool-card__value">{detail.value}</pre>
         </div>
@@ -2331,27 +2558,67 @@ const TRACE_CATEGORY_ICONS: Record<ToolTraceCategory, ComponentType<SVGProps<SVG
   generic: Wand2
 };
 
-function TraceLine(props: { item: ActivityToolStepItem; t: Translate }) {
+/**
+ * Tool failures inside the process timeline are the agent's own trial-and-error
+ * (missing dependency, bad argument, then it adapts). They render neutrally and
+ * keep the raw error behind the expandable card; only a turn-level failure
+ * (AgentModelErrorNotice) is allowed to look like an alert.
+ */
+function visibleActivityFile(file: ActivityPreviewFile | null, text: string): ActivityPreviewFile | null {
+  if (!file || !text.includes(file.name)) return null;
+  return file;
+}
+
+function ActivityFileControl(props: {
+  file: ActivityPreviewFile | null;
+  className: string;
+  onOpen?: (file: ActivityPreviewFile) => void;
+  children: ReactNode;
+}) {
+  if (!props.file || !props.onOpen) {
+    return <span className={props.className}>{props.children}</span>;
+  }
+  const file = props.file;
+  return (
+    <button
+      type="button"
+      className={`agent-activity-file-link ${props.className}`}
+      title={file.path}
+      data-activity-file-path={file.path}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onOpen?.(file);
+      }}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+function TraceLine(props: { item: ActivityToolStepItem; t: Translate; onOpenActivityFile?: (file: ActivityPreviewFile) => void }) {
   void props.t;
-  const phase = props.item.event.phase;
-  const isError = phase === "error" && !props.item.recovered;
   const category = props.item.category;
   const Icon = TRACE_CATEGORY_ICONS[category] ?? Wand2;
+  const file = props.onOpenActivityFile
+    ? visibleActivityFile(activityPreviewFileFromToolEvent(props.item.event), props.item.detail)
+    : null;
   const summary = (
     <>
       <Icon size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />
       <div className="agent-activity-timeline-item__body">
         <p className="agent-activity-timeline-item__line">
           {props.item.verb ? <span className="agent-activity-timeline-item__verb">{props.item.verb}</span> : null}
-          {props.item.detail ? <span className="agent-activity-timeline-item__detail">{props.item.detail}</span> : null}
+          {props.item.detail ? (
+            <ActivityFileControl file={file} className="agent-activity-timeline-item__detail" onOpen={props.onOpenActivityFile}>
+              {props.item.detail}
+            </ActivityFileControl>
+          ) : null}
         </p>
-        {isError && props.item.event?.error != null && (
-          <p className="agent-activity-timeline-item__error">{formatToolDetailValue(props.item.event.error)}</p>
-        )}
       </div>
     </>
   );
-  const className = `agent-activity-timeline-item agent-activity-timeline-item--tool agent-activity-timeline-item--${category}${isError ? " agent-activity-timeline-item--error" : ""}`;
+  const className = `agent-activity-timeline-item agent-activity-timeline-item--tool agent-activity-timeline-item--${category}`;
   if (props.item.details.length > 0) {
     return (
       <details className={`${className} agent-activity-tool-details`}>
@@ -2370,7 +2637,7 @@ function TraceLine(props: { item: ActivityToolStepItem; t: Translate }) {
   );
 }
 
-function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
+function FileEditLine(props: { edit: AgentFileEdit; t: Translate; onOpenActivityFile?: (file: ActivityPreviewFile) => void }) {
   const status = props.edit.status ?? "editing";
   const isError = status === "error";
   const isDone = status === "done";
@@ -2387,11 +2654,17 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
   const deleted = props.edit.deleted ?? 0;
   const hasDiff = !isUnchanged && !props.edit.binary && (added > 0 || deleted > 0);
   return (
-    <div className={`agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit${isError ? " agent-activity-timeline-item--error" : ""}`}>
+    <div className="agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit">
       <Pencil size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />
       <div className="agent-activity-timeline-item__body">
         <p className="agent-activity-timeline-item__line">
-          <span className="agent-activity-timeline-item__verb">{props.t(labelKey, { item: target })}</span>
+          <ActivityFileControl
+            file={props.onOpenActivityFile ? visibleActivityFile(activityPreviewFileFromEdit(props.edit), props.t(labelKey, { item: target })) : null}
+            className="agent-activity-timeline-item__verb"
+            onOpen={props.onOpenActivityFile}
+          >
+            {props.t(labelKey, { item: target })}
+          </ActivityFileControl>
           {hasDiff ? (
             <span className="agent-activity-diff ml-2 inline-flex items-center gap-1 whitespace-nowrap font-normal tabular-nums">
               {added > 0 ? <span className="text-status-success">+{added}</span> : null}
@@ -2403,7 +2676,7 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
         <p className="agent-activity-timeline__status sr-only">
           {isUnchanged ? "unchanged" : `${status} · ${props.edit.binary ? "binary" : `+${added} / -${deleted}`}`}
         </p>
-        {props.edit.error && <p className="agent-activity-timeline-item__error">{props.edit.error}</p>}
+        {props.edit.error && <p className="agent-activity-timeline-item__note">{props.edit.error}</p>}
       </div>
     </div>
   );
@@ -2426,15 +2699,12 @@ interface ActivityToolStepItem {
   category: ToolTraceCategory;
   event: AgentToolProgressEvent;
   details: ActivityToolDetail[];
-  /** A later invocation of the same tool in this activity run completed successfully. */
-  recovered?: boolean;
   key: string;
 }
 
 interface ActivityToolDetail {
   label: string;
   value: string;
-  tone?: "error";
 }
 
 interface ActivityFileEditItem {
@@ -2502,46 +2772,7 @@ function buildActivitySegments(messages: AgentChatMessage[], t: Translate): Acti
       appendToolGroupSegment(segments, `${messageKey}:toolgroup`, items, t);
     }
   });
-  markRecoveredToolErrors(segments);
   return segments;
-}
-
-/** Keep raw failure details available on expansion, but do not present a successfully retried call as an active red error. */
-function markRecoveredToolErrors(segments: ActivitySegment[]): void {
-  const steps = segments.flatMap((segment) => segment.type === "toolGroup"
-    ? segment.items.filter((item): item is ActivityToolStepItem => item.type === "toolStep")
-    : []);
-  steps.forEach((step, index) => {
-    if (step.event.phase !== "error") return;
-    const name = toolEventName(step.event);
-    if (!name) return;
-    step.recovered = steps.slice(index + 1).some((candidate) => (
-      toolEventName(candidate.event) === name && toolEventSucceededForDisplay(candidate.event)
-    ));
-  });
-}
-
-function toolEventSucceededForDisplay(event: AgentToolProgressEvent): boolean {
-  if (event.phase !== "end" || event.error != null) return false;
-  if (typeof event.result === "string") {
-    const result = event.result.trim();
-    if (/^(?:error|plugin_invalid|invalid|failed|failure)\s*:/iu.test(result)) return false;
-    if (result.startsWith("{")) {
-      try {
-        const parsed: unknown = JSON.parse(result);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          const record = parsed as Record<string, unknown>;
-          if (record.ok === false || record.success === false || record.error) return false;
-        }
-      } catch {
-        // A non-JSON textual result may still represent a successful tool response.
-      }
-    }
-  } else if (event.result && typeof event.result === "object" && !Array.isArray(event.result)) {
-    const record = event.result as Record<string, unknown>;
-    if (record.ok === false || record.success === false || record.error) return false;
-  }
-  return true;
 }
 
 function appendToolGroupSegment(
@@ -2802,7 +3033,8 @@ function summarizeKnownLegacyTraceSummary(line: string): { summary: ToolTraceSum
   for (const matcher of matchers) {
     const match = matcher.pattern.exec(line);
     if (!match) continue;
-    const detail = collapseActivityWhitespace(match[1] ?? "");
+    const rawDetail = collapseActivityWhitespace(match[1] ?? "");
+    const detail = matcher.toolName === "list_dir" ? readableListedDirectory(rawDetail) : rawDetail;
     const summaryLine = detail ? `${matcher.verb} ${detail}` : matcher.verb;
     return {
       summary: { line: summaryLine, verb: matcher.verb, detail, category: matcher.category, toolName: matcher.toolName },
@@ -2812,6 +3044,14 @@ function summarizeKnownLegacyTraceSummary(line: string): { summary: ToolTraceSum
     };
   }
   return null;
+}
+
+function readableListedDirectory(detail: string): string {
+  const trimmed = detail.trim();
+  if (trimmed === "." || trimmed === "./" || trimmed === ".\\") {
+    return "current directory";
+  }
+  return detail;
 }
 
 function parseLegacyTraceArguments(raw: string): unknown {
@@ -2831,7 +3071,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   appendToolDetailRow(rows, "Result", event.result);
   appendToolDetailRow(rows, "Files", event.files);
   appendToolDetailRow(rows, "Embeds", event.embeds);
-  appendToolDetailRow(rows, "Error", event.error, "error");
+  appendToolDetailRow(rows, "Error", event.error);
   const trace = legacyLine?.trim();
   if (trace && trace !== summaryLine) {
     rows.push({ label: "Trace", value: truncateToolDetailValue(trace) });
@@ -2839,7 +3079,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   return rows;
 }
 
-function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: unknown, tone?: ActivityToolDetail["tone"]): void {
+function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: unknown): void {
   if (value == null) {
     return;
   }
@@ -2853,7 +3093,7 @@ function appendToolDetailRow(rows: ActivityToolDetail[], label: string, value: u
   if (!formatted.trim()) {
     return;
   }
-  rows.push({ label, value: formatted, tone });
+  rows.push({ label, value: formatted });
 }
 
 function toolEventFallbackLine(event: AgentToolProgressEvent): string {

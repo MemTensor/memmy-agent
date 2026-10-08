@@ -1,0 +1,11 @@
+.memmy-browser-use-policies-add { display: flex; gap: 8px; align-items: center; margin: 12px 0 4px; }
+.memmy-browser-use-policies-add input { flex: 1; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--color-border-stone, #ddd); border-radius: 8px; background: transparent; }
+.memmy-browser-use-policies-add button { flex: none; height: 32px; padding: 0 12px; border-radius: 8px; }
+.memmy-browser-use-policies-list { display: flex; flex-direction: column; }
+.memmy-browser-use-policies-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--color-border-stone, #ddd); }
+.memmy-browser-use-policies-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.memmy-browser-use-policies-card__head strong { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.memmy-browser-use-policies-card__head button { flex: none; height: 28px; padding: 0 8px; border-radius: 8px; }
+.memmy-browser-use-policies-card__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.memmy-browser-settings .memmy-browser-use-policies-card__grid label { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px; min-height: 0; padding: 0; border: 0; font-size: 12px; color: var(--color-text-secondary, #777); }
+.memmy-browser-use-policies-card__grid select { width: 100%; max-width: none; }

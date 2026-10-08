@@ -295,6 +295,42 @@ describe("webui transcript replay", () => {
     expect(messages[1].activitySegmentId).toBe(messages[2].activitySegmentId);
   });
 
+  it("does not strand an answer prefix when reasoning interleaves with content", () => {
+    const draft = "The document is complete and consistent. Let me finalize the deliverable.";
+    const messages = replayTranscriptToUiMessages([
+      { event: "user", chat_id: "t-interleaved", text: "q", turn_id: "turn-interleaved" },
+      { event: "reasoning_delta", chat_id: "t-interleaved", text: "Let me final", turn_id: "turn-interleaved" },
+      { event: "reasoning_end", chat_id: "t-interleaved", turn_id: "turn-interleaved" },
+      { event: "delta", chat_id: "t-interleaved", text: "The", turn_id: "turn-interleaved" },
+      { event: "reasoning_delta", chat_id: "t-interleaved", text: "ize.", turn_id: "turn-interleaved" },
+      { event: "reasoning_end", chat_id: "t-interleaved", turn_id: "turn-interleaved" },
+      { event: "delta", chat_id: "t-interleaved", text: " document is complete and consistent. Let me finalize the deliverable.", turn_id: "turn-interleaved" },
+      { event: "stream_end", chat_id: "t-interleaved", text: draft, resuming: true, turn_id: "turn-interleaved" },
+      {
+        event: "message",
+        chat_id: "t-interleaved",
+        kind: "progress",
+        turn_id: "turn-interleaved",
+        tool_events: [{ phase: "end", call_id: "call-finalize", name: "exec", arguments: { command: "finalize" } }],
+      },
+      { event: "message", chat_id: "t-interleaved", text: "报告已完成。", turn_id: "turn-interleaved" },
+      { event: "turn_end", chat_id: "t-interleaved", turn_id: "turn-interleaved" },
+    ]);
+
+    expect(messages.map((message) => [message.role, message.kind ?? "message"])).toEqual([
+      ["user", "message"],
+      ["assistant", "message"],
+      ["assistant", "narration"],
+      ["tool", "trace"],
+      ["assistant", "message"],
+    ]);
+    expect(messages[1]).toMatchObject({ content: "", reasoning: "Let me finalize." });
+    expect(messages[2]).toMatchObject({ kind: "narration", content: draft });
+    expect(messages.filter((message) => message.role === "assistant" && message.kind !== "narration").map((message) => message.content))
+      .toEqual(["", "报告已完成。"]);
+    expect(messages.some((message) => message.content === "The")).toBe(false);
+  });
+
   it("keeps every resuming draft verbatim as narration without duplicating answers", () => {
     const draft1 = "任务：**「Memmy 技能图鉴」**\n\n## 第 1 轮 — 扫描\n\n先读取技能。";
     const draft2 = "任务：**「Memmy 技能图鉴」**\n\n## 第 1 轮 — 扫描（完成）\n\n## 第 2 轮 — 设计\n\n开始生成图片。";
@@ -442,6 +478,18 @@ describe("webui transcript replay", () => {
 
     expect(messages[0]).toMatchObject({ role: "user", content: "q", createdAt: Date.parse("2026-06-19T08:07:00.000Z") });
     expect(messages[1]).toMatchObject({ role: "assistant", content: "a", createdAt: Date.parse("2026-06-19T08:07:03.000Z") });
+  });
+
+  it("stamps the assistant reply with the turn end time", () => {
+    const messages = replayTranscriptToUiMessages([
+      { event: "user", chat_id: "t-finished-at", text: "q", createdAt: "2026-09-24T02:20:00.000Z" },
+      { event: "delta", chat_id: "t-finished-at", text: "答", createdAt: "2026-09-24T02:20:05.000Z" },
+      { event: "stream_end", chat_id: "t-finished-at", text: "答案", createdAt: "2026-09-24T02:21:00.000Z" },
+      { event: "turn_end", chat_id: "t-finished-at", createdAt: "2026-09-24T02:21:30.000Z" },
+    ]);
+
+    expect(messages[0]).toMatchObject({ role: "user", createdAt: Date.parse("2026-09-24T02:20:00.000Z") });
+    expect(messages[1]).toMatchObject({ role: "assistant", content: "答案", createdAt: Date.parse("2026-09-24T02:21:30.000Z") });
   });
 
   it("prefers canonical transcript event times over stale session message times", () => {

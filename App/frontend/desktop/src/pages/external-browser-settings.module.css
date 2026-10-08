@@ -1,0 +1,46 @@
+.section { border-top: 1px solid var(--color-border, #e5e5e8); overflow: hidden; }
+.browser + .browser { border-top: 1px solid var(--color-border, #e5e5e8); }
+.browserIcon { width: 32px; height: 32px; flex: none; object-fit: contain; }
+.row { display: flex; align-items: center; gap: 16px; padding: 16px 24px; }
+.browserCopy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.browserCopy strong { font-size: 14px; }
+.browserCopy small { overflow: hidden; color: #73777f; text-overflow: ellipsis; white-space: nowrap; }
+.statusDot { display: inline-block; width: 7px; height: 7px; margin: 0 6px 1px 0; border-radius: 50%; background: #e63946; }
+.badge { color: #73777f; font-size: 12px; white-space: nowrap; }
+.setupButton, .guide button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #d7d9df; border-radius: 8px; padding: 7px 10px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.setupButton { flex: none; }
+.primaryButton { flex: none; border: 0; border-radius: 8px; padding: 8px 11px; background: #3478f6; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+.primaryButton:disabled { opacity: .55; cursor: default; }
+.preparationStatus { margin: 0; padding: 0 24px 12px 62px; color: #475569; font-size: 12px; line-height: 1.5; }
+.consent { margin: 0 24px 12px 62px; padding: 11px 13px; border: 1px solid #cbd5e1; border-radius: 9px; background: #f8fafc; font-size: 12px; line-height: 1.5; }
+.consent p { margin: 0 0 7px; }
+.consent button { border: 1px solid #d7d9df; border-radius: 7px; padding: 6px 10px; background: #fff; color: inherit; font: inherit; cursor: pointer; }
+.consent button:first-child { border-color: #3478f6; background: #3478f6; color: #fff; }
+.setupButton svg { transition: transform .15s ease; }
+.chevronOpen { transform: rotate(180deg); }
+.guide { padding: 4px 24px 18px 62px; font-size: 12px; line-height: 1.55; }
+.guide > strong { font-size: 13px; }
+.guide > p { margin: 5px 0 10px; color: #73777f; }
+.guide ol { display: grid; gap: 10px; margin: 0; padding-left: 18px; }
+.guide li { padding-left: 3px; }
+.guideActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 5px; }
+.guideActions code, .pairing code { border-radius: 6px; padding: 5px 7px; background: rgba(90, 110, 130, .08); font-size: 11px; user-select: all; }
+.path { max-width: min(100%, 480px); overflow-wrap: anywhere; }
+.folderButton { margin-top: 6px; }
+.pairing { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 24px 16px 62px; font-size: 12px; }
+.pairing > p { flex-basis: 100%; margin: 0; color: #73777f; }
+.pairing > span { color: #73777f; }
+.pairing > small, .missing { display: block; color: #b04b37; }
+.guide button:disabled { opacity: .55; cursor: default; }
+.error { padding: 0 24px 10px; color: #c33; }
+.moreBrowsers { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 0; border-top: 1px solid var(--color-border, #e5e5e8); padding: 14px 24px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.moreBrowsers svg { transition: transform .15s ease; }
+@media (max-width: 700px) {
+  .row { flex-wrap: wrap; gap: 9px; padding: 14px 18px; }
+  .browserCopy { flex-basis: calc(100% - 35px); }
+  .badge { margin-left: 31px; }
+  .guide { padding: 4px 18px 16px 27px; }
+  .pairing { padding: 0 18px 16px 27px; }
+  .preparationStatus { padding: 0 18px 12px 27px; }
+  .consent { margin: 0 18px 12px 27px; }
+}

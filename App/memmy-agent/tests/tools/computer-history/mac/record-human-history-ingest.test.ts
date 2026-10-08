@@ -13,7 +13,7 @@ const helper = vi.hoisted(() => ({
   onCommand: undefined as ((command: string, args: string[]) => void) | undefined,
 }));
 vi.mock("../../../../src/tools/computer-history/mac/native-helper.js", () => ({
-  ensureNativeHistoryHelper: async () => "/fixture/human-recorder",
+  historyNativeCommand: async () => ({ binary: "/fixture/human-recorder", args: [], managed: false }),
 }));
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
@@ -108,19 +108,20 @@ test("persists startup fullTree and every diff across input bursts and shortcuts
   assert.equal(events.find((event) => event.eventType === "recording_started").ax.mode, "fullTree");
 });
 
-test("filters startup and incremental AX before persistence, including unknown website context", async () => {
+test("drops an excluded website and still persists a browser event whose address is unreadable", async () => {
   const browser = { ...app, bundleIdentifier: "com.google.Chrome" };
   helper.events = [
     { kind: "session.started", app: browser, window: { url: "https://bank.com" }, ax: full },
     { kind: "keyboard.text_input", app: browser, window: { url: "https://bank.com" }, keyboard: { text: "x" }, ax: firstTree },
-    { kind: "keyboard.shortcut", app: browser, window: {}, keyboard: { keyEquivalent: "c", modifiers: ["cmd"] }, ax: secondTree },
-    { kind: "mouse.click", app: browser, window: { url: "https://example.com" }, ax: thirdTree },
+    { kind: "keyboard.shortcut", app: browser, window: { browser: true }, keyboard: { keyEquivalent: "c", modifiers: ["cmd"] }, ax: secondTree },
+    { kind: "mouse.click", app: browser, window: { browser: true, url: "https://example.com" }, ax: thirdTree },
   ];
   const events = await record({ observation: {
     defaultApplicationBehavior: "observe", defaultURLBehavior: "observe",
     rules: [{ scope: "url", urlDomain: "bank.com", behavior: "do_not_observe" }],
   } });
-  assert.deepEqual(events.filter((event) => event.ax).map((event) => event.ax), [thirdTree]);
+  assert.deepEqual(events.filter((event) => event.ax).map((event) => event.ax), [secondTree, third]);
+  assert.equal(events.filter((event) => event.eventType === "key_press").length, 1);
   assert.deepEqual(events.filter((event) => event.eventType === "page_context").map((event) => event.details.url), ["https://example.com"]);
 });
 

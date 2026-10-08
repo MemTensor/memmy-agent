@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Memmy",
+  "version": "1.0.0",
+  "description": "安装后，Memmy 可以操作这个浏览器中的普通网页。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt0jm/UQuIQzc9Xzbrvf5hXxcfwGtmwOMGXKoVwabx6Pmqf+YdOW6FfUzddV/EjuU4XEa7Zll/Ninwd/e38jAPkOSQ8HXgPQZG5+Qzpe73Npzsl7ika1yUgOpHW7GpYQzIOTc+MytgtNjtXd/XKbt7KUHjdFOVobazge7HQgNRr8rTOjV/2H68Y8pxndbJFF4vVwlrwsTNDT9CEHn2P9DUpBF2ja5JOvq7KThidTrXmJ2+OUTervLQqiwSOIcOqawIipTLc2v+B7r6cYNELEh+WB/CZXR3exzbkiAlUdAFK23HghHxV3G7Rr+7dwJHDfE5rYgxyElq0LbPFasvgijqQIDAQAB",
+  "permissions": ["tabs", "debugger", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Memmy", "default_popup": "popup.html" },
+  "minimum_chrome_version": "116"
+}

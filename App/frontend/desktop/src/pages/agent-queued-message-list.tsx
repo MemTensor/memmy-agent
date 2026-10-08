@@ -1,6 +1,6 @@
 /** Queued WebUI message list displayed above the chat composer. */
 import { useEffect, useRef } from "react";
-import { CornerDownRight, MessageSquarePlus, Monitor, SquareTerminal, Trash2 } from "lucide-react";
+import { MessageSquarePlus, Monitor, Pencil, SquareTerminal, Trash2 } from "lucide-react";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
 import { Tooltip } from "../components/tooltip.js";
 import {
@@ -13,6 +13,7 @@ export interface AgentQueuedMessageListProps {
   items: AgentQueuedMessage[];
   label: string;
   removeLabel: string;
+  editLabel: string;
   steerLabel: string;
   canSteer: boolean;
   attachmentOnlyLabel: (count: number) => string;
@@ -23,7 +24,33 @@ export interface AgentQueuedMessageListProps {
     unknownIm: string;
   };
   onRemove: (clientRequestId: string) => void;
+  onEdit: (clientRequestId: string) => void;
   onSteer: (clientRequestId: string) => void;
+}
+
+export type QueuedComposerEditDecision = "restore" | "blocked" | "ignore";
+
+export function canEditQueuedMessage(
+  item: Pick<AgentQueuedMessage, "source" | "media" | "content">
+): boolean {
+  return item.source.kind === "gui"
+    && item.media.length === 0
+    && item.content.trim().length > 0
+    && !item.content.trimStart().startsWith("/");
+}
+
+export function queuedComposerEditDecision(input: {
+  item: Pick<AgentQueuedMessage, "source" | "media" | "content" | "status"> | null;
+  composerDraft: string;
+  pendingAttachmentCount: number;
+}): QueuedComposerEditDecision {
+  if (!input.item || input.item.status !== "queued" || !canEditQueuedMessage(input.item)) {
+    return "ignore";
+  }
+  if (input.composerDraft.length > 0 || input.pendingAttachmentCount > 0) {
+    return "blocked";
+  }
+  return "restore";
 }
 
 function queueSourceLabel(
@@ -82,19 +109,22 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
           const showSteer = item.queueSurface === "chat_composer"
             && item.source.kind === "gui"
             && !item.content.trimStart().startsWith("/");
+          const showEdit = canEditQueuedMessage(item);
+          const showSource = item.source.kind !== "gui";
           const sourceLabel = queueSourceLabel(item, props.sourceLabels);
           return (
             <li className="agent-queue-item" key={item.clientRequestId}>
-              <CornerDownRight className="agent-queue-item__icon" size={14} aria-hidden="true" />
-              <Tooltip content={sourceLabel}>
-                <span
-                  className="agent-queue-item__source"
-                  role="img"
-                  aria-label={sourceLabel}
-                >
-                  <QueueSourceIcon item={item} />
-                </span>
-              </Tooltip>
+              {showSource ? (
+                <Tooltip content={sourceLabel}>
+                  <span
+                    className="agent-queue-item__source"
+                    role="img"
+                    aria-label={sourceLabel}
+                  >
+                    <QueueSourceIcon item={item} />
+                  </span>
+                </Tooltip>
+              ) : null}
               <OverflowTooltipText className="agent-queue-item__text" text={text} />
               {showSteer ? (
                 <Tooltip content={props.steerLabel}>
@@ -106,7 +136,19 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
                     onClick={() => props.onSteer(item.clientRequestId)}
                   >
                     <MessageSquarePlus size={14} aria-hidden="true" />
-                    <span>{props.steerLabel}</span>
+                  </button>
+                </Tooltip>
+              ) : null}
+              {showEdit ? (
+                <Tooltip content={props.editLabel}>
+                  <button
+                    type="button"
+                    className="agent-queue-item__edit"
+                    aria-label={props.editLabel}
+                    disabled={controlPending}
+                    onClick={() => props.onEdit(item.clientRequestId)}
+                  >
+                    <Pencil size={14} aria-hidden="true" />
                   </button>
                 </Tooltip>
               ) : null}

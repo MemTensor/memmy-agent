@@ -11,13 +11,15 @@ const success = { content: [{ type: 'text', text: 'App=com.example.Memmy (pid 42
 const denied = { isError: true, content: [{ type: 'text', text: 'Accessibility permission is required. Run `open-computer-use doctor`.' }] };
 const turn = (messageId: string) => new RequestContext({ messageId, sessionKey: 'chat' });
 
-it('requires the actual parent identity and an image, never trusting page text as permission errors', () => {
+it('requires the actual parent identity and only requires an image for a screenshot check', () => {
   expect(permissionFromSelfProbe(success, target)).toEqual({ state: 'granted' });
   expect(permissionFromSelfProbe(denied, target)).toEqual({ state: 'missing', permission: 'accessibility' });
   expect(permissionFromSelfProbe({ ...denied, isError: false }, target)).toEqual({ state: 'unknown', reason: 'probeFailed' });
   expect(permissionFromSelfProbe(success, { ...target, pid: 43 })).toEqual({ state: 'unknown', reason: 'probeFailed' });
-  expect(permissionFromSelfProbe({ content: [success.content[0]] }, target)).toEqual({ state: 'unknown', reason: 'screenCaptureUnavailable' });
-  expect(permissionFromSelfProbe({ content: [success.content[0], { ...image, data: 'x'.repeat(44) }] }, target).state).toBe('unknown');
+  expect(permissionFromSelfProbe({ content: [success.content[0]] }, target)).toEqual({ state: 'granted' });
+  expect(permissionFromSelfProbe({ content: [success.content[0]] }, target, true)).toEqual({ state: 'unknown', reason: 'screenCaptureUnavailable' });
+  expect(permissionFromSelfProbe({ content: [success.content[0], { ...image, data: 'x'.repeat(44) }] }, target, true).state).toBe('unknown');
+  expect(permissionFromSelfProbe(success, target, true)).toEqual({ state: 'granted' });
   expect(permissionFromSelfProbe({ content: [{ type: 'text', text: 'App=other (pid 9)\nApp=com.example.Memmy (pid 42)' }, image] }, target).state).toBe('unknown');
 });
 
@@ -26,31 +28,33 @@ it('probes only the parent window, discards its content, and aborts without prob
   const desktop = { prepare: vi.fn().mockResolvedValue(target) };
   expect(await probeNativePermissions(session, null, desktop)).toEqual({ state: 'granted' });
   expect(session.callTool).toHaveBeenCalledExactlyOnceWith('get_app_state', { app: target.app, max_tree_nodes: 1, max_tree_depth: 1 }, 12);
+  expect(await probeNativePermissions(session, null, desktop, true)).toEqual({ state: 'granted' });
+  expect(session.callTool).toHaveBeenLastCalledWith('get_app_state', { app: target.app, max_tree_nodes: 1, max_tree_depth: 1, require_screenshot: true }, 12);
   desktop.prepare.mockResolvedValue(null);
   expect(await probeNativePermissions(session, null, desktop)).toMatchObject({ reason: 'desktopUnavailable' });
   const abort = new AbortController(); abort.abort(); desktop.prepare.mockResolvedValue(target);
   expect(await probeNativePermissions(session, abort.signal, desktop)).toMatchObject({ reason: 'desktopUnavailable' });
-  expect(session.callTool).toHaveBeenCalledOnce();
+  expect(session.callTool).toHaveBeenCalledTimes(2);
 });
 
-it('blocks the target until a NEW message verifies access; no doctor, target replay, or probe data in model result', async () => {
+it('guides after target denial and never replays that call in the same message', async () => {
   let allowed = false;
   const calls: string[] = [];
   const connect = async () => ({ close: async () => {}, session: {
     listTools: async () => ({ tools: [...OCU_TOOLS].map(name => ({ name, inputSchema: {} })) }), ping: async () => {},
     callTool: async (_tool: string, args: any) => {
       calls.push(args.app);
-      return args.app === target.app ? allowed ? success : denied : { content: [{ type: 'text', text: 'Notes result' }] };
+      return allowed ? { content: [{ type: 'text', text: 'Notes result' }] } : denied;
     },
   } });
   const guide = vi.fn().mockResolvedValue(undefined);
   const owner = new ManagedOcuSession(connect, (session, signal) => probeNativePermissions(session, signal, { prepare: async () => target }), guide);
-  await expect(owner.invoke('get_app_state', { app: 'Notes' }, 30, turn('1'))).rejects.toBeInstanceOf(OcuBlocked);
+  await expect(owner.invoke('get_app_state', { app: 'Notes' }, 30, turn('1'))).resolves.toEqual(denied);
   allowed = true;
   await expect(owner.invoke('get_app_state', { app: 'Notes' }, 30, turn('1'))).rejects.toBeInstanceOf(OcuBlocked);
-  expect(calls).toEqual([target.app]); expect(guide).toHaveBeenCalledOnce();
+  expect(calls).toEqual(['Notes']); expect(guide).toHaveBeenCalledOnce();
   expect(await owner.invoke('get_app_state', { app: 'Notes' }, 30, turn('2'))).toEqual({ content: [{ type: 'text', text: 'Notes result' }] });
-  expect(calls).toEqual([target.app, target.app, 'Notes']); expect(guide).toHaveBeenCalledOnce();
+  expect(calls).toEqual(['Notes', 'Notes']); expect(guide).toHaveBeenCalledOnce();
   await owner.close();
 });
 

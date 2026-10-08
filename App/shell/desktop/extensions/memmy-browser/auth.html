@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memmy secure sign-in</title><style>
+body{font:14px system-ui,sans-serif;color:#17212b;padding:24px;margin:0;background:#fff}
+h1{font-size:20px;margin:0 0 8px}p{line-height:1.5;color:#485565}.site{font-weight:600;overflow-wrap:anywhere}
+label.field{display:block;margin:14px 0}label.field span{display:block;margin-bottom:5px}
+input,select{box-sizing:border-box;width:100%;padding:9px;font:inherit;border:1px solid #aaa;border-radius:6px}
+.buttons{display:flex;gap:12px;justify-content:flex-end;margin-top:24px}button{padding:9px 16px;font:inherit}
+#status{color:#b42318}
+</style></head><body>
+<h1>Sign in to this website</h1>
+<p>Memmy will enter these values only in the connected browser tab. The assistant receives only a status.</p>
+<p id="site" class="site"></p>
+<form id="auth"><div id="controls"></div><div class="buttons">
+<button type="button" id="cancel">Cancel</button><button type="submit">Continue</button></div></form>
+<p id="status" role="status"></p><script src="auth.js"></script></body></html>

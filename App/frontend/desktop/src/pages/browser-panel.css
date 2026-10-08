@@ -1,0 +1,17 @@
+.memmy-browser-panel .memmy-browser-webview {
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
+}
+
+.memmy-browser-loading {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 92%);
+  color: #555;
+  font-size: 11px;
+  pointer-events: none;
+}

@@ -67,15 +67,15 @@ function currentCatalog() {
 }
 
 describe("runtime config migration boundary", () => {
-  it("persists the default Open Computer Use MCP server for a new CLI config", () => {
+  it("persists the default Memmy Computer Use MCP server for a new CLI config", () => {
     const file = configFile();
     saveConfig(new Config(), file);
-    expect(YAML.parse(fs.readFileSync(file, "utf8")).tools.mcpServers.open_computer_use).toMatchObject({
+    expect(YAML.parse(fs.readFileSync(file, "utf8")).tools.mcpServers.memmy_computer_use).toMatchObject({
       type: "stdio",
       command: "open-computer-use",
       args: ["mcp"],
     });
-    expect(loadConfig(file).tools.mcpServers.open_computer_use.command).toBe("open-computer-use");
+    expect(loadConfig(file).tools.mcpServers.memmy_computer_use.command).toBe("open-computer-use");
   });
 
   it("preserves explicit MCP maps, including an empty map after removal", () => {

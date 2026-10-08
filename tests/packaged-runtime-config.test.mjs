@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createPackage } from "@electron/asar";
+import { createPackageWithOptions } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   normalizePublicCloudService,
@@ -364,6 +364,29 @@ describe("packaged desktop runtime configuration", () => {
     expect(staleAgent.stderr).toContain("dist/runtime/memmy-agent/package.json");
   });
 
+  it("verifies standalone Windows Memory outside the ASAR", async () => {
+    const root = fixtureRoot();
+    const memoryRoot = join(root, "memory-resource");
+    const asar = await createAsarFixture(root, "external-memory", "1.1.8", false, true, [], "win32", "complete", "2.1.3", "1.1.8", false);
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "internal", "shared", "verify-packaged-asar.mjs");
+    writeFixtureJson(join(memoryRoot, "package.json"), { version: "2.1.3" });
+    writeFixtureJson(join(memoryRoot, "node_modules/@memmy/agent-source-core/package.json"), { version: "0.0.0" });
+    const core = join(memoryRoot, "node_modules/@memmy/agent-source-core/dist/src/index.js");
+    mkdirSync(dirname(core), { recursive: true });
+    writeFileSync(core, "export {};\n");
+    const onnx = join(memoryRoot, "node_modules/onnxruntime-node/bin/napi-v3/win32/x64");
+    mkdirSync(onnx, { recursive: true });
+    writeFileSync(join(onnx, "onnxruntime_binding.node"), "win-x64-node");
+    writeFileSync(join(onnx, "onnxruntime.dll"), "win-x64-dll");
+    const args = [verifier, ...verifierArgs(asar, "1.1.8", "win32", "x64", "2.1.3"), "--memory-root", memoryRoot];
+    const valid = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(valid.status, valid.stderr).toBe(0);
+    writeFixtureJson(join(memoryRoot, "package.json"), { version: "2.1.2" });
+    const stale = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(stale.status).not.toBe(0);
+    expect(stale.stderr).toContain("Packaged Memory resource version");
+  });
+
   it("fails closed on ASAR env files and stale embedded versions", async () => {
     const root = fixtureRoot();
     const verifier = join(
@@ -534,6 +557,7 @@ async function createAsarFixture(
   agentSourceCoreFixture = "complete",
   memoryVersion = version,
   agentVersion = version,
+  memoryInAsar = true,
 ) {
   const source = join(root, `${name}-source`);
   const asar = join(root, `${name}.asar`);
@@ -542,7 +566,12 @@ async function createAsarFixture(
   writeFixtureJson(join(source, "dist/main/desktop-edition.json"), {
     cloudService: "https://manifest.example.test",
   });
+  const renderer = join(source, "dist/renderer");
+  mkdirSync(join(renderer, "assets"), { recursive: true });
+  writeFileSync(join(renderer, "index.html"), '<script type="module" src="./assets/main.js"></script>\n');
+  writeFileSync(join(renderer, "assets/main.js"), "export {};\n");
   for (const component of ["memory", "memmy-agent"]) {
+    if (component === "memory" && !memoryInAsar) continue;
     const componentVersion = component === "memory" ? memoryVersion : agentVersion;
     const componentManifest = { version: componentVersion };
     const componentLock = { version: componentVersion, packages: { "": { version: componentVersion } } };
@@ -559,10 +588,28 @@ async function createAsarFixture(
   mkdirSync(dirname(knowledge), { recursive: true });
   writeFileSync(knowledge, "export {};\n");
   if (platform === "win32") {
+    for (const relativePath of [
+      "dist/main/browser-sidebar-bridge.js",
+      "dist/main/browser-history-store.js",
+      "dist/main/browser-download-catalog.js",
+      "dist/main/browser-site-permissions.js",
+      "dist/main/browser-access-store.js",
+      "dist/main/browser-download-settings.js",
+      "dist/main/browser-autofill-vault.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-profile.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-downloads.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-site-permissions.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-access-approval.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-window-visibility.js",
+    ]) {
+      const target = join(source, relativePath);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, "export {};\n");
+    }
     const ownSourceMap = join(source, "dist/runtime/memmy-agent/dist/main.js.map");
     mkdirSync(dirname(ownSourceMap), { recursive: true });
     writeFileSync(ownSourceMap, "own-production-map\n");
-    if (agentSourceCoreFixture === "complete") {
+    if (memoryInAsar && agentSourceCoreFixture === "complete") {
       const agentSourceCore = join(
         source,
         "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
@@ -570,7 +617,7 @@ async function createAsarFixture(
       mkdirSync(dirname(agentSourceCore), { recursive: true });
       writeFileSync(agentSourceCore, "export {};\n");
     }
-    if (agentSourceCoreFixture !== "missing") {
+    if (memoryInAsar && agentSourceCoreFixture !== "missing") {
       writeFixtureJson(
         join(source, "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json"),
         {
@@ -583,10 +630,12 @@ async function createAsarFixture(
     }
   }
   const targetArch = platform === "darwin" ? "arm64" : "x64";
-  const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
-  mkdirSync(onnxRuntimeRoot, { recursive: true });
-  writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
-  if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
+  if (memoryInAsar) {
+    const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
+    mkdirSync(onnxRuntimeRoot, { recursive: true });
+    writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
+    if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
+  }
   const lifecycleSidecar = join(
     source,
     "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
@@ -599,7 +648,7 @@ async function createAsarFixture(
     writeFileSync(targetPath, contents);
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
-  await createPackage(source, asar);
+  await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer" });
   return asar;
 }
 

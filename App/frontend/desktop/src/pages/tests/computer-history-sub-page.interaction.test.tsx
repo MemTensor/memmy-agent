@@ -1,5 +1,8 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,16 +10,22 @@ import type {
   ComputerHistorySnapshot,
   MemmyAgentClient
 } from "../../api/memmy-agent-client.js";
+import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { saveHistoryPermissionSetup, readHistoryPermissionSetup } from "../memory/computer-history-permission-state.js";
 import { ComputerHistorySubPage } from "../memory/computer-history-sub-page.js";
+import { hasComputerHistoryLaunchEnable, requestComputerHistoryLaunchEnable } from "../../app/computer-history-launch-intent.js";
 
 // The page reads its copy from the catalog, so it only renders inside a
 // provider; these assertions read the zh-CN catalog the app defaults to.
-function page(client: MemmyAgentClient, quotaExhausted = false) {
+function page(client: MemmyAgentClient, quotaExhausted = false, actions: {
+  memoryClient?: MemoryRuntimeClient | null;
+  onOpenSkill?: (skillId: string) => void;
+  onOpenMemory?: (memoryId: string) => void;
+} = {}) {
   return (
     <I18nProvider language="zh-CN">
-      <ComputerHistorySubPage client={client} quotaExhausted={quotaExhausted} />
+      <ComputerHistorySubPage client={client} quotaExhausted={quotaExhausted} {...actions} />
     </I18nProvider>
   );
 }
@@ -29,6 +38,7 @@ describe("ComputerHistorySubPage", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -41,9 +51,18 @@ describe("ComputerHistorySubPage", () => {
     vi.useRealTimers();
   });
 
-  const renderWith = async (initial: ComputerHistorySnapshot, overrides: Partial<MemmyAgentClient> = {}) => {
+  const renderWith = async (initial: ComputerHistorySnapshot, overrides: Partial<MemmyAgentClient> = {}, actions: {
+    memoryClient?: MemoryRuntimeClient | null;
+    onOpenSkill?: (skillId: string) => void;
+    onOpenMemory?: (memoryId: string) => void;
+  } = {}) => {
     const client = {
       getComputerHistory: vi.fn().mockResolvedValue(initial),
+      getComputerHistorySettings: vi.fn().mockResolvedValue({ observation: {
+        defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [],
+      } }),
+      updateComputerHistorySettings: vi.fn().mockImplementation(async (settings) => settings),
+      listComputerHistoryApplications: vi.fn().mockResolvedValue([]),
       deleteComputerHistory: vi.fn().mockResolvedValue(initial),
       clearComputerHistories: vi.fn().mockResolvedValue(initial),
       startComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
@@ -51,14 +70,411 @@ describe("ComputerHistorySubPage", () => {
       resumeComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
       stopComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
       pinComputerHistory: vi.fn().mockResolvedValue(initial),
+      setComputerHistoryWeChatAccess: vi.fn().mockResolvedValue(initial),
+      connectComputerHistoryWeChat: vi.fn().mockResolvedValue(initial),
       getApplicationIcon: vi.fn().mockResolvedValue(null),
       ...overrides,
     } as unknown as MemmyAgentClient;
     await act(async () => {
-      root.render(page(client));
+      root.render(page(client, false, actions));
     });
     return client;
   };
+
+  it("routes the announcement's enable request through the normal confirmation", async () => {
+    requestComputerHistoryLaunchEnable(window.sessionStorage);
+    const client = await renderWith(snapshot());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("开启电脑历史记录？");
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(hasComputerHistoryLaunchEnable(window.sessionStorage)).toBe(false);
+    await confirmStart();
+    expect(client.startComputerHistoryObservation).toHaveBeenCalledOnce();
+  });
+
+  it("uses the same introduction on an empty, stopped History page", async () => {
+    const client = await renderWith(snapshot({ histories: [], workflows: [] }));
+    expect(container.querySelector(".ch__intro .history-launch-card")).not.toBeNull();
+    expect(container.textContent).toContain("我感觉好像忘记了什么事情");
+    expect(container.textContent).toContain("可能包括 工作IM如钉钉、个人IM如微信 等通信内容");
+    expect(container.querySelector(".ch__head")).toBeNull();
+    expect(container.querySelector(".ch__feed")).toBeNull();
+    expect(container.textContent).not.toContain("还没有记录");
+    expect(container.querySelector(".ch__settings-card")).toBeNull();
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>(".ch__intro .history-launch-primary")!.click());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("开启电脑历史记录？");
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+  });
+
+  it("saves a custom app scope before starting and leaves Memory sync unchanged", async () => {
+    const settings = { memory: { syncEnabled: true }, observation: {
+      defaultApplicationBehavior: "observe" as const, defaultURLBehavior: "observe" as const, rules: [],
+    } };
+    const updateComputerHistorySettings = vi.fn().mockImplementation(async (value) => value);
+    const client = await renderWith(snapshot(), {
+      getComputerHistorySettings: vi.fn().mockResolvedValue(settings),
+      updateComputerHistorySettings,
+      listComputerHistoryApplications: vi.fn().mockResolvedValue([{ bundleId: "com.example.Writer", name: "Example Writer" }]),
+    });
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => confirmationButton()!.click());
+    const dialog = document.querySelector<HTMLElement>(".ch-source-dialog")!;
+    expect(dialog.querySelectorAll(".ch-source-dialog__column")).toHaveLength(2);
+    act(() => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    const search = dialog.querySelector<HTMLInputElement>('[aria-label="搜索应用"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Example");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const option = dialog.querySelector<HTMLButtonElement>('[role="option"]')!;
+    expect(option.textContent).toContain("Example Writer");
+    expect(option.textContent).not.toContain("com.example.Writer");
+    expect(dialog.textContent).not.toContain("请输入有效的应用 Bundle ID");
+    await act(async () => option.click());
+    expect(updateComputerHistorySettings).not.toHaveBeenCalled();
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    await act(async () => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
+    expect(updateComputerHistorySettings).toHaveBeenCalledWith({ memory: { syncEnabled: true }, observation: {
+      defaultApplicationBehavior: "observe", defaultURLBehavior: "observe",
+      rules: [{ scope: "app", bundleID: "com.example.Writer", behavior: "do_not_observe" }],
+    } });
+    expect(client.startComputerHistoryObservation).toHaveBeenCalledOnce();
+  });
+
+  it("can limit both apps and websites to an explicit allowlist", async () => {
+    const client = await renderWith(snapshot(), {
+      listComputerHistoryApplications: vi.fn().mockResolvedValue([{ bundleId: "com.example.Writer", name: "Example Writer" }]),
+    });
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => confirmationButton()!.click());
+    const columns = [...document.querySelectorAll<HTMLElement>(".ch-source-dialog__column")];
+    for (const column of columns) {
+      const select = column.querySelector<HTMLSelectElement>("select")!;
+      await act(async () => {
+        select.value = "do_not_observe";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+    act(() => columns[0]!.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    const appInput = document.querySelector<HTMLInputElement>('[aria-label="搜索应用"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(appInput, "Writer");
+      appInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => document.querySelector<HTMLButtonElement>(".ch-source-dialog__app-option")!.click());
+    act(() => columns[1]!.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    const domainInput = columns[1]!.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(domainInput, "example.com");
+      domainInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => columns[1]!.querySelector<HTMLButtonElement>(".ch-source-dialog__add-field button")!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
+    expect(client.updateComputerHistorySettings).toHaveBeenCalledWith({ observation: {
+      defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "do_not_observe",
+      rules: [
+        { scope: "app", bundleID: "com.example.Writer", behavior: "observe" },
+        { scope: "url", urlDomain: "example.com", behavior: "observe" },
+      ],
+    } });
+  });
+
+  it("discards custom scope edits when canceled and never enables recording", async () => {
+    const client = await renderWith(snapshot());
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => confirmationButton()!.click());
+    const dialog = document.querySelector<HTMLElement>(".ch-source-dialog")!;
+    act(() => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    act(() => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__footer button")!.click());
+    expect(document.querySelector(".ch-source-dialog")).toBeNull();
+    expect(client.updateComputerHistorySettings).not.toHaveBeenCalled();
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+  });
+
+  it("keeps recording off when saving the chosen scope fails", async () => {
+    const client = await renderWith(snapshot(), {
+      updateComputerHistorySettings: vi.fn().mockRejectedValue(new Error("settings unavailable")),
+    });
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => confirmationButton()!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
+    expect(document.querySelector(".ch-source-dialog [role=alert]")?.textContent).toContain("settings unavailable");
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(document.querySelector(".ch-source-dialog")).not.toBeNull();
+  });
+
+  it("opens the same scope selector from the running settings without restarting", async () => {
+    const initial = snapshot({ observation: { ...snapshot().observation, state: "running" } });
+    const client = await renderWith(initial);
+    expect(container.querySelector(".ch__sources-choose")?.textContent).toBe("选择");
+    await act(async () => container.querySelector<HTMLButtonElement>(".ch__sources-choose")!.click());
+    expect(document.querySelector(".ch-source-dialog__continue")?.textContent).toBe("保存");
+    await act(async () => document.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
+    expect(client.updateComputerHistorySettings).toHaveBeenCalledOnce();
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
+  });
+
+  it("does not offer a separate Memory sync switch", async () => {
+    await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running" } }));
+    expect(container.textContent).not.toContain("同步到记忆");
+    expect(container.querySelector('[aria-labelledby="computer-history-memory-sync-label"]')).toBeNull();
+  });
+
+  it("lets macOS users hide the menu bar recording indicator locally", async () => {
+    Object.defineProperty(window, "memmy", { configurable: true, value: { platform: "darwin" } });
+    await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running" } }));
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-tray-label"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    act(() => toggle.click());
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(window.localStorage.getItem("memmy.computerHistory.trayIndicatorEnabled")).toBe("false");
+  });
+
+  it("never toggles an already running History off from the announcement", async () => {
+    const client = await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running" } }));
+    await act(async () => requestComputerHistoryLaunchEnable(window.sessionStorage));
+    expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(hasComputerHistoryLaunchEnable(window.sessionStorage)).toBe(false);
+  });
+
+  it("offers resume, rather than stop, for an announcement opened while paused", async () => {
+    requestComputerHistoryLaunchEnable(window.sessionStorage);
+    const client = await renderWith(snapshot({ observation: { ...snapshot().observation, state: "paused" } }));
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("开启电脑历史记录？");
+    await act(async () => confirmationButton()!.click());
+    expect(client.resumeComputerHistoryObservation).toHaveBeenCalledOnce();
+    expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
+  });
+
+  it("does not show WeChat when the history snapshot has no WeChat source", async () => {
+    await renderWith(snapshot());
+    expect(container.querySelector("#computer-history-wechat-label")).toBeNull();
+    expect(container.textContent).not.toContain("允许读取微信聊天");
+  });
+
+  it("keeps WeChat off until risk confirmation and connection both finish", async () => {
+    vi.useFakeTimers();
+    const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const connecting = snapshot({ wechat: { enabled: true, connection: "connecting",
+      phase: "awaiting_wechat_login", error: null } });
+    const connected = snapshot({ wechat: { enabled: true, connection: "connected", phase: null, error: null } });
+    const setComputerHistoryWeChatAccess = vi.fn().mockResolvedValue(disabled);
+    const connectComputerHistoryWeChat = vi.fn().mockResolvedValue(connecting);
+    const getComputerHistory = vi.fn()
+      .mockResolvedValueOnce(disabled)
+      .mockResolvedValue(connected);
+    await renderWith(disabled, {
+      getComputerHistory, setComputerHistoryWeChatAccess, connectComputerHistoryWeChat,
+    });
+    const accessSwitch = () => container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
+    expect(accessSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).not.toContain("连接微信");
+
+    act(() => accessSwitch().click());
+    const notice = document.querySelector('[role="dialog"]');
+    expect(setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
+    expect(notice?.textContent).toContain("先登录微信");
+    expect(notice?.textContent).toContain("我已登录");
+    expect(notice?.textContent).not.toContain("现在轮到你");
+    expect(notice?.textContent).not.toContain("不需要小号");
+    await act(async () => dialogButton("取消")!.click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(accessSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(connectComputerHistoryWeChat).not.toHaveBeenCalled();
+
+    act(() => accessSwitch().click());
+    await act(async () => dialogButton("我已登录")!.click());
+    expect(setComputerHistoryWeChatAccess).toHaveBeenCalledTimes(1);
+    expect(setComputerHistoryWeChatAccess).toHaveBeenCalledWith(true);
+    expect(connectComputerHistoryWeChat).toHaveBeenCalledOnce();
+    expect(accessSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(accessSwitch().disabled).toBe(true);
+    expect(container.textContent).toContain("请在手机上确认微信登录");
+    expect(container.textContent).not.toContain("连接微信");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(accessSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(container.textContent).not.toContain("已连接，电脑历史记录开启时将读取新消息。");
+  });
+
+  it("asks for Full Disk Access before starting the WeChat reader", async () => {
+    const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const connecting = snapshot({ wechat: { enabled: true, connection: "connecting",
+      phase: "awaiting_wechat_login", error: null } });
+    const setComputerHistoryWeChatAccess = vi.fn().mockResolvedValue(disabled);
+    const connectComputerHistoryWeChat = vi.fn().mockResolvedValue(connecting);
+    let granted = false;
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "memmy", {
+      configurable: true,
+      value: { getFullDiskAccessStatus: vi.fn(async () => granted), openExternal },
+    });
+    await renderWith(disabled, { setComputerHistoryWeChatAccess, connectComputerHistoryWeChat });
+    const accessSwitch = container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
+    act(() => accessSwitch.click());
+    await act(async () => dialogButton("我已登录")!.click());
+    expect(connectComputerHistoryWeChat).not.toHaveBeenCalled();
+    expect(setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
+    expect(openExternal).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("需要完全磁盘访问");
+
+    granted = true;
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(setComputerHistoryWeChatAccess).toHaveBeenCalledWith(true);
+    expect(connectComputerHistoryWeChat).toHaveBeenCalledOnce();
+  });
+
+  it("does not ask Windows for Full Disk Access before connecting WeChat", async () => {
+    document.body.classList.add("memmy-platform-windows");
+    try {
+      const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+      const setComputerHistoryWeChatAccess = vi.fn().mockResolvedValue(disabled);
+      const connectComputerHistoryWeChat = vi.fn().mockResolvedValue(disabled);
+      const getFullDiskAccessStatus = vi.fn(async () => false);
+      Object.defineProperty(window, "memmy", {
+        configurable: true,
+        value: { getFullDiskAccessStatus, openExternal: vi.fn() },
+      });
+      await renderWith(disabled, { setComputerHistoryWeChatAccess, connectComputerHistoryWeChat });
+      act(() => container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!.click());
+      await act(async () => dialogButton("我已登录")!.click());
+      expect(getFullDiskAccessStatus).not.toHaveBeenCalled();
+      expect(connectComputerHistoryWeChat).toHaveBeenCalledOnce();
+    } finally {
+      document.body.classList.remove("memmy-platform-windows");
+    }
+  });
+
+  it("turns WeChat back off when connection does not finish", async () => {
+    const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const setComputerHistoryWeChatAccess = vi.fn().mockImplementation(async (enabled: boolean) => (
+      snapshot({ wechat: { enabled, connection: enabled ? "needs_setup" : "disabled", phase: null, error: null } })
+    ));
+    const connectComputerHistoryWeChat = vi.fn().mockRejectedValue(new Error("connection_failed"));
+    await renderWith(disabled, { setComputerHistoryWeChatAccess, connectComputerHistoryWeChat });
+    const accessSwitch = container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
+    act(() => accessSwitch.click());
+    await act(async () => dialogButton("我已登录")!.click());
+    expect(setComputerHistoryWeChatAccess.mock.calls.map((call) => call[0])).toEqual([true, false]);
+    expect(accessSwitch.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("connection_failed");
+    expect(container.textContent).not.toContain("连接微信");
+  });
+
+  it("closes an unfinished WeChat authorization instead of offering a connect button", async () => {
+    const unfinished = snapshot({ wechat: { enabled: true, connection: "needs_setup", phase: null, error: null } });
+    const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const setComputerHistoryWeChatAccess = vi.fn().mockResolvedValue(disabled);
+    await renderWith(unfinished, { setComputerHistoryWeChatAccess });
+    const accessSwitch = container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
+    expect(accessSwitch.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).not.toContain("连接微信");
+    expect(setComputerHistoryWeChatAccess).toHaveBeenCalledWith(false);
+    expect(container.textContent).not.toContain("未授权");
+  });
+
+  it("turns off a connected WeChat reader from the same switch", async () => {
+    const connected = snapshot({ wechat: { enabled: true, connection: "connected", phase: null, error: null } });
+    const disabled = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const setComputerHistoryWeChatAccess = vi.fn().mockResolvedValue(disabled);
+    await renderWith(connected, { setComputerHistoryWeChatAccess });
+    const accessSwitch = container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
+    expect(accessSwitch.getAttribute("aria-checked")).toBe("true");
+    await act(async () => accessSwitch.click());
+    expect(setComputerHistoryWeChatAccess).toHaveBeenCalledWith(false);
+    expect(accessSwitch.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("shows a Memory sync failure and a pending history deletion separately", async () => {
+    const sources = () => container.querySelector<HTMLElement>('section[aria-label="采集范围"]')!;
+    await renderWith(snapshot({ memorySync: { lastSyncedAt: null, error: "service unavailable", pendingDeletionCount: 0 } }));
+    expect(sources().textContent).toContain("记忆同步暂未成功");
+    expect(sources().textContent).toContain("service unavailable");
+
+    await renderWith(snapshot({ memorySync: { lastSyncedAt: null, error: "service unavailable", pendingDeletionCount: 1 } }));
+    expect(sources().textContent).toContain("对应记忆尚未删除完成");
+    expect(sources().textContent).not.toContain("记忆同步暂未成功");
+  });
+
+  it("groups multiple History sources into one crystallized Skill shortcut", async () => {
+    const onOpenSkill = vi.fn();
+    const first = snapshot().histories[0]!;
+    const memoryClient = { getMemory: vi.fn().mockResolvedValue({
+      item: { title: "My crystallized Skill", memoryLayer: "Skill", status: "activated" },
+    }) } as unknown as MemoryRuntimeClient;
+    const initial = snapshot({ histories: [
+      { ...first, skillMemoryIds: ["skill-memory-1"] },
+      { ...first, id: "history-2", title: "Second recording", skillMemoryIds: ["skill-memory-1"] },
+    ] });
+    await renderWith(initial, {}, { memoryClient, onOpenSkill });
+
+    expect(container.querySelector(".ch__skills-button")?.textContent).toContain("(1)");
+    act(() => { container.querySelector<HTMLButtonElement>(".ch__skills-button")?.click(); });
+    await act(async () => Promise.resolve());
+    expect(memoryClient.getMemory).toHaveBeenCalledExactlyOnceWith("skill-memory-1");
+    expect(container.querySelectorAll(".ch__skill-list li")).toHaveLength(1);
+    expect(container.querySelector(".ch__skill-list")?.textContent).toContain("My crystallized Skill");
+    expect(container.querySelector(".ch__skill-list")?.textContent).toContain("来源记录 2 条");
+    act(() => { container.querySelector<HTMLButtonElement>(".ch__skill-list li button")?.click(); });
+    expect(onOpenSkill).toHaveBeenCalledExactlyOnceWith("skill-memory-1");
+  });
+
+  it("hides the Skill shortcut when no History evidence has produced one", async () => {
+    await renderWith(snapshot(), {}, { onOpenSkill: vi.fn() });
+    expect(container.querySelector(".ch__skills-button")).toBeNull();
+  });
+
+  it("opens the synced History observation in the Memory page", async () => {
+    const onOpenMemory = vi.fn();
+    const initial = snapshot({ histories: [{ ...snapshot().histories[0]!, memoryId: "memory-observation-1" }] });
+    await renderWith(initial, {}, { onOpenMemory });
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="在记忆中查看My recording"]')!.click());
+    expect(onOpenMemory).toHaveBeenCalledExactlyOnceWith("memory-observation-1");
+  });
+
+  it("lets a user exclude an installed application from History", async () => {
+    const saved = { observation: {
+      defaultApplicationBehavior: "observe" as const, defaultURLBehavior: "observe" as const,
+      rules: [] as Array<{ scope: "app"; bundleID: string; behavior: "do_not_observe" }>,
+    } };
+    const updateComputerHistorySettings = vi.fn().mockImplementation(async (settings) => {
+      saved.observation = settings.observation;
+      return settings;
+    });
+    const client = await renderWith(snapshot(), {
+      getComputerHistorySettings: vi.fn().mockImplementation(async () => saved),
+      listComputerHistoryApplications: vi.fn().mockResolvedValue([{ bundleId: "com.example.Notes", name: "Example Notes" }]),
+      updateComputerHistorySettings,
+    });
+    expect(container.querySelector(".ch__sources-choose")?.textContent).toBe("选择");
+    await act(async () => container.querySelector<HTMLButtonElement>(".ch__sources-choose")!.click());
+    const dialog = document.querySelector<HTMLElement>(".ch-source-dialog")!;
+    act(() => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    const search = dialog.querySelector<HTMLInputElement>('[aria-label="搜索应用"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "ding");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(dialog.textContent).toContain("没有找到应用");
+    expect(dialog.textContent).not.toContain("请输入有效的应用 Bundle ID");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Example");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(dialog.textContent).toContain("Example Notes");
+    expect(dialog.querySelector(".ch-source-dialog__app-option small")).toBeNull();
+    await act(async () => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__app-option")!.click());
+    expect(updateComputerHistorySettings).not.toHaveBeenCalled();
+    await act(async () => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
+    expect(updateComputerHistorySettings).toHaveBeenCalledWith({ observation: {
+      defaultApplicationBehavior: "observe", defaultURLBehavior: "observe",
+      rules: [{ scope: "app", bundleID: "com.example.Notes", behavior: "do_not_observe" }],
+    } });
+    expect(client.getApplicationIcon).toHaveBeenCalledWith("com.example.Notes");
+    expect(container.querySelector(".ch__sources-choose")?.textContent).toBe("已选中 1 项");
+  });
 
   it("shows missing permissions as setup, and cancellation survives subsequent polls and actions", async () => {
     vi.useFakeTimers();
@@ -72,7 +488,7 @@ describe("ComputerHistorySubPage", () => {
     });
     expect(document.querySelector(".ch__permission-dialog")).toBeNull();
     act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
-    await act(async () => confirmationButton()!.click());
+    await confirmStart();
     expect(document.querySelector(".ch__permission-dialog")).not.toBeNull();
     expect(container.textContent).not.toContain("记录失败");
     expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
@@ -197,6 +613,10 @@ describe("ComputerHistorySubPage", () => {
     const client = {
       getComputerHistory: vi.fn().mockResolvedValue(initial),
       deleteComputerHistory,
+      getComputerHistorySettings: vi.fn().mockResolvedValue({ observation: {
+        defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [],
+      } }),
+      listComputerHistoryApplications: vi.fn().mockResolvedValue([]),
       startComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
       pauseComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
       resumeComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
@@ -229,7 +649,8 @@ describe("ComputerHistorySubPage", () => {
       container.querySelector<HTMLButtonElement>('[aria-label="确认删除 My recording"]')?.click();
     });
     expect(deleteComputerHistory).toHaveBeenCalledWith("history-1");
-    expect(container.textContent).toContain("还没有记录");
+    expect(container.querySelector(".ch__intro")).not.toBeNull();
+    expect(container.textContent).not.toContain("还没有记录");
   });
 
   it("shows only what the model wrote, and names applications by their icon", async () => {
@@ -462,6 +883,9 @@ describe("ComputerHistorySubPage", () => {
     await act(async () => {
       [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent === "清除全部")?.click();
     });
+    expect(clearComputerHistories).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("清除全部历史记录");
+    await act(async () => { dialogButton("清除")?.click(); });
     expect(container.textContent).not.toContain("My recording");
 
     await act(async () => { oldPoll.resolve(initial); });
@@ -598,9 +1022,9 @@ describe("ComputerHistorySubPage", () => {
     expect(dialog?.textContent).toContain("开启电脑历史记录？");
     expect(dialog?.textContent).toContain("大模型");
     expect(dialog?.textContent).toContain("本机");
-    expect(dialog?.querySelector(".ch-recording-confirmation__details")?.textContent).toBe("开启后，你在电脑上的所有操作，会被记录并发送给已配置的大模型进行分析，使用记录保存在本机。");
+    expect(dialog?.querySelector(".ch-recording-confirmation__details")?.textContent).toContain("完成的摘要会同步到记忆");
 
-    act(() => { confirmationButton()?.click(); });
+    await confirmStart();
     expect(recordingSwitch?.disabled).toBe(true);
     expect(recordingSwitch?.getAttribute("aria-checked")).toBe("false");
     act(() => { recordingSwitch?.click(); });
@@ -646,7 +1070,7 @@ describe("ComputerHistorySubPage", () => {
     const recordingSwitch = container.querySelector<HTMLButtonElement>('[role="switch"]');
     act(() => { recordingSwitch?.click(); });
     expect(startComputerHistoryObservation).not.toHaveBeenCalled();
-    act(() => { confirmationButton()?.click(); });
+    await confirmStart();
     expect(recordingSwitch?.disabled).toBe(true);
 
     await act(async () => { start.reject(new Error("recorder could not start")); });
@@ -658,7 +1082,7 @@ describe("ComputerHistorySubPage", () => {
     expect(startComputerHistoryObservation).toHaveBeenCalledTimes(1);
     expect(recordingSwitch?.getAttribute("aria-checked")).toBe("false");
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    await act(async () => { confirmationButton()?.click(); });
+    await confirmStart();
     expect(startComputerHistoryObservation).toHaveBeenCalledTimes(2);
     expect(recordingSwitch?.getAttribute("aria-checked")).toBe("true");
     expect(container.textContent).not.toContain("recorder could not start");
@@ -748,21 +1172,43 @@ describe("ComputerHistorySubPage", () => {
   });
 
   it.each([ ["today", "清除今天"], ["all", "清除全部"] ] as const)("clears %s through the service even when pending summaries are absent from the feed", async (scope, label) => {
-    const client = await renderWith(snapshot({ histories: [], workflows: [] }));
+    const client = await renderWith(snapshot({
+      histories: [],
+      workflows: [],
+      observation: { ...snapshot().observation, state: "paused" },
+    }));
     const clear = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("清除历史"));
     expect(clear?.disabled).toBe(false);
     act(() => clear?.click());
     await act(async () => {
       [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent === label)?.click();
     });
+    expect(client.clearComputerHistories).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      scope === "all" ? "清除全部历史记录" : "清除今天的历史记录",
+    );
+    await act(async () => { dialogButton("清除")?.click(); });
     expect(client.clearComputerHistories).toHaveBeenCalledWith(scope);
     expect(client.deleteComputerHistory).not.toHaveBeenCalled();
   });
 });
 
+function dialogButton(label: string) {
+  return [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
+    .find((button) => button.textContent === label);
+}
+
 function confirmationButton() {
   return [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
     .find((button) => button.textContent === "确认开启");
+}
+
+async function confirmStart() {
+  await act(async () => confirmationButton()!.click());
+  const sourceDialog = document.querySelector<HTMLElement>(".ch-source-dialog");
+  expect(sourceDialog).not.toBeNull();
+  expect(sourceDialog?.textContent).not.toContain("开启记忆");
+  await act(async () => sourceDialog!.querySelector<HTMLButtonElement>(".ch-source-dialog__continue")!.click());
 }
 
 function deferred<T>() {
@@ -810,3 +1256,13 @@ function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHis
     ...overrides,
   };
 }
+
+describe("computer history exclusion icons", () => {
+  it("does not let a missing application icon grow with the exclusion row", () => {
+    const styles = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"), "utf8");
+    const nameRule = styles.match(/\.ch-source-dialog__rules li span:not\(\.ch-app-icon\) \{[^}]+\}/u)?.[0] ?? "";
+    expect(nameRule).toContain("flex: 1");
+    const iconRule = styles.match(/\.ch-app-icon \{[^}]+\}/u)?.[0] ?? "";
+    expect(iconRule).toContain("flex: 0 0 24px");
+  });
+});

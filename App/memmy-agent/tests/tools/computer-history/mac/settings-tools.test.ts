@@ -99,6 +99,7 @@ describe("Computer History settings tools", () => {
   it("round-trips a full document through update and get", async () => {
     const store = temporaryStore();
     const document = {
+      memory: { syncEnabled: false },
       observation: {
         defaultApplicationBehavior: "observe",
         defaultURLBehavior: "observe",

@@ -228,6 +228,8 @@ describe("HomePage", () => {
       .toBe("home.queue.steerFailed");
     expect(agentErrorText("home.queue.steerUnavailable", (key) => key))
       .toBe("home.queue.steerUnavailable");
+    expect(agentErrorText("home.queue.editBlocked", (key) => key))
+      .toBe("home.queue.editBlocked");
   });
 
   it("recovers slash commands after the initial command snapshot fails", () => {
@@ -287,12 +289,14 @@ describe("HomePage", () => {
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
-    expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain("topBarEnd={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
-    expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
-    expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
+    expect(source).toContain("topBar={hasActiveConversation ? (");
+    expect(source).toContain("<AgentThreadToolbar");
+    expect(source).toContain("title={activeConversationTitleDisplay}");
+    expect(source).toContain("titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon");
+    expect(source).not.toContain("selectedDraftProject?.name");
+    expect(source).toContain("topBarBorder={hasActiveConversation}");
+    expect(source).toContain("topBarInset={hasActiveConversation ? false : undefined}");
+    expect(source).toContain("windowsTitlebarSafe={hasActiveConversation}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -345,7 +349,9 @@ describe("HomePage", () => {
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
-    expect(source).toContain("clearComposer: () => clearComposerAfterSend(sendScopeKey)");
+    expect(source).toContain("clearComposer: () => stageComposerForSend(sendScopeKey)");
+    expect(source).toContain("restoreComposer: () => restoreComposerAfterFailedSend(");
+    expect(source).toContain("settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
     expect(source).not.toContain("composerMediaErrorByScope");
@@ -595,27 +601,46 @@ describe("HomePage", () => {
     expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source).toContain('className="agent-composer-toolbar"');
-    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">');
+    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">');
     expect(styles).toMatch(/\.agent-composer-toolbar\s*{[^}]*display:\s*flex;/s);
     expect(styles).toMatch(/\.agent-composer-toolbar \.composer-actions\s*{[^}]*margin-left:\s*auto;/s);
-    expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+    expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 76");
   });
 
-  it("shifts the conversation without resizing it when the environment panel has room", () => {
+  it("docks the thread side panel beside the conversation instead of the legacy environment popover", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
+    const conversationColumnRule = styles.match(/\.agent-workspace-layout > \.agent-conversation-panel\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
-    expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
-    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
+    expect(source).toContain('className="home-empty-column"');
+    expect(styles).toMatch(/\.home-empty-column\s*{[^}]*width:\s*clamp\(min\(100%,\s*40rem\),\s*62cqw,\s*var\(--home-column-max,\s*50rem\)\);/s);
+    expect(styles).toMatch(/\.home-empty-column\s*{[^}]*max-width:\s*min\(\s*100%,\s*max\(calc\(100cqw - 2 \* var\(--agent-column-min-gap,\s*80px\)\),\s*min\(100%,\s*20rem\)\)\s*\);/s);
+    expect(styles).toMatch(/\.agent-conversation-content\s*{[^}]*--agent-conversation-track:\s*min\(832px,\s*100cqw\);[^}]*width:\s*calc\(var\(--agent-conversation-track\) - 2 \* var\(--agent-conversation-inset\)\);/s);
+    expect(styles).toMatch(/\.agent-conversation-content--composer\s*{\s*--agent-conversation-inset:\s*24px;/s);
+    expect(styles).toMatch(/@container agent-workspace \(width > 1200px\)\s*{\s*\.agent-conversation-content\s*{\s*--agent-conversation-track:\s*65cqw;/s);
+    expect(styles).toMatch(/@container agent-workspace \(width > 1600px\)\s*{\s*\.agent-conversation-content\s*{\s*--agent-conversation-track:\s*60cqw;/s);
+    expect(styles).toMatch(/@container agent-workspace \(width > 2000px\)\s*{\s*\.agent-conversation-content\s*{\s*--agent-conversation-track:\s*min\(55cqw,\s*1400px\);/s);
+    expect(styles).toMatch(/--home-column-max:\s*50rem;/);
+    expect(styles).toMatch(/--agent-column-min-gap:\s*80px;/);
+    expect(source).toContain('className="agent-conversation-content agent-conversation-column space-y-3"');
+    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer agent-conversation-column"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 12px;");
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 0;");
     expect(styles).toContain("container-name: agent-workspace;");
-    expect(styles).toContain("@container agent-workspace (min-width: 1240px)");
-    expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
-    expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
-    expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
-    expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
+    expect(source).toContain("const threadPanel = useAgentThreadPanel({");
+    expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
+    expect(source).toContain('style={{ "--thread-panel-offset": `${threadPanel.offset}px` } as CSSProperties}');
+    expect(source).toContain("topBarStyle={hasActiveConversation ? { right: threadPanel.offset } : undefined}");
+    expect(source).toContain("sidePanel={sidePanelMounted ? (\n        <AgentThreadPanel");
+    expect(source).toContain("<AgentThreadPanel");
+    expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.app-frame-main\s*\{[^}]*isolation:\s*auto;/s);
+    expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.agent-conversation-title\s*\{[^}]*visibility:\s*hidden;/s);
+    expect(source).not.toContain("<AgentEnvironmentPanel");
+    expect(source).not.toContain("<SlidersHorizontal");
+    expect(conversationColumnRule).toContain("margin-right: var(--thread-panel-offset, 0px);");
+    expect(conversationColumnRule).toContain("transition: margin-right 200ms cubic-bezier(0, 0, 0.2, 1);");
+    expect(styles).toMatch(/\.thread-panel-motion--closing[^{]*\{[^}]*transition-duration:\s*150ms;[^}]*cubic-bezier\(0\.4, 0, 1, 1\)/s);
+    expect(styles).toMatch(/\.thread-panel\s*\{[^}]*position:\s*absolute;[^}]*z-index:\s*20;/s);
   });
 
   it("lets expanded conversation text use the full width above the action footer", () => {
@@ -646,24 +671,28 @@ describe("HomePage", () => {
     expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
   });
 
-  it("keeps the single-line composer text and caret vertically centered", () => {
+  it("keeps the single-line conversation composer on a 76px field with the first line 12px from the top", () => {
     const window = new Window();
     const style = window.document.createElement("style");
     style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
     window.document.head.append(style);
 
+    const composer = window.document.createElement("div");
+    composer.className = "agent-conversation-composer";
     const shell = window.document.createElement("div");
-    shell.className = "agent-composer-shell";
+    shell.className = "agent-composer-shell agent-composer-shell--expanded";
     const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--single py-3 text-sm";
+    textarea.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
     shell.append(textarea);
-    window.document.body.append(shell);
+    composer.append(shell);
+    window.document.body.append(composer);
 
     const computed = window.getComputedStyle(textarea);
-    expect(computed.height).toBe("52px");
-    expect(computed.lineHeight).toBe("24px");
-    expect(computed.paddingTop).toBe("14px");
-    expect(computed.paddingBottom).toBe("14px");
+    expect(computed.height).toBe("76px");
+    expect(computed.fontSize).toBe("15px");
+    expect(computed.lineHeight).toBe("26.25px");
+    expect(computed.paddingTop).toBe("12px");
+    expect(computed.paddingBottom).toBe("0px");
     // Must stay scrollable if wrapped content briefly lags behind single-line detection.
     expect(computed.overflowY).toBe("auto");
   });
@@ -775,6 +804,10 @@ describe("HomePage", () => {
   it("guards duplicate stop requests while a stop control frame is in flight", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const normalizedSource = source.replace(/\r\n/g, "\n");
+    const sendDisabledBlock = normalizedSource.slice(
+      normalizedSource.indexOf("const composerSendDisabled"),
+      normalizedSource.indexOf("const composerStopDisabled")
+    );
     const submitDisabledBlock = normalizedSource.slice(
       normalizedSource.indexOf("const composerSubmitDisabled"),
       normalizedSource.indexOf("\n\n  useEffect", normalizedSource.indexOf("const composerSubmitDisabled"))
@@ -784,6 +817,7 @@ describe("HomePage", () => {
     expect(source).toContain("const stopRequestLocksRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("input.stopRequestLocks.has(chatId)");
     expect(source).toContain("const composerStopDisabled = stopInFlight");
+    expect(sendDisabledBlock).not.toContain("stopInFlight");
     expect(submitDisabledBlock).toContain('composerPrimaryAction === "stop"');
   });
 
@@ -795,7 +829,7 @@ describe("HomePage", () => {
     );
     const conversationComposer = source.slice(
       source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
-      source.indexOf('<p className="text-center text-[11px] text-text-ink/40 mt-2">')
+      source.indexOf('<p className="agent-conversation-disclaimer">')
     );
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
@@ -1074,19 +1108,14 @@ describe("HomePage", () => {
     expect(html).toContain("agent-attachment-card__name");
     expect(html).toContain("agent-attachment-card__meta");
     expect(html).toContain(">shot<");
-    expect(html).toContain(">report<");
-    expect(html).toContain(">brief<");
-    expect(html).toContain(">sheet<");
-    expect(html).toContain(">deck<");
-    expect(html).toContain(">notes<");
-    expect(html).toContain(">table<");
-    expect(html).toContain(">data<");
-    expect(html).toContain(">payload<");
-    expect(html).toContain(">PDF<");
-    expect(html).toContain(">DOC<");
-    expect(html).toContain(">XLS<");
-    expect(html).toContain(">PPT<");
-    expect(html).toContain(">FILE<");
+    expect(html).toContain(">report.pdf<");
+    expect(html).toContain(">brief.docx<");
+    expect(html).toContain(">sheet.xlsx<");
+    expect(html).toContain(">deck.pptx<");
+    expect(html).toContain(">notes.txt<");
+    expect(html).toContain(">table.csv<");
+    expect(html).toContain(">data.json<");
+    expect(html).toContain(">payload.xml<");
     expect(compactHtml).toContain("XLSX · 2.0 KB");
     expect(compactHtml).toContain("PPTX · 1.5 KB");
     expect(compactHtml).toContain("TXT · 512 B");
@@ -1129,7 +1158,7 @@ describe("HomePage", () => {
     expect(sendHtml).toContain('data-icon="send"');
     expect(sendHtml).toContain("composer-action-submit");
     expect(sendHtml).toContain("bg-action-sky");
-    expect(sendHtml).toContain("translate-y-[1px]");
+    expect(sendHtml).toContain("translate(-1px, 1px)");
     expect(sendHtml).not.toContain("停止");
     expect(sendHtml).not.toContain('data-icon="pause"');
     expect(sendHtml).not.toContain('data-icon="stop-square"');
@@ -1358,13 +1387,14 @@ describe("HomePage", () => {
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
   });
 
-  it("does not clear the composer or add an optimistic user before send confirmation", async () => {
+  it("clears the composer and renders the user message before send confirmation", async () => {
     let confirmSend!: () => void;
     const sendMessage = vi.fn(() => new Promise<{ status: "accepted" }>((resolve) => {
       confirmSend = () => resolve({ status: "accepted" });
     }));
     const dispatch = vi.fn();
     const clearComposer = vi.fn();
+    const settleComposer = vi.fn();
     const submission = submitAgentComposerMessage({
       chatId: "chat-1",
       connection: {
@@ -1377,24 +1407,25 @@ describe("HomePage", () => {
       uploadAgentMedia: vi.fn(async () => []),
       dispatch,
       track: vi.fn(),
-      clearComposer
+      clearComposer,
+      settleComposer
     });
 
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
-    expect(clearComposer).not.toHaveBeenCalled();
-
-    confirmSend();
-    await expect(submission).resolves.toBe(true);
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
       type: "agent/userMessageQueued",
       chatId: "chat-1",
       content: "等待正式接受"
     }));
     expect(clearComposer).toHaveBeenCalledOnce();
+    expect(settleComposer).not.toHaveBeenCalled();
+
+    confirmSend();
+    await expect(submission).resolves.toBe(true);
+    expect(settleComposer).toHaveBeenCalledOnce();
   });
 
-  it("clears a composer after queued confirmation without inserting a premature user message", async () => {
+  it("renders immediately while a queued confirmation is projected by the queue reducer", async () => {
     const submitMessage = vi.fn(async () => ({ status: "queued" as const }));
     const dispatch = vi.fn();
     const clearComposer = vi.fn();
@@ -1419,8 +1450,48 @@ describe("HomePage", () => {
       chatId: "chat-running",
       clientRequestId: "66666666-6666-4666-8666-666666666666"
     }), 1);
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/userMessageQueued",
+      chatId: "chat-running",
+      clientRequestId: "66666666-6666-4666-8666-666666666666"
+    }));
     expect(clearComposer).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back the optimistic message and restores the composer when confirmation fails", async () => {
+    const dispatch = vi.fn();
+    const clearComposer = vi.fn();
+    const restoreComposer = vi.fn();
+    const settleComposer = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-1",
+      clientRequestId: "77777777-7777-4777-8777-777777777777",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: vi.fn(() => Promise.reject(
+          new MemmyAgentMessageRejectedError("message_request_rejected", "result_unknown")
+        ))
+      },
+      content: "失败后恢复",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer,
+      restoreComposer,
+      settleComposer
+    })).resolves.toBe(false);
+
+    expect(clearComposer).toHaveBeenCalledOnce();
+    expect(restoreComposer).toHaveBeenCalledOnce();
+    expect(settleComposer).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/optimisticMessageRejected",
+      chatId: "chat-1",
+      clientRequestId: "77777777-7777-4777-8777-777777777777"
+    });
   });
 
   it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
@@ -1456,6 +1527,26 @@ describe("HomePage", () => {
       .toHaveLength(2);
     expect(steerBlock).toContain('if (result.outcome === "already_dequeued")');
     expect(steerBlock).toContain("agentActions.queueItemSteerReset(chatId, clientRequestId)");
+  });
+
+  it("writes a queued question back only after removal, and leaves it queued when the composer is busy", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const editBlock = source.slice(
+      source.indexOf("async function editQueuedMessage"),
+      source.indexOf("async function steerQueuedMessage")
+    );
+    const blockedAt = editBlock.indexOf('message: "home.queue.editBlocked"');
+    const removedAt = editBlock.indexOf("const removed = await removeQueuedMessage(clientRequestId);");
+    const draftAt = editBlock.indexOf("setCurrentComposerDraft(item.content);");
+
+    expect(editBlock).toContain("queuedComposerEditDecision({");
+    expect(editBlock).toContain('if (decision === "ignore" || !item || !chatId) return;');
+    expect(editBlock).toContain('if (decision === "blocked")');
+    expect(editBlock).toContain("if (!removed) return;");
+    expect(editBlock).toContain("inputRef.current?.focus();");
+    expect(blockedAt).toBeGreaterThan(0);
+    expect(removedAt).toBeGreaterThan(blockedAt);
+    expect(draftAt).toBeGreaterThan(removedAt);
   });
 
   it("writes the measured composer height and ignores sub-pixel-equivalent changes", () => {

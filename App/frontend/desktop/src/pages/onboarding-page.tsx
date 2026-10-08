@@ -494,10 +494,12 @@ export function OnboardingPage() {
           setFirstReportIsStreaming(false);
           setFirstReportShouldSimulate(!meta.streamed);
           setFirstReportPayload(payload);
-          writeFirstEncounterRelayPrompt(
-            typeof window === "undefined" ? undefined : window.sessionStorage,
-            payload.relayPrompt
-          );
+          if (!payload.emptyHistory) {
+            writeFirstEncounterRelayPrompt(
+              typeof window === "undefined" ? undefined : window.sessionStorage,
+              payload.relayPrompt
+            );
+          }
           setFirstScanAgents(payload.agents.length > 0 ? payload.agents : seedAgents);
           firstScanVisualComplete.current = true;
           // Persist into a real chat as soon as the report exists, so later
@@ -582,7 +584,10 @@ export function OnboardingPage() {
     }
 
     // Keep the report body queued even before seed finishes, so Home can retry.
-    writePendingFirstEncounterTaskLaunch(storage, prompt, { assistantContent });
+    writePendingFirstEncounterTaskLaunch(storage, prompt, {
+      assistantContent,
+      showRelayFollowUp: !payload.emptyHistory
+    });
 
     const memmyAgent = clients?.memmyAgent;
     if (!memmyAgent) {
@@ -599,7 +604,8 @@ export function OnboardingPage() {
       writePendingFirstEncounterTaskLaunch(storage, prompt, {
         assistantContent,
         chatId: next.chatId,
-        sessionKey: next.sessionKey
+        sessionKey: next.sessionKey,
+        showRelayFollowUp: !payload.emptyHistory
       });
       return next;
     }).catch((error) => {
@@ -631,12 +637,13 @@ export function OnboardingPage() {
         ?? (firstReportPayload ? await seedFirstEncounterReportChat(firstReportPayload) : null);
       writePendingFirstEncounterTaskLaunch(storage, prompt, {
         ...(assistantContent ? { assistantContent } : {}),
-        ...(seeded ? { chatId: seeded.chatId, sessionKey: seeded.sessionKey } : {})
+        ...(seeded ? { chatId: seeded.chatId, sessionKey: seeded.sessionKey } : {}),
+        showRelayFollowUp: !firstReportPayload?.emptyHistory
       });
-      if (seeded) {
+      if (seeded && !firstReportPayload?.emptyHistory) {
         writeFirstEncounterRelayChat(storage, seeded.chatId);
         writeFirstEncounterRelayReadyChat(storage, seeded.chatId);
-      } else {
+      } else if (!firstReportPayload?.emptyHistory) {
         armFirstEncounterRelayChat(storage);
       }
       dispatch(agentActions.newChatRequested());
@@ -785,6 +792,7 @@ export function OnboardingPage() {
     }
 
     const relayAgents = resolveReportRelayAgents(state.agentSources.items, firstReportPayload.agents);
+    const followUpMode = firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset");
 
     return (
       <main className="min-h-screen bg-canvas-oat">
@@ -792,7 +800,7 @@ export function OnboardingPage() {
           payload={firstReportPayload}
           isStreaming={firstReportIsStreaming}
           simulateStreaming={firstReportShouldSimulate}
-          followUpMode={firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset")}
+          followUpMode={firstReportPayload.emptyHistory && followUpMode === "relay" ? null : followUpMode}
           agents={relayAgents}
           onOpenAgent={openFirstEncounterRelayAgent}
           onVerifyMemory={verifyFirstEncounterRelayMemory}

@@ -212,6 +212,37 @@ describe("TaskBus snapshot helpers", () => {
     expect(snapshot.tasks[0]?.status).toBe("done");
     expect(snapshot.tasks[0]?.lastAgentMessage).toBe("端午节是6月9日");
     expect(snapshot.tasks[0]?.finishedAt).toBe(1500);
+    expect(snapshot.tasks[0]?.unseen).toBe(true);
+  });
+
+  it("侧边栏未读点按 session 同步，已读会话里的多条任务都不再计为未读", () => {
+    const older = createTaskRecord({ input: "旧问题", source: "main", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const latest = createTaskRecord({ input: "新问题", source: "main", sessionId: "websocket:chat-1" }, { now: 2000, makeId: nextId(["task-new"]) });
+    const other = createTaskRecord({ input: "另一个会话", source: "main", sessionId: "chat-2" }, { now: 3000, makeId: nextId(["task-other"]) });
+    let snapshot = addTaskToSnapshot(addTaskToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), other), latest), older);
+    snapshot = completeTaskInSnapshot(snapshot, older.id, "旧答案", 1100);
+    snapshot = completeTaskInSnapshot(snapshot, latest.id, "新答案", 2100);
+    snapshot = completeTaskInSnapshot(snapshot, other.id, "其他答案", 3100);
+
+    snapshot = syncAgentTaskStatusesToSnapshot(snapshot, {
+      now: 4000,
+      tasks: [
+        { sessionIds: ["chat-1", "websocket:chat-1"], isRunning: false, completedUnseen: false },
+        { sessionIds: ["chat-2"], isRunning: false, completedUnseen: true }
+      ]
+    });
+
+    expect(snapshot.tasks.find((item) => item.id === older.id)).toMatchObject({ unseen: false, readAt: 4000 });
+    expect(snapshot.tasks.find((item) => item.id === latest.id)).toMatchObject({ unseen: false, readAt: 4000 });
+    expect(snapshot.tasks.find((item) => item.id === other.id)?.unseen).toBe(true);
+    expect(snapshot.tasks.find((item) => item.id === other.id)?.readAt).toBeUndefined();
+
+    const acknowledged = markTaskReadInSnapshot(snapshot, other.id, 5000);
+    const resurfaced = syncAgentTaskStatusesToSnapshot(acknowledged, {
+      now: 6000,
+      tasks: [{ sessionIds: ["chat-2"], isRunning: false, completedUnseen: true }]
+    });
+    expect(resurfaced.tasks.find((item) => item.id === other.id)).toMatchObject({ unseen: false, readAt: 5000 });
   });
 
   it("完整模式任务列表只把同 session 最新代表任务推进为 running", () => {
@@ -258,6 +289,7 @@ describe("TaskBus snapshot helpers", () => {
     expect(snapshot.focusedTaskId).toBe(task.id);
     expect(snapshot.tasks[0]?.dismissed).toBeUndefined();
     expect(snapshot.tasks[0]?.readAt).toBe(1200);
+    expect(snapshot.tasks[0]?.unseen).toBe(false);
   });
 
   it("dismissTask 只关闭桌宠 answering 气泡，不删除任务历史", () => {
@@ -269,6 +301,7 @@ describe("TaskBus snapshot helpers", () => {
     const dismissedTask = snapshot.tasks[0];
     expect(dismissedTask).toBeDefined();
     expect(dismissedTask?.dismissed).toBe(true);
+    expect(dismissedTask?.unseen).toBe(false);
     expect(snapshot.focusedTaskId).toBeNull();
   });
 

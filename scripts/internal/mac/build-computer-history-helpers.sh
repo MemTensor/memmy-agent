@@ -14,8 +14,11 @@ BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 OUTPUT_DIR="$HELPER_DIR/native/$TARGET_CPU"
 mkdir -p "$OUTPUT_DIR"
+# History observation now lives inside Memmy Computer Use.app. Never ship the
+# former independent recorder binary with a second permission identity.
+rm -f "$OUTPUT_DIR/human-recorder"
 
-for helper in human-recorder app-icon; do
+for helper in app-icon; do
   xcrun --sdk macosx swiftc -O \
     -sdk "$SDK_PATH" -target "$SWIFT_CPU-apple-macos11.0" \
     -module-cache-path "$BUILD_DIR/modules" \

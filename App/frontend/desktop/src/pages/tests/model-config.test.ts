@@ -27,7 +27,7 @@ import {
   textProviderDisplayName,
   toProtocol
 } from "../model-config.js";
-import type { TextModelProviderConfig } from "../../api/config-client.js";
+import type { ModelProviderConfig, TextModelProviderConfig } from "../../api/config-client.js";
 import { modelProviderLogoUrl } from "../../components/model-provider-logo.js";
 import { canSaveModelConfig, createModelConfigValidationKey, type ModelConfigValidationState } from "../model-config-validation.js";
 import { zhCNMessages } from "../../i18n/messages.js";
@@ -353,6 +353,84 @@ describe("model config helpers", () => {
       apiKeyMasked: "sk-m••••main",
       hasExistingApiKey: true
     }, hydrated.llmValidation)).toBe(true);
+  });
+
+  it("未单独保存记忆模型时默认不勾选继承", () => {
+    const hydrated = hydrateModelConfigForm({
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: "sk-primary",
+      apiKeyMasked: "",
+      configured: true,
+      memmyMemory: {
+        summary: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "sk-primary",
+          apiKeyMasked: "",
+          configured: true
+        },
+        evolution: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "sk-primary",
+          apiKeyMasked: "",
+          configured: true
+        }
+      },
+      catalog: {
+        modelAssignments: {
+          byok: { memorySummary: null, memoryEvolution: null }
+        }
+      }
+    } as ModelProviderConfig, "local");
+
+    expect(hydrated.skillModel.reuse).toBe(false);
+    expect(hydrated.memoryModel.reuse).toBe(false);
+  });
+
+  it("已保存继承关系时重新进入仍勾选", () => {
+    const hydrated = hydrateModelConfigForm({
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: "sk-primary",
+      apiKeyMasked: "",
+      configured: true,
+      memmyMemory: {
+        summary: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "",
+          apiKeyMasked: "sk-p••••mary",
+          configured: true
+        },
+        evolution: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "",
+          apiKeyMasked: "sk-p••••mary",
+          configured: true
+        }
+      },
+      catalog: {
+        modelAssignments: {
+          byok: { memorySummary: "preset-summary", memoryEvolution: "preset-evolution" }
+        }
+      }
+    } as ModelProviderConfig, "local");
+
+    expect(hydrated.skillModel.reuse).toBe(true);
+    expect(hydrated.memoryModel.reuse).toBe(true);
   });
 
   it("真实连接测试调用配置客户端并写回成功签名", async () => {

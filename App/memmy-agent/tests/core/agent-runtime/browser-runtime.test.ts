@@ -39,6 +39,8 @@ function root(): string {
 function fakeBrowserManager(): any {
   return {
     capability: "unknown",
+    supportsEmbeddedTabs: vi.fn(() => false),
+    supportsCdpTabs: vi.fn(() => false),
     initialize: vi.fn(async function (this: any) {
       this.capability = "ready";
       return "ready";

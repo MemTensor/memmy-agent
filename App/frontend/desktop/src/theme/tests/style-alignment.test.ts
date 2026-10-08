@@ -19,15 +19,15 @@ describe("prototype style alignment", () => {
     expect(tokenCss).toContain("--radius-card: 12px");
     expect(tokenCss).toContain("--radius-card-lg: 10px");
     expect(tokenCss).toContain("--radius-pill: 9999px");
-    expect(tokenCss).toContain('"Nunito"');
-    expect(tokenCss).toContain('--font-sans: "Nunito", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC"');
+    expect(tokenCss).toContain("--font-sans: ui-sans-serif, system-ui");
+    expect(tokenCss).toContain('"PingFang SC"');
     expect(tokenCss).toContain('"Apple Color Emoji"');
     expect(tokenCss).toContain('"Segoe UI Emoji"');
     expect(tokenCss).toContain("--codex-toolbar-height: 46px");
     expect(tokenCss).toContain("--codex-sidebar-nav-icon-inset: 20px");
     expect(tokenCss).toContain("--codex-window-control-inset: 84px");
     expect(tokenCss).toContain("--codex-sidebar-hidden-topbar-padding: 124px");
-    expect(tokenCss).toContain("--codex-sidebar-width: 250px");
+    expect(tokenCss).toContain("--codex-sidebar-width: 264px");
     expect(tokenCss).toContain("--codex-sidebar-min-width: 240px");
     expect(tokenCss).toContain("--codex-content-padding-x: 32px");
     expect(tokenCss).toContain("--codex-text-base: 14px");
@@ -112,11 +112,11 @@ describe("prototype style alignment", () => {
     expect(appSidebarRule).toContain("font-family: var(--font-sans);");
     expect(appSidebarRule).toContain("font-size: var(--codex-text-base);");
     expect(appSidebarRule).toContain("line-height: var(--codex-leading-base);");
-    expect(appNavButtonRule).toContain("font-size: 13px;");
-    expect(appNavButtonRule).toContain("line-height: 18px;");
+    expect(appNavButtonRule).toContain("font-size: 14px;");
+    expect(appNavButtonRule).toContain("line-height: 21px;");
     expect(appNavButtonLayoutRule).toContain("width: calc(100% - 24px);");
     expect(appNavButtonLayoutRule).toContain("margin: 0 12px;");
-    expect(appNavButtonLayoutRule).toContain("padding: 8px 8px;");
+    expect(appNavButtonLayoutRule).toContain("padding: 5px 12px;");
     const appNavButtonActiveRule = globalCss.match(/\.app-frame-nav-button--active\s*\{[^}]*\}/)?.[0] ?? "";
     expect(appNavButtonActiveRule).toContain("color: var(--color-action-sky-hover);");
     expect(appNavButtonActiveRule).toContain("background: var(--color-nav-active-bg);");
@@ -129,7 +129,7 @@ describe("prototype style alignment", () => {
     expect(appSearchBoxRule).toContain("padding: 0 16px;");
     expect(appNavIconRule).toContain("width: var(--codex-icon-xs);");
     expect(appNavIconRule).toContain("height: var(--codex-icon-xs);");
-    expect(appTaskTitleRule).toContain("font-size: 13px;");
+    expect(appTaskTitleRule).toContain("font-size: 14px;");
     expect(globalCss).not.toContain(".app-frame-brand");
     expect(sidebarWindowToolbarRule).toContain("flex: 0 0 var(--codex-toolbar-height);");
     expect(sidebarWindowToolbarRule).toContain("min-height: var(--codex-toolbar-height);");
@@ -211,9 +211,8 @@ describe("prototype style alignment", () => {
 
     expect(conversationPanelRules.join("\n")).not.toContain("padding-top:");
     expect(conversationPanelFontRule).toContain("font-family: var(--font-sans);");
-    // The chat interaction surface (answers, bubbles, activity timeline) uses
-    // the dedicated --font-chat pairing so Latin/CJK stay consistent, while
-    // the shell around it keeps the Nunito brand font.
+    // Latin and CJK share the system stack. Nunito is reserved for the
+    // login wordmark.
     expect(tokenCss).toContain("--font-chat:");
     expect(messageContentRule).toContain("font-family: var(--font-chat);");
     expect(globalCss).toContain(".agent-conversation-panel .agent-chat-bubble,");
@@ -254,17 +253,25 @@ describe("prototype style alignment", () => {
     expect(contentTopbarBorderedRule).toContain("border-bottom: none");
     expect(globalCss).not.toContain(".agent-conversation-titlebar");
     expect(conversationTitleRule).toContain("flex: 1 1 auto;");
-    expect(conversationTitleRule).toContain("font-size: var(--codex-text-base);");
-    expect(conversationTitleRule).toContain("font-weight: 500;");
-    expect(conversationTitleRule).toContain("line-height: var(--codex-leading-base);");
+    expect(conversationTitleRule).toContain("font-size: 16px;");
+    expect(conversationTitleRule).toContain("font-weight: 600;");
+    expect(conversationTitleRule).toContain("line-height: 24px;");
     expect(conversationTitleRule).toContain("max-width: 100%;");
     expect(conversationTitleRule).toContain("text-overflow: ellipsis;");
     expect(conversationTitleRule).toContain("user-select: none;");
     expect(conversationTitleRule).toContain("white-space: nowrap;");
-    expect(conversationScrollRule).toContain("padding-top: 12px;");
+    expect(conversationScrollRule).toContain("padding-top: 16px;");
     expect(conversationScrollRule).toContain("padding-bottom: calc(var(--agent-composer-overlay-height, 120px) + 8px);");
     expect(conversationScrollRule).not.toContain("var(--color-action-sky)");
     expect(globalCss).not.toContain(".agent-conversation-scroll::-webkit-scrollbar");
+  });
+
+  it("clips content glows without turning their surfaces into scroll containers", () => {
+    const glowSurfaceRule = globalCss.match(/^\.bg-content-bg,\n\.agent-conversation-panel\s*\{[^}]*\}/m)?.[0] ?? "";
+    const conversationPanelRules = Array.from(globalCss.matchAll(/^\.agent-conversation-panel\s*\{[^}]*\}/gm), (match) => match[0]);
+
+    expect(glowSurfaceRule).toContain("overflow: clip;");
+    expect(conversationPanelRules.join("\n")).not.toContain("overflow: hidden;");
   });
 
   it("keeps modal utility shims available for connection dialog alignment", () => {

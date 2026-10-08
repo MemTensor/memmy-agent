@@ -233,12 +233,12 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       this.analytics.track(events.searchStarted, searchBase);
       const searchStartedAt = Date.now();
       try {
-        const response = await this.client.startTurn(turnId, compact({
+        const response = await this.withInteractiveDeadline(() => this.client.startTurn(turnId, compact({
           ...this.requestEnvelope(sessionKey, ctx),
           sessionId,
           query: userText || "(conversation continued)",
           layers: this.options.retrievalLayers ?? undefined,
-        }));
+        })));
         turn.episodeId = stringOrUndefined(response?.episodeId);
         turn.sourceMemoryIds = arrayOfStrings(response?.sourceMemoryIds);
         turn.hasInjectedContext = hasInjectedContextValue(response?.injectedContext);

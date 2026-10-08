@@ -74,3 +74,17 @@ export type DesktopImageSaveResult =
 export type DesktopProjectDirectorySelection =
   | { canceled: true }
   | { canceled: false; path: string };
+
+export interface DesktopWorkspaceDirectoryEntry {
+  name: string;
+  path: string;
+  relativePath: string;
+  kind: "file" | "directory";
+}
+
+export interface DesktopWorkspaceDirectoryResult {
+  rootPath: string;
+  relativePath: string;
+  entries: DesktopWorkspaceDirectoryEntry[];
+  truncated: boolean;
+}

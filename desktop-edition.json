@@ -1,0 +1,6 @@
+{
+  "edition": "cn",
+  "accountChannel": "phone",
+  "signing": "unsigned",
+  "cloudService": "https://api.memmy.cn"
+}

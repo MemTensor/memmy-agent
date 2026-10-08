@@ -14,6 +14,9 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import type {
   MemoryAddRequest,
+  ExternalEvidenceSyncRequest,
+  ExternalEvidenceStatusRequest,
+  ExternalEvidenceSkillSuggestionRequest,
   MemoryGovernanceRequest,
   MemoryLayer,
   MemoryReloadConfigRequest,
@@ -75,6 +78,10 @@ export const API_ROUTES = [
   "POST /api/v1/memory/search",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
+  "POST /api/v1/evidence/sync",
+  "POST /api/v1/evidence/status",
+  "POST /api/v1/evidence/skills/suggest",
+  "POST /api/v1/evidence/skills/:id/approve",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -831,6 +838,30 @@ async function routeRequest(
       autoWorker.schedule();
     }
     return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/sync") {
+    requireMemoryWrite(principal);
+    const request = strictEnvelopeWithPrincipal(asObject(body, "evidence.sync"), principal) as unknown as ExternalEvidenceSyncRequest;
+    return service.syncExternalEvidence(request);
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/status") {
+    requireMemoryRead(principal);
+    const request = strictEnvelopeWithPrincipal(asObject(body, "evidence.status"), principal) as unknown as ExternalEvidenceStatusRequest;
+    return service.externalEvidenceStatus(request);
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/skills/suggest") {
+    requireMemoryWrite(principal);
+    const request = strictEnvelopeWithPrincipal(asObject(body, "evidence.skills.suggest"), principal) as unknown as ExternalEvidenceSkillSuggestionRequest;
+    return service.suggestExternalEvidenceSkill(request);
+  }
+  const evidenceSkillApprove = path.match(/^\/api\/v1\/evidence\/skills\/([^/]+)\/approve$/u);
+  if (method === "POST" && evidenceSkillApprove) {
+    requireMemoryWrite(principal);
+    const request = strictEnvelopeWithPrincipal(asObject(body, "evidence.skills.approve"), principal);
+    return service.approveExternalEvidenceSkill(decodeURIComponent(evidenceSkillApprove[1]!), request);
   }
 
   if (method === "POST" && path === "/api/v1/worker/import-summaries/enqueue") {

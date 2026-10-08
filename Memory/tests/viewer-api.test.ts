@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMemoryHttpServer,
   DEFAULT_MEMMY_CONFIG,
+  loadMemmyConfig,
   MemoryDb,
   MemoryService,
   type Embedder,
@@ -163,6 +164,45 @@ describe("local Viewer API", () => {
       source: "byok",
       model: "embedding-model",
       capabilities: ["embedding"]
+    });
+  });
+
+  it("keeps a following summary on the updated evolution model after an evolution-only Viewer save", async () => {
+    const fixture = await startFixture({ loadConfigFromDisk: true });
+    const first = await viewerFetch(fixture.baseUrl, "/api/v1/config", {
+      method: "PATCH",
+      body: JSON.stringify({ config: {
+        roleRouting: { summary: "follow", evolution: "fixed" },
+        evolution: {
+          provider: "openai_compatible",
+          endpoint: "https://synthetic.example/v1",
+          model: "evolution-v1",
+          apiKey: "synthetic-key"
+        }
+      } })
+    });
+    expect(first.status).toBe(200);
+    const before = YAML.parse(readFileSync(fixture.configPath, "utf8")) as any;
+    expect(before.modelAssignments.byok.memorySummary)
+      .toBe(before.modelAssignments.byok.memoryEvolution);
+
+    const second = await viewerFetch(fixture.baseUrl, "/api/v1/config", {
+      method: "PATCH",
+      body: JSON.stringify({ config: { evolution: { model: "evolution-v2" } } })
+    });
+    expect(second.status).toBe(200);
+    const after = YAML.parse(readFileSync(fixture.configPath, "utf8")) as any;
+    const assigned = after.modelAssignments.byok;
+    expect(assigned.memoryEvolution).not.toBe(before.modelAssignments.byok.memoryEvolution);
+    expect(assigned.memorySummary).toBe(assigned.memoryEvolution);
+    expect(after.modelPresets[assigned.memorySummary].model).toBe("evolution-v2");
+    expect(after.memmyMemory.roleRouting).toMatchObject({ summary: "follow", evolution: "fixed" });
+    const health = await fetch(`${fixture.baseUrl}/health`);
+    expect(await health.json()).toMatchObject({
+      models: {
+        summary: { model: "evolution-v2", routing: "follow" },
+        evolution: { model: "evolution-v2", routing: "fixed" }
+      }
     });
   });
 
@@ -512,6 +552,7 @@ describe("local Viewer API", () => {
 });
 
 async function startFixture(options: {
+  loadConfigFromDisk?: boolean;
   llm?: LlmClient;
   skillLlm?: LlmClient;
   viewerCli?: ViewerCliOptions;
@@ -536,7 +577,9 @@ async function startFixture(options: {
     mode: "dev",
     config,
     configPath,
-    configLoader: () => ({ config, path: configPath }),
+    configLoader: options.loadConfigFromDisk
+      ? () => loadMemmyConfig(configPath)
+      : () => ({ config, path: configPath }),
     llm: options.llm,
     skillLlm: options.skillLlm,
     embedder: testEmbedder(),

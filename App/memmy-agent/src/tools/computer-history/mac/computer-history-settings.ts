@@ -70,9 +70,8 @@ export class ComputerHistoryStatusTool extends Tool {
         screenshots: snapshot.privacy.screenshots,
         audio: snapshot.privacy.audio,
         raw_retention_hours: snapshot.privacy.rawRetentionHours,
-        // Stated exactly, because "private browsing is never recorded" is
-        // only true where a browser says which windows are private.
-        private_browsing: "Private windows in Google Chrome and Arc are never recorded. Safari offers no way to tell a private window apart, so its private windows are recorded like any other; a do_not_observe rule for com.apple.Safari keeps them out.",
+        private_browsing: "A browser window is excluded whenever its private state cannot be verified. Private windows and unverifiable browser windows are not recorded.",
+        separate_sources: "Personal WeChat is excluded from screen observation and requires its own explicit source permission.",
         system_surfaces: "The login window and screen saver are never recorded.",
       },
     });

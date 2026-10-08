@@ -773,25 +773,22 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(log).not.toContain("upgrade verified");
   });
 
-  it("continues a silent relay upgrade when migration fails and retains the original data for manual recovery", async () => {
+  it("aborts a silent relay upgrade when migration fails and restores the original data", async () => {
     const fixture = await createRelayFixture(0, { failMigrationPrepare: true });
     const lockPath = join(fixture.root, "active.lock");
     await mkdir(fixture.targetUserDataPath, { recursive: true });
     await writeFile(join(fixture.targetUserDataPath, "historical.txt"), "keep-existing-target", "utf8");
 
-    await runRelay(fixture);
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
 
     expect(existsSync(join(fixture.installDir, "Memmy.exe"))).toBe(true);
-    expect(existsSync(join(fixture.installDir, "data"))).toBe(false);
+    expect(await readFile(join(fixture.dataDir, "sentinel.txt"), "utf8")).toBe("keep-me");
     expect(await readFile(join(fixture.targetUserDataPath, "historical.txt"), "utf8")).toBe("keep-existing-target");
-    expect(await readFile(join(fixture.backupPath, "Memmy", "sentinel.txt"), "utf8")).toBe("keep-me");
     expect(existsSync(fixture.migrationStatePath)).toBe(false);
     expect(existsSync(lockPath)).toBe(false);
     const log = await readFile(fixture.logPath, "utf8");
-    expect(log).toContain("data migration Prepare failed safely; continuing installation without migration");
-    expect(log).toContain(`original data retained for manual recovery at ${fixture.backupPath}`);
-    expect(log).not.toContain("upgrade not verified");
-    await waitForPathAbsent(fixture.workDir);
+    expect(log).toContain("data migration Prepare failed; aborting before installation");
+    expect(log).toContain("upgrade not verified");
   });
 
   it("keeps the installed app when migration completion fails and rolls the targets back", async () => {

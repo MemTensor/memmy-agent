@@ -67,6 +67,15 @@ describe("Computer History platform availability", () => {
   it("keeps the macOS entry and mounts History when selected", () => {
     platform("darwin");
     render();
+    const sidebarText = host.querySelector(".memory-page-sidebar")?.textContent ?? "";
+    const userMemories = sidebarText.indexOf("User Memory");
+    const system = sidebarText.indexOf("System");
+    const history = sidebarText.indexOf("Computer History");
+    const sources = sidebarText.indexOf("Cross-Agent access");
+    expect(userMemories).toBeGreaterThan(-1);
+    expect(system).toBeGreaterThan(userMemories);
+    expect(history).toBeGreaterThan(system);
+    expect(sources).toBeGreaterThan(history);
     const entry = [...host.querySelectorAll("button")].find((button) => button.textContent === "Computer History");
     expect(entry).toBeDefined();
     expect(mocks.historyPage).not.toHaveBeenCalled();

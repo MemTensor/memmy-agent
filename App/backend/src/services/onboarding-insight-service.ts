@@ -45,6 +45,10 @@ const GENERATED_REPORT_OPEN_MARKERS = [GENERATED_REPORT_OPEN, GENERATED_REPORT_A
 const GENERATED_REPORT_CLOSE_MARKERS = [GENERATED_REPORT_CLOSE, GENERATED_REPORT_ALIAS_CLOSE] as const;
 const GENERATED_NAKED_JSON_OPEN = "\n{";
 const GENERATED_JSON_FENCE_OPEN = "\n```json";
+const FIRST_ENCOUNTER_USER_MESSAGE = {
+  "zh-CN": "嗨，第一次见面，你有什么可以为我做的吗？",
+  "en-US": "Hi, it's our first time meeting. What can you do for me?"
+} as const;
 
 const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
   { keyword: "TypeScript", pattern: /\btypescript\b|\bts\b/i },
@@ -68,6 +72,7 @@ const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
 const PROBLEM_PATTERN = /\berror\b|\bfail(?:ed|ing)?\b|\bbug\b|\bfix\b|报错|失败|修复|问题|构建|编译/i;
 const DECISION_PATTERN = /方案|设计|取舍|决策|PRD|\bplan\b|\bdesign\b|\bdecision\b/i;
 const ACTION_PATTERN = /实现|修改|重启|测试|验证|push|排查|检查|补充|更新|落地|继续|接续|整理|整合|rewrite|refactor|verify|restart/i;
+const CONCRETE_REQUEST_PATTERN = /请|帮我|帮忙|如何|怎么|设计|写|生成|制作|整理|规划|计划|分析|翻译|推荐|列出|总结|修复|实现|检查|解决|搜索|查找|比较|安排|准备|继续|讨论|please|help|write|create|make|plan|analy[sz]e|translate|recommend|summari[sz]e|fix|check|compare|schedule|continue/i;
 const HIGH_SIGNAL_PATTERN = /不要|不能|必须|应该|先|后续|可落地|细节|完整|快速|轻量|token|耗时|并行|水位|清除|假数据|隐私|权限|重启|测试|验证|push|don't|must|should|first|fast|lightweight/i;
 const LOW_VALUE_TASK_PATTERN = /\/tmp\/|memos_missing_demo|请先尝试读取|失败后不要放弃|read\s+\/tmp|smoke|fixture|mock/i;
 const GENERIC_ACCOUNT_NAMES = [
@@ -773,7 +778,7 @@ async function buildReportResponse(input: {
   if (input.sample.queries.length === 0) {
     return {
       status: "ready",
-      reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
+      reportMarkdown: renderEmptyHistoryReport(input.locale),
       diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt), input.locale)
     };
   }
@@ -818,7 +823,7 @@ async function* streamReportResponse(input: {
       type: "done",
       response: {
         status: "ready",
-        reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
+        reportMarkdown: renderEmptyHistoryReport(input.locale),
         diagnostics: diagnostics(input.sample, false, input.elapsedMs, input.locale)
       }
     };
@@ -888,25 +893,21 @@ function renderFallbackReport(
   return locale === "en-US" ? renderEnglishReport(profile, sample) : renderChineseReport(profile, sample);
 }
 
-function renderEmptyHistoryReport(locale: "zh-CN" | "en-US", sample: SampleBundle): string {
-  const agentNames = sample.discovered.map((agent) => agent.displayName);
-  if (agentNames.length > 0) {
-    const names = agentNames.join(", ");
-    return locale === "en-US" ? [
-      `Memmy found ${names} on this device, but the quick first scan did not return readable conversation history.`,
-      "Once you use Memmy with a real task, it will preserve the useful background, decisions, and next step for future conversations and other Agents."
-    ].join("\n\n") : [
-      `Memmy 已识别到这台设备上的 ${names}，但首次轻量扫描暂时没有读到可用的对话历史。`,
-      "之后用 Memmy 处理真实任务时，它会记住有用的背景、决策和下一步，方便新对话或其他 Agent 继续。"
-    ].join("\n\n");
-  }
+function hasConcreteRecentRequest(
+  profile: Pick<OnboardingInsightProfileSignals, "taskCandidates">,
+  conversation: { messages: ReadonlyArray<{ role: "user" | "assistant" | "tool"; text: string }> } | null
+): boolean {
+  return profile.taskCandidates.some((task) => task.score >= 3) ||
+    Boolean(conversation?.messages.some((message) => message.role === "user" && CONCRETE_REQUEST_PATTERN.test(message.text)));
+}
 
+function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
   return locale === "en-US" ? [
-    "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
-    "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."
+    "Hi, I'm Memmy. I can help you think through questions, organize information and plans, and keep useful context so you can pick up a conversation later or with another AI.",
+    "I couldn't find enough from this scan to get a sense of what you've been up to. We can start with what you're working on, or just chat and get to know each other."
   ].join("\n\n") : [
-    "这台设备上还没有可读取的 Agent 历史，所以我不会假装已经了解你。",
-    "先告诉 Memmy 一件你正在做的真实任务。它会记住有用的背景、决策和下一步；之后新开对话，或换到 Cursor、Codex，也不用再从头解释。"
+    "嗨，我是 Memmy。我可以陪你讨论问题、整理信息和计划，也能记住有用的背景，方便之后或换个 AI 时接着聊。",
+    "我没能通过扫描获得足够的线索来了解你的近况。你可以从正在做的事说起，也可以随便聊聊，我们慢慢熟悉。"
   ].join("\n\n");
 }
 
@@ -1140,6 +1141,20 @@ function buildFallbackTaskContext(input: OnboardingInsightGenerationInput): Onbo
   const conversation = input.sample.latestConversation;
   const messages = conversation?.messages ?? [];
   const userMessages = messages.filter((message) => message.role === "user");
+  if (!hasConcreteRecentRequest(input.profile, conversation)) {
+    return {
+      topic: "",
+      userGoal: "",
+      latestRequest: summarizeContextMessage(userMessages.at(-1)?.text ?? "", 240),
+      status: "uncertain",
+      currentState: "",
+      agentActions: [],
+      verifiedResults: [],
+      unresolvedItems: [],
+      continuationPoint: "",
+      trajectorySummary: ""
+    };
+  }
   const assistantMessages = messages.filter((message) => message.role === "assistant");
   const toolMessages = messages.filter((message) => message.role === "tool");
   const firstUser = userMessages[0]?.text ?? "";
@@ -1388,61 +1403,65 @@ function isGeneratedMarkerPrefix(value: string, markers: readonly string[]): boo
 }
 
 function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
-  const lines: string[] = [];
-  const nameLine = renderChineseNameLine(profile.nameHints);
-  if (nameLine) {
-    lines.push(nameLine);
-  }
+  const lines = [`${renderChineseNameLine(profile.nameHints)}我是 Memmy。我可以陪你讨论问题、整理信息和计划，也能把有用的对话背景留给下次或其他 AI 接着用。`];
 
   const preferenceLines = [
     renderContextLanguagePreference(profile, "zh-CN"),
     ...profile.userInsights.slice(0, 4).map((insight) => insight.textZh)
   ].filter((line): line is string => Boolean(line));
-  lines.push(`## 你的偏好\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "目前只有少量用户表达，我还不会替你下偏好结论。"}`);
+  if (preferenceLines.length > 0) {
+    lines.push(`## 你的偏好\n${preferenceLines.map((line) => `- ${line}`).join("\n")}`);
+  }
 
   const conversation = sample.latestConversation;
+  if (!hasConcreteRecentRequest(profile, conversation) || !conversation) {
+    lines.push("你可以直接从眼前想聊的事开始，我会跟着你的节奏来。");
+    return lines.join("\n\n");
+  }
   const context = buildFallbackTaskContext({ locale: "zh-CN", profile, sample: toSampleSummary(sample) });
   const memoryLines = [
-    conversation ? `最近一次会话来自 ${conversation.displayName}${conversation.workspacePath ? `，项目路径是 ${conversation.workspacePath}` : ""}。` : null,
-    context.userGoal ? `用户目标：${context.userGoal}` : null,
-    context.currentState ? `当前状态：${context.currentState}` : null,
-    context.agentActions.length > 0 ? `Agent 已做：${context.agentActions.join("；")}` : null,
-    context.verifiedResults.length > 0 ? `已验证结果：${context.verifiedResults.join("；")}` : "目前没有明确的验证结果。",
+    `最近一次会话来自 ${conversation.displayName}${conversation.workspacePath ? `，相关路径是 ${conversation.workspacePath}` : ""}。`,
+    context.userGoal ? `你当时想做的是：${context.userGoal}` : null,
+    context.currentState ? `对话里最近提到：${context.currentState}` : null,
     context.unresolvedItems.length > 0 ? `仍待处理：${context.unresolvedItems.join("；")}` : null
   ].filter((line): line is string => Boolean(line));
-  lines.push(`## 最近项目记忆\n${memoryLines.join("\n\n")}`);
+  lines.push(`## 最近聊到的事\n${memoryLines.join("\n\n")}`);
 
-  lines.push(`## 接下来可以做\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "当前记录中没有明确的未完成待办。"}`);
+  if (context.continuationPoint) {
+    lines.push(`## 如果想接着做\n${context.continuationPoint}`);
+  }
 
   return lines.join("\n\n");
 }
 
 function renderEnglishReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
-  const lines: string[] = [];
-  const nameLine = renderEnglishNameLine(profile.nameHints);
-  if (nameLine) {
-    lines.push(nameLine);
-  }
+  const lines = [`${renderEnglishNameLine(profile.nameHints)}I'm Memmy. I can help you think through questions, organize information and plans, and carry useful context into another conversation or AI tool.`];
 
   const preferenceLines = [
     renderContextLanguagePreference(profile, "en-US"),
     ...profile.userInsights.slice(0, 4).map((insight) => insight.textEn)
   ].filter((line): line is string => Boolean(line));
-  lines.push(`## Your preferences\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "I only have a few user-authored signals, so I will not overstate your preferences yet."}`);
+  if (preferenceLines.length > 0) {
+    lines.push(`## Your preferences\n${preferenceLines.map((line) => `- ${line}`).join("\n")}`);
+  }
 
   const conversation = sample.latestConversation;
+  if (!hasConcreteRecentRequest(profile, conversation) || !conversation) {
+    lines.push("We can start with whatever is on your mind, and take it from there.");
+    return lines.join("\n\n");
+  }
   const context = buildFallbackTaskContext({ locale: "en-US", profile, sample: toSampleSummary(sample) });
   const memoryLines = [
-    conversation ? `Your newest conversation is from ${conversation.displayName}${conversation.workspacePath ? `, at ${conversation.workspacePath}` : ""}.` : null,
-    context.userGoal ? `User goal: ${context.userGoal}` : null,
-    context.currentState ? `Current state: ${context.currentState}` : null,
-    context.agentActions.length > 0 ? `Agent actions: ${context.agentActions.join("; ")}` : null,
-    context.verifiedResults.length > 0 ? `Verified results: ${context.verifiedResults.join("; ")}` : "There is no explicit verified result yet.",
+    `Your latest conversation was in ${conversation.displayName}${conversation.workspacePath ? `, with context at ${conversation.workspacePath}` : ""}.`,
+    context.userGoal ? `You were working on: ${context.userGoal}` : null,
+    context.currentState ? `The conversation last mentioned: ${context.currentState}` : null,
     context.unresolvedItems.length > 0 ? `Still unresolved: ${context.unresolvedItems.join("; ")}` : null
   ].filter((line): line is string => Boolean(line));
-  lines.push(`## Latest project memory\n${memoryLines.join("\n\n")}`);
+  lines.push(`## What we recently discussed\n${memoryLines.join("\n\n")}`);
 
-  lines.push(`## What to do next\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "There is no explicit unfinished action in the current record."}`);
+  if (context.continuationPoint) {
+    lines.push(`## If you want to continue\n${context.continuationPoint}`);
+  }
 
   return lines.join("\n\n");
 }
@@ -1450,60 +1469,28 @@ function renderEnglishReport(profile: OnboardingInsightProfileSignals, sample: S
 function renderChineseNameLine(hints: NameHints): string | null {
   const name = selectFallbackNameSignal(hints);
   if (!name) {
-    return "Hi，我还没看到你明确提过名字，所以先不乱称呼你。";
+    return "嗨，";
   }
   const displayName = formatNameForGreeting(name.value);
-  if (name.kind === "self_declared") {
-    return `Hi ${displayName}，我从对话里看到你这样介绍过自己。`;
-  }
-  return `Hi ${displayName}，我先按本机线索这样称呼你；如果不对，告诉我就好。`;
+  return `嗨 ${displayName}，`;
 }
 
 function renderEnglishNameLine(hints: NameHints): string | null {
   const name = selectFallbackNameSignal(hints);
   if (!name) {
-    return "Hi, I have not seen a clear name from you yet, so I will not guess one.";
+    return "Hi, ";
   }
   const displayName = formatNameForGreeting(name.value);
-  if (name.kind === "self_declared") {
-    return `Hi ${displayName}, I saw you introduce yourself this way in the conversation.`;
-  }
-  return `Hi ${displayName}, I am using the local account hint for now; tell me if I should call you something else.`;
+  return `Hi ${displayName}, `;
 }
 
 function selectFallbackNameSignal(hints: NameHints): NameSignal | null {
-  if (hints.homePathName && !isGenericAccountName(hints.homePathName)) {
-    return {
-      value: hints.homePathName,
-      source: hints.homeAndComputerMatch ? "~ 路径与电脑用户名一致" : "~ 路径",
-      kind: "local_account"
-    };
-  }
-
   const selfDeclaredName = hints.selfDeclaredNames.find((name) => !isGenericAccountName(name))
     ?? hints.selfDeclaredNames[0];
   if (selfDeclaredName) {
     return { value: selfDeclaredName, source: "query 自称", kind: "self_declared" };
   }
-
-  if (hints.computerUserName && !isGenericAccountName(hints.computerUserName)) {
-    return { value: hints.computerUserName, source: "电脑用户名", kind: "local_account" };
-  }
-
   return null;
-}
-
-function buildNameDecisionRequirement(profile: OnboardingInsightProfileSignals, locale: "zh-CN" | "en-US") {
-  return {
-    mustInferDisplayName: true,
-    mustIncludeDisplayNameInFirstSentence: true,
-    defaultPriority: "homePathName",
-    genericAccountNames: profile.nameHints.genericAccountNames,
-    locale,
-    openingPattern: locale === "en-US"
-      ? "Hi <displayName>, ..."
-      : "Hi <displayName>，..."
-  };
 }
 
 function formatNameForGreeting(value: string): string {
@@ -1916,34 +1903,30 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
     {
       role: "system",
       content: [
-        "你是 Memmy 首次登录初见报告撰写者。报告要像一位刚接手工作的可靠搭档：私人化、具体、克制，不是技术日志，也不是营销文案。",
+        "你是 Memmy。正在回答用户的第一句话，先自然介绍你能帮忙做什么，再根据已有线索展示你能如何帮这位用户。语气像刚认识的可靠搭档，不写技术日志或营销文案。",
+        "你可以陪用户讨论问题、整理信息、总结近期对话和待办，并保留有用的背景供新对话或其他 Agent 接续。不要把能力限定为编程或修 Bug。",
         "只依据输入里的明确证据，不要编造项目、完成情况、错误原因或用户偏好。证据不足时直接说明尚不能确认。",
         "不要把 diagnostics 写给用户，不要出现“轻量样本、采样、query 数、discoveredAgentCount”等实现细节。",
-        "你必须根据 profile.nameHints 综合判断用户可能希望被怎么称呼。nameHints.selfDeclaredNames 来自扫描到的用户自称，homePathName 是 home 路径最后一段，computerUserName 是电脑用户名，homeAndComputerMatch 表示 home 路径名和电脑用户名一致。",
-        "名字判断默认优先使用 homePathName，因为用户一定有 home 路径；不要因为 selfDeclaredNames 为空就省略称呼。只有当 homePathName 是 admin、administrator、root、ubuntu、user、test、guest、default、runner、ec2-user 这类泛化账号名，或明显不是可称呼名字时，才降低它的优先级。",
-        "selfDeclaredNames 和 computerUserName 是辅助判断线索：如果 selfDeclaredNames 有明确人名，可以结合它修正称呼；如果 homePathName 与 computerUserName 一致，说明本机线索更可信。",
-        "第一句必须包含你判断出的具体称呼：中文报告以“Hi <称呼>，”开头，英文报告以“Hi <name>, ”开头。不得省略名字，不得把名字替换成“这个线索”“这个称呼”“X”等占位词。",
-        "严禁出现“本机账号显示为”“本机用户名/路径名显示为”“local username/path shows”“我检测到你的用户名”这类工程口径。",
-        "不要向用户暴露 nameHints、homePathName、computerUserName 这些字段名或来源；如果本机线索只是临时称呼，要用柔和语气表达“如果不对，告诉我就好”。中英文混合名不要使用。",
-        "输出中文或英文由 locale 决定。profile.preferredResponseLanguage 来自近期用户请求的主语言统计；有值时要自然说明用户最近更常用中文还是英文。",
+        "只有 profile.nameHints.selfDeclaredNames 中存在可信的用户自称时才使用名字；否则直接打招呼，不猜本机用户名或路径名。中英文混合或明显不适合称呼的名字也不要使用。",
+        "输出中文或英文由 locale 决定。profile.preferredResponseLanguage 来自近期用户请求的主语言统计；有充分证据时可自然提及语言习惯，不必专门报告统计结果。",
         "偏好结论的唯一原始证据是 preferenceEvidence 中由用户本人发送的消息，profile 里的偏好字段也只是这些用户消息的结构化归纳。仅总结用户明确表达或在多个请求中稳定体现的偏好；不要把旧任务内容本身当成偏好，也严禁使用 assistant、tool 或 latestConversation 推断偏好。",
-        "latestConversation 是所有已扫描 Agent 中时间最新的一个会话，只允许依据这个会话总结最近项目、任务、Bug 或关键词及其当前进度。",
+        "latestConversation 是所有已扫描 Agent 中时间最新的一个会话。它可能是项目任务，也可能只是普通交流；只允许依据这个会话说明最近聊到的事及其进度。",
         "latestConversation.messages 已按首 2 个和尾 12 个对话轮次截取。user 是用户请求，assistant 是 Agent 回复，tool 是脱敏后的简短工具执行信息。",
         "区分三类进度证据：用户要求做什么、Agent 表示做了什么、工具结果实际验证了什么。只有明确成功的 tool 结果才能写成已验证；只有 assistant 自述时应写成“Agent 表示/对话中提到”，不能当成确定事实。",
-        "把 latestConversation 看作一条随时间演进的任务轨迹：合并重复要求，保留关键转折，并让较新的决定、修复和验证覆盖较早的猜测、失败或阻塞。不要逐条复述消息，不要照抄工具日志。",
-        "正文必须包含三个 Markdown 小节：『你的偏好』『最近项目记忆』『接下来可以做』。可以使用短段落和列表，不要使用表格或代码块。",
-        "『你的偏好』只总结用户本人有证据支持的语言、沟通方式、输出形式、方案取舍、实现约束或验证要求，最多 3-5 条；不要混入项目进度、Agent 行为、工具结果或空泛性格标签。",
-        "『最近项目记忆』说明最新会话来自哪个 Agent、用户目标、已做事项、已验证结果、当前状态、仍待处理内容。workspacePath 有值时必须写清项目具体路径。只写当前有效结论，不展开冗长历史。",
-        "『接下来可以做』只列证据支持且尚未完成的 0-3 条待办，按执行顺序排列。第一条应是当前最小且可立即执行的下一步；任务已完成或没有明确待办时，直接说明暂时没有明确待办，不要补通用建议。",
-        "正文长度要求：中文 300-500 字，英文 180-300 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
+        "如果 latestConversation 是连续事项，把它看作随时间演进的轨迹：合并重复要求，保留关键转折，并让较新的决定、修复和验证覆盖较早的猜测、失败或阻塞。不要逐条复述消息，不要照抄工具日志。",
+        "如果有明确的近期事项，可以沿用『你的偏好』『最近聊到的事』『接下来可以做』等简短小节，梳理背景、进度和待办；没有证据的偏好或未完成事项就省略对应小节，不要为了报告格式硬凑。",
+        "『你的偏好』最多 3 条，只写用户本人有证据支持的语言、沟通方式或工作要求；不要混入项目进度、Agent 行为、工具结果或空泛性格标签。",
+        "『最近聊到的事』说明最新会话来自哪个 Agent、用户目标、当前有效进度。workspacePath 有值且确实关联该事项时可写路径；不要假定每个人都有项目或 Bug。",
+        "『接下来可以做』只列证据支持且尚未完成的 0-3 条待办，按执行顺序排列；任务已完成或只是普通交流时，不生成待办。",
+        "正文中文一般 120-300 字，英文一般 80-180 words；有具体任务可稍长，普通交流保持简短。先回答能帮什么，再呈现有依据的线索。",
         "报告正文只允许使用 Markdown，不得包含任何原始 HTML 标签或样式。不要输出思考过程、执行计划、要求确认、Prompt 复述或起草说明。",
         "你必须一次输出两个区块，严格使用以下顺序和标签；标签前后不要添加其他文字：",
         `${GENERATED_REPORT_OPEN}\n这里放给用户看的 Markdown 报告正文\n${GENERATED_REPORT_CLOSE}`,
         `${GENERATED_TASK_CONTEXT_OPEN}\n这里放一个合法 JSON 对象\n${GENERATED_TASK_CONTEXT_CLOSE}`,
         "任务上下文 JSON 必须包含且只需包含：topic、userGoal、latestRequest、status、currentState、agentActions、verifiedResults、unresolvedItems、continuationPoint、trajectorySummary。status 只能是 pending、active、waiting、completed、uncertain；后三个集合字段必须是字符串数组。",
-        "任务上下文使用 locale 对应语言，面向任意类型任务，不要使用仅适合 Coding 的固定分类。它只总结最新任务，不得包含用户偏好，也不得复制原始 query、assistant 回复或工具流水。agentActions 写 Agent 已采取的动作，verifiedResults 只写有结果证据支持的结论，unresolvedItems 只写仍然有效的问题，continuationPoint 写其他 Agent 接手时应从哪里继续。",
-        "trajectorySummary 用一个紧凑段落总结：用户目标如何演进、Agent 做了什么、得到什么结果、现在停在哪里。最终状态优先；已经被后续解决的问题不能继续写成当前阻塞。",
-        "任务上下文要短：JSON 必须单行输出、不要缩进、不要代码块；每个普通字段最多一句，三个数组各最多 3 项，trajectorySummary 中文 80-160 字或英文 60-100 words；不要为了填满字段而重复同一事实。",
+        "任务上下文使用 locale 对应语言，面向任意类型事项，不要使用仅适合 Coding 的固定分类。它只总结最新会话，不得包含用户偏好，也不得复制原始 query、assistant 回复或工具流水。普通交流或缺少任务证据时，status 用 uncertain，任务字段和数组可为空。agentActions 写 Agent 已采取的动作，verifiedResults 只写有结果证据支持的结论，unresolvedItems 只写仍然有效的问题，continuationPoint 只写有证据支持的接续位置。",
+        "有明确事项时，trajectorySummary 用一个紧凑段落总结目标如何演进、Agent 做了什么、得到什么结果、现在停在哪里；最终状态优先。普通交流时可留空，不要编造任务轨迹。",
+        "任务上下文要短：JSON 必须单行输出、不要缩进、不要代码块；每个普通字段最多一句，三个数组各最多 3 项，不要为了填满字段而重复同一事实。",
         "报告正文不要生成按钮、行动卡片、CTA、JSON、Markdown 代码块或表格；任务上下文区块只放 JSON 对象。不要暴露任何密钥。"
       ].join("\n")
     },
@@ -1951,22 +1934,21 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
       role: "user",
       content: JSON.stringify({
         locale: input.locale,
+        openingUserMessage: FIRST_ENCOUNTER_USER_MESSAGE[input.locale],
         reportGoal: {
-          primary: "user_preferences_latest_project_memory_and_actionable_todos",
+          primary: "answer_the_opening_question_with_capabilities_and_evidence_based_context",
           lengthConstraint: input.locale === "zh-CN"
-            ? "300-500 Chinese characters"
-            : "180-300 English words",
+            ? "usually 120-300 Chinese characters"
+            : "usually 80-180 English words",
           requiredSections: [
-            "opening_with_name_or_safe_greeting",
-            "user_preferences",
-            "latest_project_memory",
-            "ordered_actionable_todos"
+            "friendly_greeting_and_capabilities",
+            "relevant_observations_when_supported",
+            "recent_context_and_open_todos_when_supported"
           ],
           focus: [
-            "用户有哪些有证据支持的稳定偏好",
-            "全局最新会话对应什么项目、任务、Bug 或关键词",
-            "用户要求、Agent 自述和工具验证分别说明了什么进度",
-            "接下来尚未完成且最可行的 0-3 个待办是什么"
+            "直接回答 openingUserMessage：Memmy 能为用户做什么",
+            "有证据时说明对这位用户已了解到什么",
+            "有明确近期事项时梳理进度与未完成待办；否则自然打招呼"
           ],
           outputEnvelope: {
             reportTag: GENERATED_REPORT_OPEN,
@@ -1986,7 +1968,6 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
           }
         },
         profile: toLlmProfile(input.profile, input.sample.activeAgents),
-        nameDecisionRequirement: buildNameDecisionRequirement(input.profile, input.locale),
         activeAgents: input.sample.activeAgents,
         preferenceEvidence: input.sample.queries,
         latestConversation: input.sample.latestConversation
@@ -2002,6 +1983,7 @@ function toLlmProfile(
   const agentNames = new Map(activeAgents.map((agent) => [agent.sourceId, agent.displayName]));
   return {
     ...profile,
+    nameHints: { selfDeclaredNames: profile.nameHints.selfDeclaredNames },
     taskCandidates: profile.taskCandidates.map((task) => ({
       title: task.title,
       summary: task.summary,

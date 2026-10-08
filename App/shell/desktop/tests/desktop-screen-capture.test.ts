@@ -1,55 +1,78 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { bindScreenCaptureIpc, createDesktopScreenCapture } from '../src/main/desktop-screen-capture.js';
-function fixture() {
-  const image = { isEmpty: () => false, getSize: () => ({ width: 100, height: 80 }), toPNG: () => Buffer.from('png'), resize: vi.fn() };
-  const deps = { getStatus: vi.fn(() => 'granted'), getSources: vi.fn(async () => [{ display_id: '7', thumbnail: image }]), getDisplays: () => [{ id: 7, bounds: { x: 0, y: 0, width: 100, height: 80 } }], getPrimaryDisplay: () => ({ id: 7, bounds: { x: 0, y: 0, width: 100, height: 80 } }), openSettings: vi.fn(async () => undefined) };
-  return { deps, image, capture: createDesktopScreenCapture(deps) };
+import { bindScreenCaptureIpc, createDesktopScreenCapture, memmyPermissionMessage, type HelperScreenShot } from '../src/main/desktop-screen-capture.js';
+import { captureMemmyScreen, computerUseAgentEnvironment, computerUseApp, memmyPermissionSnapshot, parseHelperScreenCapture, permissionsFromDoctor } from '../src/main/memmy-screen-permission.js';
+
+const displays = () => [{ id: 7, bounds: { x: 0, y: 0, width: 100, height: 80 } }];
+function fixture(shot: HelperScreenShot = { ok: true, png: Buffer.from('png'), width: 100, height: 80, displayId: '7' }) {
+  const capture = vi.fn(async () => shot);
+  const guide = vi.fn(async () => undefined);
+  return { capture, guide, screen: createDesktopScreenCapture({ capture, guide, getDisplays: displays, getPrimaryDisplay: () => displays()[0] }) };
 }
-describe('passive desktop capture', () => {
-  it('reads only screen sources; no windows, icons, audio or preview', async () => {
-    const { capture, deps } = fixture();
-    expect(await capture()).toMatchObject({ ok: true, displayId: '7', width: 100, height: 80 });
-    expect(deps.getSources).toHaveBeenCalledWith({ types: ['screen'], thumbnailSize: { width: 1280, height: 1280 }, fetchWindowIcons: false });
-    expect(deps.openSettings).not.toHaveBeenCalled();
+
+describe('one Memmy screen permission', () => {
+  it('returns the helper image without opening a second permission', async () => {
+    const { screen, guide } = fixture();
+    await expect(screen()).resolves.toMatchObject({ ok: true, displayId: '7', width: 100, height: 80, pngBase64: Buffer.from('png').toString('base64') });
+    expect(guide).not.toHaveBeenCalled();
   });
-  it('requests first permission once and discards the onboarding capture', async () => {
-    const { capture, deps } = fixture(); deps.getStatus.mockReturnValue('not-determined');
-    expect(await capture()).toMatchObject({ ok: false, code: 'permission_required' });
-    expect(await capture()).toMatchObject({ ok: false, code: 'permission_required' });
-    expect(deps.getSources).toHaveBeenCalledOnce(); expect(deps.openSettings).not.toHaveBeenCalled();
-    deps.getStatus.mockReturnValue('granted'); expect(await capture()).toMatchObject({ ok: true });
+
+  it('opens the same Memmy guide once when that permission is missing', async () => {
+    const { screen, guide, capture } = fixture({ ok: false, code: 'permission_required' });
+    const first = await screen();
+    const second = await screen();
+    expect(first).toMatchObject({ ok: false, code: 'permission_required', message: memmyPermissionMessage });
+    expect(second).toMatchObject({ ok: false, code: 'permission_required' });
+    expect(guide).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledTimes(2);
+    expect(memmyPermissionMessage).toContain('同一套权限');
+    expect(memmyPermissionMessage).toContain('不需要再单独授权另一个程序');
+    expect(memmyPermissionMessage).not.toContain('Electron');
   });
-  it('opens Settings once per denied period, without requesting AX access', async () => {
-    const { capture, deps } = fixture(); deps.getStatus.mockReturnValue('denied');
-    const result = await capture();
-    expect(result).toMatchObject({ ok: false, code: 'permission_required' });
-    if (!result.ok) {
-      expect(result.message).toContain('系统设置 → 隐私与安全性');
-      expect(result.message).toContain('Memmy'); expect(result.message).toContain('Electron');
-      expect(result.message).toContain('退出并重新打开'); expect(result.message).toContain('重新发送');
-    }
-    await capture(); expect(deps.openSettings).toHaveBeenCalledOnce(); expect(deps.getSources).not.toHaveBeenCalled();
-    deps.getStatus.mockReturnValue('granted'); await capture(); deps.getStatus.mockReturnValue('denied'); await capture(); expect(deps.openSettings).toHaveBeenCalledTimes(2);
+
+  it('asks again after a successful capture if permission is removed', async () => {
+    const capture = vi.fn<(...args: unknown[]) => Promise<HelperScreenShot>>()
+      .mockResolvedValueOnce({ ok: true, png: Buffer.from('png'), width: 20, height: 20, displayId: '7' })
+      .mockResolvedValue({ ok: false, code: 'permission_required' });
+    const guide = vi.fn(async () => undefined);
+    const screen = createDesktopScreenCapture({ capture, guide, getDisplays: displays, getPrimaryDisplay: () => displays()[0] });
+    await screen();
+    await screen();
+    await screen();
+    expect(guide).toHaveBeenCalledOnce();
   });
-  it.each(['unknown', 'restricted'])('blocks %s permission without a screenshot or prompt', async status => {
-    const { capture, deps } = fixture(); deps.getStatus.mockReturnValue(status);
-    expect(await capture()).toMatchObject({ ok: false, code: 'unavailable' }); expect(deps.getSources).not.toHaveBeenCalled(); expect(deps.openSettings).not.toHaveBeenCalled();
+
+  it('does not substitute another display or accept an oversized image', async () => {
+    const missing = fixture({ ok: true, png: Buffer.from('png'), width: 10, height: 10, displayId: '999' });
+    await expect(missing.screen('999')).resolves.toMatchObject({ ok: false, code: 'capture_failed' });
+    const huge = fixture({ ok: true, png: Buffer.alloc(901 * 1024), width: 100, height: 80, displayId: '7' });
+    await expect(huge.screen()).resolves.toMatchObject({ ok: false, code: 'capture_failed' });
   });
-  it('never substitutes another display or accepts an empty image', async () => {
-    const { capture, image, deps } = fixture();
-    expect(await capture('999')).toMatchObject({ ok: false }); expect(deps.getSources).not.toHaveBeenCalled();
-    image.isEmpty = () => true; expect(await capture('7')).toMatchObject({ ok: false });
+});
+
+describe('helper screen capture', () => {
+  it('reads the helper result and retries once after stopping a stale helper', async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"ok":false,"code":"permission_required"}\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ ok: true, pngBase64: Buffer.from('png').toString('base64'), width: 8, height: 4, displayId: '7' }), stderr: '' });
+    const stopAgent = vi.fn(async () => undefined);
+    await expect(captureMemmyScreen('/Apps/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse', undefined, undefined, { run, stopAgent }))
+      .resolves.toMatchObject({ ok: true, width: 8, height: 4, displayId: '7' });
+    expect(stopAgent).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenLastCalledWith('/Apps/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse', ['capture-screen'], undefined);
   });
-  it('discards an image if permission is revoked during capture', async () => {
-    const { capture, deps } = fixture(); deps.getStatus.mockReturnValueOnce('granted').mockReturnValue('denied');
-    expect(await capture()).toMatchObject({ ok: false, code: 'permission_required' });
-  });
-  it('shrinks oversized output before crossing IPC', async () => {
-    const { capture, image } = fixture();
-    image.toPNG = () => Buffer.alloc(950 * 1024);
-    image.resize.mockReturnValue({ isEmpty: () => false, getSize: () => ({ width: 75, height: 60 }), toPNG: () => Buffer.from('small'), resize: vi.fn() });
-    expect(await capture()).toMatchObject({ ok: true, width: 75, height: 60 }); expect(image.resize).toHaveBeenCalledOnce();
+
+  it('parses doctor output into the one permission record', () => {
+    expect(permissionsFromDoctor('Permissions: accessibility=granted, screenRecording=missing\n')).toEqual({
+      accessibility: 'granted', screenRecording: 'required',
+    });
+    expect(memmyPermissionSnapshot('{"accessibility":true,"inputMonitoring":false,"screenRecording":true}\n')).toEqual({
+      accessibility: 'granted', inputMonitoring: 'required', screenRecording: 'granted',
+    });
+    expect(parseHelperScreenCapture('not json')).toBeNull();
+    expect(computerUseApp('/Apps/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse')).toBe('/Apps/Memmy Computer Use.app');
+    expect(computerUseAgentEnvironment('/Apps/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse')
+      .OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE).toBe('memmy:/Apps/Memmy Computer Use.app');
   });
 });
 

@@ -61,6 +61,21 @@ describe("first encounter task launch", () => {
     });
   });
 
+  it("keeps the empty-history greeting out of the cross-Agent task relay", () => {
+    const storage = new MemoryStorage();
+
+    writePendingFirstEncounterTaskLaunch(storage, "嗨，第一次见面，你有什么可以为我做的吗？", {
+      assistantContent: "嗨，我是 Memmy。我们可以先聊聊。",
+      showRelayFollowUp: false,
+      now: 789
+    });
+
+    expect(consumePendingFirstEncounterTaskLaunch(storage)).toMatchObject({
+      showRelayFollowUp: false,
+      createdAt: 789
+    });
+  });
+
   it("clears a pending task before opening the empty first conversation", () => {
     const storage = new MemoryStorage();
     writePendingFirstEncounterTaskLaunch(storage, "这条内容不应自动发送");

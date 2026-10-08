@@ -203,6 +203,61 @@ describe("app reducer", () => {
     expect(staleProgressState).toBe(failedButFinishedState);
   });
 
+  it("keeps the scan card frozen while cancel is in flight and drops late progress after it finishes", () => {
+    const progressState = appReducer(
+      createInitialAppState(),
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 2,
+        total: 5,
+        message: "Adding memories"
+      })
+    );
+    const cancellingState = appReducer(progressState, appActions.agentSourceScanCancelRequested("job-1"));
+    const ignoredProgressState = appReducer(
+      cancellingState,
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 4,
+        total: 5,
+        message: "Adding memories"
+      })
+    );
+
+    expect(cancellingState.agentSources.cancellingScanJobId).toBe("job-1");
+    expect(ignoredProgressState.agentSources.isScanning).toBe(true);
+    expect(ignoredProgressState.agentSources.scanProgress).toEqual(progressState.agentSources.scanProgress);
+
+    const cancelledState = appReducer(ignoredProgressState, appActions.agentSourceScanCompleted());
+    expect(cancelledState.agentSources.isScanning).toBe(false);
+    expect(cancelledState.agentSources.scanProgress).toBeNull();
+    expect(cancelledState.agentSources.cancellingScanJobId).toBeNull();
+    expect(cancelledState.agentSources.finishedScanJobIds).toEqual(["job-1"]);
+    expect(cancelledState.agentSources.recentScanCompletions).toEqual([]);
+
+    const restoredState = appReducer(
+      cancelledState,
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 5,
+        total: 5
+      })
+    );
+    expect(restoredState).toBe(cancelledState);
+
+    const failedState = appReducer(cancellingState, appActions.agentSourceScanCancelFailed("cancel failed"));
+    expect(failedState.agentSources.cancellingScanJobId).toBeNull();
+    expect(failedState.agentSources.error).toBe("cancel failed");
+    expect(failedState.agentSources.scanProgress).toEqual(progressState.agentSources.scanProgress);
+    expect(failedState.agentSources.isScanning).toBe(true);
+  });
+
   it("ignores stale scan progress for a stopped job", () => {
     const progressState = appReducer(
       createInitialAppState(),

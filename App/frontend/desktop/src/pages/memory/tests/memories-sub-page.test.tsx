@@ -77,6 +77,7 @@ describe("MemoriesSubPage", () => {
       "QwenWork"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
+    expect(agentSourceDisplayName("computer_history")).toBe("Computer History");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");
     expect(agentSourceDisplayName("OPENCLAW")).toBe("OpenClaw");
   });

@@ -520,11 +520,11 @@ try {
     $relayPhase = 'migration-prepared'
     Write-MemmyRelayState
   } catch {
-    $migrationSkipped = $true
     $migrationFailure = $_.Exception.Message
     $relayPhase = 'migration-skipped'
     Write-MemmyRelayState
-    Write-MemmyUpgradeLog "data migration Prepare failed safely; continuing installation without migration: $migrationFailure"
+    Write-MemmyUpgradeLog "data migration Prepare failed; aborting before installation so the original data can be restored: $migrationFailure"
+    throw "data migration Prepare failed; installation was not started: $migrationFailure"
   }
 
   # Both visible and silent relay children are upgrades. Keeping --updated for the visible child

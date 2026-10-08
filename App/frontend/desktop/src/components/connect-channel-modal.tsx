@@ -1,5 +1,5 @@
 /** Connect channel modal module. */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { ChannelProvider, ConnectChannelInput, ConnectChannelResponse } from "@memmy/local-api-contracts";
 import type { ChannelsClient } from "../api/channels-client.js";
@@ -291,8 +291,9 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
         style={{
           animationDuration: "200ms",
           animationTimingFunction: "cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-          animationFillMode: "both"
-        }}
+          animationFillMode: "both",
+          WebkitAppRegion: "no-drag"
+        } as CSSProperties}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="p-4 border-b border-stone-200">

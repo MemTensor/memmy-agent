@@ -32,15 +32,16 @@ describe("macOS permission guidance", () => {
     expect(await guide.show("computer-use", "accessibility")).toBe(true);
   });
   it("does not mistake page text, another server or app safety policy for a permission request", () => {
+    expect(computerUsePermissionError("memmy_computer_use", denied())).toBe("accessibility");
     expect(computerUsePermissionError("open_computer_use", denied())).toBe("accessibility");
     expect(computerUsePermissionError("another_server", denied())).toBeNull();
-    expect(computerUsePermissionError("open_computer_use", { ...denied(), isError: false })).toBeNull();
-    expect(computerUsePermissionError("open_computer_use", { isError: true, content: [{ type: "text", text: "Computer Use is not allowed to use the app 'test' for safety reasons." }] })).toBeNull();
+    expect(computerUsePermissionError("memmy_computer_use", { ...denied(), isError: false })).toBeNull();
+    expect(computerUsePermissionError("memmy_computer_use", { isError: true, content: [{ type: "text", text: "Computer Use is not allowed to use the app 'test' for safety reasons." }] })).toBeNull();
   });
   it("preserves custom MCP permission errors without opening a second settings guide", async () => {
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
     const callTool = vi.fn().mockResolvedValue(denied());
-    const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" });
+    const tool = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "click" });
     const result = await tool.execute({ app: "Notes", element_index: 1 });
     expect(callTool).toHaveBeenCalledTimes(1);
     expect(show).not.toHaveBeenCalled();
@@ -48,7 +49,7 @@ describe("macOS permission guidance", () => {
   });
   it("preserves ordinary tool results without showing Settings", async () => {
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
-    const tool = new MCPToolWrapper({ callTool: async () => ({ content: [{ type: "text", text }] }) }, "open_computer_use", { name: "get_app_state" });
+    const tool = new MCPToolWrapper({ callTool: async () => ({ content: [{ type: "text", text }] }) }, "memmy_computer_use", { name: "get_app_state" });
     await tool.execute();
     expect(show).not.toHaveBeenCalled();
   });
@@ -56,6 +57,8 @@ describe("macOS permission guidance", () => {
     const prefix = "human history recording failed: missing macOS permission: ";
     expect(computerHistoryPermissionError(prefix + "Input Monitoring, Accessibility. Grant it to the app.")).toBe("accessibility");
     expect(computerHistoryPermissionError(prefix + "Input Monitoring. Grant it to the app.")).toBe("inputMonitoring");
+    expect(computerHistoryPermissionError("human history recording failed: Input Monitoring permission is required for Memmy Computer Use.")).toBe("inputMonitoring");
+    expect(computerHistoryPermissionError("human history recording failed: Unable to create the event tap. Grant Input Monitoring to Memmy Computer Use and restart it.")).toBe("inputMonitoring");
     expect(computerHistoryPermissionError("a page mentions missing macOS permission: Accessibility.")).toBeNull();
   });
 });
