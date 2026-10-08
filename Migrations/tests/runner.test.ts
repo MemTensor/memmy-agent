@@ -113,9 +113,10 @@ describe("migration runner", () => {
       "v1.0.9/0001-repair-runtime-model-catalog",
       "v1.1.2/0001-upgrade-summary-timeout",
       "v1.1.6/0001-add-open-computer-use-mcp",
+      "v1.1.9/0001-remove-legacy-memory-embedding",
     ]);
     expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
-    expect(first.results).toEqual({ scanned: 6, changed: 3, ignored: 3 });
+    expect(first.results).toEqual({ scanned: 7, changed: 3, ignored: 4 });
     expect(second).toEqual({
       applied: [],
       skipped: [
@@ -126,6 +127,7 @@ describe("migration runner", () => {
         "v1.0.9/0001-repair-runtime-model-catalog",
         "v1.1.2/0001-upgrade-summary-timeout",
         "v1.1.6/0001-add-open-computer-use-mcp",
+        "v1.1.9/0001-remove-legacy-memory-embedding",
       ],
       deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
       results: { scanned: 0, changed: 0, ignored: 0 },
@@ -188,6 +190,15 @@ describe("migration runner", () => {
       {
         id: "v1.1.6/0001-add-open-computer-use-mcp",
         introducedIn: "1.1.6",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: {
+          type: "runtime-config",
+          key: runtimeConfigTargetKey(configPath),
+        },
+      },
+      {
+        id: "v1.1.9/0001-remove-legacy-memory-embedding",
+        introducedIn: "1.1.9",
         appliedAt: expect.stringMatching(/Z$/),
         target: {
           type: "runtime-config",

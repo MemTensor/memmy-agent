@@ -1,3 +1,4 @@
+import { syncMemoryModelCatalog } from "../config/model-catalog.js";
 import { mutateMemoryConfig } from "../config/writer.js";
 import {
   existsSync,
@@ -293,8 +294,8 @@ function setupMemoryConfig(
 ): void {
   const app = asRecord(config.app);
   const appUserId = optionalString(app.userId);
-
-  config.memmyMemory = setupMemmyMemoryConfig(asRecord(config.memmyMemory), {
+  const existingMemory = asRecord(config.memmyMemory);
+  const memory = setupMemmyMemoryConfig(existingMemory, {
     appUserId,
     accountMode: app.userMode === "account",
     dbPath: options.dbPath,
@@ -302,6 +303,13 @@ function setupMemoryConfig(
     token: options.token,
     generateTokenIfMissing: options.generateTokenIfMissing,
   });
+  // Older installs stored embedding settings here. Normalize them into the
+  // shared model catalog while ensuring the retired runtime field is absent.
+  if (Object.prototype.hasOwnProperty.call(existingMemory, "embedding")) {
+    const embedding = setupEmbeddingForCatalog(existingMemory.embedding, app.userMode === "account");
+    syncMemoryModelCatalog(config, { ...memory, embedding }, { embedding });
+  }
+  config.memmyMemory = memory;
 }
 
 function setupMemmyMemoryConfig(
@@ -316,7 +324,6 @@ function setupMemmyMemoryConfig(
   }
 ): Record<string, unknown> {
   const roleRouting = asRecord(existing.roleRouting);
-  const embedding = asRecord(existing.embedding);
   const storage = asRecord(existing.storage);
   const algorithm = asRecord(existing.algorithm);
   const agentAccess = asRecord(existing.agentAccess);
@@ -355,14 +362,33 @@ function setupMemmyMemoryConfig(
       watchFileChanges: optionalBoolean(agentAccess.watchFileChanges) ?? true,
       autoInjectSkill: optionalBoolean(agentAccess.autoInjectSkill) ?? false
     },
-    embedding: Object.keys(embedding).length
-      ? embedding
-      : {
-          mode: options.accountMode ? "cloud" : "local",
-          ...(options.accountMode ? {} : { provider: "local" })
-        }
   };
+  delete memmyMemory.embedding;
   return memmyMemory;
+}
+
+function setupEmbeddingForCatalog(value: unknown, accountMode: boolean): Record<string, unknown> {
+  const embedding = asRecord(value);
+  const nested = asRecord(embedding.custom);
+  const configuredMode = optionalString(embedding.mode);
+  if (configuredMode === "local" || optionalString(embedding.provider) === "local") {
+    return { ...embedding, mode: "local" };
+  }
+  if (configuredMode === "custom" || Object.keys(nested).length > 0 || hasEmbeddingConnection(embedding)) {
+    return {
+      ...embedding,
+      ...nested,
+      mode: "custom",
+    };
+  }
+  return {
+    ...embedding,
+    mode: accountMode ? "cloud" : "local",
+  };
+}
+
+function hasEmbeddingConnection(value: Record<string, unknown>): boolean {
+  return ["endpoint", "model", "apiKey", "extraHeaders", "extraBody"].some((key) => key in value);
 }
 
 function memoryRoleRouting(value: unknown): "follow" | "fixed" {
