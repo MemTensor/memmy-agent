@@ -107,15 +107,13 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
 
       const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
+      const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
+      const hookConfig = {
+        memmy_config_path: memmyConfigPath,
+        ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
+      };
       await mkdir(hookDirectory, { recursive: true });
-      await writeFileAtomically(
-        join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({
-          memmy_config_path: memmyConfigPath,
-          ...(await readMemmyMemoryServiceConfig(memmyConfigPath)),
-          ...(await memmyHookRevisionField(CLAUDE_CODE_TARGET_ID, "claude-code"))
-        }, null, 2)}\n`
-      );
+      await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
       await writeFileAtomically(
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CLAUDE_CODE_TARGET_ID, mode: "claude-code" })
@@ -136,6 +134,10 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await writeFileAtomically(
+        hookConfigPath,
+        `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CLAUDE_CODE_TARGET_ID, "claude-code")) }, null, 2)}\n`
+      );
     },
 
     async uninstallPlugin(_targetId) {

@@ -76,15 +76,13 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
 
       const hookDirectory = join(cursorRootDirectory, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
+      const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
+      const hookConfig = {
+        memmy_config_path: memmyConfigPath,
+        ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
+      };
       await mkdir(hookDirectory, { recursive: true });
-      await writeFileAtomically(
-        join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({
-          memmy_config_path: memmyConfigPath,
-          ...(await readMemmyMemoryServiceConfig(memmyConfigPath)),
-          ...(await memmyHookRevisionField(CURSOR_TARGET_ID, "cursor"))
-        }, null, 2)}\n`
-      );
+      await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
       await writeFileAtomically(
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CURSOR_TARGET_ID, mode: "cursor" })
@@ -99,6 +97,10 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
       const manifest = renderMemmyPluginSkillManifest(_targetId);
       await replaceMemmySkillDirectory(cursorRootDirectory, manifest);
       await replaceMemmyResumeSkillDirectory(cursorRootDirectory, CURSOR_TARGET_ID);
+      await writeFileAtomically(
+        hookConfigPath,
+        `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CURSOR_TARGET_ID, "cursor")) }, null, 2)}\n`
+      );
     },
 
     async uninstallPlugin(_targetId) {

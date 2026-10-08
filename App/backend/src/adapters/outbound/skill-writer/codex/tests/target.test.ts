@@ -140,6 +140,10 @@ describe("codex skill target", () => {
     writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
     await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
 
+    writeFileSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"), "old hook\n", "utf8");
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
     await target.installPlugin?.("codex");
     await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
   });

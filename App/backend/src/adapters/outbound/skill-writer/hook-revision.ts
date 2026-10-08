@@ -48,8 +48,9 @@ export interface InstalledMemmyHookPaths {
 }
 
 /**
- * An installed hook is current when both files exist and the stored fingerprint
- * matches the bundle in this process. A missing fingerprint is an older install.
+ * An installed hook is current only after the on-disk script and bridge match
+ * this bundle and the config records that same fingerprint. A fingerprint written
+ * before those files were replaced is an interrupted install.
  */
 export async function isInstalledMemmyHookCurrent(input: InstalledMemmyHookPaths): Promise<boolean> {
   const [script, bridge, configText] = await Promise.all([
@@ -60,7 +61,8 @@ export async function isInstalledMemmyHookCurrent(input: InstalledMemmyHookPaths
   if (!script.trim() || !bridge.trim()) return false;
   const stored = readStoredHookRevision(configText);
   if (!stored) return false;
-  return stored === await currentMemmyHookRevision(input.source, input.mode);
+  const current = await currentMemmyHookRevision(input.source, input.mode);
+  return stored === current && hookRevision(script, bridge) === current;
 }
 
 function readStoredHookRevision(configText: string): string | null {

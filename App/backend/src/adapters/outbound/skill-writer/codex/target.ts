@@ -113,15 +113,13 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
 
       const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
+      const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
+      const hookConfig = {
+        memmy_config_path: memmyConfigPath,
+        ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
+      };
       await mkdir(hookDirectory, { recursive: true });
-      await writeFileAtomically(
-        join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({
-          memmy_config_path: memmyConfigPath,
-          ...(await readMemmyMemoryServiceConfig(memmyConfigPath)),
-          ...(await memmyHookRevisionField(CODEX_TARGET_ID, "codex"))
-        }, null, 2)}\n`
-      );
+      await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
       await writeFileAtomically(
         join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
@@ -145,6 +143,10 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         hooksFilePath,
         hookCommand
       });
+      await writeFileAtomically(
+        hookConfigPath,
+        `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CODEX_TARGET_ID, "codex")) }, null, 2)}\n`
+      );
     },
 
     async uninstallPlugin(_targetId) {
