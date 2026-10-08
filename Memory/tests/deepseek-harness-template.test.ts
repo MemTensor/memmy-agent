@@ -20,7 +20,13 @@ describe("DeepSeek Harness plugin compatibility", () => {
     expect(createDeepseekHarnessPluginPackageManifest()).toMatchObject({
       name: "@memmy/memmy-memory",
       version: "1.0.0",
-      type: "module"
+      type: "module",
+      dsh: {
+        client: {
+          platform: "web",
+          inject: ["@deepseek-ai/dsh-client-ui-conversation"]
+        }
+      }
     });
   });
 
