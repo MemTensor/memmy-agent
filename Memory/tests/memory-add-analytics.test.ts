@@ -25,6 +25,12 @@ describe("memory-add-analytics", () => {
       session_id_hash: hashAnalyticsId("conv-1"),
       turn_id_hash: hashAnalyticsId("cursor:abc"),
     });
+    expect(buildMemoryDesktopScanAddParams({
+      adapterId: "agent-source:cursor",
+      layer: "Skill",
+      conversationId: "skill:review-code",
+      turnId: "skill:review-code:v2",
+    }).layer).toBe("Skill");
   });
 
   it("tracks started/succeeded/failed desktop add events", async () => {
@@ -82,13 +88,13 @@ describe("memory-add-analytics", () => {
       adapter_id: "agent-source:cursor",
     });
     expect(body.events[1]?.params).toMatchObject({
-      success: true,
+      success: 1,
       stored_count: 1,
       duration_ms: 12,
       scan_mode: "full",
     });
     expect(body.events[2]?.params).toMatchObject({
-      success: false,
+      success: 0,
       error_code: "boom",
       duration_ms: 3,
       scan_mode: "incremental",
