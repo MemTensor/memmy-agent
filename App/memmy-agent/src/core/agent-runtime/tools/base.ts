@@ -12,6 +12,8 @@ export type ToolExecutionContext = {
   sessionKey?: string | null;
   /** The exact model preset selected for the turn that owns this tool call. */
   modelPreset?: string | null;
+  /** Stop this run without asking the model to select another executor. */
+  stopTurn?: (message: string) => void;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
 };
 
@@ -129,10 +131,12 @@ export abstract class Tool {
   }
 
   static enabled(ctx: any): boolean {
+    void ctx;
     return true;
   }
 
   static create(ctx?: any): Tool {
+    void ctx;
     return new (this as any)() as Tool;
   }
 

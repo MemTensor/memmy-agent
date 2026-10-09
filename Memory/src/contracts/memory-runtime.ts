@@ -42,6 +42,7 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
   "episode_idle_close",
+  "episode_title",
   "trace_summary",
   "user_memory_embedding",
   "import_summary",
@@ -55,8 +56,13 @@ export const JobTypeSchema = z.enum([
   "l3_world_model_update",
   "project_environment_profile",
   "skill_crystallization",
+  "skill_cluster_assign",
+  "skill_batch_evolve",
   "skill_trial_resolve",
-  "work_memory_extract"
+  "decision_repair",
+  "work_memory_extract",
+  "work_memory_idle_flush",
+  "feedback_experience"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -187,6 +193,9 @@ export const MemoryListItemSchema = z.object({
   status: MemoryStatusSchema,
   title: NonEmptyStringSchema,
   summary: z.string(),
+  sourceText: z.string().optional(),
+  generatedTitle: z.string().optional(),
+  experienceDraft: z.boolean().optional(),
   tags: z.array(z.string()),
   processing: MemoryProcessingRecordSchema.optional(),
   metrics: MemoryMetricsSchema.optional(),
@@ -262,7 +271,9 @@ export const EpisodeRefSchema = z.object({
   skillMemoryIds: z.array(NonEmptyStringSchema).optional(),
   linkedSkillId: NonEmptyStringSchema.optional(),
   skillStatus: z.string().optional(),
-  skillReason: z.string().optional()
+  skillReason: z.string().optional(),
+  titleGenerated: z.boolean().optional(),
+  titlePending: z.boolean().optional()
 });
 export type EpisodeRef = z.infer<typeof EpisodeRefSchema>;
 

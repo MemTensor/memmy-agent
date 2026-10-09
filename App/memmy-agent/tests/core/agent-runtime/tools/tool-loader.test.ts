@@ -159,6 +159,15 @@ describe("ToolLoader discovery", () => {
     expect(classNames).not.toContain("MCPPromptWrapper");
   });
 
+  it("keeps removed desktop executors out of the agent registry", () => {
+    const classNames = new Set(new ToolLoader().discover().map((cls) => cls.name));
+    expect(classNames).not.toContain("ComputerScreenshotTool");
+    expect(classNames).not.toContain("ComputerClickTool");
+    expect(classNames).not.toContain("ComputerTypeTool");
+    expect(classNames).not.toContain("ComputerKeyTool");
+    expect(classNames).not.toContain("ComputerScrollTool");
+  });
+
   it("skips private and undiscoverable classes", () => {
     const discovered = new ToolLoader({ testClasses: [MinimalTool, HiddenTool] }).discover();
     expect(discovered).toEqual([MinimalTool]);

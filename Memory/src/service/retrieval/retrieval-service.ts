@@ -28,16 +28,20 @@ import {
   worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  clipSkillGuide,
+  MEMORY_PACKET_SKILL_FULL_MAX_CHARS
+} from "../../algorithm/trace-direct-skill.js";
+import {
   MEMORY_SUMMARY_MAX_TOKENS,
   type MemmyConfig
 } from "../../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import {
-  isStrictL3WorldModelV2Memory,
   kindFromMemory,
   Repositories,
-  type EpisodeRecord
+  type EpisodeRecord,
+  type RawTurnRecord
 } from "../../storage/repositories.js";
 import type {
   InjectedContext,
@@ -146,6 +150,23 @@ export function memoryLayersForIntent(kind: Parameters<typeof retrievalForIntent
   if (plan.tier2) layers.push("L2", "L1");
   if (plan.tier3) layers.push("L3");
   return layers;
+}
+
+// L3 world-model memory is not recalled by `turns/start`. The single activated L3
+// record per user/project reaches the model only through the session L3 context
+// (system-prompt) path, so turn-start retrieval never queries the L3 layer even
+// when the intent plan or the caller asks for it. `memory.search` and
+// `worldModelQuery` keep L3 searchable.
+const TURN_START_EXCLUDED_LAYERS: ReadonlySet<MemoryLayer> = new Set<MemoryLayer>(["L3"]);
+
+export function turnStartMemoryLayers(
+  baseLayers: MemoryLayer[],
+  requestedLayers?: MemoryLayer[]
+): MemoryLayer[] {
+  return baseLayers.filter((layer) =>
+    !TURN_START_EXCLUDED_LAYERS.has(layer) &&
+    (requestedLayers === undefined || requestedLayers.includes(layer))
+  );
 }
 
 export function readableMemoryIdKind(id: string): ReadableMemoryIdKind {
@@ -533,12 +554,49 @@ const MEMORY_PACKET_MAX_SNIPPET_BODY_CHARS = 640;
 
 const MEMORY_PACKET_SKILL_SUMMARY_CHARS = 200;
 const TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT = 8;
+const QUERY_EXTRACT_HISTORY_MAX_CURRENT_CHARS = 2000;
+
+export interface QueryExtractHistoryTurn {
+  user: string;
+  assistant: string;
+}
+
+export function queryExtractHistoryFromRawTurns(
+  rawTurns: readonly RawTurnRecord[],
+  options: { currentTurnId?: string; maxTurns: number; maxChars: number }
+): QueryExtractHistoryTurn[] {
+  const maxTurns = Math.min(
+    Math.max(0, Math.trunc(options.maxTurns)),
+    TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT
+  );
+  if (maxTurns === 0) return [];
+  const maxChars = Math.max(4, Math.trunc(options.maxChars));
+  const selected: QueryExtractHistoryTurn[] = [];
+  for (const turn of rawTurns) {
+    if (selected.length >= maxTurns) break;
+    if (turn.status !== "succeeded" || turn.redactedAt) continue;
+    if (options.currentTurnId && turn.turnId === options.currentTurnId) continue;
+    const user = (turn.userText ?? "").trim();
+    const assistant = (turn.assistantText ?? "").trim();
+    if (!user || !assistant) continue;
+    selected.push({ user: clip(user, maxChars), assistant: clip(assistant, maxChars) });
+  }
+  return selected.reverse();
+}
+
+function renderQueryExtractInput(raw: string, history: readonly QueryExtractHistoryTurn[]): string {
+  const current = `CURRENT USER INPUT:\n${raw.slice(0, 4000)}`;
+  if (history.length === 0 || raw.trim().length > QUERY_EXTRACT_HISTORY_MAX_CURRENT_CHARS) return current;
+  const lines = history.map((turn) => `user: ${turn.user}\nassistant: ${turn.assistant}`);
+  return `RECENT CONVERSATION (context only, oldest first):\n${lines.join("\n\n")}\n\n${current}`;
+}
 
 interface InjectedRenderOptions {
   contextHints?: Record<string, unknown>;
   query?: string;
   skillInjectionMode?: "summary" | "full";
   skillSummaryChars?: number;
+  skillFullMaxChars?: number;
   domain?: "" | "research";
   timeZone?: string;
 }
@@ -553,6 +611,7 @@ export function buildInjectedContext(
   tuning?: {
     skillInjectionMode?: "summary" | "full";
     skillSummaryChars?: number;
+    skillFullMaxChars?: number;
     domain?: "" | "research";
     timeZone?: string;
   }
@@ -572,6 +631,7 @@ export function buildInjectedContext(
     query,
     skillInjectionMode: tuning?.skillInjectionMode ?? "summary",
     skillSummaryChars: tuning?.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS,
+    skillFullMaxChars: tuning?.skillFullMaxChars ?? MEMORY_PACKET_SKILL_FULL_MAX_CHARS,
     domain: tuning?.domain,
     timeZone: tuning?.timeZone
   };
@@ -776,10 +836,11 @@ function renderInjectedSnippet(
     const guide = skill?.invocationGuide || hit.snippet;
     const summaryChars = options.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS;
     if (options.skillInjectionMode === "full") {
+      const fullMax = options.skillFullMaxChars ?? MEMORY_PACKET_SKILL_FULL_MAX_CHARS;
       return {
         refKind: "skill",
         title: "Skill",
-        body: truncateInjectedSnippet([
+        body: [
           `id: ${hit.id}`,
           ...(hit.sourceAgentId ? [`source agent: ${hit.sourceAgentId}`] : []),
           ...(hit.sourceSkillId ? [`source skill: ${hit.sourceSkillId}`] : []),
@@ -787,8 +848,8 @@ function renderInjectedSnippet(
           "",
           ...labeledInjectedBlock("Name", name),
           "",
-          ...labeledInjectedBlock("Guide", guide.trim() || "(not provided)")
-        ].join("\n"))
+          ...labeledInjectedBlock("Guide", clipSkillGuide(guide.trim() || "(not provided)", fullMax))
+        ].join("\n")
       };
     }
     const lines = [
@@ -1754,6 +1815,12 @@ export class RetrievalService {
     return this.candidatePool.isMemoryReadyForRetrieval(memory);
   }
 
+  private defaultRetrievalLimit(retrievalMode: RetrievalMode): number {
+    if (retrievalMode === "turn_start") return this.deps.turnStartRetrievalLimit();
+    const retrieval = this.deps.config.algorithm.retrieval;
+    return Math.max(1, retrieval.tier1TopK + retrieval.tier2TopK + retrieval.tier3TopK);
+  }
+
   async search(request: InternalMemorySearchRequest): Promise<{
     searchEventId: string;
     hits: RecallHit[];
@@ -1807,12 +1874,12 @@ export class RetrievalService {
     const onboardingFirstReportHit = onboardingFirstReportMemory
       ? onboardingFirstReportRecallHit(onboardingFirstReportMemory)
       : null;
+    const recentRawTurns: RawTurnRecord[] = retrievalMode === "turn_start" && request.sessionId
+      ? this.deps.repos.runtime
+          .listRecentRawTurnsBySession(request.sessionId, TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT)
+      : [];
     const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
-      ? new Set(
-          this.deps.repos.runtime
-            .listRecentRawTurnsBySession(request.sessionId, TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT)
-            .map((turn) => turn.id)
-        )
+      ? new Set(recentRawTurns.map((turn) => turn.id))
       : undefined;
     const tuning = this.retrievalTuningConfig();
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
@@ -1846,15 +1913,22 @@ export class RetrievalService {
           projectId: context.namespace.projectId?.trim() || null
         }) + userMemoryCount;
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
+    const queryExtractHistory = retrievalMode === "turn_start"
+      ? queryExtractHistoryFromRawTurns(recentRawTurns, {
+          currentTurnId: request.turnId,
+          maxTurns: this.deps.config.algorithm.retrieval.queryExtractHistoryTurns,
+          maxChars: this.deps.config.algorithm.retrieval.queryExtractHistoryTextChars
+        })
+      : [];
     const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
-      ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
+      ? await this.extractRetrievalQuery(retrievalQuery, timeZone, queryExtractHistory)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
     const layers: MemoryLayer[] = onboardingFirstReportHit || timeFilter ? ["L1"] : semanticLayers;
     const retrievalLimit = timeFilter
       ? TIME_FILTERED_TRACE_LIMIT
-      : request.limit ?? this.deps.turnStartRetrievalLimit();
+      : request.limit ?? this.defaultRetrievalLimit(retrievalMode);
     const agentLaneLimit = includeUserMemory
       ? parallelMemoryLaneLimit(retrievalLimit)
       : retrievalLimit;
@@ -1884,8 +1958,7 @@ export class RetrievalService {
           currentAgentId: context.namespace.source
         });
     const memories = retrievalOutput.memories.filter((memory) =>
-      !memoryUsesStalePolicy(memory, stalePolicyIds) &&
-      (retrievalMode !== "turn_start" || !isStrictL3WorldModelV2Memory(memory))
+      !memoryUsesStalePolicy(memory, stalePolicyIds)
     );
     const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
     const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
@@ -1921,6 +1994,10 @@ export class RetrievalService {
       : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
       : await this.filterRecallHits(queryVectorText, merged.hits);
+    // Only set when the filter step actually ran; the two shortcuts above never
+    // reach it. Pair it with the recorded status to tell a filter that returned
+    // early on too few candidates from one that ranked them.
+    const llmFilterMs = onboardingFirstReportHit || timeFilter ? undefined : Date.now() - rerankAt;
     const hits = onboardingFirstReportHit || timeFilter
       ? filteredHits.hits
       : mmrRecallHits(filteredHits.hits, retrievalLimit, tuning.mmrLambda);
@@ -2073,7 +2150,8 @@ export class RetrievalService {
           llmFilter: {
             outcome: filteredHits.status.length > 0 ? filteredHits.status.join(",") : "kept",
             kept: hits.length,
-            dropped: Math.max(0, merged.hits.length - hits.length)
+            dropped: Math.max(0, merged.hits.length - hits.length),
+            ...(llmFilterMs === undefined ? {} : { durationMs: llmFilterMs })
           },
           finalReturned: hits.length
         },
@@ -2467,7 +2545,11 @@ export class RetrievalService {
     }
   }
 
-  private async extractRetrievalQuery(rawQuery: string, timeZone: string): Promise<RetrievalQueryExtract | null> {
+  private async extractRetrievalQuery(
+    rawQuery: string,
+    timeZone: string,
+    history: readonly QueryExtractHistoryTurn[] = []
+  ): Promise<RetrievalQueryExtract | null> {
     const raw = rawQuery.trim();
     if (!raw || !this.deps.llm.isConfigured()) return null;
     try {
@@ -2483,7 +2565,7 @@ export class RetrievalService {
           },
           {
             role: "user",
-            content: `COMPLETE USER INPUT:\n${raw.slice(0, 4000)}`
+            content: renderQueryExtractInput(raw, history)
           }
         ],
         {
@@ -2548,6 +2630,7 @@ export class RetrievalService {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     decayHalfLifeDays: number;
     domain: "" | "research";
     readOnlyInjectionProfile: "all" | "experience" | "skill" | "skill_experience";
@@ -2577,6 +2660,7 @@ export class RetrievalService {
       multiChannelBypass: retrieval.multiChannelBypass,
       skillInjectionMode: retrieval.skillInjectionMode,
       skillSummaryChars: retrieval.skillSummaryChars,
+      skillFullMaxChars: retrieval.skillFullMaxChars,
       decayHalfLifeDays: this.deps.config.algorithm.reward.decayHalfLifeDays,
       domain: this.deps.config.domain,
       readOnlyInjectionProfile: retrieval.readOnlyInjectionProfile

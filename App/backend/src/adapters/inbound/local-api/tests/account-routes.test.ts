@@ -106,6 +106,34 @@ describe("account local api routes", () => {
     ]);
   });
 
+  it("forwards lottery reward lookup and acknowledgement through AccountService", async () => {
+    const calls: unknown[] = [];
+    app = createServer({
+      account: {
+        async getLotteryReward() {
+          calls.push("get");
+          return { hasReward: true as const, drawId: "1", tokenAmount: 500_000 };
+        },
+        async ackLotteryReward(input: unknown) {
+          calls.push({ ack: input });
+          return { ok: true };
+        }
+      }
+    });
+
+    const reward = await app.inject({
+      method: "GET",
+      url: "/api/account/lottery/reward",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    const ack = await injectJson("POST", "/api/account/lottery/reward/ack", { drawId: "1" });
+
+    expect(reward.statusCode).toBe(200);
+    expect(reward.json()).toEqual({ hasReward: true, drawId: "1", tokenAmount: 500_000 });
+    expect(ack.json()).toEqual({ ok: true });
+    expect(calls).toEqual(["get", { ack: { drawId: "1" } }]);
+  });
+
   it("lists avatars and stores the selected avatar behind the runtime token", async () => {
     const calls: string[] = [];
     app = createServer({
@@ -168,6 +196,26 @@ describe("account local api routes", () => {
       }
     });
   });
+
+  it("forwards social-login start and status through the runtime-token boundary", async () => {
+    app = createServer();
+
+    const start = await injectJson("POST", "/api/account/oauth/start", {
+      provider: "google",
+      locale: "en",
+      loginSource: "Memmy"
+    });
+    const status = await injectJson("POST", "/api/account/oauth/status", {
+      flowId: "social-flow-id-0001",
+      pollToken: "social-poll-token-0000000000000001"
+    });
+
+    expect(start.json()).toMatchObject({
+      authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+      expiresInSec: 600
+    });
+    expect(status.json()).toEqual({ status: "pending" });
+  });
 });
 
 async function injectJson(method: string, url: string, payload: unknown) {
@@ -210,6 +258,18 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
           session: accountSession(),
           invitationResult: { status: "not_provided" }
         };
+      },
+      async startSocialLogin() {
+        return {
+          flowId: "social-flow-id-0001",
+          pollToken: "social-poll-token-0000000000000001",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+          expiresInSec: 600,
+          pollIntervalSec: 2
+        };
+      },
+      async getSocialLoginStatus() {
+        return { status: "pending" as const };
       },
       async getInvitation() {
         return {

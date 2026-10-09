@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
@@ -166,6 +167,7 @@ export interface AlgorithmConfig {
     failureThreshold: number;
     failureWindow: number;
     valueDelta: number;
+    valueDistributionRepairEnabled: boolean;
     minLowValueThreshold: number;
     useLlm: boolean;
     attachToPolicy: boolean;
@@ -224,6 +226,13 @@ export interface AlgorithmConfig {
     outcomeRTaskFailureThreshold: number;
     failureEpisodeScorePenalty: number;
     failureEpisodeMaxRatio: number;
+    directFromTrace: boolean;
+    clusterJoinThreshold: number;
+    clusterJoinThresholdEmpty: number;
+    toolJaccardFloor: number;
+    artifactJaccardFloor: number;
+    batchSuccessLimit: number;
+    batchFailureLimit: number;
   };
   session: {
     followUpMode: "merge_follow_ups" | "episode_per_turn";
@@ -252,14 +261,20 @@ export interface AlgorithmConfig {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     llmFilterEnabled: boolean;
     llmFilterMaxKeep: number;
     llmFilterFallbackMaxKeep: number;
     llmFilterMinCandidates: number;
     llmFilterCandidateBodyChars: number;
+    queryExtractHistoryTurns: number;
+    queryExtractHistoryTextChars: number;
     readOnlyInjectionProfile: ReadOnlyInjectionProfile;
   };
 }
+
+/** Concrete languages the host app can pin memory output to. */
+export type MemoryLanguage = "zh-CN" | "en-US";
 
 export interface MemmyConfig {
   version: 1;
@@ -270,12 +285,18 @@ export interface MemmyConfig {
   };
   userId?: string;
   timeZone?: string;
+  /** Interface language the host app is set to, when it has one. */
+  language?: MemoryLanguage;
   storage: StorageConfig;
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
   agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
+  tokenBudget: {
+    dailyLimitM: number;
+    totalLimitM: number;
+  };
 }
 
 const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
@@ -347,6 +368,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     watchFileChanges: true,
     autoInjectSkill: false
   },
+  tokenBudget: {
+    dailyLimitM: 10,
+    totalLimitM: 500
+  },
   algorithm: {
     enableMemoryAdd: true,
     enableMemorySearch: true,
@@ -401,6 +426,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       failureThreshold: 3,
       failureWindow: 5,
       valueDelta: 0.5,
+      valueDistributionRepairEnabled: false,
       minLowValueThreshold: 0.01,
       useLlm: true,
       attachToPolicy: true,
@@ -458,7 +484,14 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       outcomeRTaskSuccessThreshold: 0.5,
       outcomeRTaskFailureThreshold: -0.15,
       failureEpisodeScorePenalty: 0,
-      failureEpisodeMaxRatio: 0.4
+      failureEpisodeMaxRatio: 0.4,
+      directFromTrace: true,
+      clusterJoinThreshold: 0.5,
+      clusterJoinThresholdEmpty: 0.7,
+      toolJaccardFloor: 0.4,
+      artifactJaccardFloor: 0.3,
+      batchSuccessLimit: 3,
+      batchFailureLimit: 3
     },
     session: {
       followUpMode: "merge_follow_ups",
@@ -487,11 +520,14 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       multiChannelBypass: true,
       skillInjectionMode: "summary",
       skillSummaryChars: 200,
+      skillFullMaxChars: 16_384,
       llmFilterEnabled: true,
       llmFilterMaxKeep: 8,
       llmFilterFallbackMaxKeep: 6,
-      llmFilterMinCandidates: 2,
+      llmFilterMinCandidates: 1,
       llmFilterCandidateBodyChars: 500,
+      queryExtractHistoryTurns: 5,
+      queryExtractHistoryTextChars: 200,
       readOnlyInjectionProfile: "all"
     }
   }
@@ -601,10 +637,21 @@ function configFromEnv(): Record<string, unknown> {
       retrieval: compactRecord({
         readOnlyInjectionProfile:
           process.env.MEMMY_RETRIEVAL_INJECTION_PROFILE ??
-          process.env.MEMMY_READONLY_INJECTION_PROFILE
+          process.env.MEMMY_READONLY_INJECTION_PROFILE,
+        skillInjectionMode: process.env.MEMMY_SKILL_INJECTION_MODE,
+        skillSummaryChars: numberEnv("MEMMY_SKILL_SUMMARY_CHARS"),
+        skillFullMaxChars: numberEnv("MEMMY_SKILL_FULL_MAX_CHARS")
       })
     })
   });
+}
+
+/**
+ * Anything the host cannot resolve to a concrete language is left unset, so
+ * callers fall back to reading the language from the content itself.
+ */
+function memoryLanguage(value: unknown): MemoryLanguage | undefined {
+  return value === "zh-CN" || value === "en-US" ? value : undefined;
 }
 
 function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
@@ -629,12 +676,27 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     domain: memoryDomainName(input.domain, DEFAULT_MEMMY_CONFIG.domain),
     roleRouting: normalizeRoleRouting(asRecord(input.roleRouting)),
     userId: optionalString(input.userId),
+    ...(memoryLanguage(input.language) ? { language: memoryLanguage(input.language)! } : {}),
     storage,
     summary,
     evolution,
     embedding,
     agentAccess,
-    algorithm
+    algorithm,
+    tokenBudget: normalizeTokenBudget(asRecord(input.tokenBudget))
+  };
+}
+
+function normalizeTokenBudget(input: Record<string, unknown>): MemmyConfig["tokenBudget"] {
+  return {
+    dailyLimitM: normalizeMemoryByokLimitM(
+      input.dailyLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.dailyLimitM
+    ),
+    totalLimitM: normalizeMemoryByokLimitM(
+      input.totalLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.totalLimitM
+    )
   };
 }
 
@@ -1115,6 +1177,10 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       failureThreshold: numberValue(feedback.failureThreshold, DEFAULT_MEMMY_CONFIG.algorithm.feedback.failureThreshold),
       failureWindow: numberValue(feedback.failureWindow, DEFAULT_MEMMY_CONFIG.algorithm.feedback.failureWindow),
       valueDelta: numberValue(feedback.valueDelta, DEFAULT_MEMMY_CONFIG.algorithm.feedback.valueDelta),
+      valueDistributionRepairEnabled: booleanValue(
+        feedback.valueDistributionRepairEnabled,
+        DEFAULT_MEMMY_CONFIG.algorithm.feedback.valueDistributionRepairEnabled
+      ),
       minLowValueThreshold: numberValue(feedback.minLowValueThreshold, DEFAULT_MEMMY_CONFIG.algorithm.feedback.minLowValueThreshold),
       useLlm: booleanValue(feedback.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.feedback.useLlm),
       attachToPolicy: booleanValue(feedback.attachToPolicy, DEFAULT_MEMMY_CONFIG.algorithm.feedback.attachToPolicy),
@@ -1190,7 +1256,14 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       outcomeRTaskSuccessThreshold: numberValue(skill.outcomeRTaskSuccessThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.outcomeRTaskSuccessThreshold),
       outcomeRTaskFailureThreshold: numberValue(skill.outcomeRTaskFailureThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.outcomeRTaskFailureThreshold),
       failureEpisodeScorePenalty: numberValue(skill.failureEpisodeScorePenalty, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeScorePenalty),
-      failureEpisodeMaxRatio: numberValue(skill.failureEpisodeMaxRatio, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeMaxRatio)
+      failureEpisodeMaxRatio: numberValue(skill.failureEpisodeMaxRatio, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeMaxRatio),
+      directFromTrace: booleanValue(skill.directFromTrace, DEFAULT_MEMMY_CONFIG.algorithm.skill.directFromTrace),
+      clusterJoinThreshold: numberValue(skill.clusterJoinThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.clusterJoinThreshold),
+      clusterJoinThresholdEmpty: numberValue(skill.clusterJoinThresholdEmpty, DEFAULT_MEMMY_CONFIG.algorithm.skill.clusterJoinThresholdEmpty),
+      toolJaccardFloor: numberValue(skill.toolJaccardFloor, DEFAULT_MEMMY_CONFIG.algorithm.skill.toolJaccardFloor),
+      artifactJaccardFloor: numberValue(skill.artifactJaccardFloor, DEFAULT_MEMMY_CONFIG.algorithm.skill.artifactJaccardFloor),
+      batchSuccessLimit: numberValue(skill.batchSuccessLimit, DEFAULT_MEMMY_CONFIG.algorithm.skill.batchSuccessLimit),
+      batchFailureLimit: numberValue(skill.batchFailureLimit, DEFAULT_MEMMY_CONFIG.algorithm.skill.batchFailureLimit)
     },
     session: {
       followUpMode: "merge_follow_ups",
@@ -1219,11 +1292,14 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       multiChannelBypass: booleanValue(retrieval.multiChannelBypass, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.multiChannelBypass),
       skillInjectionMode: skillInjectionMode(retrieval.skillInjectionMode, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillInjectionMode),
       skillSummaryChars: numberValue(retrieval.skillSummaryChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillSummaryChars),
+      skillFullMaxChars: numberValue(retrieval.skillFullMaxChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillFullMaxChars),
       llmFilterEnabled: booleanValue(retrieval.llmFilterEnabled, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterEnabled),
       llmFilterMaxKeep: numberValue(retrieval.llmFilterMaxKeep, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterMaxKeep),
       llmFilterFallbackMaxKeep: numberValue(retrieval.llmFilterFallbackMaxKeep, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterFallbackMaxKeep),
       llmFilterMinCandidates: numberValue(retrieval.llmFilterMinCandidates, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterMinCandidates),
       llmFilterCandidateBodyChars: numberValue(retrieval.llmFilterCandidateBodyChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterCandidateBodyChars),
+      queryExtractHistoryTurns: numberValue(retrieval.queryExtractHistoryTurns, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTurns),
+      queryExtractHistoryTextChars: numberValue(retrieval.queryExtractHistoryTextChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTextChars),
       readOnlyInjectionProfile: readOnlyInjectionProfile(
         retrieval.readOnlyInjectionProfile,
         DEFAULT_MEMMY_CONFIG.algorithm.retrieval.readOnlyInjectionProfile

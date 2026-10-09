@@ -40,6 +40,91 @@ describe("AppConfigService", () => {
     });
   });
 
+  it("reloads Memory after publishing the interface language", async () => {
+    const calls: unknown[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings(patch) {
+          calls.push({ settings: patch });
+          return appSettings(patch);
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return { changed: false, memoryConfigAffected: false };
+        },
+        async writeMemoryLanguage(language) {
+          calls.push({ language });
+        },
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
+        }
+      },
+      memoryClient: {
+        async reloadConfig(input) {
+          calls.push({ reload: input });
+        }
+      }
+    });
+
+    await expect(service.updateSettings({ language: "system" })).resolves.toMatchObject({ language: "system" });
+    expect(calls).toEqual([
+      { language: "system" },
+      { reload: { reason: "app_language_saved" } },
+      { settings: { language: "system" } }
+    ]);
+  });
+
+  it("writes memory token budget and reloads Memory", async () => {
+    const calls: unknown[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings(patch) {
+          calls.push({ settings: patch });
+          return appSettings({
+            memoryByokDailyLimitM: 0,
+            memoryByokTotalLimitM: 500,
+            ...patch
+          });
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return { changed: false, memoryConfigAffected: false };
+        },
+        async writeMemoryTokenBudget(budget) {
+          calls.push({ budget });
+        },
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
+        }
+      },
+      memoryClient: {
+        async reloadConfig(input) {
+          calls.push({ reload: input });
+        }
+      }
+    });
+
+    await expect(service.updateSettings({ memoryByokDailyLimitM: 0 })).resolves.toMatchObject({
+      memoryByokDailyLimitM: 0,
+      memoryByokTotalLimitM: 500
+    });
+    expect(calls).toEqual([
+      { settings: { memoryByokDailyLimitM: 0 } },
+      { budget: { dailyLimitM: 0, totalLimitM: 500 } },
+      { reload: { reason: "memory_token_budget_saved" } }
+    ]);
+  });
+
   it("updates scan preferences through the bootstrap repository", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({

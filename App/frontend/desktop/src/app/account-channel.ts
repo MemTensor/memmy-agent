@@ -1,5 +1,5 @@
 /** Account channel module. */
-import type { AccountChannel } from "@memmy/local-api-contracts";
+import { resolveMemoryLanguage, type AccountChannel } from "@memmy/local-api-contracts";
 
 export type DesktopDisplayLanguage = "zh-CN" | "en-US";
 
@@ -13,9 +13,5 @@ export function resolveDesktopDisplayLanguage(
   configuredLanguage: string | undefined,
   rawChannel = import.meta.env.MEMMY_ACCOUNT_CHANNEL
 ): DesktopDisplayLanguage {
-  if (configuredLanguage === "zh-CN" || configuredLanguage === "en-US") {
-    return configuredLanguage;
-  }
-
-  return resolveDesktopAccountChannel(rawChannel) === "email" ? "en-US" : "zh-CN";
+  return resolveMemoryLanguage(configuredLanguage, resolveDesktopAccountChannel(rawChannel));
 }

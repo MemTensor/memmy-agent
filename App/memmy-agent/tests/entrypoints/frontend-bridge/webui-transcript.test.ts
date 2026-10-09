@@ -131,7 +131,7 @@ describe("webui transcript replay", () => {
     appendTranscriptObject(key, { event: "message", chat_id: "t-large-record", text });
 
     expect(readTranscriptLines(key)).toEqual([
-      { event: "message", chat_id: "t-large-record", text },
+      { event: "message", chat_id: "t-large-record", text, transcript_offset: 0 },
     ]);
   });
 
@@ -480,7 +480,7 @@ describe("webui transcript replay", () => {
     expect(messages[1]).toMatchObject({ role: "assistant", content: "a", createdAt: Date.parse("2026-06-19T08:07:03.000Z") });
   });
 
-  it("prefers persisted session message times over transcript event times", () => {
+  it("prefers canonical transcript event times over stale session message times", () => {
     const messages = replayTranscriptToUiMessages(
       [
         { event: "user", chat_id: "t-session-time", text: "q", createdAt: "2026-06-23T10:00:00.000Z" },
@@ -494,8 +494,8 @@ describe("webui transcript replay", () => {
       },
     );
 
-    expect(messages[0]).toMatchObject({ role: "user", content: "q", createdAt: Date.parse("2026-06-19T08:07:00.000Z") });
-    expect(messages[1]).toMatchObject({ role: "assistant", content: "a", createdAt: Date.parse("2026-06-19T08:07:03.000Z") });
+    expect(messages[0]).toMatchObject({ role: "user", content: "q", createdAt: Date.parse("2026-06-23T10:00:00.000Z") });
+    expect(messages[1]).toMatchObject({ role: "assistant", content: "a", createdAt: Date.parse("2026-06-23T10:00:01.000Z") });
   });
 
   it("augments replayed assistant markdown image text", () => {

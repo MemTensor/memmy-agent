@@ -30,6 +30,17 @@ type FetchLike = typeof fetch;
 
 export const DEFAULT_MEMOS_MEMORY_TIMEOUT_MS = 60_000;
 
+/**
+ * Budget for memory calls that sit on a user-visible path.
+ *
+ * Memory enrichment is best effort — the hooks that use it already log
+ * "Continuing" and proceed without it. Waiting the full background timeout for
+ * something we are prepared to skip stalls the send behind a service that may
+ * be busy with a long scan, and the desktop client gives up on the send after
+ * 30 seconds. A best-effort enrichment must never outlast the path it decorates.
+ */
+export const INTERACTIVE_MEMORY_TIMEOUT_MS = 8_000;
+
 export class MemmyMemoryClient {
   baseUrl: string;
   token: string | null;
@@ -58,6 +69,7 @@ export class MemmyMemoryClient {
     query?: Record<string, any>;
     body?: any;
     headers?: Record<string, string>;
+    timeoutMs?: number;
   } = {}): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json", ...(opts.headers ?? {}) };
     headers["x-memmy-time-zone"] = this.timeZone;
@@ -70,7 +82,7 @@ export class MemmyMemoryClient {
       method,
       headers,
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs),
     });
     const text = await response.text();
     const parsed = text.trim() ? safeJsonParse(text) : null;

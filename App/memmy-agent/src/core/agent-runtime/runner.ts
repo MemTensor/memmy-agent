@@ -1007,12 +1007,16 @@ export class AgentRunner {
     calls: ToolCallRequest[],
     externalLookupCounts: Record<string, number> = {},
     workspaceViolationCounts: Record<string, number> = {},
-  ): Promise<Array<{ call: any; result: any; event: Record<string, any>; error?: any }>> {
+  ): Promise<Array<{ call: any; result: any; event: Record<string, any>; error?: any; stopTurn?: string }>> {
     if (!spec.tools) return [];
     if (spec.abortSignal?.aborted) return [];
     const batches = this.partitionToolBatches(spec, calls);
-    const out: Array<{ call: any; result: any; event: Record<string, any>; error?: any }> = [];
+    const out: Array<{ call: any; result: any; event: Record<string, any>; error?: any; stopTurn?: string }> = [];
     for (const batch of batches) {
+      if (out.some(item => item.stopTurn)) {
+        out.push(...batch.map(call => ({ call, result: 'Not executed: this turn is waiting for user action.', event: { name: call.name, status: 'error', detail: 'turn stopped' } })));
+        continue;
+      }
       if (spec.concurrentTools && batch.length > 1) {
         out.push(...(await Promise.all(batch.map((call) => this.runTool(spec, call, externalLookupCounts, workspaceViolationCounts)))));
       } else {
@@ -1030,7 +1034,7 @@ export class AgentRunner {
     call: ToolCallRequest,
     externalLookupCounts: Record<string, number>,
     workspaceViolationCounts: Record<string, number>,
-  ): Promise<{ call: ToolCallRequest; result: any; event: Record<string, any>; error?: any }> {
+  ): Promise<{ call: ToolCallRequest; result: any; event: Record<string, any>; error?: any; stopTurn?: string }> {
     const hint = "\n\n[Analyze the error above and try a different approach.]";
     if (spec.abortSignal?.aborted) {
       const event = { name: call.name, status: "error", detail: "task cancelled" };
@@ -1088,6 +1092,7 @@ export class AgentRunner {
       );
     }
 
+    let stopTurn: string | undefined;
     try {
       let raw: any;
       const fileMutationOutcomes = new Map<string, FileMutationOutcome>();
@@ -1098,6 +1103,7 @@ export class AgentRunner {
         callId: call.id ?? null,
         sessionKey: spec.sessionKey ?? null,
         modelPreset: spec.actualModelContext?.presetId ?? null,
+        stopTurn: (message) => { stopTurn ??= message; },
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {
             path: path.resolve(outcome.path),
@@ -1123,7 +1129,7 @@ export class AgentRunner {
         const handled = this.classifyViolation(raw, raw + hint, event, call, workspaceViolationCounts);
         if (handled) {
           await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [handled.result], toolEvents: [handled.event] }), call, handled.result);
-          return { call, ...handled };
+          return { call, ...handled, ...(stopTurn ? { stopTurn } : {}) };
         }
         error = spec.failOnToolError ? new Error(raw) : null;
         raw = raw + hint;
@@ -1143,8 +1149,9 @@ export class AgentRunner {
         );
       }
       const result = this.normalizeToolResult(spec, call.id, call.name, raw);
+      if (stopTurn) event.status = "error";
       await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [result], toolEvents: [event] }), call, result);
-      return { call, result, event, error };
+      return { call, result, event, error, ...(stopTurn ? { stopTurn } : {}) };
     } catch (error) {
       const message = isAbortError(error)
         ? "Error: task cancelled"
@@ -1157,9 +1164,9 @@ export class AgentRunner {
       }
       const event = { name: call.name, status: "error", detail: eventDetail("", message, 120) };
       const handled = this.classifyViolation(String((error as Error).message ?? error), message, event, call, workspaceViolationCounts);
-      if (handled) return { call, ...handled };
+      if (handled) return { call, ...handled, ...(stopTurn ? { stopTurn } : {}) };
       const result = this.normalizeToolResult(spec, call.id, call.name, message);
-      return { call, result, event, error: spec.failOnToolError ? error : null };
+      return { call, result, event, error: spec.failOnToolError ? error : null, ...(stopTurn ? { stopTurn } : {}) };
     }
   }
 
@@ -1641,6 +1648,18 @@ export class AgentRunner {
           error = finalContent;
           context.finalContent = finalContent;
           context.error = error;
+          context.stopReason = stopReason;
+          await hook.afterIteration(context);
+          break;
+        }
+        const stopped = executed.find(item => item.stopTurn)?.stopTurn;
+        if (stopped) {
+          finalContent = stopped;
+          stopReason = 'completed';
+          AgentRunner.appendFinalMessage(messages, finalContent);
+          await this.emitCheckpoint(spec, { phase: 'toolsCompleted', iteration, model: spec.model,
+            assistantMessage: assistant, completedToolResults: completed, pendingToolCalls: [] });
+          context.finalContent = finalContent;
           context.stopReason = stopReason;
           await hook.afterIteration(context);
           break;

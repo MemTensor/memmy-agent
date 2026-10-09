@@ -1,3 +1,4 @@
+import { BookOpen } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -17,7 +18,6 @@ import {
 } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
-import { communityLinks } from "../community/community-links.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
@@ -50,7 +50,6 @@ import {
   ListChecks,
   Link2,
   Loader2,
-  MessageCircle,
   MessageSquarePlus,
   PanelLeft,
   PanelLeftCollapsed,
@@ -62,7 +61,8 @@ import {
   User,
   Wand2
 } from "./memory/memory-prototype-icons.js";
-import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
+import { AppContentTopbar } from "./app-content-topbar.js";
+import { SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
 import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
@@ -74,6 +74,7 @@ export interface AppFrameProps {
   title: string;
   reserveTopBar?: boolean;
   topBar?: ReactNode;
+  topBarEnd?: ReactNode;
   topBarBorder?: boolean;
   windowsTitlebarSafe?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
@@ -84,7 +85,7 @@ export interface AppFrameProps {
 interface NavItem {
   path?: AppRoutePath;
   icon: ReactNode;
-  action?: "search" | "community";
+  action?: "search";
   labelKey?: string;
 }
 
@@ -197,7 +198,7 @@ const navItems: NavItem[] = [
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
-  { action: "community", icon: <MessageCircle size={16} />, labelKey: "welcome.joinCommunity" }
+  { path: "/knowledge", icon: <BookOpen size={16} /> }
 ];
 
 const taskSortOptions = [
@@ -283,7 +284,6 @@ export function AppFrame(props: AppFrameProps) {
   const taskBus = useTaskBus();
   const { syncAgentTaskStatuses } = taskBus;
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -306,7 +306,6 @@ export function AppFrame(props: AppFrameProps) {
   ));
   const [desktopSidebarHidden, setDesktopSidebarHidden] = useState(false);
   const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
-  const communityMenuRef = useRef<HTMLDivElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const [taskScrollFade, setTaskScrollFade] = useState(false);
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
@@ -537,33 +536,6 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
-
-  useEffect(() => {
-    if (!showCommunity || typeof document === "undefined") {
-      return;
-    }
-
-    const closeOnOutsidePointerDown = (event: PointerEvent) => {
-      const menu = communityMenuRef.current;
-      if (menu && event.target instanceof Node && menu.contains(event.target)) {
-        return;
-      }
-
-      setShowCommunity(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setShowCommunity(false);
-      }
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [showCommunity]);
 
   function refreshAgentTasks(): void {
     taskStateCoordinator.refreshTaskState({ reason: "manual" });
@@ -1196,7 +1168,7 @@ export function AppFrame(props: AppFrameProps) {
             const key = item.path ?? item.action ?? "unknown";
             const active = item.path
               ? state.navigation.currentPath === item.path && (item.path !== "/main" || !state.agent.currentSessionKey)
-              : item.action === "community" && showCommunity;
+              : false;
 
             const label = item.path
               ? t(routeTable[item.path].navKey as Parameters<typeof t>[0])
@@ -1207,8 +1179,6 @@ export function AppFrame(props: AppFrameProps) {
               if (item.action === "search") {
                 closeCompactSidebar();
                 setSearchPaletteOpen(true);
-              } else if (item.action === "community") {
-                setShowCommunity((v) => !v);
               } else if (item.path) {
                 openSidebarRoute(item.path);
               }
@@ -1229,33 +1199,6 @@ export function AppFrame(props: AppFrameProps) {
                 <span className="flex-1 text-left">{label}</span>
               </button>
             );
-
-            if (item.action === "community") {
-              return (
-                <div key={key} ref={communityMenuRef} className="relative">
-                  {navButton}
-                  {showCommunity && (
-                    <div className="community-popover absolute top-full mt-2 bg-background-paper rounded-card-lg border-content-panel p-3 z-50">
-                      <div className="community-popover-grid grid gap-2.5">
-                        <div className="community-popover-wechat">
-                          <div className="community-popover-wechat-title">
-                            <span>{t("welcome.wechatGroup")}</span>
-                          </div>
-                          <img src={communityLinks.wechatGroupUrl} alt={t("welcome.wechatGroup")} className="community-popover-qr rounded bg-white" />
-                          <span className="community-popover-wechat-hint">{t("appFrame.scanToJoin")}</span>
-                        </div>
-                        <div className="community-popover-links">
-                          <CommunityLink href={communityLinks.githubUrl} title={t("welcome.github")} detail="MemTensor/memmy-agent" />
-                          <CommunityLink href={communityLinks.discordUrl} title={t("welcome.discord")} detail="discord.gg/zfhKKn52wP" />
-                          <CommunityLink href={communityLinks.twitterUrl} title={t("welcome.twitter")} detail="@Memmy_ai" />
-                          <CommunityLink href={communityLinks.emailUrl} title={t("welcome.email")} detail={communityLinks.email} external={false} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            }
 
             return (
               <div key={key}>
@@ -1639,17 +1582,22 @@ export function AppFrame(props: AppFrameProps) {
         minWidth={sidebarResize.minWidth}
         maxWidth={sidebarResize.maxWidth}
         isResizing={sidebarResize.isResizing}
-        isDisabled={sidebarHidden || showCommunity}
+        isDisabled={sidebarHidden}
         onResizeStart={sidebarResize.beginResize}
         onResizeBy={sidebarResize.resizeBy}
       />
 
       <main className={`app-frame-main relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}${props.windowsTitlebarSafe ? " app-frame-main--windows-titlebar-safe" : ""}`} aria-label={props.title}>
         {props.reserveTopBar !== false && (
-          <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
-            {props.topBar}
-            <div aria-hidden="true" className="app-frame-content-topbar__drag-space" />
-          </header>
+          <AppContentTopbar
+            bordered={props.topBarBorder}
+            start={props.topBar}
+            end={props.topBarEnd}
+            onOpenMemoryBudgetSettings={() => {
+              writeSettingsMemoryBudgetFocus();
+              dispatch(appActions.navigate("/settings"));
+            }}
+          />
         )}
         <div
           data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}
@@ -1751,21 +1699,6 @@ function nextAgentHistoryRequestId(chatId: string): string {
 function nextAgentSidebarMutationId(): string {
   agentSidebarMutationCounter += 1;
   return `sidebar-${Date.now()}-${agentSidebarMutationCounter}`;
-}
-
-function CommunityLink(props: { href: string; title: string; detail: string; external?: boolean }) {
-  const external = props.external ?? true;
-  return (
-    <a
-      href={props.href}
-      target={external ? "_blank" : undefined}
-      rel={external ? "noreferrer" : undefined}
-      className="community-link flex flex-col rounded-lg text-xs text-text-ink/60 transition-colors"
-    >
-      <span className="community-link-title font-medium text-text-ink/70">{props.title}</span>
-      <span className="community-link-detail text-text-ink/45">{props.detail}</span>
-    </a>
-  );
 }
 
 /**

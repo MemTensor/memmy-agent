@@ -17,6 +17,7 @@ export type AppRoutePath =
   | "/pet"
   | "/tools"
   | "/memory"
+  | "/knowledge"
   | "/memory-sources"
   | "/plugin"
   | "/settings";
@@ -54,6 +55,7 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/pet": { path: "/pet", navKey: "nav.pet", requiresBootstrap: true },
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
+  "/knowledge": { path: "/knowledge", navKey: "nav.knowledge", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
   "/plugin": { path: "/plugin", navKey: "plugin.surface.title", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }

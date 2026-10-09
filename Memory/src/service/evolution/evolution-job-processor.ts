@@ -32,9 +32,10 @@ import {
   RewardPipeline,
   type DecisionRepairSummary
 } from "./reward-pipeline.js";
+import { SkillClusterPipeline } from "./skill-cluster-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
-import type { TurnMemoryCaptureDecision } from "./span-pipeline.js";
+import type { TraceCaptureSummary, TurnMemoryCaptureDecision } from "./span-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -76,6 +77,7 @@ export interface EvolutionJobProcessorDeps {
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
   scheduleEmbeddingAfterTextUpdate(input: ScheduleEmbeddingAfterTextUpdateInput): void;
   repairEvidenceValueDiff(highValue: MemoryRow[], lowValue: MemoryRow[]): number;
+  queryVector?(query: string): Promise<number[] | undefined>;
 }
 
 export class EvolutionJobProcessor {
@@ -83,6 +85,7 @@ export class EvolutionJobProcessor {
   private readonly negativeExperience: NegativeExperiencePipeline;
   private readonly reward: RewardPipeline;
   private readonly skill: SkillPipeline;
+  private readonly skillCluster: SkillClusterPipeline;
   private readonly span: SpanPipeline;
   private readonly bigTurnSpan: BigTurnSpanPipeline;
   private readonly l3WorldModel: L3WorldModelTraceFieldPipeline;
@@ -99,6 +102,16 @@ export class EvolutionJobProcessor {
       isArchivedEvolutionMemory: this.isArchivedEvolutionMemory.bind(this),
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory
+    });
+    this.skillCluster = new SkillClusterPipeline({
+      repos: deps.repos,
+      get config() { return owner.deps.config; },
+      get skillLlm() { return owner.deps.skillLlm; },
+      buildMemory: deps.buildMemory,
+      upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
+      enqueueJob: deps.enqueueJob,
+      namespaceIdFromMemory: deps.namespaceIdFromMemory,
+      queryVector: (query) => owner.deps.queryVector?.(query) ?? Promise.resolve(undefined)
     });
     this.policy = new PolicyInductionEngine({
       get config() { return owner.deps.config; },
@@ -117,7 +130,8 @@ export class EvolutionJobProcessor {
     });
     this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
-      get skillLlm() { return owner.deps.skillLlm; }
+      get skillLlm() { return owner.deps.skillLlm; },
+      get language() { return owner.deps.config.language; }
     });
     this.span = new SpanPipeline({
       repos: deps.repos,
@@ -133,6 +147,7 @@ export class EvolutionJobProcessor {
     this.bigTurnSpan = new BigTurnSpanPipeline({
       repos: deps.repos,
       get llm() { return owner.deps.llm; },
+      get config() { return owner.deps.config; },
       buildMemory: deps.buildMemory,
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
@@ -158,6 +173,7 @@ export class EvolutionJobProcessor {
     this.negativeExperience = new NegativeExperiencePipeline({
       repos: deps.repos,
       get config() { return owner.deps.config; },
+      skillLlm: deps.skillLlm,
       buildMemory: deps.buildMemory,
       upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
       enqueueJob: deps.enqueueJob,
@@ -186,6 +202,14 @@ export class EvolutionJobProcessor {
     return this.skill.crystallizeSkill(job);
   }
 
+  assignSkillCluster(job: EvolutionJobRecord): Promise<void> {
+    return this.skillCluster.assignCluster(job);
+  }
+
+  evolveSkillCluster(job: EvolutionJobRecord): Promise<void> {
+    return this.skillCluster.evolveCluster(job);
+  }
+
   reflectTrace(job: EvolutionJobRecord): Promise<void> {
     return this.span.reflectTrace(job);
   }
@@ -198,8 +222,8 @@ export class EvolutionJobProcessor {
     return this.bigTurnSpan.splitAndStore(job);
   }
 
-  materializeNegativeExperience(job: EvolutionJobRecord): void {
-    this.negativeExperience.materialize(job);
+  materializeNegativeExperience(job: EvolutionJobRecord): Promise<void> {
+    return this.negativeExperience.materialize(job);
   }
 
   summarizeTraceForCapture(input: {
@@ -208,7 +232,7 @@ export class EvolutionJobProcessor {
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
-  }, options: { strict?: boolean } = {}): Promise<string> {
+  }, options: { strict?: boolean } = {}): Promise<TraceCaptureSummary> {
     return this.span.summarizeTraceForCapture(input, options);
   }
 
@@ -218,6 +242,7 @@ export class EvolutionJobProcessor {
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
+    mustKeep?: boolean;
   }): Promise<TurnMemoryCaptureDecision> {
     return this.span.decideTurnMemoryForCapture(input);
   }

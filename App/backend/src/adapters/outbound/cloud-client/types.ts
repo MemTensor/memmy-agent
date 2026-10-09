@@ -10,8 +10,11 @@ import type {
   LegalAgreementUrls,
   IntegrationToolResult,
   InvitationResult,
+  LotteryReward,
+  LotteryStatus,
   OkResponse,
   PromotionFlags,
+  SocialLoginProvider,
   TokenUsageDto
 } from "@memmy/local-api-contracts";
 
@@ -68,6 +71,32 @@ export interface CloudLoginResult {
   invitationResult: InvitationResult;
 }
 
+export interface CloudStartSocialLoginInput {
+  provider: SocialLoginProvider;
+  locale: "zh" | "en";
+  loginSource: "Memmy";
+  invitationCode?: string;
+}
+
+export interface CloudStartSocialLoginResult {
+  flowId: string;
+  pollToken: string;
+  authorizationUrl: string;
+  expiresInSec: number;
+  pollIntervalSec: number;
+}
+
+export interface CloudSocialLoginCredentials {
+  flowId: string;
+  pollToken: string;
+}
+
+export type CloudSocialLoginStatus =
+  | { status: "pending" }
+  | { status: "completed"; result: CloudLoginResult }
+  | { status: "failed"; code?: string; message: string }
+  | { status: "expired" };
+
 export interface EnsureInvitationCodeInput {
   uuid: string;
 }
@@ -103,6 +132,15 @@ export interface UpdateCloudAccountProfileInput {
 export interface GrantTokensInput {
   /** Uuid. */
   uuid?: string;
+}
+
+export interface GetLotteryRewardInput {
+  uuid: string;
+}
+
+export interface AckLotteryRewardInput {
+  uuid: string;
+  drawId?: string;
 }
 
 /** Contract for request token quota input. */
@@ -211,6 +249,8 @@ export interface CloudClient {
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;
   login(input: CloudLoginInput): Promise<CloudLoginResult>;
+  startSocialLogin(input: CloudStartSocialLoginInput): Promise<CloudStartSocialLoginResult>;
+  getSocialLoginStatus(input: CloudSocialLoginCredentials): Promise<CloudSocialLoginStatus>;
   ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView>;
   logout(input: CloudLogoutInput): Promise<void>;
   getAccountInfo(input: GetAccountInfoInput): Promise<CloudAccountProfile>;
@@ -232,4 +272,10 @@ export interface CloudClient {
   getLegalUrls(): Promise<LegalAgreementUrls | undefined>;
   /** Reads get promotions. */
   getPromotions(): Promise<PromotionFlags | undefined>;
+  /** Reads the remotely controlled lottery campaign status. */
+  getLotteryStatus(): Promise<LotteryStatus | undefined>;
+  /** Reads the latest unacknowledged lottery reward for the account. */
+  getLotteryReward(input: GetLotteryRewardInput): Promise<LotteryReward>;
+  /** Marks the latest matching lottery reward as shown. */
+  ackLotteryReward(input: AckLotteryRewardInput): Promise<void>;
 }

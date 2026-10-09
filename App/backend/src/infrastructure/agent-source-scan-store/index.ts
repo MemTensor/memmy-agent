@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { hasStagedSourceTurn } from "@memmy/agent-source-core";
 import type {
   ConversationCheckpoint,
   ConversationMessage,
@@ -41,8 +42,7 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
     PRAGMA synchronous = NORMAL;
     PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
-    INSERT INTO schema_meta(version) SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
-    UPDATE schema_meta SET version = 2 WHERE version < 2;
+    INSERT INTO schema_meta(version) SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
     CREATE TABLE IF NOT EXISTS scan_meta (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       job_id TEXT NOT NULL,
@@ -53,6 +53,9 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
       updated_at TEXT NOT NULL,
       error TEXT
     );
+  `);
+  recoverPartialStagedMigration(db);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS staged_messages (
       job_id TEXT NOT NULL,
       source_id TEXT NOT NULL,
@@ -65,7 +68,7 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
       git_root TEXT,
       raw_meta_json TEXT NOT NULL,
       ordinal INTEGER NOT NULL,
-      PRIMARY KEY (job_id, source_id, message_id)
+      PRIMARY KEY (job_id, source_id, conversation_id, message_id)
     );
     CREATE TABLE IF NOT EXISTS scan_source_state (
       source_id TEXT PRIMARY KEY,
@@ -80,8 +83,8 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
       error TEXT
     );
   `);
-  // Older stores created before the job_id column are upgraded in place.
-  try { db.exec("ALTER TABLE staged_messages ADD COLUMN job_id TEXT NOT NULL DEFAULT ''"); } catch { /* already present */ }
+  migrateStagedMessagesPrimaryKey(db);
+  backfillEmptyStagedJobId(db, job.jobId);
   db.exec("CREATE INDEX IF NOT EXISTS staged_order ON staged_messages(job_id, source_id, conversation_id, created_at, message_id, ordinal)");
   db.exec("CREATE TABLE IF NOT EXISTS scan_cursors (source_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, created_at TEXT NOT NULL, message_id TEXT NOT NULL, ordinal INTEGER NOT NULL)");
   db.exec("CREATE TABLE IF NOT EXISTS checkpoints (source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, last_message_id TEXT NOT NULL, last_created_at TEXT NOT NULL, content_hash TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(source_id, conversation_id))");
@@ -96,9 +99,9 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
   }
   let ordinal = Number((db.prepare("SELECT COALESCE(MAX(ordinal), -1) AS value FROM staged_messages WHERE job_id=?").get(job.jobId) as { value: number }).value) + 1;
   const insert = db.prepare("INSERT OR IGNORE INTO staged_messages(job_id,source_id,conversation_id,message_id,role,content,created_at,workspace_path,git_root,raw_meta_json,ordinal) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
-  const refreshCodex = db.prepare(`UPDATE staged_messages
-    SET conversation_id=?,role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
-    WHERE job_id=? AND source_id=? AND message_id=?`);
+  const refreshStaged = db.prepare(`UPDATE staged_messages
+    SET role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
+    WHERE job_id=? AND source_id=? AND conversation_id=? AND message_id=?`);
   const store: AppAgentSourceScanStore = {
     path,
     stage(message) {
@@ -106,10 +109,10 @@ export function openAppAgentSourceScanStore(path: string, job: AppScanJobMeta): 
       if (bytes > MAX_RECORD_BYTES) throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`);
       const rawMetaJson = JSON.stringify(message.rawMeta);
       const inserted = Number(insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, ordinal++).changes) > 0;
-      if (!inserted && message.sourceId === "codex" && typeof message.rawMeta.sourceTurnState === "string") {
+      if (!inserted && hasStagedSourceTurn(message)) {
         // Retrying a staged turn can add native identity or completion evidence
         // to an existing message. Preserve its ordinal and the insertion count.
-        refreshCodex.run(message.conversationId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.messageId);
+        refreshStaged.run(message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.conversationId, message.messageId);
       }
       return inserted;
     },
@@ -216,6 +219,80 @@ export function removeAppAgentSourceScanStore(path: string): void {
   rmSync(path, { force: true });
   rmSync(`${path}-wal`, { force: true });
   rmSync(`${path}-shm`, { force: true });
+}
+
+function migrateStagedMessagesPrimaryKey(db: DatabaseSync): void {
+  ensureStagedJobIdColumn(db);
+  const version = Number((db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as { version?: number } | undefined)?.version ?? 0);
+  if (version >= 3) return;
+  if (!hasScanTable(db, "staged_messages")) {
+    db.exec("UPDATE schema_meta SET version = 3");
+    return;
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE staged_messages_v3 (
+        job_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        workspace_path TEXT,
+        git_root TEXT,
+        raw_meta_json TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        PRIMARY KEY (job_id, source_id, conversation_id, message_id)
+      );
+      INSERT OR IGNORE INTO staged_messages_v3
+        SELECT job_id, source_id, conversation_id, message_id, role, content, created_at, workspace_path, git_root, raw_meta_json, ordinal
+        FROM staged_messages;
+      DROP TABLE staged_messages;
+      ALTER TABLE staged_messages_v3 RENAME TO staged_messages;
+      UPDATE schema_meta SET version = 3;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw error;
+  }
+}
+
+function recoverPartialStagedMigration(db: DatabaseSync): void {
+  const leftover = hasScanTable(db, "staged_messages_v3");
+  const current = hasScanTable(db, "staged_messages");
+  if (leftover && current) db.exec("DROP TABLE staged_messages_v3");
+  else if (leftover && !current && leftoverStagedTableIsComplete(db, "staged_messages_v3")) {
+    db.exec("ALTER TABLE staged_messages_v3 RENAME TO staged_messages");
+  } else if (leftover && !current) {
+    db.exec("DROP TABLE staged_messages_v3");
+  }
+}
+
+function leftoverStagedTableIsComplete(db: DatabaseSync, tableName: string): boolean {
+  const names = new Set((db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).map((row) => row.name));
+  return ["job_id", "source_id", "conversation_id", "message_id", "role", "content", "created_at", "raw_meta_json", "ordinal"]
+    .every((column) => names.has(column));
+}
+
+function ensureStagedJobIdColumn(db: DatabaseSync): void {
+  if (!hasScanTable(db, "staged_messages") || scanTableHasColumn(db, "staged_messages", "job_id")) return;
+  db.exec("ALTER TABLE staged_messages ADD COLUMN job_id TEXT NOT NULL DEFAULT ''");
+}
+
+function backfillEmptyStagedJobId(db: DatabaseSync, jobId: string): void {
+  if (!hasScanTable(db, "staged_messages") || !scanTableHasColumn(db, "staged_messages", "job_id")) return;
+  db.prepare("UPDATE staged_messages SET job_id = ? WHERE job_id = '' OR job_id IS NULL").run(jobId);
+}
+
+function hasScanTable(db: DatabaseSync, tableName: string): boolean {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName));
+}
+
+function scanTableHasColumn(db: DatabaseSync, tableName: string, column: string): boolean {
+  return (db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).some((row) => row.name === column);
 }
 
 function rowToMessage(row: Record<string, unknown>): ConversationMessage {

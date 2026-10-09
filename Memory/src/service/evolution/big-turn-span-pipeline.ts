@@ -1,3 +1,5 @@
+import { languageSteeringLine, steeredPromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import type { MemmyConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,
@@ -42,12 +44,17 @@ spanGoal requirements:
 - Describe the concrete subtask objective, not the tool used.
 - Be independently understandable and suitable for retrieval.
 - Preserve important artifact names, paths, modules, errors, and constraints.
-- Use the same language as the user's request.
 
 summary requirements:
 - State what was done and what result was obtained.
 - Preserve important decisions, failures, fixes, and verification results.
 - Be concise and evidence-based.
+
+Language:
+- spanGoal and summary are both natural-language fields.
+- Write both in the language required by the language instruction.
+- Use that one language for both fields. Do not mix languages.
+- Do not follow the language of the user request, tool output, or source memory when it differs.
 
 Return JSON only:
 {
@@ -72,6 +79,7 @@ interface SpanDraft {
 interface BigTurnSpanDeps {
   repos: Repositories;
   llm: LlmClient;
+  config: MemmyConfig;
   buildMemory(input: Record<string, unknown>): MemoryRow;
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   namespaceIdFromMemory(memory: MemoryRow): string;
@@ -92,11 +100,16 @@ export class BigTurnSpanPipeline {
       : undefined;
     if (!source || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS) return;
 
+    const lang = steeredPromptLanguage(this.deps.config.language, [
+      rawTurn.userText,
+      rawTurn.assistantText
+    ]);
     const result = await this.deps.llm.completeJson<{
       reason?: unknown;
       spans?: unknown;
     }>([
       { role: "system", content: SPAN_BIG_TURN_PROMPT },
+      { role: "system", content: languageSteeringLine(lang) },
       {
         role: "user",
         content: stableStringify(bigTurnPromptPayload(source, rawTurn, job))

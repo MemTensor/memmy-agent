@@ -964,31 +964,25 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("模型请求重试中");
   });
 
-  it("removes retry wait running affordance after the status stops", () => {
+  it("clears retry wait status after receiving normal content", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
-          chatScopeKey="chat-retry-stopped"
-          messages={[{ id: "question", role: "user", content: "继续" }]}
-          retryWaitStatus={{
-            id: "retry-wait-1",
-            chatId: "chat-1",
-            anchorMessageId: "question",
-            text: "Model request failed, retrying attempt 1 in 1s...",
-            isRunning: false,
-            createdAt: 1,
-            updatedAt: 2
-          }}
+          chatScopeKey="chat-retry-cleared"
+          messages={[
+            { id: "question", role: "user", content: "继续" },
+            { id: "answer", role: "assistant", content: "好的" }
+          ]}
+          retryWaitStatus={null}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-retry-wait-line");
-    expect(html).not.toContain("agent-retry-wait-line--running");
-    expect(html).not.toContain('aria-busy="true"');
+    expect(html).not.toContain("agent-retry-wait-line");
+    expect(html).not.toContain("模型请求失败");
   });
 
-  it("keeps activity and thinking placeholder after retry wait when no final answer exists", () => {
+  it("keeps activity and thinking placeholder after retry completes when no final answer exists", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
@@ -1006,27 +1000,18 @@ describe("AgentThreadMessages", () => {
               isStreaming: true
             }
           ]}
-          retryWaitStatus={{
-            id: "retry-wait-1",
-            chatId: "chat-1",
-            anchorMessageId: "question",
-            text: "Model request failed, retrying attempt 1 in 1s...",
-            isRunning: false,
-            createdAt: 1,
-            updatedAt: 2
-          }}
+          retryWaitStatus={null}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-retry-wait-line");
-    expect(html).toContain("模型请求失败，1 秒后重试（第 1 次）");
+    expect(html).not.toContain("agent-retry-wait-line");
     expect(html).toContain("data-activity-key=");
     expect(html).toContain("Searched web for");
     expect(html).toContain("工作中");
   });
 
-  it("hides thinking placeholder after retry wait once final answer text exists", () => {
+  it("hides thinking placeholder after retry completes once final answer text exists", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
@@ -1036,20 +1021,12 @@ describe("AgentThreadMessages", () => {
             { id: "question", role: "user", content: "继续" },
             { id: "answer", role: "assistant", content: "最终回答", isStreaming: true }
           ]}
-          retryWaitStatus={{
-            id: "retry-wait-1",
-            chatId: "chat-1",
-            anchorMessageId: "question",
-            text: "Model request failed, retrying attempt 1 in 1s...",
-            isRunning: false,
-            createdAt: 1,
-            updatedAt: 2
-          }}
+          retryWaitStatus={null}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-retry-wait-line");
+    expect(html).not.toContain("agent-retry-wait-line");
     expect(html).toContain("agent-chat-bubble--assistant");
     expect(html).toContain("最终回答");
     expect(html).not.toContain("思考中");
@@ -2307,9 +2284,9 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("min-width:max-content");
     expect(stylesSource).toMatch(/\.agent-message-content__table-scroll\s*\{[^}]*overflow-x:\s*auto;/s);
     expect(stylesSource).toMatch(/\.agent-message-content__code-scroll,\s*\.agent-message-content__pre\s*\{[^}]*overflow-x:\s*auto;/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll,\s*\.agent-message-content__code-scroll,\s*\.agent-message-content__pre\s*\{(?=[^}]*scrollbar-width:\s*thin;)(?=[^}]*scrollbar-color:\s*var\(--codex-scrollbar-thumb\)\s+transparent;)[^}]*\}/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar,\s*\.agent-message-content__code-scroll::-webkit-scrollbar,\s*\.agent-message-content__pre::-webkit-scrollbar\s*\{(?=[^}]*display:\s*block;)(?=[^}]*height:\s*var\(--codex-scrollbar-size\);)[^}]*\}/s);
-    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__code-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__pre::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--codex-scrollbar-thumb\);/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll,\s*\.agent-message-content__code-scroll,\s*\.agent-message-content__pre,\s*\.composer-media-preview-strip\s*\{(?=[^}]*scrollbar-width:\s*thin;)(?=[^}]*scrollbar-color:\s*var\(--codex-scrollbar-thumb\)\s+transparent;)[^}]*\}/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar,\s*\.agent-message-content__code-scroll::-webkit-scrollbar,\s*\.agent-message-content__pre::-webkit-scrollbar,\s*\.composer-media-preview-strip::-webkit-scrollbar\s*\{(?=[^}]*display:\s*block;)(?=[^}]*height:\s*var\(--codex-scrollbar-size\);)[^}]*\}/s);
+    expect(stylesSource).toMatch(/\.agent-message-content__table-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__code-scroll::-webkit-scrollbar-thumb,\s*\.agent-message-content__pre::-webkit-scrollbar-thumb,\s*\.composer-media-preview-strip::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--codex-scrollbar-thumb\);/s);
   });
 
   it("wraps long file paths inside user message bubbles", () => {

@@ -430,6 +430,7 @@ export class TuiGatewayClient {
   private readonly sessionResetRequestIds = new Set<string>();
   private readonly queuedContents = new Map<string, string>();
   private readonly historyBuffers = new Map<number, GatewayEvent[]>();
+  private readonly lastTranscriptOffsetByTurn = new Map<string, number>();
   private socket: TuiWebSocket | null = null;
   private generation = 0;
   private closed = true;
@@ -1081,6 +1082,15 @@ export class TuiGatewayClient {
       return;
     }
     if (event.event === "delta") {
+      // Exact dedup by transcript offset. Records written after the offset
+      // field shipped carry it; older ones fall through to the overlap
+      // heuristic in replayBufferedTranscriptEvents.
+      const offset = typeof event.transcript_offset === "number" ? event.transcript_offset : null;
+      if (offset != null) {
+        const key = turnId ?? stringValue(event.stream_id) ?? "active";
+        if (offset <= (this.lastTranscriptOffsetByTurn.get(key) ?? -1)) return;
+        this.lastTranscriptOffsetByTurn.set(key, offset);
+      }
       const id = `assistant:${stringValue(event.stream_id) ?? turnId ?? "active"}`;
       const current = this.state.messages.find((message) => message.id === id)
         ?? (turnId
@@ -1297,6 +1307,7 @@ export class TuiGatewayClient {
     if (!this.isCurrent(socket, generation)) return;
     this.socket = null;
     this.historyBuffers.delete(generation);
+    this.lastTranscriptOffsetByTurn.clear();
     this.clearAuthorizedRequests();
     if (this.closed) return;
     for (const attempt of this.pendingSubmissions.values()) attempt.sentGeneration = null;

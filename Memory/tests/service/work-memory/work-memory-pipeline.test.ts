@@ -2,12 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LlmClient } from "../../../src/model/types.js";
 import { Repositories, type EvolutionJobRecord } from "../../../src/storage/repositories.js";
 import type { MemoryRow } from "../../../src/types.js";
+import type { MemoryService } from "../../../src/service/memory-service.js";
 import {
   canonicalWorkMemoryText,
   WorkMemoryPipeline
 } from "../../../src/service/work-memory/work-memory-pipeline.js";
 import { stableHash } from "../../../src/utils/id.js";
-import { createCapturingEmbedder, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import {
+  createCapturingEmbedder,
+  createMemoryServiceFixture,
+  runWorkerRounds
+} from "../../fixtures/memory-service-fixture.js";
 import { upsertMemoryVectorForTest } from "../../fixtures/evolution-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
@@ -259,7 +264,276 @@ describe("Work Memory pipeline", () => {
     expect(recall.injectedContext.markdown).toContain("Requirement: 固定 SFT 数据清洗流程");
     expect(recall.injectedContext.markdown).toContain("Requirement rationale: 保证训练结果可复现");
   });
+
+  it("从没压缩过的会话在 session close 时抽完全部 trace", () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-close-session", "work-memory-close-user");
+    service.completeTurn("work-memory-close-turn-1", {
+      sessionId: opened.sessionId,
+      query: "第一条要求。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    service.completeTurn("work-memory-close-turn-2", {
+      sessionId: opened.sessionId,
+      query: "第二条要求。",
+      answer: "也记录了。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    expect(workMemoryJobs(repos)).toHaveLength(0);
+
+    service.closeSession(opened.sessionId, { namespace: opened.namespace });
+
+    const jobs = workMemoryJobs(repos);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.payload.qa).toEqual([
+      { user: "第一条要求。", assistant: "已记录。" },
+      { user: "第二条要求。", assistant: "也记录了。" }
+    ]);
+    expect(repos.runtime.getWorkMemoryCursor(opened.sessionId).lastExtractedSeq).toBe(2);
+  });
+
+  it("压缩之后再 close 只抽尾巴，已抽过的窗口不再入队", () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-tail-session", "work-memory-tail-user");
+    const first = service.completeTurn("work-memory-tail-turn-1", {
+      sessionId: opened.sessionId,
+      query: "压缩前的要求。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "work-memory-tail-request-1",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: opened.namespace,
+      trigger: "token_compaction",
+      throughL1MemoryId: first.l1MemoryId
+    });
+    const repos = new Repositories(db.db);
+    expect(workMemoryJobs(repos)).toHaveLength(1);
+
+    service.completeTurn("work-memory-tail-turn-2", {
+      sessionId: opened.sessionId,
+      query: "压缩后的要求。",
+      answer: "也记录了。",
+      status: "succeeded"
+    });
+    service.closeSession(opened.sessionId, { namespace: opened.namespace });
+
+    const jobs = workMemoryJobs(repos);
+    expect(jobs).toHaveLength(2);
+    expect(jobs[1]?.payload.qa).toEqual([{ user: "压缩后的要求。", assistant: "也记录了。" }]);
+    expect(repos.runtime.getWorkMemoryCursor(opened.sessionId).lastExtractedSeq).toBe(2);
+  });
+
+  it("压缩之后再 idle，不再产生新的 extract", async () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-idle-session", "work-memory-idle-user");
+    const completed = service.completeTurn("work-memory-idle-turn", {
+      sessionId: opened.sessionId,
+      query: "完整要求。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "work-memory-idle-request",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: opened.namespace,
+      trigger: "token_compaction",
+      throughL1MemoryId: completed.l1MemoryId
+    });
+    const repos = new Repositories(db.db);
+    makeIdleFlushDue(db, opened.sessionId);
+    backdateInputTraces(db, opened.sessionId);
+
+    await runWorkerRounds(service, 3, 20);
+
+    expect(workMemoryJobs(repos)).toHaveLength(1);
+  });
+
+  it("idle 到期时抽出未抽取的增量，游标推进到当前最大 trace", async () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-idle-flush-session", "work-memory-idle-flush-user");
+    service.completeTurn("work-memory-idle-flush-turn", {
+      sessionId: opened.sessionId,
+      query: "idle 才抽的要求。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    expect(workMemoryJobs(repos)).toHaveLength(0);
+
+    makeIdleFlushDue(db, opened.sessionId);
+    backdateInputTraces(db, opened.sessionId);
+    await runWorkerRounds(service, 3, 20);
+
+    const jobs = workMemoryJobs(repos);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.payload.qa).toEqual([{ user: "idle 才抽的要求。", assistant: "已记录。" }]);
+    expect(repos.runtime.getWorkMemoryCursor(opened.sessionId).lastExtractedSeq).toBe(1);
+  });
+
+  it("idle 之后 close 不再重复抽取，也不关 episode", async () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-idle-close-session", "work-memory-idle-close-user");
+    service.completeTurn("work-memory-idle-close-turn", {
+      sessionId: opened.sessionId,
+      query: "先 idle 再关闭。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    makeIdleFlushDue(db, opened.sessionId);
+    backdateInputTraces(db, opened.sessionId);
+    await runWorkerRounds(service, 3, 20);
+    expect(workMemoryJobs(repos)).toHaveLength(1);
+
+    service.closeSession(opened.sessionId, { namespace: opened.namespace });
+
+    expect(workMemoryJobs(repos)).toHaveLength(1);
+    expect(repos.runtime.listJobs(undefined, 100).some((job) => job.jobType === "l3_world_model_update")).toBe(true);
+  });
+
+  it("同一 session 两次 turn 武装同一个 dedupeKey，runAfter 以第二次为准", () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-arm-session", "work-memory-arm-user");
+    service.completeTurn("work-memory-arm-turn-1", {
+      sessionId: opened.sessionId,
+      query: "第一次说话。",
+      answer: "好。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    const first = idleFlushJobs(repos);
+    expect(first).toHaveLength(1);
+    const firstRunAfter = String(first[0]?.payload.runAfter);
+
+    service.completeTurn("work-memory-arm-turn-2", {
+      sessionId: opened.sessionId,
+      query: "第二次说话。",
+      answer: "好。",
+      status: "succeeded"
+    });
+
+    const second = idleFlushJobs(repos);
+    expect(second).toHaveLength(1);
+    expect(second[0]?.id).toBe(first[0]?.id);
+    expect(Date.parse(String(second[0]?.payload.runAfter))).toBeGreaterThan(Date.parse(firstRunAfter));
+  });
+
+  it("session 已关闭时 idle flush 不抽取", async () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-closed-idle-session", "work-memory-closed-idle-user");
+    service.completeTurn("work-memory-closed-idle-turn", {
+      sessionId: opened.sessionId,
+      query: "先关闭再 idle。",
+      answer: "已记录。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    service.closeSession(opened.sessionId, { namespace: opened.namespace });
+    const before = workMemoryJobs(repos).length;
+
+    makeIdleFlushDue(db, opened.sessionId);
+    backdateInputTraces(db, opened.sessionId);
+    await runWorkerRounds(service, 3, 20);
+
+    expect(workMemoryJobs(repos)).toHaveLength(before);
+  });
+
+  it("失败后重新武装的 idle flush 仍然可被调度", () => {
+    const { db, service } = createTestService();
+    const opened = openWorkMemorySession(service, "work-memory-retry-session", "work-memory-retry-user");    service.completeTurn("work-memory-retry-turn", {
+      sessionId: opened.sessionId,
+      query: "重试路径。",
+      answer: "好。",
+      status: "succeeded"
+    });
+    const repos = new Repositories(db.db);
+    const job = idleFlushJobs(repos)[0]!;
+    db.db.prepare(
+      `UPDATE evolution_jobs SET status = 'failed', payload_json = '{}', last_error = 'boom' WHERE id = ?`
+    ).run(job.id);
+
+    service.completeTurn("work-memory-retry-turn-2", {
+      sessionId: opened.sessionId,
+      query: "再来一次。",
+      answer: "好。",
+      status: "succeeded"
+    });
+
+    const revived = idleFlushJobs(repos)[0]!;
+    expect(revived.status).toBe("queued");
+    expect(revived.payload.lastActivityAt).toEqual(expect.any(String));
+    expect(revived.payload.runAfter).toEqual(expect.any(String));
+  });
 });
+
+function workMemoryNamespace(
+  opened: ReturnType<MemoryService["openSession"]>,
+  sessionKey: string
+): {
+  source: string;
+  profileId: string;
+  userId: string;
+  sessionKey: string;
+  projectId?: string;
+} {
+  const base = { source: "codex", profileId: "default", userId: opened.userId, sessionKey };
+  return opened.projectId ? { ...base, projectId: opened.projectId } : base;
+}
+
+function openWorkMemorySession(
+  service: MemoryService,
+  sessionKey: string,
+  userId: string
+): ReturnType<MemoryService["openSession"]> & { sessionKey: string; namespace: ReturnType<typeof workMemoryNamespace> } {
+  const opened = service.openSession({
+    l3WorldModelProtocolVersion: 2,
+    l3WorldModelTransition: "resume_only",
+    workspaceUri: `file:///tmp/${sessionKey}`,
+    workspaceHostId: stableHash(sessionKey).slice(0, 64),
+    namespace: { source: "codex", profileId: "default", sessionKey, userId }
+  });
+  return { ...opened, sessionKey, namespace: workMemoryNamespace(opened, sessionKey) };
+}
+
+function workMemoryJobs(repos: Repositories): EvolutionJobRecord[] {
+  return repos.runtime.listJobs(undefined, 100).filter((job) => job.jobType === "work_memory_extract");
+}
+
+function idleFlushJobs(repos: Repositories): EvolutionJobRecord[] {
+  return repos.runtime.listJobs(undefined, 100).filter((job) => job.jobType === "work_memory_idle_flush");
+}
+
+/** Pull the armed idle flush forward so the next worker pass leases it. */
+function makeIdleFlushDue(db: { db: import("better-sqlite3").Database }, sessionId: string): void {
+  const due = new Date(Date.now() - 1000).toISOString();
+  idleFlushJobs(new Repositories(db.db))
+    .filter((job) => job.sessionId === sessionId)
+    .forEach((job) => {
+      db.db.prepare(
+        `UPDATE evolution_jobs SET payload_json = ? WHERE id = ?`
+      ).run(JSON.stringify({ ...job.payload, runAfter: due }), job.id);
+    });
+}
+
+/**
+ * Backdate a Session's input traces so the idle handler sees a real quiet gap.
+ * The handler reads the newest trace timestamp, not the clock, as last activity.
+ */
+function backdateInputTraces(
+  db: { db: import("better-sqlite3").Database },
+  sessionId: string,
+  idleMs = 3 * 60 * 60 * 1000
+): void {
+  db.db.prepare(
+    `UPDATE l3_world_model_input_traces SET created_at = ? WHERE session_id = ?`
+  ).run(new Date(Date.now() - idleMs).toISOString(), sessionId);
+}
 
 function findWorkMemoryJob(repos: Repositories): EvolutionJobRecord {
   const job = repos.runtime.listJobs(undefined, 100).find((item) => item.jobType === "work_memory_extract");

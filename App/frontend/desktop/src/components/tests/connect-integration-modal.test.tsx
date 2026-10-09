@@ -137,6 +137,34 @@ describe("ConnectIntegrationModal", () => {
     expect(warn).toHaveBeenCalledWith("[tools] Failed to poll connection state; retrying on the next tick:", expect.any(Error));
   });
 
+  it("轮询收到云服务 ApiRequestError 时立即返回服务不可用", async () => {
+    const phases: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const client = {
+      authorize: vi.fn(async () => ({ connectUrl: "https://backend.composio.dev/api/v3/s/github-test", connectionId: "conn-github" })),
+      listCapabilities: vi.fn(async () => ({ toolkits: [] })),
+      listConnections: vi.fn(async () => {
+        throw new ApiRequestError("cloud service failed", 503, "internal", "req-2");
+      }),
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
+    };
+
+    const result = await runIntegrationConnectFlow({
+      slug: "github",
+      client,
+      openUrl: vi.fn(async () => undefined),
+      pollIntervalMs: 0,
+      pollTimeoutMs: 1000,
+      onPhase: (phase) => phases.push(phase)
+    });
+
+    expect(result).toEqual({ phase: "error", errorCode: "service_unavailable" });
+    expect(client.listConnections).toHaveBeenCalledTimes(1);
+    expect(phases).toEqual(["authorizing", "waiting", "error"]);
+    expect(warn).toHaveBeenCalledWith("[tools] Integration connection service unavailable while polling:", expect.any(ApiRequestError));
+  });
+
   it("取消信号触发后停止轮询，不再把等待流程推进到错误态", async () => {
     const phases: string[] = [];
     const controller = new AbortController();
@@ -190,7 +218,7 @@ describe("ConnectIntegrationModal", () => {
     expect(openUrl).toHaveBeenCalledWith("https://backend.composio.dev/api/v3/s/live");
   });
 
-  it("连接流程遇到 composio_not_configured 时回到 idle 且不暴露研发报错", async () => {
+  it("连接流程遇到 composio_not_configured 时保留错误态且不暴露研发报错", async () => {
     const phases: string[] = [];
     const openUrl = vi.fn().mockResolvedValue(undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -213,8 +241,8 @@ describe("ConnectIntegrationModal", () => {
       onPhase: (phase) => phases.push(phase)
     });
 
-    expect(result).toEqual({ phase: "idle" });
-    expect(phases).toEqual(["authorizing", "idle"]);
+    expect(result).toEqual({ phase: "error", errorCode: "service_unavailable" });
+    expect(phases).toEqual(["authorizing", "error"]);
     expect(openUrl).not.toHaveBeenCalled();
     expect(String(result.error)).not.toContain("尚未配置 Composio 鉴权服务");
     expect(warn).toHaveBeenCalledWith(
@@ -222,6 +250,28 @@ describe("ConnectIntegrationModal", () => {
       expect.objectContaining({ code: "composio_not_configured" })
     );
   });
+
+  it("云服务连接请求失败时保留弹窗并返回服务不可用兜底", async () => {
+    const phases: string[] = [];
+    const result = await runIntegrationConnectFlow({
+      slug: "github",
+      client: {
+        authorize: vi.fn(async () => { throw new TypeError("fetch failed"); }),
+        listCapabilities: vi.fn(async () => ({ toolkits: [] })),
+        listConnections: vi.fn(async () => ({ connections: [] })),
+        deleteConnection: vi.fn(async () => undefined),
+        reportConnectionEvent: vi.fn(async () => undefined)
+      },
+      openUrl: vi.fn(async () => undefined),
+      pollIntervalMs: 0,
+      pollTimeoutMs: 1000,
+      onPhase: (phase) => phases.push(phase)
+    });
+
+    expect(result).toEqual({ phase: "error", errorCode: "service_unavailable" });
+    expect(phases).toEqual(["authorizing", "error"]);
+  });
+
 
   it("连接态断开会调用 deleteConnection", async () => {
     const client = createFlowClient([]);

@@ -142,6 +142,20 @@ memmy-memory get <id>
 
 默认连接 `http://127.0.0.1:18960`；可用 `--url`、`--token`、`--config`、`--source` 和 `--user-id` 指定服务与命名空间。
 
+只想单独运行记忆服务、不需要 Agent Runtime 时，从源码编译这个 CLI：
+
+```bash
+git clone https://github.com/MemTensor/memmy-agent.git
+cd memmy-agent
+npm install
+npm run memory:build
+mkdir -p ~/.local/bin
+ln -sf "$PWD/Memory/dist/src/cli/index.js" ~/.local/bin/memmy-memory
+memmy-memory install --service-only
+```
+
+`install --service-only` 会下载锁定版本的 Memory 运行时、注册并启动用户级服务，并验证 `/api/v1/health`，全程不向任何 Agent 安装 Skill 或适配器。需要 Node.js `>=20`；Windows 请在 `Git Bash` 中执行。`npm run memory:binary` 则把同一个 CLI 打包成可分发归档，输出到 `Memory/src/cli/dist/binaries/`，默认按当前平台构建，可用 `MEMMY_MEMORY_TARGET` 指定其他受支持平台。
+
 
 #### 4. 源码启动
 

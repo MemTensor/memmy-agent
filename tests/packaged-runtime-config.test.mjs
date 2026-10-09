@@ -79,13 +79,22 @@ describe("packaged desktop runtime configuration", () => {
   });
 
   it.each([
-    "http://api.example.test",
+    "ftp://api.example.test",
     "https://user:pass@api.example.test",
     "https://api.example.test/path",
     "https://api.example.test?token=value",
     "https://api.example.test/#fragment",
   ])("rejects a non-public cloud-service value: %s", (value) => {
     expect(() => normalizePublicCloudService(value)).toThrow(/MEMMY_CLOUD_SERVICE/);
+  });
+
+  it.each([
+    ["http://127.0.0.1:8101", "http://127.0.0.1:8101"],
+    ["http://localhost:8101/", "http://localhost:8101"],
+    ["http://[::1]:8101", "http://[::1]:8101"],
+    ["http://192.0.2.10:8101", "http://192.0.2.10:8101"],
+  ])("allows an HTTP cloud-service origin: %s", (value, expected) => {
+    expect(normalizePublicCloudService(value)).toBe(expected);
   });
 
   it("removes runtime env files and symlinks without touching normal files", async () => {
@@ -240,7 +249,9 @@ describe("packaged desktop runtime configuration", () => {
     mkdirSync(join(root, "App", "memmy-agent", "dist"), { recursive: true });
     mkdirSync(join(runtimeDir, "memmy-agent"), { recursive: true });
     const stageStart = buildScript.indexOf('mkdir -p "$RUNTIME_DIR/memory/dist"');
-    const stageEnd = buildScript.indexOf('\nverify_office_rendering_bundle', stageStart);
+    const stageEnd = buildScript.indexOf('\nnode "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs"', stageStart);
+    expect(stageStart).toBeGreaterThanOrEqual(0);
+    expect(stageEnd).toBeGreaterThan(stageStart);
     const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
       encoding: "utf8",
       env: { ...process.env, ROOT_DIR: root, RUNTIME_DIR: runtimeDir, MEMORY_DIR: memoryDir, AGENT_DIR: join(root, "App", "memmy-agent") },
@@ -544,6 +555,9 @@ async function createAsarFixture(
   );
   mkdirSync(dirname(contracts), { recursive: true });
   writeFileSync(contracts, "export {};\n");
+  const knowledge = join(source, "dist/runtime/memmy-agent/node_modules/@memmy/knowledge/dist/index.js");
+  mkdirSync(dirname(knowledge), { recursive: true });
+  writeFileSync(knowledge, "export {};\n");
   if (platform === "win32") {
     const ownSourceMap = join(source, "dist/runtime/memmy-agent/dist/main.js.map");
     mkdirSync(dirname(ownSourceMap), { recursive: true });

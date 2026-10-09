@@ -54,6 +54,7 @@ import { ModelPage } from "../pages/model-page.js";
 import { HomePage } from "../pages/home-page.js";
 import { LoginPage } from "../pages/login-page.js";
 import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
+import { KnowledgePage } from "../pages/knowledge-page.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
 import { PluginSurfacePage } from "../pages/plugin-surface-page.js";
@@ -332,6 +333,8 @@ function renderRoute(path: AppRoutePath) {
       return <ToolsPage />;
     case "/memory":
       return <MemoryPage />;
+    case "/knowledge":
+      return <KnowledgePage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
     case "/plugin":

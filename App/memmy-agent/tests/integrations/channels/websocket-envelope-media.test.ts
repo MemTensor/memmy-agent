@@ -56,7 +56,7 @@ function makeWebuiChannel(): WebSocketChannel {
 }
 
 function makeConnection() {
-  return { send: vi.fn(async (raw: string) => { void raw; }), remoteAddress: ["127.0.0.1"] };
+  return { send: vi.fn<(raw: string) => Promise<void>>(async () => undefined), remoteAddress: ["127.0.0.1"] };
 }
 
 function sentError(connection: ReturnType<typeof makeConnection>): any {
@@ -262,7 +262,6 @@ describe("WebSocket message envelopes with media paths", () => {
       media_paths: Array.from({ length: 5 }, (_, index) => writeWebuiImage(`shot-${index}.png`)),
     });
 
-    // With no count limit, all 5 paths are accepted and handleMessage is called
     expect(channel.handleMessage).toHaveBeenCalledTimes(1);
     const opts = (channel.handleMessage as any).mock.calls[0][0];
     expect(opts.media).toHaveLength(5);

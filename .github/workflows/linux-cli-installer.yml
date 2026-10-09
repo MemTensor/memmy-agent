@@ -13,6 +13,9 @@ on:
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
+      - "tests/linux-open-computer-use-bundle.test.mjs"
+      - "tests/linux-computer-use-deps.test.mjs"
+      - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
   push:
@@ -26,6 +29,9 @@ on:
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
+      - "tests/linux-open-computer-use-bundle.test.mjs"
+      - "tests/linux-computer-use-deps.test.mjs"
+      - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
   workflow_dispatch:
@@ -105,6 +111,10 @@ jobs:
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: memmy-linux-cli-assets
@@ -130,6 +140,10 @@ jobs:
           export MEMMY_RELEASE_BASE_URL="file://$PWD/release-assets"
           bash release-assets/install.sh
           bash release-assets/install.sh
+          ocu_arch="$EXPECTED_ARCH"
+          [[ "$ocu_arch" != "x64" ]] || ocu_arch="amd64"
+          node scripts/internal/shared/check-open-computer-use.mjs \
+            "$MEMMY_INSTALL_ROOT/current/App/memmy-agent/node_modules/open-computer-use/dist/linux/$ocu_arch/open-computer-use"
           "$MEMMY_BIN_DIR/memmy" --version
           "$MEMMY_BIN_DIR/memmy" --help >/dev/null
           "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null

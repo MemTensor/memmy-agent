@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import * as lockfile from "proper-lockfile";
 
@@ -7,6 +8,7 @@ const TURN_LOCK_UPDATE_MS = 10_000;
 const TURN_LOCK_STALE_MS = 120_000;
 const RUN_HEARTBEAT_MS = 5_000;
 const RUN_STALE_MS = 120_000;
+const TERMINAL_LOCK_ROOT = path.join(os.tmpdir(), "memmy-agent-terminal-locks");
 
 export type TerminalRunState = {
   canonicalSessionKey: string;
@@ -18,6 +20,14 @@ export type TerminalRunState = {
 
 function sessionHash(sessionKey: string): string {
   return crypto.createHash("sha256").update(sessionKey).digest("hex");
+}
+
+export function terminalControlLockfilePath(target: string): string {
+  const targetHash = crypto
+    .createHash("sha256")
+    .update(path.resolve(target))
+    .digest("hex");
+  return path.join(TERMINAL_LOCK_ROOT, `${targetHash}.lock`);
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -113,10 +123,13 @@ async function acquire(
   },
 ): Promise<() => Promise<void>> {
   ensureTarget(target);
+  const lockfilePath = terminalControlLockfilePath(target);
+  fs.mkdirSync(path.dirname(lockfilePath), { recursive: true });
   while (true) {
     if (signal?.aborted) throw abortError(signal);
     try {
       return await lockfile.lock(target, {
+        lockfilePath,
         realpath: false,
         stale,
         update,

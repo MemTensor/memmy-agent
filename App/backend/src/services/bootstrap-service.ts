@@ -5,6 +5,7 @@ import {
   type AppSettingsDto,
   type HealthStatus,
   type LegalAgreementUrls,
+  type LotteryStatus,
   type OnboardingStateDto,
   type PromotionFlags,
   type TokenUsageDto
@@ -34,12 +35,13 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
       const bootstrap = options.appStateStore.repositories.bootstrap;
       const appSettings = bootstrap.getAppSettings();
       const onboarding = await reconcileImprovementProgram(options, appSettings, bootstrap.getOnboardingState());
-      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions] = await Promise.all([
+      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions, lotteryStatus] = await Promise.all([
         getMemoryHealth(options.memoryClient),
         getCloudHealth(options.cloudClient),
         refreshTokenUsage(options),
         getLegalUrls(options.cloudClient),
-        getPromotions(options.cloudClient)
+        getPromotions(options.cloudClient),
+        getLotteryStatus(options.cloudClient)
       ]);
 
       return AppBootstrapResponseSchema.parse({
@@ -62,7 +64,8 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
           cloud: cloudHealth.status
         },
         ...(legal ? { legal } : {}),
-        promotions
+        promotions,
+        ...(lotteryStatus ? { lotteryStatus } : {})
       });
     }
   };
@@ -163,6 +166,14 @@ async function getPromotions(cloudClient: CloudClient): Promise<PromotionFlags> 
     return (await cloudClient.getPromotions()) ?? PROMOTIONS_FALLBACK;
   } catch {
     return PROMOTIONS_FALLBACK;
+  }
+}
+
+async function getLotteryStatus(cloudClient: CloudClient): Promise<LotteryStatus | undefined> {
+  try {
+    return await cloudClient.getLotteryStatus();
+  } catch {
+    return undefined;
   }
 }
 

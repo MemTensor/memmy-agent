@@ -1,0 +1,33 @@
+{
+  "name": "@memmy/knowledge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./routes": "./dist/routes.js",
+    "./ui": "./dist/ui/page.js"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run tests"
+  },
+  "peerDependencies": {
+    "fastify": "^5.8.5",
+    "react": "^19.2.6"
+  },
+  "peerDependenciesMeta": {
+    "fastify": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -571,7 +571,8 @@ describe("HomePage", () => {
     expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
     expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
     expect(source).toContain("state.agent.pendingPresetByScope[modelSelectionScopeKey]");
-    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId");
+    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]");
+    expect(source).toContain("allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)");
     expect(source).toContain("modelPreset: resolvedConversationModel.candidateId ?? undefined");
     expect(source).not.toContain("copyScopedModelSelection");
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
@@ -693,6 +694,7 @@ describe("HomePage", () => {
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
     expect(source).toContain('className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
+    expect(source).toContain("topBarEnd={hasActiveConversation || environmentScope ? (");
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
@@ -2154,11 +2156,6 @@ describe("HomePage", () => {
     }));
   });
 
-  it("maps backend file 413 to the current composer file-size error", async () => {
-    // This test case tests 413 fallback behavior - kept for non-image uploads
-    // Large file test removed as file size limit is no longer enforced client-side
-  });
-
   it("validates agent attachment types and deduplication before websocket send", async () => {
     await expect(validateAgentMediaFiles([
       file("one.png", "image/png", 1024),
@@ -2174,13 +2171,14 @@ describe("HomePage", () => {
     ]);
     expect(mixedResult.files).toHaveLength(4);
 
-    await expect(validateAgentMediaFiles([
+    const manyAttachments = await validateAgentMediaFiles([
       file("1.png", "image/png", 1024),
       file("2.pdf", "application/pdf", 1024),
       file("3.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 1024),
       file("4.txt", "text/plain", 1024),
       file("5.json", "application/json", 1024)
-    ])).resolves.toMatchObject({ files: expect.arrayContaining([]) });
+    ]);
+    expect(manyAttachments.files).toHaveLength(5);
     await expect(validateAgentMediaFiles([file("big.pdf", "application/pdf", 100 * 1024 * 1024)])).resolves.toBeDefined();
     await expect(validateAgentMediaFiles([file("huge.png", "image/png", 100 * 1024 * 1024)])).resolves.toBeDefined();
     await expect(validateAgentMediaFiles([file("max.png", "image/png", 10 * 1024 * 1024)])).resolves.toBeDefined();
@@ -2327,7 +2325,7 @@ describe("HomePage", () => {
     expect(mixedSelection.duplicateCount).toBe(1);
   });
 
-  it("does not read oversized files before rejecting them", async () => {
+  it("accepts oversized files and reads them for hashing", async () => {
     const huge = {
       name: "huge.png",
       type: "image/png",
