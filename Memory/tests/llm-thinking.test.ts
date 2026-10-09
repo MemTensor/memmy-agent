@@ -1,12 +1,96 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { LlmConfig } from "../src/config/index.js";
+import { loadMemmyConfig, type LlmConfig } from "../src/config/index.js";
 import { createLlmClient } from "../src/model/llm.js";
+
+const roots: string[] = [];
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 describe("memory LLM thinking configuration", () => {
+  it("sends every Bailian thinking switch to the Memmy account gateway", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      sourceProvider: "memmy_account",
+      vendor: "openai_compatible",
+      endpoint: "https://apigw.example/api/agentExternal/v1",
+      model: "memory_summary",
+      enableThinking: false,
+      thinkingBudget: 1_000
+    }));
+
+    await client.completeJson([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+    const disabled = requestBody(fetchMock);
+    expect(disabled).toMatchObject({
+      enable_thinking: false,
+      thinking: { type: "disabled" },
+      response_format: { type: "json_object" },
+      temperature: 0.2
+    });
+    expect(disabled).not.toHaveProperty("thinking_budget");
+    expect(disabled).not.toHaveProperty("reasoning_effort");
+
+    fetchMock.mockClear();
+    await client.completeJson([{ role: "user", content: "evolve" }], {
+      operation: "evolution.induction",
+      thinkingMode: "enabled"
+    });
+    const enabled = requestBody(fetchMock);
+    expect(enabled).toMatchObject({
+      enable_thinking: true,
+      thinking: { type: "enabled" },
+      thinking_budget: 1_000
+    });
+    expect(enabled).not.toHaveProperty("response_format");
+  });
+
+  it("disables thinking for account-mode memory models resolved from the runtime config", async () => {
+    const { config } = loadMemmyConfig(writeAccountRuntimeConfig());
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const [llm, operation] of [
+      [config.summary, "retrieval.query_extract.v1"],
+      [config.summary, "retrieval.filter.v1"],
+      [config.evolution, "retrieval.query_rewrite.v1"]
+    ] as const) {
+      fetchMock.mockClear();
+      await createLlmClient(llm).completeJson([{ role: "user", content: "query" }], {
+        operation,
+        thinkingMode: "disabled"
+      });
+      expect(requestBody(fetchMock)).toMatchObject({
+        model: llm.model,
+        enable_thinking: false,
+        thinking: { type: "disabled" }
+      });
+    }
+
+    fetchMock.mockClear();
+    await createLlmClient(config.evolution).completeJson([{ role: "user", content: "evolve" }], {
+      operation: "evolution.induction",
+      thinkingMode: "enabled"
+    });
+    expect(requestBody(fetchMock)).toMatchObject({
+      model: "memory_evolution",
+      enable_thinking: true,
+      thinking: { type: "enabled" },
+      thinking_budget: 1_000
+    });
+  });
+
   it("sends the selected endpoint headers and body options", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -546,6 +630,51 @@ function llmConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
     malformedRetries: 0,
     ...overrides
   };
+}
+
+function writeAccountRuntimeConfig(): string {
+  const root = mkdtempSync(join(tmpdir(), "memmy-llm-thinking-"));
+  roots.push(root);
+  const accountPreset = (model: string, capability: string) => ({
+    provider: "memmy_account",
+    endpoint: "memory",
+    model,
+    source: "account",
+    ownerAccountId: "user_account",
+    capabilities: [capability]
+  });
+  const configPath = join(root, "config.yaml");
+  writeFileSync(configPath, YAML.stringify({
+    providers: {
+      memmy_account: {
+        apiKey: "cloud-uuid",
+        ownerAccountId: "user_account",
+        endpoints: {
+          memory: {
+            apiBase: "https://apigw.example/api/agentExternal/v1",
+            protocol: "memmy-account"
+          }
+        }
+      }
+    },
+    modelPresets: {
+      "memmy-account-agent": accountPreset("agent_chat", "agent"),
+      "memmy-account-summary": accountPreset("memory_summary", "memory_summary"),
+      "memmy-account-evolution": accountPreset("memory_evolution", "memory_evolution")
+    },
+    modelAssignments: {
+      byok: {},
+      account: {
+        ownerAccountId: "user_account",
+        agent: { candidates: ["memmy-account-agent"], default: "memmy-account-agent" },
+        memorySummary: "memmy-account-summary",
+        memoryEvolution: "memmy-account-evolution"
+      }
+    },
+    app: { userMode: "account", userId: "user_account" },
+    memmyMemory: { userId: "user_account" }
+  }));
+  return configPath;
 }
 
 function requestBody(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>): Record<string, unknown> {

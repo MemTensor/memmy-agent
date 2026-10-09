@@ -60,6 +60,7 @@ interface LlmCallResult {
   finishReason?: "stop" | "length" | "other";
 }
 
+const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 const OPENAI_COMPAT_THINKING_EFFORT = "medium";
 const ANTHROPIC_THINKING_BUDGET_TOKENS = 4096;
 const ANTHROPIC_MIN_THINKING_OUTPUT_TOKENS = ANTHROPIC_THINKING_BUDGET_TOKENS + 4096;
@@ -315,20 +316,20 @@ class HttpLlmClient implements LlmClient {
   private async completeOpenAiCompatible(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
     const url = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
+    const memmyAccount = this.config.sourceProvider === MEMMY_ACCOUNT_PROVIDER;
     const thinking = openAiCompatibleThinkingControl({
       vendor: this.config.vendor ?? "",
       endpoint: base,
       model: this.config.model ?? "",
-      requested: resolveThinkingEnabled(this.config.enableThinking, options.thinkingMode)
+      requested: resolveThinkingEnabled(this.config.enableThinking, options.thinkingMode),
+      memmyAccount
     });
     const model = this.config.model ?? "";
+    const usesEnableThinking = memmyAccount || thinkingUsesEnableThinking(this.config.vendor ?? "", base, model);
     const omitTemperature = isKimiImmutableTemperatureModel(model) ||
-      (thinking.enabled && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
-    const omitJsonMode = thinking.enabled && (
-      thinkingUsesEnableThinking(this.config.vendor ?? "", base, model) ||
-      isAlibabaCompatibleEndpoint(base)
-    );
-    const thinkingBudget = thinking.enabled && thinkingUsesEnableThinking(this.config.vendor ?? "", base, model)
+      (thinking.enabled && !memmyAccount && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
+    const omitJsonMode = thinking.enabled && (usesEnableThinking || isAlibabaCompatibleEndpoint(base));
+    const thinkingBudget = thinking.enabled && usesEnableThinking
       ? this.config.thinkingBudget
       : undefined;
     const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
@@ -666,7 +667,19 @@ function openAiCompatibleThinkingControl(input: {
   endpoint: string;
   model: string;
   requested: boolean;
+  memmyAccount?: boolean;
 }): ThinkingControl {
+  if (input.memmyAccount) {
+    // The account gateway forwards to Bailian models whose switch field varies
+    // by model family, and it does not translate between them.
+    return {
+      enabled: input.requested,
+      fields: {
+        enable_thinking: input.requested,
+        thinking: { type: input.requested ? "enabled" : "disabled" }
+      }
+    };
+  }
   const style = openAiCompatibleThinkingStyle(input.vendor, input.endpoint, input.model);
   const enabled = input.requested || isOpenAiCompatibleThinkingOnlyModel(input.vendor, input.endpoint, input.model);
   if (isAlwaysOnModelWithoutThinkingToggle(input.model)) {
