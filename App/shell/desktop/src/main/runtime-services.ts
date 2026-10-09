@@ -1891,8 +1891,10 @@ async function probeMemoryService(url: string, headers: Record<string, string> =
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
     });
     if (!response.ok) return "unexpected";
-    const body = await response.json() as { ok?: unknown; protocolVersion?: unknown };
-    if (body.ok !== true) return "unexpected";
+    const body: unknown = await response.json();
+    if (!isRecord(body) || typeof body.ok !== "boolean") return "unexpected";
+    // `ok` also reflects model health. A degraded dev-start service still owns
+    // this endpoint and must be reused instead of starting a second listener.
     return body.protocolVersion === SUPPORTED_MEMORY_PROTOCOL_VERSION ? "ready" : "incompatible";
   } catch {
     return "unreachable";
