@@ -76,6 +76,65 @@ describe("memory LLM thinking configuration", () => {
     expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
   });
 
+  it.each(["sglang", "vllm"] as const)(
+    "routes Qwen thinking through chat_template_kwargs for the %s provider",
+    async (provider) => {
+      const fetchMock = openAiFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      const client = createLlmClient(llmConfig({
+        provider,
+        vendor: "qwen",
+        endpoint: `https://${provider}.example/v1`,
+        model: "qwen3.8-27b",
+        enableThinking: true,
+        extraBody: { chat_template_kwargs: { tokenizer_option: "preserved" } }
+      }));
+
+      await client.complete([{ role: "user", content: "filter" }], {
+        operation: "retrieval.filter",
+        thinkingMode: "disabled"
+      });
+      expect(requestBody(fetchMock)).toMatchObject({
+        chat_template_kwargs: {
+          enable_thinking: false,
+          tokenizer_option: "preserved"
+        }
+      });
+      expect(requestBody(fetchMock)).not.toHaveProperty("enable_thinking");
+
+      fetchMock.mockClear();
+      await client.complete([{ role: "user", content: "evolve" }], {
+        operation: "evolution.induction",
+        thinkingMode: "enabled"
+      });
+      expect(requestBody(fetchMock)).toMatchObject({
+        chat_template_kwargs: { enable_thinking: true }
+      });
+    }
+  );
+
+  it("keeps chat_template_kwargs opt-in data isolated on the generic OpenAI-compatible provider", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      provider: "openai_compatible",
+      vendor: "qwen",
+      endpoint: "https://cloud-provider.example/v1",
+      model: "qwen3.8-27b",
+      extraBody: { chat_template_kwargs: { tokenizer_option: "preserved" } }
+    }));
+
+    await client.complete([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+
+    expect(requestBody(fetchMock)).toMatchObject({
+      enable_thinking: false,
+      chat_template_kwargs: { tokenizer_option: "preserved" }
+    });
+  });
+
   it.each([
     ["DeepSeek", "deepseek", "https://api.deepseek.com", "deepseek-v4-pro"],
     ["Zhipu", "zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-5.1"],

@@ -17,6 +17,8 @@ export type LlmProviderName =
   | ""
   | "local_only"
   | "openai_compatible"
+  | "sglang"
+  | "vllm"
   | "gemini"
   | "anthropic"
   | "bedrock"
@@ -889,6 +891,10 @@ function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
 
 function memoryLlmProvider(provider: string): LlmProviderName {
   switch (provider) {
+    case "sglang":
+      return "sglang";
+    case "vllm":
+      return "vllm";
     case "anthropic":
       return "anthropic";
     case "google":
@@ -1354,6 +1360,8 @@ function llmProvider(value: unknown, fallback: LlmProviderName): LlmProviderName
     provider === "" ||
     provider === "local_only" ||
     provider === "openai_compatible" ||
+    provider === "sglang" ||
+    provider === "vllm" ||
     provider === "gemini" ||
     provider === "anthropic" ||
     provider === "bedrock" ||
