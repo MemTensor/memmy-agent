@@ -348,6 +348,7 @@ describe("MemoryService / session / episode relation", () => {
     const { db, service } = createTestService({
       llm: createEndTopicCaptureLlm(calls, END_TOPIC_CONVENTION, {
         l1: {
+          title: "查看版本号的步骤约定",
           summary: END_TOPIC_CONVENTION,
           evidence: [{ quote: END_TOPIC_CONVENTION, role: "user", kind: "user_directive" }]
         },
