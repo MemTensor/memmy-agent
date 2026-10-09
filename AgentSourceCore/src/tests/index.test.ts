@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TURN_CONTENT_MAX_BYTES, conversationContentHash, orderedTurns, renderTurnClipped, type ConversationMessage } from "./index.js";
+import { TURN_CONTENT_MAX_BYTES, conversationContentHash, orderedTurns, renderTurnClipped, type ConversationMessage } from "../index.js";
 
 const message = (id: string, role: ConversationMessage["role"], content: string, createdAt: string): ConversationMessage => ({
   messageId: id, sourceId: "fixture", conversationId: "conversation", role, content, createdAt,

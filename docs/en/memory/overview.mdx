@@ -170,7 +170,7 @@ After mechanical ranking, Memmy prefers the evolution model for relevance filter
 | Setting | Default | Effect |
 | --- | ---: | --- |
 | `llmFilterEnabled` | `true` | Enables final semantic filtering |
-| `llmFilterMinCandidates` | `2` | Minimum mechanical candidates required before calling the LLM |
+| `llmFilterMinCandidates` | `1` | Minimum mechanical candidates required before calling the LLM |
 | `llmFilterMaxKeep` | `8` | Maximum kept after a successful LLM call |
 | `llmFilterFallbackMaxKeep` | `6` | Fallback cap when no LLM is configured, the call fails, or output is malformed |
 | `llmFilterCandidateBodyChars` | `500` | Candidate body characters shown to the filter model |
@@ -264,7 +264,7 @@ memmyMemory:
       llmFilterEnabled: true
       llmFilterMaxKeep: 8
       llmFilterFallbackMaxKeep: 6
-      llmFilterMinCandidates: 2
+      llmFilterMinCandidates: 1
       llmFilterCandidateBodyChars: 500
       readOnlyInjectionProfile: all
 ```

@@ -31,7 +31,7 @@ describe("CLI analytics event contract", () => {
         eventName: "memmy_cli_completed",
         params: expect.objectContaining({
           engagement_time_msec: 100,
-          success: true,
+          success: 1,
           user_mode: "byok",
           source: "memmy-memory",
           app_env: "prod",

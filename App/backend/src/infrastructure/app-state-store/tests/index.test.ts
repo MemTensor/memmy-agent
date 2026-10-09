@@ -131,8 +131,8 @@ describe("app state store migrations", () => {
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(33);
-    expect(secondMigrationCount).toBe(33);
+    expect(firstMigrationCount).toBe(34);
+    expect(secondMigrationCount).toBe(34);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -1892,7 +1892,9 @@ describe("app state store migrations", () => {
       "watch_file_changes",
       "auto_inject_skill",
       "installation_id",
-      "stop_memory_service_on_exit"
+      "stop_memory_service_on_exit",
+      "memory_byok_daily_limit_m",
+      "memory_byok_total_limit_m"
     ]);
     expect(settings).toMatchObject({
       defaultLaunchMode: "last",
@@ -1902,7 +1904,9 @@ describe("app state store migrations", () => {
       taskDoneNotificationEnabled: true,
       notificationSoundEnabled: true,
       menuBarIconEnabled: true,
-      stopMemoryServiceOnExit: false
+      stopMemoryServiceOnExit: false,
+      memoryByokDailyLimitM: 10,
+      memoryByokTotalLimitM: 500
     });
     expect(cloudAccountColumns).toEqual([
       "uuid",

@@ -20,6 +20,7 @@ import {
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
   resolveSettingsTabFromHash,
+  shouldFocusMemoryBudgetFromHash,
   readLogLevel,
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
@@ -250,8 +251,16 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
+    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
+  });
+});
+
+describe("shouldFocusMemoryBudgetFromHash", () => {
+  it("只把记忆限额深链当作需要定位的 Token 卡片", () => {
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage-memory-budget")).toBe(true);
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage")).toBe(false);
   });
 });
 
@@ -293,6 +302,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).toContain("自定义 API Key 消耗");
+    expect(html).toContain("记忆进化 Token 限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
@@ -671,6 +681,26 @@ describe("SettingsPageView", () => {
     expect(compactStyles).toContain("grid-column: 2");
     expect(compactStyles).toContain("flex-wrap: wrap");
     expect(source).toContain("byokTokenUsageClient.getSummary");
+    expect(source).toContain("byokTokenUsageClient.getMemoryBudget");
+    expect(source).toContain("function MemoryTokenBudgetCard");
+    const budgetCardSource = source.slice(
+      source.indexOf("function MemoryTokenBudgetCard"),
+      source.indexOf("export type MemoryBudgetUsageTone")
+    );
+    expect(budgetCardSource).toContain("<Gauge");
+    expect(budgetCardSource).toContain("usageStyles.sectionHead");
+    expect(budgetCardSource).toContain("usageStyles.budgetSection");
+    expect(budgetCardSource).toContain("usageStyles.budgetPanel");
+    expect(budgetCardSource).toContain("usageStyles.platformQuotaList");
+    const budgetRowSource = source.slice(
+      source.indexOf("export function MemoryTokenBudgetRow"),
+      source.indexOf("export interface UsageDetailsProps")
+    );
+    expect(budgetRowSource).toContain("usageStyles.platformQuotaRow");
+    expect(budgetRowSource).toContain("usageStyles.budgetMeter");
+    expect(budgetCardSource.indexOf('t("settings.token.memoryBudgetHint")')).toBeLessThan(
+      budgetCardSource.indexOf('t("settings.token.memoryBudgetDaily")')
+    );
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
     expect(source).toContain("function UsageDetails");
@@ -1055,6 +1085,7 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
     expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
     expect(source).toContain('window.addEventListener("focus"');
+    expect(source).toContain("Pending requests refresh on window focus instead of fixed-interval polling.");
     expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
   });

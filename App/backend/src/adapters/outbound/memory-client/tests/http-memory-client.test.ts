@@ -34,6 +34,7 @@ describe("HttpMemoryClient", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/admin/memory-token-budget",
       "/api/v1/admin/export",
       "/api/v1/admin/data",
       "/api/v1/sessions/open",
@@ -100,6 +101,10 @@ describe("HttpMemoryClient", () => {
         summary: { routing: "fixed" }
       }
     });
+    await expect(client.getMemoryTokenBudget()).resolves.toMatchObject({
+      dailyLimitM: 10,
+      paused: false
+    });
     await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
     await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
@@ -132,6 +137,7 @@ describe("HttpMemoryClient", () => {
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "GET /api/v1/admin/memory-token-budget",
       "GET /api/v1/admin/export",
       "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
@@ -447,6 +453,17 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    return {
+      dailyLimitM: 10,
+      totalLimitM: 500,
+      dailyUsed: 0,
+      lifetimeUsed: 0,
+      paused: false,
+      trigger: null,
+      nextLocalMidnightAt: now()
+    };
+  }
   if (method === "GET" && path === "/api/v1/admin/export") {
     return { manifest: { service: "memmy-memory-service" }, tables: {} };
   }

@@ -60,6 +60,54 @@ describe("resetAccountRuntimeForDesktopInstallChange", () => {
     });
   });
 
+  it("keeps the active account across the reinstall marker used by MEMMY-594", async () => {
+    const context = createContext();
+    await seedAccountRuntime(context);
+
+    const result = await resetAccountRuntimeForDesktopInstallChange({
+      appStateStore: context.store,
+      databasePath: context.databasePath,
+      memmyConfigPath: context.memmyConfigPath,
+      installFingerprint: "1.1.8|win32|x64|C:\\Program Files\\Memmy\\Memmy.exe|2",
+      now: () => new Date("2026-06-20T10:00:00.000Z")
+    });
+
+    expect(result).toMatchObject({ changedInstall: true, resetAccountRuntime: false });
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "user-a" }
+    });
+    expect(context.store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get())
+      .toMatchObject({ active_uuid: "cloud-account-a" });
+  });
+
+  it("restores an account whose active session was cleared before an authoritative migration", async () => {
+    const context = createContext();
+    await seedAccountRuntime(context);
+    context.store.repositories.accountSession.clear();
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: true,
+        categorySourcesShareGeneration: false
+      }
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      hydratedAppState: true,
+      reason: "hydrated_account_from_runtime_config"
+    });
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "user-a" }
+    });
+    expect(context.store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get())
+      .toMatchObject({ active_uuid: "cloud-account-a" });
+  });
+
   it("keeps account runtime when the desktop install fingerprint is unchanged", async () => {
     const context = createContext();
     await seedAccountRuntime(context);

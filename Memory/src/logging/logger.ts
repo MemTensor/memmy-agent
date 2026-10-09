@@ -318,7 +318,8 @@ function jobTypeTag(value: string): string {
     episode_idle_close: "episode.close",
     skill_trial_resolve: "skill.trial_resolve",
     decision_repair: "decision.repair",
-    l2_association: "l2.association"
+    l2_association: "l2.association",
+    work_memory_idle_flush: "work.memory.idle_flush"
   };
   return tags[value] ?? value.replace(/_/g, ".");
 }

@@ -81,6 +81,35 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.domain).toBe("");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.readOnlyInjectionProfile).toBe("all");
+    expect(loadMemmyConfig(configPath).config.tokenBudget).toEqual({
+      dailyLimitM: 10,
+      totalLimitM: 500
+    });
+  });
+
+  it("reads query extract history limits from retrieval config and defaults them", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {}
+    }));
+
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.queryExtractHistoryTurns).toBe(5);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.queryExtractHistoryTextChars).toBe(200);
+
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        algorithm: {
+          retrieval: {
+            queryExtractHistoryTurns: 3,
+            queryExtractHistoryTextChars: 120
+          }
+        }
+      }
+    }));
+
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.queryExtractHistoryTurns).toBe(3);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.queryExtractHistoryTextChars).toBe(120);
   });
 
   it("keeps summary thinking off and defaults evolution thinking on", () => {
@@ -402,6 +431,51 @@ describe("memmy memory config", () => {
     });
     expect(config.embedding.endpoint).toBeUndefined();
     expect(config.embedding.apiKey).toBeUndefined();
+    expect(config.embedding.selectionError).toBeUndefined();
+  });
+
+  it("resolves catalog embedding assignments when the legacy runtime field is absent", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "sk-embedding",
+          endpoints: {
+            embeddings: {
+              apiBase: "https://embedding.example/v1",
+              protocol: "openai-embeddings"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        embeddings: {
+          provider: "openai",
+          endpoint: "embeddings",
+          model: "text-embedding-3-small",
+          source: "byok",
+          capabilities: ["embedding"]
+        }
+      },
+      modelAssignments: {
+        byok: { embedding: "embeddings" },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: {}
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "custom",
+      provider: "openai_compatible",
+      sourceProvider: "openai",
+      endpoint: "https://embedding.example/v1",
+      model: "text-embedding-3-small",
+      apiKey: "sk-embedding"
+    });
     expect(config.embedding.selectionError).toBeUndefined();
   });
 

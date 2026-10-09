@@ -31,6 +31,10 @@ describe("codex skill target", () => {
     const skillFile = readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8");
     expect(skillFile).toContain("# Memmy");
     expect(skillFile).toContain("Call memmy-memory search when context is needed.");
+    const resumeSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+    expect(resumeSkillFile).toContain("name: memmy-resume");
+    expect(resumeSkillFile).toContain("disable-model-invocation: true");
+    expect(resumeSkillFile).toContain("--source codex");
     await expect(target.isInstalled("codex")).resolves.toBe(true);
   });
 
@@ -78,6 +82,7 @@ describe("codex skill target", () => {
     await target.uninstall("codex");
     expect(readTargetFile(rootDirectory)).toBe(["manual prefix", "manual suffix", ""].join("\n"));
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
   });
 
   it("does not create Codex directory when Codex is not installed", async () => {
@@ -120,6 +125,27 @@ describe("codex skill target", () => {
       expect(commands).toContain(unrelatedHook.command);
       expectSafeNodeHookCommand(commands.find((command) => command.includes("memmy-resume-hook.mjs")));
     }
+  });
+
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("codex");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    writeFileSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"), "old hook\n", "utf8");
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("codex");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
   });
 
   it("persists trust for the installed user-level hooks before installation completes", async () => {
@@ -236,6 +262,9 @@ describe("codex skill target", () => {
         source: "codex"
       });
       expect(authorization).toBe("Bearer test-token");
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8")).toContain(
+        "--source codex"
+      );
 
       const selectionRun = await runNodeHook(
         hookScriptPath,
@@ -268,6 +297,7 @@ describe("codex skill target", () => {
       expect(hooksAfter.hooks?.Stop).toBeUndefined();
       expect(readFileSync(join(rootDirectory, "AGENTS.md"), "utf8")).toBe(existingTargetFile);
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
     } finally {
       await close(server);
     }
