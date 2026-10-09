@@ -56,6 +56,40 @@ describe("memory LLM thinking configuration", () => {
     expect(enabled).not.toHaveProperty("response_format");
   });
 
+  it("recognizes the account gateway behind a custom provider preset", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createLlmClient(llmConfig({
+      sourceProvider: "openai",
+      vendor: "openai_compatible",
+      endpoint: "https://api.memmy.cn/api/agentExternal/v1",
+      model: "memory_summary"
+    })).completeJson([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+    expect(requestBody(fetchMock)).toMatchObject({
+      enable_thinking: false,
+      thinking: { type: "disabled" },
+      response_format: { type: "json_object" }
+    });
+
+    fetchMock.mockClear();
+    await createLlmClient(llmConfig({
+      sourceProvider: "openai",
+      vendor: "openai_compatible",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o-mini"
+    })).completeJson([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+    const ordinary = requestBody(fetchMock);
+    expect(ordinary).not.toHaveProperty("enable_thinking");
+    expect(ordinary).not.toHaveProperty("thinking");
+  });
+
   it("disables thinking for account-mode memory models resolved from the runtime config", async () => {
     const { config } = loadMemmyConfig(writeAccountRuntimeConfig());
     const fetchMock = openAiFetch();

@@ -61,6 +61,7 @@ interface LlmCallResult {
 }
 
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
+const MEMMY_ACCOUNT_GATEWAY_PATH = "/api/agentexternal/";
 const OPENAI_COMPAT_THINKING_EFFORT = "medium";
 const ANTHROPIC_THINKING_BUDGET_TOKENS = 4096;
 const ANTHROPIC_MIN_THINKING_OUTPUT_TOKENS = ANTHROPIC_THINKING_BUDGET_TOKENS + 4096;
@@ -316,7 +317,7 @@ class HttpLlmClient implements LlmClient {
   private async completeOpenAiCompatible(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
     const url = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
-    const memmyAccount = this.config.sourceProvider === MEMMY_ACCOUNT_PROVIDER;
+    const memmyAccount = this.config.sourceProvider === MEMMY_ACCOUNT_PROVIDER || isMemmyAccountEndpoint(base);
     const thinking = openAiCompatibleThinkingControl({
       vendor: this.config.vendor ?? "",
       endpoint: base,
@@ -981,6 +982,11 @@ function isMiniMaxM2ThinkingOnlyModel(model: string): boolean {
 
 function isMiniMaxM3Model(model: string): boolean {
   return /^minimax-m3(?:[.\-]|$)/.test(modelSlug(model));
+}
+
+// Custom presets can point at the account gateway under another provider name.
+function isMemmyAccountEndpoint(endpoint: string): boolean {
+  return endpoint.toLowerCase().includes(MEMMY_ACCOUNT_GATEWAY_PATH);
 }
 
 function isAlibabaCompatibleEndpoint(endpoint: string): boolean {
