@@ -83,37 +83,48 @@ function filterExtractedPages(text: string, pages?: string | null): string {
     .join("\n\n");
 }
 
-async function formatDocumentRead(target: string, pages?: string | null, maxChars = 128_000): Promise<string> {
+interface DocumentReadOptions {
+  char_offset?: number;
+  char_limit?: number;
+}
+
+function paginateDocument(text: string, options: DocumentReadOptions, maxChars: number): string {
+  const offset = options.char_offset ?? 0;
+  const limit = options.char_limit ?? 32_000;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) {
+    return `Error reading document: char_offset must be between 0 and ${text.length}.`;
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    return "Error reading document: char_limit must be a positive integer.";
+  }
+  // Reserve space for the continuation marker inside the runtime's result budget.
+  const budget = Math.max(2, maxChars - 512);
+  let end = Math.min(text.length, offset + Math.min(limit, budget));
+  if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) {
+    // A one-unit request must still make progress over a surrogate pair.
+    end += end - offset === 1 ? 1 : -1;
+  }
+  const status = end < text.length
+    ? `More content remains. Continue with char_offset=${end}. Keep the same path and pages; do not treat this excerpt as the full document.`
+    : "End of document (selected pages, if any).";
+  return `${text.slice(offset, end)}\n\n[Document read: chars ${offset}-${end} of ${text.length} (UTF-16, end exclusive). ${status}]`;
+}
+
+async function formatDocumentRead(
+  target: string,
+  pages?: string | null,
+  maxChars = 128_000,
+  options: DocumentReadOptions = {},
+): Promise<string> {
   const ext = path.extname(target).toLowerCase();
-  const extracted = await extractText(target);
+  // Page filtering and continuation must operate on the complete extraction, not its preview.
+  const extracted = await extractText(target, { maxChars: null });
   if (extracted == null) return `Error: Unsupported file format: ${ext}`;
   if (extracted.startsWith("[error:")) return `Error reading ${ext.toUpperCase()} file: ${extracted}`;
   const paged = ext === ".pdf" ? filterExtractedPages(extracted, pages) : extracted;
   if (paged.startsWith("Error:")) return paged;
   if (!paged) return `(${ext.toUpperCase().replace(".", "")} has no extractable text: ${target})`;
-  if (paged.length > maxChars) return `${paged.slice(0, maxChars)}\n\n(Document text truncated at ~128K chars)`;
-  return paged;
-}
-
-async function readPdf(target: string, pages?: string | null, maxChars = 128_000): Promise<string> {
-  const extracted = await extractText(target);
-  if (extracted == null) return "Error: PDF reading requires PDF text extraction support.";
-  if (extracted.startsWith("[error:")) return `Error reading PDF: ${extracted}`;
-  const paged = filterExtractedPages(extracted, pages);
-  if (paged.startsWith("Error:")) return paged;
-  if (!paged) return `(PDF has no extractable text: ${target})`;
-  if (paged.length > maxChars) return `${paged.slice(0, maxChars)}\n\n(PDF text truncated at ~128K chars)`;
-  return paged;
-}
-
-async function readOfficeDoc(target: string, maxChars = 128_000): Promise<string> {
-  const ext = path.extname(target).toLowerCase();
-  const extracted = await extractText(target);
-  if (extracted == null) return `Error: Unsupported file format: ${ext}`;
-  if (extracted.startsWith("[error:")) return `Error reading ${ext.toUpperCase()} file: ${extracted}`;
-  if (!extracted) return `(${ext.toUpperCase().replace(".", "")} has no extractable text: ${target})`;
-  if (extracted.length > maxChars) return `${extracted.slice(0, maxChars)}\n\n(Document text truncated at ~128K chars)`;
-  return extracted;
+  return paginateDocument(paged, options, maxChars);
 }
 
 function splitLinesKeepEnds(text: string): string[] {
@@ -575,7 +586,10 @@ export class ReadFileTool extends Tool {
       "Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. " +
       "Use find_files/list_dir first when the path is uncertain. " +
       "Read the relevant range before editing so replacements or patches are based on current content. " +
-      "Use offset and limit for large text files. Use force=true to re-read content even if unchanged."
+      "Use offset and limit for text file lines. For documents use pages for PDF page ranges, " +
+      "and char_offset/char_limit to read extracted text in chunks (also within a large PDF page). " +
+      "Follow the returned char_offset with the same path/pages until the required content is read; " +
+      "an excerpt is not the full document. Use force=true to re-read text even if unchanged."
     );
   }
 
@@ -586,7 +600,9 @@ export class ReadFileTool extends Tool {
         path: { type: "string" },
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
-        pages: { type: "string" },
+        pages: { type: "string", description: "PDF page or inclusive page range, e.g. 15 or 15-20." },
+        char_offset: { type: "integer", minimum: 0, description: "Documents only: zero-based UTF-16 offset in extracted text after PDF page selection. Use the returned continuation offset." },
+        char_limit: { type: "integer", minimum: 1, description: "Documents only: requested chunk size in UTF-16 units (default 32000; capped to the output budget)." },
         force: { type: "boolean" },
       },
       required: ["path"],
@@ -605,7 +621,7 @@ export class ReadFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } = {}): Promise<any> {
+  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}): Promise<any> {
     const requested = params.path;
     if (!requested) return "Error reading file: Unknown path";
     if (isBlockedDevicePath(requested)) {
@@ -622,9 +638,8 @@ export class ReadFileTool extends Tool {
       const stat = await fs.stat(target);
       if (!stat.isFile()) return `Error reading file: not a file: ${requested}`;
       const ext = path.extname(target).toLowerCase();
-      if (ext === ".pdf") return this.readPdfFile(target, params.pages ?? null);
-      if ([".docx", ".xlsx", ".pptx"].includes(ext)) return this.readOfficeDocument(target);
-      if (DOCUMENT_EXTS.has(ext)) return await formatDocumentRead(target, params.pages, ReadFileTool.MAX_CHARS);
+      if (ext === ".pdf") return await this.readPdfFile(target, params.pages ?? null, params);
+      if (DOCUMENT_EXTS.has(ext)) return await this.readOfficeDocument(target, params);
       if (IMAGE_EXTS.has(ext)) {
         const data = await fs.readFile(target);
         const mime = lookup(target) || "image/png";
@@ -665,12 +680,12 @@ export class ReadFileTool extends Tool {
     }
   }
 
-  readPdfFile(target: string, pages?: string | null): Promise<string> {
-    return readPdf(target, pages, ReadFileTool.MAX_CHARS);
+  readPdfFile(target: string, pages?: string | null, options: DocumentReadOptions = {}): Promise<string> {
+    return formatDocumentRead(target, pages, ReadFileTool.MAX_CHARS, options);
   }
 
-  readOfficeDocument(target: string): Promise<string> {
-    return readOfficeDoc(target, ReadFileTool.MAX_CHARS);
+  readOfficeDocument(target: string, options: DocumentReadOptions = {}): Promise<string> {
+    return formatDocumentRead(target, null, ReadFileTool.MAX_CHARS, options);
   }
 }
 
