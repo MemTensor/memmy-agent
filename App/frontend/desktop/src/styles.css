@@ -12527,3 +12527,60 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   line-height: 1.6;
   text-align: right;
 }
+
+
+/* Computer History capture scope */
+.ch__permissions-setting { gap: 16px; margin-top: 10px; }
+.ch-permissions-backdrop { background: rgb(17 29 28 / 18%); backdrop-filter: blur(2px); }
+.modal.ch-permissions { border-radius: 24px; padding: 24px; max-height: calc(100dvh - 48px); overflow-y: auto; }
+.ch-permissions:focus-visible { outline: none; }
+.ch-permissions .modal-body { display: block; padding: 0; overflow: visible; }
+.ch-permissions .modal-footer { justify-content: flex-end; gap: 16px; padding: 18px 0 0; }
+.ch-permissions .modal-footer > button { min-width: 88px; min-height: 42px; border-radius: 14px; font-size: 13px; }
+.ch-permissions__fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.ch-permissions__columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.ch-permissions__column { min-width: 0; }
+.ch-permissions__mode { position: relative; margin-bottom: 12px; }
+.ch-permissions__mode-trigger { display: inline-flex; align-items: center; gap: 10px; min-height: 36px; padding: 5px 10px; margin-left: -10px; border-radius: 12px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.ch-permissions__mode-trigger svg { color: color-mix(in srgb, var(--color-text-ink) 48%, transparent); }
+.ch-permissions__mode-trigger:hover, .ch-permissions__mode-trigger[aria-expanded="true"], .ch-permissions__add:hover, .ch-permissions__add[aria-expanded="true"] { background: color-mix(in srgb, var(--color-text-ink) 5%, transparent); }
+.ch-permissions__popover { position: absolute; z-index: 4; background: var(--color-background-paper); border: 1px solid color-mix(in srgb, var(--color-border-stone) 75%, transparent); border-radius: 18px; box-shadow: 0 12px 30px rgb(17 29 28 / 12%); padding: 8px; }
+.ch-permissions__mode-menu { top: calc(100% + 2px); left: -10px; min-width: min(280px, 100%); max-width: calc(100% + 10px); }
+.ch-permissions__mode-menu button { display: flex; align-items: center; justify-content: space-between; gap: 24px; width: 100%; padding: 11px 10px; border-radius: 10px; font-size: 13px; text-align: left; cursor: pointer; }
+.ch-permissions__mode-menu button:hover, .ch-permissions__mode-menu button:focus-visible, .ch-permissions__results button:hover, .ch-permissions__results button:focus-visible { background: color-mix(in srgb, var(--color-text-ink) 5%, transparent); }
+.ch-permissions__list { height: clamp(230px, 34vh, 300px); border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent); border-radius: 18px; padding: 7px; background: color-mix(in srgb, var(--color-canvas-oat) 38%, var(--color-background-paper)); }
+.ch-permissions__add { display: flex; align-items: center; gap: 18px; width: 100%; min-height: 52px; padding: 12px 14px; border-radius: 13px; font-size: 14px; text-align: left; cursor: pointer; }
+.ch-permissions__add svg { color: color-mix(in srgb, var(--color-text-ink) 45%, transparent); flex-shrink: 0; }
+.ch-permissions__app-add { position: relative; }
+.ch-permissions__picker { top: calc(100% + 3px); left: 0; width: min(340px, 100%); }
+.ch-permissions__search { display: flex; gap: 12px; align-items: center; padding: 9px 10px 12px; color: color-mix(in srgb, var(--color-text-ink) 45%, transparent); }
+.ch-permissions__search input, .ch-permissions__website-input input { width: 100%; min-width: 0; background: transparent; border: 0; outline: none; box-shadow: none; padding: 0; font-size: 13px; color: var(--color-text-ink); }
+.ch-permissions__search:focus-within, .ch-permissions__website-input:focus-within { box-shadow: inset 0 -1px color-mix(in srgb, var(--color-action-sky) 45%, transparent); }
+.ch-permissions__results { max-height: min(240px, 30vh); overflow-y: auto; }
+.ch-permissions__results button { display: flex; align-items: center; gap: 16px; width: 100%; padding: 10px; border-radius: 10px; text-align: left; font-size: 13px; cursor: pointer; }
+.ch-permissions__results button > span:not(.ch-app-icon) { flex: 1; overflow-wrap: anywhere; }
+.ch-permissions .ch-app-icon { flex: 0 0 28px; width: 28px; height: 28px; border-radius: 7px; }
+.ch-permissions__entries { max-height: calc(100% - 60px); overflow-y: auto; }
+.ch-permissions__row { display: flex; align-items: center; gap: 14px; min-height: 50px; padding: 9px 14px; }
+.ch-permissions__label { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.ch-permissions__row small { display: block; font-size: 11px; opacity: .6; }
+.ch-permissions__row button { flex-shrink: 0; padding: 5px; cursor: pointer; color: color-mix(in srgb, var(--color-text-ink) 50%, transparent); }
+.ch-permissions__website-input { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 10px; }
+.ch-permissions__website-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 10px; background: color-mix(in srgb, var(--color-text-ink) 4%, transparent); color: color-mix(in srgb, var(--color-text-ink) 45%, transparent); }
+.ch-permissions__website-save { flex-shrink: 0; padding: 7px 11px; border-radius: 11px; background: color-mix(in srgb, var(--color-text-ink) 5%, transparent); font-size: 13px; cursor: pointer; }
+.ch-permissions__empty, .ch-permissions__note { font-size: 11px; line-height: 1.7; opacity: .65; margin-top: 12px; }
+.ch-permissions__empty { padding: 0 14px; }
+.ch-permissions__privacy { margin-top: 14px; color: color-mix(in srgb, var(--color-text-ink) 52%, transparent); font-size: 11px; line-height: 1.8; }
+.ch-permissions__privacy > button { color: var(--color-action-sky-hover); cursor: pointer; }
+.ch-permissions__details { margin-top: 12px; padding: 12px 16px; border-radius: 12px; background: var(--color-canvas-oat); }
+.ch-permissions__details p + p { margin-top: 8px; }
+.ch-permissions__error { font-size: 11px; line-height: 1.6; color: #b44747; overflow-wrap: anywhere; margin: 8px 0; }
+@media (max-width: 640px) {
+  .modal.ch-permissions { padding: 20px; border-radius: 22px; }
+  .ch-permissions__columns { grid-template-columns: 1fr; gap: 20px; }
+  .ch-permissions__list { height: 220px; }
+  .ch-permissions__mode-trigger { font-size: 13px; }
+  .ch-permissions__mode-menu button { font-size: 13px; }
+  .ch-permissions__results { max-height: 170px; }
+  .ch-permissions .modal-footer { padding-top: 18px; }
+}

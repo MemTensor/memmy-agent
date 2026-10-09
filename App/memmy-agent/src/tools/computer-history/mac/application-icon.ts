@@ -53,6 +53,16 @@ export class ApplicationIconReader {
     return request;
   }
 
+  async listApplications(): Promise<Array<{ bundleId: string; name: string }>> {
+    if (process.platform !== "darwin") return [];
+    const binary = await this.ensureHelper();
+    const { stdout } = await execFileAsync(binary, ["--list-apps"], { timeout: 20_000, maxBuffer: 2 * 1024 * 1024 });
+    const apps: unknown = JSON.parse(stdout);
+    if (!Array.isArray(apps)) throw new Error("Invalid application inventory");
+    return apps.filter((app): app is { bundleId: string; name: string } =>
+      app && typeof app.bundleId === "string" && BUNDLE_ID.test(app.bundleId) && typeof app.name === "string");
+  }
+
   private cacheFile(bundleId: string): string {
     return path.join(this.cacheDirectory, `${bundleId}.png`);
   }

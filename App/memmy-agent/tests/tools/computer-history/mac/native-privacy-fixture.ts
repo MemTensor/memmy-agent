@@ -67,6 +67,9 @@ func hitHasSemantics(_ payload: [String: Any]) -> Bool { false }
 func modifierList(_ event: CGEvent) -> [String] { [] }
 func applicationPayload() -> [String: Any] { ["pid": frontPid] }
 func secureInputActive() -> Bool { false }
+func observationPolicyBytes() -> Data? { Data() }
+func beginCapture(application: [String: Any], policy: Data?) -> Bool { true }
+func captureStillAllowed(_ element: AXUIElement? = nil) -> Bool { true }
 func characters(from event: CGEvent) -> String { event.text }
 let enrichmentQueue = DispatchQueue(label: "native-privacy-fixture.enrichment")
 var eventTap: Int? = nil

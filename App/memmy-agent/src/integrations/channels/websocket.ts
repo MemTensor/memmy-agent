@@ -1,3 +1,4 @@
+import { ObservationSettingsError, ObservationSettingsConflict } from "../../tools/computer-history/mac/settings-store.js";
 import { staticLlmRuntime } from "../../utils/llm-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -2746,6 +2747,8 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
+    if (got === "/api/computer-history/permissions") return this.handleComputerHistoryPermissions(request);
+    if (got === "/api/computer-history/applications") return this.handleComputerHistoryPermissions(request, true);
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
     if (got === "/api/computer-history/permissions/check") return this.handleComputerHistory(request, "permissions-check");
     if (got === "/api/computer-history/permissions/open") return this.handleComputerHistory(request, "permissions-open");
@@ -2895,6 +2898,29 @@ export class WebSocketChannel extends BaseChannel {
     for (const timer of this.sessionUpdateTimers.values()) clearTimeout(timer);
     this.sessionUpdateTimers.clear();
     this.sessionUpdateScopes.clear();
+  }
+
+  async handleComputerHistoryPermissions(request: any, applications = false): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
+    const method = (request.method ?? "GET").toUpperCase();
+    try {
+      if (applications) return method === "GET"
+        ? httpJsonResponse({ applications: await this.computerHistory.installedApplications() })
+        : httpError(405, "method not allowed");
+      if (method === "GET") return httpJsonResponse(this.computerHistory.observationPermissions());
+      if (method !== "POST") return httpError(405, "method not allowed");
+      const raw = requestBodyText(request);
+      if (raw.length > 256_000) return httpError(413, "Settings are too large");
+      let body;
+      try { body = JSON.parse(raw); } catch { return httpError(400, "body must be JSON"); }
+      if (!body || typeof body.revision !== "string" || !body.revision) return httpError(400, "revision is required");
+      return httpJsonResponse(this.computerHistory.updateObservationPermissions(body.settings, body.revision));
+    } catch (error) {
+      if (error instanceof ObservationSettingsConflict) return httpError(409, error.message);
+      if (error instanceof ObservationSettingsError) return httpError(400, error.message);
+      return httpError(500, error instanceof Error ? error.message : String(error));
+    }
   }
 
   /**

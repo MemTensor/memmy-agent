@@ -405,6 +405,16 @@ export class ComputerHistoryDemoService {
       .filter((markdown) => markdown && isNarrated(markdown));
   }
 
+  /** Current recording scope and revision for the permissions editor. */
+  observationPermissions() { return this.observationSettings.snapshot(); }
+
+  updateObservationPermissions(settings: unknown, expectedRevision: string) {
+    this.observationSettings.write(settings, expectedRevision);
+    return this.observationSettings.snapshot();
+  }
+
+  installedApplications() { return this.applicationIcons.listApplications(); }
+
   /** An application's icon for the timeline, as a data URL. */
   applicationIcon(bundleId: string): Promise<string | null> {
     return this.applicationIcons.iconFor(bundleId);

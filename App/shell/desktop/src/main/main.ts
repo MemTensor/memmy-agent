@@ -5587,13 +5587,12 @@ async function openLogsDirectory(): Promise<void> {
   }
 }
 
-/** Opens a stored Computer History summary in the user's default Markdown application. */
+/** Reveals a stored Computer History summary in the system file manager. */
 async function openComputerHistoryMarkdown(rawPath: string): Promise<void> {
   const filePath = resolveComputerHistoryMarkdownPath(rawPath);
   const info = await lstat(filePath);
   if (!info.isFile()) throw new Error("Computer History Markdown is not a regular file");
-  const openError = await shell.openPath(filePath);
-  if (openError) throw new Error(openError);
+  shell.showItemInFolder(filePath);
 }
 
 /**
