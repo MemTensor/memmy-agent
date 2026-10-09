@@ -130,12 +130,16 @@ describe("hermes skill target", () => {
     expect(commandPluginInit).toContain('"layers": ["L1"]');
     expect(commandPluginInit).toContain('"limit": SEARCH_LIMIT');
     expect(commandPluginInit).toContain('"verbose": True');
+    expect(commandPluginInit).toContain('"Memmy request to " + request.full_url + " failed: "');
     expect(commandPluginInit).toContain('ctx.register_hook("pre_llm_call", _on_pre_llm_call)');
     expect(commandPluginInit).toContain('ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)');
     expect(commandPluginInit).toContain("def _episode_score");
     expect(commandPluginInit).toContain("def _format_resume_search_result");
     expect(pluginInit).toContain("def prefetch");
     expect(pluginInit).toContain("def sync_turn");
+    expect(pluginInit).toContain("/api/v1/source-turns/complete");
+    expect(pluginInit).toContain('"adapterId": "memmy-hermes-adapter"');
+    expect(pluginInit).toContain("def _read_hermes_source_turn");
     expect(pluginInit).toContain('"name": "memmy_memory_search"');
     expect(pluginInit).toContain('"name": "memmy_memory_add"');
     expect(pluginInit).toContain('"name": "memmy_memory_get"');
@@ -161,8 +165,7 @@ describe("hermes skill target", () => {
     expect(pluginInit).toContain("urlopen(request, timeout=HTTP_TIMEOUT_SECONDS)");
     expect(pluginInit).toContain("memory_session_id = self._ensure_session(active_session)");
     expect(pluginInit).toContain('"episodeId": str(turn.get("episodeId") or "")');
-    expect(pluginInit).toContain('"episodeId": turn.get("episodeId") or None');
-    expect(pluginInit).toContain('"sourceMemoryIds": turn.get("sourceMemoryIds")');
+    expect(pluginInit).toContain('"sourceMemoryIds": turn.get("sourceMemoryIds") if isinstance(turn, dict) else None');
     expect(pluginInit).toContain("if isinstance(injected_context, str) and injected_context.strip():");
     expect(pluginInit).toContain("markdown = _optional_text(injected_context.get(\"markdown\"))");
     expect(pluginInit).toContain("def _sanitize_memmy_protocol_text");
@@ -252,8 +255,22 @@ describe("hermes skill target", () => {
 
   it("uses only the resume query for the Hermes slash command search", async () => {
     const { rootDirectory } = createFixture();
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
     writeFileSync(join(rootDirectory, "config.yaml"), "memory:\n  provider: mem0\n", "utf8");
-    const target = createHermesSkillTarget({ rootDirectory });
+    const target = createHermesSkillTarget({ rootDirectory, memmyConfigPath });
 
     await target.installPlugin?.("hermes");
 
@@ -278,6 +295,7 @@ sys.modules["agent.memory_provider"] = memory_provider_module
 spec = importlib.util.spec_from_file_location("memmy_memory_plugin", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+runtime = module._load_runtime()
 
 calls = []
 
@@ -357,7 +375,7 @@ module._memmy_post = fake_memmy_post
 module._memmy_get = fake_memmy_get
 text = module._handle_memmy_resume_command("测试query")
 selection = module._on_pre_llm_call("2")
-print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_ascii=False))
+print(json.dumps({"calls": calls, "runtime": runtime, "text": text, "selection": selection}, ensure_ascii=False))
 `;
     const result = spawnSync("python3", ["-", pluginInit], {
       input: script,
@@ -369,9 +387,11 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     }
     const output = JSON.parse(result.stdout) as {
       calls: Array<{ path: string; body: { query?: string; layers?: string[]; limit?: number; verbose?: boolean } }>;
+      runtime: { baseUrl?: string };
       selection?: { context?: string };
       text: string;
     };
+    expect(output.runtime.baseUrl).toBe("http://127.0.0.1:18960");
     expect(output.text).toContain("测试query");
     expect(output.text).toContain('Memmy resume candidates for "测试query" (top 5 episodes from L1 top20):');
     expect(output.text).not.toContain(". score ");
@@ -389,6 +409,102 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     expect(output.calls[0]?.body.verbose).toBe(true);
     expect(output.selection?.context).toContain("Episode id: episode_2");
     expect(output.selection?.context).toContain("Full episode body 2");
+  }, 15_000);
+
+  it("redacts secrets in the Python SourceTurn the same way as TypeScript", async () => {
+    const { rootDirectory } = createFixture();
+    writeFileSync(join(rootDirectory, "config.yaml"), "model:\n  default: test-model\n", "utf8");
+    const target = createHermesSkillTarget({ rootDirectory });
+    await target.installPlugin?.("hermes");
+    const pluginInit = readFileSync(join(rootDirectory, "plugins", "memmy-memory", "__init__.py"), "utf8");
+    const script = `
+import importlib.util, json, sys, types
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+spec = importlib.util.spec_from_file_location("memmy_memory", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps({
+  "query": module._redact_secrets("password=review-fixture"),
+  "nested": module._redact_value({"output": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789"}),
+  "tools": module._redact_tool_record({
+    "id": "abcdefghijklmnopqrstuvwxyz012345",
+    "output": "password=review-fixture"
+  })
+}))
+`;
+    const result = spawnSync("python3", ["-", join(rootDirectory, "plugins", "memmy-memory", "__init__.py")], {
+      input: script,
+      encoding: "utf8",
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+    });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout);
+    }
+    expect(JSON.parse(result.stdout)).toEqual({
+      query: "password=[REDACTED:password]",
+      nested: { output: "Authorization: Bearer [REDACTED:authorization_bearer]" },
+      tools: { id: "abcdefghijklmnopqrstuvwxyz012345", output: "password=[REDACTED:password]" }
+    });
+  }, 15_000);
+
+  it("omits null Hermes tool identity and output fields in the Python turn", async () => {
+    const { rootDirectory } = createFixture();
+    writeFileSync(join(rootDirectory, "config.yaml"), "model:\n  default: test-model\n", "utf8");
+    const target = createHermesSkillTarget({ rootDirectory });
+    await target.installPlugin?.("hermes");
+    const script = `
+import importlib.util, json, sys, types
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+spec = importlib.util.spec_from_file_location("memmy_memory", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+query = "Inspect the connection configuration and summarize the problem."
+base = {"active": 1, "compacted": 0, "tool_name": None, "compressed_summary": None, "tool_calls": None, "finish_reason": None}
+missing_calls = json.dumps([{"function": {"name": "read", "arguments": json.dumps({"path": "config"})}}])
+null_calls = json.dumps([{"function": {"name": "read", "arguments": json.dumps({"path": "config"})}, "id": "call1"}])
+missing = module._hermes_turn_from_rows("hermes-missing-id", query, [
+  {**base, "id": 1, "role": "user", "content": query, "timestamp": 4070944800, "tool_call_id": None},
+  {**base, "id": 2, "role": "assistant", "content": None, "timestamp": 4070944801, "tool_call_id": None, "tool_calls": missing_calls},
+  {**base, "id": 3, "role": "tool", "content": "configuration data", "timestamp": 4070944802, "tool_call_id": None},
+  {**base, "id": 4, "role": "assistant", "content": "The configuration is now documented.", "timestamp": 4070944803, "tool_call_id": None, "finish_reason": "stop"}
+], "")
+null_output = module._hermes_turn_from_rows("hermes-null-output", query, [
+  {**base, "id": 1, "role": "user", "content": query, "timestamp": 4070944800, "tool_call_id": None},
+  {**base, "id": 2, "role": "assistant", "content": None, "timestamp": 4070944801, "tool_call_id": None, "tool_calls": null_calls},
+  {**base, "id": 3, "role": "tool", "content": None, "timestamp": 4070944802, "tool_call_id": "call1"},
+  {**base, "id": 4, "role": "assistant", "content": "The configuration is now documented.", "timestamp": 4070944803, "tool_call_id": None, "finish_reason": "stop"}
+], "")
+print(json.dumps({"missing": missing, "nullOutput": null_output}))
+`;
+    const result = spawnSync("python3", ["-", join(rootDirectory, "plugins", "memmy-memory", "__init__.py")], {
+      input: script,
+      encoding: "utf8",
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+    });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout);
+    }
+    const parsed = JSON.parse(result.stdout) as {
+      missing: { toolCalls: Array<Record<string, unknown>>; toolResults: Array<Record<string, unknown>> };
+      nullOutput: { toolCalls: Array<Record<string, unknown>>; toolResults: Array<Record<string, unknown>> };
+    };
+    expect(parsed.missing.toolCalls[0]).toMatchObject({ name: "read" });
+    expect(parsed.missing.toolCalls[0]).not.toHaveProperty("id");
+    expect(parsed.missing.toolResults[0]).not.toHaveProperty("id");
+    expect(parsed.nullOutput.toolResults[0]).toMatchObject({ id: "call1", status: "completed", success: true });
+    expect(parsed.nullOutput.toolResults[0]).not.toHaveProperty("output");
   }, 15_000);
 
   it("detects non-Memmy memory provider conflicts from config.yaml", async () => {

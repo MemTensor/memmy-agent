@@ -4,8 +4,14 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveCodexHomeDirectory } from "../../agent-paths.js";
 import { createNodeHookCommand } from "../hook-command.js";
+import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyResumeSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyResumeSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
@@ -61,6 +67,7 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       const existing = removeLegacyMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, renderMemmySkillBootstrapManifest(manifest)));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyResumeSkillDirectory(root, CODEX_TARGET_ID);
     },
 
     async uninstall(_targetId) {
@@ -72,6 +79,7 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       const filePath = join(root, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(existing)));
+      await removeMemmyResumeSkillDirectory(root);
       await removeMemmySkillDirectory(root);
     },
 
@@ -84,6 +92,19 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
     },
 
+    async isInstalledHookCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      return isInstalledMemmyHookCurrent({
+        source: CODEX_TARGET_ID,
+        mode: "codex",
+        hookScriptPath: join(hookDirectory, HOOK_SCRIPT_FILE_NAME),
+        bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
+      });
+    },
+
     async installPlugin(_targetId) {
       const root = await this.resolveRootDirectory();
       if (!root) {
@@ -92,11 +113,13 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
 
       const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
+      const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
+      const hookConfig = {
+        memmy_config_path: memmyConfigPath,
+        ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
+      };
       await mkdir(hookDirectory, { recursive: true });
-      await writeFileAtomically(
-        join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
-      );
+      await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
       await writeFileAtomically(
         join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
@@ -114,11 +137,16 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyResumeSkillDirectory(root, CODEX_TARGET_ID);
       await trustHooks({
         codexHomeDirectory: root,
         hooksFilePath,
         hookCommand
       });
+      await writeFileAtomically(
+        hookConfigPath,
+        `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CODEX_TARGET_ID, "codex")) }, null, 2)}\n`
+      );
     },
 
     async uninstallPlugin(_targetId) {
@@ -134,6 +162,7 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       await rm(join(root, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       const filePath = join(root, TARGET_FILE_NAME);
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath))));
+      await removeMemmyResumeSkillDirectory(root);
       await removeMemmySkillDirectory(root);
     }
   };

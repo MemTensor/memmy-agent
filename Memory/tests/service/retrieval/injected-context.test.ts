@@ -6,6 +6,7 @@ import {
   upsertMemoryVectorForTest
 } from "../../fixtures/evolution-fixture.js";
 import {
+  createBatchReflectionLlm,
   configWithMemoryGates,
   createMemoryServiceFixture,
   runWorkerRounds
@@ -307,7 +308,9 @@ describe("MemoryService / retrieval / injected context", () => {
   });
 
   it("renders similar past tasks with the unified episode get hint", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "sqlite migration pytest failed because migration table was missing")
+    });
     const namespace = {
       source: "codex",
       profileId: "jiang",
@@ -326,6 +329,8 @@ describe("MemoryService / retrieval / injected context", () => {
       answer: "reran the focused pytest and verified the migration state"
     });
     service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
 

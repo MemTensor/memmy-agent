@@ -30,6 +30,7 @@ import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
+import { readDesktopAnalyticsIdentity } from "./desktop-analytics-identity.js";
 import {
   createMemoryDesktopAddAnalytics,
   type MemoryDesktopAddAnalytics,
@@ -38,9 +39,10 @@ import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
   hitCountFromSearchResponse,
-  storedCountFromAddResponse,
   trackExternalHookCapture,
   trackExternalHookRecall,
+  trackStoredExternalMemoryAdd,
+  trackStoredExternalSourceTurnCapture,
   trackExternalToolCall,
   type PluginRuntimeAnalytics,
 } from "./plugin-runtime-analytics.js";
@@ -60,6 +62,7 @@ export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
+  "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
   "GET /api/v1/admin/export",
   "DELETE /api/v1/admin/data",
@@ -145,8 +148,15 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
-  const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
-  const memoryAddAnalytics = options.memoryAddAnalytics ?? createMemoryDesktopAddAnalytics();
+  const desktopIdentity = () => readDesktopAnalyticsIdentity(options.configPath);
+  const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics({
+    getUserId: () => desktopIdentity().userId,
+    getUserMode: () => desktopIdentity().userMode,
+  });
+  const memoryAddAnalytics = options.memoryAddAnalytics ?? createMemoryDesktopAddAnalytics({
+    getUserId: () => desktopIdentity().userId,
+    getUserMode: () => desktopIdentity().userMode,
+  });
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
@@ -332,6 +342,7 @@ function createAutoWorkerDrain(
   let disposed = false;
   let startupReleased = false;
   let startupReconciled = false;
+  let workerStarted = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
@@ -344,6 +355,7 @@ function createAutoWorkerDrain(
     if (disposed) {
       return;
     }
+    workerStarted = true;
     if (running) {
       requested = true;
       return;
@@ -438,6 +450,24 @@ function createAutoWorkerDrain(
     }, 0);
   }
 
+  service.setAppBudgetReconcileListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    if (delayedTimer) {
+      clearTimeout(delayedTimer);
+      delayedTimer = undefined;
+    }
+    scheduleNextDueJob();
+  });
+
+  service.setPersistRecoveredListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    schedule();
+  });
+
   return {
     start(): void {
       if (disposed || startupReleased || startupTimer) {
@@ -464,6 +494,8 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      service.setAppBudgetReconcileListener(undefined);
+      service.setPersistRecoveredListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -507,6 +539,10 @@ async function routeRequest(
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health([...API_ROUTES]);
+  }
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    requireMemoryRead(principal);
+    return service.memoryTokenBudget();
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
@@ -568,7 +604,8 @@ async function routeRequest(
     const result = await service.idempotent("sessions.close", request, { sessionId, request }, () =>
       service.closeSession(sessionId, request)
     );
-    scheduleAutoWorkerForEvolution(result, autoWorker);
+    // Close can queue L3 batches even when no episode closes, so always wake the worker.
+    autoWorker.schedule();
     return publicCloseSessionResponse(result);
   }
 
@@ -662,15 +699,32 @@ async function routeRequest(
     const request = strictEnvelopeWithPrincipal({ ...input, namespace }, scopedPrincipal) as unknown as SourceTurnCompleteRequest;
     requireStringField(request, "query", "source-turn.complete");
     requireStringField(request, "answer", "source-turn.complete");
-    const result = service.completeSourceTurn({
+    const completeSourceTurn = () => service.completeSourceTurn({
       namespace: request.namespace, timeZone: request.timeZone, source: request.source,
       sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      ...(request.captureLegacyHistory === true ? { captureLegacyHistory: true } : {}),
+      ...(typeof request.legacyImportTurnId === "string" && request.legacyImportTurnId.trim()
+        ? { legacyImportTurnId: request.legacyImportTurnId.trim() }
+        : {}),
       sessionId: request.sessionId, episodeId: request.episodeId,
       query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
       sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
       tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
     });
+    const result = request.channel === "hook"
+      ? await trackStoredExternalSourceTurnCapture(
+        pluginRuntimeAnalytics,
+        {
+          source: request.source ?? request.sourceTurn?.source,
+          adapterId: request.adapterId,
+          namespace: request.namespace,
+          turnId: request.sourceTurn?.turnId,
+        },
+        request,
+        completeSourceTurn,
+      )
+      : completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
     return result;
   }
@@ -784,17 +838,13 @@ async function routeRequest(
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
     const idempotency = memoryAddIdempotency(publicRequest, path);
-    const result = await trackExternalToolCall(
+    const result = await trackStoredExternalMemoryAdd(
       pluginRuntimeAnalytics,
-      { ...request, toolName: "memmy_memory_add" },
+      { ...request, layer: publicRequest.layer },
       () =>
         service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
           service.addMemory(publicRequest)
         ),
-      (addResult) => ({
-        stored_count: storedCountFromAddResponse(addResult),
-        ...(publicRequest.layer ? { layer: publicRequest.layer } : {}),
-      }),
     );
     if (!publicRequest.deferProcessing) {
       autoWorker.schedule();

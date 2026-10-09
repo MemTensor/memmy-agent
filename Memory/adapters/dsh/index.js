@@ -43,7 +43,7 @@ export async function apply(ctx, config) {
   const profileId = config.profileId || "default";
 
   async function sessionFor(agent) {
-    const key = String(agent?.id || agent?.session?.id || "default");
+    const key = agentSessionKey(agent);
     if (sessions.has(key)) return sessions.get(key);
     const opened = await request("/sessions/open", profileId, { sessionId: `dsh:${key}`, meta: { host: "dsh" } });
     sessions.set(key, opened.sessionId);
@@ -56,24 +56,26 @@ export async function apply(ctx, config) {
     try {
       const agent = payload?.agent;
       const sessionId = await sessionFor(agent);
-      const query = String(payload?.message?.content?.[0]?.text || payload?.message?.content || "").trim();
+      const query = userQuery(payload);
       if (query) {
         const started = await request("/turns/start", profileId, { sessionId, query }, config.recallTimeoutMs);
-        turns.set(String(agent?.id || "default"), { sessionId, query, turnId: started.turnId });
-        if (started.injectedContext && Array.isArray(payload?.messages)) payload.messages.push({ role: "user", content: [{ type: "text", text: started.injectedContext }], source: { kind: "plugin", plugin: name, form: "recall" } });
+        turns.set(agentSessionKey(agent), { sessionId, query, turnId: started.turnId });
+        const injectedContext = contextText(started.injectedContext);
+        if (injectedContext && Array.isArray(payload?.messages)) payload.messages.push({ role: "user", content: [{ type: "text", text: injectedContext }], source: { kind: "memmy-memory", form: "recall" } });
       }
     } catch (error) { ctx.logger.warn(`memmy-memory recall unavailable: ${String(error)}`); }
     return next();
   }));
   disposers.push(ctx.on("session/event", (session, event) => {
-    if (!config.captureEnabled || event?.type !== "assistant") return;
+    if (!config.captureEnabled || (event?.type !== "assistant/message" && event?.type !== "assistant")) return;
     const active = turns.get(String(session?.id || "default"));
     if (!active) return;
     turns.delete(String(session?.id || "default"));
-    const answer = String(event?.message?.content?.map?.((part) => part.text || "").join("\n") || event?.content || "");
+    const message = event?.data?.message || event?.message;
+    const answer = messageText(message) || contextText(event?.data?.content || event?.content);
     void request(`/turns/${encodeURIComponent(active.turnId)}/complete`, profileId, { sessionId: active.sessionId, query: active.query, answer, status: "succeeded" }, 10000).catch(() => undefined);
   }));
-  disposers.push(ctx.on("session/disposed", (session) => { const key = String(session?.id || "default"); const id = sessions.get(key); sessions.delete(key); if (id) void request(`/sessions/${encodeURIComponent(id)}/close`, profileId, {}).catch(() => undefined); }));
+  disposers.push(ctx.on("session/disposed", (session) => { const key = agentSessionKey({ session }); const id = sessions.get(key); sessions.delete(key); if (id) void request(`/sessions/${encodeURIComponent(id)}/close`, profileId, {}).catch(() => undefined); }));
 
   if (config.toolsEnabled) {
     const registrations = [
@@ -87,4 +89,30 @@ export async function apply(ctx, config) {
     for (const registration of registrations) disposers.push(ctx.tools.register(registration));
   }
   return async () => { for (const dispose of disposers.reverse()) dispose(); };
+}
+
+function userQuery(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.source?.kind === "user" || message?.role === "user") return messageText(message);
+  }
+  return messageText(payload?.message);
+}
+
+function agentSessionKey(agent) {
+  return String(agent?.session?.id || agent?.id || "default");
+}
+
+function messageText(message) {
+  return contextText(message?.content);
+}
+
+function contextText(value) {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : part?.text || "").join("\n").trim();
+  if (value && typeof value === "object") {
+    return contextText(value.markdown || value.text || value.content || value.value);
+  }
+  return "";
 }

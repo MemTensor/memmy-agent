@@ -140,7 +140,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     expect(revised.id).toBe(first.id);
     expect(revised.duplicate).toBeUndefined();
     expect(replay.id).toBe(first.id);
-    expect(replay.duplicate).toBeUndefined();
+    expect(replay.duplicate).toBe(true);
     expect(l1Count(db.db)).toBe(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count

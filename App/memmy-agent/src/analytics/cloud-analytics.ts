@@ -111,9 +111,13 @@ export function resolveAnalyticsEnvParams(options: {
   };
 }
 
+/** GA4 Measurement Protocol accepts only string and number param values. A boolean drops the whole event. */
 export function compactAnalyticsParams(params: AnalyticsParams = {}): AnalyticsParams {
   return Object.fromEntries(
-    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+    Object.entries(params).flatMap(([key, value]) => {
+      if (value === undefined || value === null || value === "") return [];
+      return [[key, typeof value === "boolean" ? (value ? 1 : 0) : value]];
+    }),
   ) as AnalyticsParams;
 }
 

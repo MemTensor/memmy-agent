@@ -21,6 +21,12 @@ describe("BYOK token usage local api routes", () => {
         async getSummary() {
           return summaryFixture();
         },
+        async getMemoryPipelineUsage() {
+          return usageFixture();
+        },
+        async getMemoryBudget() {
+          return budgetFixture();
+        }
       },
     });
 
@@ -46,6 +52,12 @@ describe("BYOK token usage local api routes", () => {
         async getSummary() {
           return summaryFixture();
         },
+        async getMemoryPipelineUsage() {
+          return usageFixture();
+        },
+        async getMemoryBudget() {
+          return budgetFixture();
+        },
       },
     });
 
@@ -57,6 +69,71 @@ describe("BYOK token usage local api routes", () => {
       outputTokens: 20,
       totalTokens: 30,
       byKind: [{ kind: "agent_chat", totalTokens: 30 }],
+    });
+  });
+
+  it("returns events-only memory pipeline usage behind the runtime token", async () => {
+    app = createServer({
+      byokTokenUsage: {
+        async recordEvent() {
+          throw new Error("record not used");
+        },
+        async getSummary() {
+          throw new Error("summary not used");
+        },
+        async getMemoryPipelineUsage() {
+          return {
+            ...usageFixture(),
+            dailyUsed: 20_000_000,
+            lifetimeUsed: 600_000_000
+          };
+        },
+        async getMemoryBudget() {
+          throw new Error("budget not used");
+        }
+      }
+    });
+
+    const response = await injectJson("GET", "/api/app/byok-token-usage/memory-pipeline-usage");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      dailyUsed: 20_000_000,
+      lifetimeUsed: 600_000_000
+    });
+    expect(response.json()).not.toHaveProperty("paused");
+  });
+
+  it("returns the memory token budget behind the runtime token", async () => {
+    app = createServer({
+      byokTokenUsage: {
+        async recordEvent() {
+          throw new Error("record not used");
+        },
+        async getSummary() {
+          throw new Error("summary not used");
+        },
+        async getMemoryPipelineUsage() {
+          throw new Error("pipeline usage not used");
+        },
+        async getMemoryBudget() {
+          return {
+            ...budgetFixture(),
+            dailyUsed: 10_100_000,
+            paused: true,
+            trigger: "daily"
+          };
+        }
+      }
+    });
+
+    const response = await injectJson("GET", "/api/app/byok-token-usage/memory-budget");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      dailyLimitM: 10,
+      paused: true,
+      trigger: "daily"
     });
   });
 
@@ -114,6 +191,12 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
       },
       async getSummary() {
         return summaryFixture();
+      },
+      async getMemoryPipelineUsage() {
+        return usageFixture();
+      },
+      async getMemoryBudget() {
+        return budgetFixture();
       },
     },
     ...overrides,
@@ -176,6 +259,28 @@ function eventFixture() {
     },
     rawUsage: { prompt_tokens: 10, completion_tokens: 20 },
     createdAt: "2026-06-11T10:00:00.000Z",
+  };
+}
+
+function usageFixture() {
+  return {
+    dailyLimitM: 10,
+    totalLimitM: 500,
+    dailyUsed: 0,
+    lifetimeUsed: 0,
+    nextLocalMidnightAt: "2026-09-19T16:00:00.000Z"
+  };
+}
+
+function budgetFixture() {
+  return {
+    dailyLimitM: 10,
+    totalLimitM: 500,
+    dailyUsed: 0,
+    lifetimeUsed: 0,
+    paused: false,
+    trigger: null,
+    nextLocalMidnightAt: "2026-09-19T16:00:00.000Z"
   };
 }
 

@@ -1,4 +1,5 @@
 /** Target tests. */
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -118,6 +119,30 @@ describe("claude code skill target", () => {
     }
   });
 
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createClaudeCodeSkillTarget({ rootDirectory, memmyConfigPath });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("claude_code");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    writeFileSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"), "old hook\n", "utf8");
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+    rmSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"));
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("claude_code");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+  });
+
   it("installs a UserPromptSubmit hook that blocks resume commands with top L1 candidates", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
@@ -152,18 +177,22 @@ describe("claude code skill target", () => {
           UserPromptSubmit: Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>;
         };
       };
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({
+      const submitHook = settings.hooks.UserPromptSubmit[0]?.hooks[0];
+      const stopHook = settings.hooks.Stop[0]?.hooks[0];
+      assert(submitHook, "UserPromptSubmit hook must be installed");
+      assert(stopHook, "Stop hook must be installed");
+      expect(submitHook).toMatchObject({
         type: "command",
         timeout: 60
       });
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toContain("memmy-resume-hook.mjs");
-      expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).not.toContain("Electron.app");
-      expectSafeNodeHookCommand(settings.hooks.UserPromptSubmit[0].hooks[0].command);
-      expect(settings.hooks.Stop[0].hooks[0]).toMatchObject({
+      expect(submitHook.command).toContain("memmy-resume-hook.mjs");
+      expect(submitHook.command).not.toContain("Electron.app");
+      expectSafeNodeHookCommand(submitHook.command);
+      expect(stopHook).toMatchObject({
         type: "command",
         timeout: 60
       });
-      expect(settings.hooks.Stop[0].hooks[0].command).toContain("memmy-resume-hook.mjs");
+      expect(stopHook.command).toContain("memmy-resume-hook.mjs");
       const commandFilePath = join(rootDirectory, "commands", "memmy-resume.md");
       const commandFile = readFileSync(commandFilePath, "utf8");
       expect(commandFile).toContain("argument-hint: <query | 1-5 | cancel>");
@@ -220,6 +249,27 @@ describe("claude code skill target", () => {
         verbose: true,
         source: "claude_code"
       });
+      const selectionRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume select 2" })
+      );
+      const selectionOutput = JSON.parse(selectionRun.stdout) as {
+        hookSpecificOutput?: { additionalContext?: string };
+      };
+      expect(selectionOutput.hookSpecificOutput?.additionalContext).toContain("Episode id: episode_2");
+      expect(selectionOutput.hookSpecificOutput?.additionalContext).toContain("Full episode body 2");
+
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume another query" })
+      );
+      const cancelRun = await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "/memmy-resume cancel" })
+      );
+      const cancelOutput = JSON.parse(cancelRun.stdout) as { decision: string; reason: string };
+      expect(cancelOutput.decision).toBe("block");
+      expect(cancelOutput.reason).toBe("Memmy resume selection cancelled.");
       expect(authorization).toBe("Bearer test-token");
       expect(readTargetFile(rootDirectory)).toContain(
         "The `memmy-memory` skill is installed at `skills/memmy-memory/SKILL.md`."
@@ -245,7 +295,7 @@ describe("claude code skill target", () => {
     }
   });
 
-  it("uses turn.complete as the only write phase for a completed Claude Code turn", async () => {
+  it("uses native source completion as the only write phase for a completed Claude Code turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -268,8 +318,8 @@ describe("claude code skill target", () => {
         });
         return;
       }
-      if (url.pathname === "/api/v1/turns/claude-turn-1/complete") {
-        writeJsonResponse(response, 200, { turnId: "claude-turn-1", l1MemoryId: "trace-1" });
+      if (url.pathname === "/api/v1/source-turns/complete") {
+        writeJsonResponse(response, 200, { status: "stored", result: { l1MemoryIds: ["trace-1"] } });
         return;
       }
       writeJsonResponse(response, 404, {});
@@ -283,6 +333,18 @@ describe("claude code skill target", () => {
     );
     const target = createClaudeCodeSkillTarget({ rootDirectory, memmyConfigPath });
 
+    // Stop rereads the session file rather than trusting last_assistant_message, so the
+    // scan recomputes the same turn identity from the same rows.
+    const transcriptPath = join(rootDirectory, "claude-session-1.jsonl");
+    const shared = { sessionId: "claude-session-1", cwd: "/tmp/claude-project", isSidechain: false };
+    writeFileSync(transcriptPath, [
+      { ...shared, type: "user", origin: { kind: "human" }, promptId: "claude-prompt-1", uuid: "user-uuid",
+        timestamp: "2026-09-16T10:00:00.000Z", message: { role: "user", content: "继续修复 episode 切换问题" } },
+      { ...shared, type: "assistant", uuid: "assistant-uuid", timestamp: "2026-09-16T10:00:10.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "修复已经完成" }] } },
+      { ...shared, type: "system", subtype: "turn_duration", uuid: "duration-uuid", timestamp: "2026-09-16T10:00:11.000Z" }
+    ].map((row) => JSON.stringify(row)).join("\n"), "utf8");
+
     try {
       await target.installPlugin?.("claude_code");
       const hookScriptPath = join(rootDirectory, "hooks", "memmy-resume-hook.mjs");
@@ -291,6 +353,7 @@ describe("claude code skill target", () => {
         JSON.stringify({
           hook_event_name: "UserPromptSubmit",
           session_id: "claude-session-1",
+          prompt_id: "claude-prompt-1",
           prompt: "继续修复 episode 切换问题",
           cwd: "/tmp/claude-project"
         })
@@ -307,7 +370,9 @@ describe("claude code skill target", () => {
         JSON.stringify({
           hook_event_name: "Stop",
           session_id: "claude-session-1",
+          prompt_id: "claude-prompt-1",
           cwd: "/tmp/claude-project",
+          transcript_path: transcriptPath,
           last_assistant_message: "修复已经完成"
         })
       );
@@ -317,9 +382,7 @@ describe("claude code skill target", () => {
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
-        "/api/v1/health",
-        "/api/v1/sessions/open",
-        "/api/v1/turns/claude-turn-1/complete"
+        "/api/v1/source-turns/complete"
       ]);
       expect(requests[1]?.body).toMatchObject({
         sessionId: "claude_code-memory-claude-session-1",
@@ -331,14 +394,21 @@ describe("claude code skill target", () => {
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题"
       });
-      expect(requests[5]?.body).toMatchObject({
+      expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-claude_code-hook",
+        channel: "hook",
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题",
         answer: "修复已经完成",
-        sourceMemoryIds: ["claude-memory-1"]
+        sourceMemoryIds: ["claude-memory-1"],
+        sourceTurn: {
+          source: "claude_code",
+          conversationId: "claude-session-1",
+          turnId: "claude-prompt-1",
+          completionEvidence: "turn_duration:duration-uuid"
+        }
       });
-      expect(requests[5]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

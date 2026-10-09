@@ -117,6 +117,7 @@ Var pid
     ReadRegStr $MemmyPreviousInstalledVersion HKCU "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
     Call MemmyRelayLegacyUpgrade
     StrCmp $MemmyIsRelayedUpgrade "1" memmy_custom_init_done
+    Call MemmyShowPreviousInstallDirectoryNotice
     ${If} ${Silent}
       Call MemmyValidateSelectedDirectories
       Pop $0
@@ -255,6 +256,22 @@ Function MemmyResolveMigrationPaths
     StrCpy $MemmyDirectSourceAuthority "current-install-authority"
 FunctionEnd
 
+Function MemmyShowPreviousInstallDirectoryNotice
+  StrCmp $MemmyPreviousInstallDir "" memmy_previous_notice_done
+  ${If} ${Silent}
+    Goto memmy_previous_notice_done
+  ${EndIf}
+
+  StrCpy $R8 "Memmy is already installed at $\"$MemmyPreviousInstallDir$\".$\r$\nUse this directory to install the update. If you want to move Memmy, manually migrate your files before installing in another directory."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_previous_notice_show
+  StrCpy $R8 "Memmy 之前安装在“$MemmyPreviousInstallDir”。$\r$\n请使用此目录安装更新；如果要更换目录，请先手动迁移 Memmy 文件。"
+
+  memmy_previous_notice_show:
+    MessageBox MB_OK|MB_ICONINFORMATION "$R8"
+
+  memmy_previous_notice_done:
+FunctionEnd
+
 ; Input: $R0 is the exact directory to validate. Output: pushes "1" when
 ; that directory supports create/write/delete operations, else "0".
 Function MemmyProbeWritableDirectory
@@ -328,6 +345,20 @@ FunctionEnd
 ; installation-drive runtime folder. Output: pushes "1" on success, else "0".
 Function MemmyValidateSelectedDirectories
   Call MemmyNormalizeInstallDirectory
+
+  StrCmp $MemmyPreviousInstallDir "" memmy_validate_resolve_paths
+  GetFullPathName $R6 "$INSTDIR"
+  GetFullPathName $R7 "$MemmyPreviousInstallDir"
+  StrCmp $R6 $R7 memmy_validate_resolve_paths
+  StrCpy $R8 "Memmy is already installed at $\"$MemmyPreviousInstallDir$\". Choose that directory to continue. If you want to move Memmy, manually migrate your files before installing in another directory."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_previous_directory_failed
+  StrCpy $R8 "Memmy 之前安装在“$MemmyPreviousInstallDir”。请返回并选择此目录继续安装；如果要更换目录，请先手动迁移 Memmy 文件。"
+  Goto memmy_validate_previous_directory_failed
+
+  memmy_validate_previous_directory_failed:
+    Goto memmy_validate_failed
+
+  memmy_validate_resolve_paths:
   Call MemmyResolveMigrationPaths
 
   StrCpy $R0 "$INSTDIR"
@@ -854,6 +885,11 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "If fso.FolderExists(relayLockPath) Then$\r$\n"
   FileWrite $1 "  lockPath = relayLockPath$\r$\n"
+  FileWrite $1 "End If$\r$\n"
+  ; A cancelled direct upgrade can leave the install-local marker lock behind. Run the
+  ; same age/process-aware recovery used for relay locks before treating it as an active lock.
+  FileWrite $1 "If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
   FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"

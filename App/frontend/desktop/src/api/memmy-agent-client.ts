@@ -664,6 +664,7 @@ export type MemmyAgentWsEvent = {
   text?: string;
   content?: string;
   stream_id?: string;
+  transcript_offset?: number;
   turn_id?: string;
   turnId?: string;
   resuming?: boolean;

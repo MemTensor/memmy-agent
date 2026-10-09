@@ -42,8 +42,66 @@ describe("native Codex ingestion", () => {
       channel: "agent_source_scan", sourceTurn: expect.objectContaining({ conversationId: "native-conversation", turnId: "native-turn" }),
       toolCalls: [expect.objectContaining({ id: "test-call", input: "npm test", output: "passed" })]
     }));
+    expect(completeSourceTurn.mock.calls[0]?.[0].captureLegacyHistory).toBeUndefined();
     expect(stats.memoryIds).toEqual(["l1-native"]);
     expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+
+  it("emits add analytics only when a native scan turn is newly stored", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const analytics = {
+      trackAddStarted(input: Record<string, unknown>) {
+        events.push({ name: "started", payload: { ...input } });
+      },
+      trackAddSucceeded(input: Record<string, unknown>) {
+        events.push({ name: "succeeded", payload: { ...input } });
+      },
+      trackAddFailed(input: Record<string, unknown>) {
+        events.push({ name: "failed", payload: { ...input } });
+      }
+    };
+    const stored = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-a", "l1-b"] } });
+    await createService({ completeSourceTurn: stored }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "initial_subset" }
+    );
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      conversationId: "native-conversation",
+      turnId: "native-turn",
+      scanMode: "initial_subset",
+      storedCount: 2
+    });
+
+    events.length = 0;
+    const existing = vi.fn().mockResolvedValue({ status: "existing", result: { l1MemoryIds: ["l1-a"] } });
+    await createService({ completeSourceTurn: existing }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "incremental" }
+    );
+    expect(events).toEqual([]);
+
+    const failed = vi.fn().mockRejectedValue(new Error("native write failed"));
+    await createService({ completeSourceTurn: failed }, {}, undefined, analytics).ingest(
+      toAsyncIterable(nativeMessages()),
+      { sourceId: "codex", scanMode: "full" }
+    );
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:codex",
+      turnId: "native-turn",
+      scanMode: "full"
+    });
+  });
+
+  it("asks a full scan to capture history that completed before activation", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-historical"] } });
+    await createService({ completeSourceTurn }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "full" });
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
+    const initial = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-initial"] } });
+    await createService({ completeSourceTurn: initial }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "initial_subset" });
+    expect(initial).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
   });
 
   it.each(["pending", "conflict"])("retains %s turns for retry without marking seen or completing the conversation", async status => {
@@ -54,16 +112,23 @@ describe("native Codex ingestion", () => {
     expect(markSeen).not.toHaveBeenCalled(); expect(addMemory).not.toHaveBeenCalled();
     expect(stats.completedConversationIds).toEqual([]);
     expect(stats.failedConversationIds).toEqual(["native-conversation"]);
-    expect(stats.errors[0]?.reason).toContain("episode_unresolved");
+    expect(stats.errors).toEqual([]);
   });
 
   it("does not submit incomplete evidence, and retries after completion arrives on the same message IDs", async () => {
     const completeSourceTurn = vi.fn().mockResolvedValue({ status: "existing", result: { l1MemoryIds: ["same-l1"] } });
     const addMemory = vi.fn(); const markSeen = vi.fn();
-    const service = createService({ addMemory, completeSourceTurn }, { markSeen });
+    const skipped: Array<{ conversationId: string; reason: string }> = [];
+    const service = createIngestionService({
+      memoryClient: { ...createMockMemoryClient({ now }), addMemory, completeSourceTurn },
+      agentSourceRepository: { ...createRepository(), markSeen, hasSeen: () => false },
+      onItemSkip: (skip) => skipped.push(skip)
+    });
     const pending = await service.ingest(toAsyncIterable(nativeMessages(false)), { sourceId: "codex" });
     expect(completeSourceTurn).not.toHaveBeenCalled(); expect(markSeen).not.toHaveBeenCalled();
-    expect(pending.errors[0]?.reason).toContain("turn_incomplete");
+    expect(pending.errors).toEqual([]);
+    expect(pending.incompleteConversationIds).toEqual(["native-conversation"]);
+    expect(skipped).toEqual([{ sourceId: "codex", conversationId: "native-conversation", reason: "turn_incomplete" }]);
     const recovered = await service.ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
     expect(completeSourceTurn).toHaveBeenCalledOnce(); expect(markSeen).toHaveBeenCalledTimes(2);
     expect(recovered.dedupedMemories).toBe(1); expect(recovered.writtenMemories).toBe(0);
@@ -146,6 +211,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
+      importSummaryMemoryIds: ["memory-1", "memory-2"],
       conversations: 2,
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: ["conv-a"],
@@ -332,7 +398,7 @@ describe("ingestion service", () => {
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: [],
       failedConversationIds: ["conv-a"],
-      errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
+      errors: []
     });
   });
 
@@ -395,6 +461,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1"],
+      importSummaryMemoryIds: ["memory-1"],
       conversations: 2,
       completedConversationIds: ["conv-a", "conv-b"],
       incompleteConversationIds: [],
@@ -435,6 +502,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -507,6 +575,7 @@ describe("ingestion service", () => {
       dedupedMemories: 1,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -557,7 +626,8 @@ describe("ingestion service", () => {
       deduped: 2,
       writtenMemories: 0,
       dedupedMemories: 1,
-      memoryIds: []
+      memoryIds: [],
+      importSummaryMemoryIds: []
     });
     expect(succeeded).toEqual([]);
   });

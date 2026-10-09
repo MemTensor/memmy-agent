@@ -122,17 +122,17 @@ async function extractDocxOpenXml(file: string): Promise<string> {
       return texts.join("");
     })
     .filter((line) => line.trim());
-  if (paragraphs.length) return truncate(paragraphs.join("\n\n"));
+  if (paragraphs.length) return paragraphs.join("\n\n");
   const texts: string[] = [];
   collectXmlText(parsed, new Set(["w:t"]), texts);
-  return truncate(texts.filter(Boolean).join("\n\n"));
+  return texts.filter(Boolean).join("\n\n");
 }
 
 async function extractDocx(file: string): Promise<string> {
   try {
     const result = await mammoth.extractRawText({ path: file });
     const text = result.value.trim();
-    if (text) return truncate(text);
+    if (text) return text;
     return extractDocxOpenXml(file);
   } catch (err) {
     try {
@@ -171,7 +171,7 @@ async function extractXlsxOpenXml(file: string): Promise<string> {
     }
     if (rows.length) sheets.push(`--- Sheet: Sheet${index + 1} ---\n${rows.join("\n")}`);
   }
-  return truncate(sheets.join("\n\n"));
+  return sheets.join("\n\n");
 }
 
 async function extractXlsx(file: string): Promise<string> {
@@ -188,7 +188,7 @@ async function extractXlsx(file: string): Promise<string> {
       });
       if (rows.length) sheets.push(`--- Sheet: ${sheet.name} ---\n${rows.join("\n")}`);
     });
-    return truncate(sheets.join("\n\n"));
+    return sheets.join("\n\n");
   } catch (err) {
     try {
       return await extractXlsxOpenXml(file);
@@ -264,7 +264,7 @@ async function extractPptx(file: string): Promise<string> {
       const cleaned = texts.map((line) => line.trim()).filter(Boolean);
       if (cleaned.length) slides.push(`--- Slide ${index + 1} ---\n${cleaned.join("\n")}`);
     }
-    return truncate(slides.join("\n\n"));
+    return slides.join("\n\n");
   } catch (err) {
     return `[error: failed to extract PPTX: ${(err as Error).message}]`;
   }
@@ -292,11 +292,11 @@ async function extractPdf(file: string): Promise<string> {
         .trim();
       pages.push(`--- Page ${i} ---\n${text}`);
     }
-    return truncate(pages.join("\n\n"));
+    return pages.join("\n\n");
   } catch (err) {
     const raw = fs.readFileSync(file);
     const text = raw.toString("latin1").match(/\(([^()\r\n]{2,})\)/g)?.map((m) => m.slice(1, -1)).join("\n") ?? "";
-    if (text) return truncate(`--- Page 1 ---\n${text}`);
+    if (text) return `--- Page 1 ---\n${text}`;
     return `[error: failed to extract PDF: ${(err as Error).message}]`;
   } finally {
     await (doc as any)?.destroy?.();
@@ -305,13 +305,14 @@ async function extractPdf(file: string): Promise<string> {
 
 function extractTextFile(file: string): string {
   try {
-    return truncate(fs.readFileSync(file, "utf8"));
+    return fs.readFileSync(file, "utf8");
   } catch {
-    return truncate(fs.readFileSync(file, "latin1"));
+    return fs.readFileSync(file, "latin1");
   }
 }
 
-export async function extractText(filePath: string): Promise<string | null> {
+/** Keep extraction lossless so callers can select pages before applying an output budget. */
+async function extractFullText(filePath: string): Promise<string | null> {
   const file = String(filePath);
   if (!fs.existsSync(file)) return `[error: file not found: ${file}]`;
   const ext = path.extname(file).toLowerCase();
@@ -328,4 +329,14 @@ export async function extractText(filePath: string): Promise<string | null> {
   }
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) return `[image: ${path.basename(file)}]`;
   return null;
+}
+
+/** By default return a bounded preview; paginated readers explicitly request the full text. */
+export async function extractText(
+  filePath: string,
+  options: { maxChars?: number | null } = {},
+): Promise<string | null> {
+  const text = await extractFullText(filePath);
+  if (text == null || text.startsWith("[error:") || options.maxChars === null) return text;
+  return truncate(text, options.maxChars ?? MAX_TEXT_LENGTH);
 }

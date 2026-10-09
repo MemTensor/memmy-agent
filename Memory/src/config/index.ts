@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
@@ -266,6 +267,8 @@ export interface AlgorithmConfig {
     llmFilterFallbackMaxKeep: number;
     llmFilterMinCandidates: number;
     llmFilterCandidateBodyChars: number;
+    queryExtractHistoryTurns: number;
+    queryExtractHistoryTextChars: number;
     readOnlyInjectionProfile: ReadOnlyInjectionProfile;
   };
 }
@@ -290,6 +293,10 @@ export interface MemmyConfig {
   embedding: EmbeddingConfig;
   agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
+  tokenBudget: {
+    dailyLimitM: number;
+    totalLimitM: number;
+  };
 }
 
 const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
@@ -360,6 +367,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     autoScanKnownAgents: true,
     watchFileChanges: true,
     autoInjectSkill: false
+  },
+  tokenBudget: {
+    dailyLimitM: 10,
+    totalLimitM: 500
   },
   algorithm: {
     enableMemoryAdd: true,
@@ -513,8 +524,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       llmFilterEnabled: true,
       llmFilterMaxKeep: 8,
       llmFilterFallbackMaxKeep: 6,
-      llmFilterMinCandidates: 2,
+      llmFilterMinCandidates: 1,
       llmFilterCandidateBodyChars: 500,
+      queryExtractHistoryTurns: 5,
+      queryExtractHistoryTextChars: 200,
       readOnlyInjectionProfile: "all"
     }
   }
@@ -669,7 +682,21 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     evolution,
     embedding,
     agentAccess,
-    algorithm
+    algorithm,
+    tokenBudget: normalizeTokenBudget(asRecord(input.tokenBudget))
+  };
+}
+
+function normalizeTokenBudget(input: Record<string, unknown>): MemmyConfig["tokenBudget"] {
+  return {
+    dailyLimitM: normalizeMemoryByokLimitM(
+      input.dailyLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.dailyLimitM
+    ),
+    totalLimitM: normalizeMemoryByokLimitM(
+      input.totalLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.totalLimitM
+    )
   };
 }
 
@@ -920,19 +947,25 @@ function resolveMemoryEmbedding(
   hasCatalog: boolean
 ): Record<string, unknown> {
   const embedding = asRecord(memory.embedding);
-  const configuredMode = optionalString(embedding.mode);
-  const embeddingMode = configuredMode === "cloud"
-    || configuredMode === "local"
-    || configuredMode === "custom"
-    ? configuredMode
-    : mode === "account" && hasCatalog
-      ? "cloud"
-      : DEFAULT_MEMMY_CONFIG.embedding.mode;
   const activeAssignment = mode
     ? asRecord(asRecord(rootConfig.modelAssignments)[mode])
     : {};
   const rawAssignedPreset = activeAssignment.embedding;
   const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
+  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
+  const configuredMode = optionalString(embedding.mode);
+  const embeddingMode = configuredMode === "cloud"
+    || configuredMode === "local"
+    || configuredMode === "custom"
+    ? configuredMode
+    : rawAssignedPreset === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+      || (mode === "byok" && hasCatalog && !hasExplicitAssignment)
+      ? "local"
+      : hasExplicitAssignment && resolved.ok && embeddingProtocolSupported(resolved.context.protocol)
+        ? resolved.context.source === "account" ? "cloud" : "custom"
+        : mode === "account" && hasCatalog
+          ? "cloud"
+          : DEFAULT_MEMMY_CONFIG.embedding.mode;
   if (rawAssignedPreset === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
     const assignmentOwner = optionalString(activeAssignment.ownerAccountId);
     const activeAccountId = optionalString(asRecord(rootConfig.app).userId);
@@ -961,8 +994,6 @@ function resolveMemoryEmbedding(
     };
   }
 
-  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
-
   if (mode === "byok" && hasCatalog && !hasExplicitAssignment) {
     return localEmbeddingConfig(embedding);
   }
@@ -979,7 +1010,7 @@ function resolveMemoryEmbedding(
     return localEmbeddingConfig(embedding);
   }
 
-  if (embeddingMode === "custom") {
+  if (embeddingMode === "custom" && (configuredMode === "custom" || !hasExplicitAssignment)) {
     const custom = asRecord(embedding.custom);
     return {
       ...embedding,
@@ -1271,6 +1302,8 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       llmFilterFallbackMaxKeep: numberValue(retrieval.llmFilterFallbackMaxKeep, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterFallbackMaxKeep),
       llmFilterMinCandidates: numberValue(retrieval.llmFilterMinCandidates, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterMinCandidates),
       llmFilterCandidateBodyChars: numberValue(retrieval.llmFilterCandidateBodyChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterCandidateBodyChars),
+      queryExtractHistoryTurns: numberValue(retrieval.queryExtractHistoryTurns, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTurns),
+      queryExtractHistoryTextChars: numberValue(retrieval.queryExtractHistoryTextChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTextChars),
       readOnlyInjectionProfile: readOnlyInjectionProfile(
         retrieval.readOnlyInjectionProfile,
         DEFAULT_MEMMY_CONFIG.algorithm.retrieval.readOnlyInjectionProfile

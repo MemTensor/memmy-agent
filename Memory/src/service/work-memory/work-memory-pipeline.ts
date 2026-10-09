@@ -4,9 +4,10 @@ import {
   type JsonValue
 } from "../../contracts/index.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
+import { splitL3TracesByRawTurn } from "../../storage/repositories.js";
 import type {
   EvolutionJobRecord,
-  L3WorldModelEvidenceBatchRecord,
+  L3WorldModelInputTraceRecord,
   Repositories
 } from "../../storage/repositories.js";
 import type { MemoryFilter, MemoryRow } from "../../types.js";
@@ -17,6 +18,22 @@ export interface WorkMemoryQaPair {
   user: string;
   assistant: string;
 }
+
+/** Result of one incremental Work Memory extraction pass. */
+export interface WorkMemoryExtractionResult {
+  windows: number;
+  enqueued: number;
+  cursorAdvancedTo: number;
+}
+
+/** Raw turns per extraction window; a single turn is never split across windows. */
+const WORK_MEMORY_WINDOW_MAX_RAW_TURNS = 20;
+
+/** Q&A pairs per extraction window; an oversized turn overflows into the next window. */
+const WORK_MEMORY_WINDOW_MAX_QA_PAIRS = 20;
+
+/** Idle delay before an untouched Session flushes its unextracted Work Memory. */
+export const WORK_MEMORY_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 export interface WorkMemoryCandidate {
   requirement: string;
@@ -73,6 +90,147 @@ export class WorkMemoryPipeline {
 
   scheduleBatches(batchIds: readonly string[], at = this.deps.nowIso()): EvolutionJobRecord[] {
     return this.deps.repos.transaction(() => this.scheduleBatchesInTransaction(batchIds, at));
+  }
+
+  /**
+   * Enqueue `work_memory_extract` jobs for every L3 input trace of a Session
+   * that has not been scheduled yet, up to `throughTraceSeq`.
+   *
+   * Callers must already hold a transaction: the cursor advance and the job
+   * enqueue have to commit together, otherwise a failed enqueue would mark the
+   * window extracted and no later trigger would ever pick it up again.
+   *
+   * @param sessionId Session whose unextracted traces should be scheduled.
+   * @param throughTraceSeq Inclusive trace sequence ceiling for this trigger.
+   * @param at Timestamp to stamp cursor and job rows with.
+   * @returns Window, enqueue, and cursor counters for the caller.
+   */
+  extractUnextracted(
+    sessionId: string,
+    throughTraceSeq: number,
+    at = this.deps.nowIso()
+  ): WorkMemoryExtractionResult {
+    const session = this.deps.repos.runtime.getSession(sessionId);
+    if (!session || session.meta.l3_world_model_protocol_version !== 2) {
+      return { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
+    }
+    // The first Work Memory pass of a Session starts from a clean slate: the L3
+    // cursor has already advanced past this compaction window by the time the
+    // boundary callback runs, so inheriting it would swallow the whole delta.
+    const cursor = this.deps.repos.runtime.ensureWorkMemoryCursor(sessionId, 0, at);
+    const endTraceSeq = Math.min(throughTraceSeq, this.deps.repos.l3WorldModels.maxInputTraceSeq(sessionId));
+    if (endTraceSeq <= cursor.lastExtractedSeq) {
+      return { windows: 0, enqueued: 0, cursorAdvancedTo: cursor.lastExtractedSeq };
+    }
+    const traces = this.deps.repos.l3WorldModels.listInputTracesInRange(
+      sessionId,
+      cursor.lastExtractedSeq,
+      endTraceSeq
+    );
+    if (traces.length === 0) {
+      return { windows: 0, enqueued: 0, cursorAdvancedTo: cursor.lastExtractedSeq };
+    }
+    const scope = { userId: session.userId, sessionId };
+    let enqueued = 0;
+    let windows = 0;
+    let lastExtractedSeq = cursor.lastExtractedSeq;
+    for (const chunk of splitL3TracesByRawTurn(traces, WORK_MEMORY_WINDOW_MAX_RAW_TURNS)) {
+      const window = this.takeWindow(chunk, scope);
+      if (window.qa.length > 0) {
+        const job = this.scheduleQaInTransaction({
+          qa: window.qa,
+          userId: session.userId,
+          sessionId,
+          projectId: session.projectId ?? null
+        }, at);
+        if (job) enqueued += 1;
+      }
+      this.deps.repos.runtime.setWorkMemoryCursor(sessionId, window.throughTraceSeq, at);
+      lastExtractedSeq = window.throughTraceSeq;
+      windows += 1;
+      if (window.truncated) break;
+    }
+    return { windows, enqueued, cursorAdvancedTo: lastExtractedSeq };
+  }
+
+  /**
+   * Build the Q&A window for one chunk of traces, capped at
+   * `WORK_MEMORY_WINDOW_MAX_QA_PAIRS` pairs without splitting a Raw turn.
+   *
+   * The cursor stops on the last turn that fits, so an oversized turn leaves
+   * its remainder to the next trigger instead of losing it.
+   */
+  private takeWindow(
+    chunk: readonly L3WorldModelInputTraceRecord[],
+    scope: { userId: string; sessionId: string }
+  ): { qa: WorkMemoryQaPair[]; throughTraceSeq: number; truncated: boolean } {
+    const rawTurnIds = [...new Set(chunk.map((trace) => trace.rawTurnId))];
+    const lastTraceByRawTurnId = new Map<string, number>();
+    for (const trace of chunk) {
+      lastTraceByRawTurnId.set(trace.rawTurnId, trace.traceSeq);
+    }
+    const qa: WorkMemoryQaPair[] = [];
+    let throughTraceSeq = chunk[0]!.traceSeq;
+    let truncated = false;
+    for (const rawTurnId of rawTurnIds) {
+      const pair = this.qaForRawTurn(rawTurnId, scope);
+      if (pair && qa.length >= WORK_MEMORY_WINDOW_MAX_QA_PAIRS) {
+        truncated = true;
+        break;
+      }
+      if (pair) qa.push(pair);
+      throughTraceSeq = lastTraceByRawTurnId.get(rawTurnId)!;
+    }
+    return { qa, throughTraceSeq, truncated };
+  }
+
+  /**
+   * Arm (or re-arm) the idle flush for a Session so its unextracted Work Memory
+   * is scheduled once the Session has been quiet for `WORK_MEMORY_IDLE_TIMEOUT_MS`.
+   *
+   * Callers must already hold a transaction.
+   */
+  armIdleFlush(
+    sessionId: string,
+    at = this.deps.nowIso()
+  ): EvolutionJobRecord | undefined {
+    const session = this.deps.repos.runtime.getSession(sessionId);
+    if (!session || session.meta.l3_world_model_protocol_version !== 2) return undefined;
+    return this.deps.repos.runtime.armWorkMemoryIdleFlush({
+      sessionId,
+      userId: session.userId,
+      lastActivityAt: at,
+      runAfter: new Date(Date.parse(at) + WORK_MEMORY_IDLE_TIMEOUT_MS).toISOString(),
+      at
+    });
+  }
+
+  /**
+   * Handle a due `work_memory_idle_flush`: extract the delta when the Session
+   * really has been quiet for the full timeout, and re-arm otherwise.
+   */
+  flushIdle(job: EvolutionJobRecord): WorkMemoryExtractionResult {
+    if (job.jobType !== "work_memory_idle_flush") {
+      throw new Error(`invalid work memory idle flush job type: ${job.id}`);
+    }
+    const sessionId = job.sessionId;
+    if (!sessionId) throw new Error(`work memory idle flush job has no session: ${job.id}`);
+    const empty: WorkMemoryExtractionResult = { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
+    const session = this.deps.repos.runtime.getSession(sessionId);
+    if (!session || session.status !== "open" || session.meta.l3_world_model_protocol_version !== 2) {
+      return empty;
+    }
+    const at = this.deps.nowIso();
+    const lastActivityAt = this.deps.repos.l3WorldModels.latestInputTraceCreatedAt(sessionId)
+      ?? (typeof job.payload.lastActivityAt === "string" ? job.payload.lastActivityAt : at);
+    if (Date.parse(at) < Date.parse(lastActivityAt) + WORK_MEMORY_IDLE_TIMEOUT_MS) {
+      this.deps.repos.transaction(() => {
+        this.armIdleFlush(sessionId, lastActivityAt);
+      });
+      return empty;
+    }
+    const throughTraceSeq = this.deps.repos.l3WorldModels.maxInputTraceSeq(sessionId);
+    return this.deps.repos.transaction(() => this.extractUnextracted(sessionId, throughTraceSeq, at));
   }
 
   async extract(job: EvolutionJobRecord): Promise<void> {
@@ -138,13 +296,59 @@ export class WorkMemoryPipeline {
     if (!session || session.userId !== batch.userId || normalizeProjectId(session.projectId) !== normalizeProjectId(batch.projectId)) {
       throw new Error(`work memory batch session scope mismatch: ${batchId}`);
     }
-    const qa = this.qaForBatch(batch);
+    return this.scheduleQaInTransaction({
+      qa: batch.rawTurnIds
+        .map((rawTurnId) => this.qaForRawTurn(rawTurnId, {
+          userId: batch.userId,
+          sessionId: batch.sessionId
+        }))
+        .filter((pair): pair is WorkMemoryQaPair => Boolean(pair)),
+      userId: batch.userId,
+      sessionId: batch.sessionId,
+      projectId: batch.projectId ?? null
+    }, at);
+  }
+
+  /**
+   * Build the Q&A pair for one Raw turn, dropping tool traffic. Returns
+   * undefined for turns that were deleted, redacted, or carry no text.
+   */
+  private qaForRawTurn(
+    rawTurnId: string,
+    scope: { userId: string; sessionId: string }
+  ): WorkMemoryQaPair | undefined {
+    const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
+    if (!rawTurn || rawTurn.deletedAt || rawTurn.redactedAt) return undefined;
+    if (rawTurn.userId !== scope.userId || rawTurn.sessionId !== scope.sessionId) {
+      throw new Error(`work memory RawTurn scope mismatch: ${rawTurnId}`);
+    }
+    const user = normalizeQaText(rawTurn.userText ?? "");
+    const assistant = normalizeQaText(rawTurn.assistantText ?? "");
+    if (!user && !assistant) return undefined;
+    return { user, assistant };
+  }
+
+  /** Enqueue one `work_memory_extract` job for a Q&A window. */
+  private scheduleQaInTransaction(
+    input: {
+      qa: readonly WorkMemoryQaPair[];
+      userId: string;
+      sessionId: string;
+      projectId: string | null;
+    },
+    at: string
+  ): EvolutionJobRecord | undefined {
+    const session = this.deps.repos.runtime.getSession(input.sessionId);
+    if (!session || session.userId !== input.userId) {
+      throw new Error(`work memory session scope mismatch: ${input.sessionId}`);
+    }
+    const qa = input.qa;
     const trajectoryHash = trajectoryHashForQa(qa);
-    const projectId = normalizeProjectId(batch.projectId);
+    const projectId = normalizeProjectId(input.projectId);
     const source = session.source.trim() || "unknown";
     const dedupeKey = stableHash([
       "work_memory_extract",
-      batch.userId,
+      input.userId,
       source,
       projectId,
       trajectoryHash
@@ -153,15 +357,15 @@ export class WorkMemoryPipeline {
     if (existing?.status === "queued" || existing?.status === "leased" || existing?.status === "succeeded" || existing?.status === "dead_letter") {
       return existing;
     }
-    const scopeKey = stableHash(["work_memory", batch.userId, projectId]);
+    const scopeKey = stableHash(["work_memory", input.userId, projectId]);
     const scopeSeq = existing?.scopeSeq ?? this.deps.repos.runtime.nextWorkMemoryScopeSeq(scopeKey);
     const job = this.deps.repos.runtime.enqueueJobInTransaction({
       id: existing?.id ?? newId("job"),
       jobType: "work_memory_extract",
       status: "queued",
       dedupeKey,
-      userId: batch.userId,
-      sessionId: batch.sessionId,
+      userId: input.userId,
+      sessionId: input.sessionId,
       scopeKey,
       scopeSeq,
       payload: {
@@ -189,22 +393,6 @@ export class WorkMemoryPipeline {
       createdAt: at
     });
     return job;
-  }
-
-  private qaForBatch(batch: L3WorldModelEvidenceBatchRecord): WorkMemoryQaPair[] {
-    const result: WorkMemoryQaPair[] = [];
-    for (const rawTurnId of batch.rawTurnIds) {
-      const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
-      if (!rawTurn || rawTurn.deletedAt || rawTurn.redactedAt) continue;
-      if (rawTurn.userId !== batch.userId || rawTurn.sessionId !== batch.sessionId) {
-        throw new Error(`work memory RawTurn scope mismatch: ${rawTurnId}`);
-      }
-      const user = normalizeQaText(rawTurn.userText ?? "");
-      const assistant = normalizeQaText(rawTurn.assistantText ?? "");
-      if (!user && !assistant) continue;
-      result.push({ user, assistant });
-    }
-    return result;
   }
 
   private async retrieveCandidates(

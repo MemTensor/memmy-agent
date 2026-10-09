@@ -10,6 +10,7 @@ import {
   type WorkspaceUri
 } from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
+import { displayFieldsForMemory } from "../service/read-model/display-fields.js";
 import type {
   ProjectEnvironmentKind,
   ProjectEnvironmentStateRecord
@@ -38,6 +39,7 @@ import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { firstSemanticUserLine } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
 import {
   attachMemoryVectors,
@@ -62,6 +64,7 @@ const BUNDLE_TABLES = [
   "user_memories",
   "sessions",
   "l3_world_model_session_cursors",
+  "work_memory_session_cursors",
   "episodes",
   "raw_turns",
   "l3_world_model_input_traces",
@@ -347,6 +350,12 @@ export interface L3WorldModelInputTraceRecord {
   rawTurnId: string;
   episodeId?: string;
   createdAt: string;
+}
+
+export interface WorkMemorySessionCursorRecord {
+  sessionId: string;
+  lastExtractedSeq: number;
+  updatedAt: string;
 }
 
 export interface L3WorldModelEvidenceBatchRecord {
@@ -711,6 +720,34 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listMemoryTags(ids: readonly string[]): string[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT tags_json, info_json, properties_json
+      FROM memories
+      WHERE id IN (${placeholders}) AND deleted_at IS NULL AND status != 'deleted'
+    `).all(...ids) as Array<{ tags_json: string; info_json: string; properties_json: string }>;
+    return uniq(rows.flatMap((row) => {
+      const info = parseJson<Record<string, unknown>>(row.info_json, {});
+      const properties = parseJson<Record<string, unknown>>(row.properties_json, {});
+      return [
+        ...asStringArray(parseJson(row.tags_json, [])),
+        ...asStringArray(info.tags),
+        ...asStringArray(properties.tags)
+      ];
+    }));
+  }
+
+  listUserMemoriesByKeyIncludingDeleted(userId: string, memoryKey: string): MemoryRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = 'L1' AND memory_key = ?
+      ORDER BY updated_at DESC, id DESC
+    `).all(userId, memoryKey) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
   archivePriorReadOnlySkillVersions(input: {
     sourceAgentId: string;
     sourceSkillIdentity: string;
@@ -891,6 +928,34 @@ export class MemoryRepository {
                  'summary_pending', 'summarizing', 'embedding_pending', 'embedding'
                )
            )
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  listImportMemoriesNeedingSummary(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND LOWER(TRIM(COALESCE(
+             json_extract(properties_json, '$.internal_info.trace.summary'),
+             json_extract(info_json, '$.summary'),
+             json_extract(properties_json, '$.internal_info.summary'),
+             ''
+           ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
          ORDER BY created_at DESC, updated_at DESC, id DESC
          LIMIT ?`
       )
@@ -1214,6 +1279,7 @@ export class MemoryRepository {
       summary: listSummaryForMemory(memory),
       tags: memory.tags,
       metrics: listMetricsForMemory(memory),
+      ...displayFieldsForMemory(memory),
       createdAt: memory.createdAt,
       updatedAt: memory.updatedAt,
       version: memory.version
@@ -1843,7 +1909,7 @@ export class RuntimeRepository {
   sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
     return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
-        OR (@source = 'codex' AND host_session_key = 'codex-memory-' || @conversationId))
+        OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
   }
 
@@ -2543,11 +2609,120 @@ export class RuntimeRepository {
     return row ? rawTurnFromSql(row) : undefined;
   }
 
+  episodeHasLaterRawTurn(episodeId: string, turnId: string, startedAt: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE episode_id = ?
+        AND turn_id != ?
+        AND created_at > ?
+      LIMIT 1
+    `).get(episodeId, turnId, startedAt) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  episodeRelationTexts(episodeId: string, rawTurnIds: readonly string[] = []): {
+    firstUser: string;
+    lastUser: string;
+    lastAssistant: string;
+    lastCompletedAt?: string;
+  } {
+    const completed = `json_type(message_payload_json, '$.turn_complete') = 'object'`;
+    const boundary = (column: "user_text" | "assistant_text" | "created_at", edge: "first" | "last") => {
+      const nonempty = column === "created_at" ? "1 = 1" : `trim(COALESCE(${column}, '')) != ''`;
+      const time = this.db.prepare(`
+        SELECT ${edge === "first" ? "MIN" : "MAX"}(created_at) AS boundary
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty}
+      `).get(episodeId) as { boundary: string | null } | undefined;
+      if (!time?.boundary) return [];
+      return this.db.prepare(`
+        SELECT id, created_at AS createdAt, user_text AS userText, assistant_text AS assistantText
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty} AND created_at = ?
+      `).all(episodeId, time.boundary) as Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>;
+    };
+    const pick = (
+      rows: Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>,
+      field: "userText" | "assistantText" | "createdAt",
+      edge: "first" | "last"
+    ) => {
+      const rank = new Map(rawTurnIds.map((id, index) => [id, index]));
+      const ordered = [...rows].sort((left, right) =>
+        (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      );
+      const chosen = edge === "first" ? ordered[0] : ordered[ordered.length - 1];
+      const value = chosen?.[field];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const firstUsers = boundary("user_text", "first");
+    const lastUsers = boundary("user_text", "last");
+    const lastAssistants = boundary("assistant_text", "last");
+    const lastCompleted = boundary("created_at", "last");
+    const lastCompletedAt = pick(lastCompleted, "createdAt", "last");
+    return {
+      firstUser: pick(firstUsers, "userText", "first"),
+      lastUser: pick(lastUsers, "userText", "last"),
+      lastAssistant: pick(lastAssistants, "assistantText", "last"),
+      ...(lastCompletedAt ? { lastCompletedAt } : {})
+    };
+  }
+
   getRawTurnBySessionTurn(sessionId: string, turnId: string): RawTurnRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM raw_turns WHERE session_id = ? AND turn_id = ?`)
       .get(sessionId, turnId) as SqlRawTurnRow | undefined;
     return row ? rawTurnFromSql(row) : undefined;
+  }
+
+  hasCompletedSourceTurnInScope(input: {
+    userId: string;
+    source: string;
+    profileId: string;
+    conversationId: string;
+    turnId: string;
+    namespaceKey: string;
+    defaultNamespaceKey: string;
+    tenantId: string | null;
+    storedProjectId: string | null;
+    workspaceId: string | null;
+  }): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE raw_turns.user_id = @userId
+        AND raw_turns.turn_id = @turnId
+        AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+        AND EXISTS (
+          SELECT 1
+          FROM sessions
+          WHERE sessions.id = raw_turns.session_id
+            AND sessions.user_id = @userId
+            AND sessions.source = @source
+            AND sessions.profile_id = @profileId
+            AND (
+              sessions.host_session_key = @conversationId
+              OR sessions.conversation_id = @conversationId
+              OR sessions.host_session_key = @source || '-memory-' || @conversationId
+            )
+            AND (
+              json_extract(sessions.meta_json, '$.source_namespace_key') = @namespaceKey
+              OR (
+                json_extract(sessions.meta_json, '$.source_namespace_key') IS NULL
+                AND @tenantId IS NULL
+                AND (
+                  @namespaceKey = @defaultNamespaceKey
+                  OR (
+                    sessions.project_id IS @storedProjectId
+                    AND sessions.workspace_id IS @workspaceId
+                  )
+                )
+              )
+            )
+        )
+      LIMIT 1
+    `).get(input) as { found: number } | undefined;
+    return row?.found === 1;
   }
 
   listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {
@@ -3086,6 +3261,97 @@ export class RuntimeRepository {
     return Number(row.next_seq);
   }
 
+  /**
+   * Read the Work Memory extraction cursor for a Session.
+   *
+   * A missing row is seeded from the L3 cursor so Sessions that predate this
+   * table do not re-extract windows the L3 boundary already covered.
+   */
+  getWorkMemoryCursor(sessionId: string, at = nowIso()): WorkMemorySessionCursorRecord {
+    const seed = this.db.prepare(
+      `SELECT COALESCE(
+         (SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?),
+         0
+       ) AS last_seq`
+    ).get(sessionId) as { last_seq: number };
+    return this.ensureWorkMemoryCursor(sessionId, Number(seed.last_seq), at);
+  }
+
+  /** Create the Work Memory cursor row for a Session when it is still missing. */
+  ensureWorkMemoryCursor(
+    sessionId: string,
+    lastExtractedSeq: number,
+    at = nowIso()
+  ): WorkMemorySessionCursorRecord {
+    this.db.prepare(
+      `INSERT INTO work_memory_session_cursors (session_id, last_extracted_seq, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO NOTHING`
+    ).run(sessionId, lastExtractedSeq, at);
+    const row = this.db.prepare(
+      `SELECT session_id, last_extracted_seq, updated_at
+       FROM work_memory_session_cursors WHERE session_id = ?`
+    ).get(sessionId) as { session_id: string; last_extracted_seq: number; updated_at: string };
+    return {
+      sessionId: row.session_id,
+      lastExtractedSeq: Number(row.last_extracted_seq),
+      updatedAt: row.updated_at
+    };
+  }
+
+  /** Advance the Work Memory extraction cursor. */
+  setWorkMemoryCursor(sessionId: string, lastExtractedSeq: number, at = nowIso()): void {
+    this.db.prepare(
+      `UPDATE work_memory_session_cursors
+       SET last_extracted_seq = ?, updated_at = ?
+       WHERE session_id = ?`
+    ).run(lastExtractedSeq, at, sessionId);
+  }
+
+  /**
+   * Arm the Work Memory idle flush for a Session, pushing `runAfter` forward.
+   *
+   * The generic enqueue path merges `runAfter` by keeping the earlier value,
+   * which is the opposite of re-arming. This upsert therefore reuses terminal
+   * rows as well and clears the retry bookkeeping, so the auto worker keeps
+   * scheduling the job.
+   */
+  armWorkMemoryIdleFlush(input: {
+    sessionId: string;
+    userId: string;
+    lastActivityAt: string;
+    runAfter: string;
+    at?: string;
+  }): EvolutionJobRecord {
+    const at = input.at ?? nowIso();
+    const dedupeKey = `work_memory_idle_flush:${input.sessionId}`;
+    const payload = toJson({ lastActivityAt: input.lastActivityAt, runAfter: input.runAfter });
+    const existing = this.getJobByDedupeKey(dedupeKey);
+    if (existing) {
+      this.db.prepare(
+        `UPDATE evolution_jobs
+         SET status = 'queued',
+             payload_json = ?,
+             attempts = 0,
+             leased_until = NULL,
+             last_error = NULL,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(payload, at, existing.id);
+    } else {
+      this.db.prepare(
+        `INSERT INTO evolution_jobs (
+           id, job_type, status, dedupe_key, user_id, session_id, episode_id,
+           target_memory_id, scope_key, scope_seq, payload_json, attempts,
+           max_attempts, leased_until, last_error, created_at, updated_at
+         ) VALUES (?, 'work_memory_idle_flush', 'queued', ?, ?, ?, NULL, NULL, NULL, NULL, ?, 0, 3, NULL, NULL, ?, ?)`
+      ).run(newId("job"), dedupeKey, input.userId, input.sessionId, payload, at, at);
+    }
+    const job = this.getJobByDedupeKey(dedupeKey);
+    if (!job) throw new Error(`failed to arm work memory idle flush: ${input.sessionId}`);
+    return job;
+  }
+
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
     void userId;
     const clauses: string[] = [];
@@ -3121,7 +3387,26 @@ export class RuntimeRepository {
     return counts;
   }
 
-  nextWorkerRunAt(): number | undefined {
+  nextWorkerRunAt(options?: {
+    jobType?: string;
+    jobTypes?: readonly string[];
+    excludedJobTypes?: readonly string[];
+    includeEmbeddingRetries?: boolean;
+  }): number | undefined {
+    const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
+    const jobTypeFilter = jobTypes
+      ? jobTypes.length === 0
+        ? "AND 1=0"
+        : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
+      : "";
+    const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    const excludeFilter = excluded
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      : "";
+    const jobTypeParams = [
+      ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
+      ...(excluded ?? [])
+    ];
     const queuedJob = this.db
       .prepare(
         `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
@@ -3129,10 +3414,12 @@ export class RuntimeRepository {
          WHERE status = 'queued'
            AND attempts < max_attempts
            AND json_type(payload_json, '$.runAfter') = 'text'
+           ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY run_after ASC
          LIMIT 1`
       )
-      .get() as { run_after: string } | undefined;
+      .get(...jobTypeParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(
         `SELECT leased_until
@@ -3140,29 +3427,36 @@ export class RuntimeRepository {
          WHERE status = 'leased'
            AND attempts < max_attempts
            AND leased_until IS NOT NULL
+           ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY leased_until ASC
          LIMIT 1`
       )
-      .get() as { leased_until: string } | undefined;
-    const pendingEmbedding = this.db
-      .prepare(
-        `SELECT next_attempt_at
-         FROM embedding_retry_queue
-         WHERE status = 'pending'
-         ORDER BY next_attempt_at ASC
-         LIMIT 1`
-      )
-      .get() as { next_attempt_at: number } | undefined;
-    const inProgressEmbedding = this.db
-      .prepare(
-        `SELECT MAX(next_attempt_at, lease_until) AS run_at
-         FROM embedding_retry_queue
-         WHERE status = 'in_progress'
-           AND lease_until IS NOT NULL
-         ORDER BY run_at ASC
-         LIMIT 1`
-      )
-      .get() as { run_at: number } | undefined;
+      .get(...jobTypeParams) as { leased_until: string } | undefined;
+    const includeEmbeddingRetries = options?.includeEmbeddingRetries !== false;
+    const pendingEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT next_attempt_at
+           FROM embedding_retry_queue
+           WHERE status = 'pending'
+           ORDER BY next_attempt_at ASC
+           LIMIT 1`
+        )
+        .get() as { next_attempt_at: number } | undefined
+      : undefined;
+    const inProgressEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+           FROM embedding_retry_queue
+           WHERE status = 'in_progress'
+             AND lease_until IS NOT NULL
+           ORDER BY run_at ASC
+           LIMIT 1`
+        )
+        .get() as { run_at: number } | undefined
+      : undefined;
     const times = [
       queuedJob ? Date.parse(queuedJob.run_after) : Number.NaN,
       leasedJob ? Date.parse(leasedJob.leased_until) : Number.NaN,
@@ -3252,9 +3546,11 @@ export class RuntimeRepository {
     limit = 10,
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
-    priorityCohortOnly = false
+    priorityCohortOnly = false,
+    allowedJobTypes?: readonly string[],
+    excludedJobTypes?: readonly string[]
   ): EvolutionJobRecord[] {
-    if (targetMemoryIds?.length === 0) {
+    if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
     }
     const at = nowIso();
@@ -3322,11 +3618,13 @@ export class RuntimeRepository {
                  )
                )
              )
+             ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
+             ${excludedJobTypes?.length ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})` : ""}
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -3433,6 +3731,79 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}`
         )
         .all() as SqlJobRow[];
+
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE evolution_jobs
+             SET status = 'queued',
+                 attempts = MAX(0, attempts - 1),
+                 leased_until = NULL,
+                 updated_at = ?
+             WHERE id = ?`
+          )
+          .run(at, row.id);
+      }
+
+      return rows.map((row) => ({
+        before: jobFromSql(row),
+        after: jobFromSql({
+          ...row,
+          status: "queued",
+          attempts: Math.max(0, row.attempts - 1),
+          leased_until: null,
+          updated_at: at
+        })
+      }));
+    });
+    return transaction();
+  }
+
+  requeueUnstartedLeasedJobs(
+    ids: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased' AND id IN (${ids.map(() => "?").join(", ")})`,
+      [...ids],
+      at
+    );
+  }
+
+  requeueExpiredLeasedJobsExcept(
+    excludedJobTypes: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const excludeFilter = excludedJobTypes.length > 0
+      ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})`
+      : "";
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased'
+         AND leased_until IS NOT NULL
+         AND leased_until <= ?
+         ${excludeFilter}`,
+      [at, ...excludedJobTypes],
+      at
+    );
+  }
+
+  private requeueLeasedJobsWhere(
+    whereSql: string,
+    params: readonly unknown[],
+    at: string
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT *
+           FROM evolution_jobs
+           WHERE ${whereSql}
+           ORDER BY ${evolutionJobOrderSql()}`
+        )
+        .all(...params) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -4050,6 +4421,38 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM decision_repairs WHERE id = ?`)
       .get(id) as SqlDecisionRepairRow | undefined;
     return row ? decisionRepairFromSql(row) : undefined;
+  }
+
+  updateDecisionRepair(id: string, patch: {
+    suggestion?: string;
+    preference?: string;
+    antiPattern?: string;
+    source?: unknown;
+    meta?: Record<string, unknown>;
+  }): DecisionRepairRecord | undefined {
+    const current = this.getDecisionRepair(id);
+    if (!current) {
+      return undefined;
+    }
+    this.db
+      .prepare(
+        `UPDATE decision_repairs
+         SET suggestion = ?,
+             preference = ?,
+             anti_pattern = ?,
+             source_json = ?,
+             meta_json = ?
+         WHERE id = ?`
+      )
+      .run(
+        patch.suggestion ?? current.suggestion,
+        patch.preference ?? current.preference ?? null,
+        patch.antiPattern ?? current.antiPattern ?? null,
+        toJson(patch.source ?? current.source ?? {}),
+        toJson(patch.meta ?? current.meta ?? {}),
+        id
+      );
+    return this.getDecisionRepair(id);
   }
 
   upsertCandidatePoolTrace(input: {
@@ -4692,6 +5095,39 @@ export class L3WorldModelRepository {
        WHERE session_id = ? AND l1_memory_id = ?`
     ).get(sessionId, l1MemoryId) as SqlL3WorldModelInputTraceRow | undefined;
     return row ? l3WorldModelInputTraceFromSql(row) : undefined;
+  }
+
+  /** Highest trace sequence registered for a Session, or 0 when it has none. */
+  maxInputTraceSeq(sessionId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).get(sessionId) as { trace_seq: number };
+    return Number(row.trace_seq);
+  }
+
+  /** Input traces for a Session in an inclusive trace sequence range, ascending. */
+  listInputTracesInRange(
+    sessionId: string,
+    afterTraceSeq: number,
+    throughTraceSeq: number
+  ): L3WorldModelInputTraceRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq > ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(sessionId, afterTraceSeq, throughTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+  }
+
+  /** Most recent input trace timestamp, used as the real last activity of a Session. */
+  latestInputTraceCreatedAt(sessionId: string): string | undefined {
+    const row = this.db.prepare(
+      `SELECT created_at FROM l3_world_model_input_traces
+       WHERE session_id = ?
+       ORDER BY trace_seq DESC LIMIT 1`
+    ).get(sessionId) as { created_at: string } | undefined;
+    return row?.created_at;
   }
 
   freezeBatches(input: {
@@ -5748,7 +6184,7 @@ function l3WorldModelSourceMemoryIds(memory?: MemoryRow): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
 }
 
-function splitL3TracesByRawTurn(
+export function splitL3TracesByRawTurn(
   traces: L3WorldModelInputTraceRecord[],
   maxRawTurns: number
 ): L3WorldModelInputTraceRecord[][] {
@@ -6055,7 +6491,6 @@ function listSummaryForMemory(memory: MemoryRow): string {
   return firstNonEmptyString(
     stringLike(memory.info.summary),
     stringLike(internal.summary),
-    stringLike(policy.trigger),
     stringLike(policy.procedure),
     stringLike(world.summary),
     stringLike(world.body),
@@ -6110,22 +6545,25 @@ function firstReadableMemoryValueLine(value: string): string | undefined {
 
 function firstUserMemoryValueLine(value: string): string | undefined {
   let inUserSection = false;
+  const userLines: string[] = [];
   for (const line of value.split(/\r?\n/)) {
     const role = memoryValueRoleMarker(line);
     if (role) {
+      if (inUserSection && role !== "user") {
+        break;
+      }
       inUserSection = role === "user";
       continue;
     }
     if (!inUserSection) {
       continue;
     }
-
-    const cleaned = cleanMemoryValueLine(line);
-    if (cleaned && !isPlaceholderMemorySummary(cleaned) && !isWorldSectionHeading(cleaned) && !isInternalMemoryKey(cleaned)) {
-      return cleaned;
-    }
+    userLines.push(line);
   }
-  return undefined;
+  const title = firstSemanticUserLine(userLines.join("\n"));
+  return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
+    ? title
+    : undefined;
 }
 
 function isPlaceholderMemorySummary(value: string | undefined): boolean {
@@ -6133,7 +6571,7 @@ function isPlaceholderMemorySummary(value: string | undefined): boolean {
     ?.split(/\r?\n/)
     .map(cleanMemoryValueLine)
     .find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
 }
 
 function memoryValueRoleMarker(value: string): string | undefined {
@@ -7352,6 +7790,7 @@ function bundleIdentity(
     source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
+    work_memory_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
@@ -7614,6 +8053,11 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
                AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
+             WHEN job_type IN ('trace_summary', 'import_summary')
+               AND json_extract(payload_json, '$.source') IN (
+                 'startup.processing_repair',
+                 'startup.placeholder_summary_repair'
+               ) THEN 90
              WHEN job_type = 'trace_summary'
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
              WHEN job_type = 'import_summary'

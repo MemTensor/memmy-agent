@@ -60,7 +60,9 @@ export const JobTypeSchema = z.enum([
   "skill_batch_evolve",
   "skill_trial_resolve",
   "decision_repair",
-  "work_memory_extract"
+  "work_memory_extract",
+  "work_memory_idle_flush",
+  "feedback_experience"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -191,6 +193,9 @@ export const MemoryListItemSchema = z.object({
   status: MemoryStatusSchema,
   title: NonEmptyStringSchema,
   summary: z.string(),
+  sourceText: z.string().optional(),
+  generatedTitle: z.string().optional(),
+  experienceDraft: z.boolean().optional(),
   tags: z.array(z.string()),
   processing: MemoryProcessingRecordSchema.optional(),
   metrics: MemoryMetricsSchema.optional(),
@@ -266,7 +271,9 @@ export const EpisodeRefSchema = z.object({
   skillMemoryIds: z.array(NonEmptyStringSchema).optional(),
   linkedSkillId: NonEmptyStringSchema.optional(),
   skillStatus: z.string().optional(),
-  skillReason: z.string().optional()
+  skillReason: z.string().optional(),
+  titleGenerated: z.boolean().optional(),
+  titlePending: z.boolean().optional()
 });
 export type EpisodeRef = z.infer<typeof EpisodeRefSchema>;
 

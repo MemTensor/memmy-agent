@@ -41,6 +41,27 @@ function withoutCreatedAt<T extends Record<string, any>>(row: T): T {
   return copy;
 }
 
+function withoutOffset(value: any): any {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const { transcript_offset: _offset, ...rest } = value as Record<string, unknown>;
+  void _offset;
+  return rest;
+}
+
+/**
+ * Persisted transcript rows stripped of the fields the writers add on the way
+ * to disk — the CreatedAt synthesis and the transcript_offset identity stamp —
+ * for cases that assert record content. Both have their own coverage.
+ */
+function transcriptRows(sessionKey: string): any[] {
+  return fs.readFileSync(webuiTranscriptPath(sessionKey), "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line))
+    .map(withoutOffset)
+    .map(withoutCreatedAt);
+}
+
 function modelSelection(preset: string, provider: string, model: string): any {
   const endpointId = provider === "anthropic" ? "messages" : "chat";
   const protocol = provider === "anthropic" ? "anthropic-messages" : "openai-chat-completions";
@@ -1203,7 +1224,7 @@ describe("WebSocket channel", () => {
       },
     }));
 
-    expect(sent(ws)).toEqual({
+    expect(withoutOffset(sent(ws))).toEqual({
       event: "context_compaction",
       chat_id: "chat-1",
       compaction_id: "context-compaction:turn-1",
@@ -1211,11 +1232,7 @@ describe("WebSocket channel", () => {
       text: "压缩已完成",
       content: "压缩已完成",
     });
-    const transcript = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\n/u)
-      .map((line) => JSON.parse(line));
-    expect(transcript.map(withoutCreatedAt)).toEqual([sent(ws)]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([withoutOffset(sent(ws))]);
   });
 
   it("sends retry wait as a live-only event without transcript content", async () => {
@@ -1592,17 +1609,15 @@ describe("WebSocket channel", () => {
 
     await channel.dispatchEnvelope(ws, "client-1", { type: "stop", chat_id: "chat-1" });
     expect(cancelActiveTasks).toHaveBeenCalledWith("websocket:chat-1");
-    expect(sent(ws)).toEqual({
+    expect(withoutOffset(sent(ws))).toEqual({
       event: "stop_result",
       chat_id: "chat-1",
       stopped: 1,
     });
     expect(bus.inbound.getNowait()).toBeUndefined();
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines.map(withoutCreatedAt)).toEqual([{ event: "stop_result", chat_id: "chat-1", stopped: 1 }]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([
+      { event: "stop_result", chat_id: "chat-1", stopped: 1 },
+    ]);
   });
 
   it("emits stream and goal control events to subscribers", async () => {
@@ -2004,7 +2019,7 @@ describe("WebSocket channel", () => {
       }),
     );
 
-    expect(sent(ws)).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
+    expect(withoutOffset(sent(ws))).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
   });
 
   it("drops live payloads for inactive turn ids but keeps cancellation terminal file edits", async () => {
@@ -2064,11 +2079,7 @@ describe("WebSocket channel", () => {
       }],
     });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines.map(withoutCreatedAt)).toEqual([sent(ws, 1)]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([withoutOffset(sent(ws, 1))]);
   });
 
   it("sends agent UI blobs on progress messages", async () => {
@@ -2111,6 +2122,52 @@ describe("WebSocket channel", () => {
     expect(sent(ws, 1)).not.toHaveProperty("resuming");
   });
 
+  it("stamps transcript_offset on broadcast delta frames, increasing across the stream", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
+    await channel.sendDelta("chat-1", "lo", { streamId: "s1", streamEnd: true });
+
+    const first = sent(ws, 0);
+    const last = sent(ws, 1);
+    expect(typeof first.transcript_offset).toBe("number");
+    expect(typeof last.transcript_offset).toBe("number");
+    expect(first.transcript_offset).toBeLessThan(last.transcript_offset);
+
+    // The broadcast identity is the record's starting byte position in the file,
+    // so the two frames match the two persisted rows.
+    const persisted = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    expect(persisted.map((row: any) => row.event)).toEqual(["delta", "stream_end"]);
+    expect(persisted.map((row: any) => row.transcript_offset)).toEqual([
+      first.transcript_offset,
+      last.transcript_offset,
+    ]);
+  });
+
+  it("broadcasts delta frames without transcript_offset when the transcript write fails", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    // Make the transcript path unwritable so appendTranscriptObject throws.
+    const transcriptPath = webuiTranscriptPath("websocket:chat-1");
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    fs.mkdirSync(transcriptPath, { recursive: true });
+
+    await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
+
+    const payload = sent(ws, 0);
+    expect(payload).toMatchObject({ event: "delta", text: "hel" });
+    expect(payload).not.toHaveProperty("transcript_offset");
+  });
+
   it("emits resuming stream_end frames only when requested", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
@@ -2150,11 +2207,7 @@ describe("WebSocket channel", () => {
       goalOutcome: "active",
     });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines.map(withoutCreatedAt)).toEqual([
+    expect(transcriptRows("websocket:chat-1")).toEqual([
       { event: "reasoning_delta", chat_id: "chat-1", text: "thinking", stream_id: "r1" },
       { event: "reasoning_end", chat_id: "chat-1", stream_id: "r1" },
       {
@@ -2609,11 +2662,7 @@ describe("WebSocket channel", () => {
     await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
     await channel.sendDelta("chat-1", "lo", { streamId: "s1", streamEnd: true, resuming: true });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines.map(withoutCreatedAt)).toEqual([
+    expect(transcriptRows("websocket:chat-1")).toEqual([
       { event: "delta", chat_id: "chat-1", text: "hel", stream_id: "s1" },
       { event: "stream_end", chat_id: "chat-1", resuming: true, text: "hello", stream_id: "s1" },
     ]);
@@ -2772,7 +2821,7 @@ describe("WebSocketChannel memmy parity cases", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
     await channel.send(new OutboundMessage({ channel: "websocket", chatId: "chat-1", metadata: { fileEditEvents: [{ path: "a.ts", action: "write" }] } }));
-    expect(sent(ws)).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
+    expect(withoutOffset(sent(ws))).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
   });
 
   it("includes agent UI payloads in progress messages", async () => {

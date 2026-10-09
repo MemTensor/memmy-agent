@@ -21,7 +21,9 @@ describe("project environment profile pipeline", () => {
     await pipeline.process(job(), evidence);
 
     expect(prompt).toContain("valid JSON object");
-    expect(complete.mock.calls[0]?.[0]?.[0]).toEqual({ role: "system", content: prompt });
+    expect(complete.mock.calls[0]?.[0]?.[0]?.role).toBe("system");
+    expect(complete.mock.calls[0]?.[0]?.[0]?.content).toContain(prompt);
+    expect(complete.mock.calls[0]?.[0]?.[0]?.content).toContain("English");
     expect(complete.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ operation, maxTokens: 65_536 }));
     expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
       scanId: "scan-1",
@@ -31,6 +33,30 @@ describe("project environment profile pipeline", () => {
       operation: "create",
       profile: "Complete profile"
     }));
+  });
+
+  it("pins an empty profile create to the interface language", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"create","profile":"完整画像"}');
+    const { pipeline } = fixture(complete, null, "scan-1", "zh-CN");
+    await pipeline.process(job(), derived("code"));
+    expect(complete.mock.calls[0]?.[0]?.[0]?.content).toContain("Simplified Chinese");
+    expect(complete.mock.calls[0]?.[0]?.[0]?.content).not.toContain("All natural-language answers MUST be in English.");
+  });
+
+  it("keeps the language of an existing profile on update", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"update","profile":"Updated Chinese profile"}');
+    const profiles = [
+      "现有项目画像：这是一份中文说明。",
+      "项目使用 TypeScript、Next.js、React、TanStackQuery、Electron 和 better-sqlite3。"
+    ];
+    for (const currentProfile of profiles) {
+      complete.mockClear();
+      const { pipeline } = fixture(complete, currentProfile, "scan-1", "zh-CN");
+      await pipeline.process(job(), derived("code"));
+      const system = complete.mock.calls[0]?.[0]?.[0]?.content ?? "";
+      expect(system).not.toContain("All natural-language answers MUST be in English.");
+      expect(system).not.toContain("All natural-language answers MUST be in Simplified Chinese");
+    }
   });
 
   it("passes the current profile and applies noop without repeating it", async () => {
@@ -102,7 +128,12 @@ describe("project environment profile pipeline", () => {
   });
 });
 
-function fixture(complete: LlmClient["complete"], currentProfile: string | null = null, scanId = "scan-1") {
+function fixture(
+  complete: LlmClient["complete"],
+  currentProfile: string | null = null,
+  scanId = "scan-1",
+  language?: "zh-CN" | "en-US"
+) {
   const applyProfile = vi.fn().mockReturnValue({ stale: false });
   const getState = vi.fn().mockReturnValue({ currentScanId: scanId });
   const repos = {
@@ -121,7 +152,8 @@ function fixture(complete: LlmClient["complete"], currentProfile: string | null 
     getState,
     pipeline: new ProjectEnvironmentProfilePipeline({
       repos,
-      llm: { complete, status: () => ({ provider: "test", model: "test" }) } as LlmClient
+      llm: { complete, status: () => ({ provider: "test", model: "test" }) } as LlmClient,
+      language
     })
   };
 }

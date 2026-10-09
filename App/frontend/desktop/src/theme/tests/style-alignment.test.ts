@@ -221,8 +221,29 @@ describe("prototype style alignment", () => {
     expect(settingsTokenUsageCss).toContain("font-family: var(--font-sans);");
     expect(globalCss).not.toContain("font-family: -apple-system");
     expect(settingsTokenUsageCss).not.toContain("OpenAI Sans");
+    expect(settingsTokenUsageCss).toMatch(/\.budgetMeter\s*\{[^}]*height: 4px;[^}]*border: 0;[^}]*background: var\(--usage-track\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.budgetMeterFillGreen\s*\{[^}]*background: var\(--color-action-sky\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.meterFill\s*\{[^}]*background: var\(--color-action-sky\);/s);
+    expect(settingsTokenUsageCss).toMatch(/\.budgetHint\s*\{[^}]*margin: 0 0 6px;[^}]*font-size: var\(--codex-text-sm\);[^}]*line-height: 19px;/s);
+    expect(settingsTokenUsageCss).toContain(".budgetMeterFillYellow");
+    expect(settingsTokenUsageCss).toContain(".budgetMeterFillRed");
+    expect(settingsTokenUsageCss).toMatch(/\.budgetInput\s*\{[^}]*background: var\(--color-background-paper\);/s);
     expect(contentTopbarRule).toContain("position: absolute;");
     expect(contentTopbarRule).toContain("top: 0;");
+    expect(contentTopbarRule).toContain("z-index: 10000;");
+    expect(globalCss).toContain(".window-drag-exclusion--memory-budget-capsule");
+    expect(globalCss).toMatch(/\.window-drag-exclusion--memory-budget-capsule\s*\{[^}]*z-index: 10002;/s);
+    expect(contentTopbarRule).toContain("display: grid;");
+    expect(contentTopbarRule).toContain("grid-template-columns: minmax(0, 1fr) minmax(0, max-content) max-content;");
+    expect(globalCss).toMatch(/\.app-frame-content-topbar:has\(\.memory-token-budget-capsule\)\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, max-content\) minmax\(max-content, 1fr\);/s);
+    expect(globalCss).toContain(".app-frame-main--sidebar-hidden .app-frame-content-topbar:has(.memory-token-budget-capsule)");
+    expect(globalCss).toContain("--app-frame-topbar-sidebar-safe: calc(var(--codex-sidebar-hidden-topbar-padding) - var(--codex-content-padding-x));");
+    expect(globalCss).toContain(
+      "minmax(var(--app-frame-topbar-sidebar-safe), 1fr)\n    minmax(0, max-content)\n    minmax(var(--app-frame-topbar-sidebar-safe), 1fr);"
+    );
+    expect(globalCss).toMatch(
+      /\.app-frame-content-topbar:has\(\.memory-token-budget-capsule\) \.app-frame-content-topbar__start\s*\{[^}]*box-sizing: border-box;[^}]*padding-left: var\(--app-frame-topbar-sidebar-safe\);/s
+    );
     expect(contentTopbarRule).toContain("min-height: var(--codex-toolbar-height);");
     expect(contentTopbarRule).toContain("align-items: center;");
     expect(contentTopbarRule).toContain("overflow: hidden;");

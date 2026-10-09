@@ -1790,6 +1790,153 @@ describe("agent chat slice", () => {
     expect(state.messagesByChatId["chat-2"]?.map((message) => message.content)).toEqual(["chat2 正常回答"]);
   });
 
+  it("drops a re-delivered delta that repeats an already applied transcript offset", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "从截图中", turn_id: "turn-1", transcript_offset: 100 }
+    });
+    // Same chunk arriving over the second delivery path.
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "从截图中", turn_id: "turn-1", transcript_offset: 100 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "可以清楚看到：", turn_id: "turn-1", transcript_offset: 140 }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant" && message.kind !== "trace");
+    expect(assistant.map((message) => message.content)).toEqual(["从截图中可以清楚看到："]);
+  });
+
+  it("drops a re-delivered reasoning_delta that repeats an already applied transcript offset", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", text: "先看时间", turn_id: "turn-1", transcript_offset: 200 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", text: "先看时间", turn_id: "turn-1", transcript_offset: 200 }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant");
+    expect(assistant.map((message) => message.reasoning).filter(Boolean)).toEqual(["先看时间"]);
+  });
+
+  it("applies every delta when events carry no transcript offset (records never persisted)", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "hel" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "lo" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "lo" } });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant" && message.kind !== "trace");
+    expect(assistant.map((message) => message.content)).toEqual(["hellolo"]);
+  });
+
+  it("shares one watermark across delta and reasoning_delta on the same chat", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", text: "思考一", turn_id: "turn-1", transcript_offset: 10 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "回答一", turn_id: "turn-1", transcript_offset: 20 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", text: "思考二", turn_id: "turn-1", transcript_offset: 30 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "回答二", turn_id: "turn-1", transcript_offset: 40 }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant");
+    const reasoning = assistant.map((message) => message.reasoning).filter(Boolean).join("");
+    const content = assistant.map((message) => message.content).filter(Boolean).join("");
+    expect(reasoning).toContain("思考一");
+    expect(reasoning).toContain("思考二");
+    expect(content).toContain("回答一");
+    expect(content).toContain("回答二");
+  });
+
+  it("drops a re-delivered delta that arrives after stream_end advanced the watermark", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "hel", turn_id: "turn-1", transcript_offset: 10 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "stream_end", chat_id: "chat-1", text: "hello", turn_id: "turn-1", transcript_offset: 50 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "hel", turn_id: "turn-1", transcript_offset: 10 }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant" && message.kind !== "trace");
+    expect(assistant.map((message) => message.content)).toEqual(["hello"]);
+  });
+
+  it("keeps stream watermarks independent per chat", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "chat1", turn_id: "turn-1", transcript_offset: 500 }
+    });
+    // chat-2 restarts from a low offset: it must not inherit chat-1's watermark.
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-2", text: "chat2", turn_id: "turn-2", transcript_offset: 5 }
+    });
+
+    expect(state.messagesByChatId["chat-1"]?.map((message) => message.content)).toEqual(["chat1"]);
+    expect(state.messagesByChatId["chat-2"]?.map((message) => message.content)).toEqual(["chat2"]);
+  });
+
+  it("re-bases the watermark on a full hydrate so a rebuilt transcript still streams", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "old", turn_id: "turn-1", transcript_offset: 900 }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "hydrate-1"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "hydrate-1",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-2",
+        last_turn_closed: false,
+        messages: []
+      }
+    });
+    // The recreated transcript restarts at a low offset; it must not be swallowed.
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", text: "new stream", turn_id: "turn-2", transcript_offset: 3 }
+    });
+
+    expect(state.messages.map((message) => message.content)).toContain("new stream");
+  });
+
   it("restores assistant media stream suppression from an open hydrated turn", () => {
     let state = loadHistory(initialAgentState, "websocket:chat-1", [
       { id: "user-1", role: "user", content: "画图" },
@@ -3132,7 +3279,7 @@ describe("agent chat slice", () => {
     expect(state.messages.every((message) => !message.isStreaming && !message.reasoningStreaming)).toBe(true);
     expect(state.messages.every((message) => message.stoppedByUser !== true)).toBe(true);
     expect(state.messagesByChatId["chat-1"]?.every((message) => !message.isStreaming && !message.reasoningStreaming)).toBe(true);
-    expect(state.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(false);
+    expect(state.retryWaitStatusByChatId["chat-1"]).toBeUndefined();
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBeNull();
     expect(state.lastTaskCompletion).toBeNull();
     expect(state.completedUnseenByChatId["chat-1"]).toBeUndefined();
@@ -4086,7 +4233,7 @@ describe("agent chat slice", () => {
     expect(state.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(true);
   });
 
-  it("stops retry_wait running when answer text starts without merging content", () => {
+  it("clears retry_wait status when answer text starts without merging content", () => {
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
@@ -4104,16 +4251,13 @@ describe("agent chat slice", () => {
       event: { event: "delta", chat_id: "chat-1", turn_id: "turn-retry", text: "真正正文" }
     });
 
-    expect(state.retryWaitStatusByChatId["chat-1"]).toMatchObject({
-      text: "Model request failed, retrying attempt 2 in 2s...",
-      isRunning: false
-    });
+    expect(state.retryWaitStatusByChatId["chat-1"]).toBeUndefined();
     expect(state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(state.messages[1]).toMatchObject({ role: "assistant", content: "真正正文", isStreaming: true });
     expect(state.messages[1]?.content).not.toContain("Model request failed");
   });
 
-  it("keeps retry_wait out of activity traces when tool progress starts", () => {
+  it("clears retry_wait status when tool progress starts", () => {
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
@@ -4137,7 +4281,7 @@ describe("agent chat slice", () => {
       }
     });
 
-    expect(state.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(false);
+    expect(state.retryWaitStatusByChatId["chat-1"]).toBeUndefined();
     expect(state.messages.map((message) => message.role)).toEqual(["user", "tool"]);
     expect(state.messages[1]).toMatchObject({
       role: "tool",
@@ -4147,7 +4291,7 @@ describe("agent chat slice", () => {
     expect(state.messages.some((message) => message.content.includes("Model request failed"))).toBe(false);
   });
 
-  it("stops retry_wait running on turn_end and stop_result", () => {
+  it("clears retry_wait status on turn_end and stop_result", () => {
     let ended = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     ended = agentReducer(ended, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     ended = agentReducer(ended, { type: "agent/userMessageQueued", chatId: "chat-1", content: "turn end" });
@@ -4157,7 +4301,7 @@ describe("agent chat slice", () => {
     });
     ended = agentReducer(ended, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-end" } });
 
-    expect(ended.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(false);
+    expect(ended.retryWaitStatusByChatId["chat-1"]).toBeUndefined();
     expect(ended.isSending).toBe(false);
 
     let stopped = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
@@ -4169,7 +4313,7 @@ describe("agent chat slice", () => {
     });
     stopped = agentReducer(stopped, { type: "agent/wsEvent", event: { event: "stop_result", chat_id: "chat-1", stopped: 1, turn_id: "turn-stop" } });
 
-    expect(stopped.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(false);
+    expect(stopped.retryWaitStatusByChatId["chat-1"]).toBeUndefined();
     expect(stopped.isSending).toBe(false);
   });
 
