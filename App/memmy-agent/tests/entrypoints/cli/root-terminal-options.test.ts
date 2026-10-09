@@ -43,7 +43,7 @@ describe("parseRootTerminalOptions", () => {
     { input: argv("--version") },
     { input: argv("-V") },
     { input: argv("gateway") },
-    { input: argv("onboard", "--wizard") },
+    { input: argv("onboard", "--defaults") },
   ])("leaves help, version, and subcommands to Commander: $input", ({ input }) => {
     expect(parseRootTerminalOptions(input)).toBeNull();
   });

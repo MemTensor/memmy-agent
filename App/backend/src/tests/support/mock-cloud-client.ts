@@ -16,6 +16,8 @@ import type {
   TokenQuotaEligibility,
   CloudLoginInput,
   CloudLogoutInput,
+  CloudSocialLoginCredentials,
+  CloudStartSocialLoginInput,
   SendEmailCodeInput,
   SendPhoneCodeInput,
   SendTelemetryInput,
@@ -23,7 +25,7 @@ import type {
   UpdateAccountGuideInput,
   UpdateCloudAccountProfileInput
 } from "../../adapters/outbound/cloud-client/types.js";
-import type { LegalAgreementUrls, PromotionFlags } from "@memmy/local-api-contracts";
+import type { LegalAgreementUrls, LotteryStatus, PromotionFlags } from "@memmy/local-api-contracts";
 
 export interface CreateMockCloudClientOptions {
   health?: CloudHealth;
@@ -33,6 +35,8 @@ export interface CreateMockCloudClientOptions {
   legal?: LegalAgreementUrls;
   /** Promotions. */
   promotions?: PromotionFlags;
+  /** Lottery campaign status. */
+  lotteryStatus?: LotteryStatus;
 }
 
 export function createMockCloudClient(options: CreateMockCloudClientOptions = {}): CloudClient {
@@ -107,6 +111,22 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
         isNewUser: true,
         profile
       };
+    },
+
+    async startSocialLogin(input: CloudStartSocialLoginInput) {
+      return {
+        flowId: "mock-social-flow-id",
+        pollToken: "mock-social-poll-token-000000000000",
+        authorizationUrl: input.provider === "google"
+          ? "https://accounts.google.com/o/oauth2/v2/auth"
+          : "https://github.com/login/oauth/authorize",
+        expiresInSec: 600,
+        pollIntervalSec: 2
+      };
+    },
+
+    async getSocialLoginStatus(_input: CloudSocialLoginCredentials) {
+      return { status: "pending" as const };
     },
 
     async logout(_input: CloudLogoutInput) {
@@ -207,6 +227,18 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
 
     async getPromotions() {
       return options.promotions;
+    },
+
+    async getLotteryStatus() {
+      return options.lotteryStatus;
+    },
+
+    async getLotteryReward() {
+      return { hasReward: false };
+    },
+
+    async ackLotteryReward() {
+      return undefined;
     }
   };
 }

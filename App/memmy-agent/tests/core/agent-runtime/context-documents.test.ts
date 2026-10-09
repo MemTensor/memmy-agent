@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextBuilder } from "../../../src/core/agent-runtime/context.js";
-import { extractDocuments } from "../../../src/utils/document.js";
 
 const roots: string[] = [];
 
@@ -41,15 +40,24 @@ describe("context builder document handling", () => {
     expect(types).toContain("text");
   });
 
-  it("ignores non-image media files", () => {
+  it("generates an attachments manifest for non-image files instead of extracting text", () => {
     const root = tempRoot();
     const txt = path.join(root, "notes.txt");
-    fs.writeFileSync(txt, "some text", "utf8");
+    fs.writeFileSync(txt, "some text content", "utf8");
 
-    expect(builder(root).buildUserContent("summarize", [txt])).toBe("summarize");
+    const result = builder(root).buildUserContent("summarize", [txt]);
+
+    // Should return an array with a text block containing the attachment manifest
+    expect(Array.isArray(result)).toBe(true);
+    const textBlocks = (result as any[]).filter((b) => b.type === "text");
+    expect(textBlocks.length).toBeGreaterThan(0);
+    const combined = textBlocks.map((b: any) => b.text ?? "").join("\n");
+    expect(combined).toContain("notes.txt");
+    expect(combined).toContain("<attachments>");
+    expect(combined).not.toContain("some text content");
   });
 
-  it("keeps only images from mixed media", () => {
+  it("includes attachment manifest alongside images for mixed media", () => {
     const root = tempRoot();
     const png = path.join(root, "chart.png");
     const txt = path.join(root, "report.txt");
@@ -60,30 +68,35 @@ describe("context builder document handling", () => {
 
     expect(Array.isArray(result)).toBe(true);
     expect((result as any[]).some((block) => block.type === "image_url")).toBe(true);
-    const textParts = (result as any[]).filter((block) => block.type === "text").map((block) => block.text ?? "");
-    expect(textParts.every((text) => !text.includes("report text"))).toBe(true);
+    const textParts = (result as any[]).filter((block) => block.type === "text").map((block: any) => block.text ?? "");
+    const combined = textParts.join("\n");
+    expect(combined).toContain("report.txt");
+    expect(combined).not.toContain("report text");
   });
 
-  it("preserves document text when extraction runs before user content building", async () => {
+  it("includes the original user text alongside the attachment manifest", () => {
     const root = tempRoot();
     const report = path.join(root, "report.txt");
     fs.writeFileSync(report, "Quarterly revenue is $5M", "utf8");
 
-    const [newContent, imageOnly] = await extractDocuments("summarize", [report]);
-    const result = builder(root).buildUserContent(newContent, imageOnly.length ? imageOnly : null);
+    const result = builder(root).buildUserContent("summarize this", [report]);
 
-    expect(result).toContain("Quarterly revenue");
-    expect(result).toContain("summarize");
+    expect(Array.isArray(result)).toBe(true);
+    const textParts = (result as any[]).filter((b: any) => b.type === "text").map((b: any) => b.text ?? "");
+    const combined = textParts.join("\n");
+    expect(combined).toContain("summarize this");
+    expect(combined).toContain("report.txt");
+    expect(combined).not.toContain("Quarterly revenue");
   });
 
-  it("loses document text when extraction is skipped", () => {
+  it("document text is not present in user content (model reads via read_file tool)", () => {
     const root = tempRoot();
     const report = path.join(root, "report.txt");
     fs.writeFileSync(report, "Secret data in document", "utf8");
 
     const result = builder(root).buildUserContent("summarize", [report]);
 
-    expect(result).toBe("summarize");
-    expect(result).not.toContain("Secret data");
+    const asString = JSON.stringify(result);
+    expect(asString).not.toContain("Secret data");
   });
 });

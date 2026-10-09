@@ -1,5 +1,5 @@
 /** Token detail page module. */
-import type { OnboardingStateDto } from "@memmy/local-api-contracts";
+import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } from "@memmy/local-api-contracts";
 import { Check, ChevronLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
@@ -7,12 +7,14 @@ import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
-import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
+import { buildAccountOnboardingStartPatch, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
+import { SocialLoginButtons } from "../components/social-login-buttons.js";
 import { LanguageToggleButton, PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
+import { useSocialLogin } from "../components/use-social-login.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -26,6 +28,7 @@ export function TokenDetailPage() {
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
   const verificationCodeAuth = useVerificationCodeAuth();
+  const socialLogin = useSocialLogin();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -44,18 +47,20 @@ export function TokenDetailPage() {
     setModePersistenceFeedback(null);
     setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
-  }, [channel, verificationCodeAuth.resetInteractionState]);
+    socialLogin.reset();
+  }, [channel, verificationCodeAuth.resetInteractionState, socialLogin.reset]);
 
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
     verificationCodeAuth.clearFeedback();
+    socialLogin.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
   }
 
   async function submitLogin() {
-    if (verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || socialLogin.pendingProvider || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
@@ -71,6 +76,21 @@ export function TokenDetailPage() {
       code,
       invitationEnabled ? inviteCode : undefined
     );
+    await finishAccountLogin(loginResult, channel);
+  }
+
+  async function startSocialLogin(provider: SocialLoginProvider) {
+    const loginResult = await socialLogin.start(
+      provider,
+      invitationEnabled ? inviteCode : undefined
+    );
+    await finishAccountLogin(loginResult, provider);
+  }
+
+  async function finishAccountLogin(
+    loginResult: AccountLoginResultView | null,
+    method: "email" | "phone" | SocialLoginProvider
+  ) {
     if (!loginResult || !loginResult.session.authenticated) {
       return;
     }
@@ -83,7 +103,7 @@ export function TokenDetailPage() {
     }
 
     track(buildInvitationSignupEvent({
-      channel,
+      channel: method,
       isNewUser: session.isNewUser,
       invitationCode: invitationEnabled ? inviteCode : undefined
     }));
@@ -96,23 +116,24 @@ export function TokenDetailPage() {
       registeredAt: session.profile.registeredAt
     }));
 
-    const onboardingPatch: Partial<OnboardingStateDto> = session.profile.hasFinishedGuide
+    const onboardingPatch: Partial<OnboardingStateDto> =
+      session.profile.hasFinishedGuide && state.bootstrap && !shouldShowFirstEncounterReport(state.bootstrap.onboarding)
       ? {
         completed: true,
         currentStep: "completed",
         completedAt: new Date().toISOString(),
         hasAcceptedTerms: true
       }
-      : buildAccountOnboardingStartPatch();
+      : buildAccountOnboardingStartPatch(state.bootstrap?.onboarding);
     setPendingAccountOnboarding(onboardingPatch);
     await continueAfterRegistration(onboardingPatch);
   }
 
   async function continueAfterRegistration(forcedOnboarding?: Partial<OnboardingStateDto>) {
     const onboarding = state.bootstrap?.onboarding;
-    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();
+    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);
     const nextOnboarding = {
-      ...buildAccountOnboardingStartPatch(),
+      ...buildAccountOnboardingStartPatch(onboarding),
       ...onboarding,
       ...onboardingPatch
     };
@@ -180,8 +201,8 @@ export function TokenDetailPage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
-                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}
+                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}
                 sendCodeLabel={verificationCodeAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
@@ -192,6 +213,14 @@ export function TokenDetailPage() {
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
               />
+              {channel === "email" ? (
+                <SocialLoginButtons
+                  pendingProvider={socialLogin.pendingProvider}
+                  disabled={verificationCodeAuth.loginPending || modePersistencePending}
+                  feedback={socialLogin.feedback}
+                  onLogin={(provider) => void startSocialLogin(provider)}
+                />
+              ) : null}
             </div>
           </div>
         </section>

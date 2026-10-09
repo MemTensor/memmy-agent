@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { INTERACTIVE_MEMORY_TIMEOUT_MS } from "./client.js";
 import { getOrCreateInstallationId } from "../analytics/cloud-analytics.js";
 import { AgentHook, AgentHookContext, type AgentToolRegistrationContext, type SystemPromptBuildContext } from "../core/agent-runtime/hook.js";
 import { ContextBuilder } from "../core/agent-runtime/context.js";
@@ -148,11 +149,15 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.withInteractiveDeadline(async () => {
+        await this.ensureSession(ctx, sessionKey);
+        const state = this.sessionStateBySessionKey.get(sessionKey);
+        if (state?.protocol === "v2") await this.loadL3Context(sessionKey, state);
+      });
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.rememberUnavailableL3(sessionKey);
-      this.warnMemoryUnavailable(sessionKey, "session-start", error);
+      this.warnMemoryUnavailable(sessionKey, "recall", error);
     }
   }
 
@@ -160,10 +165,36 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.withInteractiveDeadline(() => this.ensureSession(ctx, sessionKey));
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "session-start", error);
+    }
+  }
+
+  /**
+   * Bounds a memory call that sits between the user and their reply.
+   *
+   * These hooks are already written to continue without memory, so the only
+   * thing a long wait buys is a stalled send: the desktop client abandons a
+   * message after 30 seconds, while the memory client alone allows 60. Stop
+   * waiting well before that. The request itself is left running, so a slow
+   * service still warms the session for the next turn.
+   */
+  private async withInteractiveDeadline<T>(operation: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`memory did not answer within ${INTERACTIVE_MEMORY_TIMEOUT_MS}ms`)),
+            INTERACTIVE_MEMORY_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -351,7 +382,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           throughL1MemoryId: head.throughL1MemoryId,
         });
       }
-      await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "recall", error);
@@ -573,19 +603,22 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     return resolved;
   }
 
-  private async prepareL3Session(ctx: AgentHookContext, sessionKey: string, force: boolean): Promise<void> {
-    await this.ensureSession(ctx, sessionKey);
-    const state = this.sessionStateBySessionKey.get(sessionKey);
-    if (!state || state.protocol !== "v2") return;
-    if (!force && state.l3Cache.loadedAt) return;
-    await this.loadL3Context(sessionKey, state);
-  }
-
   private async loadL3Context(sessionKey: string, state: MemmyMemorySessionState): Promise<void> {
     const response = await this.client.l3WorldModelContext(
       state.memorySessionId,
       this.l3Envelope(sessionKey, state),
     );
+    const loadedAt = new Date().toISOString();
+    const current = state.l3Cache;
+    if (
+      response.memoryId !== null
+      && current.status === "loaded"
+      && current.memoryId === response.memoryId
+      && current.memoryVersion === response.memoryVersion
+    ) {
+      state.l3Cache = { ...current, loadedAt };
+      return;
+    }
     state.l3Cache = {
       sessionId: state.memorySessionId,
       projectId: response.projectId,
@@ -594,7 +627,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       memoryVersion: response.memoryVersion,
       renderedContext: response.renderedContext,
       sourceMemoryIds: [...response.sourceMemoryIds],
-      loadedAt: new Date().toISOString(),
+      loadedAt,
     };
   }
 

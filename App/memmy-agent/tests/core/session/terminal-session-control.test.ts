@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  terminalControlLockfilePath,
   TerminalRunControl,
   TerminalSessionTurnLock,
 } from "../../../src/core/session/terminal-session-control.js";
@@ -81,7 +82,8 @@ describe("terminal session control", () => {
     const target = lock.targetPath("cli:stale");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.closeSync(fs.openSync(target, "a"));
-    const lockDirectory = `${target}.lock`;
+    const lockDirectory = terminalControlLockfilePath(target);
+    fs.mkdirSync(path.dirname(lockDirectory), { recursive: true });
     fs.mkdirSync(lockDirectory);
     const staleAt = new Date(Date.now() - 180_000);
     fs.utimesSync(lockDirectory, staleAt, staleAt);
@@ -92,6 +94,19 @@ describe("terminal session control", () => {
     });
 
     expect(entered).toBe(true);
+    expect(fs.existsSync(lockDirectory)).toBe(false);
+  });
+
+  it("keeps lock directories outside synced workspaces", async () => {
+    const root = temporaryRoot();
+    const lock = new TerminalSessionTurnLock(root);
+    const target = lock.targetPath("cli:local-lock");
+    const lockDirectory = terminalControlLockfilePath(target);
+
+    expect(lockDirectory.startsWith(root)).toBe(false);
+    await lock.runExclusive("cli:local-lock", async () => {
+      expect(fs.existsSync(lockDirectory)).toBe(true);
+    });
     expect(fs.existsSync(lockDirectory)).toBe(false);
   });
 

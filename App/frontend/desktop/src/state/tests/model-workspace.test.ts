@@ -1,7 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ModelConfigInput, ModelConfigView } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelConfigInput,
+  type ModelConfigView
+} from "@memmy/local-api-contracts";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { CLIENT_PRESET_ID_PREFIX, persistModelCatalogMutation } from "../../api/config-client.js";
@@ -15,11 +19,13 @@ import {
   assignedCatalogEndpointId,
   clearLegacyModelWorkspace,
   createModelWorkspace,
+  defaultModelSelectionInput,
   deleteModelConnection,
   getModelCandidates,
   getTaskModelCandidates,
   modelConfigInput,
   resolveModelSelection,
+  setDefaultTaskModel,
   setModelAssignment,
   setTaskModelCandidates,
   upsertByokPreset,
@@ -156,6 +162,30 @@ function catalog(): ModelConfigView {
 }
 
 describe("canonical model workspace adapter", () => {
+  it("把小米的 UI provider id 归一成 catalog id，阶跃保持同名", async () => {
+    const base = createModelWorkspace(await readModelConfigCatalog(catalogFixture()));
+
+    const xiaomi = upsertByokPreset(base, {
+      provider: "xiaomi",
+      endpoint: "https://api.xiaomimimo.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-mimo",
+      model: "mimo-v2.5-pro",
+      capabilities: ["agent"]
+    });
+    expect(xiaomi.workspace.catalog.providers.map((provider) => provider.provider)).toContain("xiaomi_mimo");
+
+    const stepfun = upsertByokPreset(base, {
+      provider: "stepfun",
+      endpoint: "https://api.stepfun.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-stepfun",
+      model: "step-3.5-flash",
+      capabilities: ["agent"]
+    });
+    expect(stepfun.workspace.catalog.providers.map((provider) => provider.provider)).toContain("stepfun");
+  });
+
   it("真实 Backend catalog：空目录经 onboarding 两阶段创建 server UUID 并让一 preset 承载三种 chat capability", async () => {
     const file = catalogFixture();
     let workspace = createModelWorkspace(await readModelConfigCatalog(file));
@@ -403,6 +433,58 @@ describe("canonical model workspace adapter", () => {
 
     expect(saved.providers[0]!.endpoints.map((endpoint) => endpoint.endpointId)).not.toContain("embedding");
     expect(saved.providers[0]!.models.map((model) => model.model)).not.toContain("embedding-delete");
+  });
+
+  it("真实 Backend catalog：账号空间编辑共享连接并删除部分模型时清理双空间引用", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    const created = await writeModelConfigCatalog(file, {
+      configRevision: empty.configRevision,
+      providers: [{
+        provider: "openai",
+        endpoints: [{
+          endpointId: "chat",
+          apiBase: "https://api.openai.com/v1",
+          protocol: "openai-chat-completions",
+          apiKey: "sk-partial-delete"
+        }],
+        models: [
+          { endpointId: "chat", model: "gpt-keep", source: "byok", capabilities: ["agent"] },
+          { endpointId: "chat", model: "gpt-delete", source: "byok", capabilities: ["agent"] }
+        ]
+      }],
+      modelAssignments: structuredClone(emptyAssignments)
+    });
+    const keepId = created.providers[0]!.models.find((model) => model.model === "gpt-keep")!.presetId;
+    const deleteId = created.providers[0]!.models.find((model) => model.model === "gpt-delete")!.presetId;
+    const assigned = modelConfigInput(createModelWorkspace(created));
+    assigned.modelAssignments.byok.agent = { candidates: [keepId, deleteId], default: keepId };
+    assigned.modelAssignments.account.agent = { candidates: [keepId, deleteId], default: keepId };
+    const base = await writeModelConfigCatalog(file, assigned);
+
+    const workspace = createModelWorkspace(base);
+    const connection = workspace.spaces.account.connections.find((item) => item.provider === "openai")!;
+    const edited = upsertModelConnection(workspace, "account", {
+      id: connection.id,
+      provider: "openai",
+      endpoint: connection.endpoint,
+      protocol: connection.protocol,
+      models: ["gpt-keep"],
+      modelEntries: [{ presetId: keepId, model: "gpt-keep", capability: "chat" }]
+    });
+
+    expect(edited.error).toBeNull();
+    expect(edited.workspace.catalog.modelAssignments.byok.agent).toEqual({ candidates: [keepId], default: keepId });
+    expect(edited.workspace.catalog.modelAssignments.account.agent).toEqual({ candidates: [keepId], default: keepId });
+
+    const saved = await persistModelCatalogMutation(modelConfigInput(edited.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, base);
+
+    expect(saved.providers[0]!.models.map((model) => model.model)).toEqual(["gpt-keep"]);
+    expect(saved.modelAssignments.byok.agent).toEqual({ candidates: [keepId], default: keepId });
+    expect(saved.modelAssignments.account.agent).toEqual({ candidates: [keepId], default: keepId });
   });
 
   it("真实 Backend catalog：从账号空间删除共享 DashScope 配置并清理双空间引用", async () => {
@@ -780,6 +862,64 @@ describe("canonical model workspace adapter", () => {
     expect(assigned.catalog.modelAssignments.byok).toEqual(originalByok);
   });
 
+  it("账号模式新增自定义 BYOK 模型时同步登记进 byok 真源候选（重启后账号投影不丢弃）", () => {
+    const workspace = createModelWorkspace(catalog());
+    const added = upsertModelConnection(workspace, "account", {
+      provider: "openai",
+      endpoint: "https://api-int.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-custom",
+      models: ["gpt-5.6-sol"],
+      modelCapabilities: { "gpt-5.6-sol": "chat" }
+    });
+
+    expect(added.error).toBeNull();
+    const newPreset = added.workspace.catalog.providers
+      .flatMap((provider) => provider.models)
+      .find((model) => model.model === "gpt-5.6-sol");
+    expect(newPreset).toBeDefined();
+    // 当次可见：进入账号候选
+    expect(added.workspace.catalog.modelAssignments.account.agent.candidates).toContain(newPreset!.presetId);
+    // 关键：后端每次重启用 byok.agent.candidates 重算账号候选，自定义模型必须同时登记于此才不会丢
+    expect(added.workspace.catalog.modelAssignments.byok.agent.candidates).toContain(newPreset!.presetId);
+  });
+
+  it("账号模式选新自定义模型为默认时，该默认因已登记进 byok 真源而能跨重启保留", () => {
+    const workspace = createModelWorkspace(catalog());
+    const added = upsertModelConnection(workspace, "account", {
+      provider: "openai",
+      endpoint: "https://api-int.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-custom",
+      models: ["gpt-5.6-sol"],
+      modelCapabilities: { "gpt-5.6-sol": "chat" }
+    });
+    expect(added.error).toBeNull();
+    const newPresetId = added.workspace.catalog.providers
+      .flatMap((provider) => provider.models)
+      .find((model) => model.model === "gpt-5.6-sol")!.presetId;
+
+    const selected = setDefaultTaskModel(added.workspace, "account", newPresetId);
+
+    // 选中项成为账号默认
+    expect(selected.catalog.modelAssignments.account.agent.default).toBe(newPresetId);
+    // 且它在 byok 真源候选里 —— 后端账号投影仅当默认仍在“由 byok 候选重算出的候选集”中时才保留默认
+    //（见 account-model-projection.test.ts:146-155），因此该默认重启后不会被回退到平台默认
+    expect(selected.catalog.modelAssignments.byok.agent.candidates).toContain(newPresetId);
+  });
+
+  it("defaultModelSelectionInput：仅在选中项是候选且非当前默认时才产出持久化 payload", () => {
+    const workspace = createModelWorkspace(catalog());
+    // account 当前默认是 account-agent;选候选内的 byok-agent → 产出把默认设为 byok-agent 的 payload
+    const input = defaultModelSelectionInput(workspace, "account", "byok-agent");
+    expect(input).not.toBeNull();
+    expect(input!.modelAssignments.account.agent.default).toBe("byok-agent");
+    // 已是当前默认 → 无需写,返回 null(避免重复持久化)
+    expect(defaultModelSelectionInput(workspace, "account", "account-agent")).toBeNull();
+    // 不是该模式候选 → null
+    expect(defaultModelSelectionInput(workspace, "account", "not-a-candidate")).toBeNull();
+  });
+
   it("清空本地 Embedding Assignment 时保留账号 Assignment 与目录项", () => {
     const workspace = createModelWorkspace(catalog());
     const before = modelConfigInput(workspace);
@@ -810,6 +950,19 @@ describe("canonical model workspace adapter", () => {
       .toEqual(["account-agent"]);
   });
 
+  it("删除无关连接时保留两个空间的内置本地 Embedding Assignment", () => {
+    const workspace = createModelWorkspace(catalog());
+    workspace.catalog.modelAssignments.byok.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    workspace.catalog.modelAssignments.account.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    const result = deleteModelConnection(workspace, "account", "openai:chat");
+
+    expect(result.workspace.catalog.modelAssignments.byok.embedding)
+      .toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+    expect(result.workspace.catalog.modelAssignments.account.embedding)
+      .toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+  });
+
   it("Agent 多选/default 与其他任务单选引用 preset ID", () => {
     const workspace = createModelWorkspace(catalog());
     expect(getTaskModelCandidates(workspace, "account").map((item) => item.id)).toEqual(["account-agent", "byok-agent"]);
@@ -827,6 +980,25 @@ describe("canonical model workspace adapter", () => {
       unavailable: true,
       reason: "unavailable"
     });
+  });
+
+  it("历史会话可继续使用目录中仍有效但已从当前候选移除的已提交模型", () => {
+    const workspace = createModelWorkspace(catalog());
+    workspace.catalog.modelAssignments.account.agent = {
+      candidates: ["account-agent"],
+      default: "account-agent"
+    };
+
+    expect(resolveModelSelection(workspace, "account", "byok-agent", {
+      allowUnassignedSelected: true
+    })).toMatchObject({
+      candidate: { id: "byok-agent", model: "gpt-4o", available: true },
+      candidateId: "byok-agent",
+      unavailable: false,
+      reason: "committed"
+    });
+    expect(resolveModelSelection(workspace, "account", "byok-agent"))
+      .toMatchObject({ candidate: null, unavailable: true, reason: "unavailable" });
   });
 
   it("引导只 patch 自己的 endpoint/preset/assignment 并保留既有目录项", () => {

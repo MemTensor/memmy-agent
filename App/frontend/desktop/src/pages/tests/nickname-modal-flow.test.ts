@@ -14,7 +14,7 @@ describe("nickname modal flow", () => {
     for (const { path, continueFn } of accountRegistrationEntries) {
       const pageSource = readSource(path);
 
-      expect(pageSource).toContain(`await ${continueFn}(`);
+      expect(pageSource).toContain(`await ${continueFn}(onboardingPatch);`);
       // The new-user registration branch no longer opens the nickname modal during registration, to avoid pushing the nickname ahead of the scan authorization step.
       expect(pageSource).not.toContain('dispatch(appActions.modalChanged("nickname", true));');
     }

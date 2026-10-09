@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCommand } from "../src/cli/commands.js";
 import { PROJECT_VERSION } from "../src/cli/project-version.js";
 
@@ -30,6 +30,7 @@ describe("memmy CLI command map", () => {
     expect(help).toContain("init --agent codex");
     expect(help).toContain("init --skip-agent-skills");
     expect(help).toContain("--skip-agent-skills");
+    expect(help).toContain("--health-check-timeout-ms");
     expect(help).toContain("Supported agents:");
     expect(help).toContain("Default URL:");
   });
@@ -37,6 +38,53 @@ describe("memmy CLI command map", () => {
   it("prints the CLI version", async () => {
     await expect(runCommand({ argv: ["--version"] })).resolves.toBe(PROJECT_VERSION);
     await expect(runCommand({ argv: ["-v"] })).resolves.toBe(PROJECT_VERSION);
+  });
+
+  it("passes a valid installer health timeout and rejects malformed values", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-cli-timeout-"));
+    roots.push(root);
+    await expect(runCommand({
+      argv: [
+        "install",
+        "--dry-run",
+        "--service-only",
+        "--home", root,
+        "--legacy-root", root,
+        "--health-check-timeout-ms", "1234"
+      ]
+    })).resolves.toMatchObject({
+      ok: true,
+      command: "install",
+      runtime: { ok: true, dryRun: true }
+    });
+
+    await expect(runCommand({
+      argv: [
+        "install",
+        "--dry-run",
+        "--service-only",
+        "--home", root,
+        "--legacy-root", root,
+        "--health-check-timeout-ms", "0"
+      ]
+    })).rejects.toThrow("--health-check-timeout-ms must be a positive integer");
+  });
+
+  it("supports memmy-memory stop as an alias for service stop", async () => {
+    const stop = vi.fn(async (home: string) => ({ ok: true, action: "stop", home }));
+
+    await expect(runCommand({
+      argv: ["stop", "--home", "/tmp/memmy-home"],
+      stopInstalledService: stop
+    })).resolves.toMatchObject({ ok: true, action: "stop" });
+    await expect(runCommand({
+      argv: ["service", "stop", "--home", "/tmp/memmy-home"],
+      stopInstalledService: stop
+    })).resolves.toMatchObject({ ok: true, action: "stop" });
+
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(stop).toHaveBeenNthCalledWith(1, "/tmp/memmy-home");
+    expect(stop).toHaveBeenNthCalledWith(2, "/tmp/memmy-home");
   });
 
   const minimalCases: Array<{

@@ -36,6 +36,9 @@ declare global {
       onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
       openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
       openExternal(url: string): Promise<void>;
+      getComputerHistoryPermissionSessionId?(): Promise<string>;
+      restartForComputerHistoryPermissions?(): Promise<void>;
+      openComputerHistoryMarkdown(filePath: string): Promise<void>;
       openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
       openMailto(mailtoUrl: string): Promise<void>;
       copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
@@ -47,6 +50,8 @@ declare global {
       exportDiagnosticsReport(): Promise<MemmyDiagnosticsReportExportResult>;
       getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
       setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
+      getLaunchAtLogin(): Promise<boolean>;
+      setLaunchAtLogin(enabled: boolean): Promise<boolean>;
       getMicrophoneAccessStatus(): Promise<MemmyMicrophoneAccessStatus>;
       requestMicrophoneAccess(): Promise<MemmyMicrophoneAccessStatus>;
       selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;

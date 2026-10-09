@@ -78,9 +78,42 @@ export const AppSettingsDtoSchema = z.object({
     // Notification sound enabled.
     notificationSoundEnabled: z.boolean().default(true),
     // Menu bar icon enabled.
-    menuBarIconEnabled: z.boolean().default(true)
+    menuBarIconEnabled: z.boolean().default(true),
+    // Stop the standalone Memory daemon when Desktop exits.
+    stopMemoryServiceOnExit: z.boolean().default(false),
+    // Daily custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokDailyLimitM: z.number().int().min(0).max(99_999).default(10),
+    // Lifetime custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokTotalLimitM: z.number().int().min(0).max(99_999).default(500)
 });
 export type AppSettingsDto = z.infer<typeof AppSettingsDtoSchema>;
+
+export const MemoryTokenBudgetTriggerSchema = z.enum(["daily", "total"]);
+export type MemoryTokenBudgetTrigger = z.infer<typeof MemoryTokenBudgetTriggerSchema>;
+
+export const MemoryTokenBudgetDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    paused: z.boolean(),
+    trigger: MemoryTokenBudgetTriggerSchema.nullable(),
+    nextLocalMidnightAt: z.string().datetime(),
+    stale: z.boolean().optional()
+});
+export type MemoryTokenBudgetDto = z.infer<typeof MemoryTokenBudgetDtoSchema>;
+
+export const MemoryPipelineUsageDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    nextLocalMidnightAt: z.string().datetime()
+});
+export type MemoryPipelineUsageDto = z.infer<typeof MemoryPipelineUsageDtoSchema>;
+
+export const FirstEncounterReportStatusSchema = z.enum(["pending", "shown", "skipped"]);
+export type FirstEncounterReportStatus = z.infer<typeof FirstEncounterReportStatusSchema>;
 
 export const OnboardingStateDtoSchema = z.object({
   // Completed.
@@ -93,6 +126,8 @@ export const OnboardingStateDtoSchema = z.object({
   acceptedTermsVersion: z.string().nullable(),
   // Scan permission.
   scanPermission: ScanPermissionSchema,
+  // Installation-local first encounter report state.
+  firstEncounterReportStatus: FirstEncounterReportStatusSchema.optional(),
   // Improvement program.
   improvementProgram: ImprovementProgramSchema,
   // Completed at.
@@ -413,7 +448,12 @@ export type AgentSourceScanInput = z.infer<typeof AgentSourceScanInputSchema>;
 
 export const OnboardingInsightReportInputSchema = z.object({
     locale: z.enum(["zh-CN", "en-US"]).optional(),
-    stream: z.boolean().optional()
+    stream: z.boolean().optional(),
+    detectedAgents: z.array(z.object({
+        sourceId: z.string().min(1),
+        displayName: z.string().min(1),
+        recentSessionCount: z.number().int().nonnegative()
+    })).max(50).optional()
 }).default({});
 export type OnboardingInsightReportInput = z.infer<typeof OnboardingInsightReportInputSchema>;
 
@@ -523,6 +563,9 @@ export const ScanResultSchema = z.object({
     emittedMessages: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
     memoryIds: z.array(z.string().min(1)).optional(),
+    memoryIdCount: z.number().int().nonnegative().optional(),
+    errorCount: z.number().int().nonnegative().optional(),
+    detailsTruncated: z.boolean().optional(),
     errors: z.array(
         z.object({
             conversationId: z.string().min(1),
@@ -531,6 +574,18 @@ export const ScanResultSchema = z.object({
     )
 });
 export type ScanResult = z.infer<typeof ScanResultSchema>;
+
+/** Schema for paged persisted scan details. */
+export const ScanResultPageSchema = z.object({
+    items: z.array(z.object({
+        sourceId: z.string().min(1),
+        conversationId: z.string().min(1),
+        memoryId: z.string().min(1).optional(),
+        error: z.string().min(1).optional()
+    })),
+    nextCursor: z.string().nullable()
+});
+export type ScanResultPage = z.infer<typeof ScanResultPageSchema>;
 
 /** Schema for legal agreement locale urls. */
 export const LegalAgreementLocaleUrlsSchema = z.object({
@@ -565,6 +620,35 @@ export const PromotionFlagsSchema = z.object({
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
+export const LotteryStatusSchema = z.object({
+    shouldShow: z.boolean(),
+    startAt: z.number().int().nonnegative(),
+    endAt: z.number().int().nonnegative(),
+    serverNow: z.number().int().nonnegative(),
+    landingUrl: z.string().url()
+}).refine((status) => status.endAt > status.startAt, {
+    message: "Lottery endAt must be later than startAt",
+    path: ["endAt"]
+});
+export type LotteryStatus = z.infer<typeof LotteryStatusSchema>;
+
+export const LotteryRewardSchema = z.discriminatedUnion("hasReward", [
+    z.object({
+        hasReward: z.literal(false)
+    }),
+    z.object({
+        hasReward: z.literal(true),
+        drawId: z.string().min(1).optional(),
+        tokenAmount: z.number().int().positive()
+    })
+]);
+export type LotteryReward = z.infer<typeof LotteryRewardSchema>;
+
+export const LotteryRewardAckInputSchema = z.object({
+    drawId: z.string().min(1).optional()
+});
+export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -584,7 +668,8 @@ export const AppBootstrapResponseSchema = z.object({
     legal: LegalAgreementUrlsSchema.optional(),
     // Src module.
     // Promotions.
-    promotions: PromotionFlagsSchema.optional()
+    promotions: PromotionFlagsSchema.optional(),
+    lotteryStatus: LotteryStatusSchema.optional()
 });
 export type AppBootstrapResponse = z.infer<typeof AppBootstrapResponseSchema>;
 
@@ -598,7 +683,10 @@ export const PatchAppSettingsInputSchema = z
         defaultLaunchMode: DefaultLaunchModeSchema,
         taskDoneNotificationEnabled: z.boolean(),
         notificationSoundEnabled: z.boolean(),
-        menuBarIconEnabled: z.boolean()
+        menuBarIconEnabled: z.boolean(),
+        stopMemoryServiceOnExit: z.boolean(),
+        memoryByokDailyLimitM: z.number().int().min(0).max(99_999),
+        memoryByokTotalLimitM: z.number().int().min(0).max(99_999)
     })
     .partial();
 export type PatchAppSettingsInput = z.infer<typeof PatchAppSettingsInputSchema>;
@@ -635,7 +723,9 @@ export const ModelProviderSchema = z.enum([
     "kimi",
     "minimax",
     "baidu",
-    "doubao"
+    "doubao",
+    "stepfun",
+    "xiaomi"
 ]);
 export type ModelProvider = z.infer<typeof ModelProviderSchema>;
 
@@ -650,6 +740,8 @@ export const CatalogProviderIdSchema = z.enum([
     "minimax",
     "qianfan",
     "volcengine",
+    "stepfun",
+    "xiaomi_mimo",
     "memmy_account"
 ]);
 export type CatalogProviderId = z.infer<typeof CatalogProviderIdSchema>;
@@ -660,7 +752,8 @@ const CATALOG_PROVIDER_ALIASES: Readonly<Record<string, CatalogProviderId>> = {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
 };
 
 export function canonicalCatalogProviderId(value: string): CatalogProviderId | null {
@@ -1022,11 +1115,22 @@ export const EffectiveModelCandidatesSchema = z.object({
 });
 export type EffectiveModelCandidates = z.infer<typeof EffectiveModelCandidatesSchema>;
 
+/** Runtime ownership switches stored under ~/.memmy/config.yaml#memmyMemory. */
+export const MemoryRuntimeModelSettingsSchema = z.object({
+    roleRouting: z.object({
+        summary: z.enum(["follow", "fixed"]),
+        evolution: z.enum(["follow", "fixed"])
+    }),
+    embeddingMode: z.enum(["cloud", "local", "custom"])
+});
+export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettingsSchema>;
+
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
     configRevision: z.string().min(1),
     providers: z.array(TextModelProviderViewSchema),
     modelAssignments: ModelAssignmentsSchema,
+    memorySettings: MemoryRuntimeModelSettingsSchema.optional(),
     effectiveCandidates: EffectiveModelCandidatesSchema,
     configured: z.boolean(),
     updatedAt: z.string().datetime()
@@ -1054,8 +1158,24 @@ export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSc
 export const AccountChannelSchema = z.enum(["email", "phone"]);
 export type AccountChannel = z.infer<typeof AccountChannelSchema>;
 
+/**
+ * Map the desktop language setting onto a language Memory can write in.
+ * `system` follows the package channel: phone/CN defaults to Chinese, email/intl to English.
+ */
+export function resolveMemoryLanguage(
+  language: string | undefined,
+  accountChannel?: AccountChannel | string
+): "zh-CN" | "en-US" {
+  if (language === "zh-CN" || language === "en-US") return language;
+  return accountChannel === "email" ? "en-US" : "zh-CN";
+}
+
 export const AccountLocaleSchema = z.enum(["zh", "en"]);
 export type AccountLocale = z.infer<typeof AccountLocaleSchema>;
+
+/** Third-party sign-in providers supported by the international desktop package. */
+export const SocialLoginProviderSchema = z.enum(["google", "github"]);
+export type SocialLoginProvider = z.infer<typeof SocialLoginProviderSchema>;
 
 /** Definition for send code input. */
 export const SendCodeInputSchema = z
@@ -1151,6 +1271,48 @@ export const AccountLoginResultViewSchema = z.object({
     invitationResult: InvitationResultSchema
 });
 export type AccountLoginResultView = z.infer<typeof AccountLoginResultViewSchema>;
+
+/** Starts a browser-based social-login flow. */
+export const StartSocialLoginInputSchema = z.object({
+    provider: SocialLoginProviderSchema,
+    locale: AccountLocaleSchema,
+    loginSource: z.literal("Memmy"),
+    invitationCode: z.string().trim().max(12).optional()
+});
+export type StartSocialLoginInput = z.infer<typeof StartSocialLoginInputSchema>;
+
+/** Opaque credentials used by the desktop client to poll a social-login flow. */
+export const StartSocialLoginResponseSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32),
+    authorizationUrl: z.string().url(),
+    expiresInSec: z.number().int().positive().max(1800),
+    pollIntervalSec: z.number().int().positive().max(30)
+});
+export type StartSocialLoginResponse = z.infer<typeof StartSocialLoginResponseSchema>;
+
+/** Identifies a previously started social-login flow. */
+export const SocialLoginStatusInputSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32)
+});
+export type SocialLoginStatusInput = z.infer<typeof SocialLoginStatusInputSchema>;
+
+/** Current state of a browser-based social-login flow. */
+export const SocialLoginStatusResponseSchema = z.discriminatedUnion("status", [
+    z.object({ status: z.literal("pending") }),
+    z.object({
+        status: z.literal("completed"),
+        result: AccountLoginResultViewSchema
+    }),
+    z.object({
+        status: z.literal("failed"),
+        code: z.string().min(1).optional(),
+        message: z.string().min(1)
+    }),
+    z.object({ status: z.literal("expired") })
+]);
+export type SocialLoginStatusResponse = z.infer<typeof SocialLoginStatusResponseSchema>;
 
 /** Current account invitation code and today's reserved-slot summary. */
 export const AccountInvitationViewSchema = z.object({
@@ -1516,3 +1678,5 @@ export const TokenQuotaEligibilitySchema = z.object({
     latestReviewNote: z.string().nullable()
 });
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
+export * from './desktop-screen-capture.js';
+export * from './computer-use-onboarding.js';

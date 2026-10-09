@@ -1,6 +1,7 @@
 /** Settings page tests. */
 import { renderToString } from "react-dom/server";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ModelConfigView } from "@memmy/local-api-contracts";
@@ -19,6 +20,7 @@ import {
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
   resolveSettingsTabFromHash,
+  shouldFocusMemoryBudgetFromHash,
   readLogLevel,
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
@@ -28,7 +30,8 @@ import {
   availableConnectionProtocols,
   editorProtocolForCapabilities,
   modelCapabilitiesForKind,
-  normalizeEditorCapabilities
+  normalizeEditorCapabilities,
+  protocolFromConnection
 } from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
@@ -248,8 +251,16 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
+    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
+  });
+});
+
+describe("shouldFocusMemoryBudgetFromHash", () => {
+  it("只把记忆限额深链当作需要定位的 Token 卡片", () => {
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage-memory-budget")).toBe(true);
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage")).toBe(false);
   });
 });
 
@@ -291,6 +302,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).toContain("自定义 API Key 消耗");
+    expect(html).toContain("记忆进化 Token 限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
@@ -373,6 +385,28 @@ describe("SettingsPageView", () => {
     expect(source).toContain('openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))');
     expect(source).not.toContain('appActions.navigate("/terms")');
     expect(source).not.toContain('<LinkButton label={t("settings.about.terms")} href="#" />');
+  });
+
+  it("关于区承接加入社区入口，微信群二维码为静态图片且外链顺序不变", () => {
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    const communityLinksSource = readFileSync(resolve(settingsPageSourcePath, "..", "..", "community", "community-links.ts"), "utf8");
+    const githubIndex = source.indexOf('SettingsCommunityLink href={communityLinks.githubUrl}');
+    const discordIndex = source.indexOf('SettingsCommunityLink href={communityLinks.discordUrl}');
+
+    expect(source).toContain('t("settings.about.community")');
+    expect(source).toContain('className="community-popover-wechat"');
+    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
+    expect(source).toContain('className="community-link flex flex-col rounded-lg');
+    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
+    expect(source).toContain('detail="MemTensor/memmy-agent"');
+    expect(githubIndex).toBeGreaterThan(-1);
+    expect(githubIndex).toBeLessThan(discordIndex);
+    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
+
+    const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
+    expect(html).toContain('id="settings-panel-about"');
+    expect(html).toContain("community-popover-wechat");
+    expect(html).toContain("community-link");
   });
 
   it("关于区只消费应用级更新状态，下载和弹窗不随页面卸载", () => {
@@ -647,6 +681,26 @@ describe("SettingsPageView", () => {
     expect(compactStyles).toContain("grid-column: 2");
     expect(compactStyles).toContain("flex-wrap: wrap");
     expect(source).toContain("byokTokenUsageClient.getSummary");
+    expect(source).toContain("byokTokenUsageClient.getMemoryBudget");
+    expect(source).toContain("function MemoryTokenBudgetCard");
+    const budgetCardSource = source.slice(
+      source.indexOf("function MemoryTokenBudgetCard"),
+      source.indexOf("export type MemoryBudgetUsageTone")
+    );
+    expect(budgetCardSource).toContain("<Gauge");
+    expect(budgetCardSource).toContain("usageStyles.sectionHead");
+    expect(budgetCardSource).toContain("usageStyles.budgetSection");
+    expect(budgetCardSource).toContain("usageStyles.budgetPanel");
+    expect(budgetCardSource).toContain("usageStyles.platformQuotaList");
+    const budgetRowSource = source.slice(
+      source.indexOf("export function MemoryTokenBudgetRow"),
+      source.indexOf("export interface UsageDetailsProps")
+    );
+    expect(budgetRowSource).toContain("usageStyles.platformQuotaRow");
+    expect(budgetRowSource).toContain("usageStyles.budgetMeter");
+    expect(budgetCardSource.indexOf('t("settings.token.memoryBudgetHint")')).toBeLessThan(
+      budgetCardSource.indexOf('t("settings.token.memoryBudgetDaily")')
+    );
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
     expect(source).toContain("function UsageDetails");
@@ -667,9 +721,14 @@ describe("SettingsPageView", () => {
     expect(styles).toContain(".byokUsageList");
     expect(styles).not.toContain(".backButton");
     expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
-    expect(source).toContain("props.byokUsage.byModel.map");
-    expect(source).toContain("function ByokModelUsageRow");
-    expect(source).toContain('t("settings.token.historicalUnclassified")');
+    expect(source).toContain("const classifiedByokModels = props.byokUsage.byModel.filter");
+    expect(source).toContain("const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();");
+    expect(source).not.toContain("function ByokModelUsageRow");
+    expect(source).not.toContain("usageStyles.byokPurposeTitle");
+    expect(styles).not.toContain(".byokPurposeTitle");
+    expect(source).not.toContain('t("settings.token.byModel")');
+    expect(source).not.toContain('t("settings.token.byPurpose")');
+    expect(source).not.toContain('t("settings.token.historicalUnclassified")');
     expect(source).not.toContain("getTaskModelCandidates(workspace, workspaceMode)");
     expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
@@ -695,6 +754,16 @@ describe("SettingsPageView", () => {
     expect(workspaceSource).toContain("testEditorConnection");
   });
 
+  it("把 catalog 侧的 provider id 还原回工作区协议", () => {
+    expect(protocolFromConnection("volcengine")).toBe("doubao");
+    expect(protocolFromConnection("qianfan")).toBe("baidu");
+    expect(protocolFromConnection("dashscope")).toBe("qwen");
+    expect(protocolFromConnection("xiaomi_mimo")).toBe("xiaomi");
+    expect(protocolFromConnection("xiaomi")).toBe("xiaomi");
+    expect(protocolFromConnection("stepfun")).toBe("stepfun");
+    expect(protocolFromConnection("unknown-provider")).toBe("openai");
+  });
+
   it("模型工作区协议默认地址与模型配置常量保持一致", () => {
     const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const modelSource = readFileSync(modelConfigSourcePath, "utf8");
@@ -709,7 +778,9 @@ describe("SettingsPageView", () => {
       ["moonshot", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
       ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
-      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"]
+      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"],
+      ["stepfun", "https://api.stepfun.com/v1", "step-3.5-flash"],
+      ["xiaomi", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"]
     ];
 
     for (const [protocol, endpoint, placeholder] of defaults) {
@@ -754,7 +825,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("打磨 Agent 技能与偏好");
     expect(html).toContain("Embedding 检索");
     expect(html).toContain("记忆向量化检索");
-    expect(html).toContain("Xenova/all-MiniLM-L6-v2");
+    expect(html).toContain("Memmy Platform 本地 Embedding");
     expect(html).toContain("语音识别 ASR");
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");
@@ -1014,6 +1085,7 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
     expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
     expect(source).toContain('window.addEventListener("focus"');
+    expect(source).toContain("Pending requests refresh on window focus instead of fixed-interval polling.");
     expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
   });

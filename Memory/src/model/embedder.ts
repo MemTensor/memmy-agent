@@ -1,11 +1,22 @@
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import type { EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
-import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
+import {
+  aggregateOpenAiEmbeddingVectors,
+  planOpenAiEmbeddingInputs
+} from "./openai-embedding-inputs.js";
+import {
+  HttpByokTokenUsageRecorder,
+  extractModelTokenUsage,
+  type MemoryModelUsageEvent,
+  type MemoryTokenUsageSink
+} from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
 const logger = createMemoryLogger("embedding");
@@ -48,17 +59,26 @@ const EMBEDDED_EMBEDDING_MODEL_ROOT = "embedding-models";
 let localExtractorPromise: Promise<FeatureExtractor> | null = null;
 let localExtractorModel: string | null = null;
 
-export function createEmbedder(config: EmbeddingConfig): Embedder {
-  return new HttpEmbedder(config);
+export interface CreateEmbedderOptions {
+  onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
+  usageRecorder?: MemoryTokenUsageSink;
+}
+
+export function createEmbedder(config: EmbeddingConfig, options: CreateEmbedderOptions = {}): Embedder {
+  return new HttpEmbedder(config, options);
 }
 
 class HttpEmbedder implements Embedder {
   private readonly cache = new Map<string, number[]>();
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder = new HttpByokTokenUsageRecorder();
+  private readonly usageRecorder: MemoryTokenUsageSink;
 
-  constructor(readonly config: EmbeddingConfig) {}
+  constructor(readonly config: EmbeddingConfig, options: CreateEmbedderOptions = {}) {
+    this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
+      onBudgetedUsage: options.onBudgetedUsage
+    });
+  }
 
   isRemote(): boolean {
     return this.config.provider !== "local";
@@ -216,6 +236,29 @@ class HttpEmbedder implements Embedder {
     if (!this.config.apiKey && !this.config.endpoint) {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
+    const plan = provider === "openai_compatible"
+      ? planOpenAiEmbeddingInputs(texts, this.config.model, this.config.maxInputTokens)
+      : null;
+    if (!plan) return this.requestOpenAiShape(texts, provider, url, role);
+
+    const chunkVectors: number[][] = [];
+    for (const batch of plan.batches) {
+      chunkVectors.push(...await this.requestOpenAiShape(
+        batch.map((chunk) => chunk.input),
+        provider,
+        url,
+        role
+      ));
+    }
+    return aggregateOpenAiEmbeddingVectors(plan, chunkVectors);
+  }
+
+  private async requestOpenAiShape(
+    inputs: Array<string | number[]>,
+    provider: string,
+    url: string,
+    role: "query" | "document"
+  ): Promise<number[][]> {
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
       actualModelContext: this.config.actualModelContext,
       provider: this.config.sourceProvider ?? provider,
@@ -230,11 +273,11 @@ class HttpEmbedder implements Embedder {
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model,
-        input: texts,
+        input: inputs,
         ...(this.config.extraBody ?? {})
       }
     });
-    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), texts.length);
+    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), inputs.length);
     this.recordEmbeddingUsage(response, provider, role);
     return vectors;
   }
@@ -331,7 +374,12 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
   }
   localExtractorModel = model;
   localExtractorPromise = (async () => {
-    const mod = await import("@huggingface/transformers");
+    // pkg's ESM runtime does not provide a dynamic-import callback.  Use the
+    // package's CommonJS export only for the single-file build while keeping
+    // the lazy ESM import in normal Node/Vitest execution (and its mocks).
+    const mod = (process as NodeJS.Process & { pkg?: unknown }).pkg
+      ? createRequire(import.meta.url)("@huggingface/transformers")
+      : await import("@huggingface/transformers");
     const transformers = mod as unknown as TransformersModule;
     transformers.env.cacheDir = join(homedir(), ".memmy", "memory-service", "model-cache");
     transformers.env.allowLocalModels = true;
@@ -342,7 +390,13 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
     };
     const embeddedModelRoot = resolveEmbeddedEmbeddingModelRoot(model);
     if (embeddedModelRoot) {
-      transformers.env.localModelPath = embeddedModelRoot;
+      // Native ONNX runtimes cannot open files from pkg's read-only
+      // /snapshot virtual filesystem. Materialize the bundled model once in
+      // the OS temp directory before handing it to transformers.js.
+      transformers.env.localModelPath = materializePackagedEmbeddingModel(
+        embeddedModelRoot,
+        model
+      );
       transformers.env.allowRemoteModels = false;
       pipelineOptions.local_files_only = true;
     }
@@ -353,6 +407,29 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
     throw error;
   });
   return localExtractorPromise;
+}
+
+function materializePackagedEmbeddingModel(root: string, model: string): string {
+  if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return root;
+  const targetRoot = join(tmpdir(), "memmy-memory-models");
+  const targetModel = join(targetRoot, model);
+  if (!existsSync(targetModel)) {
+    copyDirectoryFromSnapshot(join(root, model), targetModel);
+  }
+  return targetRoot;
+}
+
+function copyDirectoryFromSnapshot(source: string, target: string): void {
+  mkdirSync(target, { recursive: true, mode: 0o700 });
+  for (const entry of readdirSync(source)) {
+    const sourcePath = join(source, entry);
+    const targetPath = join(target, entry);
+    if (statSync(sourcePath).isDirectory()) {
+      copyDirectoryFromSnapshot(sourcePath, targetPath);
+    } else {
+      copyFileSync(sourcePath, targetPath);
+    }
+  }
 }
 
 function resolveEmbeddedEmbeddingModelRoot(model: string): string | null {
@@ -374,6 +451,14 @@ function candidateEmbeddedEmbeddingModelRoots(): string[] {
   if (resourcesPath) {
     roots.push(join(resourcesPath, EMBEDDED_EMBEDDING_MODEL_ROOT));
   }
+  // `pkg` exposes bundled files below /snapshot. In the normal compiled
+  // layout this resolves to the runtime root as well, so the same lookup
+  // works for the standalone executable and the unpacked runtime package.
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  // esbuild's CommonJS bundle is located at the packaged runtime root.
+  roots.push(join(moduleDir, EMBEDDED_EMBEDDING_MODEL_ROOT));
+  roots.push(resolve(moduleDir, "../../../", EMBEDDED_EMBEDDING_MODEL_ROOT));
+  roots.push(resolve(moduleDir, "../../", EMBEDDED_EMBEDDING_MODEL_ROOT));
   return roots;
 }
 

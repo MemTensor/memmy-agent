@@ -276,12 +276,13 @@ describe("exec session tools", () => {
 
     let result = await tool.execute({
       command: pipeHoldingDescendantCommand(),
-      yield_time_ms: 100,
+      yield_time_ms: 1200,
     });
     if (result.includes("session_id:")) {
       result += `\n${await stdin.execute({
         session_id: sessionId(result),
-        yield_time_ms: 100,
+        wait_for: EXEC_LIFECYCLE_ERROR,
+        wait_timeout_ms: 5000,
       })}`;
     }
     const pid = Number(result.match(/descendant_pid=(\d+)/)?.[1]);

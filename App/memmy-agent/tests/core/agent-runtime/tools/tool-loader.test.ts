@@ -159,6 +159,15 @@ describe("ToolLoader discovery", () => {
     expect(classNames).not.toContain("MCPPromptWrapper");
   });
 
+  it("keeps removed desktop executors out of the agent registry", () => {
+    const classNames = new Set(new ToolLoader().discover().map((cls) => cls.name));
+    expect(classNames).not.toContain("ComputerScreenshotTool");
+    expect(classNames).not.toContain("ComputerClickTool");
+    expect(classNames).not.toContain("ComputerTypeTool");
+    expect(classNames).not.toContain("ComputerKeyTool");
+    expect(classNames).not.toContain("ComputerScrollTool");
+  });
+
   it("skips private and undiscoverable classes", () => {
     const discovered = new ToolLoader({ testClasses: [MinimalTool, HiddenTool] }).discover();
     expect(discovered).toEqual([MinimalTool]);
@@ -375,7 +384,7 @@ describe("Config round-trip", () => {
     expect(config.tools.exec.timeout).toBe(60);
     expect(config.tools.web.enable).toBe(true);
     expect(config.tools.web.search.provider).toBe("duckduckgo");
-    expect(config.tools.imageGeneration.enabled).toBe(false);
+    expect(config.tools.imageGeneration.enabled).toBe(true);
     expect(config.tools.restrictToWorkspace).toBe(false);
     expect(["cli", "Apps"].join("") in config.tools).toBe(false);
   });

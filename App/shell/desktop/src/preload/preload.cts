@@ -32,6 +32,9 @@ interface MemmyPreloadApi {
   onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
   openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
+  getComputerHistoryPermissionSessionId?(): Promise<string>;
+  restartForComputerHistoryPermissions?(): Promise<void>;
+  openComputerHistoryMarkdown(filePath: string): Promise<void>;
   openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
   openMailto(mailtoUrl: string): Promise<void>;
   copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
@@ -43,6 +46,8 @@ interface MemmyPreloadApi {
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
+  getLaunchAtLogin(): Promise<boolean>;
+  setLaunchAtLogin(enabled: boolean): Promise<boolean>;
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;
   selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
@@ -152,6 +157,18 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:openExternal", url);
   },
 
+  async getComputerHistoryPermissionSessionId(): Promise<string> {
+    return ipcRenderer.invoke("memmy:get-computer-history-permission-session");
+  },
+
+  async restartForComputerHistoryPermissions(): Promise<void> {
+    return ipcRenderer.invoke("memmy:restart-for-computer-history-permissions");
+  },
+
+  async openComputerHistoryMarkdown(filePath: string): Promise<void> {
+    return ipcRenderer.invoke("memmy:open-computer-history-markdown", filePath);
+  },
+
   async openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }> {
     return ipcRenderer.invoke("memmy:openAgentTool", sourceId, prompt);
   },
@@ -202,6 +219,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void> {
     return ipcRenderer.invoke("memmy:set-log-level", level);
+  },
+
+  async getLaunchAtLogin(): Promise<boolean> {
+    return ipcRenderer.invoke("memmy:get-launch-at-login");
+  },
+
+  async setLaunchAtLogin(enabled: boolean): Promise<boolean> {
+    return ipcRenderer.invoke("memmy:set-launch-at-login", enabled);
   },
 
   async getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus> {

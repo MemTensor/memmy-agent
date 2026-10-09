@@ -7,6 +7,9 @@ import { createCodexSourceAdapter } from "../index.js";
 import { readCodexRollout } from "../rollout-reader.js";
 import { discoverCodexSessions } from "../session-discovery.js";
 
+// Generated synthetic data for redaction coverage, never a live credential.
+const SYNTHETIC_API_KEY = `sk-${"fixture".repeat(8)}`;
+
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -24,23 +27,23 @@ describe("codex source adapter", () => {
 
     expect(messages).toEqual([
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:2",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000002",
         conversationId: "019e72be-500b-7f02-9400-112c5a194e5c",
         role: "user",
-        content: "Use OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"
+        content: `Use OPENAI_API_KEY=${SYNTHETIC_API_KEY}`
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:3",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000003",
         role: "tool",
         content: expect.stringContaining("Tool: shell")
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:4",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000004",
         role: "tool",
         content: expect.stringContaining("Output:")
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:5",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000005",
         role: "assistant",
         content: "Done"
       })
@@ -66,6 +69,25 @@ describe("codex source adapter", () => {
       expect.objectContaining({ sourceId: "codex", role: "tool" }),
       expect.objectContaining({ sourceId: "codex", role: "tool" }),
       expect.objectContaining({ sourceId: "codex", role: "assistant" })
+    ]);
+    expect(messages.some((message) => message.content.includes(SYNTHETIC_API_KEY))).toBe(false);
+  });
+
+  it("ignores backup copies of rollout files", async () => {
+    const fixture = createFixture();
+    const backupPath = `${fixture.rolloutPath}.bak-strip-input-image.jsonl`;
+    writeFileSync(
+      backupPath,
+      JSON.stringify({
+        timestamp: "2026-05-29T11:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: join(fixture.workspacePath, "backup-copy") }
+      }),
+      "utf8"
+    );
+
+    await expect(discoverCodexSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
+      expect.objectContaining({ sessionFilePath: fixture.rolloutPath })
     ]);
   });
 
@@ -157,7 +179,7 @@ function createFixture(): { sessionsRoot: string; workspacePath: string; rollout
     rolloutPath,
     [
       JSON.stringify({ timestamp: "2026-05-29T10:00:00.000Z", type: "session_meta", payload: { cwd: workspacePath } }),
-      JSON.stringify({ timestamp: "2026-05-29T10:00:01.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Use OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN" }] } }),
+      JSON.stringify({ timestamp: "2026-05-29T10:00:01.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `Use OPENAI_API_KEY=${SYNTHETIC_API_KEY}` }] } }),
       JSON.stringify({ timestamp: "2026-05-29T10:00:02.000Z", type: "response_item", payload: { type: "function_call", name: "shell", call_id: "call-shell-1", arguments: "{\"cmd\":\"pwd\"}" } }),
       JSON.stringify({ timestamp: "2026-05-29T10:00:03.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "call-shell-1", output: "/tmp/project" } }),
       JSON.stringify({ timestamp: "2026-05-29T10:00:04.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done" }] } })

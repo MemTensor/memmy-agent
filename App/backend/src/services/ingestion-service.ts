@@ -1,5 +1,6 @@
 /** Ingestion service module. */
 import { createHash } from "node:crypto";
+import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest, hasStagedSourceTurn, legacyImportTurnIdFromMessages } from "@memmy/agent-source-core";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -55,6 +56,12 @@ export interface IngestionStats {
   dedupedMemories: number;
   failedMemories: number;
   memoryIds: string[];
+  /**
+   * Subset of `memoryIds` written through the legacy add-memory path, which still needs a
+   * summary job. A native turn is summarized inside the Memory capture transaction, so its
+   * id must not be queued again: it has no import processing state to wait on.
+   */
+  importSummaryMemoryIds: string[];
   conversations: number;
   completedConversationIds: string[];
   incompleteConversationIds: string[];
@@ -62,15 +69,22 @@ export interface IngestionStats {
   errors: Array<{ conversationId: string; reason: string }>;
 }
 
+export interface IngestionItemSkip {
+  sourceId: string;
+  conversationId: string;
+  reason: string;
+}
+
 /** Contract for create ingestion service options. */
 export interface CreateIngestionServiceOptions {
-  memoryClient: Pick<MemoryClient, "addMemory">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn">;
   agentSourceRepository: Pick<AgentSourceRepository, "hasSeen" | "markSeen">;
   memoryAddAnalytics?: Pick<
     MemoryDesktopAddAnalytics,
     "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
   >;
   warn?: (warning: IngestionWarning) => void;
+  onItemSkip?: (skip: IngestionItemSkip) => void;
 }
 
 /** Implementation of ingestion assertion error. */
@@ -94,6 +108,7 @@ export function createIngestionService(options: CreateIngestionServiceOptions): 
         dedupedMemories: 0,
         failedMemories: 0,
         memoryIds: [],
+        importSummaryMemoryIds: [],
         conversations: 0,
         completedConversationIds: [],
         incompleteConversationIds: [],
@@ -163,6 +178,10 @@ async function processConversation(
   ctx: IngestionContext,
   stats: IngestionStats
 ): Promise<void> {
+  if (hasStagedSourceTurn(messages[0])) {
+    await processNativeConversation(options, messages, ctx, stats);
+    return;
+  }
   let processedTurns = 0;
   let incomplete = false;
   let failed = false;
@@ -227,19 +246,25 @@ async function processConversation(
       turnId: request.turnId,
       ...(ctx.scanMode ? { scanMode: ctx.scanMode } : {})
     };
-    options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
     const addStartedAt = Date.now();
 
     try {
       const added = await options.memoryClient.addMemory(request);
-      stats.written += turn.messages.length;
-      stats.writtenMemories += 1;
-      stats.memoryIds.push(added.id);
-      options.memoryAddAnalytics?.trackAddSucceeded({
-        ...addAnalyticsBase,
-        durationMs: Date.now() - addStartedAt,
-        storedCount: 1
-      });
+      if (added.duplicate) {
+        stats.deduped += turn.messages.length;
+        stats.dedupedMemories += 1;
+      } else {
+        stats.written += turn.messages.length;
+        stats.writtenMemories += 1;
+        stats.memoryIds.push(added.id);
+        stats.importSummaryMemoryIds.push(added.id);
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
 
       for (const dedupKey of dedupKeys) {
         options.agentSourceRepository.markSeen(dedupKey, ctx.sourceId);
@@ -249,10 +274,8 @@ async function processConversation(
       failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
-      stats.errors.push({
-        conversationId: turn.conversationId,
-        reason: error instanceof Error ? error.message : "ingestion failed"
-      });
+      reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "ingestion failed");
+      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
       options.memoryAddAnalytics?.trackAddFailed({
         ...addAnalyticsBase,
         durationMs: Date.now() - addStartedAt,
@@ -267,6 +290,97 @@ async function processConversation(
   if (failed) stats.failedConversationIds.push(conversationId);
   else if (incomplete) stats.incompleteConversationIds.push(conversationId);
   else stats.completedConversationIds.push(conversationId);
+}
+
+async function processNativeConversation(
+  options: CreateIngestionServiceOptions,
+  messages: readonly ConversationMessage[],
+  ctx: IngestionContext,
+  stats: IngestionStats
+): Promise<void> {
+  let failed = false;
+  let incomplete = false;
+  const values = (async function* () { yield* messages; })();
+  for await (const turn of orderedTurns(values)) {
+    ctx.signal?.throwIfAborted();
+    const sourceTurn = sourceTurnFromMessages(turn.messages);
+    if (!sourceTurn) {
+      const reason = sourceTurnFailureReason(turn.messages);
+      reportItemSkip(options, ctx, turn.conversationId, reason);
+      if (isIncompleteSourceTurnReason(reason)) {
+        incomplete = true;
+        stats.deduped += turn.messages.length;
+      } else {
+        failed = true;
+        stats.failed += turn.messages.length;
+        stats.failedMemories += 1;
+      }
+      emitIngestionProgress(ctx, stats);
+      continue;
+    }
+    try {
+      const legacyImportTurnId = legacyImportTurnIdFromMessages(ctx.sourceId, turn.conversationId, turn.messages);
+      const result = await options.memoryClient.completeSourceTurn({
+        ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
+        ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
+        ...(ctx.scanMode === "initial_subset" || ctx.scanMode === "full" ? { captureLegacyHistory: true } : {})
+      });
+      if (result.status === "pending" || result.status === "conflict") {
+        failed = true;
+        stats.failed += turn.messages.length;
+        stats.failedMemories += 1;
+        reportItemSkip(options, ctx, turn.conversationId, result.reason ?? result.status);
+        emitIngestionProgress(ctx, stats);
+        continue;
+      }
+      if (result.status === "stored") {
+        const ids = result.result?.l1MemoryIds ?? [];
+        stats.written += turn.messages.length;
+        stats.writtenMemories += ids.length;
+        stats.memoryIds.push(...ids);
+      } else {
+        stats.deduped += turn.messages.length;
+        if (result.status === "existing") stats.dedupedMemories += 1;
+      }
+      for (const message of turn.messages) {
+        options.agentSourceRepository.markSeen(createDedupKey(ctx.sourceId, message.messageId), ctx.sourceId);
+      }
+    } catch (error) {
+      failed = true;
+      stats.failed += turn.messages.length;
+      stats.failedMemories += 1;
+      reportItemSkip(options, ctx, turn.conversationId, error instanceof Error ? error.message : "native turn ingestion failed");
+    }
+    emitIngestionProgress(ctx, stats);
+  }
+  const conversationId = messages[0]?.conversationId;
+  if (conversationId) {
+    if (failed) stats.failedConversationIds.push(conversationId);
+    else if (incomplete) stats.incompleteConversationIds.push(conversationId);
+    else stats.completedConversationIds.push(conversationId);
+  }
+}
+
+function reportItemSkip(
+  options: CreateIngestionServiceOptions,
+  ctx: IngestionContext,
+  conversationId: string,
+  reason: string
+): void {
+  const skip = { sourceId: ctx.sourceId, conversationId, reason };
+  (options.onItemSkip ?? logItemSkip)(skip);
+}
+
+function logItemSkip(skip: IngestionItemSkip): void {
+  console.warn(`[agent-source] scan.item_skipped ${JSON.stringify(skip)}`);
+}
+
+function isIncompleteSourceTurnReason(reason: string): boolean {
+  return reason === "turn_incomplete"
+    || reason === "turn_content_incomplete"
+    || reason === "turn_cancelled"
+    || reason === "timestamp_unresolved"
+    || reason === "source_turn_incomplete";
 }
 
 function emitIngestionProgress(ctx: IngestionContext, stats: IngestionStats): void {

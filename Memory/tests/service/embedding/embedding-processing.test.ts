@@ -4,6 +4,7 @@ import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
   type Embedder,
+  type LlmClient,
   type MemoryRow
 } from "../../../src/index.js";
 import {
@@ -14,8 +15,10 @@ import {
   embeddingTextForMemory,
   updateMemoryVectorField
 } from "../../../src/service/embedding/embedding-pipeline.js";
+import { ModelHttpError } from "../../../src/model/http.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
+  addAgentSourceImport,
   createBatchReflectionLlm,
   createCapturingEmbedder,
   createMemoryServiceFixture,
@@ -45,6 +48,16 @@ describe("MemoryService / embedding / processing", () => {
 
   it("keeps legacy Skill memories searchable through their invocation guide", () => {
     expect(embeddingTextForMemory(skillMemory())).toContain("PROCEDURE_ONLY_SENTINEL");
+  });
+
+  it("keeps oversized Skill retrieval documents intact for provider-aware chunking", () => {
+    const prefix = "Legacy Skill instructions\n";
+    const text = embeddingTextForMemory(skillMemory(undefined, {
+      content: `${prefix}${" procedure".repeat(8_000)}\nTAIL_SENTINEL`
+    }));
+
+    expect(text).toContain(prefix);
+    expect(text).toContain("TAIL_SENTINEL");
   });
 
   it("marks a replacement Skill vector with its retrieval document version and source hash", () => {
@@ -95,7 +108,12 @@ describe("MemoryService / embedding / processing", () => {
       path: join(root, "memory.sqlite")
     });
     const embedder = createFlakyEmbedder();
-    const service = createTestMemoryService({ db, mode: "dev", embedder });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      embedder,
+      llm: createBatchReflectionLlm([], "Remember that transient embedding failures should be retried.")
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -112,15 +130,16 @@ describe("MemoryService / embedding / processing", () => {
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
 
-    service.closeSession(session.sessionId);
-    const reflectionRun = await service.runWorkerOnce(20);
-    expect(reflectionRun.jobs.some((job) => job.jobType === "reflection" && job.status === "succeeded")).toBe(true);
-    const reflectedMemory = db.db
-      .prepare(`SELECT version FROM memories WHERE id = ?`)
-      .get(complete.l1MemoryId) as { version: number };
+    const summaryRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(summaryRun.jobs.some((job) => job.jobType === "trace_summary" && job.status === "succeeded")).toBe(true);
+    const firstRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const failedEmbedding = firstRun.jobs.find((job) => job.jobType === "embedding" && job.status === "failed");
+    expect(failedEmbedding?.jobId).toBeTruthy();
+    const failedJob = db.db.prepare(
+      `SELECT id, status, attempts FROM evolution_jobs WHERE id = ?`
+    ).get(failedEmbedding!.jobId) as { id: string; status: string; attempts: number };
+    expect(failedJob).toMatchObject({ status: "failed", attempts: 1 });
 
-    const firstRun = await service.runWorkerOnce(20);
-    expect(firstRun.jobs.some((job) => job.jobType === "embedding" && job.status === "failed")).toBe(true);
     const queued = db.db
       .prepare(
         `SELECT target_kind, target_id, vector_field, status, attempts
@@ -141,8 +160,10 @@ describe("MemoryService / embedding / processing", () => {
       attemptCount: 1
     });
 
-    const secondRun = await service.runWorkerOnce(20);
-    expect(secondRun.jobs.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
+    const secondRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(secondRun.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: failedJob.id, jobType: "embedding", status: "succeeded" })
+    ]));
     expect(secondRun.embeddingRetries.succeeded).toBe(0);
     const drained = db.db
       .prepare(
@@ -152,6 +173,16 @@ describe("MemoryService / embedding / processing", () => {
       )
       .all(complete.l1MemoryId) as Array<{ vector_field: string; status: string; attempts: number }>;
     expect(drained).toEqual([]);
+    expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("ready");
+
+    service.closeSession(session.sessionId);
+    const reflectionRun = await service.runWorkerOnce(20);
+    expect(reflectionRun.jobs.some((job) => job.jobType === "reflection" && job.status === "succeeded")).toBe(true);
+    const reflectedMemory = db.db
+      .prepare(`SELECT version FROM memories WHERE id = ?`)
+      .get(complete.l1MemoryId) as { version: number };
+    const reindexRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    expect(reindexRun.jobs.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("ready");
     const memory = db.db
       .prepare(
@@ -172,6 +203,183 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
+  it("isolates a deterministic embedding failure and keeps the valid sibling", async () => {
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const embedder = createSelectiveFailureEmbedder();
+    const { db, service } = createTestService({
+      llm: createBatchReflectionLlm(llmCalls, "Imported memory summary."),
+      embedder
+    });
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "batch-isolation", userId: "user-batch-isolation" }
+    });
+    const good = service.completeTurn("turn-embedding-good", {
+      sessionId: session.sessionId,
+      query: "Remember the valid embedding item.",
+      answer: "VALID_EMBEDDING_ITEM"
+    });
+    const bad = service.completeTurn("turn-embedding-bad", {
+      sessionId: session.sessionId,
+      query: "Remember the oversized embedding item.",
+      answer: "BAD_EMBEDDING_ITEM"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const embeddingRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const repositories = new Repositories(db.db);
+
+    expect(embeddingRun.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetMemoryId: good.l1MemoryId, status: "succeeded" }),
+      expect.objectContaining({ targetMemoryId: bad.l1MemoryId, status: "dead_letter" })
+    ]));
+    expect(repositories.processing.get(good.l1MemoryId)?.state).toBe("ready");
+    expect(repositories.processing.get(bad.l1MemoryId)).toMatchObject({
+      state: "ready_text_only",
+      stage: null,
+      retryAction: "none",
+      errorCode: "model_input_too_long"
+    });
+    db.close();
+  });
+
+  it("terminates a legacy embedding retry after a deterministic provider failure", async () => {
+    const { db, service } = createTestService({ embedder: createForbiddenEmbedder() });
+    const repositories = new Repositories(db.db);
+    const memory = skillMemory();
+    repositories.memories.insert(memory);
+    const retry = repositories.runtime.enqueueEmbeddingRetry({
+      targetKind: "skill",
+      targetId: memory.id,
+      vectorField: "vec",
+      sourceText: embeddingTextForMemory(memory),
+      embedRole: "query",
+      now: Date.now() - 1
+    });
+
+    const run = await service.runWorkerOnce(10);
+
+    expect(run.embeddingRetries.items).toEqual([
+      expect.objectContaining({ id: retry.id, status: "failed", attempts: 1 })
+    ]);
+    expect(repositories.runtime.getEmbeddingRetry(retry.id)).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Access to the configured model is forbidden."
+    });
+    db.close();
+  });
+
+  it("does not enqueue a legacy retry for a processing-less deterministic worker failure", async () => {
+    const calls = { batch: 0, single: 0 };
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(calls) });
+    const repositories = new Repositories(db.db);
+    const memory = skillMemory(undefined, {
+      id: "skill_deterministic_worker_failure",
+      content: "BAD_EMBEDDING_ITEM"
+    });
+    repositories.memories.insert(memory);
+    repositories.runtime.enqueueJob({
+      id: "job_skill_deterministic_worker_failure",
+      jobType: "embedding",
+      status: "queued",
+      dedupeKey: `embedding:${memory.id}`,
+      userId: memory.userId,
+      targetMemoryId: memory.id,
+      payload: {},
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: memory.createdAt,
+      updatedAt: memory.updatedAt
+    });
+
+    const run = await service.runWorkerOnce(10);
+
+    expect(run.jobs).toEqual([
+      expect.objectContaining({
+        jobId: "job_skill_deterministic_worker_failure",
+        status: "dead_letter"
+      })
+    ]);
+    expect(db.db.prepare(
+      `SELECT id FROM embedding_retry_queue WHERE target_id = ?`
+    ).all(memory.id)).toEqual([]);
+    expect(calls).toEqual({ batch: 1, single: 0 });
+    db.close();
+  });
+
+  it("does not re-request a single legacy retry after a token-limit failure", async () => {
+    const calls = { batch: 0, single: 0 };
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(calls) });
+    const repositories = new Repositories(db.db);
+    const memory = skillMemory(undefined, {
+      id: "skill_legacy_token_limit",
+      content: "BAD_EMBEDDING_ITEM"
+    });
+    repositories.memories.insert(memory);
+    const retry = repositories.runtime.enqueueEmbeddingRetry({
+      targetKind: "skill",
+      targetId: memory.id,
+      vectorField: "vec",
+      sourceText: embeddingTextForMemory(memory),
+      embedRole: "query",
+      now: Date.now() - 1
+    });
+
+    await service.runWorkerOnce(10);
+
+    expect(repositories.runtime.getEmbeddingRetry(retry.id)).toMatchObject({
+      status: "failed",
+      attempts: 1
+    });
+    expect(calls).toEqual({ batch: 1, single: 0 });
+    db.close();
+  });
+
+  it("isolates a deterministic legacy retry failure and keeps the valid sibling", async () => {
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder() });
+    const repositories = new Repositories(db.db);
+    const good = skillMemory(undefined, {
+      id: "skill_legacy_retry_good",
+      content: "VALID_EMBEDDING_ITEM"
+    });
+    const bad = skillMemory(undefined, {
+      id: "skill_legacy_retry_bad",
+      content: "BAD_EMBEDDING_ITEM"
+    });
+    repositories.memories.insert(good);
+    repositories.memories.insert(bad);
+    const goodRetry = repositories.runtime.enqueueEmbeddingRetry({
+      targetKind: "skill",
+      targetId: good.id,
+      vectorField: "vec",
+      sourceText: embeddingTextForMemory(good),
+      embedRole: "query",
+      now: Date.now() - 1
+    });
+    const badRetry = repositories.runtime.enqueueEmbeddingRetry({
+      targetKind: "skill",
+      targetId: bad.id,
+      vectorField: "vec",
+      sourceText: embeddingTextForMemory(bad),
+      embedRole: "query",
+      now: Date.now() - 1
+    });
+
+    const run = await service.runWorkerOnce(10);
+
+    expect(run.embeddingRetries.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: goodRetry.id, status: "succeeded" }),
+      expect.objectContaining({ id: badRetry.id, status: "failed", attempts: 1 })
+    ]));
+    expect(repositories.runtime.getEmbeddingRetry(goodRetry.id)?.status).toBe("succeeded");
+    expect(repositories.runtime.getEmbeddingRetry(badRetry.id)?.status).toBe("failed");
+    expect(retrievalDocumentIsCurrent(repositories.memories.get(good.id)!)).toBe(true);
+    db.close();
+  });
+
   it("embeds L1 summary together with bounded user and assistant text", async () => {
     const root = createTestRoot("mindock-memory-dual-embedding-");
     const db = new MemoryDb({
@@ -179,7 +387,12 @@ describe("MemoryService / embedding / processing", () => {
     });
     const seenTexts: string[] = [];
     const embedder = createCapturingEmbedder(seenTexts);
-    const service = createTestMemoryService({ db, mode: "dev", embedder });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      embedder,
+      llm: createBatchReflectionLlm([], "Remember the SQLite migration rule.")
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -193,7 +406,7 @@ describe("MemoryService / embedding / processing", () => {
       answer: "I will run the focused migration test before broad checks."
     });
 
-    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
 
@@ -254,7 +467,7 @@ describe("MemoryService / embedding / processing", () => {
       answer: "Use focused checks first, then broaden only after the migration path is verified."
     });
 
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)).toMatchObject({
       state: "summary_pending",
       stage: "summary",
@@ -273,6 +486,8 @@ describe("MemoryService / embedding / processing", () => {
     expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
     const episodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
     expect(episodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
+    const titleRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
+    expect(titleRun.jobs.map((job) => job.jobType)).toEqual(["episode_title"]);
     expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
@@ -301,6 +516,92 @@ describe("MemoryService / embedding / processing", () => {
       `SELECT embedding_dim FROM memory_vector_entries
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
     ).get(complete.l1MemoryId)).toEqual({ embedding_dim: 3 });
+    db.close();
+  });
+
+  it("keeps L1 waiting without a summary model, then generates a title after one is configured", async () => {
+    let configured = false;
+    const llm: LlmClient = {
+      config: {
+        ...DEFAULT_MEMMY_CONFIG.summary,
+        provider: "host",
+        endpoint: "http://127.0.0.1/summary",
+        model: "summary-test"
+      },
+      isConfigured: () => configured,
+      async complete() {
+        return "{}";
+      },
+      async completeJson<T extends Record<string, unknown>>() {
+        return { title: "生成标题", summary: "生成摘要" } as unknown as T;
+      },
+      status: () => ({
+        provider: "host",
+        model: "summary-test",
+        configured,
+        remote: true
+      })
+    };
+    const { db, service } = createTestService({ llm });
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "default", sessionKey: "unconfigured-summary" }
+    });
+    service.completeTurn("turn-unconfigured-summary", {
+      sessionId: session.sessionId,
+      query: "请修复自动扫描卡顿并运行测试",
+      answer: "已完成修复并运行测试。"
+    });
+    addAgentSourceImport(
+      service,
+      { source: "codex", profileId: "unconfigured-import", userId: "unconfigured-import" },
+      "请修复导入流程并验证结果",
+      "unconfigured-import"
+    );
+
+    const held = await service.runWorkerOnce(100);
+    const heldAgain = await service.runWorkerOnce(100);
+    const summaryJobs = (run: { jobs: Array<{ jobType: string }> }) =>
+      run.jobs.filter((job) => job.jobType === "trace_summary" || job.jobType === "import_summary");
+    expect(summaryJobs(held)).toEqual([]);
+    expect(summaryJobs(heldAgain)).toEqual([]);
+
+    const waiting = service.panelItems({ layer: "L1" }).items;
+    expect(waiting.length).toBeGreaterThanOrEqual(2);
+    expect(waiting.every((item) => item.processing?.state === "summary_pending")).toBe(true);
+    expect(waiting.map((item) => item.sourceText)).toEqual(expect.arrayContaining([
+      "请修复自动扫描卡顿并运行测试",
+      "请修复导入流程并验证结果"
+    ]));
+    expect(waiting.some((item) => item.summary === "生成摘要" || item.generatedTitle === "生成标题")).toBe(false);
+    const queued = db.db.prepare(
+      `SELECT status FROM evolution_jobs WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).all() as Array<{ status: string }>;
+    expect(queued.length).toBeGreaterThanOrEqual(2);
+    expect(queued.every((job) => job.status === "queued")).toBe(true);
+    const past = new Date(Date.now() - 5_000).toISOString();
+    db.db.prepare(
+      `UPDATE evolution_jobs
+       SET payload_json = json_set(payload_json, '$.runAfter', ?)
+       WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).run(past);
+    const summaryDue = Date.parse(past);
+    const heldWake = service.nextWorkerRunAt();
+    expect(heldWake).not.toBe(summaryDue);
+    expect(heldWake === undefined || heldWake > Date.now()).toBe(true);
+
+    configured = true;
+    expect(service.nextWorkerRunAt()).toBe(summaryDue);
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    const generated = service.panelItems({ layer: "L1" }).items;
+    expect(generated.every((item) => item.generatedTitle === "生成标题")).toBe(true);
+    expect(generated.every((item) => item.summary === "生成摘要")).toBe(true);
+    expect(generated.every((item) => item.processing?.state !== "summary_pending" && item.processing?.state !== "summarizing")).toBe(true);
+    expect(generated.every((item) => item.processing?.state !== "failed")).toBe(true);
+    const finished = db.db.prepare(
+      `SELECT status FROM evolution_jobs WHERE job_type IN ('trace_summary', 'import_summary')`
+    ).all() as Array<{ status: string }>;
+    expect(finished.every((job) => job.status === "succeeded")).toBe(true);
     db.close();
   });
 });
@@ -343,17 +644,18 @@ function negativePolicyMemory(title: string, trigger: string): MemoryRow {
 function skillMemory(short?: {
   retrievalBlurb: string;
   triggerContext: string;
-}): MemoryRow {
+}, override: { id?: string; content?: string } = {}): MemoryRow {
   const now = "2026-07-24T00:00:00.000Z";
+  const content = override.content ?? "# SQLite migration\n\nPROCEDURE_ONLY_SENTINEL";
   return {
-    id: "skill_retrieval_document",
+    id: override.id ?? "skill_retrieval_document",
     timeline: now,
     userId: "skill-retrieval-user",
     memoryType: "SkillMemory",
     status: "activated",
     visibility: "private",
     memoryKey: "skill:sqlite-migration",
-    memoryValue: "# SQLite migration\n\nPROCEDURE_ONLY_SENTINEL",
+    memoryValue: content,
     tags: ["sqlite", "migration"],
     info: {},
     properties: {
@@ -363,7 +665,7 @@ function skillMemory(short?: {
         skill: {
           name: "SQLite migration",
           status: "active",
-          invocation_guide: "# SQLite migration\n\nPROCEDURE_ONLY_SENTINEL",
+          invocation_guide: content,
           ...(short ? { procedure_json: short } : {})
         }
       }
@@ -440,6 +742,79 @@ function createFlakyEmbedder(): Embedder {
         model: "flaky-test-embedding",
         configured: true,
         remote: false
+      };
+    }
+  };
+}
+
+function createSelectiveFailureEmbedder(calls?: { batch: number; single: number }): Embedder {
+  const inputTooLong = () => new ModelHttpError(
+    "openai_compatible HTTP 400: maximum context length exceeded",
+    "openai_compatible",
+    400,
+    "context_length_exceeded",
+    "This model's maximum context length is 8192 tokens"
+  );
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "openai_compatible",
+      model: "selective-test-embedding"
+    },
+    isRemote() {
+      return true;
+    },
+    async embed(texts: string[]) {
+      if (calls) calls.batch += 1;
+      if (texts.length > 1) throw inputTooLong();
+      if (texts[0]?.includes("BAD_EMBEDDING_ITEM")) throw inputTooLong();
+      return texts.map((text) => stableTestVector(text));
+    },
+    async embedOne(text: string) {
+      if (calls) calls.single += 1;
+      if (text.includes("BAD_EMBEDDING_ITEM")) throw inputTooLong();
+      return stableTestVector(text);
+    },
+    status() {
+      return {
+        provider: "openai_compatible",
+        model: "selective-test-embedding",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
+function createForbiddenEmbedder(): Embedder {
+  const forbidden = () => new ModelHttpError(
+    "openai_compatible HTTP 403: forbidden",
+    "openai_compatible",
+    403,
+    "model_access_denied",
+    "Access to the configured model is forbidden."
+  );
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "openai_compatible",
+      model: "forbidden-test-embedding"
+    },
+    isRemote() {
+      return true;
+    },
+    async embed() {
+      throw forbidden();
+    },
+    async embedOne() {
+      throw forbidden();
+    },
+    status() {
+      return {
+        provider: "openai_compatible",
+        model: "forbidden-test-embedding",
+        configured: true,
+        remote: true
       };
     }
   };

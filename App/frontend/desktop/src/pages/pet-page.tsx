@@ -2,7 +2,7 @@
 import type { AccountSessionView } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { useApiClients } from "../app/providers.js";
-import { FOCUSED_AGENT_CHAT_STORAGE_KEY, readGuidanceCompleted, resolveInitialView, type AppRoutePath } from "../app/routes.js";
+import { FOCUSED_AGENT_CHAT_STORAGE_KEY, readGuidanceCompleted, resolveInitialView, type AppRoutePath, type ByokAgentModelAvailability } from "../app/routes.js";
 import type { MemmyAgentClient, MemmyAgentSessionSummary, MemmyAgentUnsubscribe, MemmyAgentWebSocketConnection, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
 import type { AsrClient } from "../api/asr-client.js";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
@@ -258,7 +258,12 @@ export function resolvePetMainRouteSessionId(input: { explicitSessionId?: string
 }
 
 /** Handles resolve pet full route. */
-export function resolvePetFullRoute(input: Pick<AppState, "bootstrap" | "account"> & { guidanceCompleted?: boolean }): AppRoutePath {
+export function resolvePetFullRoute(
+  input: Pick<AppState, "bootstrap" | "account"> & {
+    guidanceCompleted?: boolean;
+    modelConfig?: ByokAgentModelAvailability | null;
+  }
+): AppRoutePath {
   if (!input.bootstrap) {
     return "/welcome";
   }
@@ -267,7 +272,8 @@ export function resolvePetFullRoute(input: Pick<AppState, "bootstrap" | "account
     bootstrap: input.bootstrap,
     preferredMode: "full",
     accountSession: resolvePetFullRouteAccountSession(input),
-    guidanceCompleted: input.guidanceCompleted ?? readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage)
+    guidanceCompleted: input.guidanceCompleted ?? readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage),
+    modelConfig: input.modelConfig
   });
 }
 

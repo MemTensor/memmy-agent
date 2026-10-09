@@ -8,7 +8,7 @@ import {
   l3WorldModelGetTransport,
   renderL3WorldModelContext,
   renderL3WorldModelFields
-} from "@memmy/local-api-contracts";
+} from "../../src/contracts/index.js";
 
 const envelope = {
   requestId: "9f4a5cf8-9bc6-4f64-b3c4-671504721c77",

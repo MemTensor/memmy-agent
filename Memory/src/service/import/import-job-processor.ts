@@ -65,6 +65,9 @@ export interface ImportJobProcessorDeps {
   assertSessionInScope(session: ReturnType<ImportJobProcessorDeps["requireSession"]>, namespace: unknown): void;
   normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined;
   memoryAddImportTrace(request: MemoryAddRequest, at: string): Record<string, unknown> | null;
+  memoryAddQaPair(request: MemoryAddRequest): { query: string; answer: string } | null;
+  memoryCaptureQaHash(query: string, answer: string): string;
+  normalizeMemoryCaptureSource(source: string): string;
   isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean;
   titleFromImportTrace(trace: Record<string, unknown>): string | undefined;
   memoryAddTags(request: MemoryAddRequest, isImport: boolean, traceTags: string[]): string[];
@@ -90,6 +93,7 @@ export interface ImportJobProcessorDeps {
   ): void;
   memories: {
     get(id: string): MemoryRow | undefined;
+    getIncludingDeleted(id: string): MemoryRow | undefined;
     getByKeyIncludingDeleted(layer: MemoryLayer, key: string): MemoryRow | undefined;
     upsertByKey(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
     archivePriorReadOnlySkillVersions(input: {
@@ -104,6 +108,19 @@ export interface ImportJobProcessorDeps {
     listUnprocessedAgentSourceImports(limit: number): MemoryRow[];
     toListItem(memory: MemoryRow): { id: string; kind: MemoryKind; memoryLayer: MemoryLayer; status: MemoryStatus; title: string; summary: string; tags: string[] };
     update(memory: MemoryRow): MemoryRow;
+  };
+  captureClaims: {
+    claim(input: {
+      userId: string;
+      source: string;
+      qaHash: string;
+      primaryMemoryId: string;
+      capturedBy: "agent_source_scan";
+      createdAt: string;
+    }): {
+      claimed: boolean;
+      claim: { primaryMemoryId: string; capturedBy: "turn_complete" | "agent_source_scan" };
+    };
   };
   processing: {
     get(memoryId: string): MemoryProcessingRecord | undefined;
@@ -122,7 +139,7 @@ export class ImportJobProcessor {
 
   addMemory(request: MemoryAddRequest): {
     id: string; kind: MemoryKind; memoryLayer: MemoryLayer; status: MemoryStatus;
-    title: string; summary: string; tags: string[]; createdAt: string; serverTime: string;
+    title: string; summary: string; tags: string[]; createdAt: string; serverTime: string; duplicate?: boolean;
   } {
     const d = this.deps;
     d.assertMemoryAddEnabled();
@@ -146,8 +163,12 @@ export class ImportJobProcessor {
     if (readOnlySkill && !sourceAgentId) {
       throw d.createError("invalid_argument", "memory.add Skill requires sourceAgentId or source");
     }
-    const importTitle = importTrace && d.isAgentSourceImportMemoryAdd(request) ? d.titleFromImportTrace(importTrace) : undefined;
-    const title = importTitle ?? (request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
+    const agentSourceImport = Boolean(importTrace && d.isAgentSourceImportMemoryAdd(request));
+    const importTitle = agentSourceImport && importTrace ? d.titleFromImportTrace(importTrace) : undefined;
+    const title = importTitle
+      ?? (agentSourceImport
+        ? `${request.source?.trim() || "Agent"} conversation`
+        : request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
     const importSummary = importTrace ? stringFromRecord(importTrace, "summary") || IMPORT_SUMMARY_QUEUED_TAG : undefined;
     const tags = d.memoryAddTags(request, importTrace !== null, importTrace ? stringArray(importTrace.tags) : []);
     const memoryKey = d.memoryAddKey(request, layer, title);
@@ -241,7 +262,50 @@ export class ImportJobProcessor {
       createdAt: at
     });
 
+    const qaPair = layer === "L1" && d.isAgentSourceImportMemoryAdd(request)
+      ? d.memoryAddQaPair(request)
+      : null;
+    const captureSource = qaPair
+      ? d.normalizeMemoryCaptureSource(memory.agentId ?? request.source ?? context.namespace.source ?? "")
+      : "";
     const persisted = d.transaction(() => {
+      if (qaPair && captureSource) {
+        const priorCaptureMemory = d.memories.getByKeyIncludingDeleted(layer, memoryKey);
+        const capturePrimaryMemoryId = priorCaptureMemory &&
+          priorCaptureMemory.status !== "deleted" &&
+          !priorCaptureMemory.deletedAt
+          ? priorCaptureMemory.id
+          : memory.id;
+        const capture = d.captureClaims.claim({
+          userId: memory.userId,
+          source: captureSource,
+          qaHash: d.memoryCaptureQaHash(qaPair.query, qaPair.answer),
+          primaryMemoryId: capturePrimaryMemoryId,
+          capturedBy: "agent_source_scan",
+          createdAt: at
+        });
+        if (!capture.claimed && capture.claim.capturedBy !== "agent_source_scan") {
+          const existing = d.memories.getIncludingDeleted(capture.claim.primaryMemoryId);
+          if (!existing) {
+            throw d.createError("conflict", "memory capture claim points to a missing memory");
+          }
+          d.assertMemoryInScope(existing, request.namespace);
+          return { duplicateMemory: existing } as const;
+        }
+      }
+      const existingByKey = memory.memoryKey
+        ? d.memories.getByKeyIncludingDeleted(layer, memory.memoryKey)
+        : undefined;
+      if (
+        importTrace &&
+        existingByKey &&
+        existingByKey.status !== "deleted" &&
+        !existingByKey.deletedAt &&
+        importSourceFingerprint(existingByKey) === importSourceFingerprint(memory)
+      ) {
+        repairPlaceholderImportSummary(d, existingByKey, receivedAt);
+        return { upsert: { memory: existingByKey, created: false, previous: existingByKey }, changeSeq: 0, duplicateMemory: existingByKey } as const;
+      }
       const upsert = d.memories.upsertByKey(memory);
       const inserted = upsert.memory;
       const changeSeq = d.runtime.appendChange({
@@ -287,8 +351,23 @@ export class ImportJobProcessor {
           d.processing.update(inserted.id, { activeJobId: job.id, updatedAt: at }, ["summary_pending"]);
         }
       }
-      return { upsert, changeSeq };
+      return { upsert, changeSeq, duplicateMemory: undefined };
     });
+    if (persisted.duplicateMemory) {
+      const item = d.memories.toListItem(persisted.duplicateMemory);
+      return {
+        id: item.id,
+        kind: item.kind,
+        memoryLayer: item.memoryLayer,
+        status: item.status,
+        title: item.title,
+        summary: item.summary,
+        tags: item.tags,
+        createdAt: persisted.duplicateMemory.createdAt,
+        serverTime: d.nowIso(),
+        duplicate: true
+      };
+    }
     const inserted = persisted.upsert.memory;
     if (persisted.upsert.created && !d.isAgentSourceImportMemoryAdd(request)) {
       d.enqueueJob({ jobType: "episode_idle_close", userId: inserted.userId, sessionId: inserted.sessionId,
@@ -418,7 +497,21 @@ export function memoryNeedsImportSummary(memory: MemoryRow): boolean {
 
 export function isImportSummaryPlaceholder(value: string | undefined): boolean {
   const first = value?.split(/\r?\n/).map((line) => line.replace(/^\s*#{1,6}\s+/, "").trim()).find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中)$/i.test(first));
+}
+
+export function importSourceFingerprint(memory: MemoryRow): string {
+  const trace = traceMetaFromMemory(memory);
+  return stableHash({
+    userText: (trace?.userText ?? "").trim(),
+    agentText: (trace?.agentText ?? "").trim(),
+    toolCalls: (trace?.toolCalls ?? []).map((call) => ({
+      name: call.name,
+      input: call.input,
+      output: call.output,
+      error: call.error
+    }))
+  });
 }
 
 export function firstSummary(...values: Array<string | undefined>): string | undefined {
@@ -433,17 +526,36 @@ export function importStatusTags(tags: string[], _status: "indexing" | "indexed"
   return uniq(tags.filter((tag) => !(IMPORT_STATUS_TAGS as readonly string[]).includes(tag)));
 }
 
-export function updateTraceImportSummary(memory: MemoryRow, input: { summary: string; alpha: number; value: number; priority: number; tags: string[]; updatedAt: string }): MemoryRow {
+export function updateTraceImportSummary(memory: MemoryRow, input: { summary: string; title?: string; alpha: number; value: number; priority: number; tags: string[]; updatedAt: string }): MemoryRow {
   const internalTrace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : {};
   const trace = traceMetaFromMemory(memory);
   if (!trace) return memory;
-  const nextTrace = { ...internalTrace, summary: input.summary, reflection: null, alpha: input.alpha, usable: false, reflection_source: "none", value: input.value, priority: input.priority, import_summary_at: input.updatedAt };
+  const title = input.title?.trim();
+  const nextTrace = {
+    ...internalTrace,
+    summary: input.summary,
+    reflection: null,
+    alpha: input.alpha,
+    usable: false,
+    reflection_source: "none",
+    value: input.value,
+    priority: input.priority,
+    import_summary_at: input.updatedAt,
+    ...(title ? { title } : {})
+  };
+  const memoryValue = renderTraceMemoryValue({ summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"), userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflection: { text: null, alpha: input.alpha }, value: input.value, priority: input.priority });
   return {
     ...memory,
-    memoryValue: renderTraceMemoryValue({ summary: input.summary, rawTurnId: stringFromRecord(internalTrace, "raw_turn_id"), stepIndex: numberFromRecord(internalTrace, "step_index"), userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflection: { text: null, alpha: input.alpha }, value: input.value, priority: input.priority }),
+    memoryValue,
+    contentHash: stableHash(memoryValue),
     tags: input.tags,
-    info: { ...memory.info, summary: input.summary, value: input.value, priority: input.priority, tags: input.tags },
-    properties: { ...memory.properties, tags: input.tags, info: { ...(memory.properties.info ?? {}), summary: input.summary, value: input.value, priority: input.priority, tags: input.tags }, internal_info: { ...memory.properties.internal_info, summary: input.summary, alpha: input.alpha, value: input.value, priority: input.priority, trace: nextTrace } },
+    info: { ...memory.info, summary: input.summary, value: input.value, priority: input.priority, tags: input.tags, ...(title ? { title } : {}) },
+    properties: {
+      ...memory.properties,
+      tags: input.tags,
+      info: { ...(memory.properties.info ?? {}), summary: input.summary, value: input.value, priority: input.priority, tags: input.tags, ...(title ? { title } : {}) },
+      internal_info: { ...memory.properties.internal_info, summary: input.summary, ...(title ? { title } : {}), alpha: input.alpha, value: input.value, priority: input.priority, trace: nextTrace }
+    },
     updatedAt: input.updatedAt
   };
 }
@@ -452,6 +564,42 @@ export function updateImportPipelineStatus(memory: MemoryRow, _status: "indexing
   if (memory.memoryLayer !== "L1" || !memoryHasImportPipeline(memory)) return memory;
   const tags = importStatusTags(memory.tags, _status);
   return { ...memory, tags, info: { ...memory.info, tags }, properties: { ...memory.properties, tags, info: { ...(memory.properties.info ?? {}), tags } }, updatedAt: at };
+}
+
+function repairPlaceholderImportSummary(
+  d: ImportJobProcessorDeps,
+  memory: MemoryRow,
+  at: string
+): void {
+  if (!memoryNeedsImportSummary(memory)) return;
+  const existing = d.processing.get(memory.id);
+  if (existing && (existing.state === "summary_pending" || existing.state === "summarizing")) return;
+  d.memories.deleteVector(memory.id, "vec_summary");
+  const processing = d.processing.save({
+    memoryId: memory.id,
+    state: "summary_pending",
+    stage: "summary",
+    activeJobId: null,
+    attemptCount: 0,
+    manualRetryCount: existing?.manualRetryCount ?? 0,
+    retryAction: "retry",
+    errorCode: null,
+    errorMessage: null,
+    failedAt: null,
+    updatedAt: at
+  });
+  if (processing.state === "summary_pending" && !processing.activeJobId) {
+    const job = d.enqueueJob({
+      jobType: "import_summary",
+      userId: memory.userId,
+      sessionId: memory.sessionId,
+      targetMemoryId: memory.id,
+      payload: { source: "memory.add.placeholder_repair", contentHash: memory.contentHash },
+      maxAttempts: 3,
+      createdAt: at
+    });
+    d.processing.update(memory.id, { activeJobId: job.id, updatedAt: at }, ["summary_pending"]);
+  }
 }
 
 function kindForLayer(layer: MemoryLayer): MemoryKind {

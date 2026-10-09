@@ -9,11 +9,14 @@ import type {
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
+  SourceTurnCompleteInput,
+  SourceTurnCompleteOutput,
   EnqueueImportSummariesOutput,
   GetMemoryOutput,
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryTokenBudgetDto,
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
@@ -43,12 +46,17 @@ export interface MemoryRequestContext {
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
+  exportBundle?(): Promise<Record<string, unknown>>;
+  clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 
   openSession(input: OpenSessionInput, context?: MemoryRequestContext): Promise<OpenSessionOutput>;
   closeSession(input: CloseSessionInput & { sessionId: string }, context?: MemoryRequestContext): Promise<CloseSessionOutput>;
 
   startTurn(input: StartTurnInput, context?: MemoryRequestContext): Promise<StartTurnOutput>;
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
+
+  completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;

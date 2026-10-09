@@ -1,4 +1,4 @@
-import type { AccountChannel, InvitationResult } from "@memmy/local-api-contracts";
+import type { AccountChannel, InvitationResult, SocialLoginProvider } from "@memmy/local-api-contracts";
 import type {
   AnalyticsEvent,
   InviteCodeCopiedEvent,
@@ -9,7 +9,7 @@ import type {
 export type TrackAnalyticsEvent = (event: AnalyticsEvent) => void;
 
 export interface InvitationSignupEventInput {
-  channel: AccountChannel;
+  channel: AccountChannel | SocialLoginProvider;
   isNewUser: boolean;
   invitationCode?: string;
 }

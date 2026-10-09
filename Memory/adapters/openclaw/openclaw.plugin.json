@@ -1,0 +1,11 @@
+{
+  "id": "memmy-memory",
+  "name": "Memmy Memory",
+  "description": "Thin OpenClaw HTTP adapter for the standalone Memmy Memory service.",
+  "version": "2.1.0",
+  "kind": "memory",
+  "contracts": {
+    "tools": ["memos_search", "memos_get", "memos_timeline", "memos_environment", "memos_skill_list", "memos_skill_get"]
+  },
+  "configSchema": { "type": "object", "additionalProperties": true, "properties": {} }
+}

@@ -18,7 +18,7 @@ describe("RuntimeApp bootstrap loading", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
 
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
-    expect(source).toContain("accountSession,\n          guidanceCompleted");
+    expect(source).toContain("accountSession,\n          guidanceCompleted,\n          modelConfig");
   });
 
   it("handles existing main-window route targets without reloading the renderer", () => {
@@ -41,6 +41,17 @@ describe("RuntimeApp bootstrap loading", () => {
     expect(source).toContain("translationRef.current = t;");
     expect(source).toContain("formatScanCompletedError(scanResults, nextSources, translationRef.current)");
     expect(source).toContain("formatAgentSourceScanRequestError(error, undefined, translationRef.current)");
+  });
+
+  it("reconciles scan status on heartbeat only while a scan is showing as active", () => {
+    const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
+
+    expect(source).toContain("const isScanningRef = useRef(false);");
+    expect(source).toContain("isScanningRef.current = state.agentSources.isScanning;");
+    expect(source).toContain("events.addEventListener(\"app.heartbeat\", () => {");
+    expect(source).toContain("if (isScanningRef.current) {");
+    expect(source).toContain("void reconcileAgentSourceScanStatus(clients.agentSources);");
+    expect(source).not.toContain("events.addEventListener(\"app.heartbeat\", () => dispatch(appActions.eventStatusChanged(\"heartbeat\")));");
   });
 
   it("keeps desktop update coordination above route-scoped content", () => {

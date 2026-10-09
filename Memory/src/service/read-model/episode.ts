@@ -8,6 +8,7 @@
  *
  * Intended destination: Memory/src/service/read-model/episode.ts
  */
+import { episodeTitleDisplayState } from "../episode-title/episode-title-service.js";
 import type {
   EpisodeRecord,
   RawTurnRecord,
@@ -302,6 +303,9 @@ export class EpisodeReadModel {
 
   refsForMemory(memory: MemoryRow): Record<string, unknown> {
     if (memory.memoryLayer === "L1") {
+      if (memory.properties.internal_info.memory_kind === "work_memory") {
+        return {};
+      }
       const rawTurnId = this.deps.rawTurnIdFromMemory(memory);
       const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
       const episodeId = rawTurn?.episodeId ?? this.deps.episodeIdFromMemory(memory);
@@ -341,9 +345,10 @@ export class EpisodeReadModel {
   }
 }
 
-export function episodeRef(episode: EpisodeRecord): Record<string, unknown> {
+export function episodeRef(episode: EpisodeRecord, titleJobPending = false): Record<string, unknown> {
   const skillStatus = episodeSkillStatus(episode);
   const skillReason = episodeSkillReason(episode);
+  const titleState = episodeTitleDisplayState(episode, titleJobPending);
   return {
     id: episode.id,
     sessionId: episode.sessionId,
@@ -364,7 +369,9 @@ export function episodeRef(episode: EpisodeRecord): Record<string, unknown> {
     skillMemoryIds: episode.skillMemoryIds,
     linkedSkillId: episode.skillMemoryIds[0],
     skillStatus,
-    skillReason
+    skillReason,
+    titleGenerated: titleState.titleGenerated,
+    titlePending: titleState.titlePending
   };
 }
 

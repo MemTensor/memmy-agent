@@ -87,6 +87,51 @@ describe("local api", () => {
     expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
   });
 
+  it("writes the resolved UI language into Memory config before the startup reload", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-startup-language-"));
+    const memmyConfigPath = join(tempDir, "config.yaml");
+    writeFileSync(memmyConfigPath, "memmyMemory:\n  domain: keep\n", "utf8");
+    const baseClient = createMockMemoryClient();
+    let languageAtReload: unknown;
+
+    backend = await createLocalBackend({
+      databasePath: join(tempDir, "app.sqlite"),
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryBaseUrl: "http://127.0.0.1:18960",
+      accountChannel: "phone",
+      memoryClient: {
+        ...baseClient,
+        async reloadConfig(input) {
+          languageAtReload = YAML.parse(readFileSync(memmyConfigPath, "utf8")).memmyMemory?.language;
+          return baseClient.reloadConfig(input);
+        }
+      },
+      cloudClient: createMockCloudClient(),
+      memmyConfigPath
+    });
+
+    expect(languageAtReload).toBe("zh-CN");
+    expect(YAML.parse(readFileSync(memmyConfigPath, "utf8"))).toMatchObject({
+      memmyMemory: { domain: "keep", language: "zh-CN" }
+    });
+    await backend.close();
+    backend = undefined;
+
+    writeFileSync(memmyConfigPath, "memmyMemory:\n  domain: keep\n", "utf8");
+    backend = await createLocalBackend({
+      databasePath: join(tempDir, "app-email.sqlite"),
+      runtimeConfigPath: join(tempDir, "runtime-email.json"),
+      localToken: "test-token",
+      memoryBaseUrl: "http://127.0.0.1:18960",
+      accountChannel: "email",
+      memoryClient: createMockMemoryClient(),
+      cloudClient: createMockCloudClient(),
+      memmyConfigPath
+    });
+    expect(YAML.parse(readFileSync(memmyConfigPath, "utf8")).memmyMemory.language).toBe("en-US");
+  });
+
   it("reloads Agent MCP only after writing the current Composio bridge config", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
     const memmyConfigPath = join(tempDir, "config.yaml");
@@ -239,7 +284,7 @@ describe("local api", () => {
     }
   });
 
-  it("fails fast when no real Memory Layer or local SQLite memory source is configured", async () => {
+  it("fails fast when no HTTP Memory Layer is configured", async () => {
     const previousMemoryLayerUrl = process.env.MEMMY_MEMORY_LAYER_URL;
     const previousMemoryDbPath = process.env.MEMMY_MEMORY_DB_PATH;
     const previousMemosDbPath = process.env.MEMMY_MEMOS_DB_PATH;
@@ -259,7 +304,7 @@ describe("local api", () => {
           cloudClient: createMockCloudClient(),
           memmyConfigPath: join(tempDir, "config.yaml")
         })
-      ).rejects.toThrow("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+      ).rejects.toThrow("MEMMY_MEMORY_LAYER_URL is required");
     } finally {
       restoreOptionalEnv("MEMMY_MEMORY_LAYER_URL", previousMemoryLayerUrl);
       restoreOptionalEnv("MEMMY_MEMORY_DB_PATH", previousMemoryDbPath);

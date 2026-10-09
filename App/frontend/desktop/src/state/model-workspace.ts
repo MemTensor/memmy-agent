@@ -1,13 +1,14 @@
 /** Pure view-model helpers for the canonical model catalog returned by the local API. */
-import type {
-  CatalogEndpointInput,
-  CatalogProviderId,
-  ModelAssignment,
-  ModelCapability as CatalogCapability,
-  ModelConfigInput,
-  ModelConfigView,
-  ModelEndpointProtocol,
-  TextModelItemView
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type CatalogEndpointInput,
+  type CatalogProviderId,
+  type ModelAssignment,
+  type ModelCapability as CatalogCapability,
+  type ModelConfigInput,
+  type ModelConfigView,
+  type ModelEndpointProtocol,
+  type TextModelItemView
 } from "@memmy/local-api-contracts";
 import { CLIENT_PRESET_ID_PREFIX, type ModelProviderConfig } from "../api/config-client.js";
 
@@ -110,7 +111,7 @@ export interface ResolvedModelSelection {
   candidate: ModelCandidate | null;
   candidateId: string | null;
   unavailable: boolean;
-  reason: "saved" | "initial" | "unavailable" | "empty";
+  reason: "saved" | "committed" | "initial" | "unavailable" | "empty";
   previousModel?: string | null;
   previousProvider?: string | null;
 }
@@ -341,22 +342,34 @@ export function getTaskModelCandidates(workspace: ModelWorkspace, mode: ModelWor
 export function resolveModelSelection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  selectedPresetId?: string | null
+  selectedPresetId?: string | null,
+  options: { allowUnassignedSelected?: boolean } = {}
 ): ResolvedModelSelection {
   const candidates = getTaskModelCandidates(workspace, mode);
   if (!candidates.length) {
-    return selectedPresetId
-      ? { candidate: null, candidateId: selectedPresetId, unavailable: true, reason: "unavailable" }
-      : { candidate: null, candidateId: null, unavailable: false, reason: "empty" };
+    if (!selectedPresetId) {
+      return { candidate: null, candidateId: null, unavailable: false, reason: "empty" };
+    }
+    const committed = options.allowUnassignedSelected
+      ? getModelCandidates(workspace, mode, "chat").find((item) => item.id === selectedPresetId) ?? null
+      : null;
+    return committed
+      ? { candidate: committed, candidateId: selectedPresetId, unavailable: !committed.available, reason: "committed" }
+      : { candidate: null, candidateId: selectedPresetId, unavailable: true, reason: "unavailable" };
   }
   const candidateId = selectedPresetId ?? workspace.catalog.modelAssignments[mode].agent.default;
   if (!candidateId) {
     return { candidate: candidates[0]!, candidateId: candidates[0]!.id, unavailable: false, reason: "initial" };
   }
   const candidate = candidates.find((item) => item.id === candidateId) ?? null;
+  const committed = !candidate && options.allowUnassignedSelected
+    ? getModelCandidates(workspace, mode, "chat").find((item) => item.id === candidateId) ?? null
+    : null;
   return candidate
     ? { candidate, candidateId, unavailable: !candidate.available, reason: "saved" }
-    : { candidate: null, candidateId, unavailable: true, reason: "unavailable" };
+    : committed
+      ? { candidate: committed, candidateId, unavailable: !committed.available, reason: "committed" }
+      : { candidate: null, candidateId, unavailable: true, reason: "unavailable" };
 }
 
 export function upsertModelConnection(
@@ -480,6 +493,21 @@ export function upsertModelConnection(
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
+  // BYOK presets are the source of truth: the backend re-derives account.agent.candidates
+  // from byok.agent.candidates on every account-mode startup, dropping any BYOK preset that
+  // is absent there. So a custom (source: "byok") model added while in account mode must also
+  // be enrolled in the byok candidate list, otherwise it survives the session but vanishes on
+  // the next restart.
+  if (mode !== "byok") {
+    const byokAgent = next.modelAssignments.byok.agent;
+    byokAgent.candidates = replaceIds(byokAgent.candidates, previousPresetIds, nextAgentPresetIds);
+    if (!byokAgent.default || previousPresetIds.includes(byokAgent.default)) {
+      byokAgent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? byokAgent.default;
+    }
+  }
+  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
+  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
+  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
@@ -549,6 +577,22 @@ export function setDefaultTaskModel(
   return createModelWorkspace(next);
 }
 
+/**
+ * Builds the persistence payload that makes `candidateId` the `mode` default, or null when there
+ * is nothing to persist (the id is not a candidate for this mode, or it is already the default).
+ * Used to remember the model picked in the chat selector as the default for new chats across
+ * restart, without redundant config writes.
+ */
+export function defaultModelSelectionInput(
+  workspace: ModelWorkspace,
+  mode: ModelWorkspaceMode,
+  candidateId: string
+): ModelConfigInput | null {
+  const agent = workspace.catalog.modelAssignments[mode].agent;
+  if (!agent.candidates.includes(candidateId) || agent.default === candidateId) return null;
+  return modelConfigInput(setDefaultTaskModel(workspace, mode, candidateId));
+}
+
 export function setModelAssignment(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
@@ -559,6 +603,11 @@ export function setModelAssignment(
   if (candidateId === null) {
     const next = cloneCatalog(workspace.catalog);
     next.modelAssignments[mode][key] = null;
+    return createModelWorkspace(next);
+  }
+  if (kind === "embedding" && candidateId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+    const next = cloneCatalog(workspace.catalog);
+    next.modelAssignments[mode].embedding = candidateId;
     return createModelWorkspace(next);
   }
   const capability = assignmentCapability(kind);
@@ -692,9 +741,9 @@ function cloneAssignment<T extends Omit<ModelAssignment, "ownerAccountId"> | Mod
 
 function normalizeProvider(provider: string): CatalogProviderId | null {
   const normalized = provider.trim().toLowerCase();
-  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine" };
+  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine", xiaomi: "xiaomi_mimo" };
   const candidate = aliases[normalized] ?? normalized;
-  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "memmy_account"].includes(candidate)
+  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo", "memmy_account"].includes(candidate)
     ? candidate as CatalogProviderId
     : null;
 }
@@ -794,7 +843,9 @@ function pruneInvalidAssignmentReferences(assignment: ModelAssignment, validIds:
     assignment.agent.default = assignment.agent.candidates[0] ?? null;
   }
   for (const key of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
-    if (assignment[key] && !validIds.has(assignment[key]!)) assignment[key] = null;
+    const candidateId = assignment[key];
+    if (!candidateId || (key === "embedding" && candidateId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID)) continue;
+    if (!validIds.has(candidateId)) assignment[key] = null;
   }
 }
 

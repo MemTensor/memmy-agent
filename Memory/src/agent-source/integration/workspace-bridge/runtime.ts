@@ -1,0 +1,635 @@
+import {
+  buildSourceTurnRequest,
+  deepseekHarnessSessionDirectory,
+  discoverDeepseekHarnessSessions,
+  encodeDeepseekHarnessSegment,
+  findLatestDeepseekHarnessSessionFile,
+  loadDeepseekHarnessEvents,
+  readCursorSourceTurn,
+  readDeepseekHarnessSourceTurn,
+  readOpenclawSourceTurn,
+  readOpencodeSourceTurn,
+  type CursorVscdbSource,
+  type OpenclawTranscriptSource,
+  type OpencodeSource,
+  type SourceTurn
+} from "@memmy/agent-source-core";
+export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  resolveCursorDataPaths,
+  resolveDeepseekHarnessSessionsDirectory,
+  resolveOpenclawStateDirectory,
+  resolveOpencodeDatabasePath
+} from "../../agent-paths.js";
+import { join } from "node:path";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, parse, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import YAML from "yaml";
+import {
+  normalizeWorkspaceUri,
+  renderL3WorldModelContext,
+  type L3WorldModelRequestEnvelope,
+} from "../../../contracts/index.js";
+
+const DEFAULT_ENDPOINT = "http://127.0.0.1:18960";
+
+export interface RuntimeConfig {
+  endpoint: string;
+  token: string;
+  userId: string;
+  workspaceHostId: string;
+}
+
+export interface RuntimeSession {
+  protocol: "legacy" | "v2";
+  sessionId: string;
+  projectId: string | null;
+  sessionKey: string;
+  source: string;
+  adapterId: string;
+  profileId: string;
+  workspaceRoot: string | null;
+  config: RuntimeConfig;
+}
+
+export interface OpenRuntimeSessionInput {
+  configUrl: URL;
+  source: string;
+  sessionKey: string;
+  workspaceRoot?: string | null;
+  transition: "allow_legacy_rollover" | "resume_only";
+  pinnedOwner?: boolean;
+  adapterId?: string;
+  profileId?: string;
+}
+
+export interface LoadedRuntimeSession extends RuntimeSession {
+  additionalContext: string;
+  renderedContext: string;
+  memoryVersion: number | null;
+}
+
+export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Promise<RuntimeConfig> {
+  const snapshot = objectValue(await readJson(configUrl));
+  const configPath = text(snapshot.memmy_config_path) || resolve(homedir(), ".memmy", "config.yaml");
+  const yaml = objectValue(YAML.parse(await readFile(configPath, "utf8").catch(() => "{}")));
+  const memory = objectValue(yaml.memmyMemory);
+  const storage = objectValue(memory.storage);
+  const legacyStorage = objectValue(yaml.storage);
+  const app = objectValue(yaml.app);
+  return {
+    endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
+    token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
+    userId: pinnedOwner
+      ? text(snapshot.userId) || "local-user"
+      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    workspaceHostId: text(snapshot.workspaceHostId),
+  };
+}
+
+export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
+  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
+  const client = new RuntimeHttpClient(config);
+  const health = await client.get("/api/v1/health").catch(() => null);
+  if (!health && input.pinnedOwner === true) return null;
+  const features = objectValue(objectValue(health).features);
+  const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
+  const adapterId = input.adapterId || `memmy-${input.source}-adapter`;
+  const profileId = input.profileId || "default";
+  if (!supportsV2) return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
+
+  const resolvedWorkspaceRoot = input.workspaceRoot ? await canonicalWorkspaceRoot(input.workspaceRoot) : null;
+  const workspaceRoot = resolvedWorkspaceRoot && config.workspaceHostId ? resolvedWorkspaceRoot : null;
+  const envelope = runtimeEnvelope(input.source, input.sessionKey, config.userId, null, adapterId, profileId);
+  const workspaceUri = workspaceRoot ? normalizeWorkspaceUri(pathToFileURL(workspaceRoot).href) : null;
+  let opened: Record<string, any>;
+  try {
+    opened = objectValue(await client.post("/api/v1/sessions/open", compact({
+      ...envelope,
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: input.transition,
+      workspaceUri: workspaceUri || undefined,
+      workspaceHostId: workspaceUri ? config.workspaceHostId : undefined,
+    })));
+  } catch (error) {
+    if (input.transition !== "resume_only" || !isV2ResumeConflict(error)) throw error;
+    return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
+  }
+  const sessionId = text(opened.sessionId);
+  if (!sessionId) return null;
+  return {
+    protocol: "v2",
+    sessionId,
+    projectId: text(opened.projectId) || null,
+    sessionKey: input.sessionKey,
+    source: input.source,
+    adapterId,
+    profileId,
+    workspaceRoot,
+    config,
+  };
+}
+
+async function openLegacyRuntimeSession(
+  client: RuntimeHttpClient,
+  config: RuntimeConfig,
+  input: OpenRuntimeSessionInput,
+  adapterId: string,
+  profileId: string,
+): Promise<RuntimeSession> {
+  const externalSessionId = input.sessionKey;
+  const opened = objectValue(await client.post("/api/v1/sessions/open", {
+    sessionId: externalSessionId,
+    source: input.source,
+    profileId: profileId !== "default" ? profileId : undefined,
+    workspacePath: input.workspaceRoot || undefined,
+  }));
+  return {
+    protocol: "legacy",
+    sessionId: text(opened.sessionId) || externalSessionId,
+    projectId: null,
+    sessionKey: input.sessionKey,
+    source: input.source,
+    adapterId,
+    profileId,
+    workspaceRoot: null,
+    config,
+  };
+}
+
+export async function loadRuntimeL3(session: RuntimeSession): Promise<LoadedRuntimeSession> {
+  if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
+  const client = new RuntimeHttpClient(session.config);
+  const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
+  const result = objectValue(await client.get(
+    `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
+    envelopeGetTransport(envelope),
+  ));
+  const renderedContext = text(result.renderedContext);
+  return {
+    ...session,
+    additionalContext: renderedContext ? renderL3WorldModelContext(renderedContext) : "",
+    renderedContext,
+    memoryVersion: typeof result.memoryVersion === "number" ? result.memoryVersion : null,
+  };
+}
+
+export async function notifyRuntimeBoundary(
+  session: RuntimeSession,
+  trigger: "token_compaction" | "token_compaction_attempt",
+): Promise<boolean> {
+  if (session.protocol !== "v2") return false;
+  const client = new RuntimeHttpClient(session.config);
+  const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
+  const head = objectValue(await client.get(
+    `/api/v1/sessions/${encodeURIComponent(session.sessionId)}/l3-world-model-trace-head`,
+    envelopeGetTransport(envelope),
+  ));
+  const throughL1MemoryId = text(head.throughL1MemoryId);
+  if (!throughL1MemoryId) return false;
+  await client.post(`/api/v1/sessions/${encodeURIComponent(session.sessionId)}/l3-world-model-boundary`, {
+    ...envelope,
+    trigger,
+    throughL1MemoryId,
+  });
+  return true;
+}
+
+export async function closeRuntimeSession(session: RuntimeSession): Promise<void> {
+  const client = new RuntimeHttpClient(session.config);
+  const body = session.protocol === "v2"
+    ? runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId)
+    : { source: session.source };
+  await client.post(`/api/v1/sessions/${encodeURIComponent(session.sessionId)}/close`, body);
+}
+
+export async function startRuntimeTurn(
+  session: RuntimeSession,
+  turnId: string,
+  query: string,
+): Promise<Record<string, unknown>> {
+  const client = new RuntimeHttpClient(session.config);
+  const body = session.protocol === "v2"
+    ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
+    : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };
+  return objectValue(await client.post("/api/v1/turns/start", body));
+}
+
+export async function completeRuntimeTurn(
+  session: RuntimeSession,
+  input: {
+    turnId: string;
+    episodeId?: string;
+    query: string;
+    answer: string;
+    status: "succeeded" | "failed";
+    sourceMemoryIds?: string[];
+    reasoningSummary?: string;
+    toolCalls?: unknown[];
+    toolResults?: unknown[];
+  },
+): Promise<void> {
+  const client = new RuntimeHttpClient(session.config);
+  const body = session.protocol === "v2"
+    ? {
+        ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId),
+        sessionId: session.sessionId,
+        episodeId: input.episodeId,
+        query: input.query,
+        answer: input.answer,
+        status: input.status,
+        sourceMemoryIds: input.sourceMemoryIds,
+        reasoningSummary: input.reasoningSummary,
+        toolCalls: input.toolCalls,
+        toolResults: input.toolResults,
+      }
+    : {
+        source: session.source,
+        adapterId: session.adapterId,
+        requestId: `${session.source}-complete:${input.turnId}:${hashText([input.status, input.query, input.answer].join("\u0000"))}`,
+        sessionId: session.sessionId,
+        ...input,
+      };
+  await client.post(`/api/v1/turns/${encodeURIComponent(input.turnId)}/complete`, compact(body));
+}
+
+/** Submit a completed native turn without opening a new runtime Session before deduplication. */
+export async function completeSourceTurn(input: {
+  configUrl: URL;
+  turn: SourceTurn;
+  sessionId?: string;
+  sourceMemoryIds?: string[];
+  profileId?: string;
+  adapterId?: string;
+}): Promise<Record<string, unknown>> {
+  const config = await readRuntimeConfig(input.configUrl, true);
+  const client = new RuntimeHttpClient(config);
+  const profileId = input.turn.profileId || input.profileId || "default";
+  return objectValue(await client.post("/api/v1/source-turns/complete", compact({
+    ...buildSourceTurnRequest(input.turn, "hook", profileId),
+    namespace: {
+      source: input.turn.source,
+      profileId,
+      userId: config.userId,
+      sessionKey: input.turn.conversationId,
+    },
+    sessionId: input.sessionId,
+    sourceMemoryIds: input.sourceMemoryIds,
+    adapterId: input.adapterId || `memmy-${input.turn.source}-hook`,
+  })));
+}
+
+type NodeSqliteDatabase = import("node:sqlite").DatabaseSync;
+
+let nodeSqlite: Promise<typeof import("node:sqlite")> | undefined;
+
+function loadNodeSqlite(): Promise<typeof import("node:sqlite")> {
+  if (!nodeSqlite) {
+    silenceSqliteExperimentalWarning();
+    nodeSqlite = import("node:sqlite");
+  }
+  return nodeSqlite;
+}
+
+function silenceSqliteExperimentalWarning(): void {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = ((warning, ...args) => {
+    const message = typeof warning === "string" ? warning : warning.message;
+    const warningType = typeof warning === "string"
+      ? (typeof args[0] === "string" ? args[0] : undefined)
+      : warning.name;
+    if (warningType === "ExperimentalWarning" && message.includes("SQLite is an experimental feature")) return;
+    return Reflect.apply(emitWarning, process, [warning, ...args]);
+  }) as typeof process.emitWarning;
+}
+
+async function openReadOnlySqlite(path: string): Promise<NodeSqliteDatabase> {
+  const { DatabaseSync } = await loadNodeSqlite();
+  return new DatabaseSync(path, { readOnly: true });
+}
+
+/**
+ * Reads the turn Cursor just finished out of its own global `state.vscdb`, using the same
+ * parser the offline scan uses. The hook only receives `generation_id`, which is the user
+ * bubble's `requestId`; the durable turn id is that bubble's `bubbleId`.
+ */
+export async function readCursorHookSourceTurn(input: {
+  conversationId: string;
+  requestId?: string;
+  turnId?: string;
+  globalStateDbPath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.globalStateDbPath || resolveCursorDataPaths().globalStateDbPath;
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const diskValue = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
+    const parse = (key: string): unknown => {
+      const row = diskValue.get(key) as { value?: unknown } | undefined;
+      if (typeof row?.value !== "string") return undefined;
+      try {
+        return JSON.parse(row.value);
+      } catch {
+        return undefined;
+      }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => [input.conversationId],
+      composerData: (composerId) => parse(`composerData:${composerId}`),
+      bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
+    };
+    return await readCursorSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the run OpenClaw just finished out of its own agent database, using the same
+ * parser the offline scan uses. The plugin only knows `runId` and the window id; the
+ * conversation identity is the window's session key.
+ */
+export async function readOpenclawHookSourceTurn(input: {
+  runId: string;
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+  databasePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.databasePath
+    || join(resolveOpenclawStateDirectory(), "agents", input.agentId || "main", "agent", "openclaw-agent.sqlite");
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const windows = db.prepare(
+      "SELECT session_id AS sessionId, session_key AS sessionKey FROM session_windows WHERE session_key IS NOT NULL"
+    );
+    const events = db.prepare("SELECT seq, event_json AS eventJson FROM transcript_events WHERE session_id = ? ORDER BY seq ASC");
+    const source: OpenclawTranscriptSource = {
+      windows: () => windows.all() as unknown as Array<{ sessionId: string; sessionKey: string }>,
+      events: (sessionId) => (events.all(sessionId) as unknown as Array<{ seq: number; eventJson: string }>).map((row) => {
+        let event: unknown;
+        try {
+          event = JSON.parse(row.eventJson);
+        } catch {
+          event = undefined;
+        }
+        return { seq: Number(row.seq), event };
+      })
+    };
+    return await readOpenclawSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the turn OpenCode just finished out of its own database, using the same parser the
+ * offline scan uses. The durable turn id is the user message id, which the plugin already
+ * holds and the scan reads from the same column.
+ */
+export async function readOpencodeHookSourceTurn(input: {
+  conversationId: string;
+  turnId: string;
+  databasePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const path = input.databasePath || resolveOpencodeDatabasePath();
+  let db: NodeSqliteDatabase;
+  try {
+    db = await openReadOnlySqlite(path);
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+  try {
+    const columns = new Set((db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name));
+    const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session WHERE id = ?`);
+    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
+    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC");
+    const parse = (value: unknown): unknown => {
+      if (typeof value !== "string") return undefined;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return undefined;
+      }
+    };
+    const source: OpencodeSource = {
+      sessions: () => (sessions.all(input.conversationId) as unknown as Array<Record<string, unknown>>).map((row) => {
+        const revert = typeof row.revert === "string" ? parse(row.revert) : row.revert;
+        const messageId = revert && typeof revert === "object" && !Array.isArray(revert)
+          ? (revert as { messageID?: unknown }).messageID
+          : undefined;
+        return {
+          id: String(row.id),
+          parentId: row.parentId == null ? null : String(row.parentId),
+          directory: row.directory == null ? null : String(row.directory),
+          agent: typeof row.agent === "string" ? row.agent : null,
+          revertMessageId: typeof messageId === "string" && messageId ? messageId : null
+        };
+      }),
+      messages: (sessionId) => (messages.all(sessionId) as unknown as Array<{ id: string; data: string }>)
+        .map((row) => ({ id: row.id, data: parse(row.data) })),
+      parts: (messageId) => (parts.all(messageId) as unknown as Array<{ id: string; data: string }>)
+        .map((row) => ({ id: row.id, data: parse(row.data) }))
+    };
+    return await readOpencodeSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Reads the turn DeepSeek Harness just finished out of its session log, using the same
+ * parser the offline scan uses. `turn/end` only knows `session.id` and `data.turn`; the
+ * durable turn id is `{sessionId}:{turn}`. Flush first — the log is not written at turn/end.
+ */
+export async function readDeepseekHookSourceTurn(input: {
+  conversationId: string;
+  turn?: number;
+  turnId?: string;
+  cwd?: string;
+  sessionsRoot?: string;
+  sessionFilePath?: string;
+}): Promise<{ turn: SourceTurn | null; reason?: string }> {
+  const filePath = input.sessionFilePath || await resolveDeepseekHarnessSessionFile(input);
+  if (!filePath) return { turn: null, reason: "source_store_unavailable" };
+  try {
+    return await readDeepseekHarnessSourceTurn(await loadDeepseekHarnessEvents(filePath), {
+      conversationId: input.conversationId,
+      turn: input.turn,
+      turnId: input.turnId
+    });
+  } catch {
+    return { turn: null, reason: "source_store_unavailable" };
+  }
+}
+
+async function resolveDeepseekHarnessSessionFile(input: {
+  conversationId: string;
+  cwd?: string;
+  sessionsRoot?: string;
+}): Promise<string | undefined> {
+  const root = input.sessionsRoot || resolveDeepseekHarnessSessionsDirectory();
+  if (input.cwd) {
+    const latest = await findLatestDeepseekHarnessSessionFile(
+      deepseekHarnessSessionDirectory(root, input.cwd, input.conversationId)
+    );
+    if (latest) return latest;
+  }
+  const encoded = encodeDeepseekHarnessSegment(input.conversationId);
+  const discovered = await discoverDeepseekHarnessSessions({ root, order: "recent_first" });
+  return discovered.find((file) => file.sessionFilePath.includes(`${encoded}`))?.sessionFilePath;
+}
+
+class RuntimeHttpClient {
+  constructor(private readonly config: RuntimeConfig) {}
+
+  async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
+    const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
+    for (const [key, value] of Object.entries(transport.query ?? {})) url.searchParams.set(key, value);
+    return this.request(url, { method: "GET", headers: transport.headers });
+  }
+
+  async post(path: string, body: unknown): Promise<unknown> {
+    const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
+    return this.request(url, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  private async request(url: URL, init: RequestInit): Promise<unknown> {
+    const headers = new Headers(init.headers);
+    headers.set("accept", "application/json");
+    if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+    } catch (error) {
+      throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
+    }
+    const textValue = await response.text();
+    const parsed = textValue.trim() ? JSON.parse(textValue) : null;
+    if (!response.ok) {
+      const body = objectValue(parsed);
+      const nested = objectValue(body.error);
+      throw new RuntimeHttpError(
+        response.status,
+        text(body.code) || text(nested.code),
+        text(body.message) || text(nested.message) || `Memory request failed: ${response.status}`,
+      );
+    }
+    return parsed;
+  }
+}
+
+function formatErrorWithCause(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const message = current instanceof Error ? current.message : String(current);
+    const code = typeof current === "object" && "code" in current && typeof current.code === "string"
+      ? current.code
+      : "";
+    const detail = [code, message].filter(Boolean).join(" ");
+    if (detail && !messages.includes(detail)) messages.push(detail);
+    current = typeof current === "object" && "cause" in current ? current.cause : null;
+  }
+  return messages.join("; ") || "unknown network error";
+}
+
+class RuntimeHttpError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(message);
+    this.name = "RuntimeHttpError";
+  }
+}
+
+function isV2ResumeConflict(error: unknown): boolean {
+  return error instanceof RuntimeHttpError && error.status === 409 &&
+    (error.code === "l3_world_model_v2_session_not_open" || error.message === "l3_world_model_v2_session_not_open");
+}
+
+function runtimeEnvelope(
+  source: string,
+  sessionKey: string,
+  userId: string,
+  projectId: string | null,
+  adapterId: string,
+  profileId: string,
+): L3WorldModelRequestEnvelope {
+  return {
+    requestId: randomUUID(),
+    adapterId,
+    source,
+    namespace: compact({ source, profileId, userId, sessionKey, projectId: projectId || undefined }),
+  } as L3WorldModelRequestEnvelope;
+}
+
+function envelopeGetTransport(
+  envelope: L3WorldModelRequestEnvelope,
+): { query: Record<string, string>; headers: Record<string, string> } {
+  const query = { adapterId: envelope.adapterId, source: envelope.namespace.source };
+  const headers: Record<string, string> = { "x-request-id": envelope.requestId };
+  const pairs = [
+    ["x-memmy-user-id", envelope.namespace.userId],
+    ["x-memmy-project-id", envelope.namespace.projectId],
+    ["x-memmy-profile-id", envelope.namespace.profileId],
+    ["x-memmy-session-key", envelope.namespace.sessionKey],
+  ];
+  for (const [key, value] of pairs) if (value) headers[key!] = value;
+  return { query, headers };
+}
+
+async function canonicalWorkspaceRoot(value: string): Promise<string | null> {
+  if (!value || !isAbsolute(value)) return null;
+  const canonical = await realpath(value).catch(() => "");
+  if (!canonical) return null;
+  const details = await stat(canonical).catch(() => null);
+  if (!details?.isDirectory() || canonical === parse(canonical).root || canonical === await realpath(homedir())) return null;
+  const observed = await lstat(canonical).catch(() => null);
+  return observed?.isDirectory() && !observed.isSymbolicLink() ? canonical : null;
+}
+
+function compact<T extends Record<string, any>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ""),
+  ) as T;
+}
+
+function objectValue(value: unknown): Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function numberArray(value: unknown): number[] {
+  return Array.isArray(value) ? value.filter((item): item is number => typeof item === "number") : [];
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
+
+async function readJson(url: URL): Promise<unknown> {
+  const content = await readFile(url, "utf8").catch(() => "{}");
+  try {
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}

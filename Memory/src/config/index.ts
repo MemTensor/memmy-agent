@@ -1,14 +1,16 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   resolveAssignedModel,
   type ActualModelContext,
   type ModelCapability,
   type ModelSelectionResolution,
   type RuntimeModelCatalog
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type LlmProviderName =
@@ -33,7 +35,9 @@ export type LlmVendorName =
   | "kimi"
   | "minimax"
   | "baidu"
-  | "doubao";
+  | "doubao"
+  | "stepfun"
+  | "xiaomi";
 
 export type EmbeddingProviderName =
   | "local"
@@ -89,6 +93,7 @@ export interface EmbeddingConfig {
   extraBody?: Record<string, unknown>;
   actualModelContext?: ActualModelContext;
   selectionError?: "model_selection_unavailable";
+  maxInputTokens?: number;
   batchSize: number;
   timeoutMs: number;
   maxRetries: number;
@@ -102,6 +107,12 @@ export interface StorageConfig {
   sqlitePath?: string;
   endpoint?: string;
   token?: string;
+}
+
+export interface AgentAccessConfig {
+  autoScanKnownAgents: boolean;
+  watchFileChanges: boolean;
+  autoInjectSkill: boolean;
 }
 
 export interface AlgorithmConfig {
@@ -158,6 +169,7 @@ export interface AlgorithmConfig {
     failureThreshold: number;
     failureWindow: number;
     valueDelta: number;
+    valueDistributionRepairEnabled: boolean;
     minLowValueThreshold: number;
     useLlm: boolean;
     attachToPolicy: boolean;
@@ -216,6 +228,13 @@ export interface AlgorithmConfig {
     outcomeRTaskFailureThreshold: number;
     failureEpisodeScorePenalty: number;
     failureEpisodeMaxRatio: number;
+    directFromTrace: boolean;
+    clusterJoinThreshold: number;
+    clusterJoinThresholdEmpty: number;
+    toolJaccardFloor: number;
+    artifactJaccardFloor: number;
+    batchSuccessLimit: number;
+    batchFailureLimit: number;
   };
   session: {
     followUpMode: "merge_follow_ups" | "episode_per_turn";
@@ -244,14 +263,20 @@ export interface AlgorithmConfig {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     llmFilterEnabled: boolean;
     llmFilterMaxKeep: number;
     llmFilterFallbackMaxKeep: number;
     llmFilterMinCandidates: number;
     llmFilterCandidateBodyChars: number;
+    queryExtractHistoryTurns: number;
+    queryExtractHistoryTextChars: number;
     readOnlyInjectionProfile: ReadOnlyInjectionProfile;
   };
 }
+
+/** Concrete languages the host app can pin memory output to. */
+export type MemoryLanguage = "zh-CN" | "en-US";
 
 export interface MemmyConfig {
   version: 1;
@@ -262,16 +287,31 @@ export interface MemmyConfig {
   };
   userId?: string;
   timeZone?: string;
+  /** Interface language the host app is set to, when it has one. */
+  language?: MemoryLanguage;
   storage: StorageConfig;
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
+  agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
+  tokenBudget: {
+    dailyLimitM: number;
+    totalLimitM: number;
+  };
 }
 
 const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
 const ASYNC_EVOLUTION_TIMEOUT_MS = 3 * 60_000;
 export const MEMORY_SUMMARY_MAX_TOKENS = 512;
+
+export function defaultMemoryDatabasePath(): string {
+  const baseDir =
+    process.env.MEMMY_MEMORY_HOME ??
+    process.env.MEMORY_SERVICE_HOME ??
+    join(homedir(), ".memmy", "memory-service");
+  return join(baseDir, "memory.sqlite");
+}
 
 export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   version: 1,
@@ -283,7 +323,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   storage: {
     mode: "local",
     backend: "sqlite",
-    sqlitePath: join(homedir(), ".memmy", "memory-service", "memory.sqlite"),
+    sqlitePath: defaultMemoryDatabasePath(),
     endpoint: "http://127.0.0.1:18960",
     token: undefined
   },
@@ -296,7 +336,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     enableThinking: false,
     temperature: 0,
     maxTokens: MEMORY_SUMMARY_MAX_TOKENS,
-    timeoutMs: 45_000,
+    timeoutMs: 180_000,
     maxRetries: 3,
     malformedRetries: 1
   },
@@ -324,6 +364,15 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     maxRetries: 2,
     cache: true,
     normalize: false
+  },
+  agentAccess: {
+    autoScanKnownAgents: true,
+    watchFileChanges: true,
+    autoInjectSkill: false
+  },
+  tokenBudget: {
+    dailyLimitM: 10,
+    totalLimitM: 500
   },
   algorithm: {
     enableMemoryAdd: true,
@@ -379,6 +428,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       failureThreshold: 3,
       failureWindow: 5,
       valueDelta: 0.5,
+      valueDistributionRepairEnabled: false,
       minLowValueThreshold: 0.01,
       useLlm: true,
       attachToPolicy: true,
@@ -436,7 +486,14 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       outcomeRTaskSuccessThreshold: 0.5,
       outcomeRTaskFailureThreshold: -0.15,
       failureEpisodeScorePenalty: 0,
-      failureEpisodeMaxRatio: 0.4
+      failureEpisodeMaxRatio: 0.4,
+      directFromTrace: true,
+      clusterJoinThreshold: 0.5,
+      clusterJoinThresholdEmpty: 0.7,
+      toolJaccardFloor: 0.4,
+      artifactJaccardFloor: 0.3,
+      batchSuccessLimit: 3,
+      batchFailureLimit: 3
     },
     session: {
       followUpMode: "merge_follow_ups",
@@ -465,11 +522,14 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       multiChannelBypass: true,
       skillInjectionMode: "summary",
       skillSummaryChars: 200,
+      skillFullMaxChars: 16_384,
       llmFilterEnabled: true,
       llmFilterMaxKeep: 8,
       llmFilterFallbackMaxKeep: 6,
-      llmFilterMinCandidates: 2,
+      llmFilterMinCandidates: 1,
       llmFilterCandidateBodyChars: 500,
+      queryExtractHistoryTurns: 5,
+      queryExtractHistoryTextChars: 200,
       readOnlyInjectionProfile: "all"
     }
   }
@@ -484,11 +544,12 @@ export function defaultConfigPaths(): string[] {
 
 export function loadMemmyConfig(configPath?: string): {
   config: MemmyConfig;
-  path?: string;
+  path: string;
 } {
   const selectedPath = configPath
     ? resolve(configPath)
-    : defaultConfigPaths().find((candidate) => existsSync(candidate));
+    : defaultConfigPaths().find((candidate) => existsSync(candidate))
+      ?? defaultConfigPaths().at(-1)!;
   const rootConfig = selectedPath && existsSync(selectedPath)
     ? parseConfigFile(selectedPath)
     : {};
@@ -496,8 +557,15 @@ export function loadMemmyConfig(configPath?: string): {
   const memmyMemoryConfig = asRecord(rootConfig.memmyMemory);
   const fileConfig = resolveRuntimeMemmyMemoryConfig(memmyMemoryConfig, rootConfig);
   const envConfig = configFromEnv();
+  const defaults = {
+    ...DEFAULT_MEMMY_CONFIG,
+    storage: {
+      ...DEFAULT_MEMMY_CONFIG.storage,
+      sqlitePath: defaultMemoryDatabasePath()
+    }
+  };
   const merged = normalizeConfig(deepMerge(
-    DEFAULT_MEMMY_CONFIG as unknown as Record<string, unknown>,
+    defaults as unknown as Record<string, unknown>,
     fileConfig,
     envConfig
   ));
@@ -511,17 +579,7 @@ export function loadMemmyConfig(configPath?: string): {
 }
 
 export function resolveEvolutionConfig(config: MemmyConfig): LlmConfig {
-  const evolution = config.evolution;
-  if (evolution.provider || evolution.model || evolution.endpoint || evolution.apiKey) {
-    return evolution;
-  }
-  return {
-    ...config.summary,
-    enableThinking: config.evolution.enableThinking,
-    maxTokens: config.evolution.maxTokens ?? config.summary.maxTokens,
-    timeoutMs: config.evolution.timeoutMs,
-    malformedRetries: config.evolution.malformedRetries ?? config.summary.malformedRetries
-  };
+  return config.evolution;
 }
 
 function parseConfigFile(path: string): Record<string, unknown> {
@@ -569,6 +627,7 @@ function configFromEnv(): Record<string, unknown> {
       endpoint: process.env.MEMMY_EMBEDDING_ENDPOINT,
       model: process.env.MEMMY_EMBEDDING_MODEL,
       apiKey: process.env.MEMMY_EMBEDDING_API_KEY,
+      maxInputTokens: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS"),
       batchSize: numberEnv("MEMMY_EMBEDDING_BATCH_SIZE"),
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
@@ -580,10 +639,21 @@ function configFromEnv(): Record<string, unknown> {
       retrieval: compactRecord({
         readOnlyInjectionProfile:
           process.env.MEMMY_RETRIEVAL_INJECTION_PROFILE ??
-          process.env.MEMMY_READONLY_INJECTION_PROFILE
+          process.env.MEMMY_READONLY_INJECTION_PROFILE,
+        skillInjectionMode: process.env.MEMMY_SKILL_INJECTION_MODE,
+        skillSummaryChars: numberEnv("MEMMY_SKILL_SUMMARY_CHARS"),
+        skillFullMaxChars: numberEnv("MEMMY_SKILL_FULL_MAX_CHARS")
       })
     })
   });
+}
+
+/**
+ * Anything the host cannot resolve to a concrete language is left unset, so
+ * callers fall back to reading the language from the content itself.
+ */
+function memoryLanguage(value: unknown): MemoryLanguage | undefined {
+  return value === "zh-CN" || value === "en-US" ? value : undefined;
 }
 
 function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
@@ -601,17 +671,34 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
       }
     : normalizedEvolution;
   const embedding = normalizeEmbedding(asRecord(input.embedding));
+  const agentAccess = normalizeAgentAccess(asRecord(input.agentAccess));
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
   return {
     version: 1,
     domain: memoryDomainName(input.domain, DEFAULT_MEMMY_CONFIG.domain),
     roleRouting: normalizeRoleRouting(asRecord(input.roleRouting)),
     userId: optionalString(input.userId),
+    ...(memoryLanguage(input.language) ? { language: memoryLanguage(input.language)! } : {}),
     storage,
     summary,
     evolution,
     embedding,
-    algorithm
+    agentAccess,
+    algorithm,
+    tokenBudget: normalizeTokenBudget(asRecord(input.tokenBudget))
+  };
+}
+
+function normalizeTokenBudget(input: Record<string, unknown>): MemmyConfig["tokenBudget"] {
+  return {
+    dailyLimitM: normalizeMemoryByokLimitM(
+      input.dailyLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.dailyLimitM
+    ),
+    totalLimitM: normalizeMemoryByokLimitM(
+      input.totalLimitM,
+      DEFAULT_MEMMY_CONFIG.tokenBudget.totalLimitM
+    )
   };
 }
 
@@ -627,24 +714,37 @@ function resolveRuntimeMemmyMemoryConfig(
   const routing = normalizeRoleRouting(asRecord(input.roleRouting));
   const assignmentMode = runtimeAssignmentMode(rootConfig);
   const hasCatalog = isRecord(rootConfig.modelAssignments);
-  if (!hasCatalog && hasLegacyMemoryModelConnection(input)) {
-    throw new Error("memmyMemory legacy model config requires the registered runtime config migration");
-  }
-  const summary = hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
-    : asRecord(input.summary);
-  const evolution = hasCatalog
+  const accountMode = assignmentMode === "account" && hasCatalog;
+  const evolution = accountMode
     ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
-    : asRecord(input.evolution);
+    : routing.evolution === "follow" && hasCatalog
+      ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
+      : asRecord(input.evolution);
+  const rawSummary = asRecord(input.summary);
+  // Account assignments are authoritative for both roles, even when an old
+  // config file contains a stale fixed connection from another mode.
+  const accountSummaryNeedsAssignment = accountMode;
+  const summary = accountSummaryNeedsAssignment
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
+    : routing.summary === "follow" && assignmentMode !== "account"
+      ? inheritLlmConnection(
+          evolution,
+          deepMerge(
+            DEFAULT_MEMMY_CONFIG.summary as unknown as Record<string, unknown>,
+            rawSummary
+          )
+        )
+      : rawSummary;
+  const effectiveRouting = assignmentMode === "account"
+    ? { ...routing, summary: "fixed" as const, evolution: "fixed" as const }
+    : routing;
   return {
     ...input,
-    roleRouting: routing,
+    roleRouting: effectiveRouting,
     summary,
     evolution,
     evolutionSourceProvider: optionalString(evolution.sourceProvider),
-    embedding: hasCatalog
-      ? resolveAssignedEmbedding(input, rootConfig, assignmentMode)
-      : asRecord(input.embedding)
+    embedding: resolveMemoryEmbedding(input, rootConfig, assignmentMode, hasCatalog)
   };
 }
 
@@ -698,11 +798,29 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
     selectionError: input.selectionError === "model_selection_unavailable"
       ? input.selectionError
       : undefined,
+    maxInputTokens: positiveInteger(input.maxInputTokens),
     batchSize: numberValue(input.batchSize, DEFAULT_MEMMY_CONFIG.embedding.batchSize),
     timeoutMs: numberValue(input.timeoutMs, DEFAULT_MEMMY_CONFIG.embedding.timeoutMs),
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),
     cache: booleanValue(input.cache, DEFAULT_MEMMY_CONFIG.embedding.cache),
     normalize: booleanValue(input.normalize, DEFAULT_MEMMY_CONFIG.embedding.normalize)
+  };
+}
+
+function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
+  return {
+    autoScanKnownAgents: booleanValue(
+      input.autoScanKnownAgents,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
+    ),
+    watchFileChanges: booleanValue(
+      input.watchFileChanges,
+      DEFAULT_MEMMY_CONFIG.agentAccess.watchFileChanges
+    ),
+    autoInjectSkill: booleanValue(
+      input.autoInjectSkill,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoInjectSkill
+    )
   };
 }
 
@@ -718,7 +836,7 @@ function normalizeRoleRouting(
 function resolveAssignedLlm(
   rootConfig: Record<string, unknown>,
   mode: "account" | "byok" | null,
-  capability: "memory_summary" | "memory_evolution",
+  capability: "agent" | "memory_summary" | "memory_evolution",
   defaults: LlmConfig
 ): Record<string, unknown> {
   const resolved = resolveMemoryAssignment(rootConfig, mode, capability);
@@ -738,6 +856,28 @@ function resolveAssignedLlm(
     extraBody: resolved.provider.extraBody,
     actualModelContext: resolved.context
   };
+}
+
+function inheritLlmConnection(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>
+): Record<string, unknown> {
+  const inherited = { ...target };
+  for (const key of [
+    "provider",
+    "sourceProvider",
+    "vendor",
+    "endpoint",
+    "model",
+    "apiKey",
+    "extraHeaders",
+    "extraBody",
+    "actualModelContext",
+    "selectionError"
+  ]) {
+    inherited[key] = source[key];
+  }
+  return inherited;
 }
 
 function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
@@ -790,35 +930,78 @@ function memoryLlmVendor(
     case "qianfan":
     case "doubao":
     case "volcengine":
+    case "stepfun":
+    case "xiaomi":
+    case "xiaomi_mimo":
       return ({
         dashscope: "qwen",
         moonshot: "kimi",
         qianfan: "baidu",
-        volcengine: "doubao"
-      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine"]
+        volcengine: "doubao",
+        xiaomi_mimo: "xiaomi"
+      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine" | "xiaomi_mimo"]
         ?? provider as LlmVendorName;
     default:
       return runtimeProvider === "openai_compatible" ? "openai_compatible" : "";
   }
 }
 
-function resolveAssignedEmbedding(
+function resolveMemoryEmbedding(
   memory: Record<string, unknown>,
   rootConfig: Record<string, unknown>,
-  mode: "account" | "byok" | null
+  mode: "account" | "byok" | null,
+  hasCatalog: boolean
 ): Record<string, unknown> {
   const embedding = asRecord(memory.embedding);
-  const embeddingMode = memoryEmbeddingMode(
-    embedding.mode,
-    DEFAULT_MEMMY_CONFIG.embedding.mode
-  );
-  const rawAssignedPreset = mode
-    ? asRecord(asRecord(rootConfig.modelAssignments)[mode]).embedding
-    : undefined;
+  const configuredMode = optionalString(embedding.mode);
+  const embeddingMode = configuredMode === "cloud"
+    || configuredMode === "local"
+    || configuredMode === "custom"
+    ? configuredMode
+    : mode === "account" && hasCatalog
+      ? "cloud"
+      : DEFAULT_MEMMY_CONFIG.embedding.mode;
+  const activeAssignment = mode
+    ? asRecord(asRecord(rootConfig.modelAssignments)[mode])
+    : {};
+  const rawAssignedPreset = activeAssignment.embedding;
   const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
+  if (rawAssignedPreset === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+    const assignmentOwner = optionalString(activeAssignment.ownerAccountId);
+    const activeAccountId = optionalString(asRecord(rootConfig.app).userId);
+    if (
+      mode === "account"
+      && (!assignmentOwner || !activeAccountId || assignmentOwner !== activeAccountId)
+    ) {
+      return {
+        ...embedding,
+        mode: "cloud",
+        provider: "openai_compatible",
+        model: "",
+        selectionError: "model_selection_unavailable"
+      };
+    }
+    return localEmbeddingConfig(embedding);
+  }
+
+  if (mode === "account" && !hasExplicitAssignment) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    };
+  }
+
   const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
-  if (!resolved.ok) {
-    if (hasExplicitAssignment || (mode !== "byok" && embeddingMode !== "local")) {
+
+  if (mode === "byok" && hasCatalog && !hasExplicitAssignment) {
+    return localEmbeddingConfig(embedding);
+  }
+
+  if (embeddingMode === "local") {
+    if (hasExplicitAssignment && !resolved.ok) {
       return {
         ...embedding,
         provider: "openai_compatible",
@@ -826,18 +1009,36 @@ function resolveAssignedEmbedding(
         selectionError: "model_selection_unavailable"
       };
     }
+    return localEmbeddingConfig(embedding);
+  }
+
+  if (embeddingMode === "custom") {
+    const custom = asRecord(embedding.custom);
     return {
       ...embedding,
-      mode: "local",
-      provider: "local",
-      sourceProvider: "local",
-      endpoint: undefined,
-      model: DEFAULT_MEMMY_CONFIG.embedding.model,
-      apiKey: undefined,
-      extraHeaders: undefined,
-      extraBody: undefined,
-      actualModelContext: undefined,
-      selectionError: undefined
+      ...custom,
+      mode: embeddingMode,
+      provider: optionalString(custom.provider)
+        ?? optionalString(embedding.provider)
+        ?? DEFAULT_MEMMY_CONFIG.embedding.provider
+    };
+  }
+  if (!hasCatalog) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    };
+  }
+  if (!resolved.ok) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
     };
   }
   if (!embeddingProtocolSupported(resolved.context.protocol)) {
@@ -859,6 +1060,22 @@ function resolveAssignedEmbedding(
     extraHeaders: resolved.provider.extraHeaders,
     extraBody: resolved.provider.extraBody,
     actualModelContext: resolved.context
+  };
+}
+
+function localEmbeddingConfig(embedding: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...embedding,
+    mode: "local",
+    provider: "local",
+    sourceProvider: "local",
+    endpoint: undefined,
+    model: DEFAULT_MEMMY_CONFIG.embedding.model,
+    apiKey: undefined,
+    extraHeaders: undefined,
+    extraBody: undefined,
+    actualModelContext: undefined,
+    selectionError: undefined
   };
 }
 
@@ -892,20 +1109,6 @@ function embeddingProtocolSupported(protocol: ActualModelContext["protocol"]): b
   return protocol === "openai-embeddings" || protocol === "memmy-account";
 }
 
-function hasLegacyMemoryModelConnection(memory: Record<string, unknown>): boolean {
-  const connectionFields = ["provider", "endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  if (connectionFields.some((field) => field in asRecord(memory.summary))) return true;
-  if (connectionFields.some((field) => field in asRecord(memory.evolution))) return true;
-  const embedding = asRecord(memory.embedding);
-  const mode = optionalString(embedding.mode);
-  const provider = optionalString(embedding.provider);
-  const remoteEmbeddingFields = ["endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  return mode === "cloud"
-    || mode === "custom"
-    || isRecord(embedding.custom)
-    || (Boolean(provider) && provider !== "local")
-    || remoteEmbeddingFields.some((field) => field in embedding);
-}
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   const capture = asRecord(input.capture);
@@ -980,6 +1183,10 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       failureThreshold: numberValue(feedback.failureThreshold, DEFAULT_MEMMY_CONFIG.algorithm.feedback.failureThreshold),
       failureWindow: numberValue(feedback.failureWindow, DEFAULT_MEMMY_CONFIG.algorithm.feedback.failureWindow),
       valueDelta: numberValue(feedback.valueDelta, DEFAULT_MEMMY_CONFIG.algorithm.feedback.valueDelta),
+      valueDistributionRepairEnabled: booleanValue(
+        feedback.valueDistributionRepairEnabled,
+        DEFAULT_MEMMY_CONFIG.algorithm.feedback.valueDistributionRepairEnabled
+      ),
       minLowValueThreshold: numberValue(feedback.minLowValueThreshold, DEFAULT_MEMMY_CONFIG.algorithm.feedback.minLowValueThreshold),
       useLlm: booleanValue(feedback.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.feedback.useLlm),
       attachToPolicy: booleanValue(feedback.attachToPolicy, DEFAULT_MEMMY_CONFIG.algorithm.feedback.attachToPolicy),
@@ -1055,7 +1262,14 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       outcomeRTaskSuccessThreshold: numberValue(skill.outcomeRTaskSuccessThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.outcomeRTaskSuccessThreshold),
       outcomeRTaskFailureThreshold: numberValue(skill.outcomeRTaskFailureThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.outcomeRTaskFailureThreshold),
       failureEpisodeScorePenalty: numberValue(skill.failureEpisodeScorePenalty, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeScorePenalty),
-      failureEpisodeMaxRatio: numberValue(skill.failureEpisodeMaxRatio, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeMaxRatio)
+      failureEpisodeMaxRatio: numberValue(skill.failureEpisodeMaxRatio, DEFAULT_MEMMY_CONFIG.algorithm.skill.failureEpisodeMaxRatio),
+      directFromTrace: booleanValue(skill.directFromTrace, DEFAULT_MEMMY_CONFIG.algorithm.skill.directFromTrace),
+      clusterJoinThreshold: numberValue(skill.clusterJoinThreshold, DEFAULT_MEMMY_CONFIG.algorithm.skill.clusterJoinThreshold),
+      clusterJoinThresholdEmpty: numberValue(skill.clusterJoinThresholdEmpty, DEFAULT_MEMMY_CONFIG.algorithm.skill.clusterJoinThresholdEmpty),
+      toolJaccardFloor: numberValue(skill.toolJaccardFloor, DEFAULT_MEMMY_CONFIG.algorithm.skill.toolJaccardFloor),
+      artifactJaccardFloor: numberValue(skill.artifactJaccardFloor, DEFAULT_MEMMY_CONFIG.algorithm.skill.artifactJaccardFloor),
+      batchSuccessLimit: numberValue(skill.batchSuccessLimit, DEFAULT_MEMMY_CONFIG.algorithm.skill.batchSuccessLimit),
+      batchFailureLimit: numberValue(skill.batchFailureLimit, DEFAULT_MEMMY_CONFIG.algorithm.skill.batchFailureLimit)
     },
     session: {
       followUpMode: "merge_follow_ups",
@@ -1084,11 +1298,14 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       multiChannelBypass: booleanValue(retrieval.multiChannelBypass, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.multiChannelBypass),
       skillInjectionMode: skillInjectionMode(retrieval.skillInjectionMode, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillInjectionMode),
       skillSummaryChars: numberValue(retrieval.skillSummaryChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillSummaryChars),
+      skillFullMaxChars: numberValue(retrieval.skillFullMaxChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.skillFullMaxChars),
       llmFilterEnabled: booleanValue(retrieval.llmFilterEnabled, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterEnabled),
       llmFilterMaxKeep: numberValue(retrieval.llmFilterMaxKeep, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterMaxKeep),
       llmFilterFallbackMaxKeep: numberValue(retrieval.llmFilterFallbackMaxKeep, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterFallbackMaxKeep),
       llmFilterMinCandidates: numberValue(retrieval.llmFilterMinCandidates, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterMinCandidates),
       llmFilterCandidateBodyChars: numberValue(retrieval.llmFilterCandidateBodyChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.llmFilterCandidateBodyChars),
+      queryExtractHistoryTurns: numberValue(retrieval.queryExtractHistoryTurns, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTurns),
+      queryExtractHistoryTextChars: numberValue(retrieval.queryExtractHistoryTextChars, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.queryExtractHistoryTextChars),
       readOnlyInjectionProfile: readOnlyInjectionProfile(
         retrieval.readOnlyInjectionProfile,
         DEFAULT_MEMMY_CONFIG.algorithm.retrieval.readOnlyInjectionProfile
@@ -1168,7 +1385,9 @@ function llmVendor(value: unknown, fallback: LlmVendorName): LlmVendorName {
     vendor === "kimi" ||
     vendor === "minimax" ||
     vendor === "baidu" ||
-    vendor === "doubao"
+    vendor === "doubao" ||
+    vendor === "stepfun" ||
+    vendor === "xiaomi"
   ) {
     return vendor;
   }
@@ -1320,6 +1539,12 @@ function expandEnvString(value: string): string {
 
 function numberValue(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 function booleanValue(value: unknown, fallback: boolean): boolean {

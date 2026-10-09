@@ -4,12 +4,14 @@ import {
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
+  SourceTurnCompleteOutputSchema,
   DeleteMemoryOutputSchema,
   DeletePanelTaskOutputSchema,
   EnqueueImportSummariesOutputSchema,
   GetMemoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryTokenBudgetDtoSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
   RecallEvidenceOutputSchema,
@@ -23,7 +25,7 @@ import {
   RetryMemoryProcessingOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
 import { retryWithBackoff } from "./retry.js";
@@ -128,6 +130,22 @@ export function createHttpMemoryClient(
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
     },
 
+    async getMemoryTokenBudget() {
+      return request("GET", "memoryTokenBudget", MemoryTokenBudgetDtoSchema);
+    },
+
+    async exportBundle() {
+      return request("GET", "exportBundle", z.record(z.string(), z.unknown()));
+    },
+
+    async clearAllData() {
+      return request("DELETE", "clearAllData", z.object({
+        ok: z.literal(true),
+        clearedAt: z.string(),
+        cleared: z.record(z.string(), z.number())
+      }), { body: {} });
+    },
+
     async openSession(input, context) {
       return request("POST", "openSession", OpenSessionOutputSchema, { body: input, context });
     },
@@ -152,6 +170,10 @@ export function createHttpMemoryClient(
         body,
         context
       });
+    },
+
+    async completeSourceTurn(input, context) {
+      return request("POST", "completeSourceTurn", SourceTurnCompleteOutputSchema, { body: input, context });
     },
 
     async search(input, context) {
@@ -212,7 +234,8 @@ export function createHttpMemoryClient(
           priorityCohortOnly: input.priorityCohortOnly
         },
         signal: input.signal,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        maxRetries: 0
       });
     },
 

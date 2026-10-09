@@ -99,13 +99,16 @@ describe("AgentLoop memmy memory integration", () => {
     expect(loop.context.buildSystemPrompt()).toContain("# File Memory");
   });
 
-  it("carries host project/cwd into Session open, then uses only Memory's returned project ID", async () => {
+  it("refreshes project L3 before every Turn while keeping one Memory Session and project scope", async () => {
     const profileRoot = tempRoot();
     const projectRoot = tempRoot();
     const memmyHome = tempRoot();
     const projectStore = new ProjectStore({ filePath: path.join(profileRoot, "projects.json") });
     const project = projectStore.add(projectRoot, "existing");
     const requests: Array<{ path: string; body: Record<string, any> }> = [];
+    const modelMessages: Record<string, any>[][] = [];
+    let contextVersion = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.stubEnv("MEMMY_MEMORY_URL", "http://memory.test");
     vi.stubEnv("MEMMY_HOME", memmyHome);
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -117,16 +120,20 @@ describe("AgentLoop memmy memory integration", () => {
         return response({ sessionId: "memory-session-1", projectId: "memory-project-1", resumed: false });
       }
       if (url.pathname.endsWith("/context")) {
+        contextVersion += 1;
+        if (contextVersion === 3) {
+          return response({ error: { message: "context unavailable" } }, 503);
+        }
         return response({
           schemaVersion: 2,
           projectId: "memory-project-1",
           memoryId: "world-model-1",
-          memoryVersion: 1,
-          renderedContext: "项目契约：保持现有架构。",
+          memoryVersion: contextVersion,
+          renderedContext: `L3_V${contextVersion}`,
           sourceMemoryIds: ["l1-old"],
           generalRulesAndSafetyConstraints: null,
           projectEnvironmentProfile: "语言：TypeScript",
-          projectContract: "保持现有架构。",
+          projectContract: `L3_V${contextVersion}`,
           domainKnowledge: null,
           serverTime: "2026-08-19T00:00:00.000Z",
         });
@@ -151,7 +158,10 @@ describe("AgentLoop memmy memory integration", () => {
       provider: {
         generation: { maxTokens: 256 },
         getDefaultModel: () => "test-model",
-        chatWithRetry: vi.fn(async () => new LLMResponse({ content: "done" })),
+        chatWithRetry: vi.fn(async ({ messages }: { messages: Record<string, any>[] }) => {
+          modelMessages.push(messages);
+          return new LLMResponse({ content: "done" });
+        }),
       },
       workspace: profileRoot,
       projectStore,
@@ -167,6 +177,20 @@ describe("AgentLoop memmy memory integration", () => {
       content: "continue the project",
       metadata: { webui: true },
     }));
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "memory-project",
+      senderId: "user",
+      content: "continue with the latest project context",
+      metadata: { webui: true },
+    }));
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "memory-project",
+      senderId: "user",
+      content: "continue while Memory context is temporarily unavailable",
+      metadata: { webui: true },
+    }));
     await loop.closeRuntimeTools();
 
     const opened = requests.find((request) => request.path === "/api/v1/sessions/open")!;
@@ -177,10 +201,27 @@ describe("AgentLoop memmy memory integration", () => {
       namespace: { sessionKey: "websocket:memory-project", userId: "loop-user" },
     });
     expect(JSON.stringify(opened.body)).not.toContain(project.id);
+    expect(requests.filter((request) => request.path === "/api/v1/sessions/open")).toHaveLength(1);
+    expect(requests.filter((request) => request.path.endsWith("/context"))).toHaveLength(3);
+
+    const agentPrompts = modelMessages
+      .map((messages) => messages.find((message) => message.role === "system")?.content)
+      .filter((content): content is string => typeof content === "string" && content.includes("L3_V"));
+    expect(agentPrompts).toHaveLength(3);
+    expect(agentPrompts[0]).toContain("L3_V1");
+    expect(agentPrompts[0]).not.toContain("L3_V2");
+    expect(agentPrompts[1]).toContain("L3_V2");
+    expect(agentPrompts[1]).not.toContain("L3_V1");
+    expect(agentPrompts[2]).toContain("L3_V2");
+    expect(agentPrompts[2]).not.toContain("L3_V1");
+    for (const prompt of agentPrompts) {
+      expect(prompt.match(/<memmy_l3_world_model version="2">/gu)).toHaveLength(1);
+    }
+
     const scopedRequests = requests.filter((request) =>
       request.path === "/api/v1/turns/start" || request.path.includes("/complete") || request.path.endsWith("/close")
     );
-    expect(scopedRequests).toHaveLength(3);
+    expect(scopedRequests).toHaveLength(7);
     for (const request of scopedRequests) {
       expect(request.body.namespace).toMatchObject({
         projectId: "memory-project-1",
@@ -189,6 +230,7 @@ describe("AgentLoop memmy memory integration", () => {
       expect(JSON.stringify(request.body)).not.toContain(project.id);
     }
     expect(requests.filter((request) => request.path.endsWith("/close"))).toHaveLength(1);
+    warn.mockRestore();
   });
 });
 

@@ -228,6 +228,8 @@ ensure_memmy_agent_dependencies() {
   local -a missing_packages=()
   local -a required_packages=(
     "html-validate"
+    "@xmldom/xmldom"
+    "pngjs"
     "ink"
     "parse5"
     "postcss"
@@ -352,6 +354,9 @@ is_managed_user_cli_target() {
   if [[ "$contents" == '#!/usr/bin/env bash'* ]] && [[ "$contents" == *'exec node "'*"$expected_suffix"'" "$@"'* ]]; then
     return 0
   fi
+  if [[ "$contents" == $'#!/bin/sh\nexec env ELECTRON_RUN_AS_NODE=1 '*"$expected_suffix"*' "$@"' ]]; then
+    return 0
+  fi
   [[ "$contents" == *'rem Managed by Memmy dev-start.'* ]] \
     && [[ "$contents" == *'node "'*"$expected_suffix"'" %*'* ]]
 }
@@ -393,9 +398,12 @@ install_user_cli_link() {
   fi
 
   if [[ -e "$target" || -L "$target" ]]; then
-    if [[ ! -L "$target" ]]; then
+    if [[ ! -L "$target" ]] && ! is_managed_user_cli_target "$name" "$target"; then
       printf '[dev-start] refusing to replace non-symlink CLI at %s\n' "$target" >&2
       exit 1
+    fi
+    if [[ ! -L "$target" ]]; then
+      log "removing legacy managed $name command at $target"
     fi
     unlink "$target"
   fi
@@ -606,6 +614,10 @@ run_main() {
 
   log "building memmy-agent from current source"
   ensure_memmy_agent_dependencies
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    MEMMY_DEV_COMPUTER_USE_BINARY="$(node "$ROOT_DIR/scripts/internal/mac/install-dev-computer-use.mjs" "$MEMMY_AGENT_DIR/node_modules/open-computer-use")"
+    export MEMMY_DEV_COMPUTER_USE_BINARY
+  fi
   cd "$MEMMY_AGENT_DIR"
   npm run build
 
@@ -674,11 +686,15 @@ NODE
   log "memmy command is ready in $MEMMY_BIN_DIR"
 
   log "refreshing non-interactive memmy-agent onboard state"
-  node dist/main.js onboard </dev/null
+  node dist/main.js onboard --defaults </dev/null
 
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"
   mkdir -p "$LOG_DIR"
+  export MEMMY_STABLE_ELECTRON_DEMO="${MEMMY_STABLE_ELECTRON_DEMO:-1}"
+  if [[ "$MEMMY_STABLE_ELECTRON_DEMO" == "1" ]]; then
+    log "frontend source watching disabled for a stable Electron demo; set MEMMY_STABLE_ELECTRON_DEMO=0 to enable it"
+  fi
   exec "$CONCURRENTLY_BIN" -k -n agent-api,frontend,backend -c cyan,magenta,yellow \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \

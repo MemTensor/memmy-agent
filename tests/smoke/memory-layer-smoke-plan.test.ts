@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCommand } from "../../Memory/src/cli/commands.js";
 import { PROJECT_VERSION } from "../../Memory/src/cli/project-version.js";
@@ -9,7 +9,8 @@ import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
   MemoryService,
-  type Embedder
+  type Embedder,
+  type LlmClient
 } from "../../Memory/src/index.js";
 
 const tempRoots: string[] = [];
@@ -21,6 +22,22 @@ afterEach(() => {
 });
 
 describe("memory layer smoke plan", () => {
+  it("keeps the executable Memory smoke entrypoint wired into the repository", () => {
+    const repoRoot = resolve(import.meta.dirname, "../..");
+    const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(existsSync(join(repoRoot, "tests/smoke/tsconfig.json"))).toBe(true);
+    expect(existsSync(join(repoRoot, "tests/smoke/memory-layer-smoke.ts"))).toBe(true);
+    expect(manifest.scripts["smoke:memory-layer:typecheck"])
+      .toBe("tsc -p tests/smoke/tsconfig.json --noEmit");
+    expect(manifest.scripts["smoke:memory-layer"])
+      .toContain("npm run smoke:memory-layer:test");
+    expect(manifest.scripts["smoke:memory-layer"])
+      .toContain("tsx tests/smoke/memory-layer-smoke.ts");
+  });
+
   it("stores, processes, reads, and recalls a verified turn through the real Memory service", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-smoke-"));
     tempRoots.push(root);
@@ -29,7 +46,9 @@ describe("memory layer smoke plan", () => {
       db,
       mode: "dev",
       config: DEFAULT_MEMMY_CONFIG,
-      embedder: createSmokeEmbedder()
+      llm: createSmokeSummaryLlm(),
+      embedder: createSmokeEmbedder(),
+      fetchAppMemoryBudget: async () => null
     });
     const namespace = {
       source: "smoke-plan",
@@ -108,6 +127,7 @@ describe("memory layer smoke plan", () => {
       expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
       expect(recall.injectedContext.markdown).not.toContain("# Memory context");
     } finally {
+      await service.stop();
       db.close();
     }
   });
@@ -179,6 +199,44 @@ function createSmokeEmbedder(): Embedder {
         remote: false
       };
     }
+  };
+}
+
+function createSmokeSummaryLlm(): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/summary",
+      model: "smoke-summary"
+    },
+    isConfigured: () => true,
+    async complete() {
+      return JSON.stringify({ title: "Smoke turn", summary: "Verified smoke summary" });
+    },
+    async completeJson<T extends Record<string, unknown>>(messages) {
+      const system = messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n");
+      if (system.includes("Judge L1 and User Memory independently")) {
+        return {
+          l1: {
+            title: "Release verification",
+            summary: "Verified release contracts and attachments.",
+            evidence: [{ quote: "release workflow", role: "user", kind: "task_request" }]
+          },
+          user: null
+        } as unknown as T;
+      }
+      return { title: "Smoke turn", summary: "Verified smoke summary" } as unknown as T;
+    },
+    status: () => ({
+      provider: "host",
+      model: "smoke-summary",
+      configured: true,
+      remote: true
+    })
   };
 }
 

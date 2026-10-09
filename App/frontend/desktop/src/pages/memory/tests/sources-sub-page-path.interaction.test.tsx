@@ -49,6 +49,15 @@ describe("SourcesSubPage local data path", () => {
       agentSources: {
         listSources
       },
+      config: {
+        async getScanPreferences() {
+          return {
+            autoScanKnownAgents: true,
+            watchFileChanges: true,
+            autoInjectSkill: false
+          };
+        }
+      },
       memoryRuntime: {
         async health() {
           return { ok: true, storage: { ready: true } };

@@ -7,6 +7,7 @@ import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
   resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
   type StartupSplashLanguage
 } from "../src/main/startup-splash.js";
 
@@ -19,6 +20,18 @@ afterEach(() => {
 });
 
 describe("startup splash localization", () => {
+  it("does not quit when the last window closes before boot is ready", () => {
+    expect(shouldQuitWhenAllWindowsClosed("win32", false)).toBe(false);
+  });
+
+  it("quits after boot when the last window closes on Windows", () => {
+    expect(shouldQuitWhenAllWindowsClosed("win32", true)).toBe(true);
+  });
+
+  it("keeps macOS resident after all windows close", () => {
+    expect(shouldQuitWhenAllWindowsClosed("darwin", true)).toBe(false);
+  });
+
   it.each<StartupSplashLanguage>(["zh-CN", "en-US"])("reads the persisted %s application language", (language) => {
     const databasePath = createSettingsDatabase(language);
 
@@ -48,6 +61,12 @@ describe("startup splash localization", () => {
     expect(englishHtml).not.toContain("正在启动…");
     expect(chineseHtml).toContain("正在启动…");
     expect(chineseHtml).not.toContain("Starting…");
+  });
+
+  it("renders a localized waiting message for slow startup", () => {
+    expect(resolveStartupSplashHtml("zh-CN", true)).toContain("启动时间较长，请稍候…");
+    expect(resolveStartupSplashHtml("en-US", true)).toContain("Taking longer than usual. Please wait…");
+    expect(resolveStartupSplashHtml("en-US", true)).not.toContain("启动时间较长");
   });
 
   it("renders the update splash without exposing unescaped version text", () => {

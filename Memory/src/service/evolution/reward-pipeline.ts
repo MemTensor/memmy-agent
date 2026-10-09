@@ -308,7 +308,9 @@ export class RewardPipeline {
           createdAt: at
         });
       }
-      await this.maybeCreateValueDistributionRepair(saved, at);
+      if (this.deps.config.algorithm.feedback.valueDistributionRepairEnabled) {
+        await this.maybeCreateValueDistributionRepair(saved, at);
+      }
     }
     const inductionSeed = l2Eligible[0];
     if (job.payload.downstreamScheduled !== true && inductionSeed) {
@@ -328,6 +330,23 @@ export class RewardPipeline {
       });
     }
     if (rewardedEpisode) this.deps.finalizeClosedEpisode(rewardedEpisode, at, "episode_rewarded");
+    if (
+      rewardedEpisode &&
+      typeof rewardedEpisode.rTask === "number" &&
+      this.deps.config.algorithm.skill.directFromTrace
+    ) {
+      this.deps.enqueueJob({
+        jobType: "skill_cluster_assign",
+        userId: rewardedEpisode.userId,
+        sessionId: rewardedEpisode.sessionId,
+        episodeId: rewardedEpisode.id,
+        payload: {
+          reason: "reward.updated",
+          rTask: rewardedEpisode.rTask
+        },
+        createdAt: at
+      });
+    }
   }
 
   async scoreFeedbackWithLlm(input: {

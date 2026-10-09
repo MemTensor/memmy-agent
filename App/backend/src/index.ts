@@ -1,14 +1,13 @@
 /** Src module. */
 import { RuntimeConfigSchema, type AccountChannel, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { randomBytes } from "node:crypto";
+import { removeLegacyKnowledgeCredentials } from "@memmy/knowledge";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
 import { createAppStateStore } from "./infrastructure/app-state-store/index.js";
 import { createHttpCloudClient, type CloudClient } from "./adapters/outbound/cloud-client/index.js";
 import {
   createHttpMemoryClient,
-  createMemosSqliteMemoryClient,
-  discoverMemosSqliteSources,
   type MemoryClient,
   type MemoryLayerConfig
 } from "./adapters/outbound/memory-client/index.js";
@@ -18,14 +17,13 @@ import {
   readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
+import {
+  createMemoryScanPreferencesStore,
+  ensureMemoryScanPreferences
+} from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
-import {
-  createAgentSourceAutoScanService,
-  DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-  type AgentSourceAutoScanService
-} from "./services/agent-source-auto-scan-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
@@ -63,10 +61,6 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
-  /** Agent source auto scan interval in ms. Defaults to one hour. */
-  agentSourceAutoScanIntervalMs?: number;
-  /** Agent source startup scan delay in ms. Defaults to five minutes. */
-  agentSourceAutoScanInitialDelayMs?: number;
   /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
 }
@@ -88,7 +82,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
-  let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -104,12 +97,24 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       accountChannel: options.accountChannel
     });
+    await ensureMemoryScanPreferences(
+      memmyConfigPath,
+      appStateStore.repositories.bootstrap.getScanPreferences()
+    );
+    const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
 
     const permissionManager = createPermissionManager({
       appStateStore,
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    const memmyConfigWriter = createMemmyConfigWriter({
+      configPath: memmyConfigPath,
+      accountChannel: options.accountChannel
+    });
+    await memmyConfigWriter.writeMemoryLanguage?.(
+      appStateStore.repositories.bootstrap.getAppSettings().language
+    );
     const memoryConfigReload = options.memoryReady
       ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
       : memoryClient.reloadConfig({ reason: "desktop_startup" });
@@ -129,7 +134,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       createDefaultAgentAdapterRegistry({
         pluginDirectories: options.agentAdapterPluginDirectories
       });
-    const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
     const services = createBackendServices({
       appStateStore,
@@ -140,13 +144,24 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       bootstrapScenario: options.bootstrapScenario,
       memmyConfigWriter,
       memmyConfigPath,
+      scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
     });
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
+    await removeLegacyKnowledgeCredentials(memmyConfigPath);
     server = createLocalApiServer({
+      knowledge: {
+        baseUrl: cloudConfig.baseUrl,
+        getSession: () => {
+          const account = appStateStore.repositories.accountSession;
+          const session = account.get();
+          const credential = account.getCloudUuid();
+          return session.authenticated && credential ? { accountId: session.profile.userId, credential } : null;
+        }
+      },
       permissionManager,
       services,
       composioMcpToken,
@@ -184,17 +199,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
-    autoScan = createAgentSourceAutoScanService({
-      baseUrl: runtimeConfig.baseUrl,
-      localToken,
-      intervalMs: options.agentSourceAutoScanIntervalMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-      initialDelayMs: options.agentSourceAutoScanInitialDelayMs,
-      getScanPreferences: () => appStateStore.repositories.bootstrap.getScanPreferences()
-    });
-    autoScan.start();
-
     const boundServer = server;
-    const boundAutoScan = autoScan;
     return {
       runtimeConfig,
       getAppSettings() {
@@ -204,13 +209,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        boundAutoScan.close();
         await boundServer.close();
         appStateStore.close();
       }
     };
   } catch (error) {
-    autoScan?.close();
     await server?.close().catch(() => undefined);
     appStateStore.close();
     throw error;
@@ -256,10 +259,8 @@ export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig
 /**
  * Creates the default MemoryClient.
  *
- * Priority:
- * 1. The standard HTTP memory layer pointed to by MEMMY_MEMORY_LAYER_URL.
- * 2. A read-only client over this project's MemoryService SQLite database.
- * Fails outright when no real data source is available, to avoid the desktop app silently showing fake data.
+ * Memory is a process boundary: Desktop always talks to it over HTTP and never
+ * reads the service-owned SQLite database.
  */
 function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
   const memoryLayerConfig = readMemoryLayerConfig(env);
@@ -267,12 +268,5 @@ function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
     return createHttpMemoryClient(memoryLayerConfig);
   }
 
-  if (env.MEMMY_DISABLE_MEMOS_SQLITE !== "1") {
-    const sources = discoverMemosSqliteSources(env);
-    if (sources.length > 0) {
-      return createMemosSqliteMemoryClient({ sources });
-    }
-  }
-
-  throw new Error("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+  throw new Error("MEMMY_MEMORY_LAYER_URL is required");
 }

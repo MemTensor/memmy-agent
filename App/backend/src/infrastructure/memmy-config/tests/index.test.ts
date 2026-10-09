@@ -23,9 +23,9 @@ afterEach(() => {
   tempDir = undefined;
 });
 
-function file(initial?: Record<string, unknown> | string): string {
+function file(initial?: Record<string, unknown> | string, name = "config.yaml"): string {
   tempDir ??= mkdtempSync(join(tmpdir(), "memmy-config-current-"));
-  const target = join(tempDir, "config.yaml");
+  const target = join(tempDir, name);
   if (initial !== undefined) writeFileSync(target, typeof initial === "string" ? initial : YAML.stringify(initial), "utf8");
   return target;
 }
@@ -146,6 +146,25 @@ describe("memmy runtime config current contract", () => {
     expect(saved.tools.mcpServers.composio.url).toBe("http://127.0.0.1:9000");
   });
 
+  it("writes the resolved UI language instead of clearing system", async () => {
+    const cnTarget = file({ memmyMemory: { domain: "keep" } }, "cn.yaml");
+    await createMemmyConfigWriter({ configPath: cnTarget, accountChannel: "phone" })
+      .writeMemoryLanguage?.("system");
+    expect(YAML.parse(await import("node:fs/promises").then(({ readFile }) => readFile(cnTarget, "utf8")))).toMatchObject({
+      memmyMemory: { domain: "keep", language: "zh-CN" }
+    });
+
+    const intlTarget = file({ memmyMemory: { language: "zh-CN" } }, "intl.yaml");
+    await createMemmyConfigWriter({ configPath: intlTarget, accountChannel: "email" })
+      .writeMemoryLanguage?.("system");
+    expect(YAML.parse(await import("node:fs/promises").then(({ readFile }) => readFile(intlTarget, "utf8"))).memmyMemory.language).toBe("en-US");
+
+    const explicitTarget = file({}, "explicit.yaml");
+    await createMemmyConfigWriter({ configPath: explicitTarget, accountChannel: "email" })
+      .writeMemoryLanguage?.("zh-CN");
+    expect(YAML.parse(await import("node:fs/promises").then(({ readFile }) => readFile(explicitTarget, "utf8"))).memmyMemory.language).toBe("zh-CN");
+  });
+
   it("exposes the same shared writers through createMemmyConfigWriter", async () => {
     const target = file({
       futureSection: { keepMe: true },
@@ -179,7 +198,8 @@ describe("memmy runtime config current contract", () => {
     await writeAppCloudUuidToMemmyConfig("cloud-token", target);
     await expect(readRuntimeMemmyConfigState(target)).resolves.toMatchObject({ status: "valid_account", cloudUuid: "cloud-token" });
     expect(Object.fromEntries([
-      "openai_compatible", "anthropic", "google", "deepseek", "zhipu", "qwen", "kimi", "minimax", "baidu", "doubao"
+      "openai_compatible", "anthropic", "google", "deepseek", "zhipu", "qwen", "kimi", "minimax", "baidu", "doubao",
+      "stepfun", "xiaomi"
     ].map((provider) => [provider, mapModelProtocol(provider as any).agentProvider]))).toEqual({
       openai_compatible: "openai",
       anthropic: "anthropic",
@@ -190,7 +210,19 @@ describe("memmy runtime config current contract", () => {
       kimi: "moonshot",
       minimax: "minimax",
       baidu: "qianfan",
-      doubao: "volcengine"
+      doubao: "volcengine",
+      stepfun: "stepfun",
+      xiaomi: "xiaomi_mimo"
+    });
+    expect(mapModelProtocol("stepfun")).toEqual({
+      agentProvider: "stepfun",
+      agentApiType: "auto",
+      memoryProvider: "openai_compatible"
+    });
+    expect(mapModelProtocol("xiaomi")).toEqual({
+      agentProvider: "xiaomi_mimo",
+      agentApiType: "auto",
+      memoryProvider: "openai_compatible"
     });
   });
 });

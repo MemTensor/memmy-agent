@@ -21,6 +21,9 @@ import {
   LocalDataClearResponseSchema,
   LocalDataExportResponseSchema,
   LocalDataRevealResponseSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
+  LotteryStatusSchema,
   ImageGenModelConfigInputSchema,
   ImageGenModelConfigViewSchema,
   ModelConfigInputSchema,
@@ -28,6 +31,8 @@ import {
   ModelConfigTestResultSchema,
   ModelConfigViewSchema,
   MODEL_NAME_MAX_LENGTH,
+  ModelProviderSchema,
+  canonicalCatalogProviderId,
   PatchAppSettingsInputSchema,
   PatchOnboardingInputSchema,
   PatchPrivacyInputSchema,
@@ -44,6 +49,28 @@ import {
 } from "@memmy/local-api-contracts";
 
 describe("local app contracts", () => {
+  it("accepts StepFun and Xiaomi as text providers and canonicalises their catalog ids", () => {
+    expect(ModelProviderSchema.safeParse("stepfun").success).toBe(true);
+    expect(ModelProviderSchema.safeParse("xiaomi").success).toBe(true);
+
+    expect(canonicalCatalogProviderId("stepfun")).toBe("stepfun");
+    expect(canonicalCatalogProviderId("xiaomi")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("xiaomi_mimo")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("XIAOMI")).toBe("xiaomi_mimo");
+    expect(canonicalCatalogProviderId("xiaomimimo")).toBeNull();
+
+    // Neither provider is wired into image generation yet.
+    for (const provider of ["stepfun", "xiaomi"]) {
+      expect(
+        ImageGenModelConfigInputSchema.safeParse({
+          provider,
+          baseUrl: "https://example.com/v1",
+          modelId: "x"
+        }).success
+      ).toBe(false);
+    }
+  });
+
   it("limits newly saved model names without constraining normal names", () => {
     const modelInput = {
       endpointId: "primary",
@@ -517,6 +544,45 @@ describe("local app contracts", () => {
     expect(LocalDataClearResponseSchema.parse({ ok: true, clearedAt: "2026-06-02T10:00:00.000Z" })).toMatchObject({
       ok: true
     });
+  });
+
+  it("parses the remote lottery status contract", () => {
+    expect(LotteryStatusSchema.parse({
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    })).toEqual({
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    });
+    expect(() => LotteryStatusSchema.parse({
+      shouldShow: true,
+      startAt: 1790812800000,
+      endAt: 1790121600000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    })).toThrow();
+  });
+
+  it("parses lottery reward and acknowledgement contracts", () => {
+    expect(LotteryRewardSchema.parse({ hasReward: false })).toEqual({ hasReward: false });
+    expect(LotteryRewardSchema.parse({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    })).toEqual({
+      hasReward: true,
+      drawId: "1",
+      tokenAmount: 500_000
+    });
+    expect(LotteryRewardAckInputSchema.parse({ drawId: "1" })).toEqual({ drawId: "1" });
+    expect(LotteryRewardAckInputSchema.parse({})).toEqual({});
+    expect(() => LotteryRewardSchema.parse({ hasReward: true, tokenAmount: 0 })).toThrow();
   });
 
   it("parses tool integration contracts", () => {

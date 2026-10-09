@@ -10,6 +10,7 @@ import {
   type LocalDataRevealResponse
 } from "@memmy/local-api-contracts";
 import type { LocalDataStore } from "../infrastructure/app-state-store/local-data-store.js";
+import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 
 export interface LocalDataService {
   getPath(): Promise<LocalDataRevealResponse>;
@@ -20,12 +21,11 @@ export interface LocalDataService {
 
 export interface CreateLocalDataServiceOptions {
   localDataStore: LocalDataStore;
-  now?: () => Date;
+  memoryClient: MemoryClient;
 }
 
 /** Creates create local data service. */
 export function createLocalDataService(options: CreateLocalDataServiceOptions): LocalDataService {
-  const now = options.now ?? (() => new Date());
   const getPathResponse = (): LocalDataRevealResponse => LocalDataRevealResponseSchema.parse({
     ok: true,
     dataPath: options.localDataStore.getDataPath()
@@ -43,15 +43,18 @@ export function createLocalDataService(options: CreateLocalDataServiceOptions): 
     },
 
     async export(input) {
-      return LocalDataExportResponseSchema.parse(options.localDataStore.exportData(input));
+      if (!options.memoryClient.exportBundle) throw new Error("Memory export API is unavailable");
+      const bundle = await options.memoryClient.exportBundle();
+      return LocalDataExportResponseSchema.parse(options.localDataStore.exportData(input, bundle));
     },
 
     async clear(_input) {
-      const clearedAt = now().toISOString();
-      options.localDataStore.clearMemoryDatabase(clearedAt);
+      if (!options.memoryClient.clearAllData) throw new Error("Memory clear API is unavailable");
+      const result = await options.memoryClient.clearAllData();
+      options.localDataStore.clearImportState();
       return LocalDataClearResponseSchema.parse({
         ok: true,
-        clearedAt
+        clearedAt: result.clearedAt
       });
     }
   };

@@ -1,5 +1,5 @@
-export const POLARDB_SCHEMA_VERSION = "runtime-v2";
-export const POLARDB_MIGRATION_ID = "002_memmy_l3_world_model_runtime_schema";
+export const POLARDB_SCHEMA_VERSION = "runtime-v4";
+export const POLARDB_MIGRATION_ID = "004_source_turn_captures";
 
 export function polardbMigrationSql(): string[] {
   return [
@@ -244,6 +244,36 @@ export function polardbMigrationSql(): string[] {
       ON skill_trials (l1_memory_id, status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_skill_trials_raw_status
       ON skill_trials (raw_turn_id, status, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS skill_clusters (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      project_id TEXT,
+      tools_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      artifacts_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tool_bigrams_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      centroid_json JSONB,
+      skill_memory_id TEXT,
+      meta_skill_md TEXT NOT NULL DEFAULT '',
+      processed_episode_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      member_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_clusters_scope
+      ON skill_clusters (user_id, project_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_clusters_skill
+      ON skill_clusters (skill_memory_id)`,
+    `CREATE TABLE IF NOT EXISTS skill_cluster_members (
+      cluster_id TEXT NOT NULL,
+      episode_id TEXT NOT NULL,
+      outcome TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (outcome IN ('success', 'failure', 'unknown')),
+      r_task DOUBLE PRECISION,
+      assigned_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (cluster_id, episode_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_cluster_members_episode
+      ON skill_cluster_members (episode_id, assigned_at DESC)`,
     `CREATE TABLE IF NOT EXISTS recall_events (
       id TEXT PRIMARY KEY,
       namespace_id TEXT,
@@ -286,6 +316,46 @@ export function polardbMigrationSql(): string[] {
       created_at TIMESTAMPTZ NOT NULL,
       expires_at TIMESTAMPTZ
     )`,
+  `CREATE TABLE IF NOT EXISTS source_turn_captures (
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    namespace_key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    session_id TEXT,
+    episode_id TEXT,
+    raw_turn_id TEXT,
+    response JSONB NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    source_sequence INTEGER,
+    created_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, source, profile_id, namespace_key, conversation_id, turn_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_conversation
+    ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
+
+    `CREATE TABLE IF NOT EXISTS runtime_kv (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `INSERT INTO runtime_kv (key, value, updated_at)
+      VALUES ('source_turn_capture_activated_at', to_jsonb(CURRENT_TIMESTAMP::text), CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO NOTHING`,
+    `CREATE TABLE IF NOT EXISTS memory_capture_claims (
+      user_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      qa_hash TEXT NOT NULL,
+      primary_memory_id TEXT NOT NULL,
+      captured_by TEXT NOT NULL CHECK (captured_by IN ('turn_complete', 'agent_source_scan')),
+      created_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (user_id, source, qa_hash)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_capture_claims_primary_memory
+      ON memory_capture_claims (primary_memory_id)`,
     `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
       scope_key TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -301,6 +371,11 @@ export function polardbMigrationSql(): string[] {
     `CREATE TABLE IF NOT EXISTS l3_world_model_session_cursors (
       session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
       last_scheduled_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_scheduled_seq >= 0),
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS work_memory_session_cursors (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      last_extracted_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_extracted_seq >= 0),
       updated_at TIMESTAMPTZ NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (

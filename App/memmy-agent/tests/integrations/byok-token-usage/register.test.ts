@@ -57,6 +57,72 @@ describe("installByokTokenUsage", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("reads runtime.json from MEMMY_HOME when the active development profile is relocated", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-byok-token-home-"));
+    const memmyHome = join(tempDir, "isolated-profile");
+    mkdirSync(memmyHome, { recursive: true });
+    writeFileSync(join(memmyHome, "runtime.json"), JSON.stringify({
+      baseUrl: "http://127.0.0.1:63002",
+      localToken: "runtime-token",
+    }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const hooks: AgentHook[] = [];
+
+    installByokTokenUsage(configFixture(), {
+      hooks,
+      env: { MEMMY_HOME: memmyHome },
+      homeDir: join(tempDir, "user-home"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    const ctx = new AgentHookContext({
+      spec: {
+        sessionKey: "websocket:relocated-profile",
+        model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
+      },
+    });
+    await hooks[0]?.beforeRun(ctx);
+    await hooks[0]?.afterRun(ctx, { usage: { prompt_tokens: 2, completion_tokens: 3 } });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:63002/api/app/byok-token-usage/events"
+    );
+  });
+
+  it("keeps the default user-home runtime path when MEMMY_HOME is not set", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-byok-token-default-home-"));
+    const runtimeHome = join(tempDir, ".memmy");
+    mkdirSync(runtimeHome, { recursive: true });
+    writeFileSync(join(runtimeHome, "runtime.json"), JSON.stringify({
+      baseUrl: "http://127.0.0.1:63003",
+      localToken: "runtime-token",
+    }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const hooks: AgentHook[] = [];
+
+    installByokTokenUsage(configFixture(), {
+      hooks,
+      env: {},
+      homeDir: tempDir,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    const ctx = new AgentHookContext({
+      spec: {
+        sessionKey: "websocket:default-profile",
+        model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
+      },
+    });
+    await hooks[0]?.beforeRun(ctx);
+    await hooks[0]?.afterRun(ctx, { usage: { prompt_tokens: 3, completion_tokens: 4 } });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:63003/api/app/byok-token-usage/events"
+    );
+  });
+
   it("does not install a hook in Vitest runtime", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-byok-token-"));
     const runtimeConfigPath = join(tempDir, ".memmy", "runtime.json");

@@ -70,6 +70,19 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async getMemoryTokenBudget() {
+      failIfNeeded();
+      return {
+        dailyLimitM: 10,
+        totalLimitM: 500,
+        dailyUsed: 0,
+        lifetimeUsed: 0,
+        paused: false,
+        trigger: null,
+        nextLocalMidnightAt: now()
+      };
+    },
+
     async openSession() {
       failIfNeeded();
       return {
@@ -125,6 +138,27 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         jobs: [],
         ...nextChange(),
         serverTime: now()
+      };
+    },
+
+    async completeSourceTurn(input) {
+      failIfNeeded();
+      const l1MemoryId = randomUUID();
+      return {
+        status: "stored",
+        result: {
+          turnId: input.sourceTurn.turnId,
+          sessionId: input.sessionId ?? randomUUID(),
+          episodeId: randomUUID(),
+          rawTurnId: randomUUID(),
+          l1MemoryId,
+          l1MemoryIds: [l1MemoryId],
+          closedEpisodeIds: [],
+          scheduledEvolution: false,
+          jobs: [],
+          ...nextChange(),
+          serverTime: now()
+        }
       };
     },
 

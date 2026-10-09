@@ -8,8 +8,9 @@ import {
   type L3WorldModelFields,
   type L3WorldModelTraceHeadResponse,
   type WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
+import { displayFieldsForMemory } from "../service/read-model/display-fields.js";
 import type {
   ProjectEnvironmentKind,
   ProjectEnvironmentStateRecord
@@ -29,13 +30,16 @@ import type {
   MemoryStatsRow,
   MemoryStatus,
   RecallHit,
+  SourceTurnCompleteResponse,
   UserMemoryRecord,
   UserMemoryStatus,
   UserMemoryType
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
+import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { firstSemanticUserLine } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
 import {
   attachMemoryVectors,
@@ -54,10 +58,13 @@ import {
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
+  "memory_capture_claims",
+  "source_turn_captures",
   "l3_world_model_scopes",
   "user_memories",
   "sessions",
   "l3_world_model_session_cursors",
+  "work_memory_session_cursors",
   "episodes",
   "raw_turns",
   "l3_world_model_input_traces",
@@ -78,6 +85,14 @@ const BUNDLE_TABLES = [
   "runtime_kv",
   "artifacts",
   "audit_logs"
+] as const;
+const CLEAR_MEMORY_TABLES = [
+  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures"),
+  "memories_fts",
+  "user_memories_fts",
+  "memory_vector_entries",
+  "idempotency_keys",
+  "legacy_migration_ledger"
 ] as const;
 type BundleTableName = typeof BUNDLE_TABLES[number];
 const LOG_TABLE_RETENTION_LIMIT = 10_000;
@@ -159,6 +174,30 @@ export interface EpisodeRecord {
   updatedAt: string;
 }
 
+export interface SkillClusterRecord {
+  id: string;
+  userId: string;
+  projectId?: string;
+  tools: string[];
+  artifacts: string[];
+  toolBigrams: string[];
+  centroid: number[] | null;
+  skillMemoryId?: string;
+  metaSkillMd: string;
+  processedEpisodeIds: string[];
+  memberCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillClusterMemberRecord {
+  clusterId: string;
+  episodeId: string;
+  outcome: "success" | "failure" | "unknown";
+  rTask?: number;
+  assignedAt: string;
+}
+
 export interface RawTurnRecord {
   id: string;
   sessionId: string;
@@ -177,6 +216,17 @@ export interface RawTurnRecord {
   status: string;
   redactedAt?: string | null;
   deletedAt?: string | null;
+  createdAt: string;
+}
+
+export type MemoryCaptureClaimOrigin = "turn_complete" | "agent_source_scan";
+
+export interface MemoryCaptureClaimRecord {
+  userId: string;
+  source: string;
+  qaHash: string;
+  primaryMemoryId: string;
+  capturedBy: MemoryCaptureClaimOrigin;
   createdAt: string;
 }
 
@@ -300,6 +350,12 @@ export interface L3WorldModelInputTraceRecord {
   rawTurnId: string;
   episodeId?: string;
   createdAt: string;
+}
+
+export interface WorkMemorySessionCursorRecord {
+  sessionId: string;
+  lastExtractedSeq: number;
+  updatedAt: string;
 }
 
 export interface L3WorldModelEvidenceBatchRecord {
@@ -664,6 +720,34 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listMemoryTags(ids: readonly string[]): string[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT tags_json, info_json, properties_json
+      FROM memories
+      WHERE id IN (${placeholders}) AND deleted_at IS NULL AND status != 'deleted'
+    `).all(...ids) as Array<{ tags_json: string; info_json: string; properties_json: string }>;
+    return uniq(rows.flatMap((row) => {
+      const info = parseJson<Record<string, unknown>>(row.info_json, {});
+      const properties = parseJson<Record<string, unknown>>(row.properties_json, {});
+      return [
+        ...asStringArray(parseJson(row.tags_json, [])),
+        ...asStringArray(info.tags),
+        ...asStringArray(properties.tags)
+      ];
+    }));
+  }
+
+  listUserMemoriesByKeyIncludingDeleted(userId: string, memoryKey: string): MemoryRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = 'L1' AND memory_key = ?
+      ORDER BY updated_at DESC, id DESC
+    `).all(userId, memoryKey) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
   archivePriorReadOnlySkillVersions(input: {
     sourceAgentId: string;
     sourceSkillIdentity: string;
@@ -844,6 +928,34 @@ export class MemoryRepository {
                  'summary_pending', 'summarizing', 'embedding_pending', 'embedding'
                )
            )
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  listImportMemoriesNeedingSummary(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND LOWER(TRIM(COALESCE(
+             json_extract(properties_json, '$.internal_info.trace.summary'),
+             json_extract(info_json, '$.summary'),
+             json_extract(properties_json, '$.internal_info.summary'),
+             ''
+           ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
          ORDER BY created_at DESC, updated_at DESC, id DESC
          LIMIT ?`
       )
@@ -1167,6 +1279,7 @@ export class MemoryRepository {
       summary: listSummaryForMemory(memory),
       tags: memory.tags,
       metrics: listMetricsForMemory(memory),
+      ...displayFieldsForMemory(memory),
       createdAt: memory.createdAt,
       updatedAt: memory.updatedAt,
       version: memory.version
@@ -1229,6 +1342,56 @@ export class MemoryRepository {
       )
       .all(...built.params, ...params, limit) as Array<{ id: string }>;
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel }));
+  }
+}
+
+export class MemoryCaptureClaimRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  claim(input: MemoryCaptureClaimRecord): {
+    claimed: boolean;
+    claim: MemoryCaptureClaimRecord;
+  } {
+    const result = this.db.prepare(
+      `INSERT OR IGNORE INTO memory_capture_claims (
+         user_id, source, qa_hash, primary_memory_id, captured_by, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      input.userId,
+      input.source,
+      input.qaHash,
+      input.primaryMemoryId,
+      input.capturedBy,
+      input.createdAt
+    );
+    const claim = this.get(input.userId, input.source, input.qaHash);
+    if (!claim) {
+      throw new Error("memory capture claim was not persisted");
+    }
+    return { claimed: result.changes === 1, claim };
+  }
+
+  get(userId: string, source: string, qaHash: string): MemoryCaptureClaimRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT user_id, source, qa_hash, primary_memory_id, captured_by, created_at
+       FROM memory_capture_claims
+       WHERE user_id = ? AND source = ? AND qa_hash = ?`
+    ).get(userId, source, qaHash) as {
+      user_id: string;
+      source: string;
+      qa_hash: string;
+      primary_memory_id: string;
+      captured_by: MemoryCaptureClaimOrigin;
+      created_at: string;
+    } | undefined;
+    return row ? {
+      userId: row.user_id,
+      source: row.source,
+      qaHash: row.qa_hash,
+      primaryMemoryId: row.primary_memory_id,
+      capturedBy: row.captured_by,
+      createdAt: row.created_at
+    } : undefined;
   }
 }
 
@@ -1352,6 +1515,7 @@ export class UserMemoryRepository {
     userId: string;
     status?: UserMemoryStatus;
     query?: string;
+    sourceAgent?: string;
     limit: number;
     offset: number;
   }): UserMemoryRecord[] {
@@ -1368,11 +1532,30 @@ export class UserMemoryRepository {
     userId: string;
     status?: UserMemoryStatus;
     query?: string;
+    sourceAgent?: string;
   }): number {
     const { where, params } = userMemoryPanelFilter(input);
     const row = this.db.prepare(`SELECT COUNT(*) AS count FROM user_memories WHERE ${where}`)
       .get(...params) as { count: number };
     return row.count;
+  }
+
+  embeddingDimensionCounts(userId: string): {
+    totalSlots: number;
+    dimensions: Array<{ dimension: number; count: number }>;
+  } {
+    const where = "user_id = ? AND status = 'active' AND deleted_at IS NULL";
+    const totalSlots = Number(this.db.prepare(
+      `SELECT COUNT(*) FROM user_memories WHERE ${where}`
+    ).pluck().get(userId) ?? 0);
+    const dimensions = this.db.prepare(
+      `SELECT json_array_length(embedding_json) AS dimension, COUNT(*) AS count
+       FROM user_memories
+       WHERE ${where} AND embedding_json IS NOT NULL
+       GROUP BY json_array_length(embedding_json)
+       ORDER BY count DESC, dimension DESC`
+    ).all(userId) as Array<{ dimension: number; count: number }>;
+    return { totalSlots, dimensions };
   }
 
   getActiveByNormalizedText(userId: string, hash: string): UserMemoryRecord | undefined {
@@ -1588,6 +1771,41 @@ export class MemoryProcessingRepository {
   }
 }
 
+export interface SourceTurnCaptureScope {
+  userId: string;
+  source: string;
+  profileId: string;
+  namespaceKey: string;
+  conversationId: string;
+}
+
+export interface SourceTurnCaptureRecord extends SourceTurnCaptureScope {
+  turnId: string;
+  contentHash: string;
+  sessionId?: string;
+  episodeId?: string;
+  rawTurnId?: string;
+  response: SourceTurnCompleteResponse;
+  startedAt: string;
+  completedAt: string;
+  sequence?: number;
+  createdAt: string;
+}
+
+function sourceTurnCaptureFromSql(row: Record<string, unknown>): SourceTurnCaptureRecord {
+  return {
+    userId: String(row.user_id), source: String(row.source), profileId: String(row.profile_id),
+    namespaceKey: String(row.namespace_key), conversationId: String(row.conversation_id), turnId: String(row.turn_id),
+    contentHash: String(row.content_hash), sessionId: typeof row.session_id === "string" ? row.session_id : undefined,
+    episodeId: typeof row.episode_id === "string" ? row.episode_id : undefined,
+    rawTurnId: typeof row.raw_turn_id === "string" ? row.raw_turn_id : undefined,
+    response: parseJson(String(row.response_json), { status: "pending", reason: "source_capture_response_missing" }),
+    startedAt: String(row.started_at), completedAt: String(row.completed_at),
+    sequence: typeof row.source_sequence === "number" ? row.source_sequence : undefined,
+    createdAt: String(row.created_at)
+  };
+}
+
 export class RuntimeRepository {
   private readonly scheduledLogPrunes = new Set<LogTableName>();
 
@@ -1612,6 +1830,105 @@ export class RuntimeRepository {
            updated_at = excluded.updated_at`
       )
       .run(key, toJson(value), at);
+  }
+
+  listKv(prefix: string, limit = 200): Array<{ key: string; value: unknown; updatedAt: string }> {
+    const rows = this.db
+      .prepare(`SELECT key, value_json, updated_at FROM runtime_kv WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?`)
+      .all(`${prefix}%`, Math.max(1, Math.min(limit, 1_000))) as Array<{
+        key: string;
+        value_json: string;
+        updated_at: string;
+      }>;
+    return rows.map((row) => ({
+      key: row.key,
+      value: parseJson(row.value_json, undefined),
+      updatedAt: row.updated_at
+    }));
+  }
+
+  getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+    ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
+      ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
+    ).get(scope) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  sourceTurnCaptureNeighbors(scope: SourceTurnCaptureScope, startedAt: string): {
+    before?: SourceTurnCaptureRecord;
+    after?: SourceTurnCaptureRecord;
+  } {
+    const prefix = `SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
+    const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    const after = this.db.prepare(`${prefix} AND started_at > @startedAt ORDER BY started_at ASC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    return { before: before ? sourceTurnCaptureFromSql(before) : undefined,
+      after: after ? sourceTurnCaptureFromSql(after) : undefined };
+  }
+
+  insertSourceTurnCapture(capture: SourceTurnCaptureRecord): void {
+    this.db.prepare(`INSERT INTO source_turn_captures (
+      user_id, source, profile_id, namespace_key, conversation_id, turn_id, content_hash,
+      session_id, episode_id, raw_turn_id, response_json, started_at, completed_at, source_sequence, created_at
+    ) VALUES (@userId, @source, @profileId, @namespaceKey, @conversationId, @turnId, @contentHash,
+      @sessionId, @episodeId, @rawTurnId, @responseJson, @startedAt, @completedAt, @sequence, @createdAt)`
+    ).run({ ...capture, sessionId: capture.sessionId ?? null, episodeId: capture.episodeId ?? null,
+      rawTurnId: capture.rawTurnId ?? null, responseJson: toJson(capture.response), sequence: capture.sequence ?? null });
+  }
+
+  orderEpisodeTurnsBySourceTime(episodeId: string): void {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) throw new Error(`episode not found: ${episodeId}`);
+    const rawTimes = new Map(episode.rawTurnIds.map((id) => [id, this.getRawTurn(id)?.createdAt ?? ""]));
+    const rawTurnIds = [...episode.rawTurnIds].sort((a, b) => rawTimes.get(a)!.localeCompare(rawTimes.get(b)!));
+    const memoryTime = this.db.prepare(`SELECT created_at,
+      COALESCE(json_extract(info_json, '$.raw_turn_id'), json_extract(properties_json, '$.internal_info.raw_turn_id')) AS raw_turn_id
+      FROM memories WHERE id = ?`);
+    const memoryTimes = new Map(episode.l1MemoryIds.map((id) => {
+      const row = memoryTime.get(id) as { created_at: string; raw_turn_id: string | null } | undefined;
+      return [id, rawTimes.get(row?.raw_turn_id ?? "") ?? row?.created_at ?? ""];
+    }));
+    const l1MemoryIds = [...episode.l1MemoryIds].sort((a, b) => memoryTimes.get(a)!.localeCompare(memoryTimes.get(b)!));
+    this.db.prepare(`UPDATE episodes SET raw_turn_ids_json = ?, l1_memory_ids_json = ? WHERE id = ?`)
+      .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
+  }
+
+  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+      AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
+        OR host_session_key = @source || '-memory-' || @conversationId)
+      ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
+  }
+
+  bindSessionSourceConversation(id: string, conversationId: string): boolean {
+    const result = this.db.prepare(`UPDATE sessions SET conversation_id = @conversationId
+      WHERE id = @id AND status = 'open' AND (conversation_id IS NULL OR conversation_id = '')`)
+      .run({ id, conversationId });
+    return result.changes === 1;
+  }
+
+  bindRawTurnSourceConversation(
+    scope: Pick<RawTurnRecord, "id" | "sessionId" | "userId" | "turnId">,
+    conversationId: string
+  ): boolean {
+    const result = this.db.prepare(`UPDATE raw_turns SET conversation_id = @conversationId
+      WHERE id = @id AND session_id = @sessionId AND user_id = @userId AND turn_id = @turnId
+        AND (conversation_id IS NULL OR conversation_id = '' OR conversation_id = @conversationId)`)
+      .run({ ...scope, conversationId });
+    return result.changes === 1;
   }
 
   createSession(session: SessionRecord): SessionRecord {
@@ -1905,8 +2222,8 @@ export class RuntimeRepository {
     return counts;
   }
 
-  countEpisodes(userId?: string, query?: string): number {
-    const built = buildEpisodeWhere(userId, query);
+  countEpisodes(userId?: string, query?: string, sourceAgent?: string): number {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -1917,8 +2234,8 @@ export class RuntimeRepository {
     return Number(row?.count ?? 0);
   }
 
-  listEpisodes(userId?: string, limit = 50, offset = 0, query?: string): EpisodeRecord[] {
-    const built = buildEpisodeWhere(userId, query);
+  listEpisodes(userId?: string, limit = 50, offset = 0, query?: string, sourceAgent?: string): EpisodeRecord[] {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
     const rows = this.db
       .prepare(
         `SELECT *
@@ -2004,6 +2321,33 @@ export class RuntimeRepository {
       .run(toJson(meta), at, episodeId);
     return {
       ...episode,
+      meta,
+      updatedAt: at
+    };
+  }
+
+  updateEpisodeTitle(
+    episodeId: string,
+    input: { title: string; summary: string; meta?: Record<string, unknown> },
+    at = nowIso()
+  ): EpisodeRecord | undefined {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) return undefined;
+    const meta = input.meta ? { ...episode.meta, ...input.meta } : episode.meta;
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET title = ?,
+             summary = ?,
+             meta_json = ?,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(input.title, input.summary, toJson(meta), at, episodeId);
+    return {
+      ...episode,
+      title: input.title,
+      summary: input.summary,
       meta,
       updatedAt: at
     };
@@ -2265,11 +2609,120 @@ export class RuntimeRepository {
     return row ? rawTurnFromSql(row) : undefined;
   }
 
+  episodeHasLaterRawTurn(episodeId: string, turnId: string, startedAt: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE episode_id = ?
+        AND turn_id != ?
+        AND created_at > ?
+      LIMIT 1
+    `).get(episodeId, turnId, startedAt) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  episodeRelationTexts(episodeId: string, rawTurnIds: readonly string[] = []): {
+    firstUser: string;
+    lastUser: string;
+    lastAssistant: string;
+    lastCompletedAt?: string;
+  } {
+    const completed = `json_type(message_payload_json, '$.turn_complete') = 'object'`;
+    const boundary = (column: "user_text" | "assistant_text" | "created_at", edge: "first" | "last") => {
+      const nonempty = column === "created_at" ? "1 = 1" : `trim(COALESCE(${column}, '')) != ''`;
+      const time = this.db.prepare(`
+        SELECT ${edge === "first" ? "MIN" : "MAX"}(created_at) AS boundary
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty}
+      `).get(episodeId) as { boundary: string | null } | undefined;
+      if (!time?.boundary) return [];
+      return this.db.prepare(`
+        SELECT id, created_at AS createdAt, user_text AS userText, assistant_text AS assistantText
+        FROM raw_turns
+        WHERE episode_id = ? AND ${completed} AND ${nonempty} AND created_at = ?
+      `).all(episodeId, time.boundary) as Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>;
+    };
+    const pick = (
+      rows: Array<{ id: string; createdAt: string; userText: string | null; assistantText: string | null }>,
+      field: "userText" | "assistantText" | "createdAt",
+      edge: "first" | "last"
+    ) => {
+      const rank = new Map(rawTurnIds.map((id, index) => [id, index]));
+      const ordered = [...rows].sort((left, right) =>
+        (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      );
+      const chosen = edge === "first" ? ordered[0] : ordered[ordered.length - 1];
+      const value = chosen?.[field];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const firstUsers = boundary("user_text", "first");
+    const lastUsers = boundary("user_text", "last");
+    const lastAssistants = boundary("assistant_text", "last");
+    const lastCompleted = boundary("created_at", "last");
+    const lastCompletedAt = pick(lastCompleted, "createdAt", "last");
+    return {
+      firstUser: pick(firstUsers, "userText", "first"),
+      lastUser: pick(lastUsers, "userText", "last"),
+      lastAssistant: pick(lastAssistants, "assistantText", "last"),
+      ...(lastCompletedAt ? { lastCompletedAt } : {})
+    };
+  }
+
   getRawTurnBySessionTurn(sessionId: string, turnId: string): RawTurnRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM raw_turns WHERE session_id = ? AND turn_id = ?`)
       .get(sessionId, turnId) as SqlRawTurnRow | undefined;
     return row ? rawTurnFromSql(row) : undefined;
+  }
+
+  hasCompletedSourceTurnInScope(input: {
+    userId: string;
+    source: string;
+    profileId: string;
+    conversationId: string;
+    turnId: string;
+    namespaceKey: string;
+    defaultNamespaceKey: string;
+    tenantId: string | null;
+    storedProjectId: string | null;
+    workspaceId: string | null;
+  }): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS found
+      FROM raw_turns
+      WHERE raw_turns.user_id = @userId
+        AND raw_turns.turn_id = @turnId
+        AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+        AND EXISTS (
+          SELECT 1
+          FROM sessions
+          WHERE sessions.id = raw_turns.session_id
+            AND sessions.user_id = @userId
+            AND sessions.source = @source
+            AND sessions.profile_id = @profileId
+            AND (
+              sessions.host_session_key = @conversationId
+              OR sessions.conversation_id = @conversationId
+              OR sessions.host_session_key = @source || '-memory-' || @conversationId
+            )
+            AND (
+              json_extract(sessions.meta_json, '$.source_namespace_key') = @namespaceKey
+              OR (
+                json_extract(sessions.meta_json, '$.source_namespace_key') IS NULL
+                AND @tenantId IS NULL
+                AND (
+                  @namespaceKey = @defaultNamespaceKey
+                  OR (
+                    sessions.project_id IS @storedProjectId
+                    AND sessions.workspace_id IS @workspaceId
+                  )
+                )
+              )
+            )
+        )
+      LIMIT 1
+    `).get(input) as { found: number } | undefined;
+    return row?.found === 1;
   }
 
   listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {
@@ -2292,11 +2745,183 @@ export class RuntimeRepository {
         `SELECT *
          FROM raw_turns
          WHERE episode_id = ?
-         ORDER BY created_at ASC
+         ORDER BY created_at ASC, id ASC
          LIMIT ?`
       )
       .all(episodeId, limit) as SqlRawTurnRow[];
     return rows.map(rawTurnFromSql);
+  }
+
+  countRawTurnsByEpisode(episodeId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM raw_turns WHERE episode_id = ?`)
+      .get(episodeId) as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * Newest-first turns, so callers can read an episode's tail without paging the
+   * head.  The ordering mirrors listRawTurnsByEpisode exactly, which keeps a
+   * head window and a tail window from overlapping or skipping a turn.
+   */
+  listLatestRawTurnsByEpisode(episodeId: string, limit = 100): RawTurnRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM raw_turns
+         WHERE episode_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(episodeId, limit) as SqlRawTurnRow[];
+    return rows.map(rawTurnFromSql);
+  }
+
+  insertSkillCluster(cluster: SkillClusterRecord): SkillClusterRecord {
+    this.db
+      .prepare(
+        `INSERT INTO skill_clusters (
+          id, user_id, project_id, tools_json, artifacts_json, tool_bigrams_json,
+          centroid_json, skill_memory_id, meta_skill_md, processed_episode_ids_json,
+          member_count, created_at, updated_at
+        ) VALUES (
+          @id, @userId, @projectId, @toolsJson, @artifactsJson, @toolBigramsJson,
+          @centroidJson, @skillMemoryId, @metaSkillMd, @processedEpisodeIdsJson,
+          @memberCount, @createdAt, @updatedAt
+        )`
+      )
+      .run({
+        id: cluster.id,
+        userId: cluster.userId,
+        projectId: cluster.projectId ?? null,
+        toolsJson: toJson(cluster.tools),
+        artifactsJson: toJson(cluster.artifacts),
+        toolBigramsJson: toJson(cluster.toolBigrams),
+        centroidJson: cluster.centroid ? toJson(cluster.centroid) : null,
+        skillMemoryId: cluster.skillMemoryId ?? null,
+        metaSkillMd: cluster.metaSkillMd,
+        processedEpisodeIdsJson: toJson(cluster.processedEpisodeIds),
+        memberCount: cluster.memberCount,
+        createdAt: cluster.createdAt,
+        updatedAt: cluster.updatedAt
+      });
+    return cluster;
+  }
+
+  updateSkillCluster(cluster: SkillClusterRecord): SkillClusterRecord {
+    this.db
+      .prepare(
+        `UPDATE skill_clusters
+         SET project_id = @projectId,
+             tools_json = @toolsJson,
+             artifacts_json = @artifactsJson,
+             tool_bigrams_json = @toolBigramsJson,
+             centroid_json = @centroidJson,
+             skill_memory_id = @skillMemoryId,
+             meta_skill_md = @metaSkillMd,
+             processed_episode_ids_json = @processedEpisodeIdsJson,
+             member_count = @memberCount,
+             updated_at = @updatedAt
+         WHERE id = @id`
+      )
+      .run({
+        id: cluster.id,
+        projectId: cluster.projectId ?? null,
+        toolsJson: toJson(cluster.tools),
+        artifactsJson: toJson(cluster.artifacts),
+        toolBigramsJson: toJson(cluster.toolBigrams),
+        centroidJson: cluster.centroid ? toJson(cluster.centroid) : null,
+        skillMemoryId: cluster.skillMemoryId ?? null,
+        metaSkillMd: cluster.metaSkillMd,
+        processedEpisodeIdsJson: toJson(cluster.processedEpisodeIds),
+        memberCount: cluster.memberCount,
+        updatedAt: cluster.updatedAt
+      });
+    return cluster;
+  }
+
+  getSkillCluster(id: string): SkillClusterRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM skill_clusters WHERE id = ?`)
+      .get(id) as SqlSkillClusterRow | undefined;
+    return row ? skillClusterFromSql(row) : undefined;
+  }
+
+  getSkillClusterForEpisode(episodeId: string): SkillClusterRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT c.*
+         FROM skill_cluster_members m
+         JOIN skill_clusters c ON c.id = m.cluster_id
+         WHERE m.episode_id = ?
+         ORDER BY m.assigned_at DESC
+         LIMIT 1`
+      )
+      .get(episodeId) as SqlSkillClusterRow | undefined;
+    return row ? skillClusterFromSql(row) : undefined;
+  }
+
+  listSkillClustersByScope(input: {
+    userId: string;
+    projectId?: string;
+    limit?: number;
+  }): SkillClusterRecord[] {
+    const rows = input.projectId
+      ? this.db
+          .prepare(
+            `SELECT *
+             FROM skill_clusters
+             WHERE user_id = ?
+               AND (project_id = ? OR project_id IS NULL)
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(input.userId, input.projectId, input.limit ?? 200) as SqlSkillClusterRow[]
+      : this.db
+          .prepare(
+            `SELECT *
+             FROM skill_clusters
+             WHERE user_id = ?
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(input.userId, input.limit ?? 200) as SqlSkillClusterRow[];
+    return rows.map(skillClusterFromSql);
+  }
+
+  upsertSkillClusterMember(member: SkillClusterMemberRecord): SkillClusterMemberRecord {
+    this.db
+      .prepare(
+        `INSERT INTO skill_cluster_members (
+          cluster_id, episode_id, outcome, r_task, assigned_at
+        ) VALUES (
+          @clusterId, @episodeId, @outcome, @rTask, @assignedAt
+        )
+        ON CONFLICT(cluster_id, episode_id) DO UPDATE SET
+          outcome = excluded.outcome,
+          r_task = excluded.r_task,
+          assigned_at = excluded.assigned_at`
+      )
+      .run({
+        clusterId: member.clusterId,
+        episodeId: member.episodeId,
+        outcome: member.outcome,
+        rTask: member.rTask ?? null,
+        assignedAt: member.assignedAt
+      });
+    return member;
+  }
+
+  listSkillClusterMembers(clusterId: string): SkillClusterMemberRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM skill_cluster_members
+         WHERE cluster_id = ?
+         ORDER BY assigned_at DESC`
+      )
+      .all(clusterId) as SqlSkillClusterMemberRow[];
+    return rows.map(skillClusterMemberFromSql);
   }
 
   insertFeedback(feedback: FeedbackRecord): FeedbackRecord {
@@ -2559,70 +3184,172 @@ export class RuntimeRepository {
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    const transaction = this.db.transaction(() => {
-      const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
-      if (existing) {
-        const updatedAt = job.updatedAt ?? nowIso();
-        const payload = mergeJobPayload(existing.payload, job.payload);
-        this.db
-          .prepare(
-            `UPDATE evolution_jobs
-             SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
-                 session_id = COALESCE(@sessionId, session_id),
-                 episode_id = COALESCE(@episodeId, episode_id),
-                 target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
-                 payload_json = @payloadJson,
-                 max_attempts = MAX(max_attempts, @maxAttempts),
-                 leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
-                 last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
-                 updated_at = @updatedAt
-             WHERE id = @id`
-          )
-          .run({
-            id: existing.id,
-            sessionId: job.sessionId ?? null,
-            episodeId: job.episodeId ?? null,
-            targetMemoryId: job.targetMemoryId ?? null,
-            payloadJson: toJson(payload),
-            maxAttempts: job.maxAttempts,
-            updatedAt
-          });
-        return this.getJob(existing.id) ?? {
-          ...existing,
-          payload,
-          updatedAt,
-          status: existing.status === "failed" ? "queued" : existing.status,
-          leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
-          lastError: existing.status === "failed" ? null : existing.lastError
-        };
-      }
+    return this.db.transaction(() => this.enqueueJobInTransaction(job))();
+  }
+
+  enqueueJobInTransaction(job: EvolutionJobRecord): EvolutionJobRecord {
+    const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
+    if (existing) {
+      const updatedAt = job.updatedAt ?? nowIso();
+      const payload = mergeJobPayload(existing.payload, job.payload);
       this.db
         .prepare(
-          `INSERT INTO evolution_jobs (
-            id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
-            scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
-            created_at, updated_at
-          ) VALUES (
-            @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
-            @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
-            @createdAt, @updatedAt
-          )`
+          `UPDATE evolution_jobs
+           SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+               session_id = COALESCE(@sessionId, session_id),
+               episode_id = COALESCE(@episodeId, episode_id),
+               target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
+               payload_json = @payloadJson,
+               max_attempts = MAX(max_attempts, @maxAttempts),
+               leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
+               last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
+               updated_at = @updatedAt
+           WHERE id = @id`
         )
         .run({
-          ...job,
-          dedupeKey: job.dedupeKey ?? null,
+          id: existing.id,
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
-          scopeKey: job.scopeKey ?? null,
-          scopeSeq: job.scopeSeq ?? null,
-          payloadJson: toJson(job.payload),
-          leasedUntil: job.leasedUntil ?? null,
-          lastError: job.lastError ?? null
+          payloadJson: toJson(payload),
+          maxAttempts: job.maxAttempts,
+          updatedAt
         });
-      return job;
-    });
-    return transaction();
+      return this.getJob(existing.id) ?? {
+        ...existing,
+        payload,
+        updatedAt,
+        status: existing.status === "failed" ? "queued" : existing.status,
+        leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
+        lastError: existing.status === "failed" ? null : existing.lastError
+      };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO evolution_jobs (
+          id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
+          scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
+          created_at, updated_at
+        ) VALUES (
+          @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
+          @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
+          @createdAt, @updatedAt
+        )`
+      )
+      .run({
+        ...job,
+        dedupeKey: job.dedupeKey ?? null,
+        sessionId: job.sessionId ?? null,
+        episodeId: job.episodeId ?? null,
+        targetMemoryId: job.targetMemoryId ?? null,
+        scopeKey: job.scopeKey ?? null,
+        scopeSeq: job.scopeSeq ?? null,
+        payloadJson: toJson(job.payload),
+        leasedUntil: job.leasedUntil ?? null,
+        lastError: job.lastError ?? null
+      });
+    return job;
+  }
+
+  /** Allocate the next FIFO sequence for Work Memory jobs in a merge scope. */
+  nextWorkMemoryScopeSeq(scopeKey: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(scope_seq), 0) + 1 AS next_seq
+       FROM evolution_jobs
+       WHERE job_type = 'work_memory_extract' AND scope_key = ?`
+    ).get(scopeKey) as { next_seq: number };
+    return Number(row.next_seq);
+  }
+
+  /**
+   * Read the Work Memory extraction cursor for a Session.
+   *
+   * A missing row is seeded from the L3 cursor so Sessions that predate this
+   * table do not re-extract windows the L3 boundary already covered.
+   */
+  getWorkMemoryCursor(sessionId: string, at = nowIso()): WorkMemorySessionCursorRecord {
+    const seed = this.db.prepare(
+      `SELECT COALESCE(
+         (SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?),
+         0
+       ) AS last_seq`
+    ).get(sessionId) as { last_seq: number };
+    return this.ensureWorkMemoryCursor(sessionId, Number(seed.last_seq), at);
+  }
+
+  /** Create the Work Memory cursor row for a Session when it is still missing. */
+  ensureWorkMemoryCursor(
+    sessionId: string,
+    lastExtractedSeq: number,
+    at = nowIso()
+  ): WorkMemorySessionCursorRecord {
+    this.db.prepare(
+      `INSERT INTO work_memory_session_cursors (session_id, last_extracted_seq, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO NOTHING`
+    ).run(sessionId, lastExtractedSeq, at);
+    const row = this.db.prepare(
+      `SELECT session_id, last_extracted_seq, updated_at
+       FROM work_memory_session_cursors WHERE session_id = ?`
+    ).get(sessionId) as { session_id: string; last_extracted_seq: number; updated_at: string };
+    return {
+      sessionId: row.session_id,
+      lastExtractedSeq: Number(row.last_extracted_seq),
+      updatedAt: row.updated_at
+    };
+  }
+
+  /** Advance the Work Memory extraction cursor. */
+  setWorkMemoryCursor(sessionId: string, lastExtractedSeq: number, at = nowIso()): void {
+    this.db.prepare(
+      `UPDATE work_memory_session_cursors
+       SET last_extracted_seq = ?, updated_at = ?
+       WHERE session_id = ?`
+    ).run(lastExtractedSeq, at, sessionId);
+  }
+
+  /**
+   * Arm the Work Memory idle flush for a Session, pushing `runAfter` forward.
+   *
+   * The generic enqueue path merges `runAfter` by keeping the earlier value,
+   * which is the opposite of re-arming. This upsert therefore reuses terminal
+   * rows as well and clears the retry bookkeeping, so the auto worker keeps
+   * scheduling the job.
+   */
+  armWorkMemoryIdleFlush(input: {
+    sessionId: string;
+    userId: string;
+    lastActivityAt: string;
+    runAfter: string;
+    at?: string;
+  }): EvolutionJobRecord {
+    const at = input.at ?? nowIso();
+    const dedupeKey = `work_memory_idle_flush:${input.sessionId}`;
+    const payload = toJson({ lastActivityAt: input.lastActivityAt, runAfter: input.runAfter });
+    const existing = this.getJobByDedupeKey(dedupeKey);
+    if (existing) {
+      this.db.prepare(
+        `UPDATE evolution_jobs
+         SET status = 'queued',
+             payload_json = ?,
+             attempts = 0,
+             leased_until = NULL,
+             last_error = NULL,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(payload, at, existing.id);
+    } else {
+      this.db.prepare(
+        `INSERT INTO evolution_jobs (
+           id, job_type, status, dedupe_key, user_id, session_id, episode_id,
+           target_memory_id, scope_key, scope_seq, payload_json, attempts,
+           max_attempts, leased_until, last_error, created_at, updated_at
+         ) VALUES (?, 'work_memory_idle_flush', 'queued', ?, ?, ?, NULL, NULL, NULL, NULL, ?, 0, 3, NULL, NULL, ?, ?)`
+      ).run(newId("job"), dedupeKey, input.userId, input.sessionId, payload, at, at);
+    }
+    const job = this.getJobByDedupeKey(dedupeKey);
+    if (!job) throw new Error(`failed to arm work memory idle flush: ${input.sessionId}`);
+    return job;
   }
 
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
@@ -2660,7 +3387,26 @@ export class RuntimeRepository {
     return counts;
   }
 
-  nextWorkerRunAt(): number | undefined {
+  nextWorkerRunAt(options?: {
+    jobType?: string;
+    jobTypes?: readonly string[];
+    excludedJobTypes?: readonly string[];
+    includeEmbeddingRetries?: boolean;
+  }): number | undefined {
+    const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
+    const jobTypeFilter = jobTypes
+      ? jobTypes.length === 0
+        ? "AND 1=0"
+        : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
+      : "";
+    const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    const excludeFilter = excluded
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      : "";
+    const jobTypeParams = [
+      ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
+      ...(excluded ?? [])
+    ];
     const queuedJob = this.db
       .prepare(
         `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
@@ -2668,10 +3414,12 @@ export class RuntimeRepository {
          WHERE status = 'queued'
            AND attempts < max_attempts
            AND json_type(payload_json, '$.runAfter') = 'text'
+           ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY run_after ASC
          LIMIT 1`
       )
-      .get() as { run_after: string } | undefined;
+      .get(...jobTypeParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(
         `SELECT leased_until
@@ -2679,29 +3427,36 @@ export class RuntimeRepository {
          WHERE status = 'leased'
            AND attempts < max_attempts
            AND leased_until IS NOT NULL
+           ${jobTypeFilter}
+           ${excludeFilter}
          ORDER BY leased_until ASC
          LIMIT 1`
       )
-      .get() as { leased_until: string } | undefined;
-    const pendingEmbedding = this.db
-      .prepare(
-        `SELECT next_attempt_at
-         FROM embedding_retry_queue
-         WHERE status = 'pending'
-         ORDER BY next_attempt_at ASC
-         LIMIT 1`
-      )
-      .get() as { next_attempt_at: number } | undefined;
-    const inProgressEmbedding = this.db
-      .prepare(
-        `SELECT MAX(next_attempt_at, lease_until) AS run_at
-         FROM embedding_retry_queue
-         WHERE status = 'in_progress'
-           AND lease_until IS NOT NULL
-         ORDER BY run_at ASC
-         LIMIT 1`
-      )
-      .get() as { run_at: number } | undefined;
+      .get(...jobTypeParams) as { leased_until: string } | undefined;
+    const includeEmbeddingRetries = options?.includeEmbeddingRetries !== false;
+    const pendingEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT next_attempt_at
+           FROM embedding_retry_queue
+           WHERE status = 'pending'
+           ORDER BY next_attempt_at ASC
+           LIMIT 1`
+        )
+        .get() as { next_attempt_at: number } | undefined
+      : undefined;
+    const inProgressEmbedding = includeEmbeddingRetries
+      ? this.db
+        .prepare(
+          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+           FROM embedding_retry_queue
+           WHERE status = 'in_progress'
+             AND lease_until IS NOT NULL
+           ORDER BY run_at ASC
+           LIMIT 1`
+        )
+        .get() as { run_at: number } | undefined
+      : undefined;
     const times = [
       queuedJob ? Date.parse(queuedJob.run_after) : Number.NaN,
       leasedJob ? Date.parse(leasedJob.leased_until) : Number.NaN,
@@ -2791,9 +3546,11 @@ export class RuntimeRepository {
     limit = 10,
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
-    priorityCohortOnly = false
+    priorityCohortOnly = false,
+    allowedJobTypes?: readonly string[],
+    excludedJobTypes?: readonly string[]
   ): EvolutionJobRecord[] {
-    if (targetMemoryIds?.length === 0) {
+    if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
     }
     const at = nowIso();
@@ -2839,14 +3596,14 @@ export class RuntimeRepository {
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
              AND (
-               job_type <> 'l3_world_model_update'
+               job_type NOT IN ('l3_world_model_update', 'work_memory_extract')
                OR (
                  scope_key IS NOT NULL
                  AND scope_seq IS NOT NULL
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS leased_l3_job
-                   WHERE leased_l3_job.job_type = 'l3_world_model_update'
+                   WHERE leased_l3_job.job_type = evolution_jobs.job_type
                      AND leased_l3_job.scope_key = evolution_jobs.scope_key
                      AND leased_l3_job.status = 'leased'
                      AND leased_l3_job.id <> evolution_jobs.id
@@ -2854,18 +3611,20 @@ export class RuntimeRepository {
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS earlier_l3_job
-                   WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+                   WHERE earlier_l3_job.job_type = evolution_jobs.job_type
                      AND earlier_l3_job.scope_key = evolution_jobs.scope_key
                      AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
                      AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
                  )
                )
              )
+             ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
+             ${excludedJobTypes?.length ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})` : ""}
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -2972,6 +3731,79 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}`
         )
         .all() as SqlJobRow[];
+
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE evolution_jobs
+             SET status = 'queued',
+                 attempts = MAX(0, attempts - 1),
+                 leased_until = NULL,
+                 updated_at = ?
+             WHERE id = ?`
+          )
+          .run(at, row.id);
+      }
+
+      return rows.map((row) => ({
+        before: jobFromSql(row),
+        after: jobFromSql({
+          ...row,
+          status: "queued",
+          attempts: Math.max(0, row.attempts - 1),
+          leased_until: null,
+          updated_at: at
+        })
+      }));
+    });
+    return transaction();
+  }
+
+  requeueUnstartedLeasedJobs(
+    ids: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased' AND id IN (${ids.map(() => "?").join(", ")})`,
+      [...ids],
+      at
+    );
+  }
+
+  requeueExpiredLeasedJobsExcept(
+    excludedJobTypes: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const excludeFilter = excludedJobTypes.length > 0
+      ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})`
+      : "";
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased'
+         AND leased_until IS NOT NULL
+         AND leased_until <= ?
+         ${excludeFilter}`,
+      [at, ...excludedJobTypes],
+      at
+    );
+  }
+
+  private requeueLeasedJobsWhere(
+    whereSql: string,
+    params: readonly unknown[],
+    at: string
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT *
+           FROM evolution_jobs
+           WHERE ${whereSql}
+           ORDER BY ${evolutionJobOrderSql()}`
+        )
+        .all(...params) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -3591,6 +4423,38 @@ export class RuntimeRepository {
     return row ? decisionRepairFromSql(row) : undefined;
   }
 
+  updateDecisionRepair(id: string, patch: {
+    suggestion?: string;
+    preference?: string;
+    antiPattern?: string;
+    source?: unknown;
+    meta?: Record<string, unknown>;
+  }): DecisionRepairRecord | undefined {
+    const current = this.getDecisionRepair(id);
+    if (!current) {
+      return undefined;
+    }
+    this.db
+      .prepare(
+        `UPDATE decision_repairs
+         SET suggestion = ?,
+             preference = ?,
+             anti_pattern = ?,
+             source_json = ?,
+             meta_json = ?
+         WHERE id = ?`
+      )
+      .run(
+        patch.suggestion ?? current.suggestion,
+        patch.preference ?? current.preference ?? null,
+        patch.antiPattern ?? current.antiPattern ?? null,
+        toJson(patch.source ?? current.source ?? {}),
+        toJson(patch.meta ?? current.meta ?? {}),
+        id
+      );
+    return this.getDecisionRepair(id);
+  }
+
   upsertCandidatePoolTrace(input: {
     id: string;
     userId: string;
@@ -3849,23 +4713,11 @@ export class RuntimeRepository {
     const tools = input.toolNames?.length ? input.toolNames : ["memory_add", "memory_search"] satisfies Array<ApiLogRecord["toolName"]>;
     const placeholders = tools.map(() => "?").join(", ");
     const sourceAgent = input.sourceAgent?.trim();
-    const excludedSourceAgents = Array.from(new Set(
-      (input.excludedSourceAgents ?? []).map(normalizeAgentIdKey).filter(Boolean)
-    ));
-    const excludedPlaceholders = excludedSourceAgents.map(() => "?").join(", ");
-    const sourceAgentFilter = sourceAgent
-      ? `AND lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) = ?`
-      : excludedSourceAgents.length > 0
-        ? `AND (
-             NULLIF(TRIM(source_agent), '') IS NULL
-             OR lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) NOT IN (${excludedPlaceholders})
-           )`
-        : "";
-    const parameters = sourceAgent
-      ? [...tools, normalizeAgentIdKey(sourceAgent)]
-      : excludedSourceAgents.length > 0
-        ? [...tools, ...excludedSourceAgents]
-        : tools;
+    const agentFilter = sourceAgent
+      ? agentIdMatchClause("source_agent", sourceAgent)
+      : agentIdExclusionClause("source_agent", input.excludedSourceAgents ?? []);
+    const sourceAgentFilter = agentFilter ? `AND ${agentFilter.sql}` : "";
+    const parameters = agentFilter ? [...tools, ...agentFilter.params] : tools;
     const total = this.db
       .prepare(`SELECT COUNT(*) AS n FROM api_logs WHERE tool_name IN (${placeholders}) ${sourceAgentFilter}`)
       .get(...parameters) as { n: number };
@@ -3930,6 +4782,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
+        SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
+        SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
+      )`).pluck().get());
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -3939,6 +4795,12 @@ export class RuntimeRepository {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
           const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
+          if (table === "runtime_kv" && normalized.key === "source_turn_capture_activated_at") {
+            const outcome = this.mergeSourceTurnActivation(normalized, hadRuntimeData);
+            const counts = result[outcome];
+            counts[table] = (counts[table] ?? 0) + 1;
+            continue;
+          }
           if (existed && conflictStrategy === "skip") {
             result.conflicts.push({
               table,
@@ -3988,6 +4850,30 @@ export class RuntimeRepository {
     })();
     this.scheduleLogTablesPrune();
     return result;
+  }
+
+  private mergeSourceTurnActivation(
+    row: Record<string, unknown>,
+    hadRuntimeData: boolean
+  ): "inserted" | "replaced" | "skipped" {
+    const imported = typeof row.value_json === "string" ? parseJson<unknown>(row.value_json, undefined) : undefined;
+    if (typeof imported !== "string" || !Number.isFinite(Date.parse(imported))) {
+      throw new Error("invalid source turn activation boundary in bundle");
+    }
+    const key = "source_turn_capture_activated_at";
+    const existing = this.getKv(key);
+    if (existing && (typeof existing.value !== "string" || !Number.isFinite(Date.parse(existing.value)))) {
+      throw new Error("invalid source turn activation boundary in target database");
+    }
+    // A new database contains only the automatically initialized boundary. A full restore
+    // inherits the backup's original start. Merging into existing data must never widen
+    // the historical capture window of either database; known identities remain reusable.
+    if (existing && (existing.value === imported ||
+        (hadRuntimeData && Date.parse(existing.value as string) >= Date.parse(imported)))) {
+      return "skipped";
+    }
+    this.setKv(key, imported, typeof row.updated_at === "string" ? row.updated_at : nowIso());
+    return existing ? "replaced" : "inserted";
   }
 
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
@@ -4211,6 +5097,39 @@ export class L3WorldModelRepository {
     return row ? l3WorldModelInputTraceFromSql(row) : undefined;
   }
 
+  /** Highest trace sequence registered for a Session, or 0 when it has none. */
+  maxInputTraceSeq(sessionId: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).get(sessionId) as { trace_seq: number };
+    return Number(row.trace_seq);
+  }
+
+  /** Input traces for a Session in an inclusive trace sequence range, ascending. */
+  listInputTracesInRange(
+    sessionId: string,
+    afterTraceSeq: number,
+    throughTraceSeq: number
+  ): L3WorldModelInputTraceRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq > ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(sessionId, afterTraceSeq, throughTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+  }
+
+  /** Most recent input trace timestamp, used as the real last activity of a Session. */
+  latestInputTraceCreatedAt(sessionId: string): string | undefined {
+    const row = this.db.prepare(
+      `SELECT created_at FROM l3_world_model_input_traces
+       WHERE session_id = ?
+       ORDER BY trace_seq DESC LIMIT 1`
+    ).get(sessionId) as { created_at: string } | undefined;
+    return row?.created_at;
+  }
+
   freezeBatches(input: {
     sessionId: string;
     trigger: L3WorldModelBatchTrigger;
@@ -4219,6 +5138,24 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     return this.db.transaction(() => this.freezeBatchesInTransaction(input))();
+  }
+
+  /** Freeze L3 batches and run boundary-owned work in the same transaction. */
+  freezeBatchesWithCallback(
+    input: {
+      sessionId: string;
+      trigger: L3WorldModelBatchTrigger;
+      throughL1MemoryId?: string;
+      episodeId?: string;
+      at?: string;
+    },
+    callback: (result: FreezeL3WorldModelBatchesResult) => void
+  ): FreezeL3WorldModelBatchesResult {
+    return this.db.transaction(() => {
+      const result = this.freezeBatchesInTransaction(input);
+      callback(result);
+      return result;
+    })();
   }
 
   getBatch(batchId: string): L3WorldModelEvidenceBatchRecord | undefined {
@@ -4998,6 +5935,7 @@ function projectEnvironmentStateFromSql(row: SqlProjectEnvironmentStateRow): Pro
 
 export class Repositories {
   readonly memories: MemoryRepository;
+  readonly captureClaims: MemoryCaptureClaimRepository;
   readonly userMemories: UserMemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
@@ -5008,6 +5946,7 @@ export class Repositories {
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
     this.memories = new MemoryRepository(db, this.vectors);
+    this.captureClaims = new MemoryCaptureClaimRepository(db);
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
@@ -5017,6 +5956,41 @@ export class Repositories {
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  clearAllMemoryData(): Record<string, number> {
+    const existing = new Set(
+      (this.db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").pluck().all() as unknown[])
+        .map(String)
+    );
+    const vectorTables = [...existing].filter((name) => /^memory_vec_\d+$/.test(name));
+    const tables = [...new Set([...vectorTables, ...CLEAR_MEMORY_TABLES])].filter((name) => existing.has(name));
+    const foreignKeysEnabled = this.db.pragma("foreign_keys", { simple: true }) === 1;
+    this.db.pragma("foreign_keys = OFF");
+    try {
+      return this.db.transaction(() => {
+        const cleared: Record<string, number> = {};
+        for (const table of tables) {
+          if (table === "runtime_kv") {
+            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'`).run().changes;
+          } else {
+            cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+          }
+        }
+        // Keep source tombstones, but a deleted Session must not block future turns.
+        this.db.prepare(`UPDATE source_turn_captures SET session_id = NULL, episode_id = NULL, raw_turn_id = NULL`).run();
+        if (existing.has("sqlite_sequence")) {
+          const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
+          if (sequenceTables.length) {
+            this.db.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${sequenceTables.map(() => "?").join(", ")})`)
+              .run(...sequenceTables);
+          }
+        }
+        return cleared;
+      })();
+    } finally {
+      if (foreignKeysEnabled) this.db.pragma("foreign_keys = ON");
+    }
   }
 }
 
@@ -5210,7 +6184,7 @@ function l3WorldModelSourceMemoryIds(memory?: MemoryRow): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
 }
 
-function splitL3TracesByRawTurn(
+export function splitL3TracesByRawTurn(
   traces: L3WorldModelInputTraceRecord[],
   maxRawTurns: number
 ): L3WorldModelInputTraceRecord[][] {
@@ -5364,6 +6338,7 @@ function userMemoryPanelFilter(input: {
   userId: string;
   status?: UserMemoryStatus;
   query?: string;
+  sourceAgent?: string;
 }): { where: string; params: Array<string> } {
   const clauses = ["user_id = ?"];
   const params = [input.userId];
@@ -5377,6 +6352,23 @@ function userMemoryPanelFilter(input: {
   if (query) {
     clauses.push("lower(content) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeLikePattern(query)}%`);
+  }
+  const sourceAgent = input.sourceAgent?.trim();
+  if (sourceAgent) {
+    const match = agentIdMatchClause("sessions.source", sourceAgent);
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM raw_turns
+      INNER JOIN sessions ON sessions.id = raw_turns.session_id
+      WHERE (
+        raw_turns.id = user_memories.source_turn_id
+        OR raw_turns.id IN (
+          SELECT CAST(value AS TEXT) FROM json_each(user_memories.source_turn_refs_json)
+        )
+      )
+      AND ${match.sql}
+    )`);
+    params.push(...match.params);
   }
   return { where: clauses.join(" AND "), params };
 }
@@ -5449,6 +6441,9 @@ export function titleFromValue(value: string): string {
 
 function listTitleForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.work_topic === "string" && internal.work_topic.trim()) {
+    return internal.work_topic.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
@@ -5487,13 +6482,15 @@ function listTitleForMemory(memory: MemoryRow): string {
 
 function listSummaryForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.requirement === "string") {
+    return internal.requirement.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
   return firstNonEmptyString(
     stringLike(memory.info.summary),
     stringLike(internal.summary),
-    stringLike(policy.trigger),
     stringLike(policy.procedure),
     stringLike(world.summary),
     stringLike(world.body),
@@ -5548,22 +6545,25 @@ function firstReadableMemoryValueLine(value: string): string | undefined {
 
 function firstUserMemoryValueLine(value: string): string | undefined {
   let inUserSection = false;
+  const userLines: string[] = [];
   for (const line of value.split(/\r?\n/)) {
     const role = memoryValueRoleMarker(line);
     if (role) {
+      if (inUserSection && role !== "user") {
+        break;
+      }
       inUserSection = role === "user";
       continue;
     }
     if (!inUserSection) {
       continue;
     }
-
-    const cleaned = cleanMemoryValueLine(line);
-    if (cleaned && !isPlaceholderMemorySummary(cleaned) && !isWorldSectionHeading(cleaned) && !isInternalMemoryKey(cleaned)) {
-      return cleaned;
-    }
+    userLines.push(line);
   }
-  return undefined;
+  const title = firstSemanticUserLine(userLines.join("\n"));
+  return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
+    ? title
+    : undefined;
 }
 
 function isPlaceholderMemorySummary(value: string | undefined): boolean {
@@ -5571,7 +6571,7 @@ function isPlaceholderMemorySummary(value: string | undefined): boolean {
     ?.split(/\r?\n/)
     .map(cleanMemoryValueLine)
     .find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中|建立索引中|索引建立中|索引已建立|反思生成中)$/i.test(first));
 }
 
 function memoryValueRoleMarker(value: string): string | undefined {
@@ -5756,8 +6756,41 @@ function isShortAsciiTerm(term: string): boolean {
   return /^[\x20-\x7e]{1,2}$/.test(term);
 }
 
-function normalizeAgentIdKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s-]+/gu, "_");
+function normalizedAgentIdSql(column: string): string {
+  return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
+}
+
+/**
+ * Matches one Agent filter value against a source column. Known Agents also match the
+ * ids derived from them ("memmy-onboarding" under "memmy-agent"), because the panel
+ * shows all of them as the same Agent.
+ */
+function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
+  const normalizedColumn = normalizedAgentIdSql(column);
+  const roots = agentSourceFamilyRoots(value);
+  if (roots.length === 0) {
+    return { sql: `${normalizedColumn} = ?`, params: [normalizeAgentIdKey(value)] };
+  }
+  return {
+    sql: `(${roots.map(() => `${normalizedColumn} = ? OR ${normalizedColumn} LIKE ? ESCAPE '\\'`).join(" OR ")})`,
+    params: roots.flatMap((root) => [root, `${escapeLikePattern(root)}\\_%`])
+  };
+}
+
+/** True when the column matches none of the excluded Agents (the "other Agents" filter). */
+function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
+  const matches = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+    .map((value) => agentIdMatchClause(column, value));
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return {
+    sql: `(
+      NULLIF(TRIM(${column}), '') IS NULL
+      OR NOT (${matches.map((match) => match.sql).join(" OR ")})
+    )`,
+    params: matches.flatMap((match) => match.params)
+  };
 }
 
 function layerWeight(layer: MemoryLayer): number {
@@ -5788,6 +6821,8 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
+  addMemoryKindClause(filter.memoryKind);
+  addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
   return {
@@ -5811,17 +6846,15 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
     if (value?.trim()) {
-      clauses.push("lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) = ?");
-      params.push(normalizeAgentIdKey(value));
+      const match = agentIdMatchClause("agent_id", value);
+      clauses.push(match.sql);
+      params.push(...match.params);
       return;
     }
-    const excluded = Array.from(new Set((excludedValues ?? []).map(normalizeAgentIdKey).filter(Boolean)));
-    if (excluded.length > 0) {
-      clauses.push(`(
-        NULLIF(TRIM(agent_id), '') IS NULL
-        OR lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) NOT IN (${excluded.map(() => "?").join(", ")})
-      )`);
-      params.push(...excluded);
+    const exclusion = agentIdExclusionClause("agent_id", excludedValues ?? []);
+    if (exclusion) {
+      clauses.push(exclusion.sql);
+      params.push(...exclusion.params);
     }
   }
 
@@ -5835,6 +6868,35 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${column} IN (${values.map(() => "?").join(", ")})`);
     params.push(...values);
+  }
+
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+    if (value === undefined) return;
+    const values = Array.isArray(value) ? value : [value];
+    if (values.length === 0) return;
+    const expression = `COALESCE(
+      json_extract(properties_json, '$.internal_info.memory_kind'),
+      CASE memory_layer
+        WHEN 'L1' THEN 'trace'
+        WHEN 'L2' THEN 'policy'
+        WHEN 'L3' THEN 'world_model'
+        WHEN 'Skill' THEN 'skill'
+        ELSE 'trace'
+      END
+    )`;
+    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    params.push(...values);
+  }
+
+  function addWorkMemoryScopeClause(userId: string | undefined, projectId: string | null | undefined): void {
+    if (userId === undefined || projectId === undefined) return;
+    const normalizedProjectExpression = "NULLIF(TRIM(CAST(json_extract(info_json, '$.project_id') AS TEXT)), '')";
+    clauses.push(`(
+      COALESCE(json_extract(properties_json, '$.internal_info.memory_kind'), 'trace') != 'work_memory'
+      OR (user_id = ? AND ${projectId === null ? `${normalizedProjectExpression} IS NULL` : `${normalizedProjectExpression} = ?`})
+    )`);
+    params.push(userId);
+    if (projectId !== null) params.push(projectId);
   }
 
   function addTagClauses(tags: string[] | undefined): void {
@@ -5862,12 +6924,24 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   }
 }
 
-function buildEpisodeWhere(userId?: string, query?: string): { where: string; params: SqlValue[] } {
+function buildEpisodeWhere(userId?: string, query?: string, sourceAgent?: string): { where: string; params: SqlValue[] } {
   const clauses = ["1=1"];
   const params: SqlValue[] = [];
   if (userId) {
     clauses.push("episodes.user_id = ?");
     params.push(userId);
+  }
+
+  const normalizedSourceAgent = sourceAgent?.trim();
+  if (normalizedSourceAgent) {
+    const match = agentIdMatchClause("sessions.source", normalizedSourceAgent);
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM sessions
+      WHERE sessions.id = episodes.session_id
+        AND ${match.sql}
+    )`);
+    params.push(...match.params);
   }
 
   const normalizedQuery = query?.trim();
@@ -6116,6 +7190,59 @@ function episodeFromSql(row: SqlEpisodeRow): EpisodeRecord {
     openedAt: row.opened_at,
     closedAt: row.closed_at,
     updatedAt: row.updated_at
+  };
+}
+
+interface SqlSkillClusterRow {
+  id: string;
+  user_id: string;
+  project_id: string | null;
+  tools_json: string;
+  artifacts_json: string;
+  tool_bigrams_json: string;
+  centroid_json: string | null;
+  skill_memory_id: string | null;
+  meta_skill_md: string;
+  processed_episode_ids_json: string;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function skillClusterFromSql(row: SqlSkillClusterRow): SkillClusterRecord {
+  const centroid = parseJson<number[] | null>(row.centroid_json, null);
+  return {
+    id: row.id,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    tools: asStringArray(parseJson(row.tools_json, [])),
+    artifacts: asStringArray(parseJson(row.artifacts_json, [])),
+    toolBigrams: asStringArray(parseJson(row.tool_bigrams_json, [])),
+    centroid: Array.isArray(centroid) ? centroid.filter((item): item is number => typeof item === "number") : null,
+    skillMemoryId: row.skill_memory_id ?? undefined,
+    metaSkillMd: row.meta_skill_md ?? "",
+    processedEpisodeIds: asStringArray(parseJson(row.processed_episode_ids_json, [])),
+    memberCount: row.member_count ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+interface SqlSkillClusterMemberRow {
+  cluster_id: string;
+  episode_id: string;
+  outcome: "success" | "failure" | "unknown";
+  r_task: number | null;
+  assigned_at: string;
+}
+
+function skillClusterMemberFromSql(row: SqlSkillClusterMemberRow): SkillClusterMemberRecord {
+  return {
+    clusterId: row.cluster_id,
+    episodeId: row.episode_id,
+    outcome: row.outcome,
+    rTask: typeof row.r_task === "number" ? row.r_task : undefined,
+    assignedAt: row.assigned_at
   };
 }
 
@@ -6659,8 +7786,11 @@ function bundleIdentity(
   row: Record<string, unknown>
 ): BundleIdentity | undefined {
   const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
+    memory_capture_claims: ["user_id", "source", "qa_hash"],
+    source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
+    work_memory_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
@@ -6929,7 +8059,9 @@ function evolutionJobPrioritySql(): string {
                OR (job_type = 'embedding' AND ${importedTarget}) THEN 2
              WHEN job_type = 'embedding' THEN 3
              WHEN job_type = 'episode_idle_close' THEN 10
+             WHEN job_type = 'episode_title' THEN 15
              WHEN job_type = 'reflection' THEN 20
+             WHEN job_type = 'decision_repair' THEN 25
              WHEN job_type = 'reward' THEN 30
              WHEN job_type = 'span_big_turn' THEN 35
              WHEN job_type = 'l2_association' THEN 40
@@ -6937,6 +8069,8 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'project_environment_profile' THEN 55
              WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
+             WHEN job_type = 'skill_cluster_assign' THEN 72
+             WHEN job_type = 'skill_batch_evolve' THEN 73
              WHEN job_type = 'skill_trial_resolve' THEN 80
              ELSE 100
            END`;

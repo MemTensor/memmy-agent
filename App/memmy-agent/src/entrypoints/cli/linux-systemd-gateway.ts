@@ -553,7 +553,7 @@ export async function runLinuxRootTerminal(
     config = dependencies.loadConfig();
     if (!hasUsableDefaultModel(config)) {
       throw new LinuxSystemdGatewayError(
-        "No usable default model was saved. Run `memmy onboard --wizard` to finish configuration.",
+        "No usable default model was saved. Run `memmy onboard` to finish configuration.",
       );
     }
   }

@@ -20,9 +20,13 @@ describe("packaged memmy-memory cloud-service loading", () => {
     writeFileSync(manifestPath, JSON.stringify({ cloudService: "https://manifest.example.test" }));
     writeFileSync(join(root, ".env"), "MEMMY_CLOUD_SERVICE=https://dev.example.test\n");
 
-    const externalEnv = { MEMMY_CLOUD_SERVICE: "https://external.example.test" };
-    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: externalEnv })).toBe("environment");
-    expect(externalEnv.MEMMY_CLOUD_SERVICE).toBe("https://external.example.test");
+    const externalEnv = {
+      MEMMY_CLOUD_SERVICE: "https://external.example.test",
+      MEMMY_CLOUD_URL: "https://stale.example.test"
+    };
+    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: externalEnv })).toBe(manifestPath);
+    expect(externalEnv.MEMMY_CLOUD_SERVICE).toBe("https://manifest.example.test");
+    expect(externalEnv.MEMMY_CLOUD_URL).toBeUndefined();
 
     const packagedEnv: NodeJS.ProcessEnv = {};
     expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: packagedEnv })).toBe(manifestPath);
@@ -56,6 +60,19 @@ describe("packaged memmy-memory cloud-service loading", () => {
     const env: NodeJS.ProcessEnv = {};
     expect(loadCloudServiceEnv({ cwd: root, moduleDir: sourceModuleDir, env })).toBe(join(root, ".env"));
     expect(env.MEMMY_CLOUD_SERVICE).toBe("https://dev.example.test");
+  });
+
+  it("loads the desktop manifest from the app ASAR for the standalone runtime", () => {
+    const root = fixtureRoot();
+    const moduleDir = join(root, "Resources", "memory-runtime", "dist", "src", "cli");
+    const manifestPath = join(root, "Resources", "app.asar", "dist", "main", "desktop-edition.json");
+    mkdirSync(moduleDir, { recursive: true });
+    mkdirSync(join(root, "Resources", "app.asar", "dist", "main"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ cloudService: "https://standalone.example.test" }));
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env })).toBe(manifestPath);
+    expect(env.MEMMY_CLOUD_SERVICE).toBe("https://standalone.example.test");
   });
 
   it("fails closed for an invalid packaged manifest", () => {

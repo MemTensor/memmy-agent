@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "@memmy/local-api-contracts";
 import {
   clearAccountModelProjectionFromMemmyConfig,
   readModelConfigCatalog,
@@ -94,7 +95,7 @@ describe("account model projection current catalog", () => {
       userId: "owner-a"
     }, file);
 
-    expect(result).toEqual({ changed: true, memoryConfigAffected: false });
+    expect(result).toEqual({ changed: true, memoryConfigAffected: true });
     const saved = await readConfig(file);
     expect(saved.providers.memmy_account).toMatchObject({
       ownerAccountId: "owner-a",
@@ -117,6 +118,31 @@ describe("account model projection current catalog", () => {
       });
     }
     expect(saved.modelAssignments.byok).toEqual(beforeByok);
+    expect(saved.memmyMemory).toMatchObject({
+      userId: "owner-a",
+      roleRouting: { summary: "fixed", evolution: "fixed" },
+      summary: {
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        endpoint: expect.stringContaining("/api/agentExternal/v1"),
+        model: "memory_summary",
+        apiKey: "cloud-token"
+      },
+      evolution: {
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        endpoint: expect.stringContaining("/api/agentExternal/v1"),
+        model: "memory_evolution",
+        apiKey: "cloud-token"
+      },
+      embedding: {
+        mode: "cloud",
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        model: "embedding",
+        apiKey: "cloud-token"
+      }
+    });
     expect(saved.modelAssignments.account).toMatchObject({
       ownerAccountId: "owner-a",
       agent: {
@@ -170,6 +196,52 @@ describe("account model projection current catalog", () => {
       candidates: ["byokUnchecked"],
       default: "byokUnchecked"
     });
+  });
+
+  it("preserves account-only BYOK candidates when refreshing an existing startup projection", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a"
+    }, file);
+    const running = await readConfig(file);
+    running.modelAssignments.account.agent = {
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    };
+    await writeFile(file, YAML.stringify(running), "utf8");
+
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a",
+      preserveAccountByokSelection: true
+    }, file);
+
+    const restarted = await readConfig(file);
+    expect(restarted.modelAssignments.account.agent).toEqual({
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    });
+    expect(restarted.modelAssignments.byok.agent).toEqual({
+      candidates: ["byokAgent"],
+      default: "byokAgent"
+    });
+  });
+
+  it("preserves built-in local Embedding for the same account and restores cloud for a new owner", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);
+    const local = await readConfig(file);
+    local.modelAssignments.account.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    await writeFile(file, YAML.stringify(local), "utf8");
+
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);
+    expect((await readConfig(file)).modelAssignments.account.embedding)
+      .toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-b", userId: "owner-b" }, file);
+    expect((await readConfig(file)).modelAssignments.account.embedding)
+      .toBe(accountId("owner-b", "embedding"));
   });
 
   it("switches owners without reviving the previous owner's platform definitions", async () => {

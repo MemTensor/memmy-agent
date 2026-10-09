@@ -159,8 +159,20 @@ async function reconcileMigratedAccountProjection(
   const session = options.appStateStore.repositories.accountSession.get();
   const projection = accountProjectionFromState(state);
   if (!session.authenticated) {
+    const authoritativeMigration = options.migrationConsistency?.accountSourceIsAuthoritative === true;
+    const recoveryCloudUuid = projection?.cloudUuid;
+    if (
+      authoritativeMigration
+      && recoveryCloudUuid
+      && options.appStateStore.repositories.accountSession.activateByCloudUuid(
+        recoveryCloudUuid,
+        options.accountChannel
+      )
+    ) {
+      return reconcileMigratedAccountProjection(options, state);
+    }
     if (projection || (
-      options.migrationConsistency?.accountSourceIsAuthoritative
+      authoritativeMigration
       && options.appStateStore.repositories.bootstrap.getAppSettings().userMode === "account"
     )) {
       throw createMigrationConsistencyError(
@@ -265,7 +277,8 @@ async function hydrateAccountRuntimeConfig(
   }
   const projection = await writeAccountModelProjectionToMemmyConfig({
     cloudUuid: state.cloudUuid,
-    userId: session.profile.userId
+    userId: session.profile.userId,
+    preserveAccountByokSelection: true
   }, options.memmyConfigPath);
   appStateStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
   return {

@@ -652,7 +652,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const implicitDeepseekThinking =
       specName(this.spec) === "deepseek" &&
       !["none", "minimal", "minimum"].includes(String(semanticEffort)) &&
-      /deepseek-v4|deepseek-reasoner/i.test(modelName);
+      /deepseek-v4|deepseek-flash|deepseek-reasoner/i.test(modelName);
     if (explicitThinking || implicitDeepseekThinking) {
       for (const message of kwargs.messages) {
         if (message.role === "assistant" && !("reasoning_content" in message))
@@ -901,7 +901,10 @@ export class OpenAICompatProvider extends LLMProvider {
           finishReason = String(choiceMap.finish_reason);
       }
       if (!content) content = OpenAICompatProvider.extractTextContent(msg.content);
-      if (!content && msg.reasoning && this.spec?.reasoningAsContent) {
+      // A truncated choice carries an unfinished thought rather than an answer, so
+      // promoting its reasoning would surface raw thinking as the assistant reply.
+      const truncated = String(choiceMap.finish_reason ?? finishReason) === "length";
+      if (!content && !truncated && msg.reasoning && this.spec?.reasoningAsContent) {
         content = OpenAICompatProvider.extractTextContent(msg.reasoning);
       }
       if (!reasoningContent)
@@ -1284,7 +1287,8 @@ function isKimiImmutableTemperatureModel(modelName: string): boolean {
     slug.includes("kimi-k2.5") ||
     slug.includes("kimi-k2.6") ||
     slug.includes("k2.6-code-preview") ||
-    slug.startsWith("kimi-k2.7-code")
+    slug.startsWith("kimi-k2.7-code") ||
+    slug.startsWith("kimi-k3")
   );
 }
 

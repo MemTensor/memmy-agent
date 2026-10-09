@@ -1,9 +1,7 @@
 /** Local data store tests. */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAppStateStore } from "../index.js";
 import { createFilesystemLocalDataStore } from "../local-data-store.js";
@@ -18,20 +16,25 @@ afterEach(() => {
 });
 
 describe("filesystem local data store", () => {
-  it("exports the memory database as a directory copy", () => {
+  it("writes the service export bundle without reading the Memory database", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-local-data-"));
     const databasePath = join(tempDir, "app.sqlite");
     const memoryDatabasePath = join(tempDir, "memory.sqlite");
-    writeFileSync(memoryDatabasePath, "memory-db");
     const store = createAppStateStore({ databasePath });
     const localData = createFilesystemLocalDataStore({ databasePath, db: store.db, secretStore: store.secretStore, memoryDatabasePath });
 
-    const result = localData.exportData({ targetPath: join(tempDir, "exports") });
+    const result = localData.exportData(
+      { targetPath: join(tempDir, "exports") },
+      { manifest: { service: "memmy-memory-service" }, tables: { memories: [] } }
+    );
     store.close();
 
     expect(result.bytes).toBeGreaterThan(0);
     expect(result.exportPath).toContain("memmy-export-");
-    expect(existsSync(join(result.exportPath, "memory.sqlite"))).toBe(true);
+    expect(existsSync(join(result.exportPath, "memory.json"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(result.exportPath, "memory.json"), "utf8"))).toMatchObject({
+      manifest: { service: "memmy-memory-service" }
+    });
   });
 
   it("rejects traversal-like export targets", () => {
@@ -45,16 +48,15 @@ describe("filesystem local data store", () => {
       memoryDatabasePath: join(tempDir, "memory.sqlite")
     });
 
-    expect(() => localData.exportData({ targetPath: "../escape" })).toThrow("targetPath must not contain ..");
+    expect(() => localData.exportData({ targetPath: "../escape" }, {})).toThrow("targetPath must not contain ..");
     store.close();
   });
 
-  it("clears memory database rows without clearing app configuration", () => {
+  it("clears Desktop import state without opening the Memory database", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-local-data-"));
     const databasePath = join(tempDir, "app.sqlite");
     const memoryDatabasePath = join(tempDir, "memory.sqlite");
     const store = createAppStateStore({ databasePath });
-    createMemoryDatabase(memoryDatabasePath);
     const localData = createFilesystemLocalDataStore({ databasePath, db: store.db, secretStore: store.secretStore, memoryDatabasePath });
 
     store.repositories.bootstrap.updateAppSettings({ language: "zh-CN", theme: "dark" });
@@ -90,7 +92,7 @@ describe("filesystem local data store", () => {
     });
     store.repositories.agentSources.markSeen("dedup-key-1", "cursor");
 
-    localData.clearMemoryDatabase("2026-06-02T10:00:00.000Z");
+    localData.clearImportState();
     const settings = store.repositories.bootstrap.getAppSettings();
     const session = store.repositories.accountSession.get();
     const active = store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get() as { active_uuid: string | null };
@@ -106,16 +108,6 @@ describe("filesystem local data store", () => {
     };
     const seenCount = store.db.prepare("SELECT COUNT(*) AS count FROM account_ingestion_seen").get() as { count: number };
     const watermarkCount = store.db.prepare("SELECT COUNT(*) AS count FROM account_agent_source_watermarks").get() as { count: number };
-    const memoryDb = new DatabaseSync(memoryDatabasePath, { readOnly: true, allowExtension: true });
-    memoryDb.loadExtension(getSqliteVecLoadablePath());
-    const memoryCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number };
-    const userMemoryCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM user_memories").get() as { count: number };
-    const userMemoryFtsCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM user_memories_fts").get() as { count: number };
-    const processingCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memory_processing_state").get() as { count: number };
-    const vectorCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memory_vec_3").get() as { count: number };
-    const apiLogCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number };
-    const migrationCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-    memoryDb.close();
     store.close();
 
     expect(settings).toMatchObject({
@@ -130,43 +122,5 @@ describe("filesystem local data store", () => {
     expect(lastScannedCount.count).toBe(0);
     expect(seenCount.count).toBe(0);
     expect(watermarkCount.count).toBe(0);
-    expect(memoryCount.count).toBe(0);
-    expect(userMemoryCount.count).toBe(0);
-    expect(userMemoryFtsCount.count).toBe(0);
-    expect(processingCount.count).toBe(0);
-    expect(vectorCount.count).toBe(0);
-    expect(apiLogCount.count).toBe(0);
-    expect(migrationCount.count).toBe(1);
   });
 });
-
-function createMemoryDatabase(databasePath: string): void {
-  const db = new DatabaseSync(databasePath, { allowExtension: true });
-  db.loadExtension(getSqliteVecLoadablePath());
-  db.exec(`
-    CREATE TABLE schema_migrations (id TEXT PRIMARY KEY);
-    CREATE TABLE memories (id TEXT PRIMARY KEY, memory_value TEXT NOT NULL);
-    CREATE TABLE user_memories (id TEXT PRIMARY KEY, content TEXT NOT NULL);
-    CREATE VIRTUAL TABLE user_memories_fts USING fts5(id, content);
-    CREATE TABLE memory_processing_state (memory_id TEXT PRIMARY KEY, state TEXT NOT NULL);
-    CREATE TABLE memory_vector_entries (
-      id INTEGER PRIMARY KEY,
-      memory_id TEXT NOT NULL,
-      vector_field TEXT NOT NULL,
-      embedding_dim INTEGER NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE VIRTUAL TABLE memory_vec_3 USING vec0(embedding float[3] distance_metric=cosine);
-    CREATE TABLE api_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_name TEXT NOT NULL);
-    INSERT INTO schema_migrations (id) VALUES ('001_runtime_schema');
-    INSERT INTO memories (id, memory_value) VALUES ('memory-1', 'remember this');
-    INSERT INTO user_memories (id, content) VALUES ('user-memory-1', 'prefers concise code');
-    INSERT INTO user_memories_fts (id, content) VALUES ('user-memory-1', 'prefers concise code');
-    INSERT INTO memory_processing_state (memory_id, state) VALUES ('memory-1', 'summarizing');
-    INSERT INTO memory_vector_entries VALUES (1, 'memory-1', 'vec_summary', 3, '2026-01-01');
-    INSERT INTO api_logs (tool_name) VALUES ('memory_add');
-  `);
-  db.prepare(`INSERT INTO memory_vec_3 (rowid, embedding) VALUES (?, ?)`)
-    .run(1n, Buffer.from(new Float32Array([1, 0, 0]).buffer));
-  db.close();
-}

@@ -1,3 +1,4 @@
+import { staticLlmRuntime } from "../../utils/llm-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
 import fs from "node:fs";
@@ -104,10 +105,16 @@ import {
 } from "../../entrypoints/frontend-bridge/transcript.js";
 import type { ChannelAdminApi } from "../../entrypoints/frontend-bridge/channels-api.js";
 import {
+  ComputerHistoryApiError,
+  getComputerHistoryDemoService,
+  clientSnapshot,
+} from "../../tools/computer-history/mac/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
+import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
+import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
 } from "../../session-dag/index.js";
-import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
@@ -164,7 +171,6 @@ type WebuiUploadClassification = {
   kind: "image" | "file";
   mime: string;
   extension: string;
-  maxBytes: number;
 };
 type WebuiQueuedMessage = {
   client_request_id: string;
@@ -251,9 +257,7 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/reload": "reload",
 };
 
-const MAX_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
-const MAX_WEBUI_UPLOAD_BODY_BYTES = MAX_ATTACHMENTS_PER_MESSAGE * MAX_FILE_SIZE + 1024 * 1024;
+const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
 // eslint-disable-next-line no-control-regex, no-useless-escape
 const UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
@@ -670,10 +674,12 @@ export class WebSocketChannel extends BaseChannel {
   sessionManager: any = null;
   guiSessionProjection: GuiSessionProjection | null = null;
   transcriptMonitor: GatewayTranscriptMonitor | null = null;
+  private lastWebuiTranscriptCreatedAt = 0;
   terminalRunControl: TerminalRunControl | null = null;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   runtimeToolNames: RuntimeToolNamesResolver = null;
+  private computerHistoryModelSignature: string | null = null;
   modelSelectionResolver: WebSocketChannelOptions["modelSelectionResolver"] = null;
   workspacePath: string;
   readonly fileMemoryEnabled: boolean;
@@ -705,6 +711,7 @@ export class WebSocketChannel extends BaseChannel {
   stopExpectedTurn: WebSocketChannelOptions["stopExpectedTurn"] = undefined;
   goalControlConnections = new Map<string, Set<any>>();
   dispatchingGoalControls = new Map<string, string>();
+  readonly computerHistory: ComputerHistoryDemoService;
 
   constructor(config: any = {}, bus?: any, options: WebSocketChannelOptions = {}) {
     const normalized = config instanceof WebSocketConfig ? config : new WebSocketConfig(config);
@@ -736,6 +743,7 @@ export class WebSocketChannel extends BaseChannel {
     this.stopExpectedTurn = options.stopExpectedTurn ?? config?.stopExpectedTurn;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
+    this.computerHistory = getComputerHistoryDemoService();
   }
 
   setChannelAdmin(admin: ChannelAdminApi | null): void {
@@ -2112,7 +2120,6 @@ export class WebSocketChannel extends BaseChannel {
 
     const files = form.getAll("files");
     if (!files.length) return httpError(400, "missing files");
-    if (files.length > MAX_ATTACHMENTS_PER_MESSAGE) return httpError(400, "too many attachments");
 
     const mediaDir = path.join(getMediaDir("websocket"), "webui");
     fs.mkdirSync(mediaDir, { recursive: true });
@@ -2134,7 +2141,6 @@ export class WebSocketChannel extends BaseChannel {
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
         if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
-        if (bytes.length > classification.maxBytes) return failUpload(httpError(413, classification.kind === "image" ? "image too large" : "file too large"));
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const filename = `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeOriginalName}`;
         const target = path.join(mediaDir, filename);
@@ -2574,7 +2580,23 @@ export class WebSocketChannel extends BaseChannel {
   tryAppendWebuiTranscript(chatId: string, wire: Record<string, any>): void {
     try {
       const key = `websocket:${chatId}`;
-      const offset = appendTranscriptObject(key, structuredClone(wire));
+      const record = structuredClone(wire);
+      const suppliedCreatedAt = record.createdAt ?? record.created_at ?? record.timestamp;
+      if (!(
+        (typeof suppliedCreatedAt === "number" && Number.isFinite(suppliedCreatedAt))
+        || (typeof suppliedCreatedAt === "string" && suppliedCreatedAt.trim())
+      )) {
+        const createdAt = Math.max(Date.now(), this.lastWebuiTranscriptCreatedAt + 1);
+        this.lastWebuiTranscriptCreatedAt = createdAt;
+        record.createdAt = createdAt;
+      }
+      const offset = appendTranscriptObject(key, record);
+      // appendTranscriptObject stamps this record's own starting offset onto the
+      // object it wrote. Mirror that onto `wire` so the broadcast payload and the
+      // persisted record carry one shared identity. Note `offset` is the return
+      // value — the position the *next* record starts at — so it must not be used
+      // here. A failed write leaves the field absent and the client skips dedup.
+      wire.transcript_offset = record.transcript_offset;
       this.transcriptMonitor?.noteConsumed(key, offset);
     } catch {
       // Transcript persistence is best-effort for live WebSocket delivery.
@@ -2645,7 +2667,9 @@ export class WebSocketChannel extends BaseChannel {
   ): Promise<void> {
     if (!this.shouldSendTurnPayload(chatId, payload)) return;
     const source = this.turnSourceForPayload(chatId, payload);
-    const enrichedPayload = source ? { ...payload, source } : payload;
+    // Always a copy: tryAppendWebuiTranscript stamps transcript_offset in place,
+    // and the caller's payload object must not be mutated.
+    const enrichedPayload = { ...payload, ...(source ? { source } : {}) };
     if (appendTranscript) this.tryAppendWebuiTranscript(chatId, enrichedPayload);
     for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) {
       const projected = this.payloadForConnection(connection, chatId, enrichedPayload, source);
@@ -2722,6 +2746,20 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
+    if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
+    if (got === "/api/computer-history/permissions/check") return this.handleComputerHistory(request, "permissions-check");
+    if (got === "/api/computer-history/permissions/open") return this.handleComputerHistory(request, "permissions-open");
+    if (got === "/api/computer-history/delete") return this.handleComputerHistory(request, "history-delete");
+    if (got === "/api/computer-history/model") return this.handleComputerHistory(request, "model-select");
+    if (got === "/api/computer-history/clear") return this.handleComputerHistory(request, "history-clear");
+    if (got === "/api/computer-history/pin") return this.handleComputerHistory(request, "history-pin");
+    if (got === "/api/computer-history/import") return this.handleComputerHistory(request, "import");
+    if (got === "/api/computer-history/observation/start") return this.handleComputerHistory(request, "observation-start");
+    if (got === "/api/computer-history/observation/pause") return this.handleComputerHistory(request, "observation-pause");
+    if (got === "/api/computer-history/observation/resume") return this.handleComputerHistory(request, "observation-resume");
+    if (got === "/api/computer-history/observation/stop") return this.handleComputerHistory(request, "observation-stop");
+    if (got === "/api/computer-history/workflows/create") return this.handleComputerHistory(request, "workflow-create");
+    if (got === "/api/computer-history/app-icon") return this.handleComputerHistoryAppIcon(request);
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
@@ -2833,6 +2871,9 @@ export class WebSocketChannel extends BaseChannel {
   override async stop(): Promise<void> {
     if (!this.running && !this.server) return;
     this.running = false;
+    // Recording is scoped to the app: closing it finalizes the open segment
+    // rather than leaving a recorder running behind the user's back.
+    await this.computerHistory.shutdown();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
@@ -2854,6 +2895,130 @@ export class WebSocketChannel extends BaseChannel {
     for (const timer of this.sessionUpdateTimers.values()) clearTimeout(timer);
     this.sessionUpdateTimers.clear();
     this.sessionUpdateScopes.clear();
+  }
+
+  /**
+   * An application icon, apart from the snapshot routes: it answers with one
+   * image rather than the whole timeline, and the timeline asks for a dozen of
+   * them at once.
+   */
+  async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
+    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    // The router carries the path, query and all, on `request.path`; there is
+    // no `request.url` here, and reading one silently loses every parameter.
+    const bundleId = queryFirst(parseQuery(String(request?.path ?? "/")), "bundle_id");
+    if (!bundleId) return httpError(400, "bundle_id is required");
+    try {
+      return httpJsonResponse({ icon: await this.computerHistory.applicationIcon(bundleId) });
+    } catch (error) {
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      return httpError(500, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async handleComputerHistory(
+    request: any,
+    action: "snapshot" | "model-select" | "permissions-check" | "permissions-open" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
+  ): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available only on macOS");
+    const method = (request.method ?? "GET").toUpperCase();
+    if (action === "snapshot") {
+      return method === "GET"
+        ? httpJsonResponse(clientSnapshot(this.computerHistory.snapshot()) as unknown as Record<string, any>)
+        : httpError(405, "method not allowed");
+    }
+    if (method !== "POST") return httpError(405, "method not allowed");
+
+    let body: Record<string, any> = {};
+    if (requestBodyText(request).trim()) {
+      try {
+        const parsed = JSON.parse(requestBodyText(request));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return httpError(400, "body must be an object");
+        }
+        body = parsed;
+      } catch {
+        return httpError(400, "body must be JSON");
+      }
+    }
+
+    try {
+      let snapshot;
+      switch (action) {
+        case "model-select": {
+          if (body.model_preset !== null && (typeof body.model_preset !== "string" || !body.model_preset.trim())) {
+            throw new ComputerHistoryApiError(422, "model_preset must be a preset ID or null");
+          }
+          const selection = this.modelSelectionResolver?.({ requestedPreset: body.model_preset });
+          if (!selection) throw new ComputerHistoryApiError(422, "model_selection_unavailable");
+          // Include credentials/configuration through the provider signature, but
+          // retain only a digest. Repeated syncs must not restart model requests.
+          const signature = crypto.createHash("sha256").update(JSON.stringify([
+            selection.presetId, selection.source, selection.ownerAccountId, selection.snapshot.signature,
+          ])).digest("hex");
+          if (signature !== this.computerHistoryModelSignature) {
+            this.computerHistory.setLlmRuntime(
+              staticLlmRuntime(selection.snapshot.provider, selection.snapshot.model), selection.source,
+            );
+            this.computerHistoryModelSignature = signature;
+          }
+          snapshot = this.computerHistory.snapshot();
+          break;
+        }
+        case "history-delete":
+          snapshot = this.computerHistory.deleteHistory(String(body.history_id ?? ""));
+          break;
+        case "history-clear":
+          if (body.scope !== "today" && body.scope !== "all") {
+            throw new ComputerHistoryApiError(400, "scope must be today or all");
+          }
+          snapshot = await this.computerHistory.clearHistories(body.scope);
+          break;
+        case "history-pin":
+          snapshot = this.computerHistory.pinSegment(
+            String(body.history_id ?? ""),
+            body.pinned !== false,
+          );
+          break;
+        case "import":
+          snapshot = this.computerHistory.importMarkdown({
+            title: typeof body.title === "string" ? body.title : undefined,
+            markdown: typeof body.markdown === "string" ? body.markdown : "",
+          });
+          break;
+        case "observation-start":
+          snapshot = await this.computerHistory.startObservationWithPermissions();
+          break;
+        case "observation-pause":
+          snapshot = await this.computerHistory.pauseObservation();
+          break;
+        case "observation-resume":
+          snapshot = await this.computerHistory.startObservationWithPermissions(true);
+          break;
+        case "observation-stop":
+          snapshot = await this.computerHistory.stopObservation();
+          break;
+        case "permissions-check":
+          return httpJsonResponse(await this.computerHistory.checkPermissions());
+        case "permissions-open":
+          if (body.permission !== "accessibility" && body.permission !== "inputMonitoring") return httpError(422, "invalid Computer History permission");
+          if (body.mode !== undefined && body.mode !== "request" && body.mode !== "settings") return httpError(422, "invalid Computer History permission mode");
+          return httpJsonResponse(await this.computerHistory.openPermission(body.permission, body.mode ?? "settings"));
+        case "workflow-create":
+          snapshot = this.computerHistory.createWorkflow(
+            String(body.history_id ?? ""),
+            typeof body.user_request === "string" ? body.user_request : "",
+          );
+          break;
+      }
+      return httpJsonResponse(clientSnapshot(snapshot!) as unknown as Record<string, any>);
+    } catch (error) {
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      return httpError(500, error instanceof Error ? error.message : String(error));
+    }
   }
 
   async connectionLoop(connection: any): Promise<void> {
@@ -2960,7 +3125,6 @@ export class WebSocketChannel extends BaseChannel {
   resolveEnvelopeMediaPaths(value: any): [string[], string | null] {
     if (value == null) return [[], null];
     if (!Array.isArray(value)) return [[], "malformed"];
-    if (value.length > MAX_ATTACHMENTS_PER_MESSAGE) return [[], "too_many_attachments"];
     const mediaRoot = realpathIfExists(getMediaDir("websocket"));
     const out: string[] = [];
     for (const item of value) {
@@ -2977,7 +3141,6 @@ export class WebSocketChannel extends BaseChannel {
       const bytes = fs.readFileSync(resolved);
       const classification = classifySavedWebuiAttachment(resolved, bytes);
       if (!classification) return [[], "mime"];
-      if (stat.size > classification.maxBytes) return [[], "size"];
       out.push(resolved);
     }
     return [out, null];
@@ -4914,7 +5077,6 @@ function classifyWebuiUploadAttachment(name: string, declaredMime: string, bytes
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -4934,7 +5096,6 @@ function classifySavedWebuiAttachment(filePath: string, bytes: Buffer): WebuiUpl
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -4951,7 +5112,6 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
     kind: "file",
     mime,
     extension,
-    maxBytes: MAX_FILE_SIZE,
   };
 }
 

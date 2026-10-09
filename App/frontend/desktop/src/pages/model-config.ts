@@ -20,7 +20,7 @@ import {
 } from "./model-config-validation.js";
 
 /** Type definition for protocol. */
-export type Protocol = "openai" | "anthropic" | "gemini" | "deepseek" | "zhipu" | "qwen" | "moonshot" | "minimax" | "baidu" | "doubao";
+export type Protocol = "openai" | "anthropic" | "gemini" | "deepseek" | "zhipu" | "qwen" | "moonshot" | "minimax" | "baidu" | "doubao" | "stepfun" | "xiaomi";
 
 /** Contract for model config. */
 export interface ModelConfig {
@@ -117,7 +117,9 @@ export const PROTOCOL_OPTIONS: ProtocolOption[] = [
   { value: "moonshot", labelKey: "apiKey.provider.kimi" },
   { value: "minimax", labelKey: "apiKey.provider.minimax" },
   { value: "baidu", labelKey: "apiKey.provider.baidu" },
-  { value: "doubao", labelKey: "apiKey.provider.doubao" }
+  { value: "doubao", labelKey: "apiKey.provider.doubao" },
+  { value: "stepfun", labelKey: "apiKey.provider.stepfun" },
+  { value: "xiaomi", labelKey: "apiKey.provider.xiaomi" }
 ];
 
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
@@ -132,7 +134,9 @@ export const DEFAULT_ENDPOINTS: Record<Protocol, string> = {
   moonshot: "https://api.moonshot.ai/v1",
   minimax: "https://api.minimax.chat/v1",
   baidu: "https://qianfan.baidubce.com/v2",
-  doubao: "https://ark.cn-beijing.volces.com/api/v3"
+  doubao: "https://ark.cn-beijing.volces.com/api/v3",
+  stepfun: "https://api.stepfun.com/v1",
+  xiaomi: "https://api.xiaomimimo.com/v1"
 };
 
 export const DEFAULT_MODEL_IDS: Record<Protocol, string> = {
@@ -145,7 +149,9 @@ export const DEFAULT_MODEL_IDS: Record<Protocol, string> = {
   moonshot: "moonshot-v1-128k",
   minimax: "MiniMax-Text-01",
   baidu: "ernie-x1.1",
-  doubao: "doubao-pro-256k"
+  doubao: "doubao-pro-256k",
+  stepfun: "step-3.5-flash",
+  xiaomi: "mimo-v2.5-pro"
 };
 
 export const ASR_MODEL_ID = QWEN_ASR_MODEL_ID;
@@ -251,6 +257,18 @@ export function createModelFormValues(config: ModelConfig, primary: PrimaryModel
   };
 }
 
+/** Converts resolved form values into the inheritance source for a weaker model role. */
+export function modelFormValuesAsPrimary(values: ModelConfigFormValues): PrimaryModelValues {
+  return {
+    protocol: toProtocol(values.provider),
+    modelId: values.model,
+    endpoint: values.endpoint,
+    apiKey: values.apiKey,
+    apiKeyMasked: values.apiKeyMasked,
+    configured: Boolean(values.apiKey.trim() || values.hasExistingApiKey)
+  };
+}
+
 export function hydrateModelConfigForm(
   saved: ModelProviderConfig,
   defaultEmbeddingMode: ModelConfigEmbeddingMode
@@ -310,6 +328,11 @@ export function hydrateModelConfigForm(
     imageGenApiKey,
     imageGenApiKeyMasked
   );
+  const skillModel = hydrateRoleModelConfig(saved.memmyMemory?.evolution, primary);
+  const memoryModel = hydrateRoleModelConfig(
+    saved.memmyMemory?.summary,
+    modelFormValuesAsPrimary(createModelFormValues(skillModel, primary))
+  );
 
   return {
     protocol,
@@ -335,8 +358,8 @@ export function hydrateModelConfigForm(
     imageGenApiKey,
     imageGenApiKeyMasked,
     imageGenValidation: hasImageGenApiKey(imageGenValues) ? createSavedValidation(imageGenValues) : createIdleValidation(),
-    memoryModel: hydrateRoleModelConfig(saved.memmyMemory?.summary, primary),
-    skillModel: hydrateRoleModelConfig(saved.memmyMemory?.evolution, primary)
+    memoryModel,
+    skillModel
   };
 }
 
@@ -352,13 +375,18 @@ export function createMemmyMemoryProviderConfig(
   skillModel: ModelConfig,
   primary: PrimaryModelValues
 ): MemmyMemoryProviderConfig {
+  const evolutionValues = createModelFormValues(skillModel, primary);
+  const summaryValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(evolutionValues)
+  );
   return {
     summary: {
-      ...toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
+      ...toRoleModelProviderConfig(summaryValues),
       mode: memoryModel.reuse ? "follow" : "fixed"
     },
     evolution: {
-      ...toRoleModelProviderConfig(createModelFormValues(skillModel, primary)),
+      ...toRoleModelProviderConfig(evolutionValues),
       mode: skillModel.reuse ? "follow" : "fixed"
     }
   };

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { deriveWorkspaceHostId } from "@memmy/local-api-contracts";
+import { deriveWorkspaceHostId } from "../../../src/contracts/index.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -91,7 +91,8 @@ describe("MemoryService / session / lifecycle", () => {
     expect(complete.l1MemoryIds).toEqual([complete.l1MemoryId]);
     expect(complete.jobs.map((job) => job.jobType)).toEqual([
       "trace_summary",
-      "episode_idle_close"
+      "episode_idle_close",
+      "episode_title"
     ]);
     const idleCloseJobs = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -457,6 +458,17 @@ describe("MemoryService / session / lifecycle", () => {
       query: "add a project rule",
       answer: "the project rule was added"
     });
+    expect(complete.jobs.map((job) => job.jobType)).toEqual([
+      "trace_summary",
+      "episode_idle_close",
+      "episode_title"
+    ]);
+    expect(db.db.prepare(
+      `SELECT job_type, status, session_id
+       FROM evolution_jobs WHERE job_type = 'work_memory_idle_flush'`
+    ).all()).toEqual([
+      { job_type: "work_memory_idle_flush", status: "queued", session_id: opened.sessionId }
+    ]);
     expect(db.db.prepare(
       `SELECT l1_memory_id, raw_turn_id, trace_seq
        FROM l3_world_model_input_traces WHERE session_id = ?`

@@ -1,7 +1,7 @@
 import {
   canonicalJson,
   sha256Hex
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 import type { InventoryEntry, RuntimeProbe } from "./types.js";
 
 export const PROJECT_ENVIRONMENT_SCAN_POLICY = {

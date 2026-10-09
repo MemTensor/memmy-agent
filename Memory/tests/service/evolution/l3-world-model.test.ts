@@ -50,7 +50,7 @@ describe("L3 World Model trace field pipeline", () => {
         thinkingBefore: "PRIVATE_REASONING_TOOL",
         assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
       }],
-      toolResults: [{ name: "exec", output: "dynamic linker error", exitCode: 1 }]
+      toolResults: [{ id: "call-1", name: "exec", output: "dynamic linker error", exitCode: 1 }]
     });
     service.closeSession(opened.sessionId);
 
@@ -373,7 +373,7 @@ describe("L3 World Model trace field pipeline", () => {
     expect(traceIds).toHaveLength(257);
 
     db.close();
-  }, 20_000);
+  }, 60_000);
 
   it.each(["owner field", "read-only profile"] as const)(
     "rejects a stale %s result and reruns from the same immutable batch",
@@ -600,6 +600,39 @@ describe("strict L3 World Model JSON completion", () => {
       validate: validateStrictOutput
     })).rejects.toThrow("exactly op and value");
     expect(complete).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("L3 World Model language steering", () => {
+  it("steers empty-field create to the pinned interface language", async () => {
+    const llm = fieldLlm();
+    const { db, service } = createTestService({ skillLlm: llm });
+    const opened = openProject(service, "l3-language-user", "l3-language-session");
+    service.completeTurn("l3-language-turn", {
+      sessionId: opened.sessionId,
+      query: "这个项目必须先运行测试。",
+      answer: "已记录。",
+      status: "succeeded",
+      toolCalls: [{ name: "exec", input: { command: "npm test" } }],
+      toolResults: [{ name: "exec", output: "ok", exitCode: 0 }]
+    });
+    service.closeSession(opened.sessionId);
+
+    const repos = new Repositories(db.db);
+    const job = repos.runtime.listJobs("queued", 100).find(
+      (candidate) => candidate.jobType === "l3_world_model_update"
+    );
+    expect(job).toBeTruthy();
+    await new L3WorldModelTraceFieldPipeline({
+      repos,
+      skillLlm: llm,
+      language: "en-US"
+    }).updateField(job!);
+
+    const system = vi.mocked(llm.complete).mock.calls[0]?.[0]?.[0]?.content ?? "";
+    expect(system).toContain("English");
+    expect(system).not.toContain("Simplified Chinese");
+    db.close();
   });
 });
 

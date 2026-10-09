@@ -156,23 +156,23 @@ describe("WebUI media upload route", () => {
     }
   });
 
-  it("rejects more than four attachments and oversize files", async () => {
+  it("accepts more than four attachments and large files without limit", async () => {
     tmpRoot();
     const channel = new WebSocketChannel({}, new MessageBus());
     const token = await bootstrapToken(channel);
-    const tooMany = await multipartBody(Array.from({ length: 5 }, (_, index) => ({
+    const manyFiles = await multipartBody(Array.from({ length: 5 }, (_, index) => ({
       name: `shot-${index}.png`,
       bytes: tinyPngBytes(),
       mime: "image/png"
     })));
 
-    const tooManyResponse = await channel.dispatchHttp({ remoteAddress: ["127.0.0.1"] }, {
+    const manyFilesResponse = await channel.dispatchHttp({ remoteAddress: ["127.0.0.1"] }, {
       path: "/api/webui/media/upload",
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": tooMany.contentType },
-      body: tooMany.body
+      headers: { authorization: `Bearer ${token}`, "content-type": manyFiles.contentType },
+      body: manyFiles.body
     });
-    expect(tooManyResponse?.status).toBe(400);
+    expect(manyFilesResponse?.status).toBe(200);
 
     const oversize = Buffer.concat([tinyPngBytes(), Buffer.alloc(6 * 1024 * 1024)]);
     const large = await multipartBody([{ name: "large.png", bytes: oversize, mime: "image/png" }]);
@@ -182,8 +182,7 @@ describe("WebUI media upload route", () => {
       headers: { authorization: `Bearer ${token}`, "content-type": large.contentType },
       body: large.body
     });
-    expect(largeResponse?.status).toBe(413);
-    expect(String(largeResponse?.body)).toBe("image too large");
+    expect(largeResponse?.status).toBe(200);
 
     const oversizePdf = Buffer.concat([tinyPdfBytes(), Buffer.alloc(10 * 1024 * 1024)]);
     const bigPdf = await multipartBody([{ name: "large.pdf", bytes: oversizePdf, mime: "application/pdf" }]);
@@ -193,7 +192,6 @@ describe("WebUI media upload route", () => {
       headers: { authorization: `Bearer ${token}`, "content-type": bigPdf.contentType },
       body: bigPdf.body
     });
-    expect(bigPdfResponse?.status).toBe(413);
-    expect(String(bigPdfResponse?.body)).toBe("file too large");
+    expect(bigPdfResponse?.status).toBe(200);
   });
 });

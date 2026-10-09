@@ -42,7 +42,12 @@ describe("memmy CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-cli-reads-"));
     roots.push(root);
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
-    const service = new MemoryService({ db, mode: "dev", embedder: createTestEmbedder() });
+    const service = new MemoryService({
+      db,
+      mode: "dev",
+      embedder: createTestEmbedder(),
+      fetchAppMemoryBudget: async () => null
+    });
     const server = createMemoryHttpServer({ service });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -179,6 +184,7 @@ describe("memmy CLI", () => {
       expect(deleted).toMatchObject({ ok: true, status: "deleted" });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await service.stop();
       db.close();
     }
   });
@@ -187,7 +193,12 @@ describe("memmy CLI", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-cli-"));
     roots.push(root);
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
-    const service = new MemoryService({ db, mode: "dev", embedder: createTestEmbedder() });
+    const service = new MemoryService({
+      db,
+      mode: "dev",
+      embedder: createTestEmbedder(),
+      fetchAppMemoryBudget: async () => null
+    });
     const server = createMemoryHttpServer({ service });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -300,6 +311,7 @@ describe("memmy CLI", () => {
       expect(deleted).toMatchObject({ ok: true, status: "deleted" });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await service.stop();
       db.close();
     }
   });

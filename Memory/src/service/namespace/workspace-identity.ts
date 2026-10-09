@@ -5,7 +5,7 @@ import {
   type WorkspaceHostId,
   type WorkspaceIdentityFields,
   type WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 
 export interface ResolvedWorkspaceIdentity {
   workspaceUri: WorkspaceUri | null;

@@ -10,6 +10,7 @@ import { appendTranscriptObject, webuiTranscriptPath } from "../../../src/entryp
 import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import { loadConfig } from "../../../src/config/loader.js";
 import { INBOUND_META_RUNTIME_CONTROL, RUNTIME_CONTROL_ACK, RUNTIME_CONTROL_MCP_RELOAD } from "../../../src/core/runtime-messages/events.js";
+import * as historyPlatform from "../../../src/tools/computer-history/platform.js";
 
 const routeMocks = vi.hoisted(() => ({
   mcpPresetsSettingsAction: vi.fn(),
@@ -589,6 +590,31 @@ describe("WebSocket HTTP route helpers", () => {
 
     const installed = await fetch(`http://127.0.0.1:${port}${removedRoute}/install?name=gimp`, { headers });
     expect(installed.status).toBe(404);
+  });
+
+  it("passes the requested bundle id through to the application icon reader", async () => {
+    vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
+    const channel = makeChannel({ sessionManager: seedSession(tmpRoot()) });
+    const port = await startChannel(channel);
+    const headers = await authHeaders(port);
+    // The router hands the path, query and all, on `request.path`. Reading the
+    // query off anything else loses the bundle id without failing the route,
+    // which showed up only as every application falling back to a placeholder.
+    const applicationIcon = vi.spyOn(channel.computerHistory, "applicationIcon")
+      .mockResolvedValue("data:image/png;base64,AAA");
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/computer-history/app-icon?bundle_id=${encodeURIComponent("5ZSL2CJU2T.com.dingtalk.mac")}`,
+      { headers },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ icon: "data:image/png;base64,AAA" });
+    expect(applicationIcon).toHaveBeenCalledWith("5ZSL2CJU2T.com.dingtalk.mac");
+
+    const missing = await fetch(`http://127.0.0.1:${port}/api/computer-history/app-icon`, { headers });
+    expect(missing.status).toBe(400);
+    applicationIcon.mockRestore();
   });
 
   it("serves MCP preset settings routes and validates JSON header payloads", async () => {

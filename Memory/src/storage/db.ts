@@ -1,7 +1,8 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import { getSchemaVersion, migrate, SCHEMA_VERSION } from "./schema.js";
 import { SQLITE_VEC_VERSION } from "./sqlite-vec-store.js";
@@ -18,10 +19,12 @@ export class MemoryDb {
   constructor(options: MemoryDbOptions = {}) {
     this.path = options.path ?? defaultDatabasePath();
     mkdirSync(dirname(this.path), { recursive: true });
+    const nativeBinding = packagedNativeBindingPath();
     this.db = new Database(this.path, {
-      readonly: options.readonly ?? false
+      readonly: options.readonly ?? false,
+      ...(nativeBinding ? { nativeBinding } : {})
     });
-    const extensionPath = getSqliteVecLoadablePath();
+    const extensionPath = packagedNativeAssetPath(getSqliteVecLoadablePath());
     const unpackedPath = extensionPath.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
     this.db.loadExtension(existsSync(unpackedPath) ? unpackedPath : extensionPath);
     const loadedVersion = (this.db.prepare(`SELECT vec_version() AS version`).get() as { version: string }).version;
@@ -73,6 +76,36 @@ export class MemoryDb {
     this.db.pragma("wal_checkpoint(FULL)");
     this.db.prepare("VACUUM INTO ?").run(backupPath);
   }
+}
+
+function packagedNativeBindingPath(): string | undefined {
+  if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return undefined;
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDir, "../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
+    resolve(moduleDir, "node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+  ];
+  const source = candidates.find((candidate) => existsSync(candidate));
+  if (!source) return undefined;
+  const targetDirectory = join(tmpdir(), "memmy-memory-native");
+  const target = join(targetDirectory, "better_sqlite3.node");
+  // Refresh on every start so an upgraded package cannot reuse a stale
+  // native addon left by a previous executable with the same temp path.
+  mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
+  copyFileSync(source, target);
+  return target;
+}
+
+function packagedNativeAssetPath(source: string): string {
+  if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return source;
+  if (!existsSync(source)) return source;
+  const targetDirectory = join(tmpdir(), "memmy-memory-native");
+  const target = join(targetDirectory, basename(source));
+  if (!existsSync(target)) {
+    mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
+    copyFileSync(source, target);
+  }
+  return target;
 }
 
 export function defaultDatabasePath(): string {

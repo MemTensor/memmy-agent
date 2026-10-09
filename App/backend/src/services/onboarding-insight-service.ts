@@ -32,7 +32,6 @@ const MAX_BALANCED_QUERIES = 84;
 const MAX_PREFERENCE_LLM_QUERIES = 24;
 const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 const DEFAULT_LLM_MAX_TOKENS = 2_000;
-const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
 const MAX_GENERATED_OUTPUT_CHARS = 12_000;
 const GENERATED_REPORT_OPEN = "<memmy_report>";
 const GENERATED_REPORT_CLOSE = "</memmy_report>";
@@ -273,7 +272,10 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
   return {
     async generateReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const sample = mergeDetectedAgents(
+        await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now),
+        input.detectedAgents
+      );
       const profile = buildProfileSignals(sample);
       const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       const response = await buildReportResponse({
@@ -290,7 +292,10 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
     },
     async *streamReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const sample = mergeDetectedAgents(
+        await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now),
+        input.detectedAgents
+      );
       const profile = buildProfileSignals(sample);
       const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       yield {
@@ -561,6 +566,38 @@ async function sampleRecentQueries(
   };
 }
 
+function mergeDetectedAgents(
+  sample: SampleBundle,
+  detectedAgents: OnboardingInsightReportInput["detectedAgents"]
+): SampleBundle {
+  if (!detectedAgents?.length) {
+    return sample;
+  }
+
+  const detectedBySource = new Map(detectedAgents.map((agent) => [agent.sourceId, agent]));
+  const discovered = sample.discovered.map((result) => {
+    const detected = detectedBySource.get(result.sourceId);
+    detectedBySource.delete(result.sourceId);
+    return detected
+      ? { ...result, recentSessionCount: Math.max(result.recentSessionCount, detected.recentSessionCount) }
+      : result;
+  });
+
+  for (const detected of detectedBySource.values()) {
+    discovered.push({
+      sourceId: detected.sourceId,
+      displayName: detected.displayName,
+      recentSessionCount: detected.recentSessionCount,
+      latestActivityAt: null,
+      queries: [],
+      recentMessages: [],
+      errors: []
+    });
+  }
+
+  return { ...sample, discovered };
+}
+
 function resolveLatestConversationReference(
   results: readonly OnboardingSampleResult[]
 ): OnboardingConversationReference | null {
@@ -736,7 +773,7 @@ async function buildReportResponse(input: {
   if (input.sample.queries.length === 0) {
     return {
       status: "ready",
-      reportMarkdown: renderEmptyHistoryReport(input.locale),
+      reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
       diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt), input.locale)
     };
   }
@@ -750,7 +787,13 @@ async function buildReportResponse(input: {
   const generatedReport = await generateReportSafely(input.reportGenerator, generationInput);
   const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
   const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
-  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
+  persistFirstReportMemoryInBackground(
+    input.memoryWriter,
+    input.sample,
+    input.locale,
+    reportMarkdown,
+    taskContext
+  );
 
   return {
     status: "ready",
@@ -775,7 +818,7 @@ async function* streamReportResponse(input: {
       type: "done",
       response: {
         status: "ready",
-        reportMarkdown: renderEmptyHistoryReport(input.locale),
+        reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
         diagnostics: diagnostics(input.sample, false, input.elapsedMs, input.locale)
       }
     };
@@ -819,7 +862,13 @@ async function* streamReportResponse(input: {
     : await generateReportSafely(input.reportGenerator, generationInput);
   const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
   const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
-  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
+  persistFirstReportMemoryInBackground(
+    input.memoryWriter,
+    input.sample,
+    input.locale,
+    reportMarkdown,
+    taskContext
+  );
 
   yield {
     type: "done",
@@ -839,7 +888,19 @@ function renderFallbackReport(
   return locale === "en-US" ? renderEnglishReport(profile, sample) : renderChineseReport(profile, sample);
 }
 
-function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
+function renderEmptyHistoryReport(locale: "zh-CN" | "en-US", sample: SampleBundle): string {
+  const agentNames = sample.discovered.map((agent) => agent.displayName);
+  if (agentNames.length > 0) {
+    const names = agentNames.join(", ");
+    return locale === "en-US" ? [
+      `Memmy found ${names} on this device, but the quick first scan did not return readable conversation history.`,
+      "Once you use Memmy with a real task, it will preserve the useful background, decisions, and next step for future conversations and other Agents."
+    ].join("\n\n") : [
+      `Memmy 已识别到这台设备上的 ${names}，但首次轻量扫描暂时没有读到可用的对话历史。`,
+      "之后用 Memmy 处理真实任务时，它会记住有用的背景、决策和下一步，方便新对话或其他 Agent 继续。"
+    ].join("\n\n");
+  }
+
   return locale === "en-US" ? [
     "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
     "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."
@@ -887,6 +948,21 @@ async function persistFirstReportMemory(
   });
 }
 
+function persistFirstReportMemoryInBackground(
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined,
+  sample: SampleBundle,
+  locale: "zh-CN" | "en-US",
+  reportMarkdown: string,
+  taskContext: OnboardingTaskContextSummary
+): void {
+  void persistFirstReportMemory(memoryWriter, sample, locale, reportMarkdown, taskContext)
+    .catch((error) => {
+      console.warn(
+        `[onboarding-insight] First-report memory persistence failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+}
+
 function normalizeGeneratedOutput(output: string | null): string | null {
   const trimmed = (output ?? "").trim();
   return trimmed ? trimmed.slice(0, MAX_GENERATED_OUTPUT_CHARS) : null;
@@ -926,10 +1002,19 @@ function parseGeneratedFirstReport(
 }
 
 function findGeneratedReportOpen(output: string): { index: number; marker: string } | null {
-  if (output.startsWith(GENERATED_REPORT_ALIAS_OPEN)) {
-    return { index: 0, marker: GENERATED_REPORT_ALIAS_OPEN };
+  let first: { index: number; marker: string } | null = null;
+  for (const marker of GENERATED_REPORT_OPEN_MARKERS) {
+    let index = output.indexOf(marker);
+    while (index >= 0) {
+      const lineStart = output.lastIndexOf("\n", index - 1) + 1;
+      if (!output.slice(lineStart, index).trim() && (!first || index < first.index)) {
+        first = { index, marker };
+        break;
+      }
+      index = output.indexOf(marker, index + marker.length);
+    }
   }
-  return findFirstGeneratedMarker(output, [GENERATED_REPORT_OPEN]);
+  return first;
 }
 
 function findGeneratedTaskContext(
@@ -1160,8 +1245,10 @@ function renderFallbackTrajectory(input: {
 }
 
 class FirstReportStreamParser {
-  private mode: "prefix" | "report" | "hidden" | "plain" = "prefix";
+  private mode: "prefix" | "report" | "hidden" = "prefix";
   private buffer = "";
+  private visibleSource = "";
+  private emittedVisibleChars = 0;
 
   push(delta: string): string[] {
     if (this.mode === "hidden") {
@@ -1170,48 +1257,39 @@ class FirstReportStreamParser {
     this.buffer += delta;
     if (this.mode === "prefix") {
       const candidate = this.buffer.trimStart();
-      const reportOpen = findLeadingGeneratedMarker(candidate, GENERATED_REPORT_OPEN_MARKERS);
-      if (!candidate || (!reportOpen && isGeneratedMarkerPrefix(candidate, GENERATED_REPORT_OPEN_MARKERS))) {
+      if (!candidate) {
         return [];
       }
+      const reportOpen = findGeneratedReportOpen(candidate);
       if (!reportOpen) {
-        this.mode = "plain";
-        return this.drainVisibleText([
-          GENERATED_TASK_CONTEXT_OPEN,
-          ...GENERATED_REPORT_CLOSE_MARKERS,
-          GENERATED_JSON_FENCE_OPEN,
-          GENERATED_NAKED_JSON_OPEN
-        ]);
+        return [];
       }
       this.mode = "report";
-      this.buffer = candidate.slice(reportOpen.length);
+      this.buffer = candidate.slice(reportOpen.index + reportOpen.marker.length);
     }
-    return this.mode === "plain"
-      ? this.drainVisibleText([
-          GENERATED_TASK_CONTEXT_OPEN,
-          ...GENERATED_REPORT_CLOSE_MARKERS,
-          GENERATED_JSON_FENCE_OPEN,
-          GENERATED_NAKED_JSON_OPEN
-        ])
-      : this.drainVisibleText([
-          ...GENERATED_REPORT_CLOSE_MARKERS,
-          GENERATED_TASK_CONTEXT_OPEN,
-          GENERATED_JSON_FENCE_OPEN,
-          GENERATED_NAKED_JSON_OPEN
-        ]);
+    return this.drainVisibleText([
+      ...GENERATED_REPORT_CLOSE_MARKERS,
+      GENERATED_TASK_CONTEXT_OPEN,
+      GENERATED_JSON_FENCE_OPEN,
+      GENERATED_NAKED_JSON_OPEN
+    ]);
   }
 
   finish(): string[] {
-    if (this.mode === "prefix" || this.mode === "report" || this.mode === "plain") {
+    if (this.mode === "prefix") {
+      this.buffer = "";
+      this.visibleSource = "";
+      return [];
+    }
+    if (this.mode === "report") {
       const remainder = this.buffer;
       this.buffer = "";
       const aliasBoundary = findGeneratedTaskContextAliasBoundary(remainder);
       if (aliasBoundary) {
         const report = remainder.slice(0, aliasBoundary.index);
-        return report ? [report] : [];
+        return this.visibleText(report, true);
       }
       const internalMarkers = [
-        ...(this.mode === "prefix" ? GENERATED_REPORT_OPEN_MARKERS : []),
         ...GENERATED_REPORT_CLOSE_MARKERS,
         GENERATED_TASK_CONTEXT_OPEN,
         GENERATED_TASK_CONTEXT_ALIAS_OPEN,
@@ -1219,7 +1297,7 @@ class FirstReportStreamParser {
         GENERATED_NAKED_JSON_OPEN
       ];
       const isPartialInternalMarker = isGeneratedMarkerPrefix(remainder, internalMarkers);
-      return remainder && !isPartialInternalMarker ? [remainder] : [];
+      return remainder && !isPartialInternalMarker ? this.visibleText(remainder, true) : [];
     }
     return [];
   }
@@ -1237,18 +1315,29 @@ class FirstReportStreamParser {
       const report = this.buffer.slice(0, boundary.index);
       this.buffer = "";
       this.mode = "hidden";
-      return report ? [report] : [];
+      return this.visibleText(report, true);
     }
     if (boundary) {
       const report = this.buffer.slice(0, boundary.index);
       this.buffer = this.buffer.slice(boundary.index);
-      return report ? [report] : [];
+      return this.visibleText(report);
     }
     const retainedMarkers = [...delimiters, GENERATED_TASK_CONTEXT_ALIAS_OPEN];
     const retainedChars = Math.max(...retainedMarkers.map((marker) => matchingDelimiterSuffixLength(this.buffer, marker)));
     const report = this.buffer.slice(0, this.buffer.length - retainedChars);
     this.buffer = this.buffer.slice(this.buffer.length - retainedChars);
-    return report ? [report] : [];
+    return this.visibleText(report);
+  }
+
+  private visibleText(text: string, finished = false): string[] {
+    this.visibleSource += text;
+    const sanitized = stripRawHtmlTags(this.visibleSource, true);
+    const delta = sanitized.slice(this.emittedVisibleChars);
+    this.emittedVisibleChars = sanitized.length;
+    if (finished) {
+      this.visibleSource = "";
+    }
+    return delta ? [delta] : [];
   }
 }
 
@@ -1292,10 +1381,6 @@ function findFirstGeneratedMarker(
     }
   }
   return first;
-}
-
-function findLeadingGeneratedMarker(value: string, markers: readonly string[]): string | null {
-  return markers.find((marker) => value.startsWith(marker)) ?? null;
 }
 
 function isGeneratedMarkerPrefix(value: string, markers: readonly string[]): boolean {
@@ -1851,6 +1936,7 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
         "『最近项目记忆』说明最新会话来自哪个 Agent、用户目标、已做事项、已验证结果、当前状态、仍待处理内容。workspacePath 有值时必须写清项目具体路径。只写当前有效结论，不展开冗长历史。",
         "『接下来可以做』只列证据支持且尚未完成的 0-3 条待办，按执行顺序排列。第一条应是当前最小且可立即执行的下一步；任务已完成或没有明确待办时，直接说明暂时没有明确待办，不要补通用建议。",
         "正文长度要求：中文 300-500 字，英文 180-300 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
+        "报告正文只允许使用 Markdown，不得包含任何原始 HTML 标签或样式。不要输出思考过程、执行计划、要求确认、Prompt 复述或起草说明。",
         "你必须一次输出两个区块，严格使用以下顺序和标签；标签前后不要添加其他文字：",
         `${GENERATED_REPORT_OPEN}\n这里放给用户看的 Markdown 报告正文\n${GENERATED_REPORT_CLOSE}`,
         `${GENERATED_TASK_CONTEXT_OPEN}\n这里放一个合法 JSON 对象\n${GENERATED_TASK_CONTEXT_CLOSE}`,
@@ -2012,10 +2098,7 @@ function openAiCompatibleThinkingControlFields(
     provider === "memmy_account" &&
     model.includes("agent_chat")
   ) {
-    return {
-      enable_thinking: true,
-      thinking_budget: MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET
-    };
+    return { enable_thinking: false };
   }
 
   if (provider === "dashscope" || baseUrl.includes("dashscope") || model.includes("qwen")) {
@@ -2246,8 +2329,58 @@ function extractLlmDelta(body: unknown): string | null {
 }
 
 function sanitizeGeneratedReport(report: string | null): string | null {
-  const trimmed = stripActionCopyFromReport(report ?? "").trim();
+  const trimmed = stripActionCopyFromReport(stripRawHtmlTags(report ?? "")).trim();
   return trimmed ? trimmed.slice(0, 4_000) : null;
+}
+
+function stripRawHtmlTags(value: string, dropTrailingPartial = false): string {
+  let output = "";
+  let codeTicks = 0;
+  for (let index = 0; index < value.length;) {
+    if (value[index] === "`") {
+      let end = index + 1;
+      while (value[end] === "`") {
+        end += 1;
+      }
+      const ticks = end - index;
+      if (!codeTicks) {
+        codeTicks = ticks;
+      } else if (ticks >= codeTicks) {
+        codeTicks = 0;
+      }
+      output += value.slice(index, end);
+      index = end;
+      continue;
+    }
+    if (codeTicks || value[index] !== "<") {
+      output += value[index];
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("<!--", index)) {
+      const commentEnd = value.indexOf("-->", index + 4);
+      if (commentEnd < 0) {
+        return dropTrailingPartial ? output : `${output}${value.slice(index)}`;
+      }
+      index = commentEnd + 3;
+      continue;
+    }
+    const tag = /^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^>\n]*|\/?)>/.exec(value.slice(index));
+    if (tag) {
+      index += tag[0].length;
+      continue;
+    }
+    const remainder = value.slice(index);
+    if (dropTrailingPartial && (
+      remainder === "<" || remainder === "</" || remainder === "<!" || remainder === "<!-" ||
+      /^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^>\n]*)?$/.test(remainder)
+    )) {
+      return output;
+    }
+    output += "<";
+    index += 1;
+  }
+  return output;
 }
 
 function stripActionCopyFromReport(report: string): string {

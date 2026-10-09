@@ -8,6 +8,8 @@ import minimaxLogoUrl from "../assets/model-logos/minimax.svg";
 import moonshotLogoUrl from "../assets/model-logos/moonshot.svg";
 import openaiLogoUrl from "../assets/model-logos/openai.svg";
 import qwenLogoUrl from "../assets/model-logos/qwen.svg";
+import stepfunLogoUrl from "../assets/model-logos/stepfun.svg";
+import xiaomiLogoUrl from "../assets/model-logos/xiaomi.svg";
 import zhipuLogoUrl from "../assets/model-logos/zhipu.svg";
 import type { Protocol } from "../pages/model-config.js";
 
@@ -23,7 +25,9 @@ const PROTOCOL_LOGO_URLS: Record<Protocol, string> = {
   moonshot: moonshotLogoUrl,
   minimax: minimaxLogoUrl,
   baidu: baiduLogoUrl,
-  doubao: doubaoLogoUrl
+  doubao: doubaoLogoUrl,
+  stepfun: stepfunLogoUrl,
+  xiaomi: xiaomiLogoUrl
 };
 
 /** Resolve a logo URL for a protocol or free-form provider string. */
@@ -55,6 +59,8 @@ export function modelProviderLogoUrl(provider: string): string | undefined {
   if (key.includes("doubao") || key.includes("bytedance") || key.includes("volc") || key.includes("ark")) {
     return PROTOCOL_LOGO_URLS.doubao;
   }
+  if (key.includes("stepfun") || key.includes("step-") || key.includes("阶跃")) return PROTOCOL_LOGO_URLS.stepfun;
+  if (key.includes("xiaomi") || key.includes("mimo") || key.includes("小米")) return PROTOCOL_LOGO_URLS.xiaomi;
   return undefined;
 }
 

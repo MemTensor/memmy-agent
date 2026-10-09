@@ -1,5 +1,5 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -29,8 +29,6 @@ import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
-  AGENT_ATTACHMENT_MAX_COUNT,
-  AGENT_FILE_TARGET_MAX_BYTES,
   agentAttachmentAccept,
   classifyAgentAttachmentFile,
   safeAgentAttachmentFilename,
@@ -53,7 +51,7 @@ import {
   type PendingFileAttachment,
   type PendingImage
 } from "../state/agent-composer-state.js";
-import { createModelWorkspace, resolveModelSelection } from "../state/model-workspace.js";
+import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection } from "../state/model-workspace.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -103,7 +101,6 @@ export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, P
 
 const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
-const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
 
@@ -187,7 +184,6 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendSize",
   "home.media.error.sendFileSize",
   "home.media.error.sendTooManyImages",
-  "home.media.error.sendTooManyAttachments",
   "home.media.error.sendReadFailed",
   "home.media.error.sendFailed",
   "home.media.error.messageTooBig",
@@ -389,7 +385,7 @@ export function ComposerMediaPreviewStrip(props: {
 
   return (
     <>
-      <div className="composer-media-preview-strip" style={COMPOSER_MEDIA_STRIP_STYLE} aria-label={props.selectedLabel ?? "Selected media"}>
+      <div className="composer-media-preview-strip" aria-label={props.selectedLabel ?? "Selected media"}>
         {props.items.map((item) => (
           item.kind === "image" ? (
             <ComposerImageAttachmentChip
@@ -889,14 +885,40 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
-  const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
-    ?? state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId
+  const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
+  const committedModelSelection = state.agent.committedModelSelectionByScope[modelSelectionScopeKey];
+  const selectedModelPreset = pendingModelPreset
+    ?? committedModelSelection?.presetId
     ?? null;
   const resolvedConversationModel = resolveModelSelection(
     modelWorkspace,
     modelWorkspaceMode,
-    selectedModelPreset
+    selectedModelPreset,
+    {
+      allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)
+    }
   );
+  // Persist the model the user picks in the chat selector as the mode default, so a new chat
+  // after restart defaults to the last-used model instead of the platform default. Only the
+  // account/byok `agent.default` is written (the backend mirrors it to agents.defaults.modelPreset);
+  // the per-chat selection stays in Agent state. Relies on the BYOK-candidate enrollment fix so
+  // the default survives the account-mode startup re-projection.
+  const persistDefaultModelRef = useRef(false);
+  const persistDefaultModel = useCallback(async (candidateId: string) => {
+    const configClient = clients?.config;
+    if (!configClient || persistDefaultModelRef.current) return;
+    const input = defaultModelSelectionInput(modelWorkspace, modelWorkspaceMode, candidateId);
+    if (!input) return;
+    persistDefaultModelRef.current = true;
+    try {
+      const saved = await configClient.saveModelCatalog(input);
+      dispatch(appActions.modelConfigUpdated(saved));
+    } catch {
+      // The per-chat selection is already applied; a failed default persist must not break it.
+    } finally {
+      persistDefaultModelRef.current = false;
+    }
+  }, [clients, modelWorkspace, modelWorkspaceMode, dispatch]);
   useEffect(() => {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
@@ -2518,7 +2540,7 @@ export function HomePage() {
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const files = clipboardImageFilesFromDataTransfer(event.clipboardData);
+    const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
       return;
     }
@@ -2561,7 +2583,6 @@ export function HomePage() {
       const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
       const validFiles = validation.files;
       if (!validFiles.length) {
-        setComposerMediaErrorForScope(scopeKey, t("home.media.error.duplicateAttachment"));
         return;
       }
       const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
@@ -2640,27 +2661,28 @@ export function HomePage() {
     <AppFrame
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
-        <div className="agent-conversation-topbar">
-          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
-            <span className="agent-conversation-title__text">
-              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
-            </span>
-            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-          </h1>
-          <button
-            type="button"
-            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
-            data-agent-environment-toggle
-            aria-label={t("home.environment.title")}
-            aria-pressed={environmentPanelOpen}
-            title={t("home.environment.title")}
-            onClick={() => setEnvironmentPanelOpen((open) => !open)}
-          >
-            <SlidersHorizontal size={16} aria-hidden="true" />
-          </button>
-        </div>
+        <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+          <span className="agent-conversation-title__text">
+            {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+          </span>
+          {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+        </h1>
+      ) : null}
+      topBarEnd={hasActiveConversation || environmentScope ? (
+        <button
+          type="button"
+          className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
+          data-agent-environment-toggle
+          aria-label={t("home.environment.title")}
+          aria-pressed={environmentPanelOpen}
+          title={t("home.environment.title")}
+          onClick={() => setEnvironmentPanelOpen((open) => !open)}
+        >
+          <SlidersHorizontal size={16} aria-hidden="true" />
+        </button>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+      windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
         {!hasActiveConversation ? (
@@ -2725,6 +2747,7 @@ export function HomePage() {
                     scopeKey={modelSelectionScopeKey}
                     disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                     seedConfig={state.modelConfig}
+                    onDefaultModelSelected={persistDefaultModel}
                   />
                   <button
                     type="button"
@@ -2943,6 +2966,7 @@ export function HomePage() {
                           scopeKey={modelSelectionScopeKey}
                           disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                           seedConfig={state.modelConfig}
+                          onDefaultModelSelected={persistDefaultModel}
                         />
                         <button
                           type="button"
@@ -3633,10 +3657,10 @@ export interface AgentMediaValidationResult {
   duplicateCount: number;
 }
 
-type ClipboardFileItem = Pick<DataTransferItem, "kind" | "type" | "getAsFile">;
+type ClipboardFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 type DragFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 
-export interface ClipboardImageSource {
+export interface ClipboardAttachmentSource {
   items?: ArrayLike<ClipboardFileItem> | Iterable<ClipboardFileItem>;
   files?: ArrayLike<File> | Iterable<File>;
 }
@@ -3647,11 +3671,11 @@ export interface AttachmentDropSource {
   types?: ArrayLike<string> | Iterable<string>;
 }
 
-export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource | null | undefined): File[] {
+export function clipboardAttachmentFilesFromDataTransfer(source: ClipboardAttachmentSource | null | undefined): File[] {
   const files: File[] = [];
   const seen = new Set<File>();
-  const addImageFile = (file: File | null | undefined) => {
-    if (!file || !String(file.type ?? "").toLowerCase().startsWith("image/") || seen.has(file)) {
+  const addFile = (file: File | null | undefined) => {
+    if (!file || seen.has(file)) {
       return;
     }
     seen.add(file);
@@ -3659,15 +3683,15 @@ export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource
   };
 
   for (const item of arrayLikeToArray<ClipboardFileItem>(source?.items)) {
-    if (item.kind === "file" && String(item.type ?? "").toLowerCase().startsWith("image/")) {
-      addImageFile(item.getAsFile());
+    if (item.kind === "file") {
+      addFile(item.getAsFile());
     }
   }
   if (files.length > 0) {
     return files;
   }
   for (const file of arrayLikeToArray<File>(source?.files)) {
-    addImageFile(file);
+    addFile(file);
   }
 
   return files;
@@ -3738,11 +3762,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
   if (classifications.some((item) => !item)) {
     throw new Error(translate("home.media.error.unsupported"));
   }
-  for (const [index] of classifications.entries()) {
-    if (files[index]!.size > AGENT_FILE_TARGET_MAX_BYTES) {
-      throw new Error(translate("home.media.error.fileTooLarge"));
-    }
-  }
 
   const seenSourceKeys = new Set(existingAttachments.map((item) => item.sourceKey));
   const resultFiles: ValidatedAgentMediaFile[] = [];
@@ -3758,9 +3777,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
     }
     seenSourceKeys.add(sourceKey);
     resultFiles.push({ file, classification, sourceKey });
-    if (existingAttachments.length + resultFiles.length > AGENT_ATTACHMENT_MAX_COUNT) {
-      throw new Error(translate("home.media.error.tooManyAttachments"));
-    }
   }
 
   return { files: resultFiles, duplicateCount };

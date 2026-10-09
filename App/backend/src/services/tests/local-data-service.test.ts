@@ -1,11 +1,13 @@
 /** Local data service tests. */
 import { describe, expect, it } from "vitest";
 import { createLocalDataService } from "../local-data-service.js";
+import type { MemoryClient } from "../../adapters/outbound/memory-client/index.js";
 
 describe("LocalDataService", () => {
   it("returns the local data path without revealing it", async () => {
     const calls: string[] = [];
     const service = createLocalDataService({
+      memoryClient: {} as MemoryClient,
       localDataStore: {
         getDataPath() {
           calls.push("path");
@@ -17,7 +19,7 @@ describe("LocalDataService", () => {
         exportData() {
           return { exportPath: "/tmp/export/memmy-export-1", bytes: 128 };
         },
-        clearMemoryDatabase() {
+        clearImportState() {
           calls.push("clear");
         }
       }
@@ -33,7 +35,16 @@ describe("LocalDataService", () => {
   it("reveals, exports, and clears through the local data store", async () => {
     const calls: string[] = [];
     const service = createLocalDataService({
-      now: () => new Date("2026-06-02T10:00:00.000Z"),
+      memoryClient: {
+        async exportBundle() {
+          calls.push("memory:export");
+          return { manifest: { service: "memmy-memory-service" } };
+        },
+        async clearAllData() {
+          calls.push("memory:clear");
+          return { ok: true, clearedAt: "2026-06-02T10:00:00.000Z", cleared: {} };
+        }
+      } as MemoryClient,
       localDataStore: {
         getDataPath() {
           calls.push("path");
@@ -42,12 +53,13 @@ describe("LocalDataService", () => {
         revealDataPath(dataPath) {
           calls.push(`reveal:${dataPath}`);
         },
-        exportData(input) {
+        exportData(input, bundle) {
           calls.push(`export:${input.targetPath}`);
+          expect(bundle).toMatchObject({ manifest: { service: "memmy-memory-service" } });
           return { exportPath: "/tmp/export/memmy-export-1", bytes: 128 };
         },
-        clearMemoryDatabase(clearedAt) {
-          calls.push(`clear:${clearedAt}`);
+        clearImportState() {
+          calls.push("clear-import-state");
         }
       }
     });
@@ -61,6 +73,13 @@ describe("LocalDataService", () => {
       ok: true,
       clearedAt: "2026-06-02T10:00:00.000Z"
     });
-    expect(calls).toEqual(["path", "reveal:/tmp/memmy-data", "export:/tmp/export", "clear:2026-06-02T10:00:00.000Z"]);
+    expect(calls).toEqual([
+      "path",
+      "reveal:/tmp/memmy-data",
+      "memory:export",
+      "export:/tmp/export",
+      "memory:clear",
+      "clear-import-state"
+    ]);
   });
 });

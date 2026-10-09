@@ -2,19 +2,21 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
+import YAML from "yaml";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const installerPath = path.join(repoRoot, "scripts", "install.sh");
@@ -60,6 +62,8 @@ function makeInstallerFixture(root) {
     "Xenova",
     "all-MiniLM-L6-v2",
   );
+  mkdirSync(path.join(payload, "scripts/internal/linux"), { recursive: true });
+  copyFileSync(path.join(repoRoot, "scripts/internal/linux/install-computer-use-deps.sh"), path.join(payload, "scripts/internal/linux/install-computer-use-deps.sh"));
   const archive = path.join(release, "memmy-agent-linux-cli.tar.gz");
   mkdirSync(path.join(agent, "dist"), { recursive: true });
   mkdirSync(path.join(backend, "dist", "src", "services"), { recursive: true });
@@ -154,6 +158,10 @@ function makeInstallerFixture(root) {
   writeFileSync(path.join(model, "tokenizer.json"), "{}\n");
   writeFileSync(path.join(model, "tokenizer_config.json"), "{}\n");
   writeFileSync(path.join(model, "onnx", "model_quantized.onnx"), "fixture\n");
+  const ocu = path.join(agent, "node_modules", "open-computer-use", "dist", "linux", "amd64", "open-computer-use");
+  mkdirSync(path.dirname(ocu), { recursive: true });
+  writeFileSync(ocu, "#!/bin/sh\necho 0.3.5\n");
+  chmodSync(ocu, 0o755);
   const tar = spawnSync("tar", ["-czf", archive, "-C", payload, "."], { encoding: "utf8" });
   expect(tar.status, tar.stderr).toBe(0);
   writeFileSync(`${archive}.sha256`, `${sha256(archive)}  ${path.basename(archive)}\n`);
@@ -214,6 +222,7 @@ function runInstaller(home, release, tools, overrides = {}) {
     env: cleanNpmLifecycleEnv({
       HOME: home,
       MEMMY_VERSION: "9.9.9",
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "0",
       MEMMY_RELEASE_BASE_URL: pathToFileURL(release).href.replace(/\/$/, ""),
       MEMMY_FIXTURE_MAIN_PID: String(process.pid),
       PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -232,6 +241,7 @@ describe("Linux CLI package boundary", () => {
     const installer = readFileSync(installerPath, "utf8");
 
     expect(builder).toContain("App/memmy-agent/dist/main.js");
+    expect(builder).toContain("AgentSourceCore/dist/src/index.js");
     expect(builder).toContain("Memory/dist/src/server/index.js");
     expect(builder).toContain("Memory/dist/src/cli/index.js");
     expect(builder).toContain("builtin-skill-target-registry.js");
@@ -244,7 +254,7 @@ describe("Linux CLI package boundary", () => {
     expect(builder).not.toContain("App/shell/desktop");
     expect(builder).not.toContain("App/frontend/desktop");
     expect(installer).toContain('(cd "$AGENT_DIR" && npm ci --omit=dev');
-    expect(installer).toContain("npm ci --omit=dev --workspace @memmy/memory");
+    expect(installer).toContain("npm ci --omit=dev --workspaces");
     expect(installer).toContain('--home "$MEMMY_HOME_DIR"');
     expect(installer).toContain("--generate-token-if-missing");
     expect(installer).toContain("systemctl --user enable --now memmy-memory.service");
@@ -259,6 +269,12 @@ describe("Linux CLI package boundary", () => {
     expect(installer).toContain("aarch64|arm64");
     expect(installer).toContain("Node.js 22 or newer is required");
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
+  });
+
+  it("omits the Office rendering payload from the candidate archive", () => {
+    const builder = readFileSync(builderPath, "utf8");
+    expect(builder).not.toContain("office-rendering");
+    expect(builder).not.toContain("ALLOW_MISSING_OFFICE_PAYLOAD");
   });
 
   it("installs standalone Agent dependencies before Linux archive contract tests", () => {
@@ -283,14 +299,19 @@ describe("Linux CLI package boundary", () => {
     const result = spawnSync("bash", [builderPath, "--output", output], {
       cwd: repoRoot,
       encoding: "utf8",
-      env: cleanNpmLifecycleEnv({ MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)) }),
+      env: cleanNpmLifecycleEnv({
+        MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)),
+      }),
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const archive = path.join(output, "memmy-agent-linux-cli.tar.gz");
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("scripts/internal/linux/install-computer-use-deps.sh");
+    expect(listing.stdout).toMatch(/App\/memmy-agent\/vendor\/open-computer-use-[^/]+-linux\.tgz/);
+    expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
     expect(listing.stdout).toContain("App/backend/dist/src/services/builtin-skill-target-registry.js");
@@ -299,6 +320,7 @@ describe("Linux CLI package boundary", () => {
     expect(listing.stdout).toContain("App/backend/dist/src/adapters/outbound/skill-writer/templates/memmy-opencode-plugin.js");
     expect(listing.stdout).toContain("resources/embedding-models/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx");
     expect(listing.stdout).toContain("Migrations/dist/index.js");
+    expect(listing.stdout).toContain("Knowledge/dist/index.js");
     expect(listing.stdout).toContain("App/backend/local-api-contracts/dist/index.js");
     expect(listing.stdout).not.toMatch(/electron|\.dmg|\.exe|App\/frontend|App\/shell/i);
     expect(listing.stdout).not.toMatch(/node_modules|App\/memmy-agent\/src\/|Memory\/src\/(?!server|cli)/);
@@ -322,13 +344,11 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(installDryRun.status, installDryRun.stderr).toBe(0);
-    const memoryInstallDryRun = spawnSync("npm", [
+    const runtimeInstall = spawnSync("npm", [
       "ci",
       "--omit=dev",
-      "--workspace",
-      "@memmy/memory",
+      "--workspaces",
       "--include-workspace-root=false",
-      "--dry-run",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
@@ -337,10 +357,23 @@ describe("Linux CLI package boundary", () => {
       encoding: "utf8",
       env: cleanNpmLifecycleEnv(),
     });
-    expect(memoryInstallDryRun.status, memoryInstallDryRun.stderr).toBe(0);
+    expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
+    expect(existsSync(path.join(extracted, "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(existsSync(path.join(extracted, "node_modules", "@memmy", "agent-source-core"))).toBe(true);
 
-    rmSync(path.join(extracted, "node_modules"), { recursive: true, force: true });
-    symlinkSync(path.join(repoRoot, "node_modules"), path.join(extracted, "node_modules"));
+    const migrationModuleUrl = pathToFileURL(path.join(
+      extracted,
+      "Migrations",
+      "dist",
+      "runner.js",
+    )).href;
+    const migrationImport = spawnSync("node", [
+      "--input-type=module",
+      "--eval",
+      `await import(${JSON.stringify(migrationModuleUrl)});`,
+    ], { cwd: extracted, encoding: "utf8" });
+    expect(migrationImport.status, migrationImport.stderr).toBe(0);
+
     const integrationModuleUrl = pathToFileURL(path.join(
       extracted,
       "App",
@@ -362,6 +395,35 @@ describe("Linux CLI package boundary", () => {
     ], { cwd: extracted, encoding: "utf8" });
     expect(integrationImport.status, integrationImport.stderr).toBe(0);
   }, 120_000);
+
+  it.each([
+    { event: "release", expectedRef: "refs/tags/v1.1.3" },
+    { event: "pull_request", expectedRef: "a".repeat(40) },
+    { event: "workflow_dispatch", expectedRef: "a".repeat(40) },
+  ])("selects an unambiguous checkout ref for $event", ({ event, expectedRef }) => {
+    const workflow = YAML.parse(readFileSync(linuxWorkflowPath, "utf8"));
+    const checkout = workflow.jobs.build.steps.find((step) =>
+      step.uses?.startsWith("actions/checkout@"));
+    const ref = checkout.with.ref;
+    expect(ref.startsWith("${{")).toBe(true);
+    expect(ref.endsWith("}}")).toBe(true);
+
+    // This expression uses the shared JavaScript/Actions comparison and boolean
+    // subset. Evaluate the workflow itself, including Actions' format function.
+    const resolvedRef = runInNewContext(ref.slice(3, -2), {
+      github: {
+        event_name: event,
+        sha: "a".repeat(40),
+        event: { release: { tag_name: "v1.1.3" } },
+      },
+      format: (template, ...values) => template.replace(/\{(\d+)\}/g,
+        (_, index) => String(values[Number(index)])),
+    });
+
+    // actions/checkout prefers a branch for bare vX.Y.Z when both refs exist.
+    // A release must explicitly select the tag; other runs keep their event SHA.
+    expect(resolvedRef).toBe(expectedRef);
+  });
 
   it("keeps Linux publication isolated from the desktop Draft Release", () => {
     const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
@@ -439,10 +501,19 @@ describe("Linux one-line installer transaction", () => {
     const beforeFailure = readlinkSync(current);
     const npmFailed = runInstaller(home, release, tools, { MEMMY_FIXTURE_NPM_FAIL: "1" });
     expect(npmFailed.status).not.toBe(0);
-    expect(npmFailed.stderr).toContain("Memory dependency installation failed");
+    expect(npmFailed.stderr).toContain("Memory runtime dependency installation failed");
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");
+    const configBeforeDependencies = readFileSync(configPath, "utf8");
+    const dependenciesFailed = runInstaller(home, release, tools, {
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "invalid",
+    });
+    expect(dependenciesFailed.status).not.toBe(0);
+    expect(dependenciesFailed.stderr).toContain("Computer Use dependency setup failed");
+    expect(readlinkSync(current)).toBe(beforeFailure);
+    expect(readFileSync(configPath, "utf8")).toBe(configBeforeDependencies);
+
     const configBeforeSystemdFailure = "sentinel: preserve-on-rollback\n";
     writeFileSync(configPath, configBeforeSystemdFailure);
     const systemdFailed = runInstaller(home, release, tools, {

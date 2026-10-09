@@ -1,5 +1,5 @@
 /** Skill distribution service tests. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -34,6 +34,34 @@ describe("skill distribution service", () => {
           content: expect.stringContaining("Review changed code."),
           sourceContentHash: expect.stringMatching(/^[a-f0-9]{64}$/)
         })
+      ]);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips broken directory links while scanning valid sibling skills", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-broken-skill-link-"));
+    try {
+      mkdirSync(join(rootDirectory, "skills", "valid-skill"), { recursive: true });
+      writeFileSync(
+        join(rootDirectory, "skills", "valid-skill", "SKILL.md"),
+        "---\nname: valid-skill\n---\nStill discoverable.\n",
+        "utf8"
+      );
+      symlinkSync(
+        join(rootDirectory, "missing-skill-target"),
+        join(rootDirectory, "skills", "broken-skill"),
+        "junction"
+      );
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory })
+        ])
+      });
+
+      await expect(service.listSkills?.("cursor")).resolves.toEqual([
+        expect.objectContaining({ sourceSkillId: "valid-skill" })
       ]);
     } finally {
       rmSync(rootDirectory, { recursive: true, force: true });

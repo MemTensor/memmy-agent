@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
-import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
@@ -19,6 +19,7 @@ import {
 } from "../app/pet-guide.js";
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
+import { communityLinks } from "../community/community-links.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -30,17 +31,22 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
+  MEMORY_TOKEN_BUDGET_SECTION_ID,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
+  SETTINGS_MEMORY_BUDGET_EVENT,
   readInitialSettingsTab,
   readSettingsAddModelReturnRoute,
   resolveSettingsTabFromHash,
+  resetSettingsOuterScroll,
+  scrollSettingsSectionIntoView,
+  shouldFocusMemoryBudgetFromHash,
   writeSettingsTabHash,
   type SettingsTabId
 } from "./settings-nav.js";
 import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 
-export { resolveSettingsTabFromHash, type SettingsTabId } from "./settings-nav.js";
+export { resolveSettingsTabFromHash, shouldFocusMemoryBudgetFromHash, type SettingsTabId } from "./settings-nav.js";
 import {
   OptionalModelMissingWarningModal,
   resolveOptionalModelMissingWarning,
@@ -74,6 +80,7 @@ import {
   createTestModelConnectionMessages,
   createMemmyMemoryProviderConfig,
   createModelFormValues,
+  modelFormValuesAsPrimary,
   createModelProtocolPatch,
   hydrateModelConfigForm,
   fromProtocol,
@@ -85,6 +92,7 @@ import {
 } from "./model-config.js";
 import { ValidationMessage } from "./api-key-form-fields.js";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
+import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 
 type LogLevel = "error" | "warn" | "info" | "debug";
@@ -252,6 +260,7 @@ export function SettingsPage() {
         update={update}
         track={track}
         activeTab={activeTab}
+        onActiveTabChange={selectSettingsTab}
       />
     </AppFrame>
   );
@@ -350,6 +359,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const launchAtLoginRequestVersion = useRef(0);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
   });
@@ -363,10 +373,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
+  const [accountIdCopied, setAccountIdCopied] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
+  const [memoryBudgetFocusNonce, setMemoryBudgetFocusNonce] = useState(0);
   const activeTab = activeTabProp ?? activeTabState;
 
   function setActiveTab(tab: SettingsTabId) {
@@ -386,6 +398,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [memoryBudget, setMemoryBudget] = useState<MemoryTokenBudgetDto | null>(null);
+  const [budgetSaveError, setBudgetSaveError] = useState<string | null>(null);
+  const [dailyLimitDraft, setDailyLimitDraft] = useState(() => String(bootstrap?.app.memoryByokDailyLimitM ?? 10));
+  const [totalLimitDraft, setTotalLimitDraft] = useState(() => String(bootstrap?.app.memoryByokTotalLimitM ?? 500));
+  const savedDailyLimitRef = useRef<number | null>(bootstrap?.app.memoryByokDailyLimitM ?? 10);
+  const savedTotalLimitRef = useRef<number | null>(bootstrap?.app.memoryByokTotalLimitM ?? 500);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
   const [invitationLoadStatus, setInvitationLoadStatus] =
@@ -461,6 +479,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
   const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
+  const stopMemoryServiceOnExit = appSettings?.stopMemoryServiceOnExit ?? false;
   const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
   const notificationSoundEnabled = appSettings?.notificationSoundEnabled ?? true;
   const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
@@ -513,8 +532,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     apiKeyMasked,
     configured: Boolean(apiKey.trim() || apiKeyMasked)
   };
-  const memoryModelFormValues = createModelFormValues(memoryModel, primaryModelValues);
   const skillModelFormValues = createModelFormValues(skillModel, primaryModelValues);
+  const memoryModelFormValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(skillModelFormValues)
+  );
   const embTestKey = createModelConfigValidationKey(embFormValues);
   const isEmbeddingTestStale = Boolean(embValidation.testedKey && embValidation.testedKey !== embTestKey);
   const asrFormValues = createAsrModelFormValues(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked);
@@ -694,26 +716,52 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       };
     }
 
-    setByokUsageStatus("loading");
-    void byokTokenUsageClient.getSummary().then((summary) => {
-      if (cancelled) {
-        return;
+    if (activeTab !== "tokens") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    let requestVersion = 0;
+    const refreshByokUsage = (syncBudgetDrafts = true) => {
+      const currentRequestVersion = ++requestVersion;
+      setByokUsageStatus("loading");
+      void byokTokenUsageClient.getSummary().then((summary) => {
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(summary);
+        setByokUsageStatus("ready");
+      }).catch((error) => {
+        console.warn("load byok token usage failed", error);
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
+        setByokUsageStatus("error");
+      });
+      refreshMemoryBudget(syncBudgetDrafts);
+    };
+
+    refreshByokUsage(true);
+    const onBudgetUpdated = (event: Event) => {
+      const budget = (event as CustomEvent<MemoryTokenBudgetDto>).detail;
+      if (budget) {
+        applyMemoryBudget(budget, false);
       }
-      setByokUsage(summary);
-      setByokUsageStatus("ready");
-    }).catch((error) => {
-      console.warn("load byok token usage failed", error);
-      if (cancelled) {
-        return;
-      }
-      setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
-      setByokUsageStatus("error");
-    });
+    };
+    const onWindowFocus = () => {
+      refreshByokUsage(false);
+    };
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("memmy:memory-token-budget-updated", onBudgetUpdated);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("memmy:memory-token-budget-updated", onBudgetUpdated);
     };
-  }, [byokTokenUsageClient]);
+  }, [activeTab, byokTokenUsageClient]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -729,6 +777,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       }
     }
 
+    const settingsPage = document.querySelector(".settings-page");
+    if (settingsPage instanceof HTMLElement) {
+      resetSettingsOuterScroll(settingsPage);
+    }
+
     if (window.location.hash !== "#pet-avatar") {
       return;
     }
@@ -738,6 +791,63 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }, 0);
     // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const requestMemoryBudgetFocus = () => {
+      setActiveTab("tokens");
+      setMemoryBudgetFocusNonce((current) => current + 1);
+    };
+
+    if (shouldFocusMemoryBudgetFromHash(window.location.hash)) {
+      requestMemoryBudgetFocus();
+    }
+    window.addEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+    return () => window.removeEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+  }, []);
+
+  useEffect(() => {
+    if (memoryBudgetFocusNonce === 0 || activeTab !== "tokens" || typeof document === "undefined") {
+      return undefined;
+    }
+
+    const section = document.getElementById(MEMORY_TOKEN_BUDGET_SECTION_ID);
+    const card = section?.querySelector<HTMLElement>(`.${usageStyles.budgetPanel}`) ?? null;
+    const flashClass = usageStyles.budgetCardFlash;
+    if (!section || !card || !flashClass) {
+      return undefined;
+    }
+
+    const alignCard = () => {
+      scrollSettingsSectionIntoView(section);
+    };
+
+    card.classList.add(flashClass);
+    const frame = window.requestAnimationFrame(() => {
+      alignCard();
+      window.requestAnimationFrame(alignCard);
+    });
+    const panel = document.getElementById("settings-panel-tokens");
+    const observer = typeof ResizeObserver !== "undefined" && panel
+      ? new ResizeObserver(alignCard)
+      : null;
+    if (observer && panel) {
+      observer.observe(panel);
+    }
+    const timer = window.setTimeout(() => {
+      observer?.disconnect();
+      card.classList.remove(flashClass);
+    }, 1600);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      card.classList.remove(flashClass);
+    };
+  }, [memoryBudgetFocusNonce, activeTab]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
@@ -765,6 +875,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }, [persistedMenuBarIconEnabled]);
 
+  useEffect(() => {
+    if (platform !== "win32" || typeof window === "undefined") {
+      return;
+    }
+
+    const getLaunchAtLogin = window.memmy?.getLaunchAtLogin;
+    if (!getLaunchAtLogin) {
+      return;
+    }
+
+    let cancelled = false;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    void getLaunchAtLogin().then((enabled) => {
+      if (!cancelled && launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(enabled);
+      }
+    }).catch((error) => {
+      console.warn("read Windows launch-at-login state failed", error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [platform]);
+
   // On mount, treat the log level persisted by the main process as authoritative, to avoid the local localStorage diverging from the main process.
   useEffect(() => {
     let cancelled = false;
@@ -778,15 +912,59 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     };
   }, []);
 
+  function applyMemoryBudget(budget: MemoryTokenBudgetDto, syncDrafts: boolean) {
+    setMemoryBudget(budget);
+    setDailyLimitDraft((current) => {
+      const previousSaved = savedDailyLimitRef.current;
+      savedDailyLimitRef.current = budget.dailyLimitM;
+      if (syncDrafts || previousSaved === null || current === String(previousSaved)) {
+        return String(budget.dailyLimitM);
+      }
+      return current;
+    });
+    setTotalLimitDraft((current) => {
+      const previousSaved = savedTotalLimitRef.current;
+      savedTotalLimitRef.current = budget.totalLimitM;
+      if (syncDrafts || previousSaved === null || current === String(previousSaved)) {
+        return String(budget.totalLimitM);
+      }
+      return current;
+    });
+  }
+
+  function refreshMemoryBudget(syncDrafts = true) {
+    if (!byokTokenUsageClient) {
+      return;
+    }
+    void byokTokenUsageClient.getMemoryBudget().then((budget) => {
+      applyMemoryBudget(budget, syncDrafts);
+      if (syncDrafts) {
+        window.dispatchEvent(new Event("memmy:memory-token-budget-refresh"));
+      }
+    }).catch((error) => {
+      console.warn("load memory token budget failed", error);
+    });
+  }
+
   /**
    * Saves the app settings and syncs the reducer.
    *
    * @param patch The app settings patch.
    */
   function persistSettings(patch: Partial<AppSettingsDto>) {
-    void (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
+    const savingBudget = patch.memoryByokDailyLimitM !== undefined || patch.memoryByokTotalLimitM !== undefined;
+    const pending = (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
       dispatch(appActions.settingsUpdated(savedSettings));
+      if (savingBudget) {
+        setBudgetSaveError(null);
+        refreshMemoryBudget();
+      }
     });
+    if (savingBudget) {
+      void pending.catch((error) => {
+        setBudgetSaveError(error instanceof Error ? error.message : t("settings.token.memoryBudgetSaveFailed"));
+      });
+    }
   }
 
   /**
@@ -840,6 +1018,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       typeof window === "undefined" ? undefined : window.localStorage,
       normalizedAction
     );
+  }
+
+  /**
+   * Updates the Windows login item while preserving the existing local interaction on other platforms.
+   */
+  function handleLaunchAtLoginChange(enabled: boolean) {
+    if (platform !== "win32" || typeof window === "undefined" || !window.memmy?.setLaunchAtLogin) {
+      setLaunchAtLogin(enabled);
+      return;
+    }
+
+    const previous = launchAtLogin;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    setLaunchAtLogin(enabled);
+    void window.memmy.setLaunchAtLogin(enabled).then((effectiveEnabled) => {
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(effectiveEnabled);
+      }
+    }).catch((error) => {
+      console.warn("update Windows launch-at-login state failed", error);
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(previous);
+      }
+    });
   }
 
   /**
@@ -917,7 +1119,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * @param patch The model-state patch function.
    */
   function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
-    const values = createModelFormValues(config, primaryModelValues);
+    const inheritedModel = secretTarget === "memory"
+      ? modelFormValuesAsPrimary(skillModelFormValues)
+      : primaryModelValues;
+    const values = createModelFormValues(config, inheritedModel);
     testModelConnection({
       configClient,
       values,
@@ -1272,6 +1477,33 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                     <div className="min-w-0 space-y-0.5">
                       <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
                       <div className="text-text-ink/45">{t("settings.account.registeredAt", { value: registeredAtText })}</div>
+                      {state.account.userId && (
+                        <div className="flex items-center gap-2 min-w-0 text-text-ink/45">
+                          <span className="shrink-0">{t("settings.account.userId", { value: state.account.userId })}</span>
+                          <button
+                            type="button"
+                            aria-label={t("settings.account.copyUserId")}
+                            className="inline-flex items-center gap-1 shrink-0 text-action-sky hover:underline cursor-pointer"
+                            onClick={() => {
+                              void (async () => {
+                                try {
+                                  if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+                                    throw new Error("Clipboard API is unavailable");
+                                  }
+                                  await navigator.clipboard.writeText(state.account.userId!);
+                                  setAccountIdCopied(true);
+                                  window.setTimeout(() => setAccountIdCopied(false), 2000);
+                                } catch (error) {
+                                  console.warn("copy account user id failed", error);
+                                }
+                              })();
+                            }}
+                          >
+                            <Copy size={11} strokeWidth={2.2} />
+                            {accountIdCopied ? t("settings.account.copied") : t("settings.account.copy")}
+                          </button>
+                        </div>
+                      )}
                       {accountError && <div className="text-status-error">{accountError}</div>}
                     </div>
                   ) : (
@@ -1412,6 +1644,19 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             platformUsage={tokenUsage}
             byokUsage={byokUsage}
             byokUsageStatus={byokUsageStatus}
+            modelCatalog={state.modelConfig.catalog}
+          />
+          <MemoryTokenBudgetCard
+            dailyLimitDraft={dailyLimitDraft}
+            totalLimitDraft={totalLimitDraft}
+            budget={memoryBudget}
+            fallbackDailyLimitM={appSettings?.memoryByokDailyLimitM ?? 10}
+            fallbackTotalLimitM={appSettings?.memoryByokTotalLimitM ?? 500}
+            saveError={budgetSaveError}
+            onDailyDraftChange={setDailyLimitDraft}
+            onTotalDraftChange={setTotalLimitDraft}
+            onCommitDaily={(value) => persistSettings({ memoryByokDailyLimitM: value })}
+            onCommitTotal={(value) => persistSettings({ memoryByokTotalLimitM: value })}
           />
         </div>
 
@@ -1521,7 +1766,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
         <Section icon={<Rocket size={16} className="text-text-ink/60" />} title={t("settings.window")} sectionId="pet-avatar">
           <div className="space-y-1">
-            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={setLaunchAtLogin} />
+            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={handleLaunchAtLoginChange} />
             <Divider />
             <SelectRow
               label={t("settings.preferredMode")}
@@ -1552,6 +1797,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
               checked={menuBarIcon}
               onChange={handleMenuBarIconChange}
+            />
+            <Divider />
+            <ToggleRow
+              label={t("settings.window.stopMemoryOnExit")}
+              description={t("settings.window.stopMemoryOnExitDesc")}
+              checked={stopMemoryServiceOnExit}
+              onChange={(checked) => persistSettings({ stopMemoryServiceOnExit: checked })}
             />
           </div>
         </Section>
@@ -1596,6 +1848,24 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             {update.phase === "downloading" && (
               <UpdateDownloadProgress progress={update.downloadProgress} t={t} />
             )}
+          </div>
+        </Section>
+
+        <Section icon={<Users size={16} className="text-text-ink/60" />} title={t("settings.about.community")}>
+          <div className="community-popover-grid grid gap-2.5">
+            <div className="community-popover-wechat">
+              <div className="community-popover-wechat-title">
+                <span>{t("welcome.wechatGroup")}</span>
+              </div>
+              <img src={communityLinks.wechatGroupUrl} alt={t("welcome.wechatGroup")} className="community-popover-qr rounded bg-white" />
+              <span className="community-popover-wechat-hint">{t("appFrame.scanToJoin")}</span>
+            </div>
+            <div className="community-popover-links">
+              <SettingsCommunityLink href={communityLinks.githubUrl} title={t("welcome.github")} detail="MemTensor/memmy-agent" />
+              <SettingsCommunityLink href={communityLinks.discordUrl} title={t("welcome.discord")} detail="discord.gg/zfhKKn52wP" />
+              <SettingsCommunityLink href={communityLinks.twitterUrl} title={t("welcome.twitter")} detail="@Memmy_ai" />
+              <SettingsCommunityLink href={communityLinks.emailUrl} title={t("welcome.email")} detail={communityLinks.email} external={false} />
+            </div>
           </div>
         </Section>
 
@@ -1762,11 +2032,202 @@ export function SettingsPageView(props: SettingsPageViewProps) {
  * - byokUsage: The local BYOK API Key Token usage summary.
  * - byokUsageStatus: The local usage loading status.
  */
+interface MemoryTokenBudgetCardProps {
+  dailyLimitDraft: string;
+  totalLimitDraft: string;
+  budget: MemoryTokenBudgetDto | null;
+  fallbackDailyLimitM: number;
+  fallbackTotalLimitM: number;
+  saveError?: string | null;
+  onDailyDraftChange: (value: string) => void;
+  onTotalDraftChange: (value: string) => void;
+  onCommitDaily: (value: number) => void;
+  onCommitTotal: (value: number) => void;
+}
+
+function MemoryTokenBudgetCard(props: MemoryTokenBudgetCardProps) {
+  const { t } = useTranslation();
+  const dailyLimitM = props.budget?.dailyLimitM ?? props.fallbackDailyLimitM;
+  const totalLimitM = props.budget?.totalLimitM ?? props.fallbackTotalLimitM;
+  const dailyUsed = props.budget?.dailyUsed ?? 0;
+  const lifetimeUsed = props.budget?.lifetimeUsed ?? 0;
+
+  return (
+    <section id={MEMORY_TOKEN_BUDGET_SECTION_ID} className={`${usageStyles.detailContent} ${usageStyles.usageSection} ${usageStyles.budgetSection}`}>
+      <div className={usageStyles.sectionHead}>
+        <h2>
+          <Gauge size={16} className="text-text-ink/60" aria-hidden="true" />
+          {t("settings.token.memoryBudget")}
+        </h2>
+      </div>
+      <div className={`${usageStyles.platformQuotaList} ${usageStyles.budgetPanel}`}>
+        <p className={usageStyles.budgetHint}>{t("settings.token.memoryBudgetHint")}</p>
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetDaily")}
+          noteLabel={dailyLimitM === 0 ? undefined : t("settings.token.memoryBudgetDailyUsedLabel")}
+          note={dailyLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(dailyUsed),
+              limit: String(dailyLimitM)
+            })}
+          draft={props.dailyLimitDraft}
+          savedValue={dailyLimitM}
+          usedTokens={dailyUsed}
+          limitM={dailyLimitM}
+          onDraftChange={props.onDailyDraftChange}
+          onCommit={props.onCommitDaily}
+        />
+        <MemoryTokenBudgetRow
+          label={t("settings.token.memoryBudgetTotal")}
+          noteLabel={totalLimitM === 0 ? undefined : t("settings.token.memoryBudgetTotalUsedLabel")}
+          note={totalLimitM === 0
+            ? t("settings.token.memoryBudgetUnlimited")
+            : t("settings.token.memoryBudgetUsed", {
+              used: formatBudgetUsedM(lifetimeUsed),
+              limit: String(totalLimitM)
+            })}
+          draft={props.totalLimitDraft}
+          savedValue={totalLimitM}
+          usedTokens={lifetimeUsed}
+          limitM={totalLimitM}
+          onDraftChange={props.onTotalDraftChange}
+          onCommit={props.onCommitTotal}
+        />
+        {props.budget?.stale ? (
+          <div className={usageStyles.compactScene}>
+            <p>{t("settings.token.memoryBudgetStale")}</p>
+          </div>
+        ) : null}
+        {props.saveError ? (
+          <p className={usageStyles.statusError} role="alert">{props.saveError}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+export type MemoryBudgetUsageTone = "green" | "yellow" | "red";
+
+export function memoryBudgetUsageFill(
+  usedTokens: number,
+  limitM: number
+): { percent: number; tone: MemoryBudgetUsageTone } | null {
+  if (!Number.isFinite(limitM) || limitM <= 0) {
+    return null;
+  }
+  const ratio = Math.max(0, usedTokens) / (limitM * 1_000_000);
+  const percent = Math.min(100, ratio * 100);
+  const tone: MemoryBudgetUsageTone = percent <= 60 ? "green" : percent <= 80 ? "yellow" : "red";
+  return { percent, tone };
+}
+
+export function commitMemoryByokLimitDraft(
+  draft: string,
+  savedValue: number
+): { draft: string; value?: number } {
+  const trimmed = draft.trim();
+  if (trimmed === "") {
+    return { draft: String(savedValue) };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 99_999) {
+    return { draft: String(savedValue) };
+  }
+  return { draft: String(parsed), value: parsed };
+}
+
+export function MemoryTokenBudgetRow(props: {
+  label: string;
+  noteLabel?: string;
+  note: string;
+  draft: string;
+  savedValue: number;
+  usedTokens?: number;
+  limitM?: number;
+  onDraftChange: (value: string) => void;
+  onCommit: (value: number) => void;
+}) {
+  const { t } = useTranslation();
+  const fill = props.usedTokens !== undefined && props.limitM !== undefined
+    ? memoryBudgetUsageFill(props.usedTokens, props.limitM)
+    : null;
+  const pausedTip = t("settings.token.memoryBudgetPausedTip");
+  const limitReached = fill !== null && fill.percent >= 100;
+  const noteText = props.noteLabel ? `${props.noteLabel} ${props.note}` : props.note;
+
+  function commitDraft(event?: { currentTarget: { value: string } }) {
+    const next = commitMemoryByokLimitDraft(event?.currentTarget.value ?? props.draft, props.savedValue);
+    props.onDraftChange(next.draft);
+    if (next.value !== undefined && next.value !== props.savedValue) {
+      props.onCommit(next.value);
+    }
+  }
+
+  return (
+    <article className={`${usageStyles.platformQuotaRow} ${usageStyles.budgetRow}`}>
+      <div className={usageStyles.compactScene}>
+        <h3>{props.label}</h3>
+        <p className={usageStyles.byokBreakdown}>
+          <span>
+            {props.noteLabel ? <>{props.noteLabel} <strong>{props.note}</strong></> : props.note}
+          </span>
+          {limitReached ? (
+            <Tooltip content={pausedTip}>
+              <button type="button" className={usageStyles.budgetPausedMark} aria-label={pausedTip}>
+                <AlertTriangle size={14} aria-hidden="true" />
+              </button>
+            </Tooltip>
+          ) : null}
+        </p>
+      </div>
+      <label className={usageStyles.budgetControl}>
+        <input
+          type="number"
+          min={0}
+          max={99999}
+          step={1}
+          className={usageStyles.budgetInput}
+          value={props.draft}
+          onChange={(event) => props.onDraftChange(event.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        <span className={usageStyles.byokUsageValue}>
+          <strong>{t("settings.token.memoryBudgetScale")}</strong>
+          <em>{t("settings.token.memoryBudgetUnit")}</em>
+        </span>
+      </label>
+      {fill ? (
+        <div
+          className={usageStyles.budgetMeter}
+          role="progressbar"
+          aria-label={noteText}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(fill.percent)}
+          data-tone={fill.tone}
+        >
+          <span
+            className={`${usageStyles.budgetMeterFill} ${budgetMeterFillClass(fill.tone)}`}
+            style={{ width: `${fill.percent}%` }}
+          />
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 export interface UsageDetailsProps {
   showPlatform: boolean;
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
+  modelCatalog?: ModelConfigView;
 }
 
 /**
@@ -1786,31 +2247,61 @@ export function UsageDetails(props: UsageDetailsProps) {
   const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
     props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
   ));
+  const classifiedByokModels = props.byokUsage.byModel.filter(isClassifiedByokUsageModel);
   const selectedUsageModelKey = selectedUsageModelId === "all"
-    || props.byokUsage.byModel.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
+    || classifiedByokModels.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
     ? selectedUsageModelId
     : "all";
+  const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();
+  for (const usage of classifiedByokModels) {
+    const value = byokUsageModelKey(usage);
+    if (!uniqueByokModels.has(value)) {
+      uniqueByokModels.set(value, usage);
+    }
+  }
+  const modelLabelCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    modelLabelCounts.set(label, (modelLabelCounts.get(label) ?? 0) + 1);
+  }
+  const discriminatorCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    if (modelLabelCounts.get(label) === 1) continue;
+    const discriminator = byokUsageModelDiscriminator(usage, props.modelCatalog);
+    const collisionKey = JSON.stringify([label, discriminator]);
+    discriminatorCounts.set(collisionKey, (discriminatorCounts.get(collisionKey) ?? 0) + 1);
+  }
   const byokUsageModelOptions: SelectOption[] = [
     {
       value: "all",
       label: t("settings.token.allModels"),
       selectedLabel: t("settings.token.allModels")
     },
-    ...props.byokUsage.byModel.map((usage) => ({
-      value: byokUsageModelKey(usage),
-      label: byokUsageModelLabel(usage, t),
-      selectedLabel: usage.model ?? t("settings.token.historicalUnclassified")
-    }))
+    ...[...uniqueByokModels.entries()].map(([value, usage]) => {
+      const label = byokUsageModelLabel(usage);
+      const baseDiscriminator = modelLabelCounts.get(label) === 1
+        ? null
+        : byokUsageModelDiscriminator(usage, props.modelCatalog);
+      const discriminator = baseDiscriminator
+        && discriminatorCounts.get(JSON.stringify([label, baseDiscriminator])) !== 1
+        ? `${baseDiscriminator} · ${usage.presetId}`
+        : baseDiscriminator;
+      return {
+        value,
+        label: discriminator ? `${label} · ${discriminator}` : label,
+        selectedLabel: discriminator ? `${usage.model} · ${discriminator}` : usage.model ?? ""
+      };
+    })
   ];
-  const displayedByokModels = selectedUsageModelKey === "all"
-    ? props.byokUsage.byModel
-    : props.byokUsage.byModel.filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
+  const selectedByokModels = classifiedByokModels
+    .filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
   const displayedByokUsage = selectedUsageModelKey === "all"
     ? byokUsageByKind
-    : summarizeByokModelsByKind(displayedByokModels);
+    : summarizeByokModelsByKind(selectedByokModels);
   const displayedByokSummary = selectedUsageModelKey === "all"
     ? props.byokUsage
-    : summarizeByokModels(displayedByokModels);
+    : summarizeByokModels(selectedByokModels);
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
   // uses — so the section heading mirrors the rows below it.
@@ -1907,21 +2398,6 @@ export function UsageDetails(props: UsageDetailsProps) {
                   {t("settings.token.modelBreakdownPending")}
                 </p>
               )}
-              {displayedByokModels.length > 0 && (
-                <>
-                  <div className={usageStyles.byokPurposeTitle}>
-                    {t("settings.token.byModel")}
-                  </div>
-                  <div className={usageStyles.byokPurposeRows}>
-                    {displayedByokModels.map((usage) => (
-                      <ByokModelUsageRow key={byokUsageModelKey(usage)} usage={usage} />
-                    ))}
-                  </div>
-                </>
-              )}
-              <div className={usageStyles.byokPurposeTitle}>
-                {t("settings.token.byPurpose")}
-              </div>
               <div className={usageStyles.byokPurposeRows}>
                 {displayedByokUsage.map((usage) => (
                   <ByokUsageRow
@@ -2003,14 +2479,22 @@ function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
 }
 
 function byokUsageModelKey(usage: ByokTokenUsageByModel): string {
-  return JSON.stringify([usage.presetId, usage.provider, usage.model, usage.capability]);
+  return JSON.stringify([usage.presetId, usage.provider, usage.model]);
 }
 
-function byokUsageModelLabel(usage: ByokTokenUsageByModel, t: SettingsTranslate): string {
-  if (!usage.provider || !usage.model || !usage.capability) {
-    return t("settings.token.historicalUnclassified");
-  }
-  return `${usage.provider} · ${usage.model} · ${usageSceneMeta(capabilityToUsageKind(usage.capability), t).label}`;
+function isClassifiedByokUsageModel(usage: ByokTokenUsageByModel): boolean {
+  return Boolean(usage.presetId && usage.provider && usage.model && usage.capability);
+}
+
+function byokUsageModelLabel(usage: ByokTokenUsageByModel): string {
+  return `${usage.provider} · ${usage.model}`;
+}
+
+function byokUsageModelDiscriminator(usage: ByokTokenUsageByModel, catalog?: ModelConfigView): string {
+  const provider = catalog?.providers.find((item) => item.provider === usage.provider);
+  const preset = provider?.models.find((item) => item.presetId === usage.presetId);
+  const endpoint = provider?.endpoints.find((item) => item.endpointId === preset?.endpointId);
+  return endpoint?.apiBase ?? usage.presetId ?? "";
 }
 
 function capabilityToUsageKind(capability: ByokTokenUsageCapability): ByokTokenUsageKind {
@@ -2125,27 +2609,6 @@ function ByokUsageRow(props: {
       <div className={usageStyles.byokUsageValue}>
         <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
         {!props.breakdownUnavailable && <em>Token</em>}
-      </div>
-    </article>
-  );
-}
-
-function ByokModelUsageRow(props: { usage: ByokTokenUsageByModel }) {
-  const { t } = useTranslation();
-  const classified = Boolean(props.usage.provider && props.usage.model && props.usage.capability);
-  const purpose = props.usage.capability
-    ? usageSceneMeta(capabilityToUsageKind(props.usage.capability), t).label
-    : t("settings.token.historicalUnclassifiedHint");
-
-  return (
-    <article className={usageStyles.byokUsageRow} data-testid="byok-model-usage-row">
-      <div className={usageStyles.compactScene}>
-        <h3>{classified ? props.usage.model : t("settings.token.historicalUnclassified")}</h3>
-        <p>{classified ? `${props.usage.provider} · ${purpose}` : purpose}</p>
-      </div>
-      <div className={usageStyles.byokUsageValue}>
-        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
-        <em>Token</em>
       </div>
     </article>
   );
@@ -2832,6 +3295,22 @@ function LinkButton(props: LinkButtonProps) {
   );
 }
 
+/** Renders a community link row used by the About tab's community section. */
+function SettingsCommunityLink(props: { href: string; title: string; detail: string; external?: boolean }) {
+  const external = props.external ?? true;
+  return (
+    <a
+      href={props.href}
+      target={external ? "_blank" : undefined}
+      rel={external ? "noreferrer" : undefined}
+      className="community-link flex flex-col rounded-lg text-xs text-text-ink/60 transition-colors"
+    >
+      <span className="community-link-title font-medium text-text-ink/70">{props.title}</span>
+      <span className="community-link-detail text-text-ink/45">{props.detail}</span>
+    </a>
+  );
+}
+
 /**
  * Parses the diagnostics report export result.
  *
@@ -3239,6 +3718,20 @@ function formatCompactTokenCount(value: number): string {
  * @param value The raw number.
  * @returns Uses the one-decimal M abbreviation when it can be shown, otherwise the full number with thousands separators.
  */
+function formatBudgetUsedM(tokens: number): string {
+  return (Math.max(0, tokens) / 1_000_000).toFixed(1);
+}
+
+function budgetMeterFillClass(tone: MemoryBudgetUsageTone): string {
+  if (tone === "yellow") {
+    return usageStyles.budgetMeterFillYellow ?? "";
+  }
+  if (tone === "red") {
+    return usageStyles.budgetMeterFillRed ?? "";
+  }
+  return usageStyles.budgetMeterFillGreen ?? "";
+}
+
 function formatTokenSummary(value: number): string {
   const abbreviated = formatNumber(value);
   return abbreviated === "0.0M" ? formatTokens(value) : abbreviated;

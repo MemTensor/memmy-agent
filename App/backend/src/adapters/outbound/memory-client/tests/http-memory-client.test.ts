@@ -12,14 +12,36 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("posts a native turn without a Runtime Session and preserves pending reasons", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ status: "pending", reason: "source_episode_closed" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+    const input = {
+      sourceTurn: { source: "codex", profileId: "default", conversationId: "native-session", turnId: "native-turn", startedAt: "2099-01-01T00:00:00.000Z", completedAt: "2099-01-01T00:01:00.000Z", completionEvidence: "final_answer:native-turn" },
+      channel: "agent_source_scan" as const, query: "Run tests", answer: "Tests passed", toolCalls: [{ id: "call-a", name: "test", input: "npm test", output: "passed" }]
+    };
+    expect(await client.completeSourceTurn(input, { userId: "fixture-user" })).toEqual({ status: "pending", reason: "source_episode_closed" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/source-turns/complete");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
+    expect(new Headers(calls[0]?.init?.headers).get("x-memmy-user-id")).toBe("fixture-user");
+  });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/admin/memory-token-budget",
+      "/api/v1/admin/export",
+      "/api/v1/admin/data",
       "/api/v1/sessions/open",
       "/api/v1/sessions/:sessionId/close",
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
+      "/api/v1/source-turns/complete",
       "/api/v1/memory/search",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
@@ -79,6 +101,12 @@ describe("HttpMemoryClient", () => {
         summary: { routing: "fixed" }
       }
     });
+    await expect(client.getMemoryTokenBudget()).resolves.toMatchObject({
+      dailyLimitM: 10,
+      paused: false
+    });
+    await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
+    await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
     await expect(client.closeSession(closeSessionInput())).resolves.toMatchObject({ status: "closed" });
     await expect(client.startTurn(startTurnInput())).resolves.toMatchObject({ status: [] });
@@ -109,6 +137,9 @@ describe("HttpMemoryClient", () => {
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "GET /api/v1/admin/memory-token-budget",
+      "GET /api/v1/admin/export",
+      "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
       "POST /api/v1/sessions/session-1/close",
       "POST /api/v1/turns/start",
@@ -220,6 +251,19 @@ describe("HttpMemoryClient", () => {
       limit: 20,
       targetMemoryIds: ["memory-a", "memory-b"]
     });
+  });
+
+  it("does not replay a worker request after a server failure", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.runWorker({ limit: 20 })).rejects.toThrow("memory layer 5xx");
+    expect(calls).toBe(1);
   });
 
   it("retries 5xx responses and succeeds before max retries is exhausted", async () => {
@@ -409,6 +453,23 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    return {
+      dailyLimitM: 10,
+      totalLimitM: 500,
+      dailyUsed: 0,
+      lifetimeUsed: 0,
+      paused: false,
+      trigger: null,
+      nextLocalMidnightAt: now()
+    };
+  }
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    return { manifest: { service: "memmy-memory-service" }, tables: {} };
+  }
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    return { ok: true, cleared: {}, clearedAt: now(), serverTime: now() };
+  }
   if (method === "POST" && path === "/api/v1/sessions/open") return openSessionOutput();
   if (method === "POST" && path === "/api/v1/sessions/session-1/close") return closeSessionOutput();
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);

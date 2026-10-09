@@ -1,3 +1,6 @@
+import { createDesktopScreenCapture } from './desktop-screen-capture.js';
+import { createComputerUseOnboarding } from './computer-use-onboarding.js';
+import { isComputerUsePermissionPanelFocused, showComputerUsePermissionPanel } from './computer-use-permission-panel.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
@@ -14,13 +17,13 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
-import { spawn } from "node:child_process";
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import YAML from "yaml";
 import {
   fullWindowOptions,
   parsePetWindowLayout,
@@ -91,11 +94,11 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { getOrCreateInstallationId } from "./installation-id-store.js";
-import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
   resolveUpdateSplashHtml,
+  shouldQuitWhenAllWindowsClosed,
   type StartupSplashLanguage
 } from "./startup-splash.js";
 import {
@@ -108,6 +111,17 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import {
+  installPackagedWindowsCliTools,
+  resolveCliInstallStrategy,
+  type CliInstallResult
+} from "./windows-cli-path.js";
+import {
+  getWindowsLaunchAtLogin,
+  setWindowsLaunchAtLogin,
+  type WindowsLaunchAtLoginEnvironment
+} from "./windows-launch-at-login.js";
+import { resolveComputerHistoryMarkdownPath } from "./computer-history-markdown.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -137,9 +151,13 @@ let isReplayingMainWindowAction = false;
 let isQuitting = false;
 let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
+let stopMemoryServiceForCurrentQuit = false;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
+let bootStage = "pending";
+let bootStartedAt = 0;
+let isStartupFailureReported = false;
 let analyticsClientId: string | null = null;
 let analyticsAppEnv: "dev" | "prod" | null = null;
 let analyticsAppEdition: "cn" | "intl" | null = null;
@@ -245,18 +263,6 @@ interface MemoryDatabaseExportResult {
   bytes?: number;
 }
 
-interface CliInstallResult {
-  ok: true;
-  binDirectory: string;
-  installed: Array<{
-    name: string;
-    source: string;
-    target: string;
-  }>;
-  pathUpdated: boolean;
-  profilePaths: string[];
-}
-
 /**
  * Successful result of a diagnostics report export.
  *
@@ -312,6 +318,8 @@ async function stopPackagedRendererServer(): Promise<void> {
  */
 async function boot(): Promise<void> {
   try {
+    bootStartedAt = Date.now();
+    bootStage = "initializing";
     process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
     initLogger();
     forceLightWindowChrome();
@@ -321,10 +329,19 @@ async function boot(): Promise<void> {
       return;
     }
 
+    if (isQuitting) return;
+    bootStage = "cli";
     showSplashWindow(); // Only show the splash on a normal boot (the update-handoff exit branch already returned above)
     registerIpcHandlers();
     await installBundledCliIfNeeded();
+    if (isQuitting) return;
+    bootStage = "renderer-server";
     await startPackagedRendererServerIfNeeded();
+    if (isQuitting) {
+      await stopPackagedRendererServer();
+      return;
+    }
+    bootStage = "data-migration";
     let windowsMigrationConsistency: WindowsDataMigrationConsistency | undefined;
     if (windowsDataLayout) {
       try {
@@ -337,8 +354,33 @@ async function boot(): Promise<void> {
         await writePackagedStartupLog(`boot:data-migration-state-failed-open:${JSON.stringify(recovery)}`);
       }
     }
+    if (isQuitting) return;
+    bootStage = "runtime-services";
     const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
     runtimeServices = await startManagedRuntimeServices({
+      ...(process.platform === 'darwin' ? { captureScreen: createDesktopScreenCapture({
+        getStatus: () => systemPreferences.getMediaAccessStatus('screen'),
+        getSources: options => desktopCapturer.getSources(options),
+        getDisplays: () => screen.getAllDisplays(),
+        getPrimaryDisplay: () => screen.getPrimaryDisplay(),
+        openSettings: () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'),
+      }), computerUseOnboarding: createComputerUseOnboarding({
+        target: () => {
+          if (!isComputerUsePermissionPanelFocused() && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused())) return null;
+          try {
+            const plist = join(dirname(dirname(app.getPath('exe'))), 'Info.plist');
+            const appId = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', plist], { encoding: 'utf8', timeout: 2000 }).trim();
+            return { app: appId, pid: process.pid };
+          } catch { return null; }
+        },
+        showPanel: (state, act) => {
+          if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Memmy window unavailable');
+          return showComputerUsePermissionPanel(mainWindow, state, act);
+        },
+        openSettings: url => shell.openExternal(url),
+        copyPath: value => clipboard.writeText(value),
+        reportError: error => console.warn('[computer-use] Permission guide failed:', error),
+      }) } : {}),
       appPath: app.getAppPath(),
       appDatabaseFile,
       resourcesPath: process.resourcesPath,
@@ -371,17 +413,34 @@ async function boot(): Promise<void> {
         : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
       runtimeExecutable: app.isPackaged
         ? undefined
-        : resolveDevelopmentRuntimeExecutable()
+        : resolveDevelopmentRuntimeExecutable(),
+      offlineMemoryRuntimeDirectory: app.isPackaged
+        ? join(process.resourcesPath, "memory-runtime")
+        : undefined
     });
+    if (isQuitting) {
+      await runtimeServices.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+      runtimeServices = null;
+      return;
+    }
+    bootStage = "local-api";
     runtimeConfig = await startLocalApi(runtimeServices);
-    isBootReady = true;
+    if (isQuitting) {
+      await localBackend?.close();
+      localBackend = null;
+      return;
+    }
+    bootStage = "renderer";
     const initialWindow = createInitialWindow();
+    watchStartupRenderer(initialWindow);
+    isBootReady = true;
     triggerAgentSourceAutoInject("boot");
     if (process.platform === "darwin") {
       syncMenuBarTray(resolveMenuBarIconEnabled());
     }
     setDevelopmentDockIcon();
     const rendererVerified = !windowsDataLayout || await waitForInitialRendererVerification(initialWindow);
+    if (isQuitting || isStartupFailureReported) return;
     await writePackagedStartupLog(rendererVerified ? "boot:ready" : "boot:ready-data-migration-verification-deferred");
     if (windowsDataLayout && rendererVerified) {
       await recordWindowsDataLayoutAfterBoot(
@@ -407,9 +466,8 @@ async function boot(): Promise<void> {
       void pruneWindowsLegacyUpdateCaches();
     }, UPDATES_PRUNE_STARTUP_DELAY_MS);
   } catch (error) {
-    await runtimeServices?.close();
-    runtimeServices = null;
-    throw error;
+    // Report first; before-quit owns runtime cleanup and its force-exit deadline.
+    await handleStartupFailure(error);
   }
 }
 
@@ -517,6 +575,14 @@ async function installBundledCliIfNeeded(): Promise<void> {
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
   const binDirectory = join(homedir(), ".local", "bin");
   const entries = resolveCliToolEntries();
   await mkdir(binDirectory, { recursive: true });
@@ -888,6 +954,19 @@ function registerIpcHandlers(): void {
     await openExternalUrl(url);
   });
 
+  ipcMain.handle("memmy:get-computer-history-permission-session", () => computerHistoryPermissionSessionId);
+
+  ipcMain.handle("memmy:restart-for-computer-history-permissions", () => {
+    if (process.platform !== "darwin") throw new Error("Computer History permissions require macOS");
+    shouldRelaunchAfterQuitCleanup = true;
+    // Let IPC finish, then reuse the normal recording/service shutdown path.
+    setImmediate(() => app.quit());
+  });
+
+  ipcMain.handle("memmy:open-computer-history-markdown", async (_event, filePath: string) => {
+    await openComputerHistoryMarkdown(filePath);
+  });
+
   ipcMain.handle("memmy:openAgentTool", async (_event, sourceId: string, prompt: string) => openAgentTool(sourceId, prompt));
 
   ipcMain.handle("memmy:openMailto", async (_event, mailtoUrl: string) => {
@@ -926,6 +1005,14 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:set-log-level", (_event, level: LogLevel) => {
     applyAndPersistLogLevel(level);
   });
+
+  ipcMain.handle("memmy:get-launch-at-login", () => (
+    getWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment())
+  ));
+
+  ipcMain.handle("memmy:set-launch-at-login", (_event, enabled: boolean) => (
+    setWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), Boolean(enabled))
+  ));
 
   ipcMain.handle("memmy:get-microphone-access-status", () => getMicrophoneAccessStatus());
 
@@ -1000,6 +1087,8 @@ function getDesktopAppInfo(): DesktopAppInfo {
     version: resolveDesktopAppVersion(),
     platform: process.platform,
     arch: process.arch,
+    isPackaged: app.isPackaged,
+    isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
     ...(updateManifestUrl ? { updateManifestUrl } : {})
   };
 }
@@ -2762,55 +2851,45 @@ try {
   $appDir = Split-Path -Parent $AppExe
   Write-MemmyUpdateLog "install dir $appDir"
 
-  $id = 0
-  if ([int]::TryParse($AppPid, [ref]$id)) {
+  # The app launches memory-service with the same Memmy.exe binary (run-as-node).
+  # Only the PID handed off by the app identifies the process that must exit; a
+  # path-wide scan would mistake a memory-service child/orphan for the app.
+  $appProcessId = 0
+  [void][int]::TryParse($AppPid, [ref]$appProcessId)
+  function Get-MemmyUpdateAppProcesses {
+    if ($appProcessId -le 0) {
+      return @()
+    }
+    return @(Get-Process -Id $appProcessId -ErrorAction SilentlyContinue)
+  }
+
+  if ($appProcessId -gt 0) {
+    Write-MemmyUpdateLog ('waiting for handed-off app PID; ignoring memory-service descendants: ' + $appProcessId)
     $deadline = (Get-Date).AddSeconds(60)
     do {
-      $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-      if ($null -eq $process) {
+      $running = @(Get-MemmyUpdateAppProcesses)
+      if ($running.Count -eq 0) {
         break
       }
       Start-Sleep -Milliseconds ${WINDOWS_UPDATE_INSTALL_PROCESS_POLL_MS}
     } while ((Get-Date) -lt $deadline)
+  } else {
+    Write-MemmyUpdateLog 'app PID unavailable; continuing without a path-wide process scan'
   }
 
-  $deadline = (Get-Date).AddSeconds(30)
-  do {
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      try {
-        $_.Path -eq $AppExe
-      } catch {
-        $false
-      }
-    })
-    if ($running.Count -eq 0) {
-      Write-MemmyUpdateLog 'all app processes exited'
-      break
-    }
-    Write-MemmyUpdateLog ('waiting app processes: ' + (($running | ForEach-Object { $_.Id }) -join ','))
-    Start-Sleep -Milliseconds ${WINDOWS_UPDATE_INSTALL_PROCESS_POLL_MS}
-  } while ((Get-Date) -lt $deadline)
+  $running = @(Get-MemmyUpdateAppProcesses)
+  if ($running.Count -eq 0) {
+    Write-MemmyUpdateLog 'all handed-off app processes exited'
+  }
 
-  $runningBeforeInstall = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    try {
-      $_.Path -eq $AppExe
-    } catch {
-      $false
-    }
-  })
+  $runningBeforeInstall = @(Get-MemmyUpdateAppProcesses)
 
   if ($runningBeforeInstall.Count -gt 0) {
     Write-MemmyUpdateLog ('app processes still running before install; waiting: ' + (($runningBeforeInstall | ForEach-Object { $_.Id }) -join ','))
     $deadline = (Get-Date).AddSeconds(120)
     do {
       Start-Sleep -Milliseconds ${WINDOWS_UPDATE_INSTALL_PROCESS_POLL_MS}
-      $runningBeforeInstall = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        try {
-          $_.Path -eq $AppExe
-        } catch {
-          $false
-        }
-      })
+      $runningBeforeInstall = @(Get-MemmyUpdateAppProcesses)
       if ($runningBeforeInstall.Count -eq 0) {
         Write-MemmyUpdateLog 'app processes exited before install'
         break
@@ -2906,19 +2985,19 @@ function shouldQuitForManualUpdateInstall(filePath: string): boolean {
 function scheduleQuitForManualUpdateInstall(): void {
   setTimeout(() => {
     isQuitting = true;
+    stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
     const forceExitDelayMs = process.platform === "win32" ? WINDOWS_UPDATE_INSTALL_FORCE_EXIT_DELAY_MS : UPDATE_INSTALL_FORCE_EXIT_DELAY_MS;
     if (process.platform === "win32") {
       hideAppShellForQuit();
-      runtimeServices?.terminateSync();
+      runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
       app.exit(0);
       return;
     }
     app.quit();
     if (!updateInstallForceExitTimer) {
       updateInstallForceExitTimer = setTimeout(() => {
-        // Synchronously kill the child services before force-exiting, so memory / agent-gateway do
-        // not become orphans holding ports and drag down the new instance reopened after the update.
-        runtimeServices?.terminateSync();
+        // Apply the same service-lifecycle choice even if update shutdown needs a forced exit.
+        runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
         app.exit(0);
       }, forceExitDelayMs);
       updateInstallForceExitTimer.unref?.();
@@ -3308,10 +3387,11 @@ function normalizeMicrophoneAccessStatus(status: ElectronMediaAccessStatus): Mic
 // Startup splash: covers the blank gap between "process starts up" and "main window appears"
 // (spinning up local services + a few seconds of first-screen loading).
 let splashWindow: BrowserWindow | null = null;
-let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
-// Fallback: regardless of whether the close signal arrives, force-close after at most this long, so
-// it never blocks the UI permanently.
-const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
+let splashTimer: ReturnType<typeof setTimeout> | null = null;
+let startupRendererCleanup: (() => void) | null = null;
+// Slow startup is diagnostic, not an application lifetime limit. The runtime owns its timeouts.
+const STARTUP_SLOW_MS = 15 * 1000;
+const STARTUP_RENDERER_TIMEOUT_MS = 30_000;
 const UPDATE_SPLASH_MAX_VISIBLE_MS = 60 * 1000;
 
 /**
@@ -3321,12 +3401,17 @@ const UPDATE_SPLASH_MAX_VISIBLE_MS = 60 * 1000;
  */
 function showSplashWindow(): void {
   const language = resolveCurrentStartupSplashLanguage();
-  showSplashHtml(resolveStartupSplashHtml(language), 300, 200, SPLASH_MAX_VISIBLE_MS);
+  showSplashHtml(resolveStartupSplashHtml(language), 300, 200, STARTUP_SLOW_MS, (splash) => {
+    void writePackagedStartupLog(`boot:slow:${JSON.stringify({ stage: bootStage, elapsedMs: Date.now() - bootStartedAt })}`);
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language, true))}`)
+      .catch((error: unknown) => console.warn("slow startup splash update failed:", error));
+  }, true);
 }
 
 function showUpdateInstallSplashWindow(version?: string): void {
   const language = resolveCurrentStartupSplashLanguage();
-  showSplashHtml(resolveUpdateSplashHtml(language, version), 360, 220, UPDATE_SPLASH_MAX_VISIBLE_MS);
+  showSplashHtml(resolveUpdateSplashHtml(language, version), 360, 220, UPDATE_SPLASH_MAX_VISIBLE_MS,
+    () => closeSplashWindow("update-timeout"));
 }
 
 function resolveCurrentStartupSplashLanguage(): StartupSplashLanguage {
@@ -3336,7 +3421,7 @@ function resolveCurrentStartupSplashLanguage(): StartupSplashLanguage {
   );
 }
 
-function showSplashHtml(html: string, width: number, height: number, maxVisibleMs: number): void {
+function showSplashHtml(html: string, width: number, height: number, timeoutMs: number, onTimeout: (splash: BrowserWindow) => void, quitOnUserClose = false): void {
   try {
     if (splashWindow && !splashWindow.isDestroyed()) {
       return;
@@ -3357,14 +3442,28 @@ function showSplashHtml(html: string, width: number, height: number, maxVisibleM
       backgroundColor: "#1f2937"
     });
     splashWindow = splash;
+    if (quitOnUserClose) {
+      splash.on("close", (event) => {
+        // Programmatic handoff clears splashWindow first; native close is an explicit exit.
+        if (splashWindow !== splash || isQuitting) return;
+        event.preventDefault();
+        void writePackagedStartupLog("quit:startup-splash-user-close");
+        app.quit();
+      });
+    }
     splash.once("ready-to-show", () => {
-      if (!splash.isDestroyed()) {
+      if (!splash.isDestroyed() && !isQuitting) {
         splash.show();
       }
     });
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-    splashCloseTimer = setTimeout(closeSplashWindow, maxVisibleMs);
-    splashCloseTimer.unref?.();
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      .catch((error: unknown) => console.warn("splash window load failed:", error));
+    splashTimer = setTimeout(() => {
+      splashTimer = null;
+      if (splashWindow !== splash || splash.isDestroyed() || isQuitting) return;
+      onTimeout(splash);
+    }, timeoutMs);
+    splashTimer.unref?.();
   } catch (error) {
     console.warn("splash window skipped:", error);
   }
@@ -3375,22 +3474,54 @@ function showSplashHtml(html: string, width: number, height: number, maxVisibleM
  *
  * @returns Nothing.
  */
-function closeSplashWindow(): void {
-  if (splashCloseTimer) {
-    clearTimeout(splashCloseTimer);
-    splashCloseTimer = null;
+function closeSplashWindow(reason = "requested"): void {
+  startupRendererCleanup?.();
+  if (splashTimer) {
+    clearTimeout(splashTimer);
+    splashTimer = null;
   }
   const splash = splashWindow;
   splashWindow = null;
   if (splash && !splash.isDestroyed()) {
+    void writePackagedStartupLog(`boot:splash-closed:${JSON.stringify({ reason, stage: bootStage, elapsedMs: Date.now() - bootStartedAt })}`);
     splash.close();
   }
+}
+
+function watchStartupRenderer(targetWindow: BrowserWindow | null): void {
+  const splash = splashWindow;
+  if (!splash || splash.isDestroyed() || !targetWindow || targetWindow.isDestroyed()) return;
+  const fail = (error: Error) => {
+    if (splashWindow !== splash || isQuitting) return;
+    startupRendererCleanup?.();
+    void handleStartupFailure(error);
+  };
+  const handleFailed = (_event: ElectronEvent, code: number, description: string, _url: string, isMainFrame: boolean) => {
+    if (!isMainFrame || code === -3) return; // ERR_ABORTED can be a normal navigation replacement.
+    fail(new Error(`Startup renderer failed to load (${code}): ${description}`));
+  };
+  const handleGone = (_event: ElectronEvent, details: { reason: string; exitCode: number }) => {
+    if (targetWindow.isDestroyed()) return;
+    fail(new Error(`Startup renderer exited: ${details.reason} (${details.exitCode})`));
+  };
+  const timer = setTimeout(() => {
+    fail(new Error(`Startup renderer did not present a window within ${STARTUP_RENDERER_TIMEOUT_MS}ms`));
+  }, STARTUP_RENDERER_TIMEOUT_MS);
+  timer.unref?.();
+  const cleanup = () => {
+    clearTimeout(timer);
+    targetWindow.webContents.removeListener("did-fail-load", handleFailed);
+    targetWindow.webContents.removeListener("render-process-gone", handleGone);
+    if (startupRendererCleanup === cleanup) startupRendererCleanup = null;
+  };
+  startupRendererCleanup = cleanup;
+  targetWindow.webContents.on("did-fail-load", handleFailed);
+  targetWindow.webContents.on("render-process-gone", handleGone);
 }
 
 function createInitialWindow(): BrowserWindow | null {
   if (resolveInitialWindowMode() === "pet") {
     setPetWindowMode(true);
-    closeSplashWindow(); // Pet mode starts fast; no splash needed
     return petWindow;
   }
 
@@ -3625,11 +3756,10 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
   };
   mainWindowWithMinimize.on("minimize", handleMainWindowMinimize);
 
-  void targetMainWindow.loadURL(resolveRendererUrl("full", target));
-  // Close the splash as soon as the main window is ready (dual signals + the timeout fallback above
-  // ensure it always gets closed).
-  targetMainWindow.once("ready-to-show", closeSplashWindow);
-  targetMainWindow.webContents.once("did-finish-load", closeSplashWindow);
+  void targetMainWindow.loadURL(resolveRendererUrl("full", target)).catch(handleRendererLoadFailure);
+  // The main window takes over from the splash when its renderer is ready.
+  targetMainWindow.once("ready-to-show", () => closeSplashWindow("main-ready-to-show"));
+  targetMainWindow.webContents.once("did-finish-load", () => closeSplashWindow("main-did-finish-load"));
 
   targetMainWindow.on("closed", () => {
     mainWindow = null;
@@ -3747,10 +3877,23 @@ function applyMainWindowActionResolution(
   }
 
   if (resolution === "hide") {
-    if (process.platform === "win32") {
-      syncMenuBarTray(true);
+    const hideWindow = () => {
+      if (targetWindow.isDestroyed()) {
+        return;
+      }
+      if (process.platform === "win32") {
+        syncMenuBarTray(true);
+      }
+      targetWindow.hide();
+    };
+
+    if (isWindowFullScreenLike(targetWindow)) {
+      waitForWindowToLeaveFullScreen(targetWindow, hideWindow);
+      leaveWindowFullScreen(targetWindow);
+      return;
     }
-    targetWindow.hide();
+
+    hideWindow();
     return;
   }
 
@@ -3849,7 +3992,7 @@ function createPetWindow(target: RendererRouteTarget | null = null): BrowserWind
     configurePetWindowPriority(targetPetWindow);
   });
 
-  void targetPetWindow.loadURL(resolveRendererUrl("pet", target));
+  void targetPetWindow.loadURL(resolveRendererUrl("pet", target)).catch(handleRendererLoadFailure);
 
   targetPetWindow.on("closed", () => {
     const wasProgrammaticClose = programmaticPetWindowCloses.delete(targetPetWindow);
@@ -4207,6 +4350,7 @@ function showPetWindowAfterRendererLayout(): void {
   configurePetWindowPriority(petWindow);
   applyPetWindowBounds();
   petWindow.showInactive();
+  closeSplashWindow("pet-visible");
 }
 
 /**
@@ -4748,6 +4892,7 @@ let hasSingleInstanceLock = app.requestSingleInstanceLock();
 let lastSecondInstanceActivateAt = 0;
 let didWaitForSingleInstanceLock = false;
 let hasIgnoredStaleReopenQuit = false;
+const computerHistoryPermissionSessionId = randomUUID();
 let shouldRelaunchAfterQuitCleanup = false;
 const appProcessStartedAt = Date.now();
 
@@ -4811,6 +4956,28 @@ app.on("second-instance", () => {
   }
 });
 
+async function handleStartupFailure(error: unknown): Promise<void> {
+  if (isStartupFailureReported) return;
+  isStartupFailureReported = true;
+  startupRendererCleanup?.();
+  console.error(error);
+  bootStage = "failed";
+  await writePackagedStartupLog(`boot:error\n${formatStartupError(error)}`);
+  if (isQuitting) return;
+  showPackagedStartupError(error);
+  closeSplashWindow("boot-error");
+  app.quit();
+}
+
+function handleRendererLoadFailure(error: unknown): void {
+  if (isQuitting || (error as { code?: string } | null)?.code === "ERR_ABORTED") return;
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    void handleStartupFailure(error);
+    return;
+  }
+  console.warn("renderer load failed:", error);
+}
+
 app.whenReady().then(async () => {
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
@@ -4826,13 +4993,7 @@ app.whenReady().then(async () => {
   }
 
   await boot();
-}).catch(async (error: unknown) => {
-  console.error(error);
-  closeSplashWindow(); // Close the splash even on boot failure, so it does not stay stuck on screen
-  await writePackagedStartupLog(`boot:error\n${formatStartupError(error)}`);
-  showPackagedStartupError(error);
-  app.quit();
-});
+}).catch(handleStartupFailure);
 
 app.on("activate", () => {
   if (isQuitting || isQuitCleanupInProgress) {
@@ -4854,9 +5015,14 @@ app.on("activate", () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
+  if (isQuitting) return;
+  if (!shouldQuitWhenAllWindowsClosed(process.platform, isBootReady)) {
+    if (!isBootReady) {
+      void writePackagedStartupLog(`boot:window-all-closed-ignored:${bootStage}`);
+    }
+    return;
   }
+  app.quit();
 });
 
 app.on("before-quit", (event) => {
@@ -4875,12 +5041,14 @@ app.on("before-quit", (event) => {
 
   event.preventDefault();
   isQuitting = true;
+  closeSplashWindow("quit");
   hideAppShellForQuit();
   if (isQuitCleanupInProgress) {
     return;
   }
 
   isQuitCleanupInProgress = true;
+  stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
   void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
@@ -4916,9 +5084,8 @@ function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
   quitCleanupForceExitTimer = setTimeout(() => {
     console.warn("quit cleanup timed out; forcing app exit");
-    // Before force-exiting on a cleanup timeout, synchronously kill the child services, so leftover
-    // orphan processes do not keep holding the fixed ports.
-    runtimeServices?.terminateSync();
+    // Apply the same service-lifecycle choice when graceful cleanup times out.
+    runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
   }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
@@ -4968,6 +5135,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");
   ipcMain.removeHandler("memmy:openExternal");
+  ipcMain.removeHandler("memmy:open-computer-history-markdown");
+  ipcMain.removeHandler("memmy:restart-for-computer-history-permissions");
+  ipcMain.removeHandler("memmy:get-computer-history-permission-session");
   ipcMain.removeHandler("memmy:openAgentTool");
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
@@ -4977,6 +5147,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:restart-memory-service");
   ipcMain.removeHandler("memmy:open-logs-directory");
   ipcMain.removeHandler("memmy:export-diagnostics-report");
+  ipcMain.removeHandler("memmy:get-launch-at-login");
+  ipcMain.removeHandler("memmy:set-launch-at-login");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
   ipcMain.removeHandler("memmy:request-microphone-access");
   ipcMain.removeHandler("memmy:select-project-directory");
@@ -4999,10 +5171,33 @@ async function cleanupBeforeQuit(): Promise<void> {
   memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
-  await services?.close();
+  await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
   await backend?.close();
   await stopPackagedRendererServer();
   await sendAppExitEventBeforeQuit();
+}
+
+function readStopMemoryServiceOnExitSetting(): boolean {
+  try {
+    // Windows updates and reboot handoffs cannot safely leave a detached
+    // Memmy.exe memory-service behind: it shares the app executable and can
+    // be mistaken for the desktop process by the next launch/update.
+    return localBackend?.getAppSettings().stopMemoryServiceOnExit
+      ?? process.platform === "win32";
+  } catch {
+    return process.platform === "win32";
+  }
+}
+
+/** Resolves the runtime paths used by the Windows login item adapter. */
+function currentWindowsLaunchAtLoginEnvironment(): WindowsLaunchAtLoginEnvironment {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
+    localAppDataPath: process.env.LOCALAPPDATA,
+    systemRootPath: process.env.SystemRoot ?? process.env.WINDIR
+  };
 }
 
 async function copyDesktopImageToClipboard(request: DesktopImageActionRequest, senderUrl: string): Promise<void> {
@@ -5332,19 +5527,25 @@ function desktopImageSaveFilters(name: string, mime: string | null): FileFilter[
 }
 
 /**
- * Prompts for a save path and creates a consistent Memory SQLite snapshot.
+ * Prompts for a save path and exports Memory through the standalone HTTP service.
  *
  * @param owner The window that triggered the export.
  * @returns The user cancellation or the export result.
  */
 async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<MemoryDatabaseExportResult> {
-  const sourcePath = await resolveMemoryDatabasePathForExport();
-  await access(sourcePath, fsConstants.R_OK);
+  const service = memoryServiceControl;
+  if (!service) {
+    throw new Error("Memory service is unavailable");
+  }
 
   const options = {
-    title: "Export memory.sqlite",
+    title: "Export Memmy Memory",
     buttonLabel: "Export",
-    defaultPath: join(app.getPath("documents"), `memory-${formatExportTimestamp(new Date())}.sqlite`)
+    defaultPath: join(app.getPath("documents"), `memmy-memory-${formatExportTimestamp(new Date())}.json`),
+    filters: [
+      { name: "Memmy Memory Export", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
   };
   const selected = owner && !owner.isDestroyed()
     ? await dialog.showSaveDialog(owner, options)
@@ -5353,11 +5554,22 @@ async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<Memory
     return { canceled: true };
   }
 
-  const bytes = await backupSqliteDatabase(sourcePath, selected.filePath);
+  const response = await fetch(`${service.baseUrl.replace(/\/$/u, "")}/api/v1/admin/export`, {
+    cache: "no-store",
+    headers: {
+      "x-memmy-time-zone": Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(service.token ? { authorization: `Bearer ${service.token}` } : {})
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Memory export failed: HTTP ${response.status}`);
+  }
+  const payload = new Uint8Array(await response.arrayBuffer());
+  await writeFile(selected.filePath, payload);
   return {
     canceled: false,
     exportPath: selected.filePath,
-    bytes
+    bytes: payload.byteLength
   };
 }
 
@@ -5373,6 +5585,15 @@ async function openLogsDirectory(): Promise<void> {
   if (openError) {
     throw new Error(openError);
   }
+}
+
+/** Opens a stored Computer History summary in the user's default Markdown application. */
+async function openComputerHistoryMarkdown(rawPath: string): Promise<void> {
+  const filePath = resolveComputerHistoryMarkdownPath(rawPath);
+  const info = await lstat(filePath);
+  if (!info.isFile()) throw new Error("Computer History Markdown is not a regular file");
+  const openError = await shell.openPath(filePath);
+  if (openError) throw new Error(openError);
 }
 
 /**
@@ -5465,42 +5686,6 @@ function buildDiagnosticsReport(): string {
  */
 function resolveLogsDirectory(): string {
   return app.getPath("logs");
-}
-
-async function resolveMemoryDatabasePathForExport(): Promise<string> {
-  if (runtimeServices?.memory.databasePath) {
-    return runtimeServices.memory.databasePath;
-  }
-
-  const explicitPath = [
-    process.env.MEMMY_MEMORY_DB_PATH,
-    process.env.MEMMY_MEMOS_DB_PATH,
-    process.env.MEMORY_SERVICE_DB,
-    process.env.MEMMY_MEMORY_DB
-  ].find((value) => typeof value === "string" && value.trim().length > 0);
-  if (explicitPath) {
-    return resolvePathValue(explicitPath);
-  }
-
-  const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const configuredPath = await readMemoryDatabasePathFromConfig(configPath);
-  return configuredPath ? resolvePathValue(configuredPath) : join(homedir(), ".memmy", "memory-service", "memory.sqlite");
-}
-
-async function readMemoryDatabasePathFromConfig(configPath: string): Promise<string | null> {
-  try {
-    const parsed = YAML.parse(await readFile(configPath, "utf8"));
-    const memmyMemory = recordValue(parsed)?.memmyMemory;
-    const storage = recordValue(memmyMemory)?.storage;
-    const sqlitePath = recordValue(storage)?.sqlitePath;
-    return typeof sqlitePath === "string" && sqlitePath.trim().length > 0 ? sqlitePath.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function resolvePathValue(path: string): string {

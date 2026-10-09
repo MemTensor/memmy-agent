@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { MemoryDb, SCHEMA_MIGRATION_ID, SCHEMA_VERSION } from "../../src/index.js";
-import { Repositories } from "../../src/storage/repositories.js";
+import { Repositories, RuntimeRepository } from "../../src/storage/repositories.js";
 import type { MemoryRow } from "../../src/types.js";
 
 describe("repository sqlite schema contract", () => {
@@ -55,6 +55,47 @@ describe("repository sqlite schema contract", () => {
     }
   });
 
+  it("restores the raw-turn user index and looks up a turn before its session", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-raw-turn-index-"));
+    const dbPath = join(root, "memory.sqlite");
+    try {
+      const initial = new MemoryDb({ path: dbPath });
+      initial.db.exec("DROP INDEX idx_raw_turns_user_turn");
+      initial.close();
+
+      const reopened = new MemoryDb({ path: dbPath });
+      const indexes = reopened.db.prepare("PRAGMA index_list(raw_turns)").all() as Array<{ name: string }>;
+      expect(indexes.map((index) => index.name)).toContain("idx_raw_turns_user_turn");
+      const runtime = new RuntimeRepository(reopened.db);
+      expect(runtime.hasCompletedSourceTurnInScope({
+        userId: "missing-user",
+        source: "codex",
+        profileId: "default",
+        conversationId: "missing-conversation",
+        turnId: "missing-turn",
+        namespaceKey: "missing-namespace",
+        defaultNamespaceKey: "default-namespace",
+        tenantId: null,
+        storedProjectId: null,
+        workspaceId: null
+      })).toBe(false);
+      const plan = reopened.db.prepare(`EXPLAIN QUERY PLAN
+        SELECT 1 AS found
+        FROM raw_turns
+        WHERE raw_turns.user_id = ?
+          AND raw_turns.turn_id = ?
+          AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+          AND EXISTS (
+            SELECT 1 FROM sessions WHERE sessions.id = raw_turns.session_id
+          )`).all("missing-user", "missing-turn") as Array<{ detail: string }>;
+      expect(plan.some((step) => step.detail.includes("idx_raw_turns_user_turn"))).toBe(true);
+      expect(plan.some((step) => step.detail.includes("sqlite_autoindex_sessions_1"))).toBe(true);
+      reopened.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates the runtime tables on a fresh sqlite database", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-schema-"));
     try {
@@ -71,6 +112,7 @@ describe("repository sqlite schema contract", () => {
         "l3_world_model_scopes",
         "sessions",
         "l3_world_model_session_cursors",
+        "work_memory_session_cursors",
         "episodes",
         "raw_turns",
         "l3_world_model_input_traces",
@@ -81,16 +123,20 @@ describe("repository sqlite schema contract", () => {
         "l2_candidate_pool",
         "trace_policy_links",
         "skill_trials",
+        "skill_clusters",
+        "skill_cluster_members",
         "recall_events",
         "memory_change_log",
         "idempotency_keys",
+        "memory_capture_claims",
         "l3_world_model_project_environment_state",
         "evolution_jobs",
         "embedding_retry_queue",
         "memory_processing_state",
         "artifacts",
         "audit_logs",
-        "memory_vector_entries"
+        "memory_vector_entries",
+        "token_usage_outbox"
       ]));
       expect(tables.map((table) => table.name)).not.toEqual(expect.arrayContaining([
         "memory_embeddings",
@@ -262,6 +308,81 @@ describe("repository sqlite schema contract", () => {
         "profile_scan_id"
       ]));
       db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills hook QA claims when migrating a v6 database", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v7-qa-claim-migration-"));
+    const dbPath = join(root, "memory.sqlite");
+    const at = "2026-01-01T00:00:00.000Z";
+    try {
+      const seeded = new MemoryDb({ path: dbPath });
+      seeded.db.prepare(
+        `INSERT INTO sessions (
+           id, user_id, source, profile_id, status, meta_json,
+           opened_at, last_seen_at, updated_at
+         ) VALUES (?, ?, 'codex', 'default', 'open', '{}', ?, ?, ?)`
+      ).run("qa-session", "qa-user", at, at, at);
+      seeded.db.prepare(
+        `INSERT INTO episodes (
+           id, session_id, user_id, status, l1_memory_ids_json, raw_turn_ids_json,
+           feedback_ids_json, decision_repair_ids_json, l2_policy_ids_json,
+           l3_world_model_ids_json, skill_memory_ids_json, turn_count,
+           reward_detail_json, pipeline_status, meta_json, opened_at, updated_at
+         ) VALUES (?, ?, ?, 'open', '["qa-memory"]', '["qa-turn"]',
+                   '[]', '[]', '[]', '[]', '[]', 1, '{}', 'idle', '{}', ?, ?)`
+      ).run("qa-episode", "qa-session", "qa-user", at, at);
+      seeded.db.prepare(
+        `INSERT INTO raw_turns (
+           id, session_id, episode_id, turn_id, user_id, user_text, assistant_text,
+           tool_calls_json, tool_results_json, source_memory_ids_json, usage_json,
+           message_payload_json, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', '{}',
+                   '{"turn_complete":{}}', 'succeeded', ?)`
+      ).run(
+        "qa-turn",
+        "qa-session",
+        "qa-episode",
+        "turn-1",
+        "qa-user",
+        "迁移后不要重复写入。",
+        "会通过 QA claim 判重。",
+        at
+      );
+      seeded.db.prepare(
+        `INSERT INTO memories (
+           id, timeline, user_id, session_id, agent_id, memory_type, status,
+           visibility, memory_key, memory_value, tags_json, info_json,
+           properties_json, memory_layer, content_hash, version,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'codex', 'LongTermMemory', 'activated',
+                   'private', 'trace:qa-session:turn-1:0', 'legacy hook trace', '[]',
+                   '{"raw_turn_id":"qa-turn"}',
+                   '{"internal_info":{"raw_turn_id":"qa-turn","step_index":0}}',
+                   'L1', 'qa-hash', 1, ?, ?)`
+      ).run("qa-memory", at, "qa-user", "qa-session", at, at);
+      seeded.db.exec(`
+        DROP TABLE memory_capture_claims;
+        DELETE FROM schema_migrations;
+        INSERT INTO schema_migrations (id, version, applied_at, checksum)
+        VALUES ('006_l3_world_model', 6, '${at}', 'v6');
+      `);
+      seeded.close();
+
+      const migrated = new MemoryDb({ path: dbPath });
+      expect(migrated.db.prepare(
+        `SELECT user_id, source, primary_memory_id, captured_by
+         FROM memory_capture_claims`
+      ).get()).toEqual({
+        user_id: "qa-user",
+        source: "codex",
+        primary_memory_id: "qa-memory",
+        captured_by: "turn_complete"
+      });
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
+      migrated.close();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -643,6 +764,9 @@ describe("repository sqlite schema contract", () => {
       ).get()).toEqual({ status: "open" });
       expect((migrated.db.prepare(`PRAGMA table_info(l3_world_model_scopes)`).all() as Array<{ name: string }>)
         .map((column) => column.name)).toContain("workspace_uri");
+      expect(migrated.db.prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_memory_session_cursors'`
+      ).get()).toEqual({ name: "work_memory_session_cursors" });
       const projectEnvironmentColumns = migrated.db.prepare(
         `PRAGMA table_info(l3_world_model_project_environment_state)`
       ).all() as Array<{ name: string }>;

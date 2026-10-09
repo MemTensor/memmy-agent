@@ -5,7 +5,9 @@ import { config as loadDotenv } from "dotenv";
 import { defineConfig } from "vitest/config";
 
 // Load optional repository test settings before test modules are evaluated, then pin the required
-// gateway address to a non-routable HTTPS test origin so local .env files cannot affect test behavior.
+// service addresses to reserved test origins so local .env files and an installed
+// Memory daemon cannot affect unrelated unit tests. Integration fixtures can
+// explicitly stub their own connection settings.
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -33,7 +35,11 @@ const envPath = findRepoEnvFile(moduleDir);
 const parsed = envPath ? (loadDotenv({ path: envPath, processEnv: {} }).parsed ?? {}) : {};
 const testEnv = {
   ...parsed,
-  MEMMY_CLOUD_SERVICE: "https://cloud.test.invalid"
+  MEMMY_CLOUD_SERVICE: "https://cloud.test.invalid",
+  MEMMY_MEMORY_URL: "http://memory.test.invalid",
+  MEMORY_SERVICE_URL: "http://memory.test.invalid",
+  MEMMY_MEMORY_TOKEN: "",
+  MEMORY_SERVICE_TOKEN: "",
 };
 
 export default defineConfig({

@@ -6,6 +6,7 @@ import { appManifest, compactDict } from "./app-manifest.js";
 import { loadConfig, resolveConfigEnvVars, saveConfig } from "../../config/loader.js";
 import { getRuntimeSubdir } from "../../config/paths.js";
 import { MCPServerConfig } from "../../config/schema.js";
+import { resolveOpenComputerUseCommand } from "../../tools/computer-use/open-computer-use-binary.js";
 
 type QueryParams = Record<string, string[]>;
 type TargetKind = "env" | "url_param" | "arg" | "header";
@@ -271,7 +272,7 @@ function knownMcpNames(): Set<string> {
   const names = knownPresetNames();
   try {
     for (const name of Object.keys(loadConfig().tools.mcpServers)) names.add(name);
-  } catch {}
+  } catch { /* ignore malformed optional input */ }
   return names;
 }
 
@@ -831,6 +832,7 @@ export async function mcpPresetsTestAction(query: QueryParams): Promise<Record<s
 }
 
 function commandAvailable(command: string): boolean {
+  command = resolveOpenComputerUseCommand(command);
   if (command.includes(path.sep)) return fs.existsSync(command);
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (dir && fs.existsSync(path.join(dir, command))) return true;
@@ -985,7 +987,7 @@ function closeMcpStacks(stacks: Record<string, any>): Promise<void> {
     try {
       if (typeof stack?.aclose === "function") await stack.aclose();
       else if (typeof stack?.close === "function") await stack.close();
-    } catch {}
+    } catch { /* ignore malformed optional input */ }
   })).then(() => undefined);
 }
 

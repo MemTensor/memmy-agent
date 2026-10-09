@@ -5,6 +5,9 @@
 Removes the current user's Memmy installation and local state on Windows.
 
 .DESCRIPTION
+The script runs unattended and deletes immediately with no confirmation prompt. Use -WhatIf
+to preview the exact set of changes without applying any of them.
+
 The script discovers Memmy paths before changing environment variables. It supports the
 current per-user NSIS package, custom installation drives, the historical MSIX test package,
 legacy CLI launchers, and Memmy-specific data paths. Source repositories and finished EXE or
@@ -19,9 +22,6 @@ external database or config paths are retained and reported; pass a Memmy-owned 
 The script never recursively deletes a volume root, profile root, AppData root, Windows,
 Program Files, ProgramData, Desktop, or an arbitrary external workspace. Reparse points are
 removed without traversing their targets.
-
-.PARAMETER Force
-Skips the interactive "CLEAR MEMMY" confirmation.
 
 .PARAMETER IncludeMachineScope
 Also cleans machine-level environment, PATH, registry, and legacy all-users locations. This
@@ -40,22 +40,21 @@ runtime staging directories are removed; finished installers are retained.
 .\clear-all-windows.ps1 -WhatIf
 
 .EXAMPLE
-.\clear-all-windows.ps1 -Force
+.\clear-all-windows.ps1
 
 .EXAMPLE
-.\clear-all-windows.ps1 -AdditionalMemmyHome "D:\.memmy" -Force
+.\clear-all-windows.ps1 -AdditionalMemmyHome "D:\.memmy"
 
 .EXAMPLE
-.\clear-all-windows.ps1 -RepositoryRoot "D:\work\memmy" -Force
+.\clear-all-windows.ps1 -RepositoryRoot "D:\work\memmy"
 
 .EXAMPLE
 # Run from an elevated PowerShell only when legacy machine-wide traces must also be removed.
-.\clear-all-windows.ps1 -IncludeMachineScope -Force
+.\clear-all-windows.ps1 -IncludeMachineScope
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Medium")]
 param(
-  [switch]$Force,
   [switch]$IncludeMachineScope,
   [string[]]$AdditionalMemmyHome = @(),
   [string]$RepositoryRoot
@@ -699,6 +698,9 @@ function Get-ObjectPropertyValue {
     [string]$Name
   )
 
+  if ($null -eq $Object) {
+    return $null
+  }
   $property = $Object.PSObject.Properties[$Name]
   if ($null -eq $property) {
     return $null
@@ -2276,13 +2278,8 @@ Write-Host "discovered-path-targets: $($script:Targets.Count)"
 Write-Host "discovered-environment-variables: $($script:EnvironmentEntries.Count)"
 Write-Host "discovered-uninstall-records: $($script:UninstallEntries.Count)"
 
-if (-not $Force -and -not $WhatIfPreference) {
+if (-not $WhatIfPreference) {
   Write-Host "`nWARNING: This permanently deletes Memmy application state and local data." -ForegroundColor Red
-  $confirmation = Read-Host "Type CLEAR MEMMY to continue"
-  if ($confirmation -cne "CLEAR MEMMY") {
-    Write-Host "Canceled. No changes were made."
-    exit 2
-  }
 }
 
 Stop-MemmyProcesses

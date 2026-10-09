@@ -1,0 +1,91 @@
+name: Sync GitHub to Yunxiao
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request_target:
+    types: [opened, closed, reopened]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 运行模式
+        required: true
+        type: choice
+        default: preflight
+        options:
+          - preflight
+          - backfill
+      state:
+        description: 回填 GitHub 数据范围
+        required: false
+        type: choice
+        default: open
+        options:
+          - open
+          - all
+      apply:
+        description: 回填时是否实际写入云效
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: yunxiao-github-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # pull_request_target uses the trusted default branch. Never execute the
+      # workflow or script from an untrusted PR branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run sync
+        env:
+          YUNXIAO_TOKEN: ${{ secrets.YUNXIAO_TOKEN }}
+          YUNXIAO_API_BASE_URL: ${{ vars.YUNXIAO_API_BASE_URL }}
+          # memmy-agent defaults to the memmy Yunxiao project. Repository
+          # Variables can override these values for a fork or another space.
+          YUNXIAO_PROJECT_ID: ${{ vars.YUNXIAO_PROJECT_ID || '1832b179386e24414d3891e244' }}
+          YUNXIAO_PROJECT_NAME: ${{ vars.YUNXIAO_PROJECT_NAME || 'memmy' }}
+          YUNXIAO_PARENT_ID: ${{ vars.YUNXIAO_PARENT_ID }}
+          # Yunxiao calls the required iteration field "sprint".
+          YUNXIAO_SPRINT_ID: ${{ vars.YUNXIAO_SPRINT_ID || '1b60d4a7ac4f79a141c76141c1' }}
+          YUNXIAO_PARTICIPANT_NAMES: ${{ vars.YUNXIAO_PARTICIPANT_NAMES || '徐之淇,贾澄臻' }}
+          YUNXIAO_WORKITEM_CATEGORY: ${{ vars.YUNXIAO_WORKITEM_CATEGORY }}
+          YUNXIAO_WORKITEM_TYPE_NAME: ${{ vars.YUNXIAO_WORKITEM_TYPE_NAME }}
+          YUNXIAO_PRIORITY_NAME: ${{ vars.YUNXIAO_PRIORITY_NAME }}
+          YUNXIAO_DAYS_TO_FINISH: ${{ vars.YUNXIAO_DAYS_TO_FINISH }}
+          # Optional. Empty means Yunxiao leaves the new work item unassigned.
+          YUNXIAO_DEFAULT_ASSIGNEE_NAME: ${{ vars.YUNXIAO_DEFAULT_ASSIGNEE_NAME }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            args=(--mode "${{ inputs.mode }}" --state "${{ inputs.state }}")
+            if [ "${{ inputs.mode }}" = "backfill" ] && [ "${{ inputs.apply }}" != "true" ]; then
+              args+=(--dry-run)
+            fi
+          elif [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            args=(--mode event --apply)
+          else
+            args=(--mode preflight)
+          fi
+
+          python scripts/yunxiao_github_sync.py "${args[@]}"

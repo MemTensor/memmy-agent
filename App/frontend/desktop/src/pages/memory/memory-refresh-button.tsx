@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "../../i18n/use-translation.js";
-import { RefreshCw } from "./memory-prototype-icons.js";
+import { Check, RefreshCw } from "./memory-prototype-icons.js";
 
 type RefreshFeedbackState = "idle" | "pending" | "success" | "error";
 
@@ -66,7 +66,9 @@ export function MemoryRefreshButton(props: MemoryRefreshButtonProps) {
       title={label}
       disabled={feedback === "pending"}
     >
-      <RefreshCw size={15} className="memory-refresh-button__icon" />
+      {feedback === "success"
+        ? <Check size={15} className="memory-refresh-button__icon" />
+        : <RefreshCw size={15} className="memory-refresh-button__icon" />}
     </button>
   );
 }

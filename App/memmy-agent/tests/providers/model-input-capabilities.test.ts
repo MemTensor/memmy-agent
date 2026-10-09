@@ -3,6 +3,7 @@ import {
   coversInputModalities,
   defineModelInputCapabilities,
   getModelInputModalities,
+  hasDeclaredInputModalities,
   MODEL_INPUT_CAPABILITIES,
   MODEL_INPUT_CAPABILITIES_REVIEWED_AT,
   requiredInputModalities,
@@ -13,8 +14,8 @@ describe("model input capabilities", () => {
   it("contains only immutable, valid modality sets with text support", () => {
     const allowed = new Set<ModelInputModality>(["text", "image", "video"]);
 
-    expect(MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe("2026-08-24");
-    expect(Object.keys(MODEL_INPUT_CAPABILITIES)).toHaveLength(242);
+    expect(MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe("2026-09-15");
+    expect(Object.keys(MODEL_INPUT_CAPABILITIES)).toHaveLength(244);
     expect(Object.isFrozen(MODEL_INPUT_CAPABILITIES)).toBe(true);
     for (const [model, modalities] of Object.entries(MODEL_INPUT_CAPABILITIES)) {
       expect(model).toBeTruthy();
@@ -27,6 +28,7 @@ describe("model input capabilities", () => {
   });
 
   it("uses exact full model IDs without normalization or family inheritance", () => {
+    expect(getModelInputModalities("agent_chat")).toEqual(["text", "image"]);
     expect(getModelInputModalities("gpt-5.6")).toEqual(["text", "image"]);
     expect(getModelInputModalities("gemini-3.7-flash")).toEqual(["text", "image", "video"]);
     expect(getModelInputModalities("qwen3.8-max")).toEqual(["text", "image"]);
@@ -34,6 +36,8 @@ describe("model input capabilities", () => {
     expect(getModelInputModalities("global.anthropic.claude-sonnet-5")).toEqual(["text", "image"]);
     expect(getModelInputModalities("qwen/qwen3.6-27b")).toEqual(["text", "image"]);
     expect(getModelInputModalities("deepseek-v4-pro")).toEqual(["text"]);
+    expect(getModelInputModalities("deepseek-flash")).toEqual(["text", "image"]);
+    expect(getModelInputModalities("deepseek-v4.1-flash")).toEqual(["text", "image"]);
     expect(getModelInputModalities("deepseek-v4-flash-vision-exp")).toEqual(["text", "image"]);
     expect(getModelInputModalities("kimi-k3")).toEqual(["text", "image", "video"]);
     expect(getModelInputModalities("glm-5v-turbo")).toEqual(["text", "image", "video"]);
@@ -43,6 +47,17 @@ describe("model input capabilities", () => {
     expect(getModelInputModalities(" gpt-5.6 ")).toEqual(["text"]);
     expect(getModelInputModalities("gpt-5.6-unknown-snapshot")).toEqual(["text"]);
     expect(getModelInputModalities(null)).toEqual(["text"]);
+  });
+
+  it("separates an unknown model from one the catalog declares text-only", () => {
+    expect(hasDeclaredInputModalities("deepseek-v4-pro")).toBe(true);
+    expect(hasDeclaredInputModalities("gpt-5.6")).toBe(true);
+    expect(hasDeclaredInputModalities("Qwen3-27B")).toBe(false);
+    expect(hasDeclaredInputModalities("Gpt-5.6")).toBe(false);
+    expect(hasDeclaredInputModalities("gpt-5.6-unknown-snapshot")).toBe(false);
+    expect(hasDeclaredInputModalities("toString")).toBe(false);
+    expect(hasDeclaredInputModalities(null)).toBe(false);
+    expect(hasDeclaredInputModalities(undefined)).toBe(false);
   });
 
   it("rejects duplicate model keys instead of overwriting them", () => {

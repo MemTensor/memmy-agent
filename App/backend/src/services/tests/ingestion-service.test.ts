@@ -12,6 +12,91 @@ import {
 import type { AgentSourceRepository } from "../../infrastructure/agent-source-store/index.js";
 import type { ConversationMessage } from "../../adapters/outbound/agent-source/types.js";
 
+describe("native Codex ingestion", () => {
+  function nativeMessages(complete = true): ConversationMessage[] {
+    const sourceTurn = {
+      source: "codex", conversationId: "native-conversation", turnId: "native-turn", sequence: 1,
+      startedAt: "2026-09-09T10:00:00.000Z", completedAt: "2026-09-09T10:01:00.000Z",
+      completionEvidence: "task_complete:native-turn", query: "Run tests", answer: "Tests passed", status: "succeeded",
+      toolCalls: [{ id: "test-call", name: "test", input: "npm test", output: "passed", success: true }],
+      toolResults: [{ id: "test-call", output: "passed", success: true }]
+    };
+    return ["user", "assistant"].map((role, index) => ({
+      messageId: `native-${index}`, sourceId: "codex", conversationId: "native-conversation",
+      role: role as "user" | "assistant", content: index === 0 ? sourceTurn.query : sourceTurn.answer,
+      createdAt: index === 0 ? sourceTurn.startedAt : sourceTurn.completedAt,
+      workspacePath: null, gitRoot: null,
+      rawMeta: { sourceTurnId: "native-turn", sourceTurnState: complete ? "complete" : "turn_incomplete",
+        sourceTurnReason: complete ? undefined : "turn_incomplete", ...(complete && index === 1 ? { sourceTurn } : {}) }
+    }));
+  }
+
+  it("submits the structured native turn once and never creates an import-summary memory", async () => {
+    const addMemory = vi.fn();
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-native"] } });
+    const markSeen = vi.fn();
+    const stats = await createService({ addMemory, completeSourceTurn }, { markSeen }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(addMemory).not.toHaveBeenCalled();
+    expect(completeSourceTurn).toHaveBeenCalledOnce();
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "agent_source_scan", sourceTurn: expect.objectContaining({ conversationId: "native-conversation", turnId: "native-turn" }),
+      toolCalls: [expect.objectContaining({ id: "test-call", input: "npm test", output: "passed" })]
+    }));
+    expect(completeSourceTurn.mock.calls[0]?.[0].captureLegacyHistory).toBeUndefined();
+    expect(stats.memoryIds).toEqual(["l1-native"]);
+    expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks a full scan to capture history that completed before activation", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-historical"] } });
+    await createService({ completeSourceTurn }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "full" });
+    expect(completeSourceTurn).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
+    const initial = vi.fn().mockResolvedValue({ status: "stored", result: { l1MemoryIds: ["l1-initial"] } });
+    await createService({ completeSourceTurn: initial }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex", scanMode: "initial_subset" });
+    expect(initial).toHaveBeenCalledWith(expect.objectContaining({ captureLegacyHistory: true }));
+  });
+
+  it.each(["pending", "conflict"])("retains %s turns for retry without marking seen or completing the conversation", async status => {
+    const markSeen = vi.fn();
+    const addMemory = vi.fn();
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status, reason: "episode_unresolved" });
+    const stats = await createService({ addMemory, completeSourceTurn }, { markSeen }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(markSeen).not.toHaveBeenCalled(); expect(addMemory).not.toHaveBeenCalled();
+    expect(stats.completedConversationIds).toEqual([]);
+    expect(stats.failedConversationIds).toEqual(["native-conversation"]);
+    expect(stats.errors).toEqual([]);
+  });
+
+  it("does not submit incomplete evidence, and retries after completion arrives on the same message IDs", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "existing", result: { l1MemoryIds: ["same-l1"] } });
+    const addMemory = vi.fn(); const markSeen = vi.fn();
+    const skipped: Array<{ conversationId: string; reason: string }> = [];
+    const service = createIngestionService({
+      memoryClient: { ...createMockMemoryClient({ now }), addMemory, completeSourceTurn },
+      agentSourceRepository: { ...createRepository(), markSeen, hasSeen: () => false },
+      onItemSkip: (skip) => skipped.push(skip)
+    });
+    const pending = await service.ingest(toAsyncIterable(nativeMessages(false)), { sourceId: "codex" });
+    expect(completeSourceTurn).not.toHaveBeenCalled(); expect(markSeen).not.toHaveBeenCalled();
+    expect(pending.errors).toEqual([]);
+    expect(pending.incompleteConversationIds).toEqual(["native-conversation"]);
+    expect(skipped).toEqual([{ sourceId: "codex", conversationId: "native-conversation", reason: "turn_incomplete" }]);
+    const recovered = await service.ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(completeSourceTurn).toHaveBeenCalledOnce(); expect(markSeen).toHaveBeenCalledTimes(2);
+    expect(recovered.dedupedMemories).toBe(1); expect(recovered.writtenMemories).toBe(0);
+    expect(addMemory).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges rejected old turns without reporting a newly written memory", async () => {
+    const markSeen = vi.fn();
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "rejected", reason: "legacy_before_activation" });
+    const stats = await createService({ completeSourceTurn }, { markSeen }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(stats.writtenMemories).toBe(0); expect(stats.memoryIds).toEqual([]);
+    expect(stats.completedConversationIds).toEqual(["native-conversation"]);
+    expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("ingestion service", () => {
   it("imports each contiguous conversation as turn memories through memory add", async () => {
     const added: Array<Record<string, unknown>> = [];
@@ -78,6 +163,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
+      importSummaryMemoryIds: ["memory-1", "memory-2"],
       conversations: 2,
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: ["conv-a"],
@@ -264,7 +350,7 @@ describe("ingestion service", () => {
       completedConversationIds: ["conv-b"],
       incompleteConversationIds: [],
       failedConversationIds: ["conv-a"],
-      errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
+      errors: []
     });
   });
 
@@ -327,6 +413,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: ["memory-1"],
+      importSummaryMemoryIds: ["memory-1"],
       conversations: 2,
       completedConversationIds: ["conv-a", "conv-b"],
       incompleteConversationIds: [],
@@ -367,6 +454,7 @@ describe("ingestion service", () => {
       dedupedMemories: 0,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
@@ -439,12 +527,61 @@ describe("ingestion service", () => {
       dedupedMemories: 1,
       failedMemories: 0,
       memoryIds: [],
+      importSummaryMemoryIds: [],
       conversations: 1,
       completedConversationIds: ["conv-a"],
       incompleteConversationIds: [],
       failedConversationIds: [],
       errors: []
     });
+  });
+
+  it("counts a QA duplicate returned by memory.add as deduped and marks its source messages seen", async () => {
+    const markSeen = vi.fn(() => true);
+    const succeeded: Array<Record<string, unknown>> = [];
+    const service = createService(
+      {
+        async addMemory(input) {
+          return {
+            id: "hook-memory",
+            kind: "trace",
+            memoryLayer: input.layer ?? "L1",
+            status: "activated",
+            title: input.title ?? "Hook memory",
+            summary: input.content,
+            tags: input.tags ?? [],
+            createdAt: now(),
+            serverTime: now(),
+            duplicate: true
+          };
+        }
+      },
+      { hasSeen: () => false, markSeen },
+      undefined,
+      {
+        trackAddStarted() {},
+        trackAddSucceeded(input) {
+          succeeded.push({ ...input });
+        },
+        trackAddFailed() {}
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor" }
+    );
+
+    expect(markSeen).toHaveBeenCalledTimes(2);
+    expect(stats).toMatchObject({
+      written: 0,
+      deduped: 2,
+      writtenMemories: 0,
+      dedupedMemories: 1,
+      memoryIds: [],
+      importSummaryMemoryIds: []
+    });
+    expect(succeeded).toEqual([]);
   });
 
   it("does not import user-only or assistant-only turns as memories", async () => {

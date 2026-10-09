@@ -3,17 +3,17 @@ import path from "node:path";
 import { Config } from "../../config/schema.js";
 import { getMediaDir } from "../../config/paths.js";
 import { InboundMessage } from "../../core/runtime-messages/events.js";
-import { FileSizeExceeded, MAX_FILE_SIZE, saveBase64DataUrl } from "../../utils/media-decode.js";
+import { FileSizeExceeded, saveBase64DataUrl } from "../../utils/media-decode.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
 
 export const API_SESSION_KEY = "api:default";
 export const API_CHAT_ID = "default";
-export const API_MAX_BODY_BYTES = 20 * 1024 * 1024;
+export const API_MAX_BODY_BYTES = 256 * 1024 * 1024;
 
-export { FileSizeExceeded, MAX_FILE_SIZE, saveBase64DataUrl };
+export { FileSizeExceeded, saveBase64DataUrl };
 
 export class RequestBodyTooLarge extends Error {
-  constructor(message = "Request body exceeds 20MB limit") {
+  constructor(message = "Request body exceeds 256MB limit") {
     super(message);
     this.name = "RequestBodyTooLarge";
   }
@@ -165,9 +165,6 @@ async function parseMultipart(request: Request): Promise<[string, string[], stri
     else if (name === "files" && value && typeof value === "object" && "arrayBuffer" in value) {
       const file = value as File;
       const raw = Buffer.from(await file.arrayBuffer());
-      if (raw.length > MAX_FILE_SIZE) {
-        throw new FileSizeExceeded(`File '${file.name || "upload.bin"}' exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`);
-      }
       const dest = path.join(mediaDir, `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}_${safeFilename(file.name || "upload.bin")}`);
       fs.writeFileSync(dest, raw);
       mediaPaths.push(dest);

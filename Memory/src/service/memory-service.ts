@@ -3,26 +3,43 @@ import {
   canonicalJson,
   isLocalWorkspaceUri,
   sha256Hex
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import {
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
 import {
+  MEMORY_CAPABILITIES,
+  MEMORY_PROTOCOL_VERSION,
+  MEMORY_VIEWER_VERSION
+} from "../version.js";
+import {
   DEFAULT_MEMMY_CONFIG,
   loadMemmyConfig,
   resolveEvolutionConfig,
   type MemmyConfig
 } from "../config/index.js";
-import { createMemoryLogger } from "../logging/logger.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
 import {
   MemoryModelTaskRouter,
   type MemoryModelTaskContext
 } from "../model/task-routing.js";
-import type { MemoryLlmModelRole } from "../model/token-usage.js";
+import {
+  jobTypeConsumesMemoryBudget,
+  type MemoryBudgetModelSources
+} from "@memmy/agent-source-core";
+import {
+  fetchAppMemoryBudget,
+  HttpByokTokenUsageRecorder,
+  type HttpByokTokenUsageRecorderOptions,
+  type MemoryLlmModelRole,
+  type MemoryModelUsageEvent
+} from "../model/token-usage.js";
+import { TokenUsageOutbox } from "../storage/token-usage-outbox.js";
+import { MemoryTokenBudgetLedger } from "./memory-token-budget-ledger.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
   sqliteBackendCapabilities,
@@ -81,11 +98,15 @@ import type {
   ToolCallPayload,
   ToolObserveRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
+  SourceTurnCompleteResponse,
+  TurnCompletionResult,
   TurnStartRequest
 } from "../types.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId,stableHash,stableStringify } from "../utils/id.js";
 import { isRecord,stringifyForMemory } from "../utils/json.js";
+import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 import { clip,firstLine } from "../utils/text.js";
 import { nowIso, resolveTimeZone } from "../utils/time.js";
 import {
@@ -107,11 +128,13 @@ import {
   isAgentSourceImportMemoryAdd,
   memoryAddImportTrace,
   memoryAddKey,
+  memoryAddQaPair,
   memoryAddTags,
   normalizeMemoryAddCreatedAt,
   titleFromImportTrace,
   toolCallsFromUnknown
 } from "./import/memory-import-pipeline.js";
+import { EpisodeTitleService } from "./episode-title/episode-title-service.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
 import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import {
@@ -141,7 +164,8 @@ import {
   memoryLayersForIntent,
   memoryMatchesTags,
   readableMemoryIdKind,
-  retrievedMemorySourceIds
+  retrievedMemorySourceIds,
+  turnStartMemoryLayers
 } from "./retrieval/retrieval-service.js";
 import {
   SessionTurnService,
@@ -149,6 +173,7 @@ import {
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
 import { SkillTrialResolver } from "./trials/skill-trial-resolver.js";
+import { WorkMemoryPipeline } from "./work-memory/work-memory-pipeline.js";
 import {
   buildSearchQuery,
   sanitizeMemoryAddRequest,
@@ -166,18 +191,6 @@ const serviceLogger = createMemoryLogger("memory-service");
 export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
 
-function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
-  const evolution = config.evolution;
-  return !evolution.provider && !evolution.model && !evolution.endpoint && !evolution.apiKey;
-}
-
-function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
-  return createLlmClient(
-    modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
-    { modelRole }
-  );
-}
-
 export interface MemoryServiceOptions {
   db?: MemoryDb;
   backend?: StorageBackend;
@@ -191,26 +204,17 @@ export interface MemoryServiceOptions {
   llm?: LlmClient;
   skillLlm?: LlmClient;
   embedder?: Embedder;
+  /** Actual HTTP endpoint used by the current server instance. */
+  viewerEndpoint?: string;
+  fetchAppMemoryBudget?: (signal?: AbortSignal) => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  tokenUsage?: Pick<
+    HttpByokTokenUsageRecorderOptions,
+    "fetchImpl" | "runtimeConfig" | "runtimeConfigPath" | "timeoutMs" | "retryDelaysMs" | "continueDelayMs"
+  >;
 }
 
-export interface CompleteTurnResponse {
-  turnId: string;
-  sessionId: string;
-  episodeId: string;
-  rawTurnId: string;
-  userMemoryId: string;
-  userMemoryIds: string[];
-  l1MemoryId: string;
-  l1MemoryIds: string[];
-  closedEpisodeIds: string[];
-  scheduledEvolution: boolean;
-  jobs: JobRef[];
-  changeSeq: number;
-  syncCursor: string;
-  etag: string;
-  serverTime: string;
-  duplicate?: boolean;
-}
+export type CompleteTurnResponse = TurnCompletionResult;
+
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 interface DecisionRepairSummary {
@@ -244,12 +248,17 @@ function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
   return options.db;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 export class MemoryService {
   private readonly embeddingJobs: EmbeddingJobProcessor;
   private readonly evolutionJobs: EvolutionJobProcessor;
   private readonly feedbackExperience: FeedbackExperienceService;
   private readonly skillTrials: SkillTrialResolver;
   private readonly episodeReadModel: EpisodeReadModel;
+  private readonly episodeTitle: EpisodeTitleService;
   private readonly importJobs: ImportJobProcessor;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
@@ -259,6 +268,7 @@ export class MemoryService {
   private readonly skillReadModel: SkillReadModel;
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
+  private readonly workMemory: WorkMemoryPipeline;
   private readonly repos: Repositories;
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
@@ -268,20 +278,72 @@ export class MemoryService {
   private skillLlm: LlmClient;
   private embedder: Embedder;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
+  private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
+  private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
+  private readonly fetchAppMemoryBudgetFn: (signal?: AbortSignal) => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
+  private readonly budgetAbort = new AbortController();
+  private appBudgetReconcile: {
+    succeeded: boolean;
+    inFlight?: Promise<boolean>;
+    nextAttemptAtMs: number;
+    backoffMs: number;
+    settledListener?: () => void;
+  } = {
+    succeeded: false,
+    nextAttemptAtMs: 0,
+    backoffMs: 1_000
+  };
+  private persistRecoveredListener?: () => void;
+  private closing = false;
+  private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
+    this.viewerEndpoint = options.viewerEndpoint;
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
     this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
+    this.tokenBudgetLedger = new MemoryTokenBudgetLedger(
+      this.repos.runtime,
+      () => new Date(),
+      this.config.tokenBudget
+    );
+    this.tokenUsageRecorder = new HttpByokTokenUsageRecorder({
+      ...options.tokenUsage,
+      outbox: new TokenUsageOutbox(this.repos.db),
+      transaction: (fn) => this.repos.transaction(fn),
+      onBudgetedUsage: (event) => this.recordBudgetedUsage(event),
+      touchBudget: () => this.tokenBudgetLedger.touch(),
+      onPersistRecovered: () => this.persistRecoveredListener?.()
+    });
+    this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget
+      ?? ((signal) => fetchAppMemoryBudget({ signal }));
+    this.startAppBudgetReconcile();
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
     this.embedder = this.modelTasks.embedder();
+    const serviceOwner = this;
+    this.workMemory = new WorkMemoryPipeline({
+      repos: this.repos,
+      get llm() { return serviceOwner.llm; },
+      get embedder() { return serviceOwner.embedder; },
+      get embedAfterCapture() { return serviceOwner.config.algorithm.capture.embedAfterCapture; },
+      nowIso
+    });
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
       repos: this.repos,
-      get llm() { return projectEnvironmentOwner.skillLlm; }
+      get llm() { return projectEnvironmentOwner.skillLlm; },
+      get language() { return projectEnvironmentOwner.config.language; }
+    });
+    const episodeTitleOwner = this;
+    this.episodeTitle = new EpisodeTitleService({
+      repos: this.repos,
+      get llm() { return episodeTitleOwner.llm; },
+      get language() { return episodeTitleOwner.config.language; },
+      nowIso,
+      namespaceIdFromSession
     });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
@@ -305,17 +367,31 @@ export class MemoryService {
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
           updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
+          assignSkillCluster: (job) => this.evolutionJobs.assignSkillCluster(job),
+          evolveSkillCluster: (job) => this.evolutionJobs.evolveSkillCluster(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
         feedback: {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
           reflectTrace: (job) => this.evolutionJobs.reflectTrace(job),
-          resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job)
+          resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job),
+          createDecisionRepair: (job) => this.createRevisionDecisionRepairFromJob(job),
+          synthesizeDecisionRepair: (job) => this.feedbackExperience.processDecisionRepairJob(job),
+          refineFeedbackExperience: (job) => this.feedbackExperience.processFeedbackExperienceJob(job)
         },
         embedding: {
           embedMemory: this.embedMemory.bind(this),
           embedUserMemory: (job) => this.embeddingJobs.embedUserMemory(job)
+        },
+        workMemory: {
+          extract: (job) => this.workMemory.extract(job),
+          flushIdle: (job) => {
+            this.workMemory.flushIdle(job);
+          }
+        },
+        episodeTitle: {
+          generate: (job) => this.episodeTitle.generate(job)
         }
       }
     });
@@ -338,7 +414,8 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
+      repairEvidenceValueDiff: sessionRepairEvidenceValueDiff,
+      queryVector: this.queryVector.bind(this)
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -373,7 +450,8 @@ export class MemoryService {
       readOnlyCursor: this.readOnlyCursor.bind(this),
       findExistingSkillForPolicy: this.evolutionJobs.findExistingSkillForPolicy.bind(this.evolutionJobs),
       upsertEvolutionMemory: this.evolutionJobs.upsertEvolutionMemory.bind(this.evolutionJobs),
-      pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials)
+      pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
+      shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm()
     });
     const importJobOwner = this;
     this.importJobs = new ImportJobProcessor({
@@ -389,6 +467,9 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       normalizeMemoryAddCreatedAt,
       memoryAddImportTrace,
+      memoryAddQaPair,
+      memoryCaptureQaHash,
+      normalizeMemoryCaptureSource,
       isAgentSourceImportMemoryAdd,
       titleFromImportTrace,
       memoryAddTags,
@@ -403,6 +484,7 @@ export class MemoryService {
       recordApiLog: (operation, request, result, latencyMs, success, at, agentId) =>
         recordApiLog(this.repos.runtime, operation, request, result, latencyMs, success, at, agentId),
       memories: this.repos.memories,
+      captureClaims: this.repos.captureClaims,
       processing: this.repos.processing,
       runtime: this.repos.runtime
     });
@@ -428,6 +510,12 @@ export class MemoryService {
       get capture() { return workerRunnerOwner.config.algorithm.capture; },
       embeddingRetryWorkerId: this.embeddingRetryWorkerId,
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
+      memoryBudgetPaused: () => this.isMemoryBudgetPaused(),
+      memoryBudgetJobConsumes: (jobType) => this.memoryBudgetJobConsumes(jobType),
+      memoryBudgetModelSources: () => this.budgetModelSources(),
+      memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
+      memoryBudgetNextReconcileAtMs: () => this.nextAppBudgetReconcileAtMs(),
+      summaryModelConfigured: () => workerRunnerOwner.llm.isConfigured(),
       nowIso,
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       namespaceIdFromMemory,
@@ -576,8 +664,12 @@ export class MemoryService {
         useLlm: this.config.algorithm.feedback.useLlm,
         llm: this.skillLlm
       }),
+      shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm(),
       firstLine,
       memoryLayersForIntent,
+      turnStartMemoryLayers,
+      armWorkMemoryIdleFlush: this.armWorkMemoryIdleFlush.bind(this),
+      extractUnextractedWorkMemory: this.extractUnextractedWorkMemory.bind(this),
       namespaceIdFromContext,
       namespaceIdFromMemory,
       namespaceIdFromSession,
@@ -592,6 +684,162 @@ export class MemoryService {
       withDuplicateFlag
     });
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
+    this.tokenUsageRecorder.start();
+  }
+
+  stopTokenUsageDelivery(): void {
+    this.tokenUsageRecorder.stop();
+  }
+
+  async stop(): Promise<void> {
+    if (this.closing) {
+      return;
+    }
+    this.closing = true;
+    this.tokenUsageRecorder.stop();
+    this.budgetAbort.abort();
+  }
+
+  private createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
+    return createLlmClient(
+      modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
+      {
+        modelRole,
+        usageRecorder: this.tokenUsageRecorder
+      }
+    );
+  }
+
+  private recordBudgetedUsage(event: MemoryModelUsageEvent): void {
+    this.tokenBudgetLedger.addIfBudgeted({
+      kind: event.kind,
+      operation: event.operation,
+      totalTokens: event.usage.totalTokens
+    });
+  }
+
+  private budgetModelSources(): MemoryBudgetModelSources {
+    return {
+      memory_summary: {
+        source: this.config.summary.actualModelContext?.source
+      },
+      memory_evolution: {
+        source: resolveEvolutionConfig(this.config).actualModelContext?.source
+      },
+      embedding: {
+        source: this.config.embedding.actualModelContext?.source,
+        mode: this.config.embedding.mode
+      }
+    };
+  }
+
+  private memoryBudgetJobConsumes(jobType: string): boolean {
+    return jobTypeConsumesMemoryBudget(jobType, this.budgetModelSources());
+  }
+
+  private shouldDeferBudgetedEvolutionLlm(): boolean {
+    return this.isMemoryBudgetPaused() && this.memoryBudgetJobConsumes("decision_repair");
+  }
+
+  isMemoryBudgetPaused(): boolean {
+    return this.tokenBudgetLedger.snapshot().paused || this.tokenUsageRecorder.isPersistUnreliable();
+  }
+
+  private startAppBudgetReconcile(): void {
+    if (this.closing) {
+      return;
+    }
+    void this.reconcileMemoryTokenBudgetFromApp().catch((error) => {
+      if (this.closing) {
+        serviceLogger.warn("token_budget.reconcile_abandoned", memoryErrorFields(error));
+        return;
+      }
+      serviceLogger.error("token_budget.reconcile_failed", memoryErrorFields(error));
+    });
+  }
+
+  private async reconcileMemoryTokenBudgetFromApp(): Promise<boolean> {
+    if (this.closing) {
+      return false;
+    }
+    if (this.appBudgetReconcile.inFlight) {
+      return this.appBudgetReconcile.inFlight;
+    }
+    this.appBudgetReconcile.inFlight = this.performAppBudgetReconcile().finally(() => {
+      this.appBudgetReconcile.inFlight = undefined;
+    });
+    return this.appBudgetReconcile.inFlight;
+  }
+
+  private async performAppBudgetReconcile(): Promise<boolean> {
+    try {
+      if (this.closing) {
+        return false;
+      }
+      let remote: { dailyUsed: number; lifetimeUsed: number } | null;
+      try {
+        remote = await this.fetchAppMemoryBudgetFn(this.budgetAbort.signal);
+      } catch (error) {
+        if (this.closing || isAbortError(error)) {
+          return false;
+        }
+        serviceLogger.error("token_budget.reconcile_failed", memoryErrorFields(error));
+        this.appBudgetReconcile.nextAttemptAtMs = Date.now() + this.appBudgetReconcile.backoffMs;
+        this.appBudgetReconcile.backoffMs = Math.min(this.appBudgetReconcile.backoffMs * 2, 30_000);
+        return false;
+      }
+      if (this.closing) {
+        return false;
+      }
+      if (!remote) {
+        this.appBudgetReconcile.nextAttemptAtMs = Date.now() + this.appBudgetReconcile.backoffMs;
+        this.appBudgetReconcile.backoffMs = Math.min(this.appBudgetReconcile.backoffMs * 2, 30_000);
+        return false;
+      }
+      this.tokenBudgetLedger.reconcile(remote);
+      this.appBudgetReconcile.succeeded = true;
+      this.appBudgetReconcile.backoffMs = 1_000;
+      return true;
+    } finally {
+      if (!this.closing) {
+        this.appBudgetReconcile.settledListener?.();
+      }
+    }
+  }
+
+  setAppBudgetReconcileListener(listener?: () => void): void {
+    this.appBudgetReconcile.settledListener = listener;
+  }
+
+  setPersistRecoveredListener(listener?: () => void): void {
+    this.persistRecoveredListener = listener;
+  }
+
+  private nextAppBudgetReconcileAtMs(): number | undefined {
+    if (this.closing || this.appBudgetReconcile.succeeded || this.appBudgetReconcile.nextAttemptAtMs <= 0) {
+      return undefined;
+    }
+    return this.appBudgetReconcile.nextAttemptAtMs;
+  }
+
+  private async ensureAppBudgetReconciled(waitMs = 1_500): Promise<void> {
+    if (this.closing || this.appBudgetReconcile.succeeded) {
+      return;
+    }
+    if (this.appBudgetReconcile.inFlight) {
+      await Promise.race([
+        this.appBudgetReconcile.inFlight,
+        new Promise((resolve) => setTimeout(resolve, waitMs))
+      ]);
+      return;
+    }
+    if (Date.now() < this.appBudgetReconcile.nextAttemptAtMs) {
+      return;
+    }
+    await Promise.race([
+      this.reconcileMemoryTokenBudgetFromApp(),
+      new Promise((resolve) => setTimeout(resolve, waitMs))
+    ]);
   }
 
   private resolveModelTaskContext(): MemoryModelTaskContext {
@@ -601,14 +849,12 @@ export class MemoryService {
         : this.config
     );
     const summary = this.options.llm
-      ?? createConfiguredMemoryLlm(taskConfig, "memory_summary");
+      ?? this.createConfiguredMemoryLlm(taskConfig, "memory_summary");
     const evolution = this.options.skillLlm
-      ?? (
-        this.options.llm && evolutionUsesSharedLlm(taskConfig)
-          ? this.options.llm
-          : createConfiguredMemoryLlm(taskConfig, "memory_evolution")
-      );
-    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding);
+      ?? this.createConfiguredMemoryLlm(taskConfig, "memory_evolution");
+    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding, {
+      usageRecorder: this.tokenUsageRecorder
+    });
     freezeModelSelectionConfig(taskConfig);
     return {
       config: taskConfig,
@@ -641,15 +887,37 @@ export class MemoryService {
   }
 
   private turnStartRetrievalLimit(): number {
+    // Turn-start retrieval never queries L3, so tier3TopK does not contribute to its limit.
     const retrieval = this.config.algorithm.retrieval;
-    return Math.max(1, retrieval.tier1TopK + retrieval.tier2TopK + retrieval.tier3TopK);
+    return Math.max(1, retrieval.tier1TopK + retrieval.tier2TopK);
+  }
+
+  /** Set after the HTTP server binds, including when an ephemeral port is used. */
+  setViewerEndpoint(endpoint: string): void {
+    this.viewerEndpoint = endpoint;
   }
 
   health(routes: string[] = []): HealthResponse {
     const schema = this.schemaVersion();
     const backend = this.storageCapabilities();
+    const summary = {
+      ...this.llm.status(),
+      routing: this.config.roleRouting.summary
+    };
+    const evolution = {
+      ...this.skillLlm.status(),
+      routing: this.config.roleRouting.evolution
+    };
+    const embedding = {
+      ...this.embedder.status(),
+      mode: this.config.embedding.mode
+    };
     return {
-      ok: true,
+      ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
+      serviceVersion: PROJECT_VERSION,
+      protocolVersion: MEMORY_PROTOCOL_VERSION,
+      viewerVersion: MEMORY_VIEWER_VERSION,
+      viewerUrl: viewerUrlFromEndpoint(this.viewerEndpoint ?? this.config.storage.endpoint),
       version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
@@ -660,18 +928,9 @@ export class MemoryService {
         lastMigrationId: schema.lastMigrationId
       },
       models: {
-        summary: {
-          ...this.llm.status(),
-          routing: this.config.roleRouting.summary
-        },
-        evolution: {
-          ...this.skillLlm.status(),
-          routing: this.config.roleRouting.evolution
-        },
-        embedding: {
-          ...this.embedder.status(),
-          mode: this.config.embedding.mode
-        }
+        summary,
+        evolution,
+        embedding
       },
       capabilities: {
         routes,
@@ -689,7 +948,8 @@ export class MemoryService {
           "panel.items"
         ],
         memoryLayers: ["L1", "L2", "L3", "Skill"],
-        supportsCli: true
+        supportsCli: true,
+        service: [...MEMORY_CAPABILITIES]
       },
       ...(backend.backendId === "sqlite-local" && schema.version >= 6
         ? {
@@ -702,6 +962,35 @@ export class MemoryService {
     };
   }
 
+  async testModels(): Promise<{
+    ok: boolean;
+    checkedAt: string;
+    models: {
+      summary: ModelProbeResult;
+      evolution: ModelProbeResult;
+      embedding: ModelProbeResult;
+    };
+  }> {
+    const summaryProbe = probeLlm(this.llm, "viewer.model-test.summary");
+    const evolutionProbe = this.skillLlm === this.llm
+      ? summaryProbe.then((result) => ({ ...result }))
+      : probeLlm(this.skillLlm, "viewer.model-test.evolution");
+    const [summary, evolution, embedding] = await Promise.all([
+      summaryProbe,
+      evolutionProbe,
+      probeEmbedding(this.embedder)
+    ]);
+    return {
+      ok: summary.ok && evolution.ok && embedding.ok,
+      checkedAt: nowIso(),
+      models: { summary, evolution, embedding }
+    };
+  }
+
+  hubRecords(limit = 200): Array<{ key: string; value: unknown; updatedAt: string }> {
+    return this.repos.runtime.listKv("legacy_hub:", limit);
+  }
+
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
     const previousConfig = this.config;
     const loader = this.options.configLoader ?? loadMemmyConfig;
@@ -711,6 +1000,10 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
+    this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
+    this.appBudgetReconcile.succeeded = false;
+    this.appBudgetReconcile.nextAttemptAtMs = 0;
+    this.startAppBudgetReconcile();
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
@@ -903,6 +1196,16 @@ export class MemoryService {
     return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
   }
 
+  /** Arm the Work Memory idle flush for a Session inside the caller's transaction. */
+  private armWorkMemoryIdleFlush(sessionId: string, at: string): void {
+    this.workMemory.armIdleFlush(sessionId, at);
+  }
+
+  /** Extract unextracted Work Memory for a Session inside the caller's transaction. */
+  private extractUnextractedWorkMemory(sessionId: string, throughTraceSeq: number, at: string): void {
+    this.workMemory.extractUnextracted(sessionId, throughTraceSeq, at);
+  }
+
   l3WorldModelTraceHead(
     sessionId: string,
     request: L3WorldModelRequestEnvelope
@@ -923,10 +1226,14 @@ export class MemoryService {
     if (!this.repos.l3WorldModels.inputTraceByL1MemoryId(sessionId, request.throughL1MemoryId)) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered for this Session");
     }
-    const result = this.repos.l3WorldModels.freezeBatches({
+    const result = this.repos.l3WorldModels.freezeBatchesWithCallback({
       sessionId,
       trigger: request.trigger,
       throughL1MemoryId: request.throughL1MemoryId
+    }, (frozen) => {
+      if (request.trigger === "token_compaction" && frozen.throughTraceSeq) {
+        this.workMemory.extractUnextracted(sessionId, frozen.throughTraceSeq, nowIso());
+      }
     });
     if (!result.throughTraceSeq) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered");
@@ -1001,6 +1308,35 @@ export class MemoryService {
     serverTime: string;
   }> {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+  }
+
+  completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
+    // Native scans have no Hook envelope. Use the configured owner only when
+    // the request (including authenticated scope) did not provide one.
+    const response = this.sessionTurns.completeSourceTurn(this.withTimeZone({
+      ...request,
+      namespace: {
+        source: request.sourceTurn?.source,
+        profileId: request.sourceTurn?.profileId,
+        sessionKey: request.sourceTurn?.conversationId,
+        ...request.namespace,
+        userId: request.namespace?.userId ?? this.config.userId
+      }
+    }));
+    serviceLogger.info("source_turn.complete", {
+      source: request.sourceTurn?.source,
+      profileId: request.sourceTurn?.profileId,
+      conversationId: request.sourceTurn?.conversationId,
+      turnId: request.sourceTurn?.turnId,
+      channel: request.channel,
+      status: response.status,
+      reason: response.reason,
+      sessionId: response.result?.sessionId,
+      episodeId: response.result?.episodeId,
+      rawTurnId: response.result?.rawTurnId,
+      l1MemoryIds: response.result?.l1MemoryIds
+    });
+    return response;
   }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
@@ -1108,6 +1444,7 @@ export class MemoryService {
     multiChannelBypass: boolean;
     skillInjectionMode: "summary" | "full";
     skillSummaryChars: number;
+    skillFullMaxChars: number;
     decayHalfLifeDays: number;
     domain: "" | "research";
     readOnlyInjectionProfile: "all" | "experience" | "skill" | "skill_experience";
@@ -1125,6 +1462,7 @@ export class MemoryService {
     tags: string[];
     createdAt: string;
     serverTime: string;
+    duplicate?: boolean;
   } {
     return this.importJobs.addMemory(this.withTimeZone(request));
   }
@@ -1241,6 +1579,39 @@ export class MemoryService {
     return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
   }
 
+  private async createRevisionDecisionRepairFromJob(job: EvolutionJobRecord): Promise<void> {
+    const feedbackId = typeof job.payload.feedbackId === "string" ? job.payload.feedbackId : undefined;
+    const contextHash = typeof job.payload.contextHash === "string" ? job.payload.contextHash : undefined;
+    if (!feedbackId || !contextHash) return;
+    const feedback = this.repos.runtime.getFeedback(feedbackId);
+    const session = job.sessionId ? this.repos.runtime.getSession(job.sessionId) : undefined;
+    const queuedNamespace = isRecord(job.payload.namespace) ? job.payload.namespace : undefined;
+    const namespace = session
+      ? namespaceForSession(session)
+      : queuedNamespace && typeof queuedNamespace.source === "string" && typeof queuedNamespace.profileId === "string"
+        ? { ...queuedNamespace, source: queuedNamespace.source, profileId: queuedNamespace.profileId }
+        : undefined;
+    if (!feedback || !namespace) return;
+    const request: FeedbackRequest = {
+      sessionId: feedback.sessionId,
+      episodeId: feedback.episodeId,
+      l1MemoryId: feedback.l1MemoryId,
+      rawTurnId: feedback.rawTurnId,
+      channel: feedback.channel,
+      polarity: feedback.polarity,
+      magnitude: feedback.magnitude,
+      rationale: feedback.rationale,
+      rawPayload: feedback.rawPayload,
+      namespace
+    };
+    await this.feedbackExperience.createRevisionDecisionRepair(
+      request,
+      feedback,
+      contextHash,
+      namespaceIdFromContext(namespace)
+    );
+  }
+
   exportBundle(request: MemoryExportRequest = {}): {
     schemaVersion: number;
     exportedAt: string;
@@ -1290,6 +1661,17 @@ export class MemoryService {
         tables: Object.keys(tables)
       },
       tables,
+      serverTime: nowIso()
+    };
+  }
+
+  clearAllData(): { ok: true; cleared: Record<string, number>; clearedAt: string; serverTime: string } {
+    this.assertMemoryAddEnabled();
+    const clearedAt = nowIso();
+    return {
+      ok: true,
+      cleared: this.repos.clearAllMemoryData(),
+      clearedAt,
       serverTime: nowIso()
     };
   }
@@ -1890,7 +2272,7 @@ export class MemoryService {
     return this.panelReadModel.panelItems(this.withTimeZone(input));
   }
 
-  panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
+  panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
     tasks: Array<{
       id: string;
       episode: Record<string, unknown>;
@@ -1965,6 +2347,84 @@ export class MemoryService {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
   }
 
+  rebuildEmbeddings(): {
+    accepted: true;
+    enqueued: number;
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    const at = nowIso();
+    let offset = 0;
+    let enqueued = 0;
+    for (;;) {
+      const memories = this.repos.memories.list({}, 250, offset);
+      for (const memory of memories) {
+        this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
+        enqueued += 1;
+      }
+      if (memories.length < 250) break;
+      offset += memories.length;
+    }
+    const userId = this.config.userId?.trim() || "local-user";
+    offset = 0;
+    for (;;) {
+      const userMemories = this.repos.userMemories.listForPanel({
+        userId,
+        status: "active",
+        limit: 250,
+        offset
+      });
+      for (const memory of userMemories) {
+        this.workerHandlers.enqueueJob({
+          jobType: "user_memory_embedding",
+          userId: memory.userId,
+          targetMemoryId: memory.id,
+          payload: { contentHash: stableHash(memory.content) },
+          maxAttempts: 6,
+          createdAt: at
+        });
+        enqueued += 1;
+      }
+      if (userMemories.length < 250) break;
+      offset += userMemories.length;
+    }
+    return { accepted: true, enqueued, serverTime: at };
+  }
+
+  embeddingMaintenanceStats(): {
+    dimension: number;
+    available: boolean;
+    totalSlots: number;
+    ready: number;
+    missing: number;
+    dimMismatch: number;
+    needsRepair: number;
+  } {
+    const userId = this.config.userId?.trim() || "local-user";
+    const regular = this.repos.vectors.maintenanceDimensionCounts();
+    const user = this.repos.userMemories.embeddingDimensionCounts(userId);
+    const dimensions = new Map<number, number>();
+    for (const row of [...regular.dimensions, ...user.dimensions]) {
+      if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
+    }
+    const [dimension = 0] = [...dimensions.entries()]
+      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
+    const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
+    const totalSlots = regular.totalSlots + user.totalSlots;
+    const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
+    const missing = Math.max(0, totalSlots - stored);
+    const dimMismatch = Math.max(0, stored - ready);
+    return {
+      dimension,
+      available: this.embedder.status().configured,
+      totalSlots,
+      ready,
+      missing,
+      dimMismatch,
+      needsRepair: missing + dimMismatch
+    };
+  }
+
   private restartFailedProcessing(at: string, limit = 10000): number {
     return this.importJobs.restartFailedProcessing(at, limit);
   }
@@ -1981,17 +2441,30 @@ export class MemoryService {
     return this.workerRunner.nextWorkerRunAt();
   }
 
+  memoryTokenBudgetSnapshot() {
+    return this.tokenBudgetLedger.snapshot();
+  }
+
+  memoryTokenBudget() {
+    const snapshot = this.tokenBudgetLedger.snapshot();
+    return {
+      ...snapshot,
+      nextLocalMidnightAt: new Date(this.tokenBudgetLedger.nextWakeAtMs()).toISOString()
+    };
+  }
+
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
     return this.workerRunner.reconcileWorkerStartup(limit);
   }
 
-  runWorkerOnce(
+  async runWorkerOnce(
     limit = 100,
     request: RequestEnvelope & {
       targetMemoryIds?: string[];
       priorityCohortOnly?: boolean;
     } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
+    await this.ensureAppBudgetReconciled();
     return this.workerRunner.runWorkerOnce(limit, request);
   }
 
@@ -2185,10 +2658,8 @@ export class MemoryService {
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
     const contextHints = turnStartContextHints(request);
-    const defaultLayers: MemoryLayer[] = ["Skill", "L2", "L1", "L3"];
-    const requestedLayers = request.layers === undefined
-      ? defaultLayers
-      : defaultLayers.filter((layer) => request.layers?.includes(layer));
+    const defaultLayers: MemoryLayer[] = ["Skill", "L2", "L1"];
+    const requestedLayers = turnStartMemoryLayers(defaultLayers, request.layers);
     const search = await this.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -2533,9 +3004,12 @@ function sanitizeTraceToolCalls(toolCalls: ToolCallPayload[]): ToolCallPayload[]
   return toolCalls.map((call) => ({
     id: call.id,
     name: call.name,
+    input: call.input,
+    output: call.output,
+    status: call.status,
     success: call.success,
     errorCode: call.errorCode,
-    error: call.error ?? errorMessageFromUnknown(call.output),
+    error: call.error,
     startedAt: call.startedAt,
     endedAt: call.endedAt,
     thinkingBefore: call.thinkingBefore,
@@ -2763,4 +3237,82 @@ function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
       skillMinGain: config.algorithm.skill.minGain
     }
   };
+}
+
+function viewerUrlFromEndpoint(endpoint?: string): string {
+  const base = new URL(endpoint ?? "http://127.0.0.1:18960");
+  base.pathname = "/viewer";
+  base.search = "";
+  base.hash = "";
+  return base.toString().replace(/\/$/, "");
+}
+
+interface ModelProbeResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  latencyMs: number;
+  dimensions?: number;
+  error?: string;
+}
+
+async function probeLlm(client: LlmClient, operation: string): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = client.status();
+  if (!client.isConfigured()) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: 0,
+      error: "model is not configured"
+    };
+  }
+  try {
+    const text = await client.complete(
+      [{ role: "user", content: "Reply with OK." }],
+      { operation, temperature: 0, maxTokens: 8, timeoutMs: 15_000, maxRetries: 0 }
+    );
+    if (!text.trim()) throw new Error("model returned an empty response");
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function probeEmbedding(embedder: Embedder): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = embedder.status();
+  try {
+    const vector = await embedder.embedOne("Memmy model connectivity test", "query");
+    if (vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+      throw new Error("embedding model returned an invalid vector");
+    }
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      dimensions: vector.length
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }

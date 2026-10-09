@@ -219,6 +219,7 @@ export interface AgentState {
   currentSessionsRequestRunStatusVersionByChatId: Record<string, number> | null;
   activeTurnIdByChatId: Record<string, string | null>;
   activeTurnSourceByChatId: Record<string, AgentTurnSource | null>;
+  transcriptOffsetByChatId: Record<string, number>;
   closedTurnIdsByChatId: Record<string, Record<string, "stopped" | "ended">>;
   optimisticSendingByChatId: Record<string, boolean>;
   deliveryUncertainByChatId: Record<string, boolean>;
@@ -380,6 +381,7 @@ export const initialAgentState: AgentState = {
   currentSessionsRequestRunStatusVersionByChatId: null,
   activeTurnIdByChatId: {},
   activeTurnSourceByChatId: {},
+  transcriptOffsetByChatId: {},
   closedTurnIdsByChatId: {},
   optimisticSendingByChatId: {},
   deliveryUncertainByChatId: {},
@@ -1769,6 +1771,10 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
     currentSessionKey: thread.sessionKey,
     messages,
     historyVersionByChatId,
+    // A full rebuild re-bases the stream watermark: the transcript file can be
+    // recreated (delete + restore reuses an ext_ chatId), and a stale watermark
+    // would silently swallow the new session's stream. See completeHistoryHydrateLoad.
+    transcriptOffsetByChatId: clearChatMapValue(state.transcriptOffsetByChatId, chatId),
     pendingCanonicalHydrateByChatId,
     currentHistoryRequestIdByChatId,
     currentHistoryHydrateRequestIdByChatId,
@@ -1849,6 +1855,8 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
     ...state,
     messagesByChatId,
     historyVersionByChatId,
+    // See completeHistoryLoad: a full thread rebuild re-bases the watermark.
+    transcriptOffsetByChatId: clearChatMapValue(state.transcriptOffsetByChatId, chatId),
     pendingCanonicalHydrateByChatId,
     currentHistoryHydrateRequestIdByChatId,
     ...(chatId === state.currentChatId && !state.blankDraftActive
@@ -2137,6 +2145,33 @@ function clearChatMapValue<T>(values: Record<string, T>, chatId: string): Record
   const next = { ...values };
   delete next[chatId];
   return next;
+}
+
+/**
+ * Streaming content reaches the client over two independent paths — the live
+ * in-memory push and the transcript-file replay — so the same chunk can arrive
+ * twice. Both carry one transcript_offset, so anything at or below the applied
+ * watermark is a re-delivery and is dropped.
+ *
+ * A missing offset means the record never reached disk; that path cannot be
+ * replayed, so the chunk is applied rather than risk losing content.
+ */
+const OFFSET_GUARDED_EVENTS = new Set(["delta", "reasoning_delta", "stream_end"]);
+
+function applyTranscriptOffset(
+  state: AgentState,
+  chatId: string,
+  event: MemmyAgentWsEvent
+): AgentState | null {
+  if (!OFFSET_GUARDED_EVENTS.has(event.event)) return state;
+  const offset = event.transcript_offset;
+  if (typeof offset !== "number" || !Number.isFinite(offset)) return state;
+  const applied = state.transcriptOffsetByChatId[chatId];
+  if (applied != null && offset <= applied) return null;
+  return {
+    ...state,
+    transcriptOffsetByChatId: { ...state.transcriptOffsetByChatId, [chatId]: offset },
+  };
 }
 
 function clearPendingModelCommit(state: AgentState, clientRequestId: string): AgentState {
@@ -2766,6 +2801,11 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
   if (!chatId) {
     return state;
   }
+  const offsetApplied = applyTranscriptOffset(state, chatId, event);
+  if (offsetApplied === null) {
+    return state;
+  }
+  state = offsetApplied;
   const suppressing = state.suppressAssistantStreamUntilTurnEndByChatId[chatId] === true;
   const turnId = eventTurnId(event);
   if (turnId && isClosedTurn(state, chatId, turnId) && !isCancellationTerminalFileEditEvent(event)) {
@@ -2916,11 +2956,6 @@ function mediaRejectedMessageKey(reason: string | undefined): string {
     case "mime":
     case "deprecated_payload":
       return "home.media.error.sendUnsupported";
-    case "size":
-      return "home.media.error.sendFileSize";
-    case "too_many_images":
-    case "too_many_attachments":
-      return "home.media.error.sendTooManyAttachments";
     case "decode":
     case "malformed":
       return "home.media.error.sendReadFailed";
@@ -3408,18 +3443,7 @@ function finishRetryWaitStatusForTurn(state: AgentState, chatId: string, turnId:
     return state;
   }
 
-  const nextState = {
-    ...state,
-    retryWaitStatusByChatId: {
-      ...state.retryWaitStatusByChatId,
-      [chatId]: {
-        ...status,
-        isRunning: false,
-        updatedAt: Date.now()
-      }
-    }
-  };
-  return chatId === state.currentChatId ? syncCurrentMessages(nextState) : nextState;
+  return clearRetryWaitStatusForChat(state, chatId);
 }
 
 function toolProgressFallbackLine(event: MemmyAgentWsEvent): string {

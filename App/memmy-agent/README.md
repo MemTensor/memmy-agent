@@ -30,12 +30,20 @@ memmy --help
 memmy --version
 ```
 
-### Initialize Configuration
+### Configure Memmy
 
-Run onboarding once to create the configuration file and workspace:
+Run the interactive onboarding wizard to configure models, providers, tools,
+and API settings:
 
 ```bash
 memmy onboard
+```
+
+To create or refresh the configuration file and workspace with defaults
+instead, use the non-interactive mode:
+
+```bash
+memmy onboard --defaults
 ```
 
 The default locations are:
@@ -46,7 +54,7 @@ The default locations are:
 Override either location with command-line options:
 
 ```bash
-memmy onboard \
+memmy onboard --defaults \
   --config /path/to/config.yaml \
   --workspace /path/to/workspace
 ```
@@ -56,13 +64,6 @@ The same defaults can be overridden with environment variables:
 ```bash
 MEMMY_CONFIG=/path/to/config.yaml memmy status
 MEMMY_AGENT_WORKSPACE=/path/to/workspace memmy status
-```
-
-Use the interactive wizard to configure models, providers, tools, and API
-settings:
-
-```bash
-memmy onboard --wizard
 ```
 
 Onboarding only writes configuration and initializes the workspace. It does not
@@ -187,8 +188,8 @@ memmy config set app.userId <user-id>
 | Task                             | Command                                                   |
 | -------------------------------- | --------------------------------------------------------- |
 | Show help                        | `memmy --help`                                            |
-| Initialize                       | `memmy onboard`                                           |
-| Run the interactive wizard       | `memmy onboard --wizard`                                  |
+| Run the interactive wizard       | `memmy onboard`                                           |
+| Initialize with defaults         | `memmy onboard --defaults`                                |
 | Inspect status                   | `memmy status`                                            |
 | Start interactive chat           | `memmy`                                                   |
 | Send one message                 | `memmy agent --message "..."`                             |
@@ -221,7 +222,7 @@ Use the compiled CLI:
 ```bash
 node dist/main.js --help
 node dist/main.js onboard
-node dist/main.js onboard --wizard
+node dist/main.js onboard --defaults
 node dist/main.js
 node dist/main.js agent --message "Summarize the current workspace"
 node dist/main.js serve

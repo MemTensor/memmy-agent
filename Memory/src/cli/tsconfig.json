@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
-    "rootDir": ".",
+    "rootDir": "..",
     "outDir": "dist/build",
     "declaration": false,
     "sourceMap": false,
@@ -20,6 +20,9 @@
   "include": [
     "*.ts",
     "render/**/*.ts",
-    "skill-writer/**/*.ts"
+    "skill-writer/**/*.ts",
+    "../config/writer.ts",
+    "../contracts/desktop-runtime-manifest.ts",
+    "../version.ts"
   ]
 }

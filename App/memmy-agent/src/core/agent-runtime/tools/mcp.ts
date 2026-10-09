@@ -14,9 +14,18 @@ import {
 } from "../../runtime-messages/events.js";
 import { loadConfig, resolveConfigEnvVars } from "../../../config/loader.js";
 import { VERSION } from "../../../version.js";
-import { Tool } from "./base.js";
+import { Tool, type ToolExecutionContext } from "./base.js";
+import { RequestContext, RequestContextStore } from "./context.js";
+import { MacPermissionPreflight, nativePermissionDoctor, type PermissionPreflight } from "../../../tools/computer-use/mac-permission-preflight.js";
+import { probeNativePermissions, guideNativePermissions } from "../../../tools/computer-use/native-permission-probe.js";
+import { stopOwnedNativeAgent } from "../../../tools/computer-use/native-agent-lifecycle.js";
 import { ToolRegistry } from "./registry.js";
 import { storeToolImageArtifact } from "../../../utils/artifacts.js";
+import { isManagedOcuConfig, managedOcuEnvironment, openComputerUseEnvironment, resolveOpenComputerUseCommand } from "../../../tools/computer-use/open-computer-use-binary.js";
+
+import { computerUsePermissionError } from "../../../tools/computer-use/mac-permission-settings.js";
+
+import { ManagedOcuSession, OcuBlocked, OcuUncertain } from "../../../tools/computer-use/managed-ocu-session.js";
 
 const TRANSIENT_EXC_NAMES = new Set([
   "ClosedResourceError",
@@ -74,8 +83,12 @@ class SdkClientSession {
     await this.client.close();
   }
 
+  async ping(): Promise<any> {
+    return this.client.ping({ timeout: 3000 });
+  }
+
   async listTools(): Promise<any> {
-    return this.client.listTools();
+    return this.client.listTools({}, { timeout: 15_000 });
   }
 
   async callTool(name: string, args: Record<string, any>, timeout: number): Promise<any> {
@@ -270,14 +283,49 @@ function textFromContentBlock(block: any): string {
   return String(block);
 }
 
-export type McpContentMode = "text" | "structured";
+export type McpContentMode = "text" | "structured" | "auto";
+
+function hasImageContent(content: any[]): boolean {
+  return content.some((block) => block?.type === "image");
+}
+
+function sanitizeStructuredContent(value: any, textContent: string, key = ""): any {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeStructuredContent(item, textContent));
+  }
+  if (!value || typeof value !== "object") {
+    if (
+      typeof value === "string" &&
+      value.length > 1024 &&
+      /(base64|blob|image_data|screenshot_data)/i.test(key)
+    ) {
+      return `[omitted ${value.length} character binary payload]`;
+    }
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([childKey, childValue]) => {
+        return !(
+          childKey === "tree_markdown" &&
+          typeof childValue === "string" &&
+          textContent.includes(childValue)
+        );
+      })
+      .map(([childKey, childValue]) => [
+        childKey,
+        sanitizeStructuredContent(childValue, textContent, childKey),
+      ]),
+  );
+}
 
 export function convertMcpToolContent(
   result: any,
   mode: McpContentMode = "text",
 ): string | Array<Record<string, any>> {
   const content = Array.isArray(result?.content) ? result.content : [];
-  if (mode === "text") {
+  const effectiveMode = mode === "auto" ? (hasImageContent(content) ? "structured" : "text") : mode;
+  if (effectiveMode === "text") {
     return content.map(textFromContentBlock).join("\n") || "(no output)";
   }
   const converted: Array<Record<string, any>> = [];
@@ -310,6 +358,24 @@ export function convertMcpToolContent(
       type: "text",
       text: `[unsupported MCP content: ${String(block?.type ?? typeof block)}]`,
     });
+  }
+  if (result?.structuredContent != null) {
+    try {
+      const textContent = content
+        .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+        .map((block: any) => block.text)
+        .join("\n");
+      const structured = sanitizeStructuredContent(result.structuredContent, textContent);
+      converted.push({
+        type: "text",
+        text: `[structuredContent]\n${JSON.stringify(structured)}`,
+      });
+    } catch (error) {
+      converted.push({
+        type: "text",
+        text: `[structured MCP content unavailable: ${error instanceof Error ? error.message : "invalid content"}]`,
+      });
+    }
   }
   return converted.length ? converted : [{ type: "text", text: "(no output)" }];
 }
@@ -356,18 +422,35 @@ export async function connectInMemoryMcpServer(server: any): Promise<InMemoryMcp
   };
 }
 
+function ocuPermissionMessage(status: PermissionPreflight): string {
+  if (status.state === 'unknown' && status.reason === 'helperPauseFailed') return '未能安全暂停当前 Open Computer Use 辅助程序，本次操作未执行，未打开授权设置。请关闭正在使用它的其他任务后重新发送消息。';
+  if (status.state === 'unknown' && status.reason === 'desktopUnavailable') return '请返回 Memmy 的可见聊天窗口后重新发送消息，以便检查 Open Computer Use 的权限。本次应用操作未执行。';
+  if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' && (status.state === 'missing' || (status.state === 'unknown' && status.reason === 'screenCaptureUnavailable'))) return '电脑操作已暂停，尚未完成权限设置。你可以重新发送消息，在授权面板中完成设置后点击“继续任务”。';
+  if (status.state === 'unknown' && status.reason === 'screenCaptureUnavailable') return 'Open Computer Use 已能读取 Memmy 界面，但未取得截图，本次应用操作未执行。辅助程序已暂停，请在 Memmy 的引导框点击“打开系统设置”，检查 Open Computer Use 的屏幕录制权限。完成后重新发送消息，Memmy 会启动当前辅助程序并重新检查。';
+  if (status.state !== 'missing') return '无法确认 Open Computer Use 的系统权限或连接状态，本次应用操作未执行。请检查辅助程序后重新发送消息。';
+  const permissions = status.missingPermissions ?? [status.permission];
+  const labels = permissions.map(p => p === 'screenRecording' ? '屏幕录制' : p === 'inputMonitoring' ? '输入监控' : '辅助功能');
+  const settings = labels.map(label => `系统设置 → 隐私与安全性 → ${label === '屏幕录制' ? '屏幕与系统音频录制（屏幕录制）' : label}`).join('\n');
+  const guide = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' ? '请在 Memmy 的引导框点击“打开系统设置”。' : '请在 Open Computer Use 授权窗口完成授权。';
+  const restart = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1' ? '辅助程序已暂停。完成后重新发送消息，Memmy 会启动当前辅助程序并重新检查；本次操作不会自动继续。' : '若系统提示「退出并重新打开」，请重启 Open Computer Use 辅助程序；Memmy 无需退出。完成后重新发送消息，我会重新检查权限。';
+  return `Open Computer Use 缺少 macOS「${labels.join('、')}」权限，本次应用操作未执行。\n\n${guide}若找不到窗口，请打开：\n${settings}\n开启其中的 Open Computer Use。\n\n${restart}`;
+}
+
 export class MCPToolWrapper extends Tool {
   static pluginDiscoverable = false;
   private session: any;
+  private readonly serverName: string;
+  private readonly requestContext = new RequestContextStore();
   originalName: string;
   private toolName: string;
   private toolDescription: string;
   private toolParameters: Record<string, any>;
   private toolTimeout: number;
 
-  constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30) {
+  constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30, private readonly permissionPreflight?: MacPermissionPreflight, private readonly managed?: ManagedOcuSession) {
     super();
     this.session = session;
+    this.serverName = serverName;
     this.originalName = toolDef.name;
     this.toolName = sanitizeName(`mcp_${serverName}_${toolDef.name}`);
     this.toolDescription = toolDef.description || toolDef.name;
@@ -375,11 +458,16 @@ export class MCPToolWrapper extends Tool {
     this.toolTimeout = toolTimeout;
   }
 
+  get exclusive(): boolean { return Boolean(this.managed || this.permissionPreflight); }
+
   get name(): string {
     return this.toolName;
   }
 
   get description(): string {
+    if (this.managed && this.originalName !== 'list_apps') {
+      return `${this.toolDescription}\nFor a new user request, call this tool even after an earlier permission or connection failure. Memmy rechecks permissions and reconnects before executing; never infer current permission from previous messages. If this attempt is blocked, end this turn and wait for a new user message.`;
+    }
     return this.toolDescription;
   }
 
@@ -387,7 +475,44 @@ export class MCPToolWrapper extends Tool {
     return this.toolParameters;
   }
 
-  async execute(params: Record<string, any> = {}): Promise<string> {
+  setContext(context: RequestContext): void {
+    this.requestContext.set(context);
+  }
+
+  async execute(params: Record<string, any> = {}, context?: ToolExecutionContext): Promise<string | Array<Record<string, any>>> {
+    if (context?.abortSignal?.aborted) return "(MCP tool call was cancelled)";
+    if (this.managed) {
+      try {
+        const result = await this.managed.invoke(this.originalName, params, this.toolTimeout, this.requestContext.get(), context?.abortSignal);
+        const permission = computerUsePermissionError(this.serverName, result);
+        if (permission) {
+          context?.stopTurn?.(ocuPermissionMessage({ state: 'missing', permission }));
+        }
+        return convertMcpToolContent(result, 'auto');
+      } catch (error) {
+        if (error instanceof OcuUncertain) {
+          const message = 'Open Computer Use 在操作过程中断开，无法确认执行结果，操作未被重复执行。请检查当前界面，再发送新消息。';
+          context?.stopTurn?.(message);
+          return error.message;
+        }
+        const status = error instanceof OcuBlocked ? error.status : { state: 'unknown' as const };
+        const message = ocuPermissionMessage(status);
+        context?.stopTurn?.(message);
+        return message;
+      }
+    }
+    if (this.permissionPreflight && this.originalName !== 'list_apps') {
+      const status = await this.permissionPreflight.check(this.requestContext.get());
+      if (status.state !== "granted") {
+        context?.stopTurn?.(ocuPermissionMessage(status));
+        // doctor owns native onboarding. Opening Settings here as well races
+        // its Allow/drag flow and leaves multiple permission windows visible.
+        return status.state === "missing"
+          ? `Computer Use is waiting for macOS ${status.permission} permission. The requested application operation was not executed. Ask the user to complete the Computer Use permission window. Only the helper may need restarting; Memmy stays open. End this turn. Wait for a NEW user message after authorization; do not retry in this turn or use browser/exec/AppleScript as a fallback.`
+          : "Computer Use could not verify its native macOS permissions. The requested application operation was not executed. Explain that the permission check failed and end this turn. Do not use another executor as a fallback; wait for a new user message before retrying.";
+      }
+    }
+    if (context?.abortSignal?.aborted) return "(MCP tool call was cancelled)";
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const result: any = await timeoutPromise(
@@ -395,8 +520,16 @@ export class MCPToolWrapper extends Tool {
           this.toolTimeout,
           "timeout",
         );
-        return convertMcpToolContent(result, "text") as string;
+        const permission = computerUsePermissionError(this.serverName, result);
+        if (permission) this.permissionPreflight?.deny(this.requestContext.get(), permission);
+        if (permission && this.permissionPreflight) context?.stopTurn?.(ocuPermissionMessage({ state: 'missing', permission }));
+        return convertMcpToolContent(result, "auto");
       } catch (error) {
+        if (this.permissionPreflight) {
+          this.permissionPreflight.block(this.requestContext.get());
+          context?.stopTurn?.('Open Computer Use 在操作过程中断开，无法确认执行结果，操作未被重复执行。请发送新消息后再试。');
+          return 'Computer Use restarted or disconnected during the operation. Its result is unknown and it was not replayed.';
+        }
         if ((error as Error).message === "timeout") return `(MCP tool call timed out after ${this.toolTimeout}s)`;
         if ((error as Error).name === "CancelledError") return "(MCP tool call was cancelled)";
         if (isTransient(error) && attempt === 0) continue;
@@ -589,20 +722,45 @@ export async function connectMcpServers(
       if (!transport) transport = command ? "stdio" : url?.replace(/\/+$/g, "").endsWith("/sse") ? "sse" : "streamableHttp";
       let read: any;
       let write: any;
+      let managed: ManagedOcuSession | undefined;
       if (transport === "stdio") {
-        const [normalizedCommand, args, env] = normalizeWindowsStdioCommand(
-          command,
+        const [normalizedCommand, args, configuredEnv] = normalizeWindowsStdioCommand(
+          resolveOpenComputerUseCommand(command),
           cfgValue(cfg, "args") ?? [],
-          cfgValue(cfg, "env") ?? null,
+          openComputerUseEnvironment(command, cfgValue(cfg, "env") ?? null),
           cfgValue(cfg, "platform"),
         );
+        const managedConfig = isManagedOcuConfig(name, cfg);
+        const env = managedConfig ? managedOcuEnvironment(normalizedCommand, configuredEnv) : configuredEnv;
         const params = new runtime.StdioServerParameters({
           command: normalizedCommand,
           args,
           env,
           cwd: cfgValue(cfg, "cwd") ?? null,
         });
-        [read, write] = await enterMaybe(runtime.stdioClient(params), closers);
+        if (managedConfig) {
+          const desktop = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1';
+          const helperApp = path.dirname(path.dirname(path.dirname(normalizedCommand)));
+          managed = new ManagedOcuSession(async () => {
+            const owned: Array<() => Promise<void>> = [];
+            try {
+              const [input, output] = await enterMaybe(runtime.stdioClient(params), owned);
+              const candidate = new runtime.ClientSession(input, output);
+              const live = typeof candidate.enter === 'function' ? await enterMaybe(candidate, owned) : candidate;
+              const close = async () => { for (const fn of owned.splice(0).reverse()) await fn().catch(() => undefined); };
+              await timeoutPromise(live.initialize(), 15, 'Computer Use initialization timed out');
+              return { session: live, close };
+            } catch (error) {
+              for (const fn of owned.reverse()) await fn().catch(() => undefined);
+              throw error;
+            }
+          }, desktop ? probeNativePermissions : nativePermissionDoctor({ command: normalizedCommand, args, env, cwd: cfgValue(cfg, 'cwd') ?? null }),
+          desktop ? (status, signal, check, canContinue) => guideNativePermissions(status, helperApp, signal, check, canContinue) : undefined,
+          desktop ? () => stopOwnedNativeAgent(normalizedCommand, env!.OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE) : undefined);
+          closers.push(() => managed!.close());
+        } else {
+          [read, write] = await enterMaybe(runtime.stdioClient(params), closers);
+        }
       } else if (transport === "sse" || transport === "streamableHttp") {
         if (!url || !(await probeHttpUrl(url))) continue;
         if (transport === "sse") {
@@ -615,7 +773,7 @@ export async function connectMcpServers(
         continue;
       }
 
-      const session = new runtime.ClientSession(read, write);
+      const session = managed ?? new runtime.ClientSession(read, write);
       const liveSession = typeof session.enter === "function" ? await enterMaybe(session, closers) : session;
       const discovered = await timeoutPromise((async () => {
         await liveSession.initialize?.();
@@ -643,12 +801,13 @@ export async function connectMcpServers(
       for (const toolDef of tools?.tools ?? []) {
         const wrapped = sanitizeName(`mcp_${name}_${toolDef.name}`);
         if (!allowAll && !enabledTools.has(toolDef.name) && !enabledTools.has(wrapped)) continue;
-        registry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
+        registry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30, undefined, managed));
         if (enabledTools.has(toolDef.name)) matched.add(toolDef.name);
         if (enabledTools.has(wrapped)) matched.add(wrapped);
       }
       if (enabledTools.size && !allowAll) {
-        const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry));
+        const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry)
+          && !(managed && ["get_screen_state", "mcp_open_computer_use_get_screen_state"].includes(entry)));
         if (unknown.length) {
           console.warn(
             `MCP server '${name}': enabledTools entries not found: ${unknown.join(", ")}. ` +
@@ -673,11 +832,17 @@ export async function connectMcpServers(
       };
     } catch (error) {
       const text = String((error as Error).message ?? error).toLowerCase();
-      if (["parse error", "invalid json", "unexpected token", "jsonrpc", "content-length"].some((marker) => text.includes(marker))) {
+      const protocolPollution = ["parse error", "invalid json", "unexpected token", "jsonrpc", "content-length"]
+        .some((marker) => text.includes(marker));
+      if (protocolPollution) {
         console.error(
           `MCP server '${name}': failed to connect. Hint: this looks like stdio protocol pollution. ` +
             "Make sure the MCP server writes only JSON-RPC to stdout and sends logs/debug output to stderr instead.",
         );
+      } else if (text.includes("cannot connect") || text.includes("spawn")) {
+        // Surface launcher failures without turning ordinary server errors into
+        // an extra log line that can hide the actionable pollution hint.
+        console.error(String((error as Error).message ?? error));
       }
       for (const close of closers.reverse()) await close().catch(() => undefined);
     }

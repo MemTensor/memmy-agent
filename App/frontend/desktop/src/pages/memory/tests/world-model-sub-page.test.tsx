@@ -78,7 +78,7 @@ const worldDetailV2: GetMemoryOutput = {
       summary: "项目场域摘要",
       generalRulesAndSafetyConstraints: null,
       projectEnvironmentProfile: "语言：TypeScript\n测试入口：npm test",
-      projectContract: "修改后必须运行测试。",
+      projectContract: "## 提交要求\n- 修改后必须运行 `npm test`。",
       domainKnowledge: "Alpine 使用 musl libc。"
     }
   },
@@ -256,7 +256,10 @@ describe("WorldModelSubPage", () => {
     expect(html).toContain("项目环境画像");
     expect(html).toContain("语言：TypeScript");
     expect(html).toContain("项目契约");
-    expect(html).toContain("修改后必须运行测试。");
+    expect(html).toContain("修改后必须运行");
+    expect(html).toContain('<h4 class="memory-markdown__heading">提交要求</h4>');
+    expect(html).toContain('<ul class="memory-markdown__list">');
+    expect(html).toContain('<code class="memory-markdown__code">npm test</code>');
     expect(html).toContain("领域知识");
     expect(html).toContain("Alpine 使用 musl libc。");
     expect(html).not.toContain("通用规则与安全约束");

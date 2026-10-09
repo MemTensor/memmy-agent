@@ -179,7 +179,7 @@ function isImportSummaryPlaceholder(value: string | undefined): boolean {
     ?.split(/\r?\n/)
     .map((line) => line.replace(/^\s*#{1,6}\s+/, "").trim())
     .find(Boolean);
-  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中)$/i.test(first));
+  return Boolean(first && /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中)$/i.test(first));
 }
 
 function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {

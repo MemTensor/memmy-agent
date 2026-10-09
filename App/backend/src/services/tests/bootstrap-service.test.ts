@@ -4,6 +4,25 @@ import type { AppStateStore } from "../../infrastructure/app-state-store/index.j
 import { createBootstrapService } from "../bootstrap-service.js";
 
 describe("BootstrapService", () => {
+  it("includes the remote lottery status in bootstrap for logged-out clients", async () => {
+    const lotteryStatus = {
+      shouldShow: true,
+      startAt: 1790121600000,
+      endAt: 1790812800000,
+      serverNow: 1790456789000,
+      landingUrl: "https://memmy.cn/activity/mid-autumn"
+    };
+    const service = createBootstrapService(createUnauthenticatedOptions({
+      async getLotteryStatus() {
+        return lotteryStatus;
+      }
+    }));
+
+    await expect(service.getBootstrap()).resolves.toMatchObject({
+      lotteryStatus
+    });
+  });
+
   it("refreshes token usage from cloud for authenticated account sessions", async () => {
     const calls: unknown[] = [];
     const cloudTokenUsage = {

@@ -1,3 +1,4 @@
+import { BookOpen } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -17,7 +18,6 @@ import {
 } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
-import { communityLinks } from "../community/community-links.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
@@ -50,7 +50,6 @@ import {
   ListChecks,
   Link2,
   Loader2,
-  MessageCircle,
   MessageSquarePlus,
   PanelLeft,
   PanelLeftCollapsed,
@@ -62,8 +61,9 @@ import {
   User,
   Wand2
 } from "./memory/memory-prototype-icons.js";
-import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
-import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+import { AppContentTopbar } from "./app-content-topbar.js";
+import { SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -74,7 +74,9 @@ export interface AppFrameProps {
   title: string;
   reserveTopBar?: boolean;
   topBar?: ReactNode;
+  topBarEnd?: ReactNode;
   topBarBorder?: boolean;
+  windowsTitlebarSafe?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -83,7 +85,7 @@ export interface AppFrameProps {
 interface NavItem {
   path?: AppRoutePath;
   icon: ReactNode;
-  action?: "search" | "community";
+  action?: "search";
   labelKey?: string;
 }
 
@@ -188,6 +190,7 @@ interface SidebarUpdateActionView {
   ariaLabel: string;
   title: string;
   disabled: boolean;
+  progress: number | null;
 }
 
 const navItems: NavItem[] = [
@@ -195,7 +198,7 @@ const navItems: NavItem[] = [
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
-  { action: "community", icon: <MessageCircle size={16} />, labelKey: "welcome.joinCommunity" }
+  { path: "/knowledge", icon: <BookOpen size={16} /> }
 ];
 
 const taskSortOptions = [
@@ -279,7 +282,6 @@ export function AppFrame(props: AppFrameProps) {
   const taskBus = useTaskBus();
   const { syncAgentTaskStatuses } = taskBus;
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -296,7 +298,6 @@ export function AppFrame(props: AppFrameProps) {
     readDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage)
   );
   const [sidebarHidden, setSidebarHidden] = useState(false);
-  const communityMenuRef = useRef<HTMLDivElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const [taskScrollFade, setTaskScrollFade] = useState(false);
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
@@ -488,33 +489,6 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
-
-  useEffect(() => {
-    if (!showCommunity || typeof document === "undefined") {
-      return;
-    }
-
-    const closeOnOutsidePointerDown = (event: PointerEvent) => {
-      const menu = communityMenuRef.current;
-      if (menu && event.target instanceof Node && menu.contains(event.target)) {
-        return;
-      }
-
-      setShowCommunity(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setShowCommunity(false);
-      }
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [showCommunity]);
 
   function refreshAgentTasks(): void {
     taskStateCoordinator.refreshTaskState({ reason: "manual" });
@@ -1130,7 +1104,7 @@ export function AppFrame(props: AppFrameProps) {
             const key = item.path ?? item.action ?? "unknown";
             const active = item.path
               ? state.navigation.currentPath === item.path && (item.path !== "/main" || !state.agent.currentSessionKey)
-              : item.action === "community" && showCommunity;
+              : false;
 
             const label = item.path
               ? t(routeTable[item.path].navKey as Parameters<typeof t>[0])
@@ -1140,8 +1114,6 @@ export function AppFrame(props: AppFrameProps) {
               handleFirstSidebarInteraction();
               if (item.action === "search") {
                 setSearchPaletteOpen(true);
-              } else if (item.action === "community") {
-                setShowCommunity((v) => !v);
               } else if (item.path) {
                 openSidebarRoute(item.path);
               }
@@ -1162,33 +1134,6 @@ export function AppFrame(props: AppFrameProps) {
                 <span className="flex-1 text-left">{label}</span>
               </button>
             );
-
-            if (item.action === "community") {
-              return (
-                <div key={key} ref={communityMenuRef} className="relative">
-                  {navButton}
-                  {showCommunity && (
-                    <div className="community-popover absolute top-full mt-2 bg-background-paper rounded-card-lg border-content-panel p-3 z-50">
-                      <div className="community-popover-grid grid gap-2.5">
-                        <div className="community-popover-wechat">
-                          <div className="community-popover-wechat-title">
-                            <span>{t("welcome.wechatGroup")}</span>
-                          </div>
-                          <img src={communityLinks.wechatGroupUrl} alt={t("welcome.wechatGroup")} className="community-popover-qr rounded bg-white" />
-                          <span className="community-popover-wechat-hint">{t("appFrame.scanToJoin")}</span>
-                        </div>
-                        <div className="community-popover-links">
-                          <CommunityLink href={communityLinks.githubUrl} title={t("welcome.github")} detail="MemTensor/memmy-agent" />
-                          <CommunityLink href={communityLinks.discordUrl} title={t("welcome.discord")} detail="discord.gg/zfhKKn52wP" />
-                          <CommunityLink href={communityLinks.twitterUrl} title={t("welcome.twitter")} detail="@Memmy_ai" />
-                          <CommunityLink href={communityLinks.emailUrl} title={t("welcome.email")} detail={communityLinks.email} external={false} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            }
 
             return (
               <div key={key}>
@@ -1489,7 +1434,7 @@ export function AppFrame(props: AppFrameProps) {
                 void update?.requestInlineAction();
               }}
             >
-              {renderSidebarUpdateActionIcon(sidebarUpdateAction.kind)}
+              {renderSidebarUpdateActionIcon(sidebarUpdateAction)}
               <span className="app-frame-sidebar-update-button__label">{sidebarUpdateAction.label}</span>
             </button>
             <button
@@ -1563,23 +1508,29 @@ export function AppFrame(props: AppFrameProps) {
         minWidth={sidebarResize.minWidth}
         maxWidth={sidebarResize.maxWidth}
         isResizing={sidebarResize.isResizing}
-        isDisabled={sidebarHidden || showCommunity}
+        isDisabled={sidebarHidden}
         onResizeStart={sidebarResize.beginResize}
         onResizeBy={sidebarResize.resizeBy}
       />
 
-      <main className={`relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}`} aria-label={props.title}>
+      <main className={`app-frame-main relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}${props.windowsTitlebarSafe ? " app-frame-main--windows-titlebar-safe" : ""}`} aria-label={props.title}>
         {props.reserveTopBar !== false && (
-          <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
-            {props.topBar}
-          </header>
+          <AppContentTopbar
+            bordered={props.topBarBorder}
+            start={props.topBar}
+            end={props.topBarEnd}
+            onOpenMemoryBudgetSettings={() => {
+              writeSettingsMemoryBudgetFocus();
+              dispatch(appActions.navigate("/settings"));
+            }}
+          />
         )}
         <div
           data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}
           className={`min-h-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
-          style={props.topBarBorder ? { paddingTop: "var(--codex-toolbar-height)" } : undefined}
+          style={props.topBarBorder ? { paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))" } : undefined}
         >
           {props.children}
         </div>
@@ -1674,21 +1625,6 @@ function nextAgentHistoryRequestId(chatId: string): string {
 function nextAgentSidebarMutationId(): string {
   agentSidebarMutationCounter += 1;
   return `sidebar-${Date.now()}-${agentSidebarMutationCounter}`;
-}
-
-function CommunityLink(props: { href: string; title: string; detail: string; external?: boolean }) {
-  const external = props.external ?? true;
-  return (
-    <a
-      href={props.href}
-      target={external ? "_blank" : undefined}
-      rel={external ? "noreferrer" : undefined}
-      className="community-link flex flex-col rounded-lg text-xs text-text-ink/60 transition-colors"
-    >
-      <span className="community-link-title font-medium text-text-ink/70">{props.title}</span>
-      <span className="community-link-detail text-text-ink/45">{props.detail}</span>
-    </a>
-  );
 }
 
 /**
@@ -2973,7 +2909,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.available"),
       ariaLabel: t("appFrame.update.availableAria"),
       title: t("appFrame.update.availableAria"),
-      disabled: false
+      disabled: false,
+      progress: null
     };
   }
 
@@ -2984,7 +2921,8 @@ export function resolveSidebarUpdateAction(
       label: percent === null ? t("appFrame.update.downloading") : t("appFrame.update.progress", { percent }),
       ariaLabel: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
       title: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
-      disabled: true
+      disabled: true,
+      progress: percent
     };
   }
 
@@ -2994,7 +2932,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.installing"),
       ariaLabel: t("appFrame.update.installingAria"),
       title: t("appFrame.update.installingAria"),
-      disabled: true
+      disabled: true,
+      progress: null
     };
   }
 
@@ -3004,7 +2943,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.restart"),
       ariaLabel: t("appFrame.update.restartAria"),
       title: t("appFrame.update.restartAria"),
-      disabled: false
+      disabled: false,
+      progress: null
     };
   }
 
@@ -3018,12 +2958,29 @@ function normalizeUpdateDownloadPercent(percent: number | null | undefined): num
   return Math.min(100, Math.max(0, Math.round(percent)));
 }
 
-function renderSidebarUpdateActionIcon(kind: SidebarUpdateActionView["kind"]): ReactNode {
-  if (kind === "available") {
-    return <Download size={14} strokeWidth={2.2} aria-hidden="true" />;
+function renderSidebarUpdateActionIcon(action: SidebarUpdateActionView): ReactNode {
+  if (action.kind === "available") {
+    return <ArrowDown size={12} strokeWidth={2.2} aria-hidden="true" />;
   }
-  if (kind === "prepared") {
-    return <RefreshCw size={13} strokeWidth={2.1} aria-hidden="true" />;
+  if (action.kind === "downloading") {
+    if (action.progress === null) {
+      return <Loader2 size={14} strokeWidth={2.2} className="animate-spin" aria-hidden="true" />;
+    }
+    return (
+      <span
+        className="app-frame-sidebar-update-progress"
+        style={{ "--app-frame-sidebar-update-progress": `${action.progress}%` } as CSSProperties}
+        aria-hidden="true"
+      >
+        <span>{action.progress}</span>
+      </span>
+    );
+  }
+  if (action.kind === "installing") {
+    return <Loader2 size={14} strokeWidth={2.2} className="animate-spin" aria-hidden="true" />;
+  }
+  if (action.kind === "prepared") {
+    return <RefreshCw size={12} strokeWidth={2.1} aria-hidden="true" />;
   }
   return null;
 }

@@ -4,22 +4,32 @@ import {
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
+  LotteryRewardSchema,
   SendCodeResponseSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginResponseSchema,
   type AccountChannel,
   type AccountInvitationView,
   type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
+  type LotteryReward,
+  type LotteryRewardAckInput,
   type SendCodeInput,
   type SendCodeResponse,
+  type SocialLoginStatusInput,
+  type SocialLoginStatusResponse,
+  type StartSocialLoginInput,
+  type StartSocialLoginResponse,
   type UpdateAccountProfileInput,
   type VerifyCodeInput
 } from "@memmy/local-api-contracts";
-import type { CloudAccountProfile, CloudClient } from "../adapters/outbound/cloud-client/index.js";
+import type { CloudAccountProfile, CloudClient, CloudLoginResult } from "../adapters/outbound/cloud-client/index.js";
 import type {
   AccountSessionProfileInput,
   AccountSessionRepository
 } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
+import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter, RuntimeProjectionResult } from "../infrastructure/memmy-config/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { OkResponse } from "@memmy/local-api-contracts";
@@ -29,7 +39,11 @@ const RESEND_WINDOW_MS = 60_000;
 export interface AccountService {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
   verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  startSocialLogin(input: StartSocialLoginInput): Promise<StartSocialLoginResponse>;
+  getSocialLoginStatus(input: SocialLoginStatusInput): Promise<SocialLoginStatusResponse>;
   getInvitation(): Promise<AccountInvitationView>;
+  getLotteryReward(): Promise<LotteryReward>;
+  ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -41,6 +55,8 @@ export interface CreateAccountServiceOptions {
   cloudClient: CloudClient;
   /** Account session repository. */
   accountSessionRepository: AccountSessionRepository;
+  /** Bootstrap repository used to preserve machine-level onboarding across logout. */
+  bootstrapRepository: Pick<BootstrapRepository, "preserveCompletedOnboardingForLocalByok">;
   /** Memmy config writer. */
   memmyConfigWriter?: MemmyConfigWriter;
   /** Memory client. */
@@ -91,34 +107,25 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         loginSource: input.loginSource,
         ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
       });
+      return finalizeCloudLogin(loginResult, input.channel, options);
+    },
 
-      if (options.memmyConfigWriter) {
-        const projection = await options.memmyConfigWriter.writeAccountModelProjection({
-          cloudUuid: loginResult.uuid,
-          userId: loginResult.profile.userId
-        });
-        await reloadMemoryConfigIfNeeded(projection, options);
-      }
-
-      const session = AccountSessionViewSchema.parse(
-        options.accountSessionRepository.upsert({
-          profile: toSessionProfileInput(loginResult.profile),
-          uuid: loginResult.accountUuid,
-          cloudUuid: loginResult.uuid,
-          isNewUser: loginResult.isNewUser,
-          authChannel: input.channel
-        })
+    async startSocialLogin(input) {
+      assertSocialLoginSupported(options.accountChannel);
+      return StartSocialLoginResponseSchema.parse(
+        await options.cloudClient.startSocialLogin(input)
       );
+    },
 
-      const refreshedSession = await refreshCloudGuideState({
-        cloudClient: options.cloudClient,
-        accountSessionRepository: options.accountSessionRepository,
-        session,
-        cloudUuid: loginResult.uuid
-      });
-      return AccountLoginResultViewSchema.parse({
-        session: refreshedSession,
-        invitationResult: loginResult.invitationResult ?? { status: "not_provided" }
+    async getSocialLoginStatus(input) {
+      assertSocialLoginSupported(options.accountChannel);
+      const status = await options.cloudClient.getSocialLoginStatus(input);
+      if (status.status !== "completed") {
+        return SocialLoginStatusResponseSchema.parse(status);
+      }
+      return SocialLoginStatusResponseSchema.parse({
+        status: "completed",
+        result: await finalizeCloudLogin(status.result, "email", options)
       });
     },
 
@@ -132,6 +139,32 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
       return AccountInvitationViewSchema.parse(
         await options.cloudClient.ensureInvitationCode({ uuid: cloudUuid })
       );
+    },
+
+    async getLotteryReward() {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) {
+        return { hasReward: false };
+      }
+      try {
+        return LotteryRewardSchema.parse(await options.cloudClient.getLotteryReward({ uuid }));
+      } catch {
+        return { hasReward: false };
+      }
+    },
+
+    async ackLotteryReward(input) {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) {
+        throw Object.assign(new Error("Account session is not authenticated"), {
+          code: "unauthorized" as const
+        });
+      }
+      await options.cloudClient.ackLotteryReward({
+        uuid,
+        ...(input.drawId ? { drawId: input.drawId } : {})
+      });
+      return { ok: true };
     },
 
     async updateProfile(input) {
@@ -175,6 +208,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
     async logout() {
       const uuid = options.accountSessionRepository.getCloudUuid();
       const session = options.accountSessionRepository.get();
+      options.bootstrapRepository.preserveCompletedOnboardingForLocalByok();
       if (uuid) {
         try {
           await options.cloudClient.logout({ uuid });
@@ -218,6 +252,48 @@ function assertExpectedAccountChannel(
   if (!expectedChannel || actualChannel === expectedChannel) return;
   throw Object.assign(new Error(`Account channel ${actualChannel} is not supported by this desktop package`), {
     code: "invalid_argument" as const
+  });
+}
+
+function assertSocialLoginSupported(accountChannel: AccountChannel | undefined): void {
+  if (accountChannel === "email") return;
+  throw Object.assign(new Error("Social login is not supported by this desktop package"), {
+    code: "invalid_argument" as const
+  });
+}
+
+async function finalizeCloudLogin(
+  loginResult: CloudLoginResult,
+  authChannel: AccountChannel,
+  options: CreateAccountServiceOptions
+): Promise<AccountLoginResultView> {
+  if (options.memmyConfigWriter) {
+    const projection = await options.memmyConfigWriter.writeAccountModelProjection({
+      cloudUuid: loginResult.uuid,
+      userId: loginResult.profile.userId
+    });
+    await reloadMemoryConfigIfNeeded(projection, options);
+  }
+
+  const session = AccountSessionViewSchema.parse(
+    options.accountSessionRepository.upsert({
+      profile: toSessionProfileInput(loginResult.profile),
+      uuid: loginResult.accountUuid,
+      cloudUuid: loginResult.uuid,
+      isNewUser: loginResult.isNewUser,
+      authChannel
+    })
+  );
+
+  const refreshedSession = await refreshCloudGuideState({
+    cloudClient: options.cloudClient,
+    accountSessionRepository: options.accountSessionRepository,
+    session,
+    cloudUuid: loginResult.uuid
+  });
+  return AccountLoginResultViewSchema.parse({
+    session: refreshedSession,
+    invitationResult: loginResult.invitationResult ?? { status: "not_provided" }
   });
 }
 

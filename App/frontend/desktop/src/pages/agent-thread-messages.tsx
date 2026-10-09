@@ -2334,7 +2334,7 @@ const TRACE_CATEGORY_ICONS: Record<ToolTraceCategory, ComponentType<SVGProps<SVG
 function TraceLine(props: { item: ActivityToolStepItem; t: Translate }) {
   void props.t;
   const phase = props.item.event.phase;
-  const isError = phase === "error";
+  const isError = phase === "error" && !props.item.recovered;
   const category = props.item.category;
   const Icon = TRACE_CATEGORY_ICONS[category] ?? Wand2;
   const summary = (
@@ -2426,6 +2426,8 @@ interface ActivityToolStepItem {
   category: ToolTraceCategory;
   event: AgentToolProgressEvent;
   details: ActivityToolDetail[];
+  /** A later invocation of the same tool in this activity run completed successfully. */
+  recovered?: boolean;
   key: string;
 }
 
@@ -2500,7 +2502,46 @@ function buildActivitySegments(messages: AgentChatMessage[], t: Translate): Acti
       appendToolGroupSegment(segments, `${messageKey}:toolgroup`, items, t);
     }
   });
+  markRecoveredToolErrors(segments);
   return segments;
+}
+
+/** Keep raw failure details available on expansion, but do not present a successfully retried call as an active red error. */
+function markRecoveredToolErrors(segments: ActivitySegment[]): void {
+  const steps = segments.flatMap((segment) => segment.type === "toolGroup"
+    ? segment.items.filter((item): item is ActivityToolStepItem => item.type === "toolStep")
+    : []);
+  steps.forEach((step, index) => {
+    if (step.event.phase !== "error") return;
+    const name = toolEventName(step.event);
+    if (!name) return;
+    step.recovered = steps.slice(index + 1).some((candidate) => (
+      toolEventName(candidate.event) === name && toolEventSucceededForDisplay(candidate.event)
+    ));
+  });
+}
+
+function toolEventSucceededForDisplay(event: AgentToolProgressEvent): boolean {
+  if (event.phase !== "end" || event.error != null) return false;
+  if (typeof event.result === "string") {
+    const result = event.result.trim();
+    if (/^(?:error|plugin_invalid|invalid|failed|failure)\s*:/iu.test(result)) return false;
+    if (result.startsWith("{")) {
+      try {
+        const parsed: unknown = JSON.parse(result);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const record = parsed as Record<string, unknown>;
+          if (record.ok === false || record.success === false || record.error) return false;
+        }
+      } catch {
+        // A non-JSON textual result may still represent a successful tool response.
+      }
+    }
+  } else if (event.result && typeof event.result === "object" && !Array.isArray(event.result)) {
+    const record = event.result as Record<string, unknown>;
+    if (record.ok === false || record.success === false || record.error) return false;
+  }
+  return true;
 }
 
 function appendToolGroupSegment(

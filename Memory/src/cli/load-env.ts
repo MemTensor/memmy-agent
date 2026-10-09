@@ -4,7 +4,7 @@
  */
 import {
   cloudServiceFromDesktopRuntimeManifest,
-} from "@memmy/local-api-contracts";
+} from "../contracts/desktop-runtime-manifest.js";
 import { config as loadDotenv } from "dotenv";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -34,7 +34,7 @@ export function findRepoEnvFile(startDir: string): string | null {
   }
 }
 
-/** Load external env, then the packaged manifest, then a development .env. */
+/** Load a packaged manifest first, then external env, then a development .env. */
 export function loadCloudServiceEnv(options: {
   cwd?: string;
   moduleDir?: string;
@@ -43,6 +43,22 @@ export function loadCloudServiceEnv(options: {
   loadDotenv?: typeof loadDotenv;
 } = {}): string | null {
   const env = options.env ?? process.env;
+  const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));
+  const packagedRuntime = isPackagedRuntimeModule(moduleDir);
+  if (options.manifestPath !== undefined || packagedRuntime) {
+    const manifestPath = options.manifestPath ?? packagedManifestPath(moduleDir);
+    if (!existsSync(manifestPath)) {
+      throw new Error("Packaged desktop runtime manifest is missing");
+    }
+    env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
+      readFileSync(manifestPath, "utf8"),
+    );
+    // MEMMY_CLOUD_URL is a development-only override. Do not let a stale
+    // value inherited from an older installation redirect a packaged runtime.
+    delete env.MEMMY_CLOUD_URL;
+    return manifestPath;
+  }
+
   if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
     const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
     if (externalValue) {
@@ -50,19 +66,6 @@ export function loadCloudServiceEnv(options: {
       return "environment";
     }
     delete env.MEMMY_CLOUD_SERVICE;
-  }
-
-  const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));
-  const packagedRuntime = isPackagedRuntimeModule(moduleDir);
-  if (options.manifestPath !== undefined || packagedRuntime) {
-    const manifestPath = options.manifestPath ?? resolve(moduleDir, "../../../../main/desktop-edition.json");
-    if (!existsSync(manifestPath)) {
-      throw new Error("Packaged desktop runtime manifest is missing");
-    }
-    env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
-      readFileSync(manifestPath, "utf8"),
-    );
-    return manifestPath;
   }
 
   const envPath =
@@ -77,7 +80,17 @@ export function loadCloudServiceEnv(options: {
 }
 
 function isPackagedRuntimeModule(moduleDir: string): boolean {
-  return resolve(moduleDir).replace(/\\/g, "/").endsWith("/dist/runtime/memory/src/cli");
+  const normalized = resolve(moduleDir).replace(/\\/g, "/");
+  return normalized.endsWith("/dist/runtime/memory/src/cli")
+    || normalized.endsWith("/memory-runtime/dist/src/cli");
+}
+
+function packagedManifestPath(moduleDir: string): string {
+  const normalized = resolve(moduleDir).replace(/\\/g, "/");
+  if (normalized.endsWith("/memory-runtime/dist/src/cli")) {
+    return resolve(moduleDir, "../../../../app.asar/dist/main/desktop-edition.json");
+  }
+  return resolve(moduleDir, "../../../../main/desktop-edition.json");
 }
 
 loadCloudServiceEnv();
