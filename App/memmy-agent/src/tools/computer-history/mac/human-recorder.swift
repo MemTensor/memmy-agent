@@ -3,6 +3,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import CryptoKit
 
 let emitLock = NSLock()
 
@@ -99,16 +100,164 @@ func axElement(_ value: CFTypeRef?) -> AXUIElement? {
   return (value as! AXUIElement)
 }
 
+// MARK: - Observation policy (identity-only checks before content reads)
+
+struct NativeObservationPolicy: Decodable {
+  struct Rule: Decodable { let scope: String; let bundleID: String?; let urlDomain: String?; let behavior: String }
+  struct Observation: Decodable {
+    let defaultApplicationBehavior: String
+    let defaultURLBehavior: String
+    let rules: [Rule]
+  }
+  let observation: Observation
+  static func parse(_ data: Data) -> NativeObservationPolicy? {
+    guard let policy = try? JSONDecoder().decode(Self.self, from: data) else { return nil }
+    let valid = Set(["observe", "do_not_observe"])
+    guard valid.contains(policy.observation.defaultApplicationBehavior),
+      valid.contains(policy.observation.defaultURLBehavior), policy.observation.rules.count <= 1000 else { return nil }
+    for rule in policy.observation.rules {
+      guard valid.contains(rule.behavior) else { return nil }
+      if rule.scope == "app" {
+        guard let id = rule.bundleID, id.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", options: .regularExpression) != nil else { return nil }
+      } else if rule.scope == "url" {
+        guard let domain = rule.urlDomain, !domain.isEmpty, domain.count <= 253,
+          domain.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({
+            $0.range(of: "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$", options: .regularExpression) != nil
+          }) else { return nil }
+      } else { return nil }
+    }
+    return policy
+  }
+  func resolve(_ rules: [Rule], fallback: String) -> Bool {
+    if rules.contains(where: { $0.behavior == "do_not_observe" }) { return false }
+    return rules.contains(where: { $0.behavior == "observe" }) || fallback == "observe"
+  }
+  func allowsApp(_ id: String) -> Bool {
+    guard !id.isEmpty, id != "com.apple.loginwindow", id != "com.apple.ScreenSaver.Engine" else { return false }
+    return resolve(observation.rules.filter { $0.scope == "app" && $0.bundleID == id },
+      fallback: observation.defaultApplicationBehavior)
+  }
+  func allowsWebsite(_ url: String?) -> Bool {
+    guard let url, let components = URLComponents(string: url),
+      components.scheme == "http" || components.scheme == "https", let rawHost = components.url?.host else {
+      return observation.defaultURLBehavior == "observe" && !observation.rules.contains {
+        $0.scope == "url" && $0.behavior == "do_not_observe"
+      }
+    }
+    let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    return resolve(observation.rules.filter {
+      guard $0.scope == "url", let domain = $0.urlDomain?.lowercased() else { return false }
+      return host == domain || host.hasSuffix("." + domain)
+    }, fallback: observation.defaultURLBehavior)
+  }
+}
+
+let observationSettingsPath: String? = {
+  let args = CommandLine.arguments
+  guard let index = args.firstIndex(of: "--observation-settings") else { return nil }
+  return index + 1 < args.count ? args[index + 1] : ""
+}()
+func observationPolicyBytes() -> Data? {
+  guard let file = observationSettingsPath else {
+    return Data(#"{"observation":{"defaultApplicationBehavior":"observe","defaultURLBehavior":"observe","rules":[]}}"#.utf8)
+  }
+  return try? Data(contentsOf: URL(fileURLWithPath: file))
+}
+struct CapturePermit {
+  let data: Data
+  let pid: pid_t
+  let bundleId: String
+  let window: AXUIElement
+  let url: String?
+  let restrictsWebsites: Bool
+}
+// Owned by enrichmentQueue. A permit is never carried over to another event.
+var capturePermit: CapturePermit?
+func invalidateCapture() {
+  capturePermit = nil
+  dragOrigin = nil
+  lastTreeKey = nil
+  lastTreeAt = nil
+}
+func beginCapture(application: [String: Any], policy: Data?) -> Bool {
+  let previous = capturePermit
+  capturePermit = nil
+  guard let data = policy, data == observationPolicyBytes(),
+    let settings = NativeObservationPolicy.parse(data),
+    let pid = application["pid"] as? pid_t,
+    NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+    let bundleId = application["bundleId"] as? String, settings.allowsApp(bundleId) else {
+    invalidateCapture(); return false
+  }
+  // Only identity/URL/private-mode metadata has been read at this point.
+  let context = currentWindow(pid: pid, bundleId: bundleId)
+  guard let window = context.element, context.payload["privateBrowsing"] as? Bool != true,
+    !browserBundleIds.contains(bundleId) || settings.allowsWebsite(context.payload["url"] as? String),
+    data == observationPolicyBytes() else { invalidateCapture(); return false }
+  if let previous, previous.data != data || previous.pid != pid || !CFEqual(previous.window, window)
+    || previous.url != context.payload["url"] as? String { dragOrigin = nil }
+  capturePermit = CapturePermit(data: data, pid: pid, bundleId: bundleId, window: window, url: context.payload["url"] as? String,
+    restrictsWebsites: settings.observation.defaultURLBehavior == "do_not_observe" || settings.observation.rules.contains { $0.scope == "url" && $0.behavior == "do_not_observe" })
+  return true
+}
+func captureStillAllowed(_ element: AXUIElement? = nil) -> Bool {
+  guard !secureInputActive(), let permit = capturePermit, permit.data == observationPolicyBytes(),
+    NSWorkspace.shared.frontmostApplication?.processIdentifier == permit.pid else { invalidateCapture(); return false }
+  let context = currentWindow(pid: permit.pid, bundleId: permit.bundleId)
+  guard let window = context.element, CFEqual(window, permit.window),
+    context.payload["privateBrowsing"] as? Bool != true,
+    context.payload["url"] as? String == permit.url else { invalidateCapture(); return false }
+  if let element {
+    if permit.restrictsWebsites && browserBundleIds.contains(permit.bundleId) && CFEqual(element, permit.window) { return false }
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success, pid == permit.pid else { return false }
+    // A hit/selection can belong to another window of the same browser.
+    if !CFEqual(element, permit.window) {
+      var ref: CFTypeRef?
+      guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &ref) == .success,
+        let owner = axElement(ref), CFEqual(owner, permit.window) else { return false }
+      if browserBundleIds.contains(permit.bundleId) {
+        // Split panes / background web areas can share a window. Only read the
+        // authorized page; under site restrictions also omit browser chrome
+        // (for example other tabs' titles) that has no attributable page.
+        var ancestor = element
+        var foundPage = false
+        for _ in 0..<64 {
+          if identityString(ancestor, kAXRoleAttribute as CFString) == "AXWebArea" {
+            guard webAreaUrl(ancestor) == permit.url else { return false }
+            foundPage = true
+            break
+          }
+          if CFEqual(ancestor, permit.window) { break }
+          var parent: CFTypeRef?
+          guard AXUIElementCopyAttributeValue(ancestor, kAXParentAttribute as CFString, &parent) == .success,
+            let next = axElement(parent) else { break }
+          ancestor = next
+        }
+        if !foundPage && permit.restrictsWebsites { return false }
+      }
+    }
+  }
+  return true
+}
+
 func accessibilityString(_ element: AXUIElement, _ attribute: CFString) -> String? {
+  guard captureStillAllowed(element) else { return nil }
+  return identityString(element, attribute).map { String($0.prefix(240)) }
+}
+
+// This reader is ONLY for role/document metadata used in policy decisions.
+func identityString(_ element: AXUIElement, _ attribute: CFString) -> String? {
   var value: CFTypeRef?
   guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
   guard let string = value as? String else { return nil }
   let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !trimmed.isEmpty else { return nil }
-  return String(trimmed.prefix(240))
+  return String(trimmed.prefix(4096))
 }
 
 func accessibilityValueString(_ element: AXUIElement) -> String? {
+  guard captureStillAllowed(element) else { return nil }
   var value: CFTypeRef?
   guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
         let value
@@ -188,6 +337,7 @@ func accessibilityHit(at point: CGPoint) -> (payload: [String: Any], pid: pid_t?
   guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &elementRef) == .success,
         let element = elementRef
   else { return nil }
+  guard captureStillAllowed(element) else { return nil }
   var payload = nodePayload(element)
   var pid: pid_t = 0
   let resolvedPid: pid_t? = AXUIElementGetPid(element, &pid) == .success ? pid : nil
@@ -255,7 +405,7 @@ func webAreaUrl(_ element: AXUIElement) -> String? {
     }
     if let string = urlRef as? String { return sanitizedPageUrl(string) }
   }
-  if let document = accessibilityString(element, "AXDocument" as CFString) {
+  if let document = identityString(element, "AXDocument" as CFString) {
     return sanitizedPageUrl(document)
   }
   return nil
@@ -263,8 +413,8 @@ func webAreaUrl(_ element: AXUIElement) -> String? {
 
 func browserPage(window: AXUIElement) -> (url: String?, title: String?) {
   AXUIElementSetMessagingTimeout(window, 0.1)
-  let title = accessibilityString(window, kAXTitleAttribute as CFString)
-  if let document = accessibilityString(window, "AXDocument" as CFString),
+  let title: String? = nil
+  if let document = identityString(window, "AXDocument" as CFString),
      let sanitized = sanitizedPageUrl(document) {
     return (sanitized, title)
   }
@@ -275,7 +425,7 @@ func browserPage(window: AXUIElement) -> (url: String?, title: String?) {
     let current = queue.removeFirst()
     visited += 1
     AXUIElementSetMessagingTimeout(current, 0.05)
-    if accessibilityString(current, kAXRoleAttribute as CFString) == "AXWebArea" {
+    if identityString(current, kAXRoleAttribute as CFString) == "AXWebArea" {
       return (webAreaUrl(current), title)
     }
     var childrenRef: CFTypeRef?
@@ -398,13 +548,20 @@ func applicationEnvelope(_ application: [String: Any]? = nil) -> [String: Any] {
 func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
   let source = application ?? applicationPayload()
   let at = timestamp()
+  let previous = DispatchQueue.getSpecific(key: enrichmentQueueKey) == true ? capturePermit : nil
+  let policy = DispatchQueue.getSpecific(key: enrichmentQueueKey) == true ? previous?.data : observationPolicyBytes()
   let capture = {
+    guard beginCapture(application: source, policy: policy) else { return }
+    if let previous, let current = capturePermit,
+      previous.pid != current.pid || previous.url != current.url || !CFEqual(previous.window, current.window) { invalidateCapture(); return }
+
     guard let pid = source["pid"] as? pid_t,
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     else { return }
     let bundleId = source["bundleId"] as? String ?? ""
     let context = currentWindow(pid: pid, bundleId: bundleId)
-    let window = context.payload
+    var window = context.payload
+    if let element = context.element, let title = accessibilityString(element, kAXTitleAttribute as CFString) { window["title"] = title }
     var payload: [String: Any] = [
       "kind": kind, "id": nextEventId(), "timestamp": at,
       "app": applicationEnvelope(source), "window": window,
@@ -425,7 +582,10 @@ func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: 
         payload["ax"] = ax
       }
     }
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+    guard captureStillAllowed(), let permit = capturePermit else { return }
+    if observationSettingsPath != nil {
+      payload["policyRevision"] = SHA256.hash(data: permit.data).map { String(format: "%02x", $0) }.joined()
+    }
     for (key, value) in extra { payload[key] = value }
     emit(payload)
   }
@@ -443,7 +603,6 @@ func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], ele
   var payload: [String: Any] = [:]
   if browserBundleIds.contains(bundleId) { payload["browser"] = true }
   guard let window = axElement(windowRef) else { return (payload, nil) }
-  if let title = accessibilityString(window, kAXTitleAttribute as CFString) { payload["title"] = title }
   if browserBundleIds.contains(bundleId), let url = browserPage(window: window).url {
     payload["url"] = url
   }
@@ -475,13 +634,17 @@ func refreshFocusedElement(pid: pid_t) {
 // Selected text is the single highest-volume semantic signal: it reports what
 // the user is actually reading or editing without any coordinate involved.
 func emitSelectionChanged(_ element: AXUIElement) {
-  guard !secureInputActive() else { return }
+  let application = applicationPayload()
+  let policy = observationPolicyBytes()
+  enrichmentQueue.async {
+  guard beginCapture(application: application, policy: policy), captureStillAllowed(element), !secureInputActive() else { return }
   var target = nodePayload(element)
   var selection: [String: Any] = [:]
   if let text = accessibilityString(element, kAXSelectedTextAttribute as CFString) {
     selection["selectedText"] = text
   }
   var rangeRef: CFTypeRef?
+  guard captureStillAllowed(element) else { return }
   if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
      let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID() {
     var range = CFRange(location: 0, length: 0)
@@ -492,7 +655,8 @@ func emitSelectionChanged(_ element: AXUIElement) {
   guard !selection.isEmpty else { return }
   if target.isEmpty { target = ["role": "AXUnknown"] }
   selection["target"] = target
-  emitEvent(kind: "selection.changed", extra: ["selection": selection])
+  emitEvent(kind: "selection.changed", application: application, extra: ["selection": selection])
+  }
 }
 
 // MARK: - Accessibility tree snapshots
@@ -665,7 +829,9 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
     let button = type == .rightMouseDown ? "right" : "left"
     let modifiers = modifierList(event)
     let application = applicationPayload()
+    let policy = observationPolicyBytes()
     enrichmentQueue.async {
+      guard beginCapture(application: application, policy: policy) else { return }
       var target = resolveTarget(at: point)
       if target.isEmpty { target = ["role": "AXUnknown"] }
       if type == .leftMouseDown { dragOrigin = (point, target) }
@@ -680,7 +846,9 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
   case .leftMouseUp:
     let point = event.location
     let application = applicationPayload()
+    let policy = observationPolicyBytes()
     enrichmentQueue.async {
+      guard beginCapture(application: application, policy: policy) else { return }
       guard let origin = dragOrigin else { return }
       dragOrigin = nil
       let dx = point.x - origin.point.x
@@ -697,13 +865,18 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
     }
   case .keyDown:
     let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-    let text = characters(from: event)
     let modifiers = modifierList(event)
     let application = applicationPayload()
+    let policy = observationPolicyBytes()
     let secure = secureInputActive()
     let focus = captureFocusSnapshot()
     enrichmentQueue.async {
+      guard beginCapture(application: application, policy: policy) else { return }
+      guard !secure, !secureInputActive(), focusSnapshotIsCurrent(focus, pid: application["pid"] as? pid_t),
+        captureStillAllowed(focus.element) else { return }
       let target = keyboardTarget(snapshot: focus, pid: application["pid"] as? pid_t)
+      guard focusSnapshotIsCurrent(focus, pid: application["pid"] as? pid_t), captureStillAllowed(focus.element) else { return }
+      let text = characters(from: event)
       guard let classified = classifiedKeyboard(keyCode: keyCode, text: text, modifiers: modifiers, secure: secure),
             let kind = classified["kind"] as? String,
             var keyboard = classified["keyboard"] as? [String: Any]

@@ -6,7 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
-const history = vi.hoisted(() => ({ snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn(), applicationIcon: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
+const history = vi.hoisted(() => ({ observationPermissions: vi.fn(), updateObservationPermissions: vi.fn(), installedApplications: vi.fn(), snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn(), applicationIcon: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -236,5 +236,37 @@ describe("Computer History model selection", () => {
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
     expect((await instance.dispatchHttp({}, input))?.status).toBe(422);
     expect(history.setLlmRuntime).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("Computer History permission routes", () => {
+  it("authenticates settings and application inventory and enforces HTTP methods", async () => {
+    for (const route of ["permissions", "applications"]) {
+      expect((await channel().dispatchHttp({}, request({ path: `/api/computer-history/${route}`, method: "GET", headers: {} })))?.status).toBe(401);
+      expect((await channel().dispatchHttp({}, request({ path: `/api/computer-history/${route}`, method: "DELETE" })))?.status).toBe(405);
+    }
+  });
+  it("round-trips actual settings, rejects invalid policies and returns 409 for a stale revision", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-permissions-http-"));
+    const service = new ComputerHistoryDemoService({ historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"),
+      workflowDirectory: path.join(root, "workflows"), observationSettingsFile: path.join(root, "settings.json") });
+    history.observationPermissions.mockImplementation(() => service.observationPermissions());
+    history.updateObservationPermissions.mockImplementation((settings, revision) => service.updateObservationPermissions(settings, revision));
+    const route = (body?: unknown) => request({ path: "/api/computer-history/permissions", method: body ? "POST" : "GET", body: body ? JSON.stringify(body) : "" });
+    try {
+      const read = await channel().dispatchHttp({}, route());
+      const initial = JSON.parse(String(read?.body));
+      initial.settings.observation.defaultApplicationBehavior = "do_not_observe";
+      const saved = await channel().dispatchHttp({}, route(initial));
+      expect(saved?.status).toBe(200);
+      expect(JSON.parse(String(saved?.body)).settings).toEqual(initial.settings);
+      expect((await channel().dispatchHttp({}, route(initial)))?.status).toBe(409);
+      expect((await channel().dispatchHttp({}, route({ settings: initial.settings })))?.status).toBe(400);
+      expect((await channel().dispatchHttp({}, route({ settings: {}, revision: "missing" })))?.status).toBe(400);
+      history.installedApplications.mockResolvedValue([{ bundleId: "com.apple.Notes", name: "Notes" }]);
+      const apps = await channel().dispatchHttp({}, request({ path: "/api/computer-history/applications", method: "GET" }));
+      expect(JSON.parse(String(apps?.body)).applications[0].name).toBe("Notes");
+    } finally { await service.shutdown(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

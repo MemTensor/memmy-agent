@@ -81,6 +81,26 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it("reads and saves observation scope independently of macOS permissions", async () => {
+    const policy = { revision: "policy-1", settings: { observation: {
+      defaultApplicationBehavior: "observe" as const, defaultURLBehavior: "observe" as const,
+      rules: [{ scope: "app" as const, bundleID: "com.apple.Notes", behavior: "do_not_observe" as const }],
+    } } };
+    const apps = [{ bundleId: "com.apple.Notes", name: "Notes" }];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const route = new URL(String(input)).pathname;
+      if (route === "/webui/bootstrap") return json(bootstrap);
+      if (route === "/api/computer-history/applications") return json({ applications: apps });
+      expect(route).toBe("/api/computer-history/permissions");
+      if (init?.method === "POST") expect(JSON.parse(String(init.body))).toEqual(policy);
+      return json(policy);
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.getComputerHistoryObservationPermissions()).resolves.toEqual(policy);
+    await expect(client.saveComputerHistoryObservationPermissions(policy)).resolves.toEqual(policy);
+    await expect(client.listComputerHistoryApplications()).resolves.toEqual(apps);
+  });
+
   it("syncs the history model and retains its actual model source in the response", async () => {
     const snapshot = {
       observation: { state: "running", startedAt: null, segmentId: null, segmentStartedAt: null, error: null, narrationError: null, modelSource: "byok" },

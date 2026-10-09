@@ -157,7 +157,7 @@ describe("ComputerHistorySubPage", () => {
     await act(async () => root.render(page(client, true)));
     expect(container.querySelector(".ch__recording-status")?.textContent).toBe("Token 已用完");
     expect(container.textContent).toContain("My recording");
-    expect(container.querySelector('[aria-label="打开 My recording 的完整 Markdown"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="在 Finder 中显示 My recording"]')).not.toBeNull();
   });
 
   it("opens history directly without an introduction or automatic recording on a fresh installation", async () => {
@@ -246,7 +246,7 @@ describe("ComputerHistorySubPage", () => {
     expect(container.querySelector('[aria-label="com.apple.Notes"]')).not.toBeNull();
   });
 
-  it("opens an entry's complete Markdown file through the desktop bridge", async () => {
+  it("reveals an entry's Markdown file in Finder through the desktop bridge", async () => {
     const openComputerHistoryMarkdown = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window, "memmy", {
       configurable: true,
@@ -255,25 +255,25 @@ describe("ComputerHistorySubPage", () => {
     await renderWith(snapshot());
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的完整 Markdown"]')?.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="在 Finder 中显示 My recording"]')?.click();
     });
 
     expect(openComputerHistoryMarkdown).toHaveBeenCalledWith("/tmp/history-1.md");
     expect(openComputerHistoryMarkdown).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a readable error when the desktop cannot open the Markdown file", async () => {
+  it("shows a readable error when the desktop cannot reveal the Markdown file", async () => {
     Object.defineProperty(window, "memmy", {
       configurable: true,
-      value: { openComputerHistoryMarkdown: vi.fn().mockRejectedValue(new Error("no default editor")) },
+      value: { openComputerHistoryMarkdown: vi.fn().mockRejectedValue(new Error("file missing")) },
     });
     await renderWith(snapshot());
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的完整 Markdown"]')?.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="在 Finder 中显示 My recording"]')?.click();
     });
 
-    expect(container.textContent).toContain("打开 Markdown 失败：no default editor");
+    expect(container.textContent).toContain("在 Finder 中显示失败：file missing");
   });
 
   it("keeps a current window at ten-minute resolution", async () => {
@@ -598,7 +598,7 @@ describe("ComputerHistorySubPage", () => {
     expect(dialog?.textContent).toContain("开启电脑历史记录？");
     expect(dialog?.textContent).toContain("大模型");
     expect(dialog?.textContent).toContain("本机");
-    expect(dialog?.querySelector(".ch-recording-confirmation__details")?.textContent).toBe("开启后，你在电脑上的所有操作，会被记录并发送给已配置的大模型进行分析，使用记录保存在本机。");
+    expect(dialog?.querySelector(".ch-recording-confirmation__details")?.textContent).toBe("开启后，记录范围内的电脑操作，会被记录并发送给已配置的大模型进行分析，使用记录保存在本机。");
 
     act(() => { confirmationButton()?.click(); });
     expect(recordingSwitch?.disabled).toBe(true);

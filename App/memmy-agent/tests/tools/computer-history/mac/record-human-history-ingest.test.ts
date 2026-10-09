@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -214,9 +215,9 @@ test.runIf(platform.value === "darwin")("native snapshots cannot carry excluded 
   assert.equal(native.restored.mode, "fullTree");
   assert.equal(native.unchanged.mode, "fullTree");
   assert.deepEqual(native.keyboard.map((event: any) => event.keyboard.target.role), [
-    "AXUnknown", "AXSearchField", "AXUnknown", "AXUnknown", "AXUnknown",
+    "AXSearchField",
   ]);
-  assert.deepEqual(native.keyboard[4].keyboard.target, { role: "AXUnknown" });
+  assert.equal(native.keyboard[0].keyboard.text, "allowed query");
   const sameWindow = { browser: true, url: "https://example.com/", title: "Same document" };
   const blocked = { observation: { ...allow.observation,
     rules: [{ scope: "app", bundleID: chrome.bundleIdentifier, behavior: "do_not_observe" }],
@@ -248,7 +249,7 @@ test.runIf(platform.value === "darwin")("native snapshots cannot carry excluded 
   assert.deepEqual([...reconstructed], native.changed.text.split("\n"));
   const typed = events.filter((event) => event.eventType === "text_input");
   assert.deepEqual(typed.map((event) => [event.details.text, event.details.redacted]), [
-    ["[REDACTED]", true], ["allowed query", false], ["[REDACTED]", true],
+    ["allowed query", false],
   ]);
   assert.equal(JSON.stringify(events).includes("SYNTHETIC_ORDINARY_FIELD_TEXT"), false);
 }, 65_000);
@@ -295,4 +296,20 @@ test("a failed final authorization invalidates an already committed baseline", a
   const events = await record(allow, { screenshots: true });
   assert.deepEqual(events.filter((event) => event.ax).map((event) => event.ax), [full, firstTree]);
   assert.equal(events.filter((event) => event.eventType === "mouse_click").length, 1);
+});
+
+
+test("discards buffered native text after a policy revision changes even if the app is still allowed", async () => {
+  const policy = { observation: { defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [] } };
+  const policyRevision = crypto.createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+  helper.events = [
+    { kind: "keyboard.text_input", app, policyRevision, keyboard: { text: "STALE_PRIVATE_INPUT" } },
+    { kind: "mouse.click", app, policyRevision },
+  ];
+  helper.afterEvent = (index) => {
+    if (index === 0) fs.writeFileSync(path.join(directory, "settings.json"), JSON.stringify({ ...policy, revision: "new" }));
+  };
+  const events = await record(policy, { flags: ["--capture-text", "--allow-app", "com.apple.Notes"] });
+  assert.equal(events.some((event) => event.eventType === "text_input"), false);
+  assert.equal(JSON.stringify(events).includes("STALE_PRIVATE_INPUT"), false);
 });
