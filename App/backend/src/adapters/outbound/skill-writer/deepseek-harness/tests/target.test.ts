@@ -50,7 +50,7 @@ describe("DeepSeek Harness skill target", () => {
         ".": "./index.mjs",
         "./client": "./client.js"
       },
-      dsh: { client: { platform: "web" } }
+      dsh: { client: { platform: "web", inject: ["@deepseek-ai/dsh-client-ui-conversation"] } }
     });
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
     expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source deepseek_harness");
@@ -225,6 +225,29 @@ describe("DeepSeek Harness skill target", () => {
     });
 
     expect(definition?.kind).toBe("memmy-optimistic-user");
+  });
+
+  it("supports the transitional conversation.events registry", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    let registered = 0;
+    const client = handoff?.factory();
+    client?.apply({
+      get(name: string) {
+        return name === "conversation"
+          ? { events: { register: () => { registered += 1; } } }
+          : undefined;
+      }
+    });
+
+    expect(registered).toBe(1);
   });
 
   it("fails clearly when neither conversation event API is available", async () => {
