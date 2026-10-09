@@ -97,6 +97,30 @@ describe("ReadFileTool", () => {
     expect(result).toContain("End of file");
   });
 
+  it("does not show a trailing newline as an extra blank line", async () => {
+    const root = workspace();
+    const file = path.join(root, "memory.md");
+    await fs.writeFile(file, "only one memory line\n");
+
+    const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
+
+    expect(result).toContain("1| only one memory line");
+    expect(result).not.toMatch(/^2\|/m);
+    expect(result).toContain("End of file");
+  });
+
+  it("keeps a real blank line before the final newline", async () => {
+    const root = workspace();
+    const file = path.join(root, "memory.md");
+    await fs.writeFile(file, "first\n\n");
+
+    const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
+
+    expect(result).toContain("1| first");
+    expect(result).toMatch(/^2\| $/m);
+    expect(result).not.toMatch(/^3\|/m);
+  });
+
   it("reports empty files", async () => {
     const root = workspace();
     const file = path.join(root, "empty.txt");

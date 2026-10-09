@@ -32,6 +32,14 @@ function normalizeNewlines(text: string): string {
   return text.replace(/\r\n/g, "\n");
 }
 
+/** Same line split as apply_patch: a final newline does not create an extra blank line. */
+function splitFileLines(text: string): string[] {
+  if (!text) return [];
+  const lines = normalizeNewlines(text).split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
 function lineNumbered(lines: string[], start: number): string {
   const width = String(start + lines.length - 1).length;
   return lines.map((line, index) => `${String(start + index).padStart(width, " ")}| ${line}`).join("\n");
@@ -653,7 +661,7 @@ export class ReadFileTool extends Tool {
       }
       const content = await fs.readFile(target, "utf8");
       if (!content) return "Empty file";
-      const lines = normalizeNewlines(content).split("\n");
+      const lines = splitFileLines(content);
       const offset = params.offset ?? 1;
       if (offset > lines.length) return `Error reading file: offset ${offset} beyond end (${lines.length} lines)`;
       const limit = params.limit ?? null;
