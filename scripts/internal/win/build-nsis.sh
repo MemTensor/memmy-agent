@@ -10,7 +10,6 @@ AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
-OFFICE_RENDERING_RUNTIME_DIR="$RUNTIME_DIR/memmy-agent/dist/extra-dependencies/office-rendering"
 MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 EMBEDDING_MODELS_DIR="$DESKTOP_DIR/dist/embedding-models"
@@ -170,38 +169,6 @@ require_packaged_runtime_glob() {
     echo "Missing required packaged runtime file matching: $required_pattern" >&2
     exit 1
   fi
-}
-
-verify_office_rendering_bundle() {
-  local bundle_dir="$OFFICE_RENDERING_RUNTIME_DIR/win32-x64"
-  local manifest="$bundle_dir/OFFICE-RENDERING-MANIFEST.json"
-
-  for candidate in "$OFFICE_RENDERING_RUNTIME_DIR"/*; do
-    [ -e "$candidate" ] || continue
-    if [ "$(basename "$candidate")" != "win32-x64" ]; then rm -rf "$candidate"; fi
-  done
-  require_packaged_runtime_file "$manifest"
-  for binary in soffice.exe pdfinfo.exe pdftoppm.exe; do
-    require_packaged_runtime_file "$bundle_dir/bin/$binary"
-  done
-
-node - "$manifest" <<'NODE'
-const { createHash } = require("node:crypto");
-const { readFileSync } = require("node:fs");
-const path = require("node:path");
-const [manifestPath] = process.argv.slice(2);
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-if (`${manifest.platform}-${manifest.arch}` !== "win32-x64") throw new Error(`Office rendering manifest target mismatch: ${manifestPath}`);
-if (JSON.stringify(manifest.binaries) !== JSON.stringify(["bin/soffice.exe", "bin/pdfinfo.exe", "bin/pdftoppm.exe"])) throw new Error(`Office rendering manifest binary list mismatch: ${manifestPath}`);
-if (Object.hasOwn(manifest, "schemaVersion")) throw new Error(`Office rendering manifest must not contain schemaVersion: ${manifestPath}`);
-if (!manifest.toolVersions || typeof manifest.toolVersions !== "object" || Array.isArray(manifest.toolVersions)) throw new Error(`Office rendering toolVersions must be an object: ${manifestPath}`);
-if (!manifest.sha256 || typeof manifest.sha256 !== "object" || Array.isArray(manifest.sha256)) throw new Error(`Office rendering sha256 must be an object: ${manifestPath}`);
-for (const [relative, expected] of Object.entries(manifest.sha256)) {
-  if (!/^[^/].*$/.test(relative) || relative.includes("..") || !/^[0-9a-f]{64}$/i.test(expected)) throw new Error(`Invalid Office rendering hash entry: ${relative}`);
-  const actual = createHash("sha256").update(readFileSync(path.join(path.dirname(manifestPath), relative))).digest("hex");
-  if (actual !== expected.toLowerCase()) throw new Error(`Office rendering hash mismatch: ${relative}`);
-}
-NODE
 }
 
 require_packaged_runtime_absent() {
@@ -567,6 +534,9 @@ verify_windows_agent_native_artifacts() {
   local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64"
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
     exit 1
@@ -654,6 +624,9 @@ verify_packaged_windows_unpacked_artifacts() {
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
     "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
@@ -775,35 +748,8 @@ verify_windows_sharp_module
 
 package_step_start "Stage Windows memmy-agent runtime files"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
-verify_office_rendering_bundle
 
-verify_office_skill_payload() {
-  local skill_root="$RUNTIME_DIR/memmy-agent/dist/skills"
-  for skill in pptx xlsx; do
-    require_packaged_runtime_file "$skill_root/$skill/SKILL.md"
-    require_packaged_runtime_glob "$skill_root/$skill/scripts/*.mjs"
-  done
-  local schema_root="$skill_root/pptx/schemas"
-  local schema_manifest="$schema_root/SCHEMA-MANIFEST.json"
-  require_packaged_runtime_file "$schema_manifest"
-  node - "$schema_manifest" "$schema_root" <<'NODE'
-const { createHash } = require("node:crypto");
-const { readFileSync } = require("node:fs");
-const path = require("node:path");
-const [manifestPath, schemaRoot] = process.argv.slice(2);
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-if (!manifest.root || !Array.isArray(manifest.files) || !manifest.files.includes(manifest.root)) throw new Error(`Invalid PPTX schema manifest: ${manifestPath}`);
-for (const relative of manifest.files) {
-  if (!relative || path.posix.normalize(relative) !== relative || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error(`Unsafe PPTX schema path: ${relative}`);
-  const bytes = readFileSync(path.join(schemaRoot, relative));
-  const expected = manifest.sha256?.[relative];
-  if (!/^[0-9a-f]{64}$/i.test(expected ?? "")) throw new Error(`Missing PPTX schema hash: ${relative}`);
-  const actual = createHash("sha256").update(bytes).digest("hex");
-  if (actual !== expected.toLowerCase()) throw new Error(`PPTX schema hash mismatch: ${relative}`);
-}
-NODE
-}
-verify_office_skill_payload
+node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_DIR/memmy-agent"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
@@ -824,6 +770,11 @@ if [ ! -f "$RUNTIME_LOCAL_API_CONTRACTS_DIR/dist/index.js" ]; then
   echo "Packaged local API contracts entrypoint is missing." >&2
   exit 1
 fi
+RUNTIME_KNOWLEDGE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/knowledge"
+rm -rf "$RUNTIME_KNOWLEDGE_DIR"
+mkdir -p "$RUNTIME_KNOWLEDGE_DIR"
+cp "$ROOT_DIR/Knowledge/package.json" "$RUNTIME_KNOWLEDGE_DIR/package.json"
+cp -R "$ROOT_DIR/Knowledge/dist" "$RUNTIME_KNOWLEDGE_DIR/dist"
 RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
 rm -rf "$RUNTIME_MIGRATIONS_DIR"
 mkdir -p "$RUNTIME_MIGRATIONS_DIR"

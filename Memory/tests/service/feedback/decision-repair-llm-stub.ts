@@ -27,6 +27,26 @@ export function createDecisionRepairEvolutionLlm(): LlmClient {
           reason: "explicit positive feedback confirms successful completion"
         } as unknown as T;
       }
+      if (options.operation === "failure.experience.sink.v5") {
+        const payload = JSON.parse(_messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          evidence_trace_ids?: string[];
+        };
+        const traceId = payload.evidence_trace_ids?.[0];
+        return {
+          title: "Avoid reporting TLS completion before verification",
+          trigger: "When configuring TLS and reporting the service endpoint.",
+          procedure: "Use the requested secure port and verify TLS before reporting completion.",
+          verification: "Confirm the secure endpoint responds successfully with certificate verification enabled.",
+          boundary: "Use for TLS configuration tasks with an explicit port or verification requirement.",
+          experience_type: "failure_avoidance",
+          decision_guidance: {
+            prefer: ["Verify the secure endpoint before reporting completion."],
+            avoid: ["Do not report TLS completion while the requested port or verification remains wrong."]
+          },
+          support_trace_ids: traceId ? [traceId] : [],
+          confidence: 0.82
+        } as unknown as T;
+      }
       if (options.operation === "l2.induction.v4") {
         return {
           title: "Use focused sqlite repair checks",

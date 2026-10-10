@@ -32,14 +32,17 @@ import { createQwenworkSourceAdapter } from "./adapters/qwenwork/index.js";
 import { createSourceRegistry, type SourceRegistry } from "./adapters/source-registry.js";
 import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapters/types.js";
 import {
+  hasStagedSourceTurn,
   isCompleteTurn,
   orderedTurns,
   sourceTurnFromMessages,
   sourceTurnFailureReason,
+  sourceTurnSkipBlocksWatermark,
   buildSourceTurnRequest,
   renderTurnClipped,
   stableTurnIdentity,
   legacyTurnId,
+  legacyImportTurnIdFromMessages,
   legacyTurnRequestId,
   type ScanStore
 } from "@memmy/agent-source-core";
@@ -60,6 +63,10 @@ import {
 } from "./integration/target-registry.js";
 import { renderMemmyDefaultSkillManifest } from "./integration/templates/memmy-default.js";
 import { createWorkbuddySkillTarget } from "./integration/workbuddy/index.js";
+import type {
+  MemoryDesktopAddAnalytics,
+  MemoryDesktopAddScanMode
+} from "../server/memory-add-analytics.js";
 
 const logger = createMemoryLogger("agent-source");
 const INITIAL_SCAN_DELAY_MS = 5 * 60 * 1000;
@@ -128,6 +135,10 @@ export interface CreateAgentSourceExecutorOptions {
   /** Resolves the Agent root used for optional cross-Agent Skill ingestion. */
   resolveAgentSkillRoot?: (sourceId: string) => string | null;
   scanStoreDirectory?: string;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
 }
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
@@ -280,12 +291,21 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         if (await adapter.detect()) available.push(adapter);
         else if (request.sourceId !== "all") throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
+      const preservedModes = new Map<string, "initial_subset" | "incremental" | "full">();
+      if (!request.mode) {
+        for (const adapter of available) {
+          const existing = store.getSourceState(adapter.descriptor.sourceId);
+          if (existing && existing.phase !== "done" && (existing.mode === "initial_subset" || existing.mode === "incremental" || existing.mode === "full")) {
+            preservedModes.set(adapter.descriptor.sourceId, existing.mode);
+          }
+        }
+      }
       const globalInitial = request.sourceId === "all" && available.length > 0 &&
-        (request.mode === "initial_subset" || (request.mode === undefined && available.every((adapter) => !state.sources[adapter.descriptor.sourceId]?.lastScannedAt)));
+        (request.mode === "initial_subset" || (request.mode === undefined && preservedModes.size === 0 && available.every((adapter) => !state.sources[adapter.descriptor.sourceId]?.lastScannedAt)));
       const stages: StandaloneSourceStage[] = [];
       for (const adapter of available) {
         const stored = state.sources[adapter.descriptor.sourceId] ?? emptySourceState();
-        const mode = request.mode ?? (stored.lastScannedAt ? "incremental" : "initial_subset");
+        const mode = request.mode ?? preservedModes.get(adapter.descriptor.sourceId) ?? (stored.lastScannedAt ? "incremental" : "initial_subset");
         store.saveMeta({ jobId, sourceId: store.getMeta()?.sourceId ?? request.sourceId, mode, phase: "stage", createdAt: store.getMeta()?.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() });
         stages.push(await stageStandaloneSource(adapter, stored, mode, store, signal, () => waitWhilePaused(signal), (progress) => {
           if (!scanPaused) { progressBeforePause = progress; scan = { ...scan, progress }; }
@@ -311,7 +331,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         store.saveSourceState({ ...(preparedState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: new Date().toISOString() }), phase: "ingest", updatedAt: new Date().toISOString() });
         const result = await ingestStagedMessages(options.service, store, sourceId, signal, (progress) => {
           if (!scanPaused) { progressBeforePause = progress; scan = { ...scan, progress }; }
-        }, options.scheduleWorker);
+        }, options.scheduleWorker, options.memoryAddAnalytics, persistentScanMode(mode));
         const skillResult = await ingestAgentSkills(
           options.service,
           sourceId,
@@ -331,11 +351,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           messageCount: mode === "incremental"
             ? stored.messageCount + result.messageCount
             : result.messageCount,
-          lastScannedAt: now,
-          ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && preparedContentHashes.has(sourceId)
+          ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips
+            ? { lastScannedAt: now }
+            : stored.lastScannedAt ? { lastScannedAt: stored.lastScannedAt } : {}),
+          ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips && preparedContentHashes.has(sourceId)
             ? { contentHash: preparedContentHashes.get(sourceId) }
             : stored.contentHash ? { contentHash: stored.contentHash } : {}),
-          latestSeenAt: stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0
+          latestSeenAt: stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips
             ? (result.latestSeenAt ?? stored.latestSeenAt)
             : stored.latestSeenAt
         };
@@ -343,7 +365,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         store.saveSourceState({
           sourceId,
           mode,
-          phase: sourceErrorCount > 0 ? "failed" : "done",
+          phase: sourceErrorCount > 0 || result.hasUncommittedSkips ? "failed" : "done",
           messageCount: result.messageCount,
           resultCount: store.resultCount(sourceId),
           errorCount: sourceErrorCount,
@@ -357,7 +379,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         const meta = store.getMeta();
         if (meta) store.saveMeta({ ...meta, phase: "failed", updatedAt: new Date().toISOString(), error: failures.slice(0, 3).join("; ") });
       }
-      completed = failureCount === 0 && store.resultCount() <= INITIAL_SCAN_MESSAGE_LIMIT;
+      completed = failureCount === 0 && stages.every((stage) => {
+        const sourceState = store?.getSourceState(stage.sourceId);
+        return sourceState?.phase === "done";
+      }) && store.resultCount() <= INITIAL_SCAN_MESSAGE_LIMIT;
     } catch (error) {
       if (store) {
         const meta = store.getMeta();
@@ -666,10 +691,10 @@ async function stageStandaloneSource(
     for await (const message of adapter.scan({
       ...(mode === "incremental" && stored.latestSeenAt ? { since: stored.latestSeenAt } : {}),
       order: mode === "initial_subset" ? "recent_first" : "source_default",
-      // Incremental scans must honor the persisted boundary. Full-history
-      // streaming is only safe for an explicit full scan; otherwise the
-      // adapter would stage every historical message in an active session.
-      fullHistory: mode === "full",
+      // Incremental scans must honor the persisted boundary. Initial and full
+      // scans read every historical message; initial scans still select only
+      // the recent memory subset before capture.
+      fullHistory: mode === "initial_subset" || mode === "full",
       signal,
       onProgress
     })) {
@@ -678,10 +703,7 @@ async function stageStandaloneSource(
       const normalizedMessage = message.sourceId === sourceId ? message : { ...message, sourceId };
       const bytes = Buffer.byteLength(JSON.stringify(normalizedMessage));
       if (bytes > 64 * 1024 * 1024) {
-        const reason = "record exceeds 64 MiB";
-        scanErrorCount += 1;
-        if (errors.length < 1000) errors.push(`${sourceId}:${message.conversationId}: ${reason}`);
-        store.saveResult({ sourceId, conversationId: message.conversationId, error: reason });
+        recordScanItemSkip(store, sourceId, message.conversationId, "record exceeds 64 MiB");
         continue;
       }
       if (batch.length > 0 && (batch.length >= 500 || batchBytes + bytes > 8 * 1024 * 1024)) {
@@ -732,16 +754,27 @@ async function ingestStagedMessages(
   sourceId: string,
   signal: AbortSignal,
   onProgress: (progress: ScanProgress) => void,
-  scheduleWorker?: () => void
-): Promise<{ written: number; messageCount: number; errors: string[]; errorCount: number; latestSeenAt: string | null }> {
+  scheduleWorker?: () => void,
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >,
+  scanMode?: MemoryDesktopAddScanMode
+): Promise<{ written: number; messageCount: number; errors: string[]; errorCount: number; latestSeenAt: string | null; hasUncommittedSkips: boolean }> {
   let written = 0;
   let messageCount = 0;
   let processed = 0;
   let latestSeenAt: string | null = null;
   const errors: string[] = [];
   let errorCount = 0;
+  let hasUncommittedSkips = false;
   let activeConversationId: string | null = null;
   let activeConversationFailed = false;
+  const noteUncommittedSkip = (reason: string) => {
+    if (!sourceTurnSkipBlocksWatermark(reason)) return;
+    activeConversationFailed = true;
+    hasUncommittedSkips = true;
+  };
   const commitConversation = () => {
     if (!activeConversationId || activeConversationFailed) return;
     const meta = store.getConversationMeta(sourceId, activeConversationId);
@@ -784,15 +817,49 @@ async function ingestStagedMessages(
       activeConversationFailed = false;
     }
     const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
-    if (conversationMeta?.selected === false) continue;
+    if (conversationMeta?.selected === false) {
+      processed += turn.messages.length;
+      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
-    if (selectedTurn && !selectedTurn.selected) continue;
-    if (sourceId === "codex") {
+    if (selectedTurn && !selectedTurn.selected) {
+      processed += turn.messages.length;
+      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
+    if (hasStagedSourceTurn(turn.messages[0])) {
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
-        if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
-        const result = service.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
-        if (result.status === "pending" || result.status === "conflict") throw new Error(result.reason ?? result.status);
+        if (!sourceTurn) {
+          const reason = sourceTurnFailureReason(turn.messages);
+          recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
+          processed += turn.messages.length;
+          onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
+        const legacyImportTurnId = legacyImportTurnIdFromMessages(sourceId, turn.conversationId, turn.messages);
+        const result = service.completeSourceTurn({
+          ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
+          ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
+          ...(scanMode === "initial_subset" || scanMode === "full" ? { captureLegacyHistory: true } : {})
+        });
+        if (result.status === "rejected" && result.reason === "legacy_before_activation" && (scanMode === "initial_subset" || scanMode === "full")) {
+          recordScanItemSkip(store, sourceId, turn.conversationId, result.reason);
+          noteUncommittedSkip(result.reason);
+          processed += turn.messages.length;
+          onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
+        if (result.status === "pending" || result.status === "conflict") {
+          const reason = result.reason ?? result.status;
+          recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+          noteUncommittedSkip(reason);
+          processed += turn.messages.length;
+          onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+          continue;
+        }
         const ids = result.result?.l1MemoryIds ?? [];
         if (result.status === "stored") written += ids.length;
         if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
@@ -800,17 +867,23 @@ async function ingestStagedMessages(
         messageCount += turn.messages.length;
         if (result.status === "stored") scheduleWorker?.();
       } catch (error) {
-        activeConversationFailed = true;
         const reason = error instanceof Error ? error.message : "native turn ingestion failed";
-        errorCount += 1;
-        if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
-        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+        recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+        noteUncommittedSkip(reason);
       }
       processed += turn.messages.length;
       onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
       continue;
     }
     let succeeded = true;
+    const resolvedScanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanMode);
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: turn.conversationId,
+      turnId: legacyTurnId(turn),
+      ...(resolvedScanMode ? { scanMode: resolvedScanMode } : {})
+    };
+    const addStartedAt = Date.now();
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
@@ -819,8 +892,16 @@ async function ingestStagedMessages(
         requestId: legacyTurnRequestId(turn), adapterId: `agent-source:${sourceId}`,
         content: renderTurnClipped(turn.messages), layer: "L1",
         title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
-        turnId: legacyTurnId(turn), createdAt: turn.messages[0]!.createdAt, deferProcessing: true
+        turnId: addAnalyticsBase.turnId, createdAt: turn.messages[0]!.createdAt, deferProcessing: true
       });
+      if (!added.duplicate) {
+        memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
       if (!added.duplicate) { memoryIds.push(added.id); written += 1; }
     } catch (error) {
@@ -830,6 +911,14 @@ async function ingestStagedMessages(
       errorCount += 1;
       if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
       store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      hasUncommittedSkips = true;
+      recordScanItemSkip(store, sourceId, turn.conversationId, reason);
+      memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
     if (succeeded) {
       messageCount += turn.messages.length;
@@ -840,7 +929,7 @@ async function ingestStagedMessages(
   }
   flush(true);
   commitConversation();
-  return { written, messageCount, errors, errorCount, latestSeenAt };
+  return { written, messageCount, errors, errorCount, latestSeenAt, hasUncommittedSkips };
 }
 
 async function prepareStandaloneSource(
@@ -860,7 +949,7 @@ async function prepareStandaloneSource(
   sourceHash.update("[");
   let firstSourceMessage = true;
   const flushTurn = () => {
-    if (!currentTurn.length || (sourceId !== "codex" && !isCompleteTurn(currentTurn))) return;
+    if (!currentTurn.length || (!hasStagedSourceTurn(currentTurn[0]) && !isCompleteTurn(currentTurn))) return;
     const firstMessage = currentTurn[0]!;
     const lastMessage = currentTurn[currentTurn.length - 1]!;
     const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex: 0, messages: currentTurn };
@@ -904,7 +993,7 @@ async function prepareStandaloneSource(
         hash.update("[");
         first = true;
       }
-      if (currentTurn.length > 0 && (sourceId === "codex" ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
+      if (currentTurn.length > 0 && (hasStagedSourceTurn(message) ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
         flushTurn();
         currentTurn = [];
       }
@@ -918,7 +1007,7 @@ async function prepareStandaloneSource(
         createdAt: message.createdAt,
         toolName: hashMeta(message, "toolName") ?? hashMeta(message, "hermesToolName"),
         toolCallId: hashMeta(message, "toolCallId") ?? hashMeta(message, "hermesToolCallId"),
-        ...(sourceId === "codex" ? { sourceTurn: message.rawMeta } : {})
+        ...(hasStagedSourceTurn(message) ? { sourceTurn: message.rawMeta } : {})
       };
       const serialized = JSON.stringify(hashable);
       if (!firstSourceMessage) sourceHash.update(",");
@@ -947,6 +1036,16 @@ function isAtOrAfter(value: string, boundary: string): boolean {
 function hashMeta(message: ConversationMessage, key: string): string | undefined {
   const value = message.rawMeta[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function recordScanItemSkip(
+  store: MemoryAgentSourceScanStore,
+  sourceId: string,
+  conversationId: string,
+  reason: string
+): void {
+  logger.warn("scan.item_skipped", { sourceId, conversationId, reason });
+  store.saveResult({ sourceId, conversationId, error: reason });
 }
 
 function readScanPage(store: MemoryAgentSourceScanStore, sourceId: string, cursor?: { conversationId: string; createdAt: string; messageId: string; ordinal: number }): ConversationMessage[] {
@@ -1012,10 +1111,12 @@ async function ingestAgentSkills(
         flush();
       }
     } catch (error) {
-      const reason = `skill ${sourceSkillId}: ${error instanceof Error ? error.message : String(error)}`;
-      errorCount += 1;
-      if (errors.length < 1000) errors.push(reason);
-      store.saveResult({ sourceId, conversationId: `skill:${sourceSkillId}`, error: reason });
+      recordScanItemSkip(
+        store,
+        sourceId,
+        `skill:${sourceSkillId}`,
+        error instanceof Error ? error.message : String(error)
+      );
     }
   }
   flush(true);
@@ -1065,6 +1166,10 @@ function frontmatterValue(content: string, key: string): string | undefined {
   return content.slice(3, end)
     .match(new RegExp(`^${key}:\\s*["']?([^\\n"']+)["']?\\s*$`, "im"))?.[1]
     ?.trim();
+}
+
+function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode | undefined {
+  return value === "initial_subset" || value === "incremental" || value === "full" ? value : undefined;
 }
 
 function titleForTurn(sourceId: string, messages: readonly ConversationMessage[]): string {

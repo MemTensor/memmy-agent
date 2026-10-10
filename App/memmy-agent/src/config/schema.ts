@@ -968,7 +968,13 @@ export class ToolsConfig extends Base {
         : new ImageGenerationToolConfig(pick(init, ["imageGeneration"], {}));
     this.restrictToWorkspace = pick(init, ["restrictToWorkspace"], false);
     this.ssrfWhitelist = assertStringArray("ssrfWhitelist", pick(init, ["ssrfWhitelist"], []));
-    const mcp = pick(init, ["mcpServers"], {});
+    const mcp = pick(init, ["mcpServers"], {
+      open_computer_use: {
+        type: "stdio",
+        command: "open-computer-use",
+        args: ["mcp"],
+      },
+    });
     this.mcpServers = Object.fromEntries(
       Object.entries(mcp).map(([name, cfg]) => [
         name,

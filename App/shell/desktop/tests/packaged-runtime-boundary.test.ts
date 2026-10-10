@@ -36,6 +36,7 @@ const createMemoryRuntimeManifestPath = fileURLToPath(
 );
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
+const winStandardUpgradeCheckPath = fileURLToPath(new URL("../build/MemmyWindowsStandardUpgradeCheck.ps1", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
 const winDataMigrationScriptPath = fileURLToPath(new URL("../build/MemmyWindowsDataMigration.ps1", import.meta.url));
@@ -198,7 +199,7 @@ describe("desktop packaged runtime boundaries", () => {
     });
     for (const scriptName of ["prebuild", "pretypecheck", "pretest"]) {
       expect(agentPackage.scripts?.[scriptName]).toBe(
-        "npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
+        "npm --prefix ../../Knowledge run build && npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
       );
     }
   });
@@ -352,7 +353,7 @@ describe("desktop packaged runtime boundaries", () => {
       expect(config.asarUnpack).toContain(
         "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
       );
-      expect(config.asarUnpack).toContain(
+      expect(config.asarUnpack).not.toContain(
         "dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering/**"
       );
     }
@@ -867,6 +868,25 @@ describe("desktop packaged runtime boundaries", () => {
     expect(customInstallIndex).toBeGreaterThan(customInitIndex);
   });
 
+  it("explains the existing Windows install directory and requires manual relocation", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const standardUpgradeCheckSource = readFileSync(winStandardUpgradeCheckPath, "utf8");
+    const noticeCall = includeSource.indexOf("Call MemmyShowPreviousInstallDirectoryNotice");
+    const noticeFunction = includeSource.indexOf("Function MemmyShowPreviousInstallDirectoryNotice");
+    const validationFunction = includeSource.indexOf("Function MemmyValidateSelectedDirectories");
+    const validationProbe = includeSource.indexOf("Call MemmyProbeWritableDirectory", validationFunction);
+    const previousDirectoryGuard = includeSource.indexOf("memmy_validate_previous_directory_failed", validationFunction);
+
+    expect(noticeCall).toBeGreaterThan(-1);
+    expect(noticeFunction).toBeGreaterThan(noticeCall);
+    expect(includeSource).toContain("$MemmyPreviousInstallDir");
+    expect(includeSource).toContain("If you want to move Memmy, manually migrate your files");
+    expect(includeSource).toContain("如果要更换目录，请先手动迁移 Memmy 文件");
+    expect(previousDirectoryGuard).toBeGreaterThan(validationFunction);
+    expect(previousDirectoryGuard).toBeLessThan(validationProbe);
+    expect(standardUpgradeCheckSource).toContain("manually migrate files before choosing a new directory");
+  });
+
   it("adds packaged Windows CLI launchers to the user PATH", () => {
     const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
@@ -914,6 +934,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
     expect(includeSource).toContain("lockPath = relayLockPath");
+    expect(includeSource).toContain("If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
     expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
     expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");
@@ -960,7 +981,6 @@ describe("desktop packaged runtime boundaries", () => {
       includeSource.indexOf('RMDir /r "$LOCALAPPDATA\\Memmy\\launcher"')
     );
     expect(includeSource).not.toContain("MsgBox");
-    expect(includeSource).not.toContain("MessageBox MB_OK|MB_ICONINFORMATION");
     expect(includeSource).not.toContain("Memmy 将安装到当前用户目录");
     expect(updatePromptSource).toContain("function Resolve-MemmyPromptLanguage");
     expect(updatePromptSource).toContain("function Test-MemmyUpdatePromptDone");
@@ -1153,6 +1173,24 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:export-diagnostics-report")');
   });
 
+  it("stops the Windows memory service by default during app exit", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    expect(mainSource).toContain('process.platform === "win32"');
+    expect(mainSource).toContain("stopMemoryServiceOnExit");
+  });
+
+  it("opens Computer History Markdown through a restricted desktop bridge", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    const preloadSource = readFileSync(preloadSourcePath, "utf8");
+
+    expect(preloadSource).toContain("openComputerHistoryMarkdown(filePath: string): Promise<void>;");
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:open-computer-history-markdown", filePath)');
+    expect(mainSource).toContain('ipcMain.handle("memmy:open-computer-history-markdown"');
+    expect(mainSource).toContain("resolveComputerHistoryMarkdownPath(rawPath)");
+    expect(mainSource).toContain("await shell.openPath(filePath)");
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:open-computer-history-markdown")');
+  });
+
   it("exposes app version and update checks through the desktop bridge", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
@@ -1250,6 +1288,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
     expect(mainSource).toContain("app processes still running before install; waiting");
+    expect(mainSource).toContain("function Get-MemmyUpdateAppProcesses");
+    expect(mainSource).toContain("$AppPid");
+    expect(mainSource).toContain("memory-service");
+    expect(mainSource).not.toContain("$_.Path -eq $AppExe");
     expect(mainSource).toContain("function hideMacDockForPreparedUpdateInstall");
     expect(mainSource).toContain("app.dock?.hide()");
     expect(mainSource).toContain("isManagedUpdateInstallerRunning");
@@ -1907,6 +1949,7 @@ describe("desktop packaged runtime boundaries", () => {
     const versionGuardSource = readFileSync(verifyPackageVersionPath, "utf8");
     const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
 
+    expect(mainSource).toContain("loadCloudServiceEnv({");
     expect(mainSource).toContain('manifestPath: app.isPackaged ? join(import.meta.dirname, "desktop-edition.json") : undefined');
     for (const source of [macSource, winSource]) {
       expect(source).toContain("write-desktop-edition-manifest.mjs");

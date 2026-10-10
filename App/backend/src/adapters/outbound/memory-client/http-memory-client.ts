@@ -12,6 +12,7 @@ import {
   GetMemoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryTokenBudgetDtoSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
   RecallEvidenceOutputSchema,
@@ -128,6 +129,10 @@ export function createHttpMemoryClient(
 
     async reloadConfig(input = {}) {
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
+    },
+
+    async getMemoryTokenBudget() {
+      return request("GET", "memoryTokenBudget", MemoryTokenBudgetDtoSchema);
     },
 
     async exportBundle() {

@@ -1,7 +1,17 @@
+export * from "./source-turn.js";
 export * from "./codex-source-turn.js";
+export * from "./cursor-source-turn.js";
+export * from "./claude-code-source-turn.js";
+export * from "./openclaw-source-turn.js";
+export * from "./opencode-source-turn.js";
+export * from "./hermes-source-turn.js";
+export * from "./deepseek-source-turn.js";
+export * from "./deepseek-session-files.js";
 export * from "./secret-redactor.js";
 export * from "./jsonl-lines.js";
+export * from "./memory-token-budget.js";
 import { createHash } from "node:crypto";
+import { hasStagedSourceTurn } from "./source-turn.js";
 
 export interface ConversationMessage {
   messageId: string;
@@ -175,16 +185,19 @@ export async function* orderedTurns(messages: AsyncIterable<ConversationMessage>
   if (shouldEmitTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
 }
 
+/**
+ * A native reader has already decided the turn boundary and recorded whether the turn
+ * is complete, so its turns are emitted as staged. Sources without a native reader
+ * still need the user/assistant heuristic to tell a finished exchange apart.
+ */
 function shouldEmitTurn(messages: readonly ConversationMessage[]): boolean {
-  return messages.length > 0 && (messages[0]!.sourceId === "codex" || isCompleteTurn(messages));
+  return messages.length > 0 && (hasStagedSourceTurn(messages[0]) || isCompleteTurn(messages));
 }
 
 function beginsNextTurn(current: readonly ConversationMessage[], next: ConversationMessage): boolean {
-  if (next.sourceId === "codex") {
-    const currentId = current[0]!.rawMeta.sourceTurnId;
-    const nextId = next.rawMeta.sourceTurnId;
-    if (currentId || nextId) return currentId !== nextId;
-  }
+  const currentId = current[0]!.rawMeta.sourceTurnId;
+  const nextId = next.rawMeta.sourceTurnId;
+  if (currentId || nextId) return currentId !== nextId;
   return next.role === "user";
 }
 
@@ -229,7 +242,7 @@ export function conversationContentHash(messages: Iterable<ConversationMessage>)
 
 export function stableTurnIdentity(turn: ImportedTurn): string {
   const nativeId = turn.messages[0]?.rawMeta.sourceTurnId;
-  if (turn.sourceId === "codex") {
+  if (hasStagedSourceTurn(turn.messages[0])) {
     return `${turn.sourceId}::${turn.conversationId}::${typeof nativeId === "string" ? nativeId : turn.messages[0]?.messageId ?? "unresolved"}`;
   }
   const firstUser = turn.messages.find((message) => message.role === "user");
@@ -247,6 +260,32 @@ export function legacyTurnRequestId(turn: ImportedTurn): string {
 /** Preserves the pre-staging stable turn id for an unsplit turn. */
 export function legacyTurnId(turn: ImportedTurn): string {
   return `${turn.sourceId}:${createHash("sha256").update(stableTurnIdentity(turn)).digest("hex").slice(0, 24)}`;
+}
+
+/** Rebuilds the pre-native import turn id from the first user message id. */
+export function legacyImportTurnId(sourceId: string, conversationId: string, firstUserMessageId: string): string {
+  const identity = `${sourceId}::${conversationId}::${firstUserMessageId}`;
+  return `${sourceId}:${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+}
+
+export function legacyImportTurnIdFromMessages(
+  sourceId: string,
+  conversationId: string,
+  messages: readonly { role: string; messageId?: string; rawMeta?: Readonly<Record<string, unknown>> }[]
+): string | undefined {
+  const firstUser = messages.find((message) => message.role === "user" && message.messageId);
+  if (!firstUser?.messageId) return undefined;
+  const legacyConversationId = textValue(firstUser.rawMeta?.legacyConversationId);
+  const legacyMessageId = textValue(firstUser.rawMeta?.legacyMessageId);
+  return legacyImportTurnId(
+    sourceId,
+    legacyConversationId || conversationId,
+    legacyMessageId || firstUser.messageId
+  );
+}
+
+function textValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** Leaves ample room for JSON escaping and the add-memory envelope. */

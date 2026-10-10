@@ -29,7 +29,12 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
+import {
+  createMemoryDesktopAddAnalytics,
+  type MemoryDesktopAddAnalytics,
+} from "./memory-add-analytics.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
@@ -56,6 +61,7 @@ export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
+  "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
   "GET /api/v1/admin/export",
   "DELETE /api/v1/admin/data",
@@ -96,6 +102,10 @@ export interface MemoryHttpServerOptions {
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   configPath?: string;
   viewerCli?: ViewerCliOptions;
   onRestartRequested?: () => void | Promise<void>;
@@ -139,10 +149,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
+  const memoryAddAnalytics = options.memoryAddAnalytics ?? createMemoryDesktopAddAnalytics();
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
-    scheduleWorker: autoWorker.schedule
+    scheduleWorker: autoWorker.schedule,
+    memoryAddAnalytics
   });
   const activeRequests = new Set<Promise<void>>();
   const server = createServer((request, response) => {
@@ -323,6 +335,7 @@ function createAutoWorkerDrain(
   let disposed = false;
   let startupReleased = false;
   let startupReconciled = false;
+  let workerStarted = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
@@ -335,6 +348,7 @@ function createAutoWorkerDrain(
     if (disposed) {
       return;
     }
+    workerStarted = true;
     if (running) {
       requested = true;
       return;
@@ -429,6 +443,24 @@ function createAutoWorkerDrain(
     }, 0);
   }
 
+  service.setAppBudgetReconcileListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    if (delayedTimer) {
+      clearTimeout(delayedTimer);
+      delayedTimer = undefined;
+    }
+    scheduleNextDueJob();
+  });
+
+  service.setPersistRecoveredListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    schedule();
+  });
+
   return {
     start(): void {
       if (disposed || startupReleased || startupTimer) {
@@ -455,6 +487,8 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      service.setAppBudgetReconcileListener(undefined);
+      service.setPersistRecoveredListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -498,6 +532,10 @@ async function routeRequest(
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health([...API_ROUTES]);
+  }
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    requireMemoryRead(principal);
+    return service.memoryTokenBudget();
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
@@ -656,6 +694,10 @@ async function routeRequest(
     const result = service.completeSourceTurn({
       namespace: request.namespace, timeZone: request.timeZone, source: request.source,
       sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      ...(request.captureLegacyHistory === true ? { captureLegacyHistory: true } : {}),
+      ...(typeof request.legacyImportTurnId === "string" && request.legacyImportTurnId.trim()
+        ? { legacyImportTurnId: request.legacyImportTurnId.trim() }
+        : {}),
       sessionId: request.sessionId, episodeId: request.episodeId,
       query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
@@ -780,11 +822,12 @@ async function routeRequest(
       sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
+    const idempotency = memoryAddIdempotency(publicRequest, path);
     const result = await trackExternalToolCall(
       pluginRuntimeAnalytics,
       { ...request, toolName: "memmy_memory_add" },
       () =>
-        service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+        service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
           service.addMemory(publicRequest)
         ),
       (addResult) => ({
@@ -961,6 +1004,49 @@ async function routeRequest(
   }
 
   throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
+}
+
+function memoryAddIdempotency(
+  request: MemoryAddRequest,
+  path: string
+): { request: RequestEnvelope; fingerprint: unknown } {
+  const sourceAgentId = request.sourceAgentId?.trim();
+  const sourceSkillId = request.sourceSkillId?.trim();
+  const sourceContentHash = request.sourceContentHash?.trim();
+  const isAgentSourceSkill =
+    request.layer === "Skill" &&
+    Boolean(request.requestId) &&
+    Boolean(sourceAgentId) &&
+    Boolean(sourceSkillId) &&
+    Boolean(sourceContentHash) &&
+    request.adapterId === `agent-source:${sourceAgentId}`;
+
+  if (!isAgentSourceSkill) {
+    return {
+      request,
+      fingerprint: { path, request }
+    };
+  }
+
+  const identity = {
+    namespace: request.namespace,
+    sourceAgentId,
+    sourceSkillId,
+    sourceContentHash
+  };
+  return {
+    request: {
+      adapterId: request.adapterId,
+      // Version the key so legacy full-request fingerprints cannot keep
+      // conflicting after volatile Skill metadata changes.
+      requestId: `agent-source-skill:v2:${stableHash(identity)}`,
+      namespace: request.namespace
+    },
+    fingerprint: {
+      path,
+      skill: identity
+    }
+  };
 }
 
 function publicOpenSessionResponse(result: unknown): Record<string, unknown> {

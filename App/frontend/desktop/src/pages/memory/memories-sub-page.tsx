@@ -25,7 +25,7 @@ import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { MemoryAgentSourceTag } from "./memory-agent-source-tag.js";
 import { MemoryMarkdown } from "./memory-markdown.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
-import { cleanMemoryBody, cleanMemoryText, displayMemoryTitle, drawerEyebrow, memoryDisplaySource } from "./memory-display.js";
+import { cleanMemoryBody, cleanMemoryText, displayMemoryTitle, drawerEyebrow, independentGeneratedTitle, isMemorySummaryWaiting, memoryDisplaySource, showsGeneratedSummaryRow, waitingPrimaryText } from "./memory-display.js";
 import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
@@ -501,6 +501,11 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
         {visibleItems.map((item) => {
           const selected = props.selectedMemoryId === item.id || ("detail" in props.state && props.state.detail?.status === "ready" && props.state.detail.data.item.id === item.id);
           const processingStatus = memoryProcessingStatus(item);
+          const waiting = isMemorySummaryWaiting(item.processing);
+          const primaryText = waiting ? waitingPrimaryText(item) : displayMemoryTitle(item);
+          const summaryText = !waiting && showsGeneratedSummaryRow(item, waiting)
+            ? cleanMemoryText(item.summary)
+            : "";
           return (
             <div
               key={item.id}
@@ -517,7 +522,8 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
               className={`memory-card${selected ? " memory-card--selected" : ""}`}
             >
               <div className="memory-card__body">
-                <div className="memory-card__title">{displayMemoryTitle(item)}</div>
+                <div className="memory-card__title">{primaryText}</div>
+                {summaryText ? <div className="memory-card__summary">{summaryText}</div> : null}
                 <div className="memory-card__meta">
                   <MemoryAgentSourceTag sourceAgent={memoryDisplaySource(item)} label={t("memory.memories.source")} />
                   <span>{formatDateTime(item.createdAt)}</span>
@@ -570,6 +576,10 @@ function MemoryDetailPanel(props: {
 
   const readyDetail = props.detail.status === "ready" ? props.detail.data : null;
   const eyebrow = readyDetail ? drawerEyebrow(readyDetail.item) : t("memory.memories.detailTitle");
+  const waiting = readyDetail ? isMemorySummaryWaiting(readyDetail.item.processing) : false;
+  const drawerTitle = readyDetail && !waiting && readyDetail.item.kind !== "span"
+    ? independentGeneratedTitle(readyDetail.item)
+    : undefined;
 
   return (
     <div className="memory-drawer-backdrop" onClick={props.onClose}>
@@ -577,12 +587,13 @@ function MemoryDetailPanel(props: {
         e.stopPropagation();
         props.onClose();
       }} />
-      <aside className="memory-drawer memory-drawer--entry" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title" onClick={(e) => e.stopPropagation()}>
+      <aside className="memory-drawer memory-drawer--entry" role="dialog" aria-modal="true" aria-labelledby={drawerTitle ? "memory-detail-heading" : "memory-detail-title"} onClick={(e) => e.stopPropagation()}>
         <header className="memory-drawer__header">
           <div>
             <div className="memory-drawer__identity">
               <span id="memory-detail-title" className="memory-drawer__eyebrow">{eyebrow}</span>
             </div>
+            {drawerTitle ? <h4 id="memory-detail-heading" className="memory-drawer__title">{drawerTitle}</h4> : null}
           </div>
           <button type="button" className="memory-drawer__close" onClick={props.onClose} aria-label={t("common.close")}>
             <X size={16} />
@@ -622,7 +633,7 @@ function MemoryDetailBody(props: {
   const detail = props.detail;
   const item = detail.item;
   const traceDetail = readTraceDetail(detail);
-  const summaryText = displayMemorySummaryText(item.summary, t);
+  const summaryText = displayMemorySummaryText(item.summary, t, item.processing);
 
   if (item.kind === "span") {
     const span = recordValue(recordValue(recordValue(item.metadata.properties).internal_info).span);
@@ -874,7 +885,7 @@ function TraceMemoryDetail(props: {
     : detail.steps.flatMap((step) => step.toolCalls);
   const turnEvents = buildTraceTurnEvents(detail, toolCalls);
   const hasTurnSteps = turnEvents.length > 0;
-  const summaryText = displayMemorySummaryText(detail.summary || props.item.summary, t);
+  const summaryText = displayMemorySummaryText(detail.summary || props.item.summary, t, props.item.processing);
 
   return (
     <>
@@ -1075,7 +1086,14 @@ function waitForProcessingPoll(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 500));
 }
 
-function displayMemorySummaryText(value: string | undefined | null, t: (key: MessageKey) => string): string {
+function displayMemorySummaryText(
+  value: string | undefined | null,
+  t: (key: MessageKey) => string,
+  processing?: MemoryProcessingRecord
+): string {
+  if (isMemorySummaryWaiting(processing)) {
+    return t(MEMORY_PROCESSING_STATUS_LABELS.summary);
+  }
   const cleaned = cleanMemoryText(value);
   const processingStatus = importProcessingSummaryStatus(cleaned);
   return processingStatus ? t(MEMORY_PROCESSING_STATUS_LABELS[processingStatus]) : cleaned;

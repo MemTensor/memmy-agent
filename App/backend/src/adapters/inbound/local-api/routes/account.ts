@@ -5,10 +5,16 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   AvatarOptionSchema,
+  LotteryRewardAckInputSchema,
+  LotteryRewardSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
   SetAvatarInputSchema,
+  SocialLoginStatusInputSchema,
+  SocialLoginStatusResponseSchema,
+  StartSocialLoginInputSchema,
+  StartSocialLoginResponseSchema,
   UpdateAccountProfileInputSchema,
   VerifyCodeInputSchema
 } from "@memmy/local-api-contracts";
@@ -42,6 +48,30 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
     withErrorEnvelope(async (request, reply) => {
       const input = VerifyCodeInputSchema.parse(request.body);
       const response = AccountLoginResultViewSchema.parse(await options.account.verifyCode(input));
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/oauth/start",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = StartSocialLoginInputSchema.parse(request.body);
+      const response = StartSocialLoginResponseSchema.parse(
+        await options.account.startSocialLogin(input)
+      );
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/oauth/status",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = SocialLoginStatusInputSchema.parse(request.body);
+      const response = SocialLoginStatusResponseSchema.parse(
+        await options.account.getSocialLoginStatus(input)
+      );
       return reply.send(response);
     })
   );
@@ -90,6 +120,25 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (_request, reply) => {
       const response = AccountSessionViewSchema.parse(await options.account.getSession());
+      return reply.send(response);
+    })
+  );
+
+  app.get(
+    "/api/account/lottery/reward",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = LotteryRewardSchema.parse(await options.account.getLotteryReward());
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/lottery/reward/ack",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = LotteryRewardAckInputSchema.parse(request.body);
+      const response = OkResponseSchema.parse(await options.account.ackLotteryReward(input));
       return reply.send(response);
     })
   );

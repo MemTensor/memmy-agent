@@ -39,6 +39,11 @@ import {
   panelToolLatency
 } from "./model-costs.js";
 import {
+  evidenceMemoryIds,
+  storedGeneratedTitle,
+  waitingSourceText
+} from "./display-fields.js";
+import {
   panelCountByDate,
   panelListItemFromMemory,
   panelSourceDistribution
@@ -76,7 +81,7 @@ export interface PanelReadModelDependencies {
   };
   encodeChangeCursor: (seq: number, namespace?: RuntimeNamespace) => string;
   decodeChangeCursor: (cursor: string | undefined, namespace?: RuntimeNamespace) => number;
-  episodeRef: (episode: EpisodeRecord) => Record<string, unknown>;
+  episodeRef: (episode: EpisodeRecord, titleJobPending?: boolean) => Record<string, unknown>;
   rawTurnSummary: (rawTurn: RawTurnRecord) => RawTurnSummary;
   now?: () => string;
 }
@@ -509,13 +514,27 @@ export class PanelReadModel {
     const scopesByMemoryId = new Map(
       scopes.flatMap((scope) => scope.memoryId ? [[scope.memoryId, scope] as const] : [])
     );
+    const evidenceIds = [...new Set(memories.flatMap((memory) =>
+      memory.memoryLayer === "L2" && !storedGeneratedTitle(memory) ? evidenceMemoryIds(memory) : []
+    ))];
+    const evidenceById = new Map(
+      (evidenceIds.length > 0 ? this.deps.repos.memories.getMany(evidenceIds) : [])
+        .map((memory) => [memory.id, memory] as const)
+    );
     return {
       items: memories.map((memory) => {
-        const item = panelListItemFromMemory(
+        const listed = panelListItemFromMemory(
           this.deps.repos.memories.toListItem(memory),
           memory,
           this.deps.repos.processing.get(memory.id)
         );
+        const sourceText = memory.memoryLayer === "L2" && !listed.generatedTitle
+          ? waitingSourceText(memory, evidenceMemoryIds(memory).flatMap((id) => {
+            const source = evidenceById.get(id);
+            return source ? [source] : [];
+          }))
+          : undefined;
+        const item = sourceText ? { ...listed, sourceText } : listed;
         const scope = scopesByMemoryId.get(memory.id);
         const worldModelScope = memory.memoryLayer === "L3" && scope &&
           scope.memoryId === memory.id && scope.userId === memory.userId
@@ -567,7 +586,10 @@ export class PanelReadModel {
     return {
       tasks: episodes.map((episode) => ({
         id: episode.id,
-        episode: this.deps.episodeRef(episode),
+        episode: this.deps.episodeRef(
+          episode,
+          this.deps.repos.runtime.hasEpisodeJob(episode.id, "episode_title", ["queued", "leased"])
+        ),
         memoryIds: episode.l1MemoryIds.filter((memoryId) => Boolean(this.deps.repos.memories.get(memoryId))),
         turns: this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000).map(this.deps.rawTurnSummary),
         updatedAt: episode.updatedAt

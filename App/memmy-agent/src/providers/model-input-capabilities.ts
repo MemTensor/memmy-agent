@@ -4,7 +4,7 @@ const TEXT = Object.freeze(["text"] as const);
 const TEXT_IMAGE = Object.freeze(["text", "image"] as const);
 const TEXT_IMAGE_VIDEO = Object.freeze(["text", "image", "video"] as const);
 
-export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-24";
+export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-09-15";
 
 export function defineModelInputCapabilities(
   entries: ReadonlyArray<readonly [string, readonly ModelInputModality[]]>,
@@ -20,9 +20,10 @@ export function defineModelInputCapabilities(
 }
 
 export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
-  // Memmy. Reviewed 2026-08-13.
+  // Memmy. Reviewed 2026-09-17.
   // Source: App/backend/src/infrastructure/memmy-config/index.ts
-  ["agent_chat", TEXT],
+  // The default account route accepts images, including Computer Use screenshots.
+  ["agent_chat", TEXT_IMAGE],
 
   // OpenAI / Codex. Reviewed 2026-08-13.
   // Source: https://developers.openai.com/api/docs/models
@@ -167,12 +168,17 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["groq/compound-mini", TEXT],
   ["qwen/qwen3.6-27b", TEXT_IMAGE],
 
-  // DeepSeek. Reviewed 2026-08-24.
-  // Source: https://api-docs.deepseek.com/updates/
+  // DeepSeek. Reviewed 2026-09-15.
+  // Source: https://api-docs.deepseek.com/quick_start/pricing
+  // Source: https://api-docs.deepseek.com/guides/vision/
+  // Official API ID is deepseek-flash (DeepSeek-V4.1-Flash) with native vision.
+  // deepseek-v4.1-flash is the Hugging Face / informal ID; lookup is exact, so register both.
+  ["deepseek-flash", TEXT_IMAGE],
+  ["deepseek-v4.1-flash", TEXT_IMAGE],
   ["deepseek-v4-pro", TEXT],
   ["deepseek-v4-flash", TEXT],
   ["deepseek-v4-flash-0731", TEXT],
-  // Internal experimental route; it is not part of the public DeepSeek model list.
+  // Retired experimental route; DeepSeek still accepts the name and serves V4.1-Flash.
   ["deepseek-v4-flash-vision-exp", TEXT_IMAGE],
   ["deepseek-v3.2", TEXT],
 

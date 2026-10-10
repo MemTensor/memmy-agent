@@ -34,7 +34,7 @@ export function findRepoEnvFile(startDir: string): string | null {
   }
 }
 
-/** Load external env, then the packaged manifest, then a development .env. */
+/** Load a packaged manifest first, then external env, then a development .env. */
 export function loadCloudServiceEnv(options: {
   cwd?: string;
   moduleDir?: string;
@@ -43,15 +43,6 @@ export function loadCloudServiceEnv(options: {
   loadDotenv?: typeof loadDotenv;
 } = {}): string | null {
   const env = options.env ?? process.env;
-  if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
-    const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
-    if (externalValue) {
-      env.MEMMY_CLOUD_SERVICE = externalValue;
-      return "environment";
-    }
-    delete env.MEMMY_CLOUD_SERVICE;
-  }
-
   const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));
   const packagedRuntime = isPackagedRuntimeModule(moduleDir);
   if (options.manifestPath !== undefined || packagedRuntime) {
@@ -62,7 +53,19 @@ export function loadCloudServiceEnv(options: {
     env.MEMMY_CLOUD_SERVICE = cloudServiceFromDesktopRuntimeManifest(
       readFileSync(manifestPath, "utf8"),
     );
+    // MEMMY_CLOUD_URL is a development-only override. Do not let a stale
+    // value inherited from an older installation redirect a packaged runtime.
+    delete env.MEMMY_CLOUD_URL;
     return manifestPath;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(env, "MEMMY_CLOUD_SERVICE")) {
+    const externalValue = env.MEMMY_CLOUD_SERVICE?.trim();
+    if (externalValue) {
+      env.MEMMY_CLOUD_SERVICE = externalValue;
+      return "environment";
+    }
+    delete env.MEMMY_CLOUD_SERVICE;
   }
 
   const envPath =

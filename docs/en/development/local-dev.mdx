@@ -15,7 +15,7 @@ bash scripts/dev-start.sh    # Install deps → build → start the full stack
 
 `scripts/dev-start.sh` does everything in one command: it installs dependencies, builds Memory and memmy-agent, installs the `memmy` / `memmy-memory` CLIs into `~/.local/bin`, and starts the full stack (Memory, Agent API, Gateway, frontend, and desktop backend). Once the desktop app opens, finish account sign-in or BYOK setup — the script waits for the model config and then starts the agent services automatically.
 
-> `MEMMY_CLOUD_SERVICE` in `.env` defaults to `https://memmy-api.memtensor.cn`, so copying it connects you to the official cloud — no self-hosted backend or API key required. On Windows, run it in Git Bash; the script adds `~/.local/bin` to your PATH.
+> `MEMMY_CLOUD_SERVICE` in `.env` defaults to `https://api.memmy.cn (use the origin only; clients append /api/... paths)`, so copying it connects you to the official cloud — no self-hosted backend or API key required. On Windows, run it in Git Bash; the script adds `~/.local/bin` to your PATH.
 
 ## Requirements
 

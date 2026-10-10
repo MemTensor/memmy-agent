@@ -4,6 +4,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
+import { Config } from "../../src/config/schema.js";
 
 const roots: string[] = [];
 
@@ -66,6 +67,25 @@ function currentCatalog() {
 }
 
 describe("runtime config migration boundary", () => {
+  it("persists the default Open Computer Use MCP server for a new CLI config", () => {
+    const file = configFile();
+    saveConfig(new Config(), file);
+    expect(YAML.parse(fs.readFileSync(file, "utf8")).tools.mcpServers.open_computer_use).toMatchObject({
+      type: "stdio",
+      command: "open-computer-use",
+      args: ["mcp"],
+    });
+    expect(loadConfig(file).tools.mcpServers.open_computer_use.command).toBe("open-computer-use");
+  });
+
+  it("preserves explicit MCP maps, including an empty map after removal", () => {
+    for (const servers of [{}, { custom: { command: "custom-mcp", args: [] } }]) {
+      const file = configFile({ tools: { mcpServers: servers } });
+      saveConfig(loadConfig(file), file);
+      expect(Object.keys(YAML.parse(fs.readFileSync(file, "utf8")).tools.mcpServers)).toEqual(Object.keys(servers));
+    }
+  });
+
   it("loads only the current catalog contract without changing the file", () => {
     const file = configFile({ futureSection: { keepMe: true }, ...currentCatalog() });
     const before = fs.readFileSync(file, "utf8");

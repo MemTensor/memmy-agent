@@ -160,4 +160,24 @@ describe("SearchPalette", () => {
     expect(html).toContain('title="项目注册表不可用 · /projects/alpha"');
     expect(html).toContain('aria-label="Project task · 项目注册表不可用 · /projects/alpha"');
   });
+
+  it("does not render the standalone ownership label for independent tasks", () => {
+    const html = renderToString(
+      <SearchPalette
+        open
+        tasks={[makeTask({ sessionKey: "standalone", title: "独立任务" })]}
+        standaloneLabel="最近"
+        placeholder="搜索任务"
+        emptyLabel="无匹配结果"
+        untitledLabel="未命名对话"
+        ariaLabel="搜索任务"
+        onClose={() => undefined}
+        onSelectTask={() => undefined}
+      />
+    );
+
+    expect(html).toContain("独立任务");
+    expect(html).not.toContain("最近");
+    expect(html).not.toContain("search-palette-item-preview");
+  });
 });

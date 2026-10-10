@@ -358,7 +358,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(draftSource).not.toContain("Publish release as latest");
   });
 
-  it("downloads all four OSS artifacts and verifies Normal MD5 or Multipart CRC64", () => {
+  it("downloads all six OSS artifacts and verifies Normal MD5 or Multipart CRC64", () => {
     expect(draftSteps.find((step) => step.name === "Download and verify OSS artifacts")?.if).toBe(
       "${{ steps.release.outputs.preflight_level == 'full' }}",
     );
@@ -371,7 +371,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(download).toContain("Installer checksum verification failed");
     expect(download).toContain('[[ ! -s "release-assets/$artifact" ]]');
     expect(download).toContain("Installer download is empty");
-    expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(4);
+    expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(6);
     expect(download).toContain("MD5SUMS.txt");
     expect(download).toContain("SHA256SUMS.txt");
     expect(ossIntegritySource).toContain('metadata.objectType === "Normal"');
@@ -476,6 +476,13 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain(
       "doc-agent: source-id=memmy-official-changelog-v2",
     );
+    expect(releaseNotes).toContain(
+      "macOS Intel (China): [Memmy-$VERSION-darwin-x64-cn-signed.dmg]",
+    );
+    expect(releaseNotes).toContain(
+      "macOS Intel (International): [Memmy-$VERSION-darwin-x64-intl-signed.dmg]",
+    );
+    expect(releaseNotes).toContain("On Apple Silicon or Intel Macs");
     const uploadAudit = draftSteps.find((step) => step.name === "Upload release audit artifact");
     expect(uploadAudit?.uses).toBe("actions/upload-artifact@v4");
     expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES.md");

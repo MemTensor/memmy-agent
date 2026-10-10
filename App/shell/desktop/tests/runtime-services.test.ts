@@ -428,6 +428,15 @@ describe("packaged desktop runtime config", () => {
       agentGatewayBootstrapSecret: "stable-secret"
     });
     expect(config).toMatchObject({
+      tools: {
+        mcpServers: {
+          open_computer_use: {
+            type: "stdio",
+            command: "open-computer-use",
+            args: ["mcp"]
+          }
+        }
+      },
       agents: {
         defaults: { workspace: join(memmyHome, "workspace") }
       },
@@ -567,6 +576,21 @@ describe("packaged desktop runtime config", () => {
     });
 
     expect(runtime.agentWorkspace).toBe(legacyWorkspace);
+  });
+
+  it.each([
+    {},
+    { custom: { command: "custom-mcp", args: [] } },
+    { open_computer_use: { command: "/custom/ocu", args: ["mcp"], enabledTools: [] } }
+  ])("preserves existing MCP maps on desktop startup: %j", async (mcpServers) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ tools: { mcpServers } }));
+    await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    });
+    expect(recordValue(recordValue(await readYaml(configPath), "tools"), "mcpServers")).toEqual(mcpServers);
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {

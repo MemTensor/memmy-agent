@@ -6,7 +6,9 @@ import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
-  type MemoryLlmModelRole
+  type MemoryLlmModelRole,
+  type MemoryModelUsageEvent,
+  type MemoryTokenUsageSink
 } from "./token-usage.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
@@ -58,6 +60,8 @@ interface LlmCallResult {
   finishReason?: "stop" | "length" | "other";
 }
 
+const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
+const MEMMY_ACCOUNT_GATEWAY_PATH = "/api/agentexternal/";
 const OPENAI_COMPAT_THINKING_EFFORT = "medium";
 const ANTHROPIC_THINKING_BUDGET_TOKENS = 4096;
 const ANTHROPIC_MIN_THINKING_OUTPUT_TOKENS = ANTHROPIC_THINKING_BUDGET_TOKENS + 4096;
@@ -80,6 +84,8 @@ let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
+  onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
+  usageRecorder?: MemoryTokenUsageSink;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -89,9 +95,13 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 class HttpLlmClient implements LlmClient {
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
-  private readonly usageRecorder = new HttpByokTokenUsageRecorder();
+  private readonly usageRecorder: MemoryTokenUsageSink;
 
-  constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {}
+  constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {
+    this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
+      onBudgetedUsage: options.onBudgetedUsage
+    });
+  }
 
   isConfigured(): boolean {
     if (!this.config.provider || this.config.provider === "local_only") {
@@ -307,20 +317,20 @@ class HttpLlmClient implements LlmClient {
   private async completeOpenAiCompatible(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
     const url = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
+    const memmyAccount = this.config.sourceProvider === MEMMY_ACCOUNT_PROVIDER || isMemmyAccountEndpoint(base);
     const thinking = openAiCompatibleThinkingControl({
       vendor: this.config.vendor ?? "",
       endpoint: base,
       model: this.config.model ?? "",
-      requested: resolveThinkingEnabled(this.config.enableThinking, options.thinkingMode)
+      requested: resolveThinkingEnabled(this.config.enableThinking, options.thinkingMode),
+      memmyAccount
     });
     const model = this.config.model ?? "";
+    const usesEnableThinking = memmyAccount || thinkingUsesEnableThinking(this.config.vendor ?? "", base, model);
     const omitTemperature = isKimiImmutableTemperatureModel(model) ||
-      (thinking.enabled && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
-    const omitJsonMode = thinking.enabled && (
-      thinkingUsesEnableThinking(this.config.vendor ?? "", base, model) ||
-      isAlibabaCompatibleEndpoint(base)
-    );
-    const thinkingBudget = thinking.enabled && thinkingUsesEnableThinking(this.config.vendor ?? "", base, model)
+      (thinking.enabled && !memmyAccount && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
+    const omitJsonMode = thinking.enabled && (usesEnableThinking || isAlibabaCompatibleEndpoint(base));
+    const thinkingBudget = thinking.enabled && usesEnableThinking
       ? this.config.thinkingBudget
       : undefined;
     const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
@@ -658,7 +668,19 @@ function openAiCompatibleThinkingControl(input: {
   endpoint: string;
   model: string;
   requested: boolean;
+  memmyAccount?: boolean;
 }): ThinkingControl {
+  if (input.memmyAccount) {
+    // The account gateway forwards to Bailian models whose switch field varies
+    // by model family, and it does not translate between them.
+    return {
+      enabled: input.requested,
+      fields: {
+        enable_thinking: input.requested,
+        thinking: { type: input.requested ? "enabled" : "disabled" }
+      }
+    };
+  }
   const style = openAiCompatibleThinkingStyle(input.vendor, input.endpoint, input.model);
   const enabled = input.requested || isOpenAiCompatibleThinkingOnlyModel(input.vendor, input.endpoint, input.model);
   if (isAlwaysOnModelWithoutThinkingToggle(input.model)) {
@@ -960,6 +982,11 @@ function isMiniMaxM2ThinkingOnlyModel(model: string): boolean {
 
 function isMiniMaxM3Model(model: string): boolean {
   return /^minimax-m3(?:[.\-]|$)/.test(modelSlug(model));
+}
+
+// Custom presets can point at the account gateway under another provider name.
+function isMemmyAccountEndpoint(endpoint: string): boolean {
+  return endpoint.toLowerCase().includes(MEMMY_ACCOUNT_GATEWAY_PATH);
 }
 
 function isAlibabaCompatibleEndpoint(endpoint: string): boolean {

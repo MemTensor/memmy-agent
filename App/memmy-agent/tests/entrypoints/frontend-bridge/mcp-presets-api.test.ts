@@ -50,6 +50,18 @@ afterEach(() => {
 });
 
 describe("mcp presets api", () => {
+  it("detects bundled OCU with an empty PATH and preserves the portable config", () => {
+    useConfig();
+    saveConfig(new Config({ tools: { mcpServers: {
+      open_computer_use: { type: "stdio", command: "open-computer-use", args: ["mcp"] },
+    } } }));
+    process.env.PATH = "";
+    const payload = mcpPresetsPayload();
+    const server = payload.presets.find((item: any) => item.name === "open_computer_use");
+    expect(server).toMatchObject({ available: true, status: "configured" });
+    expect(loadConfig().tools.mcpServers.open_computer_use.command).toBe("open-computer-use");
+  });
+
   it("lists supported preset cards", () => {
     useConfig();
 

@@ -481,6 +481,7 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o", "medium")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("kimi-k2.5")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("moonshotai/kimi-k2.6")).toBe(false);
+    expect(OpenAICompatProvider.supportsTemperature("kimi-k3")).toBe(false);
 
     const kwargs = providerFor("openai", "gpt-5-chat").buildKwargs({
       messages: [{ role: "user", content: "hello" }],
@@ -744,6 +745,7 @@ describe("OpenAI-compatible request kwargs", () => {
       reasoning: { effort: "medium" },
     });
     expect(buildKwargsFor("moonshot", "kimi-k2.6", null)).not.toHaveProperty("temperature");
+    expect(buildKwargsFor("moonshot", "kimi-k3", null)).not.toHaveProperty("temperature");
     expect(buildKwargsFor("openrouter", "moonshotai/kimi-k2.5", null)).not.toHaveProperty("extra_body");
     expect(buildKwargsFor("moonshot", "k2.6-code-preview", "high").extra_body).toEqual({ thinking: { type: "enabled" } });
     expect(buildKwargsFor("moonshot", "k2.6-code-preview", null)).not.toHaveProperty("temperature");
@@ -955,25 +957,28 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kwargs.messages[1]).not.toHaveProperty("reasoning_content");
   });
 
-  it("backfills DeepSeek V4 reasoning history when effort is implicit", () => {
-    const kwargs = providerFor("deepseek", "deepseek-v4-pro").buildKwargs({
-      messages: [
-        { role: "system", content: "system" },
-        { role: "user", content: "hi" },
-        { role: "assistant", content: "", tool_calls: [toolCall("tc1")] },
-        { role: "tool", tool_call_id: "tc1", content: "result" },
-        { role: "user", content: "thanks" },
-      ],
-      model: "deepseek-v4-pro",
-      maxTokens: 1024,
-      temperature: 0.7,
-      reasoningEffort: null,
-    });
+  it.each(["deepseek-v4-pro", "deepseek-flash", "deepseek-v4.1-flash"])(
+    "backfills DeepSeek reasoning history for %s when effort is implicit",
+    (model) => {
+      const kwargs = providerFor("deepseek", model).buildKwargs({
+        messages: [
+          { role: "system", content: "system" },
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "", tool_calls: [toolCall("tc1")] },
+          { role: "tool", tool_call_id: "tc1", content: "result" },
+          { role: "user", content: "thanks" },
+        ],
+        model,
+        maxTokens: 1024,
+        temperature: 0.7,
+        reasoningEffort: null,
+      });
 
-    expect(kwargs.messages.map((message: any) => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
-    expect(kwargs.messages[2].reasoning_content).toBe("");
-    expect(kwargs.messages.at(-1).content).toBe("thanks");
-  });
+      expect(kwargs.messages.map((message: any) => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
+      expect(kwargs.messages[2].reasoning_content).toBe("");
+      expect(kwargs.messages.at(-1).content).toBe("thanks");
+    },
+  );
 
   it("keeps DeepSeek chat tool history untouched when effort is implicit", () => {
     const kwargs = providerFor("deepseek", "deepseek-chat").buildKwargs({

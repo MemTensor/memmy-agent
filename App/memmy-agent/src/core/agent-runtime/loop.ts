@@ -1,3 +1,4 @@
+import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -123,6 +124,7 @@ import { SubagentManager } from "./subagent.js";
 import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
 import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
+import { createKnowledgeHook } from "../../knowledge/register.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -805,6 +807,7 @@ export class AgentLoop {
     this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
+    this.extraHooks.unshift(createKnowledgeHook());
     this.memmyMemoryIntegration = installMemmyMemory(this.config, {
       workspace: this.workspace,
       hooks: this.extraHooks,
@@ -1137,6 +1140,7 @@ export class AgentLoop {
   }
 
   async initializeRuntimeTools(): Promise<void> {
+    await initializeDesktopScreenCapture();
     await this.connectMcp();
     await this.browserSessionManager.initialize();
     if (!this.browserRegistryInitialized) {
@@ -3927,6 +3931,7 @@ export class AgentLoop {
       ctx.session!,
       compactionOptions,
     );
+    await initializeDesktopScreenCapture();
     ctx.tools = this.createToolRegistry("turn", sessionWorkspace, {
       includeConnectedMcp: true,
       messageSendCallback: ctx.messageSendCallback,
@@ -4065,7 +4070,7 @@ export class AgentLoop {
       channel: ctx.msg.channel,
       chatId: ctx.msg.chatId,
       messageId: ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId,
-      metadata: ctx.msg.metadata,
+      metadata: { ...ctx.msg.metadata, ...(ctx.msg.internal ? { computerUseInteractive: false } : {}) },
       sessionKey: ctx.sessionKey,
       pendingQueue: ctx.pendingQueue,
       abortSignal: ctx.abortSignal,
@@ -4451,7 +4456,7 @@ export class AgentLoop {
       channel,
       chatId,
       messageId: msg.metadata?.message_id ?? msg.metadata?.messageId ?? null,
-      metadata: msg.metadata,
+      metadata: { ...msg.metadata, computerUseInteractive: false },
       sessionKey: key,
       pendingQueue,
       abortSignal,

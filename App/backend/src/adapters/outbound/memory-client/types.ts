@@ -18,6 +18,7 @@ import type {
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryTokenBudgetDto,
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
@@ -47,6 +48,7 @@ export interface MemoryRequestContext {
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
   exportBundle?(): Promise<Record<string, unknown>>;
   clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 

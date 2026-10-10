@@ -21,11 +21,11 @@ REPO_DIR="/Users/zongy/Documents/MemTensor/Memmy-agent"
 BRANCH="${MEMMY_RELEASE_BRANCH:-}"
 
 # Backend for upload + querying the download list (cn/intl share the same one)
-API_BASE="https://memmy-api.memtensor.cn"
+API_BASE="https://api.memmy.cn"
 
 # Public cloud-service origin embedded through the allowlisted runtime manifest.
-CN_CLOUD_SERVICE="https://memmy-api.memtensor.cn"
-INTL_CLOUD_SERVICE="https://memmy-api.memtensor.cn"
+CN_CLOUD_SERVICE="https://api.memmy.cn"
+INTL_CLOUD_SERVICE="https://api.memmy.cn"
 
 # Release notes (customizable)
 RELEASE_NOTES="Daily automated build (dev)"

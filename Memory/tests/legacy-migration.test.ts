@@ -120,9 +120,11 @@ describe("Local Plugin 2.0 migration", () => {
     const service = new MemoryService({
       db: memmyDb,
       mode: "dev",
-      config: { ...DEFAULT_MEMMY_CONFIG, userId: "local-user" }
+      config: { ...DEFAULT_MEMMY_CONFIG, userId: "local-user" },
+      fetchAppMemoryBudget: async () => null
     });
     service.addMemory({ content: "existing Memmy memory", source: "memmy", layer: "L1" });
+    await service.stop();
     memmyDb.close();
 
     const report = await migrateLegacyLocalPlugins({
