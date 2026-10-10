@@ -151,7 +151,7 @@ fi`;
       );
       expect(init.status, init.stderr || init.stdout).toBe(0);
       const config = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(config.memmyMemory.embedding).toEqual({ mode: "local", provider: "local" });
+      expect(config.memmyMemory.embedding).toBeUndefined();
 
       const validate = spawnSync(
         "node",

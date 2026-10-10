@@ -103,6 +103,7 @@ export interface AgentSourceService {
   uninstallSkill(sourceId: string): Promise<void>;
   installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
 
@@ -452,6 +453,10 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       }
     },
 
+    async isInstalledHookCurrent(sourceId) {
+      return options.skillDistributionService.isInstalledHookCurrent?.(sourceId) ?? true;
+    },
+
     async uninstallPlugin(sourceId, action = {}) {
       const startedAt = Date.now();
       const installType = normalizePluginInstallType(action.installType);
@@ -729,7 +734,7 @@ async function ingestPersistentStagedSource(
   const ingestion = await ingestPersistentSource(options, store, sourceId, scanOptions, []);
   const scannedAt = now();
   options.agentSourceRepository.setLastScannedAt(sourceId, scannedAt);
-  const skillResult = await ingestSourceSkills(options, sourceId, scanOptions, store);
+  const skillResult = await ingestSourceSkills(options, sourceId, scanOptions, store, mode);
   if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0 && !ingestion.hasUncommittedSkips) {
     updatePersistentWatermark(options, sourceId, mode, ingestion.latestSeenAt, scannedAt, since);
   }
@@ -907,6 +912,14 @@ async function ingestPersistentSource(
     }
     const scanMode = persistentScanMode(store.getSourceState(sourceId)?.mode ?? scanOptions.mode);
     if (hasStagedSourceTurn(turn.messages[0]) || sourceId === "codex") {
+      let addAnalyticsBase: {
+        adapterId: string;
+        conversationId: string;
+        turnId: string;
+        scanMode?: MemoryDesktopAddScanMode;
+      } | undefined;
+      let addStartedAt = 0;
+      let reportedAdd = false;
       try {
         const sourceTurn = sourceTurnFromMessages(turn.messages);
         if (!sourceTurn) {
@@ -918,6 +931,13 @@ async function ingestPersistentSource(
           continue;
         }
         const legacyImportTurnId = legacyImportTurnIdFromMessages(sourceId, turn.conversationId, turn.messages);
+        addAnalyticsBase = {
+          adapterId: `agent-source:${sourceId}`,
+          conversationId: turn.conversationId,
+          turnId: sourceTurn.turnId,
+          ...(scanMode ? { scanMode } : {})
+        };
+        addStartedAt = Date.now();
         const result = await options.memoryClient.completeSourceTurn({
           ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
           ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
@@ -935,6 +955,13 @@ async function ingestPersistentSource(
         if (result.status === "stored") {
           memoryIdCount += ids.length;
           memoryIds.push(...ids.slice(0, Math.max(0, 1000 - memoryIds.length)));
+          options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+          options.memoryAddAnalytics?.trackAddSucceeded({
+            ...addAnalyticsBase,
+            durationMs: Date.now() - addStartedAt,
+            storedCount: Math.max(ids.length, 1)
+          });
+          reportedAdd = true;
         } else {
           deduped += turn.messages.length;
         }
@@ -945,6 +972,14 @@ async function ingestPersistentSource(
         const reason = error instanceof Error ? error.message : "native turn ingestion failed";
         skipPersistentTurn(store, sourceId, turn.conversationId, reason);
         noteUncommittedSkip(reason);
+        if (addAnalyticsBase && !reportedAdd) {
+          options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+          options.memoryAddAnalytics?.trackAddFailed({
+            ...addAnalyticsBase,
+            durationMs: Date.now() - addStartedAt,
+            error
+          });
+        }
       }
       processed += turn.messages.length;
       emitAddProgress("Capturing conversation turns");
@@ -1241,7 +1276,7 @@ async function ingestCollectedSource(
   ) {
     updateScanWatermark(options, collected, scanOptions, scannedAt);
   }
-  errors.push(...(await ingestSourceSkills(options, collected.sourceId, scanOptions)).errors);
+  errors.push(...(await ingestSourceSkills(options, collected.sourceId, scanOptions, undefined, collected.scanMode ?? scanOptions.mode)).errors);
   return {
     result: {
       sourceId: collected.sourceId,
@@ -1265,7 +1300,8 @@ async function ingestSourceSkills(
   options: CreateAgentSourceServiceOptions,
   sourceId: string,
   scanOptions: AgentSourceScanOptions,
-  store?: AppAgentSourceScanStore
+  store?: AppAgentSourceScanStore,
+  resolvedScanMode?: AgentSourceScanMode
 ): Promise<SkillScanOutcome> {
   if (!options.skillDistributionService.listSkills) return { errors: [], errorCount: 0, memoryIdCount: 0 };
 
@@ -1281,8 +1317,18 @@ async function ingestSourceSkills(
     return { errors: [], errorCount: 0, memoryIdCount: 0 };
   }
 
+  const scanMode = persistentScanMode(resolvedScanMode ?? scanOptions.mode);
   for (const skill of skills) {
     scanOptions.signal?.throwIfAborted();
+    const turnId = `skill:${skill.sourceSkillId}:${skill.sourceSkillVersion}`;
+    const addAnalyticsBase = {
+      adapterId: `agent-source:${sourceId}`,
+      conversationId: `skill:${skill.sourceSkillId}`,
+      turnId,
+      layer: "Skill" as const,
+      ...(scanMode ? { scanMode } : {})
+    };
+    const addStartedAt = Date.now();
     try {
       const added = await options.memoryClient.addMemory({
         requestId: `agent-source-skill:${sourceId}:${skill.sourceSkillId}:${skill.sourceContentHash}`,
@@ -1292,7 +1338,7 @@ async function ingestSourceSkills(
         title: skill.title,
         tags: ["agent-source", "cross-agent-skill", sourceId],
         source: sourceId,
-        turnId: `skill:${skill.sourceSkillId}:${skill.sourceSkillVersion}`,
+        turnId,
         createdAt: skill.updatedAt,
         sourceAgentId: sourceId,
         sourceSkillId: skill.sourceSkillId,
@@ -1300,6 +1346,14 @@ async function ingestSourceSkills(
         sourceSkillVersion: skill.sourceSkillVersion,
         sourceContentHash: skill.sourceContentHash
       });
+      if (added.duplicate !== true && added.status !== "deleted") {
+        options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+        options.memoryAddAnalytics?.trackAddSucceeded({
+          ...addAnalyticsBase,
+          durationMs: Date.now() - addStartedAt,
+          storedCount: 1
+        });
+      }
       memoryIdCount += 1;
       store?.saveResult({ sourceId, conversationId: `skill:${skill.sourceSkillId}`, memoryId: added.id });
     } catch (error) {
@@ -1309,6 +1363,12 @@ async function ingestSourceSkills(
         `skill:${skill.sourceSkillId}`,
         error instanceof Error ? error.message : "Agent Skill import failed"
       );
+      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+      options.memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
     }
   }
   return { errors, errorCount, memoryIdCount };

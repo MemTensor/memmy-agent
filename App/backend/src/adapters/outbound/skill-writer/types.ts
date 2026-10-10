@@ -25,5 +25,6 @@ export interface SkillTarget {
   isInstalled(targetId: string): Promise<boolean>;
   installPlugin?(targetId: string): Promise<void>;
   uninstallPlugin?(targetId: string): Promise<void>;
+  isInstalledHookCurrent?(): Promise<boolean>;
   detectMemoryPluginConflict?(): Promise<MemoryPluginConflict | null>;
 }

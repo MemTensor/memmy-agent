@@ -175,6 +175,64 @@ describe("agent source service", () => {
     ]);
   });
 
+  it("emits add analytics only when a scanned skill is newly stored", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const memoryClient = createMockMemoryClient();
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", [])],
+      memoryClient: {
+        ...memoryClient,
+        async addMemory(input, context) {
+          if (input.sourceSkillId === "duplicate-skill") {
+            return { ...(await memoryClient.addMemory(input, context)), duplicate: true };
+          }
+          if (input.sourceSkillId === "deleted-skill") {
+            return { ...(await memoryClient.addMemory(input, context)), status: "deleted" as const };
+          }
+          if (input.sourceSkillId === "failing-skill") throw new Error("skill import failed");
+          return memoryClient.addMemory(input, context);
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events),
+      skillDistributionService: {
+        async listSkills() {
+          return ["fresh-skill", "duplicate-skill", "deleted-skill", "failing-skill"].map((sourceSkillId) => ({
+            sourceAgentId: "cursor",
+            sourceSkillId,
+            sourceSkillPath: `/tmp/cursor/skills/${sourceSkillId}/SKILL.md`,
+            sourceSkillVersion: "v1",
+            sourceContentHash: `${sourceSkillId}-hash`,
+            title: sourceSkillId,
+            content: sourceSkillId,
+            updatedAt: "2026-05-28T09:00:00.000Z"
+          }));
+        },
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    await service.scanOne("cursor", { mode: "incremental" });
+
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded", "started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "skill:fresh-skill",
+      turnId: "skill:fresh-skill:v1",
+      layer: "Skill",
+      scanMode: "incremental",
+      storedCount: 1
+    });
+    expect(events[3]?.payload).toMatchObject({
+      conversationId: "skill:failing-skill",
+      layer: "Skill",
+      scanMode: "incremental",
+      error: expect.any(Error)
+    });
+  });
+
   it("completes the scan and advances checkpoints when every memory is skipped", async () => {
     const repository = createRepository();
     const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");
@@ -1404,6 +1462,33 @@ describe("agent source service", () => {
     });
   });
 
+  it("reports whether an installed hook matches the bundled revision", async () => {
+    const fallback = createService();
+    const service = createService({
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async isInstalledHookCurrent(sourceId) {
+          return sourceId !== "cursor";
+        }
+      }
+    });
+
+    await expect(fallback.isInstalledHookCurrent("cursor")).resolves.toBe(true);
+    await expect(service.isInstalledHookCurrent("cursor")).resolves.toBe(false);
+    await expect(service.isInstalledHookCurrent("claude_code")).resolves.toBe(true);
+  });
+
   it("emits skill install analytics", async () => {
     const repository = createRepository();
     repository.upsertSource({
@@ -1573,6 +1658,49 @@ describe("agent source service", () => {
     const result = await service.scanOne("cursor", { scanJobId: "job-add-dup", mode: "full" });
 
     expect(result.memoryIdCount).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  it("emits add analytics for a newly stored native persistent scan turn", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-native-add-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", stagedNativeMessages("cursor"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-native-add", mode: "initial_subset" });
+
+    expect(result.errors).toEqual([]);
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      turnId: "native-turn",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+  });
+
+  it("does not emit add analytics when a native persistent scan turn already exists", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-native-existing-analytics-"));
+    const memoryClient = createReadyMemoryClient();
+    memoryClient.completeSourceTurn = vi.fn().mockResolvedValue({
+      status: "existing",
+      result: { l1MemoryIds: ["l1-existing"] }
+    });
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", stagedNativeMessages("cursor"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient,
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await service.scanOne("cursor", { scanJobId: "job-native-existing", mode: "incremental" });
+
     expect(events).toEqual([]);
   });
 
@@ -1818,6 +1946,39 @@ function createMessage(sourceId: string, index: number): ConversationMessage {
     gitRoot: null,
     rawMeta: Object.freeze({})
   };
+}
+
+function stagedNativeMessages(sourceId: string): ConversationMessage[] {
+  const sourceTurn = {
+    source: sourceId,
+    conversationId: `${sourceId}-conv-1`,
+    turnId: "native-turn",
+    sequence: 1,
+    startedAt: "2026-05-28T10:00:00.000Z",
+    completedAt: "2026-05-28T10:01:00.000Z",
+    completionEvidence: "task_complete:native-turn",
+    query: "Run tests",
+    answer: "Tests passed",
+    status: "succeeded",
+    toolCalls: [],
+    toolResults: []
+  };
+  return [
+    {
+      ...createMessage(sourceId, 1),
+      role: "user",
+      content: sourceTurn.query,
+      createdAt: sourceTurn.startedAt,
+      rawMeta: { sourceTurnId: "native-turn", sourceTurnState: "complete" }
+    },
+    {
+      ...createMessage(sourceId, 2),
+      role: "assistant",
+      content: sourceTurn.answer,
+      createdAt: sourceTurn.completedAt,
+      rawMeta: { sourceTurnId: "native-turn", sourceTurnState: "complete", sourceTurn }
+    }
+  ];
 }
 
 function createCompleteMemoryMessages(

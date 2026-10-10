@@ -4,7 +4,12 @@ import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import { MEMORY_BYOK_BUDGET_KV_KEY } from "../../../src/service/memory-token-budget-ledger.js";
 import { evolutionJobDedupeKey } from "../../../src/service/worker/job-handlers.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { accountRuntimeConfig, byokRuntimeConfig, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import {
+  accountRuntimeConfig,
+  addAgentSourceImport,
+  byokRuntimeConfig,
+  createMemoryServiceFixture
+} from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup: cleanupMemoryServiceFixture,
@@ -16,6 +21,63 @@ afterEach(() => {
 });
 
 describe("MemoryService / worker / runtime", () => {
+  it("runs normal reflection before startup summary repair backlogs", () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "startup-repair-priority",
+      userId: "startup-repair-priority-user"
+    };
+    const processingRepair = addAgentSourceImport(
+      service,
+      namespace,
+      "repair an interrupted import summary",
+      "startup-processing-repair"
+    );
+    const placeholderRepair = addAgentSourceImport(
+      service,
+      namespace,
+      "repair a placeholder import summary",
+      "startup-placeholder-repair"
+    );
+    db.db.prepare(
+      `UPDATE evolution_jobs
+       SET payload_json = json_set(payload_json, '$.source', ?)
+       WHERE target_memory_id = ?`
+    ).run("startup.processing_repair", processingRepair.id);
+    db.db.prepare(
+      `UPDATE evolution_jobs
+       SET payload_json = json_set(payload_json, '$.source', ?)
+       WHERE target_memory_id = ?`
+    ).run("startup.placeholder_summary_repair", placeholderRepair.id);
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+        id, job_type, status, user_id, episode_id, payload_json,
+        attempts, max_attempts, created_at, updated_at
+      ) VALUES (?, 'reflection', 'queued', ?, ?, '{}', 0, 3, ?, ?)`
+    ).run(
+      "job_normal_reflection_before_startup_repairs",
+      namespace.userId,
+      "episode_normal_reflection_before_startup_repairs",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z"
+    );
+
+    const runtime = new Repositories(db.db).runtime;
+    const leased = runtime.leaseQueuedJobs(10, 60, undefined, true).map((job) => job.id);
+
+    expect(leased).toEqual(["job_normal_reflection_before_startup_repairs"]);
+    runtime.completeJob("job_normal_reflection_before_startup_repairs");
+    const repairs = runtime.leaseQueuedJobs(10, 60, undefined, true);
+    expect(repairs).toHaveLength(2);
+    expect(repairs.every((job) => job.jobType === "import_summary")).toBe(true);
+    expect(repairs.map((job) => job.payload.source).sort()).toEqual([
+      "startup.placeholder_summary_repair",
+      "startup.processing_repair"
+    ]);
+    db.close();
+  });
+
   it.each([
     [{ repairId: "repair-1" }, "episode-1", "decision_repair:repair-1"],
     [{ feedbackId: "feedback-1" }, "episode-1", "decision_repair:feedback-1"],
