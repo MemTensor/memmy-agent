@@ -51,6 +51,57 @@ describe("syncRuntimeConfigWithAppState", () => {
     expect(context.store.db.prepare("SELECT * FROM account_model_config ORDER BY uuid").all()).toEqual(legacyBefore);
   });
 
+  it("restores built-in models when an authenticated account has an unset runtime projection", async () => {
+    const context = createContext();
+    seedAccountSession(context, "phone");
+    const config = currentByokCatalog() as any;
+    config.app.userMode = "unset";
+    config.modelAssignments.account = {
+      ownerAccountId: "owner-a",
+      agent: { candidates: ["missing-account-preset"], default: "missing-account-preset" }
+    };
+    context.writeConfig(config);
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "phone"
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      provider: "memmy_account",
+      model: "agent_chat",
+      hydratedAppState: true
+    });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.providers.memmy_account).toMatchObject({
+      ownerAccountId: "owner-a",
+      apiKey: "cloud-token-a"
+    });
+    expect(saved.modelAssignments.account.agent.candidates).toContainEqual(
+      expect.stringMatching(/^memmy-account-.+-agent$/)
+    );
+  });
+
+  it("keeps an explicit BYOK runtime selection while the account remains authenticated", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    context.writeConfig(currentByokCatalog());
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email"
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "byok",
+      provider: "openai",
+      model: "gpt-5"
+    });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.providers.memmy_account).toBeUndefined();
+  });
+
   it("hydrates account mode only from a current owner-bound projection", async () => {
     const context = createContext();
     context.store.repositories.accountSession.upsert({
