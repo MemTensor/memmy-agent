@@ -2,7 +2,7 @@ import { get_encoding } from "tiktoken";
 import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
-import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
+import { bearer, ModelHttpError, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
@@ -95,6 +95,7 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 class HttpLlmClient implements LlmClient {
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
+  private openAiJsonResponseFormat: "json_object" | "text" = "json_object";
   private readonly usageRecorder: MemoryTokenUsageSink;
 
   constructor(readonly config: LlmConfig, private readonly options: CreateLlmClientOptions = {}) {
@@ -334,31 +335,53 @@ class HttpLlmClient implements LlmClient {
       ? this.config.thinkingBudget
       : undefined;
     const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
-    const response = await postJsonWithRetry<OpenAiChatResponse>({
-      actualModelContext: this.config.actualModelContext,
-      provider: "openai_compatible",
-      operation: options.operation,
-      model: this.config.model,
-      url,
-      headers: {
-        ...bearer(this.config.apiKey),
-        ...(this.config.extraHeaders ?? {}),
-        ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
-      },
-      timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
-      maxRetries: options.maxRetries ?? this.config.maxRetries,
-      body: {
+    const explicitResponseFormat = this.config.extraBody?.response_format;
+    const automaticResponseFormat = options.jsonMode && !omitJsonMode && explicitResponseFormat === undefined
+      ? this.openAiJsonResponseFormat
+      : undefined;
+    const request = (responseFormat: "json_object" | "text" | undefined) =>
+      postJsonWithRetry<OpenAiChatResponse>({
+        actualModelContext: this.config.actualModelContext,
+        provider: "openai_compatible",
+        operation: options.operation,
         model: this.config.model,
-        messages,
-        ...(!omitTemperature ? { temperature: options.temperature ?? this.config.temperature } : {}),
-        max_tokens: options.maxTokens ?? this.config.maxTokens,
-        stream: false,
-        ...thinking.fields,
-        ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),
-        ...(options.jsonMode && !omitJsonMode ? { response_format: { type: "json_object" } } : {}),
-        ...(this.config.extraBody ?? {})
+        url,
+        headers: {
+          ...bearer(this.config.apiKey),
+          ...(this.config.extraHeaders ?? {}),
+          ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
+        },
+        timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
+        maxRetries: options.maxRetries ?? this.config.maxRetries,
+        body: {
+          model: this.config.model,
+          messages,
+          ...(!omitTemperature ? { temperature: options.temperature ?? this.config.temperature } : {}),
+          max_tokens: options.maxTokens ?? this.config.maxTokens,
+          stream: false,
+          ...thinking.fields,
+          ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),
+          ...(responseFormat ? { response_format: { type: responseFormat } } : {}),
+          ...(this.config.extraBody ?? {})
+        }
+      });
+    let response: OpenAiChatResponse;
+    try {
+      response = await request(automaticResponseFormat);
+    } catch (error) {
+      if (automaticResponseFormat !== "json_object" || !requiresTextResponseFormat(error)) {
+        throw error;
       }
-    });
+      this.openAiJsonResponseFormat = "text";
+      logger.warn("json.response_format_fallback", {
+        operation: options.operation,
+        provider: "openai_compatible",
+        model: this.config.model,
+        responseFormat: "text",
+        ...memoryErrorFields(error)
+      });
+      response = await request("text");
+    }
     const choice = response.choices?.[0];
     const text = choice?.message?.content;
     if (typeof text !== "string" || !text.trim()) {
@@ -589,6 +612,16 @@ class HttpLlmClient implements LlmClient {
       usage: extractModelTokenUsage(response)
     });
   }
+}
+
+function requiresTextResponseFormat(error: unknown): boolean {
+  if (!(error instanceof ModelHttpError) || (error.httpStatus !== 400 && error.httpStatus !== 422)) {
+    return false;
+  }
+  const detail = error.detail.toLowerCase().replace(/['"`]/g, "");
+  return /response[_ ]format(?:\.type)?/.test(detail)
+    && detail.includes("json_schema")
+    && /\btext\b/.test(detail);
 }
 
 function constrainSummaryMessages(
