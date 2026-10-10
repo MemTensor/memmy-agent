@@ -136,7 +136,7 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
     () => buildAgentDisplayUnits(props.messages, { chatScopeKey: props.chatScopeKey, retryWaitStatus: props.retryWaitStatus ?? null }),
     [props.chatScopeKey, props.messages, props.retryWaitStatus]
   );
-  const finalAssistantAnswerIndex = useMemo(() => findFinalAssistantAnswerUnitIndex(units, { isSending: props.isSending }), [props.isSending, units]);
+  const finalAssistantAnswerIndices = useMemo(() => findFinalAssistantAnswerUnitIndices(units, { isSending: props.isSending }), [props.isSending, units]);
   const recallEvidenceAnchors = useMemo(
     () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
     [props.isSending, units]
@@ -217,7 +217,7 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
               artifactClient={props.artifactClient}
               chatScopeKey={props.chatScopeKey}
               unitIndex={index}
-              isFinalAssistantAnswer={index === finalAssistantAnswerIndex}
+              isFinalAssistantAnswer={finalAssistantAnswerIndices.has(index)}
               forceMessageActions={unit.message.id === (props.forceMessageActionsForMessageId ?? props.afterMessageId)}
               deferContentRender={shouldDeferAgentMessageContent(unit, index, units.length)}
               deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
@@ -361,16 +361,23 @@ function isActivityAutoOpenRunning(unit: Extract<AgentDisplayUnit, { type: "acti
 }
 
 /**
- * Locate the index of the last "single" unit that is a finalized assistant
- * answer. While the current turn is still sending, assistant text after the
+ * Locate the last finalized assistant answer in each user-delimited turn.
+ * While the current turn is still sending, assistant text after the
  * latest user message is treated as continuation text, because the agent may
  * still alternate body → tool → reasoning → tool before the actual final answer.
  */
-function findFinalAssistantAnswerUnitIndex(units: AgentDisplayUnit[], options: { isSending?: boolean } = {}): number {
+function findFinalAssistantAnswerUnitIndices(units: AgentDisplayUnit[], options: { isSending?: boolean } = {}): Set<number> {
+  const indices = new Set<number>();
   const lastUserUnitIndex = findLastUserUnitIndex(units);
+  let foundAnswerInTurn = false;
   for (let index = units.length - 1; index >= 0; index -= 1) {
     const unit = units[index];
     if (unit?.type !== "single") continue;
+    if (unit.message.role === "user") {
+      foundAnswerInTurn = false;
+      continue;
+    }
+    if (foundAnswerInTurn) continue;
     if (options.isSending && index > lastUserUnitIndex) continue;
     const message = unit.message;
     if (message.role === "assistant"
@@ -378,10 +385,11 @@ function findFinalAssistantAnswerUnitIndex(units: AgentDisplayUnit[], options: {
       && message.kind !== "narration"
       && message.kind !== "context_compaction"
       && message.content.trim().length > 0) {
-      return index;
+      indices.add(index);
+      foundAnswerInTurn = true;
     }
   }
-  return -1;
+  return indices;
 }
 
 function findLastUserUnitIndex(units: AgentDisplayUnit[]): number {
