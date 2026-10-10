@@ -156,15 +156,16 @@ async function importLegacyConfig(source: LegacySource, targetPath: string): Pro
   const legacy = record(parsed);
   const llm = record(legacy.llm);
   const skillEvolver = record(legacy.skillEvolver);
-  const embedding = record(legacy.embedding);
+  const rawEmbedding = record(legacy.embedding);
   const algorithm = record(legacy.algorithm);
   const summary = mapLlm(llm);
   const evolution = mapLlm(Object.keys(skillEvolver).length ? skillEvolver : llm);
+  const embedding = mapEmbedding(rawEmbedding);
   await mutateMemoryConfig(targetPath, (root) => {
     const memory = record(root.memmyMemory);
     const hub = record(legacy.hub);
     const telemetry = record(legacy.telemetry);
-    const nextMemory = {
+    const nextMemory: Record<string, unknown> = {
       ...memory,
       roleRouting: {
         ...record(memory.roleRouting),
@@ -173,19 +174,20 @@ async function importLegacyConfig(source: LegacySource, targetPath: string): Pro
       },
       summary,
       evolution,
-      embedding: mapEmbedding(embedding),
+      embedding,
       algorithm: mergeLegacyAlgorithm(record(memory.algorithm), algorithm),
       ...(Object.keys(telemetry).length ? { telemetry: { ...record(memory.telemetry), ...telemetry } } : {}),
       ...(Object.keys(hub).length ? { hub: { ...hub, migratedFrom: source.agent } } : {}),
       migratedFrom: source.agent
     };
-    root.memmyMemory = nextMemory;
     syncMemoryModelCatalog(root, nextMemory, {
       roleRouting: nextMemory.roleRouting,
       summary,
       evolution,
-      embedding: nextMemory.embedding
+      embedding
     });
+    delete nextMemory.embedding;
+    root.memmyMemory = nextMemory;
   });
 }
 

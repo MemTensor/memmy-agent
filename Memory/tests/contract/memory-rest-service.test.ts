@@ -688,6 +688,72 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "auto-worker-l3-close-session",
+        userId: "auto-worker-l3-close-user"
+      }
+    });
+    const first = service.completeTurn("turn-auto-worker-l3-close", {
+      sessionId: opened.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+    const ended = service.completeTurn("turn-auto-worker-l3-close-end", {
+      sessionId: opened.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题到这里结束。"
+    });
+    expect(ended.closedEpisodeIds).toEqual([first.episodeId]);
+    await service.runWorkerOnce(20);
+    const l3Jobs = () => db.db.prepare(
+      `SELECT status, attempts
+       FROM evolution_jobs
+       WHERE job_type = 'l3_world_model_update'`
+    ).all() as Array<{ status: string; attempts: number }>;
+    expect(l3Jobs()).toEqual([]);
+
+    // Keep the startup fallback out of the wait window so only session.close can wake the worker.
+    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    await withServerClosed(server, async () => {
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected TCP address");
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+
+    const closeResponse = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(opened.sessionId)}/close`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }
+    );
+    expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: opened.sessionId,
+      status: "closed",
+      closedEpisodeIds: []
+    });
+    expect(l3Jobs()).toHaveLength(1);
+
+    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
+
+    });
+    db.close();
+  });
+
   it("auto-closes idle episodes after a REST turn.complete", async () => {
     const { db, service } = createTestService();
     const idleSession = service.openSession({

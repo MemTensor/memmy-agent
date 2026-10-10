@@ -42,12 +42,14 @@ const EXTERNAL_AGENT_SOURCE_IDS = new Set([
   "opencode",
   "openclaw",
   "hermes",
+  "deepseek_harness",
 ]);
 
 const HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex"]);
-const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes"]);
+const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
 
-const PLUGIN_RUNTIME_SOURCE = "memmy-memory";
+/** Ingest stores `memmy-agent`. `memmy-memory` is rejected before the row is written. */
+const PLUGIN_RUNTIME_SOURCE = "memmy-agent";
 
 export type PluginRuntimeAnalytics = CliLifecycleAnalytics;
 
@@ -58,6 +60,9 @@ export type PluginRuntimeBaseParams = AnalyticsParams & {
 
 export function createPluginRuntimeAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
+  getUserId?: () => string | null | undefined;
+  getUserMode?: () => string | null | undefined;
   fetchImpl?: typeof fetch;
   baseUrl?: string | null;
 } = {}): PluginRuntimeAnalytics {
@@ -195,6 +200,14 @@ export function storedCountFromCompleteTurnResponse(response: unknown): number {
   return typeof record.l1MemoryId === "string" && record.l1MemoryId.trim() ? 1 : 0;
 }
 
+/** Source-turn replies nest the turn result and repeat its ids on `existing`. */
+export function storedCountFromSourceTurnResponse(response: unknown): number {
+  if (!response || typeof response !== "object") return 0;
+  const record = response as { status?: unknown; result?: unknown };
+  if (record.status !== "stored") return 0;
+  return storedCountFromCompleteTurnResponse(record.result);
+}
+
 export function toolCallCountFromCompleteTurnRequest(request: unknown): number | undefined {
   if (!request || typeof request !== "object") return undefined;
   const toolCalls = (request as { toolCalls?: unknown }).toolCalls;
@@ -222,6 +235,16 @@ export function storedCountFromAddResponse(response: unknown): number {
   if (!response || typeof response !== "object") return 0;
   const id = (response as { id?: unknown; memoryId?: unknown }).id ?? (response as { memoryId?: unknown }).memoryId;
   return typeof id === "string" && id.trim() ? 1 : 0;
+}
+
+function isReplayCompleteTurn(response: unknown): boolean {
+  return Boolean(response && typeof response === "object" && (response as { duplicate?: unknown }).duplicate === true);
+}
+
+function isReplayOrDeletedAdd(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const record = response as { duplicate?: unknown; status?: unknown };
+  return record.duplicate === true || record.status === "deleted";
 }
 
 export async function trackExternalHookRecall<T>(
@@ -263,6 +286,11 @@ export async function trackExternalHookRecall<T>(
   }
 }
 
+/**
+ * Reports a legacy `POST /turns/:turnId/complete` write only after a new row is stored.
+ * Replays (`duplicate: true`) and empty captures emit nothing.
+ * `started` is emitted with `succeeded` so a replay does not leave an unmatched start.
+ */
 export async function trackExternalHookCapture<T>(
   analytics: PluginRuntimeAnalytics,
   input: PluginRuntimeAttribution,
@@ -270,40 +298,162 @@ export async function trackExternalHookCapture<T>(
   run: () => Promise<T> | T,
 ): Promise<T> {
   const agentSourceId = resolveExternalAgentSource(input);
-  if (!agentSourceId) return await run();
-
-  const baseParams = buildPluginRuntimeBaseParams(agentSourceId, input, "turn_complete");
-  if (!baseParams) return await run();
-
+  const baseParams = agentSourceId
+    ? buildPluginRuntimeBaseParams(agentSourceId, input, "turn_complete")
+    : null;
   const fallbackMode = resolveCaptureFallbackMode(input.turnId);
   const startedAt = Date.now();
-  analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureStarted, compactAnalyticsParams({
-    ...baseParams,
-    status: "started",
-    ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
-  }));
   try {
     const result = await run();
+    const storedCount = isReplayCompleteTurn(result) ? 0 : storedCountFromCompleteTurnResponse(result);
+    if (!baseParams || storedCount <= 0) return result;
     const toolCallCount = toolCallCountFromCompleteTurnRequest(request);
+    analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureStarted, compactAnalyticsParams({
+      ...baseParams,
+      status: "started",
+      ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+    }));
     analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureSucceeded, compactAnalyticsParams({
       ...baseParams,
       status: "succeeded",
       ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
       latency_ms: elapsedMs(startedAt),
       success: true,
-      stored_count: storedCountFromCompleteTurnResponse(result),
+      stored_count: storedCount,
       ...(typeof toolCallCount === "number" ? { tool_call_count: toolCallCount } : {}),
     }));
     return result;
   } catch (error) {
-    analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureFailed, compactAnalyticsParams({
+    if (baseParams) {
+      analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureStarted, compactAnalyticsParams({
+        ...baseParams,
+        status: "started",
+        ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+      }));
+      analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureFailed, compactAnalyticsParams({
+        ...baseParams,
+        status: "failed",
+        ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+        latency_ms: elapsedMs(startedAt),
+        success: false,
+        error_code: errorCodeFromUnknown(error),
+      }));
+    }
+    throw error;
+  }
+}
+
+/**
+ * Reports a hook or native-plugin source-turn write only after a new row is stored.
+ * Replays (`existing`), skips, and scan-channel calls must not reach this helper.
+ * `started` is emitted with `succeeded` so a replay does not leave an unmatched start.
+ */
+export async function trackStoredExternalSourceTurnCapture<T>(
+  analytics: PluginRuntimeAnalytics,
+  input: PluginRuntimeAttribution,
+  request: unknown,
+  run: () => Promise<T> | T,
+): Promise<T> {
+  const agentSourceId = resolveExternalAgentSource(input);
+  const baseParams = agentSourceId
+    ? buildPluginRuntimeBaseParams(agentSourceId, input, "turn_complete")
+    : null;
+  const fallbackMode = resolveCaptureFallbackMode(input.turnId);
+  const startedAt = Date.now();
+  try {
+    const result = await run();
+    const storedCount = storedCountFromSourceTurnResponse(result);
+    if (!baseParams || storedCount <= 0) return result;
+    const toolCallCount = toolCallCountFromCompleteTurnRequest(request);
+    analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureStarted, compactAnalyticsParams({
       ...baseParams,
-      status: "failed",
+      status: "started",
+      ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+    }));
+    analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureSucceeded, compactAnalyticsParams({
+      ...baseParams,
+      status: "succeeded",
       ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
       latency_ms: elapsedMs(startedAt),
-      success: false,
-      error_code: errorCodeFromUnknown(error),
+      success: true,
+      stored_count: storedCount,
+      ...(typeof toolCallCount === "number" ? { tool_call_count: toolCallCount } : {}),
     }));
+    return result;
+  } catch (error) {
+    if (baseParams) {
+      analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureStarted, compactAnalyticsParams({
+        ...baseParams,
+        status: "started",
+        ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+      }));
+      analytics.track(PLUGIN_RUNTIME_EVENTS.hookCaptureFailed, compactAnalyticsParams({
+        ...baseParams,
+        status: "failed",
+        ...(fallbackMode ? { fallback_mode: fallbackMode } : {}),
+        latency_ms: elapsedMs(startedAt),
+        success: false,
+        error_code: errorCodeFromUnknown(error),
+      }));
+    }
+    throw error;
+  }
+}
+
+/**
+ * Reports a native-plugin `memmy_memory_add` only after a new memory is stored.
+ * Duplicate and deleted echoes still return the existing id, and emit nothing.
+ */
+export async function trackStoredExternalMemoryAdd<T>(
+  analytics: PluginRuntimeAnalytics,
+  input: PluginRuntimeAttribution & { layer?: string },
+  run: () => Promise<T> | T,
+): Promise<T> {
+  const toolName = "memmy_memory_add";
+  const agentSourceId = resolveExternalPluginToolCallSource(input);
+  const baseParams = agentSourceId
+    ? buildPluginRuntimeBaseParams(agentSourceId, input, toolName)
+    : null;
+  const layer = stringValue(input.layer);
+  const startedAt = Date.now();
+  try {
+    const result = await run();
+    const storedCount = isReplayOrDeletedAdd(result) ? 0 : storedCountFromAddResponse(result);
+    if (!baseParams || storedCount <= 0) return result;
+    analytics.track(PLUGIN_RUNTIME_EVENTS.toolCallStarted, compactAnalyticsParams({
+      ...baseParams,
+      status: "started",
+      tool_name: toolName,
+      ...(layer ? { layer } : {}),
+    }));
+    analytics.track(PLUGIN_RUNTIME_EVENTS.toolCallSucceeded, compactAnalyticsParams({
+      ...baseParams,
+      status: "succeeded",
+      tool_name: toolName,
+      ...(layer ? { layer } : {}),
+      latency_ms: elapsedMs(startedAt),
+      success: true,
+      stored_count: storedCount,
+    }));
+    return result;
+  } catch (error) {
+    if (baseParams) {
+      analytics.track(PLUGIN_RUNTIME_EVENTS.toolCallStarted, compactAnalyticsParams({
+        ...baseParams,
+        status: "started",
+        tool_name: toolName,
+        ...(layer ? { layer } : {}),
+      }));
+      analytics.track(PLUGIN_RUNTIME_EVENTS.toolCallFailed, compactAnalyticsParams({
+        ...baseParams,
+        status: "failed",
+        tool_name: toolName,
+        ...(layer ? { layer } : {}),
+        latency_ms: elapsedMs(startedAt),
+        success: false,
+        error_code: errorCodeFromUnknown(error),
+      }));
+    }
     throw error;
   }
 }

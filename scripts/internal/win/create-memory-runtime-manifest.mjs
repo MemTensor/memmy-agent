@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { memoryRuntimeBuildIdentity } from "../shared/memory-runtime-build-identity.mjs";
+import { dirname, resolve } from "node:path";
 
 const [sourcePackagePath, runtimePackagePath, runtimeMetadataPath] = process.argv.slice(2);
 if (!sourcePackagePath || !runtimePackagePath || !runtimeMetadataPath) {
@@ -22,6 +23,7 @@ const runtimePackage = {
   dependencies,
 };
 const runtimeMetadata = {
+  ...await memoryRuntimeBuildIdentity(resolve(dirname(sourcePackagePath), "..")),
   version: sourcePackage.version,
   protocolVersion: 1,
   target: "windows-x64",

@@ -9,6 +9,7 @@ import {
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
+import { MEMORY_RUNTIME_BUILD_ID } from "../runtime-build.js";
 import {
   MEMORY_CAPABILITIES,
   MEMORY_PROTOCOL_VERSION,
@@ -915,6 +916,7 @@ export class MemoryService {
     return {
       ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
       serviceVersion: PROJECT_VERSION,
+      ...(MEMORY_RUNTIME_BUILD_ID ? { buildId: MEMORY_RUNTIME_BUILD_ID } : {}),
       protocolVersion: MEMORY_PROTOCOL_VERSION,
       viewerVersion: MEMORY_VIEWER_VERSION,
       viewerUrl: viewerUrlFromEndpoint(this.viewerEndpoint ?? this.config.storage.endpoint),

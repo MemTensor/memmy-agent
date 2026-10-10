@@ -125,6 +125,27 @@ describe("skill distribution service", () => {
     expect(calls).toEqual(["cursor"]);
   });
 
+  it("reads hook currency from targets that publish it", async () => {
+    const current = createSkillDistributionService({
+      targetRegistry: createSkillTargetRegistry([
+        createFakeTarget({ isInstalledHookCurrent: async () => true })
+      ])
+    });
+    const outdated = createSkillDistributionService({
+      targetRegistry: createSkillTargetRegistry([
+        createFakeTarget({ isInstalledHookCurrent: async () => false })
+      ])
+    });
+    const untouched = createSkillDistributionService({
+      targetRegistry: createSkillTargetRegistry([createFakeTarget({})])
+    });
+
+    await expect(current.isInstalledHookCurrent?.("cursor")).resolves.toBe(true);
+    await expect(outdated.isInstalledHookCurrent?.("cursor")).resolves.toBe(false);
+    await expect(untouched.isInstalledHookCurrent?.("cursor")).resolves.toBe(true);
+    await expect(untouched.isInstalledHookCurrent?.("missing")).resolves.toBe(true);
+  });
+
   it("delegates native plugin installation to plugin-capable targets", async () => {
     const calls: string[] = [];
     const service = createSkillDistributionService({
@@ -224,6 +245,7 @@ function createFakeTarget(overrides: {
   uninstall?: (targetId: string) => void;
   installPlugin?: (targetId: string) => void;
   uninstallPlugin?: (targetId: string) => void;
+  isInstalledHookCurrent?: () => Promise<boolean>;
   detectMemoryPluginConflict?: () => MemoryPluginConflict | null;
 }): SkillTarget {
   return {
@@ -253,6 +275,7 @@ function createFakeTarget(overrides: {
       : undefined,
     detectMemoryPluginConflict: overrides.detectMemoryPluginConflict
       ? async () => overrides.detectMemoryPluginConflict?.() ?? null
-      : undefined
+      : undefined,
+    isInstalledHookCurrent: overrides.isInstalledHookCurrent
   };
 }

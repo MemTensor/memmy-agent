@@ -438,6 +438,51 @@ describe("memmy memory config", () => {
     expect(config.embedding.selectionError).toBeUndefined();
   });
 
+  it("resolves catalog embedding assignments when the legacy runtime field is absent", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "sk-embedding",
+          endpoints: {
+            embeddings: {
+              apiBase: "https://embedding.example/v1",
+              protocol: "openai-embeddings"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        embeddings: {
+          provider: "openai",
+          endpoint: "embeddings",
+          model: "text-embedding-3-small",
+          source: "byok",
+          capabilities: ["embedding"]
+        }
+      },
+      modelAssignments: {
+        byok: { embedding: "embeddings" },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: {}
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "custom",
+      provider: "openai_compatible",
+      sourceProvider: "openai",
+      endpoint: "https://embedding.example/v1",
+      model: "text-embedding-3-small",
+      apiKey: "sk-embedding"
+    });
+    expect(config.embedding.selectionError).toBeUndefined();
+  });
+
   it("rejects a built-in local Embedding assignment owned by another account", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
