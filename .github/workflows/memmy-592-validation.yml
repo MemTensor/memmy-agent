@@ -1,0 +1,121 @@
+name: MEMMY-592 output location validation
+
+on:
+  push:
+    branches: [fix/memmy-592-task-evidence]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memmy-592-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent:
+    if: github.repository == 'yxyi123/memmy-agent'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install repository dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Agent dependencies
+        run: npm ci --prefix App/memmy-agent --no-audit --no-fund
+      - name: Typecheck Agent and tests
+        run: npm --prefix App/memmy-agent run typecheck
+      - name: Build Agent
+        if: ${{ !cancelled() }}
+        run: npm --prefix App/memmy-agent run build
+      - name: Test output locations and affected runtime
+        if: ${{ !cancelled() }}
+        working-directory: App/memmy-agent
+        run: >-
+          npm test -- tests/core/agent-runtime/tools/output-location.test.ts
+          tests/core/agent-runtime/tools/filesystem-tools.test.ts
+          tests/core/agent-runtime/tools/apply-patch-tool.test.ts
+          tests/core/agent-runtime/loop-progress.test.ts
+          tests/core/agent-runtime/task-cancel.test.ts
+          tests/core/agent-runtime/runner
+          --reporter=default --reporter=json --outputFile=memmy-592-runtime-results.json
+      - name: Run full Agent regression
+        if: ${{ !cancelled() }}
+        working-directory: App/memmy-agent
+        run: npm test -- --reporter=default --reporter=json --outputFile=memmy-592-agent-results.json
+      - name: Preserve test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memmy-592-agent-${{ matrix.runner }}
+          path: App/memmy-agent/memmy-592-*-results.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  repository:
+    if: github.repository == 'yxyi123/memmy-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install repository dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Agent dependencies
+        run: npm ci --prefix App/memmy-agent --no-audit --no-fund
+      - name: Check repository lint
+        run: npm run lint
+      - name: Check repository types
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+      - name: Check changed Agent source and tests lint
+        if: ${{ !cancelled() }}
+        working-directory: App/memmy-agent
+        run: >-
+          npx --no-install eslint src/core/agent-runtime/loop.ts
+          src/core/agent-runtime/runner.ts src/core/agent-runtime/subagent.ts
+          src/core/agent-runtime/tools/apply-patch.ts src/core/agent-runtime/tools/base.ts
+          src/core/agent-runtime/tools/filesystem.ts src/core/agent-runtime/tools/loader.ts
+          src/core/agent-runtime/tools/output-location.ts src/core/agent-runtime/tools/shell.ts
+          src/core/agent-runtime/tools/spawn.ts tests/core/agent-runtime/loop-progress.test.ts
+          tests/core/agent-runtime/task-cancel.test.ts tests/core/agent-runtime/tools/output-location.test.ts
+      - name: Full repository regression including release and packaging guards
+        if: ${{ !cancelled() }}
+        run: npm test
+      - name: Run TUI regression independently
+        if: ${{ !cancelled() }}
+        run: npm run agent:test:tui-cursor
+      - name: Memory layer smoke
+        if: ${{ !cancelled() }}
+        run: npm run smoke:memory-layer
+      - name: Local Agent Memory smoke
+        if: ${{ !cancelled() }}
+        run: npm run smoke:local-agent-memory
+      - name: Cursor Memory smoke
+        if: ${{ !cancelled() }}
+        run: npm run smoke:local-agent-memory:cursor
+      - name: Check clean source after builds and tests
+        if: ${{ !cancelled() }}
+        run: git diff --exit-code
+      - name: Record scope
+        if: ${{ always() }}
+        run: |
+          printf '%s\n' 'Personal-branch validation only. No PR, release or deployment is created. Windows/macOS/Linux jobs exercise path routing and Agent regressions. Hosted tests do not replace signed desktop installation or upgrade acceptance. Existing baseline failures remain failures.' >> "$GITHUB_STEP_SUMMARY"
