@@ -15,7 +15,8 @@ const INSTALL_LOCK_WRITE_GRACE_MS = 2_000;
 const SERVICE_STOP_TIMEOUT_MS = 5_000;
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 120_000;
 
-export interface RuntimeAssetDescriptor { name: string; sha256: string; size?: number; url?: string; }
+export interface RuntimeBuildIdentity { buildId?: string; schemaVersion?: number; }
+export interface RuntimeAssetDescriptor extends RuntimeBuildIdentity { name: string; sha256: string; size?: number; url?: string; }
 export interface MemoryReleaseManifest {
   version: string;
   protocolVersion: number;
@@ -45,7 +46,7 @@ export interface MemoryRuntimeInstallOptions {
   preferInstalledCompatible?: boolean;
 }
 
-export interface InstalledRuntimePointer {
+export interface InstalledRuntimePointer extends RuntimeBuildIdentity {
   version: string;
   protocolVersion: number;
   target: string;
@@ -69,16 +70,14 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   }
   const currentPath = join(serviceHome, "current.json");
   const installationPath = join(serviceHome, "installation.json");
-  const previous = await readJsonFile<InstalledRuntimePointer>(currentPath);
-  const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
-  if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0) {
-    return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
-  }
-  if (previous && versionComparison < 0) {
-    throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
-  }
-  const runtimeDir = join(runtimeRoot, manifest.version, target);
+  const identity = parseBuildIdentity(descriptor);
+  // Keep builds immutable so replacing same-version code never overwrites an
+  // active process or destroys the previous runtime needed for recovery.
+  const runtimeDir = identity.buildId
+    ? join(runtimeRoot, manifest.version, target, identity.buildId)
+    : join(runtimeRoot, manifest.version, target);
   const pointer: InstalledRuntimePointer = {
+    ...identity,
     version: manifest.version,
     protocolVersion: manifest.protocolVersion,
     target,
@@ -89,6 +88,11 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   };
   const launcher = launcherPaths(home);
   if (options.dryRun) {
+    const previous = await currentInstalledRuntime(home);
+    if (previous && compareVersions(manifest.version, previous.version) < 0) {
+      if (options.preferInstalledCompatible) return { ok: true, reused: true, dryRun: true, ...previous };
+      throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
+    }
     return { ok: true, dryRun: true, home, serviceHome, target, manifest, pointer, launcher };
   }
 
@@ -97,6 +101,22 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   let stagedPath: string | undefined;
   let installedRuntimeCreated = false;
   try {
+    // Decide after acquiring the lock: a concurrent installer may have changed
+    // the pointer while this installer was resolving its release.
+    const previous = await currentInstalledRuntime(home);
+    const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
+    if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION
+      && (versionComparison < 0 || (versionComparison === 0
+        && (!identity.buildId || identity.buildId === previous.buildId)
+        && existsSync(previous.entrypoint)))) {
+      return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
+    }
+    if (previous && versionComparison < 0) {
+      throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
+    }
+    if (previous?.schemaVersion && identity.schemaVersion && identity.schemaVersion < previous.schemaVersion) {
+      throw new Error(`refusing to downgrade Memory schema from ${previous.schemaVersion} to ${identity.schemaVersion}`);
+    }
     if (!existsSync(pointer.entrypoint)) {
       stagedPath = join(runtimeRoot, `.staging-${process.pid}-${Date.now()}`);
       await mkdir(stagedPath, { recursive: true });
@@ -113,13 +133,13 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
         await mkdir(unpacked, { recursive: true });
         extractTarGzip(archivePath, unpacked);
       }
-      await validateRuntime(unpacked, manifest.version, target, manifest.protocolVersion);
+      await validateRuntime(unpacked, manifest.version, target, manifest.protocolVersion, identity);
       await mkdir(dirname(runtimeDir), { recursive: true });
       await rm(runtimeDir, { recursive: true, force: true });
       await rename(unpacked, runtimeDir);
       installedRuntimeCreated = true;
     } else {
-      await validateRuntime(runtimeDir, manifest.version, target, manifest.protocolVersion);
+      await validateRuntime(runtimeDir, manifest.version, target, manifest.protocolVersion, identity);
     }
 
     const switching = !previous || previous.runtimeDir !== runtimeDir;
@@ -129,6 +149,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
       if (process.platform === "win32") await stopInstalledMemoryService(home);
       else if (switching && previous) stopUserService();
     }
+    if (switching) await waitForServiceOwnerExit(serviceHome);
     await writeJsonAtomic(currentPath, pointer);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
     if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
@@ -139,14 +160,19 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
         await waitForRuntimeHealth(
           options.endpoint ?? "http://127.0.0.1:18960",
           manifest.version,
-          healthCheckTimeoutMs
+          healthCheckTimeoutMs,
+          identity.buildId
         );
       } catch (error) {
         if (!options.skipServiceRegistration && previous) {
           if (process.platform === "win32") await stopInstalledMemoryService(home);
           else stopUserService();
         }
-        if (previous) {
+        if (previous && identity.schemaVersion && (!previous.schemaVersion || previous.schemaVersion < identity.schemaVersion)) {
+          // The failed process may already have committed its DB migration.
+          // Keep the new pointer; rolling back code could strand that database.
+          throw new Error(`Memory activation failed; kept the runtime supporting schema ${identity.schemaVersion} to avoid a schema downgrade`, { cause: error });
+        } else if (previous) {
           await writeJsonAtomic(currentPath, previous);
           await writeStableLauncher(home, serviceHome, previous.runtimeExecutable ?? process.execPath);
           if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
@@ -166,6 +192,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     }
 
     await writeJsonAtomic(installationPath, {
+      ...identity,
       serviceVersion: manifest.version,
       protocolVersion: manifest.protocolVersion,
       target,
@@ -200,7 +227,7 @@ export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Re
   try {
     const pointer = await currentInstalledRuntime(resolvedHome);
     if (!pointer) throw new Error("Memory is not installed");
-    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
+    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion, pointer);
     if (process.platform === "win32") await stopInstalledMemoryService(resolvedHome);
     await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
     registerAndStartUserService(resolvedHome, serviceHome);
@@ -222,7 +249,7 @@ export async function repairInstalledWindowsMemoryService(home = "~/.memmy"): Pr
     if (!isLegacyWindowsTask(resolvedHome)) return { ok: true, repaired: false };
     const pointer = await currentInstalledRuntime(resolvedHome);
     if (!pointer) throw new Error("Memory is not installed");
-    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
+    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion, pointer);
     await stopInstalledMemoryService(resolvedHome);
     await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
     registerAndStartUserService(resolvedHome, serviceHome, false);
@@ -378,6 +405,25 @@ async function waitForMemoryRuntimeStop(
   return false;
 }
 
+async function waitForServiceOwnerExit(serviceHome: string): Promise<void> {
+  const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
+  while (true) {
+    const lock = await readJsonFile<{ pid?: number }>(join(serviceHome, "service.lock"));
+    if (!lock || (Number.isInteger(lock.pid) && !isProcessAlive(lock.pid!))) return;
+    if (Date.now() >= deadline) throw new Error("Memory service still owns its storage; stop it before activating another runtime");
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isNodeError(error) && error.code === "EPERM";
+  }
+}
+
 function loopbackEndpoint(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
@@ -394,27 +440,21 @@ async function reuseInstalledRuntime(
   healthCheckTimeoutMs: number
 ): Promise<Record<string, unknown>> {
   if (options.dryRun) return { ok: true, reused: true, dryRun: true, ...pointer };
-  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
-  try {
-    // Another installer may have activated a newer runtime while we waited.
-    pointer = await currentInstalledRuntime(home) ?? pointer;
-    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
-    const repairLegacyTask = Boolean(options.skipServiceRegistration && isLegacyWindowsTask(home));
-    if (process.platform === "win32" && (!options.skipServiceRegistration || repairLegacyTask)) await stopInstalledMemoryService(home);
-    await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable ?? options.nodeExecutable ?? process.execPath);
-    if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
-    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
-    if (!options.skipHealthCheck) {
-      await waitForRuntimeHealth(
-        options.endpoint ?? "http://127.0.0.1:18960",
-        pointer.version,
-        healthCheckTimeoutMs
-      );
-    }
-    return { ok: true, reused: true, ...pointer };
-  } finally {
-    await installLock.release();
+  await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion, pointer);
+  const repairLegacyTask = Boolean(options.skipServiceRegistration && isLegacyWindowsTask(home));
+  if (process.platform === "win32" && (!options.skipServiceRegistration || repairLegacyTask)) await stopInstalledMemoryService(home);
+  await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable ?? options.nodeExecutable ?? process.execPath);
+  if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+  else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
+  if (!options.skipHealthCheck) {
+    await waitForRuntimeHealth(
+      options.endpoint ?? "http://127.0.0.1:18960",
+      pointer.version,
+      healthCheckTimeoutMs,
+      pointer.buildId
+    );
   }
+  return { ok: true, reused: true, ...pointer };
 }
 
 async function resolveReleaseManifest(
@@ -437,10 +477,13 @@ async function resolveReleaseManifest(
   if (options.runtimeAsset) {
     const path = resolveHome(options.runtimeAsset);
     const sha256 = options.runtimeSha256 ?? await sha256File(path);
+    const result = spawnSync("tar", ["-xOf", path, "./memory-runtime.json"], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`Cannot read Memory runtime metadata: ${result.stderr}`);
+    const identity = parseBuildIdentity(JSON.parse(result.stdout) as Record<string, unknown>);
     return {
       version: options.version ?? MEMORY_SERVICE_VERSION,
       protocolVersion: MEMORY_PROTOCOL_VERSION,
-      assets: { [target]: { name: basename(path), sha256, url: pathToFileURL(path).href } }
+      assets: { [target]: { ...identity, name: basename(path), sha256, url: pathToFileURL(path).href } }
     };
   }
   if (options.runtimeDirectory) {
@@ -460,6 +503,7 @@ async function resolveReleaseManifest(
       protocolVersion,
       assets: {
         [packagedTarget]: {
+          ...parseBuildIdentity(metadata ?? {}),
           name: basename(path),
           sha256: "0".repeat(64),
           url: pathToFileURL(path).href
@@ -491,7 +535,7 @@ function parseReleaseManifest(value: unknown): MemoryReleaseManifest {
     if (!isRecord(asset) || typeof asset.name !== "string" || !asset.name || typeof asset.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(asset.sha256)) {
       throw new Error(`Memory release asset is invalid: ${target}`);
     }
-    assets[target] = { name: asset.name, sha256: asset.sha256.toLowerCase(), ...(typeof asset.size === "number" ? { size: asset.size } : {}), ...(typeof asset.url === "string" ? { url: asset.url } : {}) };
+    assets[target] = { ...parseBuildIdentity(asset), name: asset.name, sha256: asset.sha256.toLowerCase(), ...(typeof asset.size === "number" ? { size: asset.size } : {}), ...(typeof asset.url === "string" ? { url: asset.url } : {}) };
   }
   return { version: value.version, protocolVersion: value.protocolVersion as number, assets };
 }
@@ -543,9 +587,24 @@ function sourceUrl(value: string): string {
   return pathToFileURL(resolveHome(value)).href;
 }
 
-async function validateRuntime(path: string, version: string, target: string, protocolVersion: number): Promise<void> {
+function parseBuildIdentity(value: { buildId?: unknown; schemaVersion?: unknown }): RuntimeBuildIdentity {
+  if (value.buildId !== undefined && (typeof value.buildId !== "string" || !/^[a-f0-9]{64}$/.test(value.buildId))) {
+    throw new Error("Memory runtime buildId must be a SHA-256 digest");
+  }
+  if (value.schemaVersion !== undefined && (!Number.isSafeInteger(value.schemaVersion) || Number(value.schemaVersion) < 1)) {
+    throw new Error("Memory runtime schemaVersion must be a positive integer");
+  }
+  return {
+    ...(typeof value.buildId === "string" ? { buildId: value.buildId } : {}),
+    ...(typeof value.schemaVersion === "number" ? { schemaVersion: value.schemaVersion } : {})
+  };
+}
+
+async function validateRuntime(path: string, version: string, target: string, protocolVersion: number, identity: RuntimeBuildIdentity = {}): Promise<void> {
   const manifest = await readJsonFile<Record<string, unknown>>(join(path, "memory-runtime.json"));
-  if (!manifest || manifest.version !== version || manifest.target !== target || manifest.protocolVersion !== protocolVersion) {
+  if (!manifest || manifest.version !== version || manifest.target !== target || manifest.protocolVersion !== protocolVersion
+    || (identity.buildId && manifest.buildId !== identity.buildId)
+    || (identity.schemaVersion && manifest.schemaVersion !== identity.schemaVersion)) {
     throw new Error(`Memory runtime metadata is invalid for ${version}-${target}`);
   }
   const entrypoint = join(path, "dist", "src", "server", "index.js");
@@ -760,7 +819,8 @@ function runLifecycle(command: string, args: string[], allowFailure = false): vo
 async function waitForRuntimeHealth(
   endpoint: string,
   expectedVersion: string,
-  timeoutMs: number
+  timeoutMs: number,
+  expectedBuildId?: string
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "service did not respond";
@@ -776,11 +836,12 @@ async function waitForRuntimeHealth(
           health.ok === true
           && health.protocolVersion === MEMORY_PROTOCOL_VERSION
           && (health.serviceVersion === expectedVersion || health.version === expectedVersion)
+          && (!expectedBuildId || health.buildId === expectedBuildId)
         ) return;
         if (health.protocolVersion !== MEMORY_PROTOCOL_VERSION) {
           lastError = `service reported protocol ${String(health.protocolVersion)}`;
         } else {
-          lastError = `service reported version ${String(health.serviceVersion ?? health.version)}`;
+          lastError = `service reported version ${String(health.serviceVersion ?? health.version)}, build ${String(health.buildId)}`;
         }
       } else {
         lastError = `health returned HTTP ${response.status}`;

@@ -573,6 +573,7 @@ export interface RawTurnRedactRequest extends RequestEnvelope {
 
 export interface HealthResponse {
   ok: boolean;
+  buildId?: string;
   serviceVersion: string;
   protocolVersion: number;
   viewerVersion: string;
