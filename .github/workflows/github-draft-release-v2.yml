@@ -394,6 +394,8 @@ jobs:
             "Memmy-$VERSION-win32-x64-intl-signed.exe"
             "Memmy-$VERSION-darwin-arm64-cn-signed.dmg"
             "Memmy-$VERSION-darwin-arm64-intl-signed.dmg"
+            "Memmy-$VERSION-darwin-x64-cn-signed.dmg"
+            "Memmy-$VERSION-darwin-x64-intl-signed.dmg"
           )
           : > release-assets/OSS_VERIFICATION.jsonl
 
@@ -700,10 +702,12 @@ jobs:
           - Windows x64 (International): [Memmy-$VERSION-win32-x64-intl-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-intl-signed.exe)
           - macOS Apple Silicon (China): [Memmy-$VERSION-darwin-arm64-cn-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-cn-signed.dmg)
           - macOS Apple Silicon (International): [Memmy-$VERSION-darwin-arm64-intl-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-intl-signed.dmg)
+          - macOS Intel (China): [Memmy-$VERSION-darwin-x64-cn-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-x64-cn-signed.dmg)
+          - macOS Intel (International): [Memmy-$VERSION-darwin-x64-intl-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-x64-intl-signed.dmg)
 
           ## Installation
 
-          On Windows, download the appropriate signed exe and run the installer. On Apple Silicon Macs, download the appropriate signed dmg, open it, and drag Memmy to Applications.
+          On Windows, download the appropriate signed exe and run the installer. On Apple Silicon or Intel Macs, download the appropriate signed dmg, open it, and drag Memmy to Applications.
 
           ## Checksums
 
