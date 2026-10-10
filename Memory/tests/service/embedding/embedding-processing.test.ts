@@ -203,12 +203,17 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
-  it("isolates a deterministic embedding failure and keeps the valid sibling", async () => {
+  it.each([
+    [400, "context_length_exceeded", "maximum context length exceeded"],
+    [400, "20015", "The parameter is invalid."],
+    [413, "payload_too_large", "Request too large"],
+    [422, "invalid_input", "Invalid input"]
+  ])("isolates a deterministic embedding failure and keeps the valid sibling (%s / %s)", async (status, code, message) => {
     const llmCalls: Array<{
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
     }> = [];
-    const embedder = createSelectiveFailureEmbedder();
+    const embedder = createSelectiveFailureEmbedder(undefined, new ModelHttpError(message, "openai_compatible", status as number, code as string, message as string));
     const { db, service } = createTestService({
       llm: createBatchReflectionLlm(llmCalls, "Imported memory summary."),
       embedder
@@ -237,10 +242,10 @@ describe("MemoryService / embedding / processing", () => {
     ]));
     expect(repositories.processing.get(good.l1MemoryId)?.state).toBe("ready");
     expect(repositories.processing.get(bad.l1MemoryId)).toMatchObject({
-      state: "ready_text_only",
-      stage: null,
+      state: code === "context_length_exceeded" ? "ready_text_only" : "failed",
+      stage: code === "context_length_exceeded" ? null : "embedding",
       retryAction: "none",
-      errorCode: "model_input_too_long"
+      errorCode: code === "context_length_exceeded" ? "model_input_too_long" : "invalid_model_request"
     });
     db.close();
   });
@@ -338,8 +343,13 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
-  it("isolates a deterministic legacy retry failure and keeps the valid sibling", async () => {
-    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder() });
+  it.each([
+    [400, "context_length_exceeded", "maximum context length exceeded"],
+    [400, "20015", "The parameter is invalid."],
+    [413, "payload_too_large", "Request too large"],
+    [422, "invalid_input", "Invalid input"]
+  ])("isolates a deterministic legacy retry failure and keeps the valid sibling (%s / %s)", async (status, code, message) => {
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(undefined, new ModelHttpError(message, "openai_compatible", status as number, code as string, message as string)) });
     const repositories = new Repositories(db.db);
     const good = skillMemory(undefined, {
       id: "skill_legacy_retry_good",
@@ -377,6 +387,22 @@ describe("MemoryService / embedding / processing", () => {
     expect(repositories.runtime.getEmbeddingRetry(goodRetry.id)?.status).toBe("succeeded");
     expect(repositories.runtime.getEmbeddingRetry(badRetry.id)?.status).toBe("failed");
     expect(retrievalDocumentIsCurrent(repositories.memories.get(good.id)!)).toBe(true);
+    db.close();
+  });
+
+  it.each([401, 403, 429, 500])("does not fan out a shared HTTP %s failure", async (status) => {
+    const calls = { batch: 0, single: 0 };
+    const failure = new ModelHttpError("Provider unavailable", "openai_compatible", status, undefined, "Provider unavailable");
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(calls, failure) });
+    const repositories = new Repositories(db.db);
+    for (let index = 0; index < 2; index += 1) {
+      const memory = skillMemory(undefined, { id: `shared-failure-${index}`, content: "VALID_EMBEDDING_ITEM" });
+      repositories.memories.insert(memory);
+      repositories.runtime.enqueueEmbeddingRetry({ targetKind: "skill", targetId: memory.id, vectorField: "vec",
+        sourceText: embeddingTextForMemory(memory), embedRole: "query", now: Date.now() - 1 });
+    }
+    await service.runWorkerOnce(10);
+    expect(calls).toEqual({ batch: 1, single: 0 });
     db.close();
   });
 
@@ -747,8 +773,8 @@ function createFlakyEmbedder(): Embedder {
   };
 }
 
-function createSelectiveFailureEmbedder(calls?: { batch: number; single: number }): Embedder {
-  const inputTooLong = () => new ModelHttpError(
+function createSelectiveFailureEmbedder(calls?: { batch: number; single: number }, failure?: ModelHttpError): Embedder {
+  const inputTooLong = () => failure ?? new ModelHttpError(
     "openai_compatible HTTP 400: maximum context length exceeded",
     "openai_compatible",
     400,

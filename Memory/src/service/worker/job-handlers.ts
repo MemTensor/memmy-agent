@@ -1,3 +1,4 @@
+import { EmbeddingInputLimitError } from "../../model/openai-embedding-inputs.js";
 /**
  * Worker job routing and durable write-back helpers.
  *
@@ -583,6 +584,9 @@ export function classifyProcessingError(error: unknown): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
 } {
+  if (error instanceof EmbeddingInputLimitError) {
+    return { code: "model_input_too_long", retryAction: "none" };
+  }
   if (error instanceof ModelHttpError && error.errorCode === "40309") {
     return { code: "40309", retryAction: "open_settings" };
   }

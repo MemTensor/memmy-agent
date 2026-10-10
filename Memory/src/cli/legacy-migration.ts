@@ -212,6 +212,7 @@ function mapEmbedding(value: Row): Row {
     model: string(value.model),
     apiKey: string(value.apiKey),
     maxInputTokens: finite(value.maxInputTokens) ?? undefined,
+    maxInputBytes: finite(value.maxInputBytes) ?? undefined,
     batchSize: finite(value.batchSize) ?? undefined,
     cache: typeof cache.enabled === "boolean" ? cache.enabled : undefined
   });
