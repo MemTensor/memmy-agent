@@ -423,7 +423,7 @@ function addPackage(packageKey) {
   if (!packageInfo) {
     throw new Error(`Missing package-lock entry for ${packageKey}`);
   }
-  if (packageInfo.link) {
+  if (packageInfo.link || !packageMatchesTarget(packageInfo, targetCpu)) {
     return;
   }
 
@@ -445,6 +445,32 @@ function addDependency(fromPackageKey, dependencyName, optional) {
     throw new Error(`Cannot resolve ${dependencyName} from ${fromPackageKey || "runtime root"}`);
   }
   addPackage(packageKey);
+}
+
+function packageMatchesTarget(packageInfo, cpu) {
+  return matchesConstraint(packageInfo.os, "darwin") && matchesConstraint(packageInfo.cpu, cpu);
+}
+
+function matchesConstraint(list, actual) {
+  if (!Array.isArray(list) || list.length === 0) {
+    return true;
+  }
+  let matched = false;
+  let hasPositive = false;
+  for (const raw of list) {
+    const negated = raw.startsWith("!");
+    const name = negated ? raw.slice(1) : raw;
+    if (!negated) {
+      hasPositive = true;
+    }
+    if (name === actual) {
+      if (negated) {
+        return false;
+      }
+      matched = true;
+    }
+  }
+  return hasPositive ? matched : true;
 }
 
 function resolvePackageKey(fromPackageKey, dependencyName) {
