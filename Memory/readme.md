@@ -72,11 +72,25 @@ The `MEMMY_MEMORY_HOST`, `MEMMY_MEMORY_PORT`, and `MEMMY_MEMORY_DB`
 environment variables override the corresponding server settings. The
 `MEMORY_SERVICE_*` aliases are also accepted.
 
-OpenAI-compatible embedding inputs are tokenized and split automatically with
-a conservative 7,500-token per-input budget. Set
-`memmyMemory.embedding.maxInputTokens` or
-`MEMMY_EMBEDDING_MAX_INPUT_TOKENS` to use a smaller budget for a provider with
-a shorter context window.
+OpenAI-compatible embedding inputs are split without truncating the source text.
+Known OpenAI embedding models use a 7,500-token per-input budget. Opaque aliases
+(such as BGE deployments) use a 4,000-token estimate plus an independent 12,000-byte
+UTF-8 cap, because the provider may use a different tokenizer. Splits preserve
+Unicode characters; chunk vectors are length-weighted and combined into one
+vector per original input. Set `memmyMemory.embedding.maxInputTokens` /
+`MEMMY_EMBEDDING_MAX_INPUT_TOKENS`, or for opaque aliases
+`memmyMemory.embedding.maxInputBytes` / `MEMMY_EMBEDDING_MAX_INPUT_BYTES`, to lower
+these limits. Defaults are conservative guards, not guarantees of an unknown
+provider's context window. Budgets too small for a complete character fail
+locally without retrying or dropping text.
+
+Embedding workers isolate a rejected batch by trying each original item once
+for input-related HTTP 400/413/422 failures, including generic parameter errors.
+Successful siblings are saved; a still-invalid item stops automatic retries.
+Authentication/configuration, quota, rate-limit and server errors do not trigger
+this fan-out. This applies to both new jobs and the embedding retry queue.
+Previously failed records require an explicit retry/reindex; updating the code
+does not automatically reset their failed state.
 
 All remote summary-model calls (capture, reflection, long-turn splitting,
 reward scoring, retrieval filtering, and turn routing) are clipped before
