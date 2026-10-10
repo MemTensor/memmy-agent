@@ -365,6 +365,22 @@ export const PROVIDERS: ProviderSpec[] = [
     defaultApiBase: "https://api.minimax.io/anthropic",
   }),
   new ProviderSpec({
+    name: "minimax_cn",
+    keywords: ["minimax_cn"],
+    envKey: "MINIMAX_API_KEY",
+    displayName: "MiniMax (China)",
+    defaultApiBase: "https://api.minimaxi.com/v1",
+    thinkingStyle: "reasoning_split",
+  }),
+  new ProviderSpec({
+    name: "minimax_anthropic_cn",
+    keywords: ["minimax_anthropic_cn"],
+    envKey: "MINIMAX_API_KEY",
+    displayName: "MiniMax (China Anthropic)",
+    backend: "anthropic",
+    defaultApiBase: "https://api.minimaxi.com/anthropic",
+  }),
+  new ProviderSpec({
     name: "mistral",
     keywords: ["mistral"],
     envKey: "MISTRAL_API_KEY",
