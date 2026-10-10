@@ -1,0 +1,81 @@
+name: MEMMY-592 same-runner failure diagnosis
+
+on:
+  push:
+    branches: [fix/memmy-592-task-evidence]
+    paths: ['.github/workflows/memmy-592-failure-diagnostic.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  same-runner:
+    if: github.repository == 'yxyi123/memmy-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 20b8eddd89f6d2374fe43ec050d481cad3a24d12
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install repository dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Agent dependencies
+        run: npm ci --prefix App/memmy-agent --no-audit --no-fund
+      - name: Test backend and frontend failures independently on both revisions
+        run: |
+          set +e
+          set -o pipefail
+          evidence="$RUNNER_TEMP/memmy-592-diagnostic"
+          mkdir -p "$evidence"
+          failed=0
+          for revision in baseline candidate; do
+            if [ "$revision" = baseline ]; then ref=fa12bd06e0d1de9a4bf1e23f321b0e833d064c22; else ref=20b8eddd89f6d2374fe43ec050d481cad3a24d12; fi
+            git checkout --detach "$ref" || exit 2
+            git rev-parse HEAD > "$evidence/$revision-commit.txt"
+            npm test -w @memmy/backend -- src/services/tests/agent-source-service.test.ts --reporter=default --reporter=json --outputFile="$evidence/$revision-backend.json" 2>&1 | tee "$evidence/$revision-backend.log"
+            result=${PIPESTATUS[0]}
+            printf '%s\n' "$result" > "$evidence/$revision-backend.exit"
+            if [ "$result" -ne 0 ]; then failed=1; fi
+            npm test -w @memmy/frontend-desktop -- src/pages/tests/app-frame.test.tsx --reporter=default --reporter=json --outputFile="$evidence/$revision-frontend.json" 2>&1 | tee "$evidence/$revision-frontend.log"
+            result=${PIPESTATUS[0]}
+            printf '%s\n' "$result" > "$evidence/$revision-frontend.exit"
+            if [ "$result" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Alternate original DAG suites on the same runner and dependencies
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          set -o pipefail
+          evidence="$RUNNER_TEMP/memmy-592-diagnostic"
+          failed=0
+          attempt=0
+          for revision in baseline candidate baseline candidate baseline candidate baseline candidate; do
+            attempt=$((attempt + 1))
+            if [ "$revision" = baseline ]; then ref=fa12bd06e0d1de9a4bf1e23f321b0e833d064c22; else ref=20b8eddd89f6d2374fe43ec050d481cad3a24d12; fi
+            git checkout --detach "$ref" || exit 2
+            git ls-tree -r "$ref" App/memmy-agent/src/session-dag App/memmy-agent/tests/session-dag App/memmy-agent/src/core/session App/memmy-agent/src/utils App/memmy-agent/src/config App/memmy-agent/src/providers > "$evidence/$revision-dag-inputs-$attempt.txt"
+            npm --prefix App/memmy-agent test -- tests/session-dag/builder-queue.test.ts --reporter=default --reporter=json --outputFile="$evidence/$revision-dag-$attempt.json" 2>&1 | tee "$evidence/$revision-dag-$attempt.log"
+            result=${PIPESTATUS[0]}
+            printf '%s\n' "$result" > "$evidence/$revision-dag-$attempt.exit"
+            if [ "$result" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Preserve original failure evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memmy-592-same-runner-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memmy-592-diagnostic/
+          if-no-files-found: error
+          retention-days: 7
