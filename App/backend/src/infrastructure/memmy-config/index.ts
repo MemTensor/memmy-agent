@@ -334,6 +334,20 @@ export async function readRuntimeMemmyConfigState(
   return deriveRuntimeMemmyConfigState(parsed, configPath, mode);
 }
 
+/** Reads the persisted runtime user mode without deriving a model selection. */
+export async function readRuntimeMemmyConfigUserMode(
+  configPath = resolveDefaultMemmyConfigPath()
+): Promise<UserMode | undefined> {
+  const content = await readMemmyConfigContent(configPath);
+  if (!content?.trim()) return undefined;
+  const parsed = YAML.parse(content) as unknown;
+  if (!isRecord(parsed)) return undefined;
+  const userMode = existingString(asRecord(parsed.app)?.userMode);
+  return userMode === "account" || userMode === "byok" || userMode === "unset"
+    ? userMode
+    : undefined;
+}
+
 /** Reads agents.defaults.timezone without inventing a configured value. */
 export async function readConfiguredAgentTimeZone(
   configPath = resolveDefaultMemmyConfigPath()

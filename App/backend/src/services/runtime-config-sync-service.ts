@@ -6,6 +6,7 @@ import {
 } from "../infrastructure/app-state-store/index.js";
 import {
   clearAccountModelProjectionFromMemmyConfig,
+  readRuntimeMemmyConfigUserMode,
   readRuntimeMemmyConfigState,
   writeAccountModelProjectionToMemmyConfig,
   type RuntimeMemmyConfigState
@@ -90,6 +91,7 @@ export async function syncRuntimeConfigWithAppState(
     }
     return accountChannelMismatchResult(options.appStateStore, wroteConfig);
   }
+  state = await restoreMissingActiveAccountProjection(options, state);
   switch (state.status) {
     case "valid_byok": {
       const clearedDormantProjection = await clearUntrustedAccountProjection(options, state.accountProjection);
@@ -133,6 +135,36 @@ export async function syncRuntimeConfigWithAppState(
         reason: "cleared_conflicting_account_credentials"
       };
   }
+}
+
+async function restoreMissingActiveAccountProjection(
+  options: SyncRuntimeConfigWithAppStateOptions,
+  state: RuntimeMemmyConfigState
+): Promise<RuntimeMemmyConfigState> {
+  if (state.status === "valid_account" || state.status === "invalid_yaml" || state.status === "conflict") {
+    return state;
+  }
+
+  const session = options.appStateStore.repositories.accountSession.get();
+  if (!session.authenticated) return state;
+  if (options.appStateStore.repositories.bootstrap.getAppSettings().userMode !== "account") {
+    return state;
+  }
+
+  // An explicit BYOK selection remains authoritative even while the user is signed in.
+  // The repair is only for an account-mode database paired with an unset/incomplete runtime projection.
+  if (await readRuntimeMemmyConfigUserMode(options.memmyConfigPath) === "byok") {
+    return state;
+  }
+
+  const cloudUuid = options.appStateStore.repositories.accountSession.getCloudUuid();
+  if (!cloudUuid) return state;
+  await writeAccountModelProjectionToMemmyConfig({
+    cloudUuid,
+    userId: session.profile.userId,
+    preserveAccountByokSelection: true
+  }, options.memmyConfigPath);
+  return readRuntimeMemmyConfigState(options.memmyConfigPath);
 }
 
 /** Handles sync runtime config for startup. */
