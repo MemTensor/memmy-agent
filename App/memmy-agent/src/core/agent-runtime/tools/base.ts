@@ -1,3 +1,5 @@
+import type { OutputLocationPolicy } from "./output-location.js";
+
 export type JsonSchema = Record<string, any>;
 
 export type FileMutationOutcome = {
@@ -6,6 +8,7 @@ export type FileMutationOutcome = {
 };
 
 export type ToolExecutionContext = {
+  outputLocation?: OutputLocationPolicy;
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;

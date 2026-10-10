@@ -525,6 +525,10 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       return "No changes made by patch:\n" + plan.summaries.map(formatSummary).join("\n");
     }
 
+    for (const change of actionable) {
+      const locationError = await context?.outputLocation?.checkWrite(change.target, context);
+      if (locationError) return locationError;
+    }
     const attemptedPaths: string[] = [];
     const attempted = new Set<string>();
     const markAttempted = (target: string): void => {
@@ -577,6 +581,9 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       throwIfAborted(signal);
       const lintResults = await lintFiles(lintRequests, { abortSignal: signal });
       throwIfAborted(signal);
+      for (const change of actionable) {
+        if (change.kind !== "delete") context?.outputLocation?.recordFile(change.target);
+      }
       const success = "Patch applied:\n" + plan.summaries.map(formatSummary).join("\n");
       const result = appendFileLintResults(success, lintResults);
       for (const change of unchanged) {

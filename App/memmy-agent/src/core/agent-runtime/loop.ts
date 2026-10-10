@@ -1,3 +1,4 @@
+import { OutputLocationPolicy } from "./tools/output-location.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
@@ -2561,6 +2562,8 @@ export class AgentLoop {
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
+      ...(!msg.internal && msg.channel !== "system" && !msg.metadata?.injectedEvent
+        ? { output_user_instruction: msg.content } : {}),
       ...(clientRequestId
         ? { client_request_id: clientRequestId }
         : {}),
@@ -3487,6 +3490,7 @@ export class AgentLoop {
       midTurnContext = null,
       consolidator = null,
       onTokenCompactionEvent = null,
+      outputInstruction = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3511,6 +3515,7 @@ export class AgentLoop {
       midTurnContext?: MidTurnContextDescriptor | null;
       consolidator?: Consolidator | null;
       onTokenCompactionEvent?: TokenCompactionEventCallback | null;
+      outputInstruction?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3544,6 +3549,8 @@ export class AgentLoop {
       },
     });
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
+    const outputLocation = new OutputLocationPolicy(sessionWorkspace, session?.metadata);
+    if (outputInstruction) outputLocation.addUserRequest(outputInstruction);
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
@@ -3558,6 +3565,7 @@ export class AgentLoop {
         maxToolResultChars: this.maxToolResultChars,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
+        outputLocation,
         sessionKey: activeSessionKey,
         hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
@@ -4055,6 +4063,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
+      outputInstruction: ctx.msg.internal || ctx.msg.channel === "system" || ctx.msg.metadata?.injectedEvent ? null : ctx.msg.content,
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -4442,6 +4451,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(messages, {
+      outputInstruction: isSubagent || msg.internal ? null : msg.content,
       onProgress,
       onStream,
       onStreamEnd,
