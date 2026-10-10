@@ -917,8 +917,8 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     this.unavailableWarnedSessionKeys.add(sessionKey);
     console.warn(
       `[memmy-memory] Memory service unavailable (session "${sessionKey}", ${phase}): ${this.lastError}. ` +
-        "Continuing without long-term memory recall/write for this session; further failures for this " +
-        "session are suppressed until the service recovers.",
+        "Agent execution continues; background memory writes remain best effort. Further warnings " +
+        "for this session are suppressed until the service recovers.",
     );
   }
 
