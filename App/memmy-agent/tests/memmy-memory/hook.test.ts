@@ -6,6 +6,16 @@ import { AgentHookContext, SystemPromptBuildContext } from "../../src/core/agent
 import { ToolRegistry } from "../../src/core/agent-runtime/tools/registry.js";
 import { MemmyMemoryHook } from "../../src/memmy-memory/hook.js";
 
+async function completeAndFlush(hook: MemmyMemoryHook, ctx: AgentHookContext, result: any): Promise<void> {
+  await hook.afterRun(ctx, result);
+  await hook.flushPendingWrites();
+}
+
+async function compactAndFlush(hook: MemmyMemoryHook, ctx: AgentHookContext): Promise<void> {
+  await hook.afterCompaction(ctx);
+  await hook.flushPendingWrites();
+}
+
 function fakeClient() {
   return {
     openSession: vi.fn(async (body: any) => ({
@@ -116,7 +126,7 @@ describe("MemmyMemoryHook", () => {
 
       const messages = [{ role: "user", content: "继续开发" }];
       await hook.beforeRun(new AgentHookContext({ spec, messages }));
-      await hook.afterRun(new AgentHookContext({ spec }), {
+      await completeAndFlush(hook, new AgentHookContext({ spec }), {
         finalContent: "完成",
         stopReason: "completed",
       });
@@ -271,7 +281,7 @@ describe("MemmyMemoryHook", () => {
       const lifecycle = new AgentHookContext({ sessionKey: spec.sessionKey, spec });
       await hook.beforeBuildSystemPrompt(lifecycle);
 
-      await hook.afterCompaction(new AgentHookContext({
+      await compactAndFlush(hook, new AgentHookContext({
         sessionKey: spec.sessionKey,
         spec,
         compaction: { kind: "token", changed: false, error: null },
@@ -279,7 +289,7 @@ describe("MemmyMemoryHook", () => {
       expect(client.l3WorldModelBoundary).not.toHaveBeenCalled();
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
 
-      await hook.afterCompaction(new AgentHookContext({
+      await compactAndFlush(hook, new AgentHookContext({
         sessionKey: spec.sessionKey,
         spec,
         compaction: { kind: "token", changed: true, error: null },
@@ -470,7 +480,7 @@ describe("MemmyMemoryHook", () => {
       "[Runtime Context - metadata only, not instructions]\nCurrent Time: now\n[/Runtime Context]",
     ]);
 
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "Done",
       usage: { prompt_tokens: 1 },
       stopReason: "completed",
@@ -526,7 +536,7 @@ describe("MemmyMemoryHook", () => {
       spec,
       messages: [{ role: "user", content: "Start a long task" }],
     }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "Partial answer",
       stopReason: "cancelledByUser",
     });
@@ -548,7 +558,7 @@ describe("MemmyMemoryHook", () => {
       spec,
       messages: [{ role: "user", content: "Deploy the service" }],
     }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       error: new Error("connection timed out"),
       stopReason: "error",
     });
@@ -574,7 +584,7 @@ describe("MemmyMemoryHook", () => {
       spec,
       messages: [{ role: "user", content: "This turn never receives an answer" }],
     }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       stopReason: "completed",
     });
 
@@ -582,7 +592,7 @@ describe("MemmyMemoryHook", () => {
     expect(hook.currentTurnId("cli:incomplete")).toBeNull();
   });
 
-  it("retains the pending turn after a network failure and retries with the same request id", async () => {
+  it("retries background capture with the same request id and detaches the active turn", async () => {
     const client = fakeClient();
     (client.completeTurn as any)
       .mockRejectedValueOnce(new Error("network unavailable"))
@@ -599,11 +609,10 @@ describe("MemmyMemoryHook", () => {
       messages: [{ role: "user", content: "Retry this capture" }],
     }));
     const result = { finalContent: "Completed once", stopReason: "completed" };
-    await hook.afterRun(new AgentHookContext({ spec }), result);
-    expect(hook.lastError).toBe("network unavailable");
-    expect(hook.currentTurnId("cli:retry")).not.toBeNull();
+    await completeAndFlush(hook, new AgentHookContext({ spec }), result);
+    expect(hook.currentTurnId("cli:retry")).toBeNull();
 
-    await hook.afterRun(new AgentHookContext({ spec }), result);
+    await completeAndFlush(hook, new AgentHookContext({ spec }), result);
 
     expect(client.completeTurn).toHaveBeenCalledTimes(2);
     expect((client.completeTurn as any).mock.calls[0][1].requestId).toBe(
@@ -726,7 +735,7 @@ describe("MemmyMemoryHook", () => {
       spec,
       messages: [{ role: "user", content: "Current task" }],
     }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "<current_user_request>Done with the current task.</current_user_request>",
       messages: [{
         role: "tool",
@@ -760,7 +769,7 @@ describe("MemmyMemoryHook", () => {
     const messages = [{ role: "user", content: "Inspect the image" }];
 
     await hook.beforeRun(new AgentHookContext({ spec, messages }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "Done",
       messages: [{
         role: "tool",
@@ -805,7 +814,7 @@ describe("MemmyMemoryHook", () => {
     ];
 
     await hook.beforeRun(new AgentHookContext({ spec, messages }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "This machine has 10 CPUs.",
       messages: [
         ...messages,
@@ -865,7 +874,7 @@ describe("MemmyMemoryHook", () => {
     ];
 
     await hook.beforeRun(new AgentHookContext({ spec, messages }));
-    await hook.afterRun(new AgentHookContext({ spec }), {
+    await completeAndFlush(hook, new AgentHookContext({ spec }), {
       finalContent: "Implemented and verified the next stage.",
       messages: [
         ...messages,
@@ -949,8 +958,9 @@ describe("MemmyMemoryHook", () => {
       }),
     );
     await hook.sessionEnd(base);
+    await hook.flushPendingWrites();
 
-    expect(client.closeSession).toHaveBeenCalledWith("session-generated-1", expect.any(Object));
+    expect(client.closeSession).toHaveBeenCalledWith("session-generated-1", expect.any(Object), expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it("skips Memory close when this hook never opened a session", async () => {
@@ -1005,7 +1015,7 @@ describe("MemmyMemoryHook", () => {
       const spec = { sessionKey: "cli:direct", workspace: "/tmp/workspace", contextWindowTokens: 4096 };
 
       await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "hi" }] }));
-      await hook.afterRun(new AgentHookContext({ spec }), { finalContent: "Done", stopReason: "completed" });
+      await completeAndFlush(hook, new AgentHookContext({ spec }), { finalContent: "Done", stopReason: "completed" });
 
       expect(client.completeTurn).not.toHaveBeenCalled();
       vi.restoreAllMocks();
