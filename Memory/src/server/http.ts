@@ -738,6 +738,7 @@ async function routeRequest(
     requireStringField(request, "answer", "turn.complete");
     const turnId = decodeMatchSegment(turnComplete, 1);
     const publicRequest: TurnCompleteRequest = {
+      ...(typeof request.recallApplied === "boolean" ? { recallApplied: request.recallApplied } : {}),
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,

@@ -438,6 +438,30 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("forwards recallApplied=false through HTTP without attributing undelivered recall", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({ namespace: { source: "memmy-agent", profileId: "default" } });
+    const started = await service.startTurn({ sessionId: opened.sessionId, turnId: "late-recall", query: "Implement the memory timeout repair" });
+    db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?").run('["undelivered-memory"]', started.searchEventId);
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/turns/late-recall/complete`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: opened.sessionId, query: "Implement the memory timeout repair",
+          answer: "The model answered after memory timed out.", sourceMemoryIds: [], recallApplied: false }),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { rawTurnId: string; l1MemoryIds: string[] };
+      expect(result.l1MemoryIds).toHaveLength(1);
+      const row = db.db.prepare("SELECT source_memory_ids_json FROM raw_turns WHERE id = ?").get(result.rawTurnId) as { source_memory_ids_json: string };
+      expect(JSON.parse(row.source_memory_ids_json)).toEqual([]);
+    });
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];

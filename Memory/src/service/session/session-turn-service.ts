@@ -1733,7 +1733,7 @@ export class SessionTurnService {
       const requestSourceMemoryIds = normalizeCompleteTurnSourceMemoryIds(request);
       const sourceMemoryIds = requestSourceMemoryIds.length > 0
         ? requestSourceMemoryIds
-        : turnStartRecall?.injectedMemoryIds ?? [];
+        : request.recallApplied === false ? [] : turnStartRecall?.injectedMemoryIds ?? [];
       const completionRequest = sourceMemoryIds === requestSourceMemoryIds
         ? request
         : { ...request, sourceMemoryIds };

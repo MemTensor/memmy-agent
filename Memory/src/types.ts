@@ -354,6 +354,8 @@ export interface TurnStartRequest extends RequestEnvelope {
 }
 
 export interface TurnCompleteRequest extends RequestEnvelope {
+  /** False when automatic recall was not delivered to the model (for example, a host timeout). */
+  recallApplied?: boolean;
   sessionId: string;
   episodeId?: string;
   query: string;
