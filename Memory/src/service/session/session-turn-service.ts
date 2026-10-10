@@ -1261,8 +1261,8 @@ export class SessionTurnService {
       toolCalls: normalizeCompleteTurnToolCalls(normalized), toolResults: normalizeCompleteTurnToolResults(normalized)
     });
     return this.deps.repos.transaction(() => {
-      // A durable source identity is checked before touching an open Session. Deleted memories
-      // and closed Sessions therefore cannot turn a retry into a second capture.
+      // Native captures belong to the local source conversation, not the cloud account
+      // currently sending them. Check before opening a Session or scheduling any work.
       const existing = this.deps.repos.runtime.getSourceTurnCapture(scope, identity.turnId);
       if (existing) {
         if (existing.contentHash !== contentHash) {
@@ -1310,6 +1310,12 @@ export class SessionTurnService {
       const adoptedImport = this.adoptLegacyImport(request, namespace, normalized, scope, contentHash);
       if (adoptedImport) return adoptedImport;
       const previous = this.deps.repos.runtime.latestSourceTurnCapture(scope);
+      if (previous) {
+        namespace.userId = previous.userId;
+        scope.userId = previous.userId;
+      }
+      normalized.namespace = namespace;
+      request = { ...request, namespace };
       let gapEpisode: EpisodeRecord | undefined;
       let targetSessionId = previous?.sessionId;
       const legacyBackfill = allowsLegacyHistoryCapture(request);
@@ -1347,6 +1353,10 @@ export class SessionTurnService {
           : resolved;
       }
       const session = resolved as SessionRecord;
+      // A scan may be the first completion of a Hook Session opened by another account.
+      // Keep the Session owner and all persisted capture references consistent.
+      namespace.userId = session.userId;
+      scope.userId = session.userId;
       const observed = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, identity.turnId);
       if (observed && this.deps.repos.runtime.getEpisode(observed.episodeId)?.status !== "open") {
         return detachLegacyHistory("source_episode_closed");
@@ -1581,7 +1591,7 @@ export class SessionTurnService {
   ): SessionRecord | { status: "pending"; reason: string } {
     const namespace = normalizeNamespace(request.namespace);
     const inScope = (candidate: SessionRecord): boolean =>
-      candidate.userId === namespace.userId && candidate.source === identity.source && candidate.profileId === identity.profileId &&
+      candidate.source === identity.source && candidate.profileId === identity.profileId &&
       (!candidate.conversationId || candidate.conversationId === identity.conversationId) &&
       (candidate.hostSessionKey === identity.conversationId || candidate.conversationId === identity.conversationId ||
         candidate.hostSessionKey === `${identity.source}-memory-${identity.conversationId}`) &&

@@ -1847,17 +1847,20 @@ export class RuntimeRepository {
     }));
   }
 
+  // userId is capture provenance. It must not partition the same local native turn
+  // when an installed Hook and the desktop scanner submit under different accounts.
   getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
-        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+      WHERE source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId
+      ORDER BY created_at ASC, user_id ASC LIMIT 1`
     ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
   latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
       ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
     ).get(scope) as Record<string, unknown> | undefined;
@@ -1869,7 +1872,7 @@ export class RuntimeRepository {
     after?: SourceTurnCaptureRecord;
   } {
     const prefix = `SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
     const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
       .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
@@ -1906,8 +1909,8 @@ export class RuntimeRepository {
       .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
   }
 
-  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
-    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+  sourceConversationSessions(input: { userId?: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
         OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
