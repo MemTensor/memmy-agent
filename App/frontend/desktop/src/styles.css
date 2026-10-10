@@ -2038,7 +2038,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 .agent-conversation-topbar--preview-open .agent-conversation-topbar__actions {
   position: absolute;
   top: 50%;
-  right: calc(var(--agent-preview-panel-width, 520px) + 8px - var(--codex-content-padding-x));
+  right: calc(var(--agent-preview-panel-width, 520px) + 24px);
   z-index: 95;
   padding: 0 2px;
   margin: 0;
@@ -2053,7 +2053,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windo
 .app-frame-content-topbar:has(.agent-conversation-topbar--preview-open) .agent-conversation-topbar__actions {
   position: absolute;
   top: 50%;
-  right: calc(var(--agent-preview-panel-width, 520px) + 8px - var(--codex-content-padding-x));
+  right: calc(var(--agent-preview-panel-width, 520px) + 24px);
   z-index: 95;
   padding: 0 2px;
   margin: 0;

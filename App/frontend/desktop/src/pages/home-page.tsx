@@ -3829,7 +3829,10 @@ export function HomePage() {
         </div>
       ) : null}
       topBarEnd={hasActiveConversation || environmentScope ? (
-          <div className="agent-conversation-topbar__actions">
+          <div
+            className="agent-conversation-topbar__actions"
+            style={sidePreviewOpen ? { "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties : undefined}
+          >
             {environmentScope && !recordingEntry.open ? (
               <button
                 type="button"
