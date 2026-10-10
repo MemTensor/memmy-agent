@@ -19,6 +19,8 @@ import {
 } from "../scripts/internal/shared/write-desktop-edition-manifest-lib.mjs";
 import { pruneRuntimeEnvFiles } from "../scripts/internal/shared/prune-runtime-env-files-lib.mjs";
 
+import { memoryRuntimeBuildIdentity } from "../scripts/internal/shared/memory-runtime-build-identity.mjs";
+
 const roots = [];
 
 afterEach(() => {
@@ -152,8 +154,23 @@ describe("packaged desktop runtime configuration", () => {
     expect(existsSync(join(runtime, ".env"))).toBe(false);
   });
 
+  it("changes Memory build identity when runtime code changes without a version bump", async () => {
+    const root = fixtureRoot();
+    seedMemoryBuildInputs(root);
+    const before = await memoryRuntimeBuildIdentity(root);
+    writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 9;\r\n");
+    expect(await memoryRuntimeBuildIdentity(root)).toEqual(before);
+    writeFileSync(join(root, "Memory/src/server.ts"), "export const behavior = 'new';\n");
+    const changed = await memoryRuntimeBuildIdentity(root);
+    expect(changed.buildId).not.toBe(before.buildId);
+    expect(changed.schemaVersion).toBe(9);
+    writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 10;\n");
+    expect(await memoryRuntimeBuildIdentity(root)).toMatchObject({ schemaVersion: 10 });
+  });
+
   it("creates a standalone Windows Memory manifest without private workspace dependencies", () => {
     const root = fixtureRoot();
+    seedMemoryBuildInputs(root);
     const sourcePackage = join(root, "Memory", "package.json");
     const runtimePackage = join(root, "runtime", "package.json");
     const runtimeMetadata = join(root, "runtime", "memory-runtime.json");
@@ -186,6 +203,8 @@ describe("packaged desktop runtime configuration", () => {
       dependencies: { zod: "^4.4.3" },
     });
     expect(JSON.parse(readFileSync(runtimeMetadata, "utf8"))).toEqual({
+      buildId: expect.stringMatching(/^[a-f0-9]{64}$/),
+      schemaVersion: 9,
       version: "2.1.0",
       protocolVersion: 1,
       target: "windows-x64",
@@ -196,6 +215,7 @@ describe("packaged desktop runtime configuration", () => {
 
   it("creates a standalone macOS Memory manifest and stages its workspace parser package", () => {
     const root = fixtureRoot();
+    seedMemoryBuildInputs(root);
     const memoryDir = join(root, "Memory");
     const runtimeDir = join(root, "runtime");
     const coreDir = join(root, "AgentSourceCore");
@@ -225,6 +245,9 @@ describe("packaged desktop runtime configuration", () => {
       env: { ...process.env, ROOT_DIR: root, MEMORY_DIR: memoryDir, MEMORY_RUNTIME_DIR: runtimeDir, TARGET_CPU: "arm64" },
     });
     expect(generated.status, generated.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(runtimeDir, "memory-runtime.json"), "utf8"))).toMatchObject({
+      buildId: expect.stringMatching(/^[a-f0-9]{64}$/), schemaVersion: 9
+    });
     expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({
       "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
       zod: "4.4.3",
@@ -618,4 +641,19 @@ function fixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), "memmy-packaged-runtime-"));
   roots.push(root);
   return root;
+}
+
+function seedMemoryBuildInputs(root) {
+  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "AgentSourceCore/src"]) {
+    mkdirSync(join(root, path), { recursive: true });
+  }
+  for (const path of ["Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
+    "Memory/viewer/package.json", "AgentSourceCore/package.json", "AgentSourceCore/tsconfig.json",
+    "tsconfig.base.json", "package-lock.json"]) writeFixtureJson(join(root, path), {});
+  writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 9;\n");
+  writeFileSync(join(root, "Memory/viewer/vite.config.ts"), "export default {};\n");
+  writeFileSync(join(root, "Memory/viewer/index.html"), "<html></html>\n");
+  const relative = "scripts/internal/shared/memory-runtime-build-identity.mjs";
+  mkdirSync(dirname(join(root, relative)), { recursive: true });
+  writeFileSync(join(root, relative), readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", relative)));
 }

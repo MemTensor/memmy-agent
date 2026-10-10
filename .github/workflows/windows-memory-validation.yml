@@ -8,7 +8,11 @@ on:
       - "Memory/**"
       - "AgentSourceCore/**"
       - "App/shell/desktop/build/**"
+      - "App/shell/desktop/src/main/runtime-services.ts"
+      - "App/shell/desktop/tests/runtime-memory-upgrade.test.ts"
       - "App/shell/desktop/tests/windows-standard-upgrade-check.test.ts"
+      - "scripts/internal/shared/memory-runtime-build-identity.mjs"
+      - "scripts/internal/win/create-memory-runtime-manifest.mjs"
       - "package.json"
       - "package-lock.json"
   workflow_dispatch:
@@ -57,11 +61,19 @@ jobs:
         run: npm ci
       - name: Build shared Agent source contracts
         run: npm run build -w @memmy/agent-source-core
+      - name: Build desktop startup dependencies
+        run: |
+          npm run build -w @memmy/migrations
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build -w @memmy/local-api-contracts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Windows Memory contracts and temporary upgrade layouts
         run: >-
           node node_modules/vitest/vitest.mjs run
           tests/windows-memory-workflow.test.ts
           Memory/tests/runtime-installer-windows.test.ts
+          Memory/tests/runtime-installer.test.ts
+          App/shell/desktop/tests/runtime-memory-upgrade.test.ts
           App/shell/desktop/tests/windows-standard-upgrade-check.test.ts
           --reporter=default --reporter=json --outputFile=windows-memory-unit-results.json
       - name: Test the native temporary Memory task

@@ -337,6 +337,7 @@ create_memory_runtime_manifest() {
     node --input-type=module <<'NODE'
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const rootDir = requiredEnv("ROOT_DIR");
 const memoryDir = requiredEnv("MEMORY_DIR");
@@ -345,6 +346,8 @@ const targetCpu = requiredEnv("TARGET_CPU");
 const runtimeName = "memmy-memory-runtime";
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
 const runtimeVersion = memoryPackage.version;
+const { memoryRuntimeBuildIdentity } = await import(pathToFileURL(join(rootDir, "scripts/internal/shared/memory-runtime-build-identity.mjs")));
+const buildIdentity = await memoryRuntimeBuildIdentity(rootDir);
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
 const dependencies = { ...(memoryPackage.dependencies ?? {}) };
 const workspacePackageDirs = new Map();
@@ -400,6 +403,7 @@ await writeFile(join(runtimeDir, "package.json"), `${JSON.stringify(runtimePacka
 await writeFile(join(runtimeDir, "package-lock.json"), `${JSON.stringify(runtimeLock, null, 2)}\n`);
 await writeFile(join(runtimeDir, "memory-runtime.json"), `${JSON.stringify({
   version: runtimeVersion,
+  ...buildIdentity,
   protocolVersion: 1,
   target: `darwin-${targetCpu}`,
   entrypoint: "dist/src/server/index.js",
