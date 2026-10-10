@@ -114,6 +114,27 @@ describe("lifecycle hooks", () => {
     });
   });
 
+  it.each(["ordinary", "system"])("passes one turn identity and cancellation signal through %s prompt and run", async (kind) => {
+    const contexts: AgentHookContext[] = [];
+    class IdentityHook extends AgentHook {
+      override async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> { contexts.push(ctx); }
+      override async beforeRun(ctx: AgentHookContext): Promise<void> { contexts.push(ctx); }
+    }
+    const loop = makeLoop([new IdentityHook()]);
+    const abort = new AbortController();
+    if (kind === "ordinary") {
+      await loop.processDirect("hello", { sessionKey: "cli:identity", abortSignal: abort.signal });
+    } else {
+      await loop.processSystemMessage({ channel: "system", chatId: "cli:identity", senderId: "system", content: "hello", metadata: {} } as any,
+        "cli:identity", { turnId: "identity-turn", abortSignal: abort.signal });
+    }
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0].spec.turnId).toEqual(expect.any(String));
+    expect(contexts[0].spec.turnId).toBe(contexts[1].spec.turnId);
+    expect(contexts[0].spec.abortSignal).toBe(contexts[1].spec.abortSignal);
+    expect(contexts[0].spec.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
   it("emits sessionStart once for a newly created session", async () => {
     const hook = new RecordingLifecycleHook();
     const loop = makeLoop([hook]);

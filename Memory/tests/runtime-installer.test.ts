@@ -128,6 +128,145 @@ describe("standalone Memory runtime installer", () => {
     expect(launcher).not.toContain("/desktop/electron");
   });
 
+  it.each([true, false])("replaces changed same-version builds (preferInstalledCompatible=%s) without touching data", async (preferInstalledCompatible) => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const legacy = createRuntimeDirectory(root, "2.1.3");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    const old = await installMemoryRuntime({ ...flags, runtimeDirectory: legacy });
+    const dbPath = join(home, "memory-service", "memory.sqlite");
+    writeFileSync(dbPath, "existing schema 9 database");
+    const bundle = createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 });
+    writeFileSync(join(bundle, "dist/src/server/index.js"), "// schema 9 implementation");
+    const upgraded = await installMemoryRuntime({ ...flags, runtimeDirectory: bundle, preferInstalledCompatible });
+    expect(upgraded).toMatchObject({ buildId: "a".repeat(64), schemaVersion: 9, upgraded: true });
+    expect(upgraded.entrypoint).not.toBe(old.entrypoint);
+    expect(readFileSync(String(upgraded.entrypoint), "utf8")).toContain("schema 9 implementation");
+    expect(readFileSync(String(old.entrypoint), "utf8")).toContain("runtime fixture");
+    expect(readFileSync(dbPath, "utf8")).toBe("existing schema 9 database");
+    const next = createRuntimeDirectory(root, "2.1.3", { buildId: "b".repeat(64), schemaVersion: 9 });
+    const changed = await installMemoryRuntime({ ...flags, runtimeDirectory: next, preferInstalledCompatible });
+    expect(changed.entrypoint).not.toBe(upgraded.entrypoint);
+    const reused = await installMemoryRuntime({ ...flags, runtimeDirectory: next, preferInstalledCompatible: true });
+    expect(reused).toMatchObject({ reused: true, buildId: "b".repeat(64) });
+  });
+
+  it("keeps the previous pointer after a changed same-version build fails activation", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 }) });
+    const before = await currentInstalledRuntime(home);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fixture unavailable"));
+    try {
+      await expect(installMemoryRuntime({
+        ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "b".repeat(64), schemaVersion: 9 }),
+        preferInstalledCompatible: true, skipHealthCheck: false, healthCheckTimeoutMs: 1
+      })).rejects.toThrow("failed its activation health check");
+      expect(await currentInstalledRuntime(home)).toEqual(before);
+      expect(readFileSync(before!.entrypoint, "utf8")).toContain("runtime fixture");
+    } finally { fetchSpy.mockRestore(); }
+  });
+
+  it("repairs an installed build whose files were removed", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 });
+    const flags = { home, runtimeDirectory, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    const installed = await installMemoryRuntime(flags);
+    rmSync(String(installed.runtimeDir), { recursive: true });
+    await installMemoryRuntime({ ...flags, preferInstalledCompatible: true });
+    expect(existsSync(String(installed.entrypoint))).toBe(true);
+  });
+
+  it("keeps the new runtime after a failed activation may have advanced the schema", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3") });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fixture unavailable"));
+    try {
+      await expect(installMemoryRuntime({ ...flags, preferInstalledCompatible: true, skipHealthCheck: false, healthCheckTimeoutMs: 1,
+        runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "b".repeat(64), schemaVersion: 9 })
+      })).rejects.toThrow("kept the runtime supporting schema 9");
+      expect(await currentInstalledRuntime(home)).toMatchObject({ buildId: "b".repeat(64), schemaVersion: 9 });
+    } finally { fetchSpy.mockRestore(); }
+  });
+
+  it("does not accept health from another same-version build", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: true, protocolVersion: 1, serviceVersion: "2.1.3", buildId: "b".repeat(64) })));
+    try {
+      await expect(installMemoryRuntime({ home, skipServiceRegistration: true, healthCheckTimeoutMs: 1, agents: [],
+        runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 })
+      })).rejects.toThrow("failed its activation health check");
+      expect(await currentInstalledRuntime(home)).toBeUndefined();
+    } finally { fetchSpy.mockRestore(); }
+  });
+
+  it("waits for the old service to release storage before switching the pointer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3") });
+    const before = await currentInstalledRuntime(home);
+    const lockPath = join(home, "memory-service/service.lock");
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid }));
+    const install = installMemoryRuntime({ ...flags,
+      runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 })
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await currentInstalledRuntime(home)).toEqual(before);
+    } finally { rmSync(lockPath); }
+    await expect(install).resolves.toMatchObject({ buildId: "a".repeat(64) });
+  });
+
+  it("rechecks the installed version after waiting for another installer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3") });
+    const before = await currentInstalledRuntime(home);
+    const lockPath = join(home, "memory-service/install.lock");
+    writeFileSync(lockPath, String(process.pid));
+    const install = installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.4") });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const newer = { ...before, version: "3.0.0" };
+    writeFileSync(join(home, "memory-service/current.json"), JSON.stringify(newer));
+    rmSync(lockPath);
+    await expect(install).rejects.toThrow("refusing to downgrade Memory from 3.0.0");
+    expect(await currentInstalledRuntime(home)).toEqual(newer);
+  });
+
+  it("installs a release archive using its advertised build identity", async () => {
+    const root = tempRoot();
+    const identity = { buildId: "a".repeat(64), schemaVersion: 9 };
+    const fixture = createRuntimeArchive(root, "2.1.3", identity);
+    const releaseManifest = join(root, "memory-release.json");
+    writeFileSync(releaseManifest, JSON.stringify({ version: "2.1.3", protocolVersion: 1, assets: {
+      [fixture.target]: { ...identity, name: "runtime.tar.gz", sha256: fixture.sha256, url: fixture.archive }
+    } }));
+    const installed = await installMemoryRuntime({ home: join(root, "home"), releaseManifest,
+      skipServiceRegistration: true, skipHealthCheck: true, agents: []
+    });
+    expect(installed).toMatchObject(identity);
+    expect(String(installed.runtimeDir)).toContain(identity.buildId);
+  });
+
+  it("rejects same-version schema downgrades before changing the pointer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "a".repeat(64), schemaVersion: 9 }) });
+    const before = await currentInstalledRuntime(home);
+    await expect(installMemoryRuntime({ ...flags, preferInstalledCompatible: true,
+      runtimeDirectory: createRuntimeDirectory(root, "2.1.3", { buildId: "b".repeat(64), schemaVersion: 8 })
+    })).rejects.toThrow("refusing to downgrade Memory schema");
+    expect(await currentInstalledRuntime(home)).toEqual(before);
+  });
+
   it("rejects checksum failures without activating the staged runtime", async () => {
     const root = tempRoot();
     const home = join(root, "home");
@@ -467,9 +606,9 @@ function tempRoot(): string {
   return root;
 }
 
-function createRuntimeArchive(root: string, version: string): { archive: string; sha256: string; target: string } {
+function createRuntimeArchive(root: string, version: string, identity: { buildId?: string; schemaVersion?: number } = {}): { archive: string; sha256: string; target: string } {
   const target = runtimeTarget(process.platform, process.arch);
-  const stage = createRuntimeDirectory(root, version);
+  const stage = createRuntimeDirectory(root, version, identity);
   const archive = join(root, `memmy-memory-runtime-${version}-${target}.tar.gz`);
   const packed = spawnSync("tar", ["-czf", archive, "-C", stage, "."], { encoding: "utf8" });
   if (packed.status !== 0) throw new Error(packed.stderr || "failed to create runtime fixture");
@@ -477,11 +616,11 @@ function createRuntimeArchive(root: string, version: string): { archive: string;
   return { archive, sha256, target };
 }
 
-function createRuntimeDirectory(root: string, version: string): string {
+function createRuntimeDirectory(root: string, version: string, identity: { buildId?: string; schemaVersion?: number } = {}): string {
   const target = runtimeTarget(process.platform, process.arch);
   const stage = join(root, `runtime-${version}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(stage, "dist", "src", "server"), { recursive: true });
   writeFileSync(join(stage, "dist", "src", "server", "index.js"), "// runtime fixture\n");
-  writeFileSync(join(stage, "memory-runtime.json"), `${JSON.stringify({ version, protocolVersion: 1, target })}\n`);
+  writeFileSync(join(stage, "memory-runtime.json"), `${JSON.stringify({ version, protocolVersion: 1, target, ...identity })}\n`);
   return stage;
 }

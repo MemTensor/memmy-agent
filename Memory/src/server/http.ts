@@ -604,7 +604,8 @@ async function routeRequest(
     const result = await service.idempotent("sessions.close", request, { sessionId, request }, () =>
       service.closeSession(sessionId, request)
     );
-    scheduleAutoWorkerForEvolution(result, autoWorker);
+    // Close can queue L3 batches even when no episode closes, so always wake the worker.
+    autoWorker.schedule();
     return publicCloseSessionResponse(result);
   }
 
@@ -737,6 +738,7 @@ async function routeRequest(
     requireStringField(request, "answer", "turn.complete");
     const turnId = decodeMatchSegment(turnComplete, 1);
     const publicRequest: TurnCompleteRequest = {
+      ...(typeof request.recallApplied === "boolean" ? { recallApplied: request.recallApplied } : {}),
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,

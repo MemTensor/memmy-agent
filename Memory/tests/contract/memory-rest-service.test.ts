@@ -438,6 +438,30 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("forwards recallApplied=false through HTTP without attributing undelivered recall", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({ namespace: { source: "memmy-agent", profileId: "default" } });
+    const started = await service.startTurn({ sessionId: opened.sessionId, turnId: "late-recall", query: "Implement the memory timeout repair" });
+    db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?").run('["undelivered-memory"]', started.searchEventId);
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/turns/late-recall/complete`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: opened.sessionId, query: "Implement the memory timeout repair",
+          answer: "The model answered after memory timed out.", sourceMemoryIds: [], recallApplied: false }),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { rawTurnId: string; l1MemoryIds: string[] };
+      expect(result.l1MemoryIds).toHaveLength(1);
+      const row = db.db.prepare("SELECT source_memory_ids_json FROM raw_turns WHERE id = ?").get(result.rawTurnId) as { source_memory_ids_json: string };
+      expect(JSON.parse(row.source_memory_ids_json)).toEqual([]);
+    });
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];
@@ -683,6 +707,72 @@ describe("MemoryService / REST contract", () => {
       return row?.embedding_dim === 3;
     });
     expect(embeddingTexts.length).toBeGreaterThan(0);
+
+    });
+    db.close();
+  });
+
+  it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "auto-worker-l3-close-session",
+        userId: "auto-worker-l3-close-user"
+      }
+    });
+    const first = service.completeTurn("turn-auto-worker-l3-close", {
+      sessionId: opened.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+    const ended = service.completeTurn("turn-auto-worker-l3-close-end", {
+      sessionId: opened.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题到这里结束。"
+    });
+    expect(ended.closedEpisodeIds).toEqual([first.episodeId]);
+    await service.runWorkerOnce(20);
+    const l3Jobs = () => db.db.prepare(
+      `SELECT status, attempts
+       FROM evolution_jobs
+       WHERE job_type = 'l3_world_model_update'`
+    ).all() as Array<{ status: string; attempts: number }>;
+    expect(l3Jobs()).toEqual([]);
+
+    // Keep the startup fallback out of the wait window so only session.close can wake the worker.
+    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    await withServerClosed(server, async () => {
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected TCP address");
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+
+    const closeResponse = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(opened.sessionId)}/close`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }
+    );
+    expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: opened.sessionId,
+      status: "closed",
+      closedEpisodeIds: []
+    });
+    expect(l3Jobs()).toHaveLength(1);
+
+    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
 
     });
     db.close();

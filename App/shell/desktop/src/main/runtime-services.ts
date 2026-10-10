@@ -904,7 +904,7 @@ export async function ensureMemoryService(
   );
 }
 
-/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+/** Replace a Desktop-owned runtime when its version or build changes, after migrations finish. */
 async function stopOlderBundledMemoryRuntime(
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
@@ -929,7 +929,12 @@ async function stopOlderBundledMemoryRuntime(
   const installedVersion = parseStableMemoryVersion(installed.version);
   if (!bundledVersion || !installedVersion) return false;
   const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
-  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+  const changedBuild = typeof bundled.buildId === "string" && /^[a-f0-9]{64}$/.test(bundled.buildId)
+    && bundled.buildId !== installed.buildId;
+  if (difference < 0 || (difference === 0 && !changedBuild)
+    || (typeof bundled.schemaVersion === "number" && typeof installed.schemaVersion === "number"
+      && bundled.schemaVersion < installed.schemaVersion)
+    || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
     || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
 
   // The standalone CLI records its own Node executable. Sharing a home or a

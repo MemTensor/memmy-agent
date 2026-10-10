@@ -21,6 +21,10 @@ afterEach(async () => {
 
 async function fixture(options: {
   version?: string;
+  buildId?: string;
+  bundledBuildId?: string;
+  schemaVersion?: number;
+  bundledSchemaVersion?: number;
   delay?: number;
   independent?: boolean;
   identity?: boolean;
@@ -78,9 +82,10 @@ async function fixture(options: {
   ].join("\n");
   await writeFile(entry, source);
   await writeFile(join(bundled, "server.cjs"), source);
-  await writeFile(join(bundled, "memory-runtime.json"), JSON.stringify({ version: "2.1.1", protocolVersion: 1 }));
+  await writeFile(join(bundled, "memory-runtime.json"), JSON.stringify({ version: "2.1.1", protocolVersion: 1, buildId: options.bundledBuildId, schemaVersion: options.bundledSchemaVersion }));
   await writeFile(join(serviceHome, "current.json"), JSON.stringify({
     version: options.version ?? "2.1.0", protocolVersion: 1, runtimeDir, entrypoint: entry,
+    buildId: options.buildId, schemaVersion: options.schemaVersion,
     runtimeExecutable: options.independent ? join(root, "independent-node") : process.execPath,
   }));
   await writeFile(cli, [
@@ -238,6 +243,42 @@ describe("bundled Memory upgrades", () => {
     expect(await running.version()).toBe("2.1.1");
     expect(running.children).toHaveLength(1);
     expect(running.children[0]?.process.pid).not.toBe(running.old.process.pid);
+  });
+
+  it.each([undefined, "a".repeat(64)])("replaces an old same-version Desktop build (%s) after releasing its database", async (buildId) => {
+    const running = await fixture({ version: "2.1.1", buildId, bundledBuildId: "b".repeat(64), shutdownDelay: 100 });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBe(0);
+    expect(running.children).toHaveLength(1);
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it("reuses an identical Desktop build", async () => {
+    const running = await fixture({ version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "a".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("keeps a newer compatible independently installed build", async () => {
+    const running = await fixture({ version: "2.2.0", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("does not replace a separately owned same-version build", async () => {
+    const running = await fixture({ independent: true, version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("does not replace a same-version build with a lower schema", async () => {
+    const running = await fixture({ version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64), schemaVersion: 9, bundledSchemaVersion: 8 });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
   });
 
   it("waits for an older migrating runtime before upgrading and releasing its database lock", async () => {

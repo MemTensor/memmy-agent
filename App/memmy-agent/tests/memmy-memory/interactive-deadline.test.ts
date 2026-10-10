@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { INTERACTIVE_MEMORY_TIMEOUT_MS } from "../../src/memmy-memory/client.js";
-import { MemmyMemoryHook } from "../../src/memmy-memory/hook.js";
+import { waitForMemory } from "../../src/memmy-memory/lifecycle.js";
 
 describe("interactive memory deadline", () => {
   it("stays well inside the window the desktop client allows a send", () => {
@@ -12,9 +12,8 @@ describe("interactive memory deadline", () => {
   it("gives up on a hanging memory service instead of holding the reply", async () => {
     vi.useFakeTimers();
     try {
-      const hook = Object.create(MemmyMemoryHook.prototype) as any;
       const never = new Promise(() => {});
-      const raced = hook.withInteractiveDeadline(() => never);
+      const raced = waitForMemory(() => never, INTERACTIVE_MEMORY_TIMEOUT_MS);
       const settled = raced.then(() => "resolved", (error: Error) => error.message);
 
       await vi.advanceTimersByTimeAsync(INTERACTIVE_MEMORY_TIMEOUT_MS + 1);
@@ -26,14 +25,12 @@ describe("interactive memory deadline", () => {
   });
 
   it("returns the value untouched when memory answers in time", async () => {
-    const hook = Object.create(MemmyMemoryHook.prototype) as any;
-    await expect(hook.withInteractiveDeadline(async () => "session-1")).resolves.toBe("session-1");
+    await expect(waitForMemory(async () => "session-1", INTERACTIVE_MEMORY_TIMEOUT_MS)).resolves.toBe("session-1");
   });
 
   it("propagates a real failure rather than masking it as a timeout", async () => {
-    const hook = Object.create(MemmyMemoryHook.prototype) as any;
-    await expect(hook.withInteractiveDeadline(async () => {
+    await expect(waitForMemory(async () => {
       throw new Error("memory refused the connection");
-    })).rejects.toThrow("memory refused the connection");
+    }, INTERACTIVE_MEMORY_TIMEOUT_MS)).rejects.toThrow("memory refused the connection");
   });
 });

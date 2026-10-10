@@ -28,6 +28,8 @@ export class MemmyMemoryHttpError extends Error {
 
 type FetchLike = typeof fetch;
 
+export type MemoryRequestOptions = { signal?: AbortSignal; timeoutMs?: number };
+
 export const DEFAULT_MEMOS_MEMORY_TIMEOUT_MS = 60_000;
 
 /**
@@ -70,6 +72,7 @@ export class MemmyMemoryClient {
     body?: any;
     headers?: Record<string, string>;
     timeoutMs?: number;
+    signal?: AbortSignal;
   } = {}): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json", ...(opts.headers ?? {}) };
     headers["x-memmy-time-zone"] = this.timeZone;
@@ -82,7 +85,9 @@ export class MemmyMemoryClient {
       method,
       headers,
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs),
+      signal: opts.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs)])
+        : AbortSignal.timeout(opts.timeoutMs ?? this.timeoutMs),
     });
     const text = await response.text();
     const parsed = text.trim() ? safeJsonParse(text) : null;
@@ -94,36 +99,36 @@ export class MemmyMemoryClient {
     return parsed as T;
   }
 
-  get<T = any>(path: string, query?: Record<string, any>): Promise<T> {
-    return this.request<T>("GET", path, { query });
+  get<T = any>(path: string, query?: Record<string, any>, options: MemoryRequestOptions = {}): Promise<T> {
+    return this.request<T>("GET", path, { ...options, query });
   }
 
-  post<T = any>(path: string, body: any = {}): Promise<T> {
-    return this.request<T>("POST", path, { body });
+  post<T = any>(path: string, body: any = {}, options: MemoryRequestOptions = {}): Promise<T> {
+    return this.request<T>("POST", path, { ...options, body });
   }
 
-  async health(): Promise<MemoryHealthSnapshot> {
-    return MemoryHealthSnapshotSchema.parse(await this.get("/api/v1/health"));
+  async health(options: MemoryRequestOptions = {}): Promise<MemoryHealthSnapshot> {
+    return MemoryHealthSnapshotSchema.parse(await this.get("/api/v1/health", undefined, options));
   }
 
-  openSession(body: JsonRecord & MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
-    return this.post("/api/v1/sessions/open", body);
+  openSession(body: JsonRecord & MemmyMemoryRequestEnvelope, options: MemoryRequestOptions = {}): Promise<JsonRecord> {
+    return this.post("/api/v1/sessions/open", body, options);
   }
 
-  closeSession(sessionId: string, body: MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
-    return this.post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, body);
+  closeSession(sessionId: string, body: MemmyMemoryRequestEnvelope, options: MemoryRequestOptions = {}): Promise<JsonRecord> {
+    return this.post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, body, options);
   }
 
-  startTurn(turnId: string, body: JsonRecord & MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
+  startTurn(turnId: string, body: JsonRecord & MemmyMemoryRequestEnvelope, options: MemoryRequestOptions = {}): Promise<JsonRecord> {
     return this.post("/api/v1/turns/start", {
       ...body,
       turnId,
       query: body.query,
-    });
+    }, options);
   }
 
-  completeTurn(turnId: string, body: JsonRecord & MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
-    return this.post(`/api/v1/turns/${encodeURIComponent(turnId)}/complete`, body);
+  completeTurn(turnId: string, body: JsonRecord & MemmyMemoryRequestEnvelope, options: MemoryRequestOptions = {}): Promise<JsonRecord> {
+    return this.post(`/api/v1/turns/${encodeURIComponent(turnId)}/complete`, body, options);
   }
 
   search(body: JsonRecord & MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
@@ -136,36 +141,40 @@ export class MemmyMemoryClient {
 
   async l3WorldModelTraceHead(
     sessionId: string,
-    envelope: L3WorldModelRequestEnvelope
+    envelope: L3WorldModelRequestEnvelope,
+    options: MemoryRequestOptions = {}
   ): Promise<L3WorldModelTraceHeadResponse> {
     const transport = l3WorldModelGetTransport(envelope);
     const value = await this.request<unknown>(
       "GET",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-trace-head`,
-      { query: transport.query, headers: transport.headers }
+      { ...options, query: transport.query, headers: transport.headers }
     );
     return L3WorldModelTraceHeadResponseSchema.parse(value);
   }
 
   async l3WorldModelBoundary(
     sessionId: string,
-    request: L3WorldModelBoundaryRequest
+    request: L3WorldModelBoundaryRequest,
+    options: MemoryRequestOptions = {}
   ): Promise<L3WorldModelBoundaryResponse> {
     return L3WorldModelBoundaryResponseSchema.parse(await this.post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`,
-      request
+      request,
+      options
     ));
   }
 
   async l3WorldModelContext(
     sessionId: string,
-    envelope: L3WorldModelRequestEnvelope
+    envelope: L3WorldModelRequestEnvelope,
+    options: MemoryRequestOptions = {}
   ): Promise<SessionL3WorldModelContextResponse> {
     const transport = l3WorldModelGetTransport(envelope);
     const value = await this.request<unknown>(
       "GET",
       `/api/v1/l3-world-model/sessions/${encodeURIComponent(sessionId)}/context`,
-      { query: transport.query, headers: transport.headers }
+      { ...options, query: transport.query, headers: transport.headers }
     );
     return SessionL3WorldModelContextResponseSchema.parse(value);
   }
