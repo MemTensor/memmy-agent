@@ -1076,7 +1076,7 @@ describe("native source turn submission", () => {
     expect(runtime.getEpisode(completed.result!.episodeId)?.openedAt).toBe("2099-01-01T10:02:00.000Z");
   });
 
-  it("rejects a supplied Session from another account or native conversation", () => {
+  it("rejects a supplied Session from another native conversation", () => {
     const { service } = createTestService();
     const foreign = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "other-user", sessionKey: "other-conversation" } });
     expect(() => service.completeSourceTurn(request({ sessionId: foreign.sessionId }))).toThrow("source_session_scope_conflict");
