@@ -554,6 +554,52 @@ describe("packaged desktop runtime config", () => {
     expect(children).toHaveLength(0);
   });
 
+  it("reuses a compatible degraded Memory service started by dev-start", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        ok: false,
+        protocolVersion: 1,
+        serviceVersion: "2.1.3",
+        models: { summary: { lastError: "model unavailable" } }
+      }));
+    });
+    testServers.push(server);
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    const children: ManagedChild[] = [];
+
+    await ensureMemoryService(
+      { memoryEntry: join(root, "missing-memory.js"), agentEntry: join(root, "missing-agent.js") },
+      {
+        configPath: join(root, "config.yaml"),
+        agentWorkspace: join(root, "workspace"),
+        memoryDatabasePath: databasePath,
+        memoryBaseUrl: `http://127.0.0.1:${address.port}`,
+        memoryToken: "",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: address.port,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "secret"
+      },
+      children,
+      {
+        appPath: root,
+        appDatabaseFile: join(root, "app.sqlite"),
+        resourcesPath: root,
+        logDirectory: root,
+        logLevel: "info"
+      }
+    );
+
+    expect(children).toHaveLength(0);
+  });
+
   it("rereads the migrated workspace instead of pinning the pre-migration legacy value", async () => {
     const memmyHome = await makeTempRoot();
     const configPath = join(memmyHome, "config.yaml");
