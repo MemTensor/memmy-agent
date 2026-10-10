@@ -3,6 +3,7 @@ name: MEMMY-592 output location validation
 on:
   push:
     branches: [fix/memmy-592-task-evidence]
+    paths-ignore: ['.github/workflows/memmy-592-*.yml']
   workflow_dispatch:
 
 permissions:
