@@ -1491,6 +1491,7 @@ export class AgentRunner {
   }
 
   async run(spec: AgentRunSpec): Promise<AgentRunResult> {
+    spec.turnId ??= crypto.randomUUID();
     spec.provider ??= this.provider;
     if (!spec.provider) throw new Error("AgentRunSpec.provider is required");
     const hook = spec.hook ?? new AgentHook();

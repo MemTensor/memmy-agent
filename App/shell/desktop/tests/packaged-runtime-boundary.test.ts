@@ -125,7 +125,7 @@ describe("desktop packaged runtime boundaries", () => {
       yaml: expect.any(String),
       zod: expect.any(String)
     });
-    expect(memoryPackage.version).toBe("2.1.3");
+    expect(memoryPackage.version).toBe("2.1.4");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
     expect(memoryPackage.scripts?.prebuild).toBeUndefined();
