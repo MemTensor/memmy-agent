@@ -141,7 +141,8 @@ import {
   namespaceForMemory,
   namespaceForRawTurn,
   namespaceForSession,
-  normalizeNamespace
+  normalizeNamespace,
+  projectIdFromMemory
 } from "./namespace/namespace-scope.js";
 import {
   EpisodeReadModel,
@@ -542,7 +543,6 @@ export class MemoryService {
       requireEpisode: this.requireEpisode.bind(this),
       assertSessionInScope: this.assertSessionInScope.bind(this),
       assertEpisodeInScope: this.assertEpisodeInScope.bind(this),
-      assertMemoryInScope: this.assertMemoryInScope.bind(this),
       namespaceForSession,
       readableMemoryIdKind,
       invalidArgument: (message) => new MemoryServiceError("invalid_argument", message),
@@ -2844,19 +2844,35 @@ export class MemoryService {
     }
   }
 
+  // Scope boundary for generic (non-L3) rows. A request that carries no namespace
+  // keeps the historical whole-local-store semantics; a namespace that explicitly
+  // carries an identity dimension (userId / projectId) which contradicts the row's
+  // owner is rejected. Mirrors the user-memory and L3 checks in deleteMemory.
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
-    void memory;
-    void namespace;
+    if (!namespace) return;
+    if (namespace.userId && namespace.userId !== memory.userId) {
+      throw new MemoryServiceError("forbidden", `memory ${memory.id} belongs to a different namespace user`);
+    }
+    if (namespace.projectId && namespace.projectId !== (projectIdFromMemory(memory) ?? null)) {
+      throw new MemoryServiceError("forbidden", `memory ${memory.id} belongs to a different namespace project`);
+    }
   }
 
   private assertEpisodeInScope(episode: EpisodeRecord, namespace?: RuntimeNamespace): void {
-    void episode;
-    void namespace;
+    if (!namespace) return;
+    if (namespace.userId && namespace.userId !== episode.userId) {
+      throw new MemoryServiceError("forbidden", `episode ${episode.id} belongs to a different namespace user`);
+    }
+    if (namespace.projectId && namespace.projectId !== (episode.projectId ?? null)) {
+      throw new MemoryServiceError("forbidden", `episode ${episode.id} belongs to a different namespace project`);
+    }
   }
 
   private assertRawTurnInScope(rawTurn: RawTurnRecord, namespace?: RuntimeNamespace): void {
-    void rawTurn;
-    void namespace;
+    if (!namespace) return;
+    if (namespace.userId && namespace.userId !== rawTurn.userId) {
+      throw new MemoryServiceError("forbidden", `raw turn ${rawTurn.id} belongs to a different namespace user`);
+    }
   }
 
 

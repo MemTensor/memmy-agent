@@ -127,7 +127,6 @@ export interface EpisodeReadModelDependencies {
   requireEpisode(id: string): EpisodeRecord;
   assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void;
   assertEpisodeInScope(episode: EpisodeRecord, namespace?: RuntimeNamespace): void;
-  assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void;
   namespaceForSession(session: SessionRecord): RuntimeNamespace;
   readableMemoryIdKind(id: string): "trace" | "policy" | "world" | "skill" | "episode" | "raw" | "unknown";
   invalidArgument(message: string): Error;
@@ -228,7 +227,10 @@ export class EpisodeReadModel {
 
     const memory = this.deps.repos.memories.get(id);
     if (!memory) throw this.deps.notFound(`memory not found: ${id}`);
-    this.deps.assertMemoryInScope(memory, request.namespace);
+    // Shared-resource read: single-memory GETs intentionally stay reachable across
+    // namespaces of the same local installation (see the "shared resource access"
+    // REST contract and cross-user evolution merges). Namespace boundaries are
+    // enforced on the mutation paths instead (archive/delete/redact).
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
     const refs = this.refsForMemory(memory);
     const item = this.deps.memoryDetailWithLayerPayload(detail, memory);
