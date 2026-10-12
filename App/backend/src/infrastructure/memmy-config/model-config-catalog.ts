@@ -134,10 +134,10 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
     if (providerInput.provider === ACCOUNT_PROVIDER) continue;
     const previousProvider = record(existingProviders[providerInput.provider]);
     const provider = mergeProvider(previousProvider, providerInput);
+    const modelInputs = canonicalizeEndpointDefinitions(providerInput, provider);
     nextProviders[providerInput.provider] = provider;
-    validateEndpointDefinitions(providerInput, provider);
 
-    for (const modelInput of providerInput.models) {
+    for (const modelInput of modelInputs) {
       if (modelInput.source !== "byok" || modelInput.ownerAccountId) {
         throw new InvalidModelConfigError("Desktop model settings may only create ownerless BYOK presets");
       }
@@ -446,10 +446,12 @@ function mergeEndpoint(previous: ConfigRecord, input: CatalogEndpointInput): Con
   return next;
 }
 
-function validateEndpointDefinitions(input: TextModelProviderInput, provider: ConfigRecord): void {
-  const signatures = new Set<string>();
+function canonicalizeEndpointDefinitions(input: TextModelProviderInput, provider: ConfigRecord): TextModelItemInput[] {
+  const canonicalIds = new Map<string, string>();
+  const redirects = new Map<string, string>();
+  const endpoints = record(provider.endpoints);
   for (const endpoint of input.endpoints) {
-    const merged = record(record(provider.endpoints)[endpoint.endpointId]);
+    const merged = record(endpoints[endpoint.endpointId]);
     const signature = stableJson({
       provider: input.provider,
       protocol: merged.protocol,
@@ -458,11 +460,18 @@ function validateEndpointDefinitions(input: TextModelProviderInput, provider: Co
       extraHeaders: merged.extraHeaders ?? provider.extraHeaders ?? null,
       extraBody: merged.extraBody ?? provider.extraBody ?? null
     });
-    if (signatures.has(signature)) {
-      throw new InvalidModelConfigError(`Duplicate endpoint definition for Provider ${input.provider}`);
+    const canonicalId = canonicalIds.get(signature);
+    if (canonicalId) {
+      redirects.set(endpoint.endpointId, canonicalId);
+      delete endpoints[endpoint.endpointId];
+    } else {
+      canonicalIds.set(signature, endpoint.endpointId);
     }
-    signatures.add(signature);
   }
+  return input.models.map((model) => {
+    const endpointId = redirects.get(model.endpointId);
+    return endpointId ? { ...model, endpointId } : model;
+  });
 }
 
 function validatePresetEndpoint(providerId: CatalogProviderId, model: TextModelItemInput, endpoint: ConfigRecord): void {
