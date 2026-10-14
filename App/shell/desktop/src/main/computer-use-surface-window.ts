@@ -11,7 +11,7 @@ import { windowsSourceOwners } from './computer-use-window-capture.js';
 
 export type NativePIP = {
   create(title: string, width: number, height: number, x: number, y: number,
-    onAction: (action: 'open' | 'hide' | 'hide-task' | 'hide-all' | 'click' | 'scroll' | 'dragged' | 'resized' | 'source-size' | 'interrupt' | 'capture-ready' | 'capture-ended',
+    onAction: (action: 'open' | 'hide' | 'hide-task' | 'hide-all' | 'click' | 'scroll' | 'dragged' | 'resized' | 'source-size' | 'interrupt' | 'capture-ready' | 'capture-ended' | 'screen-permission-required',
       x: number, y: number, deltaY: number, frameWidth: number, frameHeight: number, captureEpoch?: number) => void,
     interruptAvailable: boolean): number;
   setImage(id: number, png: Buffer): void;
@@ -20,6 +20,7 @@ export type NativePIP = {
   setVisible(id: number, visible: boolean): void;
   setPosition(id: number, x: number, y: number): void;
   close(id: number): void;
+  screenRecordingGranted(): boolean;
 };
 
 function loadNativePIP(platform: string): NativePIP | null {
@@ -33,7 +34,7 @@ function loadNativePIP(platform: string): NativePIP | null {
       && typeof addon.setTargetWindow === 'function'
       && typeof addon.clearTargetWindow === 'function'
       && typeof addon.setVisible === 'function' && typeof addon.setPosition === 'function'
-      && typeof addon.close === 'function' ? addon : null;
+      && typeof addon.close === 'function' && typeof addon.screenRecordingGranted === 'function' ? addon : null;
   } catch (error) {
     console.warn('Memmy native Computer Use PiP is unavailable:', error);
     return null;
@@ -57,6 +58,9 @@ const VIDEO_DISCOVERY_TIMEOUT_MS = 3500;
 
 export type ComputerUsePIPOptions = {
   onVisibilityChanged?: () => void;
+  onScreenRecordingPermissionRequired?: (request: {
+    isCurrent(): boolean; readGranted(): boolean; retryCapture(): void;
+  }) => void;
 };
 
 function initialPIPSize(imageDataUrl: string | undefined, edge = 200): { width: number; height: number } {
@@ -592,6 +596,24 @@ export function createComputerUseSurfaceWindows(platform = process.platform,
         const y = display.bounds.height - top - nativeSize.height;
         nativeId = nativePIP.create(message.title, nativeSize.width, nativeSize.height, x, y, (action, px, py, deltaY, frameWidth, frameHeight, captureEpoch) => {
           if (!entry || isClosed(entry)) return;
+          if (action === 'screen-permission-required') {
+            const binding = entry.nativeBinding;
+            const epoch = entry.nativeEpoch;
+            const current = () => !isClosed(entry) && entry.nativeBinding === binding && entry.nativeEpoch === epoch
+              && entry.latest.targetWindowId === px;
+            if (binding !== null && captureEpoch === epoch && current()) {
+              options?.onScreenRecordingPermissionRequired?.({
+                isCurrent: current,
+                readGranted: () => nativePIP.screenRecordingGranted(),
+                retryCapture: () => {
+                  if (!current() || !nativePIP.screenRecordingGranted()) return;
+                  entry.nativeBinding = null;
+                  attachNativeWindow(entry);
+                },
+              });
+            }
+            return;
+          }
           if (action === 'capture-ready' || action === 'capture-ended') {
             // Capture notifications use x for the CGWindowID, so a delayed event
             // from the previous target cannot disable the current live stream.

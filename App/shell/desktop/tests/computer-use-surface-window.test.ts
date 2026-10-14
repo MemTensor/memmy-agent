@@ -1038,12 +1038,41 @@ function fakeNative() {
   const native: NativePIP = { create: vi.fn((_title, _width, _height, _x, _y, callback) => {
     const id = nextID++; actions.set(id, callback); return id;
   }), setImage: vi.fn(), setTargetWindow: vi.fn(), clearTargetWindow: vi.fn(), setVisible: vi.fn(), setPosition: vi.fn(),
-  close: vi.fn() };
+  close: vi.fn(), screenRecordingGranted: vi.fn().mockReturnValue(false) };
   return { native, actions };
 }
 const baseSurface = { type: 'memmy:computer-use-surface:update', surface: 'computer', targetPid: 321,
   sessionKey: 's', channel: 'gui', chatId: 'c', targetId: 'Notes', title: 'Notes',
   targetWindowId: 123, turnId: 'turn' } as const;
+
+it('routes only the current native screen permission miss and retries after the host grant', () => {
+  state.windows.length = 0; state.sources = [];
+  const { native, actions } = fakeNative();
+  const permissionRequired = vi.fn();
+  const surfaces = createComputerUseSurfaceWindows('darwin', {
+    onScreenRecordingPermissionRequired: permissionRequired,
+  }, native);
+  try {
+    surfaces.update(baseSurface);
+    actions.get(1)!('screen-permission-required', 999, 0, 0, 0, 0, 1);
+    actions.get(1)!('screen-permission-required', 123, 0, 0, 0, 0, 0);
+    expect(permissionRequired).not.toHaveBeenCalled();
+    actions.get(1)!('screen-permission-required', 123, 0, 0, 0, 0, 1);
+    expect(permissionRequired).toHaveBeenCalledOnce();
+    const request = permissionRequired.mock.calls[0]![0];
+    expect(request.isCurrent()).toBe(true);
+    expect(request.readGranted()).toBe(false);
+    request.retryCapture();
+    expect(native.setTargetWindow).toHaveBeenCalledOnce();
+    vi.mocked(native.screenRecordingGranted).mockReturnValue(true);
+    request.retryCapture();
+    expect(native.setTargetWindow).toHaveBeenLastCalledWith(1, 123, 321, 2, []);
+    expect(request.isCurrent()).toBe(false);
+    surfaces.update({ ...baseSurface, type: 'memmy:computer-use-surface:close' });
+    actions.get(1)!('screen-permission-required', 123, 0, 0, 0, 0, 2);
+    expect(permissionRequired).toHaveBeenCalledOnce();
+  } finally { surfaces.dispose(); }
+});
 
 it.each([
   { platform: 'darwin' as const, windowId: 123, alias: 'com.apple.calculator', withNative: true },

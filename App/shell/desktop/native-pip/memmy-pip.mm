@@ -605,6 +605,13 @@ static NSString *captureStopErrorDomain(NSError *error) {
   });
 }
 - (void)startTargetCapture {
+  // The PiP runs in Memmy's host process. ScreenCaptureKit can display its
+  // own first-use prompt here, bypassing the host-owned restart intent.
+  // Keep every initial bind and retry behind the same passive TCC check.
+  if (!CGPreflightScreenCaptureAccess()) {
+    [self emitAction:"screen-permission-required" x:_targetWindowID y:0 deltaY:0];
+    return;
+  }
   const CGWindowID windowID = _targetWindowID;
   const pid_t pid = _targetPID;
   const uint64_t attempt = _captureState.begin(NSDate.timeIntervalSinceReferenceDate);
@@ -914,6 +921,11 @@ static napi_value closeWindow(napi_env env, napi_callback_info info) {
   }}
   napi_value result; napi_get_undefined(env,&result); return result;
 }
+static napi_value screenRecordingGranted(napi_env env, napi_callback_info info) {
+  napi_value result;
+  napi_get_boolean(env, CGPreflightScreenCaptureAccess(), &result);
+  return result;
+}
 static napi_value init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
     {"create",nullptr,create,nullptr,nullptr,nullptr,napi_default,nullptr},
@@ -923,6 +935,7 @@ static napi_value init(napi_env env, napi_value exports) {
     {"setVisible",nullptr,setVisible,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"setPosition",nullptr,setPosition,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"close",nullptr,closeWindow,nullptr,nullptr,nullptr,napi_default,nullptr},
+    {"screenRecordingGranted",nullptr,screenRecordingGranted,nullptr,nullptr,nullptr,napi_default,nullptr},
   };
   napi_define_properties(env,exports,sizeof(properties) / sizeof(properties[0]),properties); return exports;
 }

@@ -21,6 +21,7 @@ export type GuideControls = {
 export type ComputerUseOnboarding = {
   prepare(): ComputerUseProbeTarget | null;
   guide(reason: ComputerUseGuideReason | 'inputMonitoring', helperApp: string, controls: GuideControls): Promise<boolean>;
+  whenIdle(): Promise<{ permission: MemmySystemPermission; approved: boolean; dismissedByUser: boolean } | null>;
 };
 const unknown = (): ComputerUsePermissions => ({ accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' });
 const permissionState = (status: MemmyPermissionStatus, required: MemmySystemPermission) =>
@@ -45,13 +46,20 @@ export function createComputerUseOnboarding(deps: {
   permissionGuideStarted?(permission: MemmySystemPermission): ((approved: boolean) => void) | undefined;
 }): ComputerUseOnboarding {
   let active = false;
+  let activePermission: MemmySystemPermission | null = null;
+  const idleWaiters: Array<(result: { permission: MemmySystemPermission; approved: boolean; dismissedByUser: boolean }) => void> = [];
   return {
     prepare: deps.target,
+    whenIdle: () => active && activePermission
+      ? new Promise(resolve => idleWaiters.push(resolve)) : Promise.resolve(null),
     async guide(reason, helperApp, controls) {
       if (active || controls.signal.aborted) return false;
       active = true;
+      activePermission = permissionFor(reason);
+      let approved = false;
+      let dismissedByUser = false;
       try {
-        return await new Promise<boolean>(resolve => {
+        approved = await new Promise<boolean>(resolve => {
           let closed = false;
           let panel: PermissionPanel | undefined;
           let observationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -132,7 +140,7 @@ export function createComputerUseOnboarding(deps: {
           };
           const act = (action: PermissionPanelAction) => {
             if (closed) return;
-            if (action === 'later') { finish(); return; }
+            if (action === 'later') { dismissedByUser = true; finish(); return; }
             if (state.busy) return;
             if (action === 'copyPath') {
               deps.copyPath(helperApp);
@@ -167,7 +175,13 @@ export function createComputerUseOnboarding(deps: {
           catch (error) { deps.reportError(error); finish(); }
           if (controls.signal.aborted) finish();
         });
-      } finally { active = false; }
+        return approved;
+      } finally {
+        active = false;
+        const permission = activePermission!;
+        activePermission = null;
+        for (const resolve of idleWaiters.splice(0)) resolve({ permission, approved, dismissedByUser });
+      }
     },
   };
 }

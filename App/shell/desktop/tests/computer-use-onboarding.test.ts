@@ -44,8 +44,10 @@ it('finishes a recording request as approved only after the functional permissio
 it.each(['later', 'abort'] as const)('cancels the recording restart intent on %s', async (action) => {
   const f = fixture();
   const pending = f.guide.guide('screenCaptureUnavailable', helper, f.controls);
+  const idle = f.guide.whenIdle();
   if (action === 'later') f.action('later'); else f.controller.abort();
   expect(await pending).toBe(false);
+  expect(await idle).toEqual({ permission: 'screenRecording', approved: false, dismissedByUser: action === 'later' });
   expect(f.guideFinished).toHaveBeenCalledExactlyOnceWith(false);
 });
 
@@ -110,6 +112,21 @@ it('presents only the permission needed for the current operation', async () => 
   f.action('copyPath'); expect(f.deps.copyPath).toHaveBeenCalledExactlyOnceWith(helper);
   expect(f.state().message).toContain('已复制');
   f.action('later'); expect(await pending).toBe(false);
+});
+it('waits for the active accessibility card before another permission guide can open', async () => {
+  const f = fixture();
+  const accessibility = f.guide.guide('accessibility', helper, f.controls);
+  const idle = f.guide.whenIdle();
+  expect(f.deps.showPanel).toHaveBeenCalledOnce();
+  expect(await f.guide.guide('screenCaptureUnavailable', helper, f.controls)).toBe(false);
+  f.action('later');
+  expect(await accessibility).toBe(false);
+  expect(await idle).toEqual({ permission: 'accessibility', approved: false, dismissedByUser: true });
+  expect(await f.guide.whenIdle()).toBeNull();
+  const screen = f.guide.guide('screenCaptureUnavailable', helper, f.controls);
+  expect(f.deps.showPanel).toHaveBeenCalledTimes(2);
+  f.action('later');
+  expect(await screen).toBe(false);
 });
 it('never captures on focus return and requires an explicit check and Continue before resolving', async () => {
   const f = fixture(); let settled = false;

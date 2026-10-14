@@ -4,6 +4,7 @@ import { compareVersionSegments, parseUpdatePackageVersion } from './version-com
 import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
 import { desktopSaveFileName } from './save-file-name.js';
 import { createComputerUseOnboarding } from './computer-use-onboarding.js';
+import { createComputerUsePIPScreenPermissionGuide } from './computer-use-pip-screen-permission.js';
 import { stopComputerUseAgentForPermissionRestart } from './computer-use-agent-restart.js';
 import { createComputerUseSurfaceWindows } from './computer-use-surface-window.js';
 import { captureComputerUseWindow } from './computer-use-window-capture.js';
@@ -34,7 +35,7 @@ import { NativeAppAllowAll, nativeAppAccessDecision } from './native-app-allow-a
 import { isComputerUsePermissionPanelFocused, showComputerUsePermissionPanel } from './computer-use-permission-panel.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { browserUsePatternMatches, evaluateBrowserUseSiteRule, resolveCloudServiceBaseUrl,
-  type BrowserUseSiteRule, type AccountChannel } from "@memmy/local-api-contracts";
+  type BrowserUseSiteRule, type AccountChannel, type ComputerUsePermissions } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
   DesktopImageActionRequest,
@@ -170,6 +171,7 @@ import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagn
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
+let pipScreenPermissionGuide: ReturnType<typeof createComputerUsePIPScreenPermissionGuide> | null = null;
 let petWindow: BrowserWindow | null = null;
 let localBackend: LocalBackend | null = null;
 let menuBarTray: Tray | null = null;
@@ -498,9 +500,16 @@ async function boot(): Promise<void> {
     }
     if (isQuitting) return;
     bootStage = "runtime-services";
+    if (process.platform === 'darwin') pipScreenPermissionGuide = createComputerUsePIPScreenPermissionGuide({
+      whenIdle: () => memmyPermissionOnboarding?.whenIdle() ?? Promise.resolve(null),
+      guide: readGranted => guideMemmySystemPermission('screenRecording', readGranted),
+      isQuitting: () => isQuitting,
+      reportError: error => console.warn('[computer-use] Native PiP screen permission guide failed:', error),
+    });
     computerUseSurfaceWindows = createComputerUseSurfaceWindows(process.platform, {
       onVisibilityChanged: () => computerUseTrayRecovery.visibilityChanged(
-        computerUseSurfaceWindows?.hasHiddenActive() ?? false)
+        computerUseSurfaceWindows?.hasHiddenActive() ?? false),
+      onScreenRecordingPermissionRequired: request => pipScreenPermissionGuide?.request(request),
     });
     embeddedBrowserHistoryStore = new BrowserHistoryStore(join(app.getPath('userData'), 'in-app-browser-history.json'));
     embeddedBrowserDriver.setHistoryStore(embeddedBrowserHistoryStore);
@@ -1273,7 +1282,8 @@ async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult
  * Registers the IPC handlers the renderer uses to read the runtime config.
  * @returns Nothing.
  */
-async function guideMemmySystemPermission(permission: "accessibility" | "inputMonitoring" | "screenRecording"): Promise<boolean> {
+async function guideMemmySystemPermission(permission: "accessibility" | "inputMonitoring" | "screenRecording",
+  readHostScreenGranted?: () => boolean): Promise<boolean> {
   const onboarding = memmyPermissionOnboarding;
   const binary = await resolveComputerUseBinary(app.isPackaged, process.resourcesPath, process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
   const helper = binary ? computerUseApp(binary) : null;
@@ -1281,7 +1291,13 @@ async function guideMemmySystemPermission(permission: "accessibility" | "inputMo
   const reason = permission === "screenRecording" ? "screenCaptureUnavailable" : permission;
   // Read flags while Settings retains focus so enabling a switch can finish
   // this guide without requiring the user to close it first.
-  const readPermissions = async () => memmyPermissionSnapshot((await runHelperCommand(binary, ["__memmy-history", "--permissions"])).stdout);
+  const readPermissions = async (): Promise<ComputerUsePermissions> => {
+    if (permission === 'screenRecording' && readHostScreenGranted) {
+      try { return { accessibility: 'unknown', screenRecording: readHostScreenGranted() ? 'granted' : 'required' }; }
+      catch { return { accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' }; }
+    }
+    return memmyPermissionSnapshot((await runHelperCommand(binary, ["__memmy-history", "--permissions"])).stdout);
+  };
   return onboarding.guide(reason, helper, {
     signal: AbortSignal.timeout(120_000),
     canContinue: false,
@@ -6006,6 +6022,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   browserSidebarBridge?.dispose();
   browserSidebarBridge = null;
   embeddedBrowserDriver.dispose();
+  pipScreenPermissionGuide?.dispose();
+  pipScreenPermissionGuide = null;
   computerUseSurfaceWindows?.dispose();
   computerUseSurfaceWindows = null;
   await backend?.close();
