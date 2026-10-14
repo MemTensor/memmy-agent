@@ -238,7 +238,7 @@ describe("memmy resume hook stop capture", () => {
     ["codex", "codex" as const],
     ["claude_code", "claude-code" as const],
     ["cursor", "cursor" as const],
-  ])("opens %s SessionStart with the pinned v2 identity and injects one L3 snapshot", async (source, mode) => {
+  ])("opens %s SessionStart with the active v2 identity and injects one L3 snapshot", async (source, mode) => {
     tempDir = mkdtempSync(join(tmpdir(), `memmy-${source}-l3-start-`));
     const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -273,6 +273,9 @@ describe("memmy resume hook stop capture", () => {
     try {
       const port = (server.address() as { port: number }).port;
       const hookScriptPath = installHookFixture(tempDir, source, mode, `http://127.0.0.1:${port}`, runtimeAsset);
+      writeFileSync(join(tempDir, "missing-config.yaml"), [
+        "app:", "  userId: active-account", "memmyMemory:", "  userId: stale-account", "",
+      ].join("\n"));
       const result = await runHook(hookScriptPath, {
         hook_event_name: "SessionStart",
         session_id: "host-session",
@@ -294,13 +297,165 @@ describe("memmy resume hook stop capture", () => {
         workspaceHostId: "a".repeat(64),
         namespace: {
           source,
-          userId: "installed-owner",
+          userId: "active-account",
           sessionKey: `${source}-memory-host-session`,
         },
       });
       expect(opened).not.toHaveProperty("sessionId");
       expect(requests.filter((item) => item.path.includes("/context?"))).toHaveLength(1);
       expect(requests.some((item) => item.path.includes("environment-sync"))).toBe(false);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s keeps an existing lifecycle Session on its original account and uses the active account for a new session", async (_label, render) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-hook-account-lifecycle-"));
+    const requests: Array<{ method: string; path: string; body: Record<string, any> }> = [];
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = await requestBody(request);
+      requests.push({ method: request.method ?? "", path: request.url ?? "", body });
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+      } else if (request.url === "/api/v1/sessions/open") {
+        const userId = (body.namespace as { userId: string }).userId;
+        response.end(JSON.stringify({ sessionId: `session-${userId}`, projectId: null }));
+      } else if (request.url?.includes("/l3-world-model/sessions/") && request.url.includes("/context?")) {
+        response.end(JSON.stringify({ renderedContext: "" }));
+      } else {
+        response.end(JSON.stringify({ ok: true }));
+      }
+    });
+    await listen(server);
+    try {
+      const port = (server.address() as { port: number }).port;
+      const hookScriptPath = installHookFixture(tempDir, "codex", "codex", `http://127.0.0.1:${port}`, runtimeAsset, render);
+      const configPath = join(tempDir, "missing-config.yaml");
+      const sessionPayload = { session_id: "shared-codex-session", cwd: tempDir };
+      const newSessionPayload = { session_id: "new-codex-session", cwd: tempDir };
+
+      expect((await runHook(hookScriptPath, { ...sessionPayload, hook_event_name: "SessionStart" })).status).toBe(0);
+      writeFileSync(configPath, ["app:", "  userId: account-b", "memmyMemory:", "  userId: account-b", ""].join("\n"));
+      expect((await runHook(hookScriptPath, { ...sessionPayload, hook_event_name: "SessionStart" })).status).toBe(0);
+      expect((await runHook(hookScriptPath, { ...sessionPayload, hook_event_name: "SessionEnd" })).status).toBe(0);
+      expect((await runHook(hookScriptPath, { ...newSessionPayload, hook_event_name: "SessionStart" })).status).toBe(0);
+      expect((await runHook(hookScriptPath, { ...newSessionPayload, hook_event_name: "SessionEnd" })).status).toBe(0);
+
+      expect(requests.filter(item => item.path === "/api/v1/sessions/open").map(item =>
+        (item.body.namespace as { userId: string }).userId)).toEqual(["installed-owner", "installed-owner", "account-b"]);
+      expect(requests.filter(item => item.path.endsWith("/close")).map(item => ({
+        path: item.path,
+        userId: (item.body.namespace as { userId: string }).userId,
+      }))).toEqual([
+        { path: "/api/v1/sessions/session-installed-owner/close", userId: "installed-owner" },
+        { path: "/api/v1/sessions/session-account-b/close", userId: "account-b" },
+      ]);
+      expect(readDirectory(tempDir).some(name => name.startsWith("memmy-lifecycle-state-"))).toBe(false);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s keeps all turns in an existing session on its original account and routes a new session to the active account", async (_label, render) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-hook-account-switch-turns-"));
+    const requests: Array<{ path: string; userIdHeader: string | undefined; body: Record<string, any> }> = [];
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = await requestBody(request);
+      requests.push({
+        path: request.url ?? "",
+        userIdHeader: typeof request.headers["x-memmy-user-id"] === "string"
+          ? request.headers["x-memmy-user-id"]
+          : undefined,
+        body,
+      });
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+      } else if (request.url === "/api/v1/sessions/open") {
+        const userId = (body.namespace as { userId: string }).userId;
+        response.end(JSON.stringify({ sessionId: `session-${userId}`, projectId: null }));
+      } else if (request.url === "/api/v1/turns/start") {
+        response.end(JSON.stringify({
+          sessionId: body.sessionId,
+          turnId: body.turnId,
+          episodeId: `episode-${body.sessionId}`,
+        }));
+      } else if (request.url === "/api/v1/source-turns/complete") {
+        response.end(JSON.stringify({ status: "stored" }));
+      } else if (request.url?.includes("/l3-world-model/sessions/") && request.url.includes("/context?")) {
+        response.end(JSON.stringify({ renderedContext: "" }));
+      } else {
+        response.end(JSON.stringify({ ok: true }));
+      }
+    });
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const hookScriptPath = installHookFixture(tempDir, "claude_code", "claude-code", endpoint, runtimeAsset, render);
+      const configPath = join(tempDir, "missing-config.yaml");
+      writeFileSync(configPath, [
+        "app:", "  userId: account-a", "memmyMemory:", "  userId: stale-memory-owner", "",
+      ].join("\n"));
+      const transcriptPath = join(tempDir, "account-switch-session.jsonl");
+      const newTranscriptPath = join(tempDir, "new-account-session.jsonl");
+      const shared = { session_id: "shared-session", cwd: tempDir, transcript_path: transcriptPath };
+      const newConversation = { session_id: "new-session", cwd: tempDir, transcript_path: newTranscriptPath };
+      const turnRows = [
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-a", type: "user", origin: { kind: "human" }, uuid: "u-a", timestamp: "2026-09-16T10:00:00.000Z", message: { role: "user", content: "First turn under account A" } },
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-a", type: "assistant", uuid: "a-a", timestamp: "2026-09-16T10:00:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "First answer" }] } },
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-a", type: "system", subtype: "turn_duration", uuid: "d-a", timestamp: "2026-09-16T10:00:06.000Z" },
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-b", type: "user", origin: { kind: "human" }, uuid: "u-b", timestamp: "2026-09-16T10:01:00.000Z", message: { role: "user", content: "Second turn in the existing session" } },
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-b", type: "assistant", uuid: "a-b", timestamp: "2026-09-16T10:01:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "Second answer" }] } },
+        { sessionId: "shared-session", isSidechain: false, promptId: "turn-b", type: "system", subtype: "turn_duration", uuid: "d-b", timestamp: "2026-09-16T10:01:06.000Z" },
+      ];
+      writeFileSync(transcriptPath, `${turnRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+      const newTurnRows = [
+        { sessionId: "new-session", isSidechain: false, promptId: "turn-c", type: "user", origin: { kind: "human" }, uuid: "u-c", timestamp: "2026-09-16T10:02:00.000Z", message: { role: "user", content: "First turn in the new session" } },
+        { sessionId: "new-session", isSidechain: false, promptId: "turn-c", type: "assistant", uuid: "a-c", timestamp: "2026-09-16T10:02:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "Third answer" }] } },
+        { sessionId: "new-session", isSidechain: false, promptId: "turn-c", type: "system", subtype: "turn_duration", uuid: "d-c", timestamp: "2026-09-16T10:02:06.000Z" },
+      ];
+      writeFileSync(newTranscriptPath, `${newTurnRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+
+      const run = async (payload: Record<string, unknown>, session = shared) => {
+        const result = await runHook(hookScriptPath, { ...session, ...payload });
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+      };
+      await run({ hook_event_name: "SessionStart", source: "startup" });
+      await run({ hook_event_name: "UserPromptSubmit", prompt_id: "turn-a", prompt: "First turn under account A" });
+
+      writeFileSync(configPath, [
+        "app:", "  userId: account-b", "memmyMemory:", "  userId: account-b", "",
+      ].join("\n"));
+      await run({ hook_event_name: "Stop", prompt_id: "turn-a", stop_hook_active: false });
+      await run({ hook_event_name: "UserPromptSubmit", prompt_id: "turn-b", prompt: "Second turn in the existing session" });
+      await run({ hook_event_name: "Stop", prompt_id: "turn-b", stop_hook_active: false });
+      await run({ hook_event_name: "SessionEnd" });
+      await run({ hook_event_name: "SessionStart", source: "startup" }, newConversation);
+      await run({ hook_event_name: "UserPromptSubmit", prompt_id: "turn-c", prompt: "First turn in the new session" }, newConversation);
+      await run({ hook_event_name: "Stop", prompt_id: "turn-c", stop_hook_active: false }, newConversation);
+      await run({ hook_event_name: "SessionEnd" }, newConversation);
+
+      const turnStarts = requests.filter((request) => request.path === "/api/v1/turns/start");
+      expect(turnStarts.map((request) => (request.body.namespace as { userId: string }).userId))
+        .toEqual(["account-a", "account-a", "account-b"]);
+      const completions = requests.filter((request) => request.path === "/api/v1/source-turns/complete");
+      expect(completions.map((request) => request.userIdHeader)).toEqual(["account-a", "account-a", "account-b"]);
+      expect(completions.map((request) => (request.body.namespace as { userId: string }).userId))
+        .toEqual(["account-a", "account-a", "account-b"]);
+      const closed = requests.filter((request) => request.path.endsWith("/close"));
+      expect(closed.map((request) => [request.path, request.userIdHeader])).toEqual([
+        ["/api/v1/sessions/session-account-a/close", "account-a"],
+        ["/api/v1/sessions/session-account-b/close", "account-b"],
+      ]);
+      expect(readDirectory(tempDir).some((name) => name.startsWith("memmy-lifecycle-state-"))).toBe(false);
     } finally {
       await close(server);
     }

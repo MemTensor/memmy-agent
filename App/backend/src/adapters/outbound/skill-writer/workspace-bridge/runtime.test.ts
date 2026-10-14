@@ -33,7 +33,10 @@ describe("Memory lifecycle runtime", () => {
       workspaceHostId: "a".repeat(64),
     }));
     writeFileSync(configPath, [
+      "app:",
+      "  userId: active-owner",
       "memmyMemory:",
+      "  userId: memory-owner",
       "  workspaceBridge:",
       "    enabled: false",
       "  storage:",
@@ -42,23 +45,26 @@ describe("Memory lifecycle runtime", () => {
       "",
     ].join("\n"));
 
-    await expect(readRuntimeConfig(configUrl, true)).resolves.toEqual({
+    await expect(readRuntimeConfig(configUrl)).resolves.toEqual({
       endpoint: "http://127.0.0.1:18888",
       token: "test-token",
-      userId: "installed-owner",
+      userId: "active-owner",
       workspaceHostId: "a".repeat(64),
     });
   });
 
-  it.each([undefined, "pending-session"])("submits the pinned owner with pending Session %s across account changes", async (sessionId) => {
+  it.each([undefined, "pending-session"])("uses the active account for native capture with pending Session %s", async (sessionId) => {
     const fixture = createFixture();
-    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const requests: Array<{ path: string; userIdHeader: string | undefined; body: Record<string, unknown> }> = [];
     const server = createServer(async (request, response) => {
-      requests.push({ path: request.url ?? "", body: await requestBody(request) });
+      requests.push({ path: request.url ?? "", userIdHeader: request.headers["x-memmy-user-id"] as string | undefined,
+        body: await requestBody(request) });
       return json(response, 200, { status: "stored" });
     });
     const endpoint = await listen(server);
-    const configUrl = runtimeConfig(fixture, endpoint);
+    const configPath = join(fixture, "config.yaml");
+    const configUrl = runtimeConfig(fixture, endpoint, configPath);
+    writeFileSync(configPath, ["app:", "  userId: account-a", "memmyMemory:", "  userId: memory-a", ""].join("\n"));
     const turn: SourceTurn = {
       source: "codex", conversationId: "native-conversation", turnId: "native-turn",
       startedAt: "2026-09-09T10:00:00.000Z", completedAt: "2026-09-09T10:00:01.000Z",
@@ -67,25 +73,59 @@ describe("Memory lifecycle runtime", () => {
     };
     try {
       await completeSourceTurn({ configUrl, turn, sessionId, profileId: "work", sourceMemoryIds: ["recalled-1"] });
-      writeFileSync(join(fixture, "missing.yaml"), [
+      writeFileSync(configPath, [
         "app:", "  userId: switched-app-owner", "memmyMemory:", "  userId: switched-memory-owner", "",
       ].join("\n"));
       await completeSourceTurn({ configUrl, turn, sessionId, profileId: "work", sourceMemoryIds: ["recalled-1"] });
 
       expect(requests).toHaveLength(2);
-      expect(requests[1]).toEqual(requests[0]);
+      expect(requests.map(({ path }) => path)).toEqual([
+        "/api/v1/source-turns/complete", "/api/v1/source-turns/complete",
+      ]);
+      expect(requests[0]).toMatchObject({ userIdHeader: "account-a", body: {
+        namespace: { source: "codex", profileId: "work", userId: "account-a", sessionKey: "native-conversation" },
+        sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },
+        sourceMemoryIds: ["recalled-1"], workspacePath: fixture,
+      } });
+      expect(requests[1]).toMatchObject({ userIdHeader: "switched-app-owner", body: {
+        namespace: { source: "codex", profileId: "work", userId: "switched-app-owner", sessionKey: "native-conversation" },
+        sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },
+        sourceMemoryIds: ["recalled-1"], workspacePath: fixture,
+      } });
       for (const request of requests) {
-        expect(request.path).toBe("/api/v1/source-turns/complete");
-        expect(request.body.namespace).toEqual({
-          source: "codex", profileId: "work", userId: "installed-owner", sessionKey: "native-conversation",
-        });
-        expect(request.body).toMatchObject({
-          sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },
-          sourceMemoryIds: ["recalled-1"], workspacePath: fixture,
-        });
         if (sessionId) expect(request.body.sessionId).toBe(sessionId);
         else expect(request.body).not.toHaveProperty("sessionId");
       }
+    } finally {
+      await close(server);
+    }
+  });
+
+  it("keeps an in-flight source turn on the owner resolved when its prompt started", async () => {
+    const fixture = createFixture();
+    const requests: Array<{ userIdHeader: string | undefined; body: Record<string, unknown> }> = [];
+    const server = createServer(async (request, response) => {
+      requests.push({ userIdHeader: request.headers["x-memmy-user-id"] as string | undefined,
+        body: await requestBody(request) });
+      return json(response, 200, { status: "stored" });
+    });
+    const endpoint = await listen(server);
+    const configPath = join(fixture, "config.yaml");
+    const configUrl = runtimeConfig(fixture, endpoint, configPath);
+    writeFileSync(configPath, ["app:", "  userId: account-b", "memmyMemory:", "  userId: account-b", ""].join("\n"));
+    const turn: SourceTurn = {
+      source: "codex", conversationId: "native-conversation", turnId: "native-turn",
+      startedAt: "2026-09-09T10:00:00.000Z", completedAt: "2026-09-09T10:00:01.000Z",
+      sequence: 1, completionEvidence: "final_answer:native-turn", query: "Fix parser", answer: "Fixed",
+      status: "succeeded", toolCalls: [], toolResults: [],
+    };
+    try {
+      await completeSourceTurn({ configUrl, turn, userId: "account-a" });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        userIdHeader: "account-a",
+        body: { namespace: { userId: "account-a" } },
+      });
     } finally {
       await close(server);
     }
@@ -109,7 +149,6 @@ describe("Memory lifecycle runtime", () => {
         sessionKey: "codex-memory-project",
         workspaceRoot: fixture,
         transition: "allow_legacy_rollover",
-        pinnedOwner: true,
       });
 
       expect(session).toMatchObject({
@@ -150,7 +189,6 @@ describe("Memory lifecycle runtime", () => {
         sessionKey: "codex-memory-invalid-root",
         workspaceRoot: process.platform === "win32" ? "C:\\" : "/",
         transition: "allow_legacy_rollover",
-        pinnedOwner: true,
       });
       expect(session).toMatchObject({ protocol: "v2", projectId: null, workspaceRoot: null });
       expect(requests).toHaveLength(1);
@@ -184,7 +222,6 @@ describe("Memory lifecycle runtime", () => {
         source: "claude_code",
         sessionKey: "claude_code-memory-existing",
         transition: "resume_only",
-        pinnedOwner: true,
       });
       expect(session).toMatchObject({ protocol: "legacy", sessionId: "legacy-memory-session" });
       expect(requests[0]).toMatchObject({
@@ -247,13 +284,13 @@ function createFixture(): string {
   return directory;
 }
 
-function runtimeConfig(directory: string, endpoint: string): URL {
+function runtimeConfig(directory: string, endpoint: string, configPath = join(directory, "missing.yaml")): URL {
   const configUrl = pathToFileURL(join(directory, "memmy-memory-config.json"));
   writeFileSync(configUrl, JSON.stringify({
     endpoint,
     userId: "installed-owner",
     workspaceHostId: "a".repeat(64),
-    memmy_config_path: join(directory, "missing.yaml"),
+    memmy_config_path: configPath,
   }));
   return configUrl;
 }

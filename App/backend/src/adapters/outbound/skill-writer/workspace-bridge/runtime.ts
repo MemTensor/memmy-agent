@@ -61,7 +61,8 @@ export interface OpenRuntimeSessionInput {
   sessionKey: string;
   workspaceRoot?: string | null;
   transition: "allow_legacy_rollover" | "resume_only";
-  pinnedOwner?: boolean;
+  userId?: string;
+  requireHealth?: boolean;
   adapterId?: string;
   profileId?: string;
 }
@@ -72,7 +73,7 @@ export interface LoadedRuntimeSession extends RuntimeSession {
   memoryVersion: number | null;
 }
 
-export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Promise<RuntimeConfig> {
+export async function readRuntimeConfig(configUrl: URL, userIdOverride?: string): Promise<RuntimeConfig> {
   const snapshot = objectValue(await readJson(configUrl));
   const configPath = text(snapshot.memmy_config_path) || resolve(homedir(), ".memmy", "config.yaml");
   const yaml = objectValue(YAML.parse(await readFile(configPath, "utf8").catch(() => "{}")));
@@ -83,18 +84,16 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   return {
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
-    userId: pinnedOwner
-      ? text(snapshot.userId) || "local-user"
-      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    userId: text(userIdOverride) || text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
     workspaceHostId: text(snapshot.workspaceHostId),
   };
 }
 
 export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
-  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
+  const config = await readRuntimeConfig(input.configUrl, input.userId);
   const client = new RuntimeHttpClient(config);
   const health = await client.get("/api/v1/health").catch(() => null);
-  if (!health && input.pinnedOwner === true) return null;
+  if (!health && input.requireHealth === true) return null;
   const features = objectValue(objectValue(health).features);
   const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
   const adapterId = input.adapterId || `memmy-${input.source}-adapter`;
@@ -260,12 +259,13 @@ export async function completeRuntimeTurn(
 export async function completeSourceTurn(input: {
   configUrl: URL;
   turn: SourceTurn;
+  userId?: string;
   sessionId?: string;
   sourceMemoryIds?: string[];
   profileId?: string;
   adapterId?: string;
 }): Promise<Record<string, unknown>> {
-  const config = await readRuntimeConfig(input.configUrl, true);
+  const config = await readRuntimeConfig(input.configUrl, input.userId);
   const client = new RuntimeHttpClient(config);
   const profileId = input.turn.profileId || input.profileId || "default";
   return objectValue(await client.post("/api/v1/source-turns/complete", compact({
@@ -506,7 +506,10 @@ class RuntimeHttpClient {
     return this.request(url, {
       method: "POST",
       body: JSON.stringify(body),
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-memmy-user-id": this.config.userId,
+      },
     });
   }
 

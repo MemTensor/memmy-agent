@@ -23,6 +23,7 @@ import {
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
+  readRuntimeConfig,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
@@ -36,6 +37,7 @@ const SEARCH_LIMIT = 20;
 const DISPLAY_LIMIT = 5;
 const STATE_TTL_MS = 10 * 60 * 1000;
 const TURN_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+const LIFECYCLE_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const RESUME_CONTEXT_MAX_CHARS = 24000;
 
 async function main() {
@@ -170,27 +172,32 @@ function isL3LifecycleEvent(payload) {
   return event === "sessionstart" || event === "postcompact" || event === "precompact" || event === "sessionend";
 }
 
-async function openHookRuntimeSession(payload, transition) {
-  return openRuntimeSession({
+async function openHookRuntimeSession(payload, transition, userId) {
+  const rememberedSessions = await readLifecycleSessions(payload);
+  const sessionOwner = normalizeText(rememberedSessions[0] && rememberedSessions[0].userId) || normalizeText(userId) || undefined;
+  const session = await openRuntimeSession({
     configUrl: CONFIG_URL,
     source: SOURCE,
     adapterId: "memmy-" + SOURCE + "-hook",
     sessionKey: memoryExternalSessionId(payload),
     workspaceRoot: workspacePath(payload) || null,
     transition,
-    pinnedOwner: true
+    userId: sessionOwner,
+    requireHealth: true
   });
+  if (session) await rememberLifecycleSession(payload, session);
+  return session;
 }
 
 async function handleL3LifecycleEvent(payload) {
   const event = hookEventName(payload);
-  const session = await openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only");
-  if (!session) {
+  if (event === "sessionend") {
+    await closeLifecycleSessions(payload);
     writeLifecycleOutput(payload, "");
     return;
   }
-  if (event === "sessionend") {
-    await closeRuntimeSession(session);
+  const session = await openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only");
+  if (!session) {
     writeLifecycleOutput(payload, "");
     return;
   }
@@ -377,6 +384,7 @@ async function submitSourceTurn(turn, pending, payload) {
   const result = await completeSourceTurn({
     configUrl: CONFIG_URL,
     turn,
+    userId: normalizeText(pending && pending.userId) || undefined,
     sessionId: normalizeText(pending && pending.sessionId) || undefined,
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
     adapterId: "memmy-" + SOURCE + "-hook"
@@ -411,6 +419,7 @@ async function startCapturedTurn(payload, prompt) {
   const state = {
     createdAt: new Date().toISOString(),
     sessionId,
+    userId: runtimeSession.config.userId,
     turnId: normalizeText(turn && turn.turnId) || requestedTurnId,
     episodeId: normalizeText(turn && turn.episodeId) || undefined,
     query,
@@ -945,6 +954,81 @@ async function readTurnState(payload) {
   } catch {
     return null;
   }
+}
+
+function lifecycleStateUrl(payload) {
+  return new URL("./memmy-lifecycle-state-" + hashText(memoryExternalSessionId(payload)) + ".json", import.meta.url);
+}
+
+async function readLifecycleSessions(payload) {
+  try {
+    const state = parseJson(await readFile(lifecycleStateUrl(payload), "utf8"));
+    const updatedAt = Date.parse(normalizeText(state && state.updatedAt));
+    if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > LIFECYCLE_STATE_TTL_MS || !Array.isArray(state.sessions)) {
+      return [];
+    }
+    return state.sessions.filter(session => session &&
+      typeof session.userId === "string" && typeof session.sessionId === "string" &&
+      typeof session.sessionKey === "string" && typeof session.source === "string" &&
+      typeof session.adapterId === "string" && typeof session.profileId === "string" &&
+      (session.protocol === "legacy" || session.protocol === "v2"));
+  } catch {
+    return [];
+  }
+}
+
+async function writeLifecycleSessions(payload, sessions) {
+  await writeFile(lifecycleStateUrl(payload), JSON.stringify({
+    updatedAt: new Date().toISOString(), sessions
+  }, null, 2) + "\n", "utf8");
+}
+
+async function rememberLifecycleSession(payload, session) {
+  const sessions = await readLifecycleSessions(payload);
+  const userId = session.config.userId;
+  const existingOwner = normalizeText(sessions[0] && sessions[0].userId);
+  if (existingOwner && existingOwner !== userId) return;
+  const sessionRecord = {
+    protocol: session.protocol,
+    sessionId: session.sessionId,
+    projectId: session.projectId,
+    sessionKey: session.sessionKey,
+    source: session.source,
+    adapterId: session.adapterId,
+    profileId: session.profileId,
+    userId,
+  };
+  const key = userId + "\u0000" + session.sessionId;
+  const existingIndex = sessions.findIndex(saved => saved.userId + "\u0000" + saved.sessionId === key);
+  if (existingIndex >= 0) sessions[existingIndex] = sessionRecord;
+  else sessions.push(sessionRecord);
+  await writeLifecycleSessions(payload, sessions);
+}
+
+async function closeLifecycleSessions(payload) {
+  let sessions = await readLifecycleSessions(payload);
+  if (sessions.length === 0) {
+    // Older hook versions did not persist session owners. Their installed snapshot
+    // is the only owner available for closing a pre-upgrade Session.
+    const snapshot = await readLocalConfig();
+    const session = await openHookRuntimeSession(payload, "resume_only", normalizeText(snapshot.userId) || undefined);
+    if (session) await closeRuntimeSession(session);
+    await unlink(lifecycleStateUrl(payload)).catch(() => undefined);
+    return;
+  }
+
+  const failed = [];
+  for (const saved of sessions) {
+    try {
+      const config = await readRuntimeConfig(CONFIG_URL, saved.userId);
+      await closeRuntimeSession({ ...saved, workspaceRoot: null, config });
+    } catch (error) {
+      failed.push(saved);
+      reportCaptureFailure("lifecycle_close_failed", error, payload);
+    }
+  }
+  if (failed.length > 0) await writeLifecycleSessions(payload, failed);
+  else await unlink(lifecycleStateUrl(payload)).catch(() => undefined);
 }
 
 async function writeTurnState(payload, state) {

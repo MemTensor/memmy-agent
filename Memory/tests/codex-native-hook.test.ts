@@ -23,10 +23,11 @@ function transcript(complete = true) {
 }
 async function fixture(responseStatus = "stored") {
   const dir = mkdtempSync(join(tmpdir(), "memmy-native-hook-")); directories.push(dir);
-  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const requests: { path: string; userIdHeader: string | undefined; body: Record<string, unknown> }[] = [];
   const server = createServer(async (req, res) => {
     let data = ""; for await (const chunk of req) data += chunk;
-    requests.push({ path: req.url ?? "", body: data ? JSON.parse(data) : {} });
+    requests.push({ path: req.url ?? "", userIdHeader: typeof req.headers["x-memmy-user-id"] === "string"
+      ? req.headers["x-memmy-user-id"] : undefined, body: data ? JSON.parse(data) : {} });
     res.setHeader("content-type", "application/json");
     if (req.url === "/api/v1/health") res.end(JSON.stringify({ features: {} }));
     else if (req.url === "/api/v1/sessions/open") res.end(JSON.stringify({ sessionId: "runtime-session" }));
@@ -59,8 +60,27 @@ describe("installed Codex Hook native capture", () => {
       expect(result.status).toBe(0); expect(result.stderr).toBe("");
       expect(f.requests).toHaveLength(1);
       const turn = (await readCodexSourceTurn(f.path)).turn!;
-      expect(f.requests[0]).toEqual({ path: "/api/v1/source-turns/complete", body: { ...buildSourceTurnRequest(turn, "hook"), namespace: expectedNamespace, adapterId: "memmy-codex-hook" } });
+      expect(f.requests[0]).toEqual({ path: "/api/v1/source-turns/complete", userIdHeader: "fixture-owner",
+        body: { ...buildSourceTurnRequest(turn, "hook"), namespace: expectedNamespace, adapterId: "memmy-codex-hook" } });
       expect(f.requests[0]?.body.toolCalls).toEqual([{ id: "a", name: "read", input: { path: "parser.ts" }, output: "source contents" }]);
+    } finally { await f.close(); }
+  });
+
+  it("routes a newly completed turn to the current account without reinstalling the hook", async () => {
+    const f = await fixture();
+    try {
+      writeFileSync(join(f.dir, "missing.yaml"), [
+        "app:", "  userId: switched-app-owner", "memmyMemory:", "  userId: switched-memory-owner", "",
+      ].join("\n"));
+      const result = await run(f.dir, f.path);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(f.requests).toHaveLength(1);
+      expect(f.requests[0]).toMatchObject({
+        path: "/api/v1/source-turns/complete",
+        userIdHeader: "switched-app-owner",
+        body: { namespace: { userId: "switched-app-owner" } },
+      });
     } finally { await f.close(); }
   });
 
