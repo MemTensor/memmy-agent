@@ -47,6 +47,8 @@ import { renderTemplate } from "../../utils/prompt-templates.js";
 import type { TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
 import { resolveToolResultMaxChars, type ToolResultMaxCharsByName } from "./tool-result-budget.js";
 
+import type { OutputLocationPolicy } from "./tools/output-location.js";
+
 const DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model.";
 const PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model error.]";
 export const MAX_EMPTY_RETRIES = 2;
@@ -154,6 +156,7 @@ export class AgentRunSpec {
   errorMessage: string | null;
   maxIterationsMessage: string | null;
   maxIterationsFinalPrompt: string | null;
+  outputLocation?: OutputLocationPolicy;
   workspace?: string | null;
   sessionKey?: string | null;
   hostProjectId?: string | null;
@@ -193,6 +196,7 @@ export class AgentRunSpec {
     errorMessage?: string | null;
     maxIterationsMessage?: string | null;
     maxIterationsFinalPrompt?: string | null;
+    outputLocation?: OutputLocationPolicy;
     workspace?: string | null;
     sessionKey?: string | null;
     hostProjectId?: string | null;
@@ -231,6 +235,7 @@ export class AgentRunSpec {
     this.maxIterationsMessage = init.maxIterationsMessage ?? null;
     this.maxIterationsFinalPrompt = init.maxIterationsFinalPrompt ?? null;
     this.workspace = init.workspace ?? null;
+    this.outputLocation = init.outputLocation;
     this.sessionKey = init.sessionKey ?? null;
     this.hostProjectId = init.hostProjectId ?? null;
     this.contextWindowTokens = init.contextWindowTokens ?? null;
@@ -356,6 +361,8 @@ export class AgentRunner {
         messages.push({
           role: "user",
           content,
+          ...(typeof item.output_user_instruction === "string"
+            ? { output_user_instruction: item.output_user_instruction } : {}),
           ...(typeof item.client_request_id === "string"
             ? { client_request_id: item.client_request_id }
             : {}),
@@ -407,6 +414,10 @@ export class AgentRunner {
         });
       }
     }
+    for (const injection of injections) {
+      if (typeof injection.output_user_instruction === "string") spec.outputLocation?.addUserRequest(injection.output_user_instruction);
+      delete injection.output_user_instruction;
+    }
     AgentRunner.appendInjectedMessages(messages, injections);
     return [true, injectionCycles];
   }
@@ -422,6 +433,7 @@ export class AgentRunner {
         delete providerMessage.turn_source;
         delete providerMessage.webui_queue_steer_origin;
         delete providerMessage.webui_queue_steer_recovery;
+        delete providerMessage.output_user_instruction;
         return providerMessage;
       }),
       tools,
@@ -1098,6 +1110,7 @@ export class AgentRunner {
       const fileMutationOutcomes = new Map<string, FileMutationOutcome>();
       await spec.hook?.beforeToolCall(new AgentHookContext({ spec, toolCalls: [call] }), call);
       const toolContext: ToolExecutionContext = {
+        outputLocation: spec.outputLocation,
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
@@ -1490,6 +1503,15 @@ export class AgentRunner {
     return batches;
   }
 
+  private withOutputInstruction(spec: AgentRunSpec, messages: Record<string, any>[]): Record<string, any>[] {
+    if (!spec.outputLocation) return messages;
+    const instruction = spec.outputLocation.instruction();
+    const index = messages.findIndex(message => message.role === "system" && typeof message.content === "string");
+    if (index < 0) return [{ role: "system", content: instruction }, ...messages];
+    return messages.map((message, position) => position === index
+      ? { ...message, content: `${message.content}\n\n${instruction}` } : message);
+  }
+
   async run(spec: AgentRunSpec): Promise<AgentRunResult> {
     spec.turnId ??= crypto.randomUUID();
     spec.provider ??= this.provider;
@@ -1509,6 +1531,7 @@ export class AgentRunner {
     let error: string | null = null;
     let emptyContentRetries = 0;
     let lengthRecoveries = 0;
+    let outputLocationRetries = 0;
     let injectionCycles = 0;
     let hadInjections = false;
     const imageTextState: TurnImageTextState = {
@@ -1549,7 +1572,7 @@ export class AgentRunner {
           break;
         }
       }
-      let messagesForModel = this.modelContextMessages(messages, modelContextProjection);
+      let messagesForModel = this.withOutputInstruction(spec, this.modelContextMessages(messages, modelContextProjection));
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
         toolsForRequest,
         reservedPromptTokens: 0,
@@ -1564,6 +1587,7 @@ export class AgentRunner {
         hook,
         context,
         imageTextState,
+        { forceNonStreaming: Boolean(spec.outputLocation?.hasOutputs) },
       );
       const iterationUsage = this.usageDict(response.usage);
       this.accumulateUsage(usage, iterationUsage);
@@ -1748,7 +1772,7 @@ export class AgentRunner {
       const terminalImageError = AgentRunner.terminalImageError(response);
       let shouldContinue = false;
       if (!terminalImageError) {
-        const [drained, cycles] = await this.tryDrainInjections(spec, messages, assistant, injectionCycles, {
+        const [drained, cycles] = await this.tryDrainInjections(spec, messages, spec.outputLocation?.hasOutputs ? null : assistant, injectionCycles, {
           phase: "after final response",
           iteration,
         });
@@ -1801,6 +1825,24 @@ export class AgentRunner {
         break;
       }
 
+      const invalidPaths = await spec.outputLocation?.checkDelivery(clean!) ?? [];
+      if (invalidPaths.length) {
+        const feedback = spec.outputLocation!.rejection(invalidPaths);
+        if (outputLocationRetries++ < 2 && iteration + 1 < spec.maxIterations) {
+          messages.push({ role: "system", content: feedback });
+          await hook.afterIteration(context);
+          continue;
+        }
+        finalContent = feedback;
+        stopReason = "toolError";
+        error = "Output location verification failed";
+        AgentRunner.appendFinalMessage(messages, finalContent);
+        context.finalContent = finalContent;
+        context.stopReason = stopReason;
+        context.error = error;
+        await hook.afterIteration(context);
+        break;
+      }
       messages.push(assistant ?? buildAssistantMessage(clean));
       await this.emitCheckpoint(spec, {
         phase: "finalResponse",
@@ -1850,7 +1892,7 @@ export class AgentRunner {
           stopReason = "cancelled";
           error = finalContent;
         } else {
-          const finalizationMessages = this.modelContextMessages(messages, modelContextProjection);
+          const finalizationMessages = this.withOutputInstruction(spec, this.modelContextMessages(messages, modelContextProjection));
           const preparedMessages = this.prepareMessagesForModel(spec, finalizationMessages, {
             toolsForRequest: null,
             reservedPromptTokens,
@@ -1930,6 +1972,16 @@ export class AgentRunner {
       }
     }
 
+    if (stopReason === "maxIterations" && finalContent) {
+      const invalid = await spec.outputLocation?.checkDelivery(finalContent) ?? [];
+      if (invalid.length) {
+        if (messages.at(-1)?.role === "assistant" && messages.at(-1)?.content === finalContent) messages.pop();
+        finalContent = spec.outputLocation!.rejection(invalid);
+        AgentRunner.appendFinalMessage(messages, finalContent);
+        stopReason = "toolError";
+        error = "Output location verification failed";
+      }
+    }
     const result = new AgentRunResult({
       finalContent,
       finalContentStreamed,

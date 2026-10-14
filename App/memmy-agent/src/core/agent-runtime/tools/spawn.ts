@@ -1,3 +1,4 @@
+import type { ToolExecutionContext } from "./base.js";
 import { Tool } from "./base.js";
 import { RequestContextStore } from "./context.js";
 
@@ -62,7 +63,7 @@ export class SpawnTool extends Tool {
     this.workspace = ctx.workspace ?? null;
   }
 
-  async execute(params: { task?: string; label?: string; temperature?: number } = {}): Promise<string> {
+  async execute(params: { task?: string; label?: string; temperature?: number } = {}, context?: ToolExecutionContext): Promise<string> {
     if (!params.task) return "Error: missing task";
     if (!this.manager || typeof this.manager.spawn !== "function") {
       return "Error: subagent manager is unavailable; cannot spawn subagent.";
@@ -94,6 +95,7 @@ export class SpawnTool extends Tool {
         temperature: params.temperature,
         workspace,
         readonlySkillRoots: this.readonlySkillRoots,
+        outputLocation: context?.outputLocation?.fork(),
       }),
     );
   }

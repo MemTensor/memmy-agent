@@ -1,3 +1,4 @@
+import { OutputLocationPolicy } from "./tools/output-location.js";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
@@ -247,6 +248,7 @@ export class SubagentManager {
     temperature?: number | null;
     workspace?: string | null;
     readonlySkillRoots?: readonly string[];
+    outputLocation?: OutputLocationPolicy;
     provider?: any;
     model?: string | null;
     contextWindowTokens?: number;
@@ -303,7 +305,7 @@ export class SubagentManager {
       status,
       args.originMessageId ?? originMessageId,
       args.temperature ?? temperature,
-      { signal: controller.signal },
+      { signal: controller.signal, outputLocation: args.outputLocation },
     )
       .finally(() => {
         settled = true;
@@ -345,7 +347,7 @@ export class SubagentManager {
     status: SubagentStatus,
     originMessageId: string | null = null,
     temperature: number | null = null,
-    { signal = null }: { signal?: AbortSignal | null } = {},
+    { signal = null, outputLocation }: { signal?: AbortSignal | null; outputLocation?: OutputLocationPolicy } = {},
   ): Promise<void> {
     let finalStatus = "error";
     let resultText: string | null = null;
@@ -386,6 +388,7 @@ export class SubagentManager {
         },
         sessionKey: sessKey,
         workspace,
+        outputLocation: outputLocation ?? new OutputLocationPolicy(workspace),
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
         hook: new SubagentHook(taskId, status),
