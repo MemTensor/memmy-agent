@@ -546,6 +546,10 @@ Paths may be workspace-relative or absolute paths inside the workspace. Use at m
       return "No changes made by patch:\n" + plan.summaries.map(formatSummary).join("\n");
     }
 
+    for (const change of actionable) {
+      const locationError = await context?.outputLocation?.checkWrite(change.target, context);
+      if (locationError) return locationError;
+    }
     const attemptedPaths: string[] = [];
     const attempted = new Set<string>();
     const markAttempted = (target: string): void => {
@@ -598,6 +602,9 @@ Paths may be workspace-relative or absolute paths inside the workspace. Use at m
       throwIfAborted(signal);
       const lintResults = await lintFiles(lintRequests, { abortSignal: signal });
       throwIfAborted(signal);
+      for (const change of actionable) {
+        if (change.kind !== "delete") context?.outputLocation?.recordFile(change.target);
+      }
       const success = "Patch applied:\n" + plan.summaries.map(formatSummary).join("\n");
       const result = appendFileLintResults(success, lintResults);
       for (const change of unchanged) {

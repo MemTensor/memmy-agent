@@ -544,6 +544,6 @@ describe("task cancellation", () => {
 
     expect(out.content).toBe("done");
     expect(loop.runner.run).toHaveBeenCalledTimes(1);
-    expect(injections).toEqual([{ role: "user", content: "second" }]);
+    expect(injections).toEqual([{ role: "user", content: "second", output_user_instruction: "second" }]);
   });
 });
