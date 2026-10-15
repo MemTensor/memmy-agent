@@ -347,6 +347,32 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
+  it("cleans old imported context on panel/detail reads without rewriting stored content", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const namespace = { source: "codex", profileId: "preview", userId: "user-preview" };
+    const userText = '<in-app-browser-context source="ambient-ui-state">\n页面内容\n</in-app-browser-context>\n请修复扫描标题';
+    const added = addAgentSourceImport(service, namespace, userText, "preview-context");
+    const row = repos.memories.get(added.id)!;
+    // Simulate a record imported before this repair; reads must not depend on
+    // re-importing it or rewriting its stored provisional title.
+    row.info.title = '<in-app-browser-context source="ambient-ui-state">';
+    repos.memories.update(row);
+    const before = repos.memories.get(added.id)!;
+    const listed = service.panelItems({ namespace, layer: "L1" }).items.find(item => item.id === added.id);
+    expect(listed?.sourceText).toBe("请修复扫描标题");
+    expect(listed?.processing?.state).toBe("summary_pending");
+    expect(listed?.generatedTitle).toBeUndefined();
+    expect(detailFromMemory(before).sourceText).toBe("请修复扫描标题");
+    expect(repos.memories.get(added.id)).toEqual(before);
+
+    const contextOnly = addAgentSourceImport(service, namespace, '<in-app-browser-context>\n页面内容\n</in-app-browser-context>', "preview-context-only");
+    const empty = service.panelItems({ namespace, layer: "L1" }).items.find(item => item.id === contextOnly.id);
+    expect(empty?.sourceText).toBeUndefined();
+    expect(detailFromMemory(repos.memories.get(contextOnly.id)!).sourceText).toBeUndefined();
+    db.close();
+  });
+
   it("does not treat an imported user-sentence title as a generated title", () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);

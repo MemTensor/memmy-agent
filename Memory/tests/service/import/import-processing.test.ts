@@ -266,6 +266,7 @@ describe("MemoryService / import / processing", () => {
     });
 
     expect(added.title).toBe("修复 Cursor 记忆标题。");
+    expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === added.id)?.sourceText).toBe("修复 Cursor 记忆标题。");
 
     const notification = service.addMemory({
       adapterId: "agent-source:cursor",
@@ -288,6 +289,7 @@ describe("MemoryService / import / processing", () => {
     });
 
     expect(notification.title).toBe("cursor conversation");
+    expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === notification.id)?.sourceText).toBeUndefined();
     db.close();
   });
 
