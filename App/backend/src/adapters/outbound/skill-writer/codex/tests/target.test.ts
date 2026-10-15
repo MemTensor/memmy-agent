@@ -1,5 +1,5 @@
 /** Target tests. */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -184,6 +184,47 @@ describe("codex skill target", () => {
     });
 
     await expect(target.installPlugin?.("codex")).rejects.toThrow("trust failed");
+    expect(existsSync(join(rootDirectory, "hooks.json"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-memory-config.json"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-workspace-bridge.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+  });
+
+  it("restores existing hook files and links when Codex cannot persist hook trust", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const hookDirectory = join(rootDirectory, "hooks");
+    mkdirSync(hookDirectory);
+    const hooksFilePath = join(rootDirectory, "hooks.json");
+    const hookConfigPath = join(hookDirectory, "memmy-memory-config.json");
+    const hookScriptPath = join(hookDirectory, "memmy-resume-hook.mjs");
+    const bridgePath = join(hookDirectory, "memmy-workspace-bridge.mjs");
+    const bridgeTargetPath = join(rootDirectory, "previous-workspace-bridge.mjs");
+    const originalHooks = '{"hooks":{"Stop":[]}}\n';
+    writeFileSync(hooksFilePath, originalHooks);
+    writeFileSync(hookConfigPath, "previous hook config\n");
+    writeFileSync(hookScriptPath, "previous hook script\n");
+    writeFileSync(bridgeTargetPath, "previous bridge\n");
+    symlinkSync(bridgeTargetPath, bridgePath);
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async () => {
+        throw new Error("trust failed");
+      }
+    });
+
+    await expect(target.installPlugin?.("codex")).rejects.toThrow("trust failed");
+
+    expect(readFileSync(hooksFilePath, "utf8")).toBe(originalHooks);
+    expect(readFileSync(hookConfigPath, "utf8")).toBe("previous hook config\n");
+    expect(readFileSync(hookScriptPath, "utf8")).toBe("previous hook script\n");
+    expect(lstatSync(bridgePath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(bridgePath)).toBe(bridgeTargetPath);
+    expect(readFileSync(bridgePath, "utf8")).toBe("previous bridge\n");
+    expect(existsSync(join(rootDirectory, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
   });
 
   it("installs a UserPromptSubmit hook that blocks resume commands with top L1 candidates", async () => {

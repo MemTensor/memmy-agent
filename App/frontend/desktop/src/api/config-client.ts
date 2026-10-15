@@ -604,24 +604,35 @@ interface PendingPreset {
   clientId: string;
   provider: string;
   endpointId: string;
+  endpointApiBase: string | null;
+  endpointProtocol: ModelEndpointProtocol | null;
+  endpointApiKey?: string;
+  providerApiKey?: string;
   model: string;
   source: "account" | "byok";
   capabilities: ModelCapability[];
 }
 
 function pendingPresets(input: ModelConfigInput): PendingPreset[] {
-  return input.providers.flatMap((provider) => provider.models.flatMap((model) => (
-    model.presetId?.startsWith(CLIENT_PRESET_ID_PREFIX)
+  return input.providers.flatMap((provider) => provider.models.flatMap((model) => {
+    const endpoint = provider.endpoints.find((item) => item.endpointId === model.endpointId);
+    const endpointApiKey = trimNonEmpty(endpoint?.apiKey);
+    const providerApiKey = trimNonEmpty(provider.apiKey);
+    return model.presetId?.startsWith(CLIENT_PRESET_ID_PREFIX)
       ? [{
           clientId: model.presetId,
           provider: provider.provider,
           endpointId: model.endpointId,
+          endpointApiBase: endpoint?.apiBase ?? null,
+          endpointProtocol: endpoint?.protocol ?? null,
+          ...(endpointApiKey ? { endpointApiKey } : {}),
+          ...(providerApiKey ? { providerApiKey } : {}),
           model: model.model,
           source: model.source,
           capabilities: [...model.capabilities]
         }]
-      : []
-  )));
+      : [];
+  }));
 }
 
 function withoutPendingPresetAssignments(input: ModelConfigInput, pendingIds: ReadonlySet<string>): ModelConfigInput {
@@ -646,19 +657,63 @@ function withoutPendingPresetAssignments(input: ModelConfigInput, pendingIds: Re
 function resolvePendingPresetIds(pending: PendingPreset[], view: ModelConfigView): Map<string, string> {
   const mapping = new Map<string, string>();
   for (const item of pending) {
-    const matches = view.providers.flatMap((provider) => provider.models).filter((model) => (
+    const provider = view.providers.find((candidate) => candidate.provider === item.provider);
+    const matchesModel = (model: ModelConfigView["providers"][number]["models"][number]) => (
       model.provider === item.provider
-      && model.endpointId === item.endpointId
       && model.model === item.model
       && model.source === item.source
       && sameStringSet(model.capabilities, item.capabilities)
-    ));
+    );
+    const exactMatches = provider?.models.filter((model) => (
+      matchesModel(model) && model.endpointId === item.endpointId
+    )) ?? [];
+    const canonicalizedMatches = exactMatches.length === 0 && provider
+      ? provider.models.filter((model) => (
+        matchesModel(model) && pendingEndpointMatches(item, provider, model.endpointId)
+      ))
+      : [];
+    const matches = exactMatches.length > 0 ? exactMatches : canonicalizedMatches;
     if (matches.length !== 1) {
       throw new Error(`Unable to resolve server preset for ${item.provider}/${item.endpointId}/${item.model}`);
     }
     mapping.set(item.clientId, matches[0]!.presetId);
   }
   return mapping;
+}
+
+function pendingEndpointMatches(
+  item: PendingPreset,
+  provider: ModelConfigView["providers"][number],
+  endpointId: string
+): boolean {
+  if (!item.endpointApiBase || !item.endpointProtocol) return false;
+  const endpoint = provider.endpoints.find((candidate) => candidate.endpointId === endpointId);
+  if (
+    !endpoint
+    || normalizeApiBase(endpoint.apiBase) !== normalizeApiBase(item.endpointApiBase)
+    || endpoint.protocol !== item.endpointProtocol
+  ) {
+    return false;
+  }
+  const expectedApiKey = maskSecret(item.endpointApiKey ?? item.providerApiKey);
+  const actualApiKey = trimNonEmpty(endpoint.hasApiKey ? endpoint.apiKeyMasked : provider.apiKeyMasked);
+  return !expectedApiKey || expectedApiKey === actualApiKey;
+}
+
+function normalizeApiBase(value: string): string {
+  return value.trim().replace(/\/+$/u, "");
+}
+
+function trimNonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function maskSecret(value: string | undefined): string | undefined {
+  const secret = trimNonEmpty(value);
+  if (!secret) return undefined;
+  if (secret.length <= 8) return "••••••••";
+  return `${secret.slice(0, 3)}••••${secret.slice(-4)}`;
 }
 
 function assignmentPhaseInput(
@@ -704,10 +759,12 @@ function assertResolvedPresetsStillExist(
   const byId = new Map(view.providers.flatMap((provider) => provider.models).map((model) => [model.presetId, model]));
   for (const item of pending) {
     const preset = byId.get(mapping.get(item.clientId) ?? "");
+    const provider = view.providers.find((candidate) => candidate.provider === item.provider);
     if (
       !preset
       || preset.provider !== item.provider
-      || preset.endpointId !== item.endpointId
+      || !provider
+      || (preset.endpointId !== item.endpointId && !pendingEndpointMatches(item, provider, preset.endpointId))
       || preset.model !== item.model
       || preset.source !== item.source
       || !sameStringSet(preset.capabilities, item.capabilities)

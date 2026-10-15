@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SSE_DONE, sseChunk, createApp } from "../../../src/entrypoints/openai-like-api/server.js";
+import { SSE_DONE, sseChunk, sseMemmyEvent, createApp } from "../../../src/entrypoints/openai-like-api/server.js";
 
 function request(body: unknown): Request {
   return new Request("http://localhost/v1/chat/completions", {
@@ -46,6 +46,14 @@ describe("SSE response helpers", () => {
 
   it("uses the OpenAI [DONE] SSE terminator", () => {
     expect(SSE_DONE).toBe("data: [DONE]\n\n");
+  });
+
+  it("encodes Memmy progress events without changing the OpenAI chunk shape", () => {
+    const payload = JSON.parse(sseMemmyEvent("thinking_delta", { text: "先分析" }, "m", "id1").slice(6));
+
+    expect(payload.choices).toEqual([]);
+    expect(payload.memmy_event).toEqual({ type: "thinking_delta", text: "先分析" });
+    expect(payload.object).toBe("chat.completion.chunk");
   });
 });
 
@@ -168,6 +176,33 @@ describe("SSE chat completions", () => {
     expect(captured.onStreamEnd).toBeTypeOf("function");
   });
 
+  it("streams reasoning, tool lifecycle and generated files through Memmy events", async () => {
+    const app = createApp({
+      processDirect: async (args: any) => {
+        await args.onProgress("先分析", { reasoning: true });
+        await args.onProgress("", { reasoningEnd: true });
+        await args.onProgress("", {
+          toolEvents: [{ phase: "start", call_id: "call-1", name: "write_file", arguments: { path: "a.txt" } }],
+        });
+        await args.onProgress("", {
+          toolEvents: [{ phase: "end", call_id: "call-1", name: "write_file", result: [{ type: "resource_link", uri: "/tmp/a.txt", mimeType: "text/plain" }], files: ["/tmp/a.txt"] }],
+        });
+        await args.onStream("完成");
+        return "完成";
+      },
+    }, "m");
+
+    const payloads = ssePayloads(await (await app.fetch(request({ messages: [{ role: "user", content: "go" }], stream: true }))).text())
+      .filter((line) => line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+    expect(payloads.map((item) => item.memmy_event?.type).filter(Boolean)).toEqual([
+      "thinking_delta", "thinking_end", "tool_call", "tool_result", "media",
+    ]);
+    expect(payloads.filter((item) => item.memmy_event?.type === "media").map((item) => item.memmy_event.media[0])).toEqual([
+      { kind: "file", path: "/tmp/a.txt" },
+    ]);
+  });
+
   it("does not close the SSE response on intermediate stream-end callbacks", async () => {
     const app = createApp(
       {
@@ -257,6 +292,18 @@ describe("SSE chat completions", () => {
 
     expect(response.status).toBe(200);
     expect(body).not.toContain('"finish_reason":"stop"');
+    expect(body).not.toContain("[DONE]");
+    expect(JSON.parse(ssePayloads(body)[0]).error.code).toBe("server_error");
+    expect(body).not.toContain("backend blew up");
+  });
+
+  it("reports an unavailable session model instead of silently closing the stream", async () => {
+    const app = createApp({ processDirect: async () => {
+      throw new Error("model_selection_unavailable");
+    } }, "m");
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hi" }], stream: true }));
+    const body = await response.text();
+    expect(JSON.parse(ssePayloads(body)[0]).error).toMatchObject({ code: "model_selection_unavailable" });
     expect(body).not.toContain("[DONE]");
   });
 });

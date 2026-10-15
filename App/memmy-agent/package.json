@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "TypeScript refactor of memmy's agent runtime.",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,6 +15,9 @@
     "pretest": "npm --prefix ../../Knowledge run build && npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
     "pretest:tui-cursor": "npm run version:sync",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-build-assets.mjs",
+    "prepackage:npm": "npm run build",
+    "package:npm": "node scripts/build-npm-package.mjs",
+    "pack:npm": "npm run package:npm && npm pack ./npm-packages/memmy-agent --pack-destination ./npm-packages",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:tui-cursor": "vitest run tests/entrypoints/cli/tui-cursor.test.ts",

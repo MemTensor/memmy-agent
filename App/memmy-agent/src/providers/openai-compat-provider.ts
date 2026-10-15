@@ -1,3 +1,4 @@
+import { requestTiming } from "../utils/request-timing.js";
 import crypto from "crypto";
 import OpenAI from "openai";
 import {
@@ -51,7 +52,7 @@ const THINKING_STYLE_MAP: Record<string, (on: boolean) => Record<string, any>> =
 const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<string, any>> = {
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
 };
-const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0;
+const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 300.0;
 
 export const RESPONSES_FAILURE_THRESHOLD = 3;
 export const RESPONSES_PROBE_INTERVAL_S = 300;
@@ -1172,11 +1173,14 @@ export class OpenAICompatProvider extends LLMProvider {
       }
       if (args.signal?.aborted) throw createProviderAbortError();
       const options = providerAbortOptions(args.signal);
+      requestTiming("model.http_start");
       const stream = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
+      requestTiming("model.http_headers");
       const chunks: any[] = [];
       for await (const chunk of timedAsyncIterable(stream, idleTimeoutS)) {
+        requestTiming("model.first_chunk", true);
         if (args.signal?.aborted) throw createProviderAbortError();
         chunks.push(chunk);
         const choice =

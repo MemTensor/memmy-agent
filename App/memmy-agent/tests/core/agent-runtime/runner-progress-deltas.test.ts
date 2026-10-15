@@ -42,6 +42,41 @@ afterEach(() => {
 });
 
 describe("AgentRunner progress deltas", () => {
+  it("buffers provider output when a hook requires complete content", async () => {
+    const provider = {
+      supportsProgressDeltas: true,
+      chatStreamWithRetry: vi.fn(),
+      chatWithRetry: vi.fn(async () => new LLMResponse({ content: "done", toolCalls: [], usage: {} })),
+    };
+    const progress = withProgressCapabilities(vi.fn(), { reasoning: true });
+    const hook = {
+      requiresBufferedLlmContent: vi.fn(() => true),
+      wantsStreaming: () => true,
+      beforeRun: vi.fn(),
+      beforeIteration: vi.fn(),
+      rewriteLlmContent: vi.fn(async (_context: AgentHookContext, content: string | null) => content),
+      finalizeContent: (_context: AgentHookContext, content: string | null) => content,
+      afterIteration: vi.fn(),
+      afterRun: vi.fn(),
+    } as any;
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      provider: provider as any,
+      tools: toolRegistry([], async () => "ok"),
+      model: "test-model",
+      maxIterations: 1,
+      progressCallback: progress,
+      hook,
+    }));
+
+    expect(result.finalContent).toBe("done");
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
+    expect(provider.chatStreamWithRetry).not.toHaveBeenCalled();
+    expect(progress).not.toHaveBeenCalled();
+    expect(hook.requiresBufferedLlmContent).toHaveBeenCalledOnce();
+  });
+
   it("streams only visible incremental content after stripping thinking blocks", async () => {
     const deltas: string[] = [];
     const hook = new AgentProgressHook(null, (delta) => {

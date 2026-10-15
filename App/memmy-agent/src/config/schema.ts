@@ -1168,6 +1168,7 @@ export class FileMemoryConfig extends Base {
 
 export class Config extends Base {
   app: Dict;
+  agentHooks: string[];
   agents: AgentsConfig;
   providers: ProvidersConfig;
   channels: ChannelsConfig;
@@ -1208,6 +1209,7 @@ export class Config extends Base {
     if (appUserId) {
       this.app.userId = appUserId;
     }
+    this.agentHooks = assertStringArray("agentHooks", pick(init, ["agentHooks"], []));
     this.agents =
       init.agents instanceof AgentsConfig ? init.agents : new AgentsConfig(init.agents ?? {});
     this.providers =
@@ -1456,6 +1458,7 @@ export class Config extends Base {
     delete this.app.user_id;
     this.memmyMemory.userId = appUserId ?? this.memmyMemory.userId ?? "local-user";
     const data: Dict = {
+      agentHooks: this.agentHooks,
       agents: this.agents,
       providers: this.providers,
       channels: this.channels,

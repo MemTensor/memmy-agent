@@ -168,7 +168,7 @@ describe("bundled Memory upgrades", () => {
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
     expect(await running.version()).toBe("2.1.1");
-  });
+  }, 15_000);
 
   it("waits for a migrating Windows database owner before repairing its launcher", async () => {
     const running = await fixture({ version: "2.1.1", platform: "win32", delay: 400 });

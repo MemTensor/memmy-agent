@@ -75,6 +75,19 @@ describe("MemmyMemoryClient", () => {
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ requestId: "req-1", sessionId: "s1" });
   });
 
+  it("propagates caller cancellation to an in-flight memory request", async () => {
+    const abort = new AbortController();
+    const transport = vi.fn((_url: any, init: any) => new Promise<Response>((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    }));
+    const client = new MemmyMemoryClient({ baseUrl: "http://memory.test" }, transport as any);
+    const result = client.startTurn("turn", { sessionId: "session", query: "hello" }, { signal: abort.signal });
+    const rejection = expect(result).rejects.toThrow("cancel this turn");
+    abort.abort(new Error("cancel this turn"));
+    await rejection;
+    expect(transport.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
   it("throws structured HTTP errors", async () => {
     const client = new MemmyMemoryClient({ baseUrl: "http://memory.test", timeoutMs: 1000 }, vi.fn(async () => response({ error: { message: "bad token" } }, 401)) as any);
 

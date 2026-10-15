@@ -209,6 +209,72 @@ describe("config-client canonical model catalog", () => {
     expect(saved.catalog?.modelAssignments.byok.agent.default).toBe(serverPresetId);
   });
 
+  it.each(["endpoint apiKey", "provider apiKey", "missing apiKey"] as const)(
+    "后端合并相同 endpoint 定义后可用 %s 解析新模型并完成 assignment",
+    async (keyLocation) => {
+      const bodies: any[] = [];
+      const serverPresetId = "5c8872cf-28c8-4cf3-bf51-9a3a2a0fb42a";
+      vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        bodies.push(body);
+        const response = catalog(bodies.length === 1 ? "revision-2" : "revision-3");
+        response.providers[0]!.apiKeyMasked = "sk-••••1234";
+        for (const endpoint of response.providers[0]!.endpoints) endpoint.apiKeyMasked = "sk-••••1234";
+        response.providers[0]!.models.push({
+          presetId: serverPresetId,
+          provider: "openai",
+          endpointId: "chat",
+          protocol: "openai-chat-completions",
+          model: "gpt-new",
+          source: "byok",
+          capabilities: ["agent"],
+          available: true
+        });
+        if (bodies.length > 1) {
+          response.modelAssignments.byok.agent = {
+            candidates: ["byok-agent", serverPresetId],
+            default: serverPresetId
+          };
+        }
+        return jsonResponse(response);
+      }));
+      const input = inputFromCatalog(catalog("revision-1"));
+      const clientPresetId = `${CLIENT_PRESET_ID_PREFIX}canonicalized-endpoint`;
+      input.providers[0]!.endpoints.push({
+        endpointId: "chat-duplicate",
+        apiBase: "https://api.openai.com/v1/",
+        protocol: "openai-chat-completions",
+        ...(keyLocation === "endpoint apiKey" ? { apiKey: "  sk-live1234  " } : {})
+      });
+      if (keyLocation === "provider apiKey") input.providers[0]!.apiKey = "  sk-live1234  ";
+      input.providers[0]!.models.push({
+        presetId: clientPresetId,
+        endpointId: "chat-duplicate",
+        model: "gpt-new",
+        source: "byok",
+        capabilities: ["agent"]
+      });
+      input.modelAssignments.byok.agent = {
+        candidates: ["byok-agent", clientPresetId],
+        default: clientPresetId
+      };
+
+      const saved = await createHttpConfigClient(config).saveModelCatalog(input);
+
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0].providers[0].endpoints.some((endpoint: any) => endpoint.endpointId === "chat-duplicate")).toBe(true);
+      expect(bodies[1].providers[0].models.find((model: any) => model.model === "gpt-new")).toMatchObject({
+        presetId: serverPresetId,
+        endpointId: "chat"
+      });
+      expect(bodies[1].modelAssignments.byok.agent).toEqual({
+        candidates: ["byok-agent", serverPresetId],
+        default: serverPresetId
+      });
+      expect(saved.catalog?.modelAssignments.byok.agent.default).toBe(serverPresetId);
+    }
+  );
+
   it("首次成功 GET 后只清理旧 workspace cache", async () => {
     const removeItem = vi.fn();
     vi.stubGlobal("window", { localStorage: { removeItem } });

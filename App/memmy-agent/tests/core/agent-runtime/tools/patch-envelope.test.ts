@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PatchError,
@@ -121,13 +122,25 @@ describe("patch envelope parser", () => {
     );
   });
 
-  it.each(["~/a", "/a", "\\a", "C:a", "C:\\a", "../a", "a/../b", "a\0b"])(
+  it.each(["~/a", "C:a", "../a", "a/../b", "a\0b"])(
     "rejects unsafe path %s",
     (unsafe) => expect(() => normalizePatchPath(unsafe)).toThrow(PatchError),
   );
 
-  it("normalizes separators, empty segments, and dot segments", () => {
+  it.runIf(process.platform !== "win32")("rejects absolute paths for another platform", () => {
+    expect(() => normalizePatchPath("\\a")).toThrow(PatchError);
+    expect(() => normalizePatchPath("C:\\a")).toThrow(PatchError);
+  });
+
+  it("accepts absolute paths and normalizes separators and dot segments", () => {
+    const absolute = path.resolve("workspace", "file.ts");
+    expect(path.isAbsolute(normalizePatchPath(` ${absolute} `))).toBe(true);
     expect(normalizePatchPath(" ./src\\nested//./file.ts ")).toBe("src/nested/file.ts");
+  });
+
+  it("rejects parent traversal in absolute paths before normalization", () => {
+    const absolute = `${path.resolve("workspace")}${path.sep}nested${path.sep}..${path.sep}file.ts`;
+    expect(() => normalizePatchPath(absolute)).toThrow("must not contain '..'");
   });
 });
 

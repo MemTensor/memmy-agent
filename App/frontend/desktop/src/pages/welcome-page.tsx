@@ -252,6 +252,15 @@ export function WelcomePage() {
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
               />
+              {channel === "email" ? (
+                <SocialLoginButtons
+                  pendingProvider={socialLogin.pendingProvider}
+                  disabled={verificationCodeAuth.loginPending || modePersistencePending}
+                  showDivider
+                  feedback={socialLogin.feedback}
+                  onLogin={(provider) => void startSocialLogin(provider)}
+                />
+              ) : null}
             </div>
           </div>
 
@@ -270,14 +279,6 @@ export function WelcomePage() {
             <Key size={15} />
             {t("welcome.byok.quickAction")}
           </button>
-          {channel === "email" ? (
-            <SocialLoginButtons
-              pendingProvider={socialLogin.pendingProvider}
-              disabled={verificationCodeAuth.loginPending || modePersistencePending}
-              feedback={socialLogin.feedback}
-              onLogin={(provider) => void startSocialLogin(provider)}
-            />
-          ) : null}
           </div>
         </div>
       </div>

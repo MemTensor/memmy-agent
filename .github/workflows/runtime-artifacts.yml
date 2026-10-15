@@ -1,0 +1,93 @@
+name: Agent and Memory runtime artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [zy_runtime_artifacts]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+            arch: arm64
+          - target: darwin-x64
+            runner: macos-15-intel
+            arch: x64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+          - target: linux-x64
+            runner: ubuntu-24.04
+            arch: x64
+          - target: windows-arm64
+            runner: windows-11-arm
+            arch: arm64
+          - target: windows-x64
+            runner: windows-2025
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      COPYFILE_DISABLE: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.0.0
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - name: Install build dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm --prefix App/memmy-agent install --ignore-scripts --no-audit --no-fund
+      - name: Build Agent runtime
+        run: npm run agent:runtime:package -- --target "${{ matrix.target }}" --output "$RUNNER_TEMP/runtime-artifacts"
+      - name: Build Memory runtime
+        run: npm run runtime:package -w @memmy/memory -- --target "${{ matrix.target }}" --output "$RUNNER_TEMP/runtime-artifacts"
+      - name: Verify unpacked runtimes and native dependencies
+        run: node scripts/internal/shared/verify-runtime-artifacts.mjs "$RUNNER_TEMP/runtime-artifacts" "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtimes-${{ matrix.target }}
+          path: ${{ runner.temp }}/runtime-artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  collect:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtimes-*
+          path: runtime-input
+      - name: Collect all twelve archives with checksums
+        run: node scripts/internal/shared/collect-runtime-artifacts.mjs runtime-input runtime-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-platform-runtimes
+          path: runtime-output/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

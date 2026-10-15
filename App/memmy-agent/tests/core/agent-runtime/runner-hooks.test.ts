@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentHook, AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
 import { LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
@@ -10,6 +10,208 @@ class FinalHook extends AgentHook {
 }
 
 describe("AgentRunner hooks", () => {
+  it("adds beforeIteration messages only to the current model request", async () => {
+    const requests: any[][] = [];
+    const provider = {
+      chatWithRetry: async ({ messages }: any) => {
+        requests.push(messages);
+        return new LLMResponse({ content: "done" });
+      },
+    };
+    class InjectionHook extends AgentHook {
+      override async beforeIteration() {
+        return [{ role: "user" as const, content: "request-only memory" }];
+      }
+    }
+    const initial = [{ role: "user", content: "question" }];
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: initial,
+      hook: new InjectionHook(),
+      maxIterations: 1,
+    }));
+
+    expect(requests[0]?.at(-1)?.content).toContain("request-only memory");
+    expect(initial).toEqual([{ role: "user", content: "question" }]);
+    expect(result.messages.some((message) => String(message.content).includes("request-only memory"))).toBe(false);
+    expect(result.hadInjections).toBe(false);
+  });
+
+  it("continues before executing rejected tool calls", async () => {
+    const requests: any[][] = [];
+    let call = 0;
+    const provider = {
+      chatWithRetry: async ({ messages }: any) => {
+        requests.push(messages);
+        call += 1;
+        if (call === 1) {
+          return new LLMResponse({
+            content: "draft",
+            toolCalls: [new ToolCallRequest({ id: "call_1", name: "dangerous", arguments: {} })],
+          });
+        }
+        return new LLMResponse({ content: "verified" });
+      },
+    };
+    const execute = vi.fn(async () => "should not run");
+    const tools = {
+      getDefinitions: () => [],
+      get: () => null,
+      execute,
+    };
+    class VerificationHook extends AgentHook {
+      rewrites = 0;
+      override async rewriteLlmContent(context: AgentHookContext, content: string | null) {
+        this.rewrites += 1;
+        return this.rewrites === 1
+          ? { content: "revise this answer", continue: true as const }
+          : content;
+      }
+    }
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      tools,
+      hook: new VerificationHook(),
+      maxIterations: 2,
+    }));
+
+    expect(result.finalContent).toBe("verified");
+    expect(execute).not.toHaveBeenCalled();
+    expect(requests[1]?.at(-1)?.content).toContain("revise this answer");
+    expect(result.messages.some((message) => String(message.content).includes("revise this answer"))).toBe(false);
+  });
+
+  it("does not run an unverified finalization request after continuation exhausts iterations", async () => {
+    const provider = {
+      chatWithRetry: vi.fn(async () => new LLMResponse({ content: "unverified draft" })),
+    };
+    class RejectingHook extends AgentHook {
+      override async rewriteLlmContent() {
+        return { content: "try again", continue: true as const };
+      }
+    }
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      hook: new RejectingHook(),
+      maxIterations: 1,
+      maxIterationsFinalPrompt: "Summarize completed work.",
+    }));
+
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
+    expect(result.stopReason).toBe("maxIterations");
+    expect(result.messages.some((message) => message.content === "unverified draft")).toBe(false);
+  });
+
+  it("continues from beforeFinalize with request-only feedback", async () => {
+    const requests: any[][] = [];
+    const checkpoints: string[] = [];
+    let calls = 0;
+    let afterRuns = 0;
+    const provider = {
+      chatWithRetry: async ({ messages }: any) => {
+        requests.push(structuredClone(messages));
+        calls += 1;
+        return new LLMResponse({ content: calls === 1 ? "unverified draft" : "verified answer" });
+      },
+    };
+    class StopHook extends AgentHook {
+      override requiresBufferedLlmContent(): boolean {
+        return true;
+      }
+      override async beforeFinalize(_context: AgentHookContext, candidate: string) {
+        return candidate === "unverified draft"
+          ? [{ role: "user" as const, content: "verify the page count before answering" }]
+          : [];
+      }
+      override async afterRun(): Promise<void> {
+        afterRuns += 1;
+      }
+    }
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      hook: new StopHook(),
+      maxIterations: 2,
+      checkpointCallback: ({ phase }) => {
+        checkpoints.push(phase);
+      },
+    }));
+
+    expect(result.finalContent).toBe("verified answer");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.at(-1)?.content).toContain("verify the page count before answering");
+    expect(result.messages.some((message) => String(message.content).includes("unverified draft"))).toBe(false);
+    expect(result.messages.some((message) => String(message.content).includes("verify the page count"))).toBe(false);
+    expect(checkpoints).toEqual(["finalResponse"]);
+    expect(afterRuns).toBe(1);
+  });
+
+  it("does not submit a candidate rejected by beforeFinalize when iterations are exhausted", async () => {
+    const provider = {
+      chatWithRetry: vi.fn(async () => new LLMResponse({ content: "unverified draft" })),
+    };
+    class StopHook extends AgentHook {
+      override async beforeFinalize() {
+        return [{ role: "user" as const, content: "verification failed" }];
+      }
+    }
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      hook: new StopHook(),
+      maxIterations: 1,
+      maxIterationsFinalPrompt: "Summarize completed work.",
+    }));
+
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
+    expect(result.stopReason).toBe("maxIterations");
+    expect(result.messages.some((message) => message.content === "unverified draft")).toBe(false);
+  });
+
+  it("checks a max-iteration finalization candidate before submitting it", async () => {
+    let calls = 0;
+    const candidates: string[] = [];
+    const provider = {
+      chatWithRetry: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new LLMResponse({
+            content: "working",
+            toolCalls: [new ToolCallRequest({ id: "call_1", name: "read_file", arguments: {} })],
+          });
+        }
+        return new LLMResponse({ content: "unverified summary" });
+      }),
+    };
+    const tools = {
+      getDefinitions: () => [],
+      get: () => null,
+      execute: async () => "tool result",
+    };
+    class StopHook extends AgentHook {
+      override async beforeFinalize(_context: AgentHookContext, candidate: string) {
+        candidates.push(candidate);
+        return [{ role: "user" as const, content: "verification failed" }];
+      }
+    }
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "question" }],
+      tools,
+      hook: new StopHook(),
+      maxIterations: 1,
+      maxIterationsMessage: "iteration limit reached",
+      maxIterationsFinalPrompt: "Summarize completed work.",
+    }));
+
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(2);
+    expect(candidates).toEqual(["unverified summary"]);
+    expect(result.finalContent).toBe("iteration limit reached");
+    expect(result.messages.some((message) => message.content === "unverified summary")).toBe(false);
+  });
+
   it("lets hooks finalize assistant content", async () => {
     const provider = { chatWithRetry: async () => new LLMResponse({ content: "done" }) };
     const result = await new AgentRunner(provider as any).run(new AgentRunSpec({ messages: [], hook: new FinalHook() }));
@@ -58,6 +260,9 @@ describe("AgentRunner hooks", () => {
         events.push(["finalizeContent", context.iteration, content]);
         return content?.toUpperCase() ?? content;
       }
+      override async beforeFinalize(context: AgentHookContext, candidate: string) {
+        events.push(["beforeFinalize", context.iteration, candidate]);
+      }
     }
 
     const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
@@ -75,6 +280,7 @@ describe("AgentRunner hooks", () => {
       ["afterIteration", 0, null, ["tool result"], [{ name: "list_dir", status: "ok", detail: "tool result" }], null],
       ["beforeIteration", 1],
       ["finalizeContent", 1, "done"],
+      ["beforeFinalize", 1, "DONE"],
       ["afterIteration", 1, "DONE", [], [], "completed"],
     ]);
   });

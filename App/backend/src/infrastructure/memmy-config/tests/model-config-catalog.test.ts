@@ -501,17 +501,90 @@ describe("model config catalog", () => {
     expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.roleRouting.summary).toBe("follow");
   });
 
-  it("rejects duplicate endpoint definitions, invalid protocol capabilities, and duplicate models", async () => {
+  it("coalesces identical endpoint definitions and redirects their model references", async () => {
     const file = fixture();
-    const revision = (await readModelConfigCatalog(file)).configRevision;
-    const duplicateEndpoint = openAiInput(revision);
-    duplicateEndpoint.providers[0]!.endpoints.push({
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints.push({
       endpointId: "chat-copy",
       apiBase: "https://api.example.test/v1",
       protocol: "openai-chat-completions"
     });
-    await expect(writeModelConfigCatalog(file, duplicateEndpoint)).rejects.toThrow(/Duplicate endpoint definition/);
+    input.providers[0]!.models.push({
+      endpointId: "chat-copy",
+      model: "gpt-5-alias",
+      source: "byok",
+      capabilities: ["agent"]
+    });
 
+    const saved = await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["chat"]);
+    expect(Object.values(raw.modelPresets).map((preset: any) => preset.endpoint)).toEqual(["chat", "chat"]);
+    expect(saved.providers[0]?.endpoints).toHaveLength(1);
+  });
+
+  it("coalesces duplicate embedding endpoints created while adding models", async () => {
+    const file = fixture();
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints = [
+      {
+        endpointId: "embedding",
+        apiBase: "https://api.example.test/v1/",
+        protocol: "openai-embeddings"
+      },
+      {
+        endpointId: "embedding-copy",
+        apiBase: "https://api.example.test/v1",
+        protocol: "openai-embeddings"
+      }
+    ];
+    input.providers[0]!.models = [
+      {
+        endpointId: "embedding",
+        model: "embedding-a",
+        source: "byok",
+        capabilities: ["embedding"]
+      },
+      {
+        endpointId: "embedding-copy",
+        model: "embedding-b",
+        source: "byok",
+        capabilities: ["embedding"]
+      }
+    ];
+
+    const saved = await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["embedding"]);
+    expect(Object.values(raw.modelPresets).map((preset: any) => preset.endpoint)).toEqual(["embedding", "embedding"]);
+    expect(saved.providers[0]?.models.map((model) => model.model)).toEqual(["embedding-a", "embedding-b"]);
+  });
+
+  it("keeps endpoints with different credentials even when their route is the same", async () => {
+    const file = fixture();
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints.push({
+      endpointId: "chat-other-key",
+      apiBase: "https://api.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-another-secret"
+    });
+    input.providers[0]!.models.push({
+      endpointId: "chat-other-key",
+      model: "gpt-5-alias",
+      source: "byok",
+      capabilities: ["agent"]
+    });
+
+    await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["chat", "chat-other-key"]);
+    expect(raw.providers.openai.endpoints["chat-other-key"].apiKey).toBe("sk-another-secret");
+  });
+
+  it("rejects invalid protocol capabilities and duplicate models", async () => {
+    const file = fixture();
+    const revision = (await readModelConfigCatalog(file)).configRevision;
     const wrongProtocol = openAiInput(revision);
     wrongProtocol.providers[0]!.models[0]!.capabilities = ["embedding"];
     await expect(writeModelConfigCatalog(file, wrongProtocol)).rejects.toThrow(/does not support capability embedding/);

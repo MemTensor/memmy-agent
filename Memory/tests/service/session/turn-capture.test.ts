@@ -20,6 +20,28 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
+  it.each([false, undefined])("stores a completed degraded turn and respects recallApplied=%s", async (recallApplied) => {
+    const { db, service } = createTestService();
+    const session = service.openSession({ namespace: { source: "memmy-agent", profileId: "deadline", userId: "deadline-user" } });
+    const seed = service.completeTurn("seed", { sessionId: session.sessionId, query: "Inspect the SQLite schema", answer: "The schema has a sessions table." });
+    const started = await service.startTurn({ sessionId: session.sessionId, turnId: "degraded", query: "Implement the SQLite deadline fix" });
+    db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?")
+      .run(JSON.stringify([seed.l1MemoryId]), started.searchEventId);
+    const request = { adapterId: "memmy-agent", requestId: "deadline-complete", sessionId: session.sessionId,
+      query: "Implement the SQLite deadline fix", answer: "Implemented and verified the deadline.", sourceMemoryIds: [],
+      ...(recallApplied === false ? { recallApplied } : {}) };
+    const completed = service.completeTurn("degraded", request);
+    if (recallApplied === false) expect(completed.l1MemoryIds).toHaveLength(1);
+    const row = db.db.prepare("SELECT source_memory_ids_json, user_text, assistant_text FROM raw_turns WHERE id = ?")
+      .get(completed.rawTurnId) as { source_memory_ids_json: string; user_text: string; assistant_text: string };
+    expect(JSON.parse(row.source_memory_ids_json)).toEqual(recallApplied === false ? [] : [seed.l1MemoryId]);
+    expect(row.user_text).toBe(request.query);
+    expect(row.assistant_text).toBe(request.answer);
+    expect(service.completeTurn("degraded", request)).toMatchObject({ duplicate: true, rawTurnId: completed.rawTurnId });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE session_id = ? AND turn_id = ?").get(session.sessionId, "degraded")).toEqual({ count: 1 });
+    db.close();
+  });
+
   it("preserves an explicit empty turn-start layer selection for evaluation ablations", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({

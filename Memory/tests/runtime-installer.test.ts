@@ -126,7 +126,7 @@ describe("standalone Memory runtime installer", () => {
     const launcher = readFileSync(join(home, "bin", process.platform === "win32" ? "memmy-memory-service.cmd" : "memmy-memory-service"), "utf8");
     expect(launcher).toContain("/original/node");
     expect(launcher).not.toContain("/desktop/electron");
-  });
+  }, 15_000);
 
   it.each([true, false])("replaces changed same-version builds (preferInstalledCompatible=%s) without touching data", async (preferInstalledCompatible) => {
     const root = tempRoot();

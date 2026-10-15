@@ -11070,6 +11070,88 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   color: color-mix(in srgb, var(--color-text-ink) 24%, transparent);
 }
 
+.login-page__body {
+  padding-bottom: 24px;
+}
+
+.login-page__body .auth-code-form-input.flex-1,
+.welcome-login-card__body .auth-code-form-input.flex-1 {
+  min-width: 0;
+}
+
+.social-login-actions {
+  display: grid;
+  gap: 18px;
+}
+
+.social-login-actions__buttons {
+  display: grid;
+  gap: 10px;
+}
+
+.social-login-button {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 85%, var(--color-text-ink));
+  border-radius: 11px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+
+.social-login-button--google {
+  border-color: color-mix(in srgb, var(--color-action-sky) 53%, var(--color-border-stone));
+  background: color-mix(in srgb, var(--color-canvas-oat) 42%, white);
+  box-shadow: 0 2px 9px rgb(29 93 76 / 7%);
+}
+
+.social-login-button:hover:not(:disabled) {
+  border-color: var(--color-action-sky-hover);
+  background: color-mix(in srgb, var(--color-canvas-oat) 68%, white);
+}
+
+.social-login-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-action-sky) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.social-login-button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.social-login-divider {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.social-login-divider::before,
+.social-login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-border-stone);
+}
+
+.login-page__body .social-login-actions,
+.welcome-login-card__body .social-login-actions {
+  margin-top: 22px;
+}
+
 /* Optional invite field: muted so it reads as secondary / non-required. */
 .auth-code-form-input--optional {
   border-color: color-mix(in srgb, var(--color-border-stone) 42%, white);
