@@ -5748,6 +5748,10 @@ body.memmy-platform-windows .memory-drawer {
   overflow-wrap: anywhere;
 }
 
+.memory-markdown__literal-html {
+  white-space: pre-wrap;
+}
+
 .memory-markdown :first-child {
   margin-top: 0;
 }

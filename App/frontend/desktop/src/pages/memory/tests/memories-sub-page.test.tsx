@@ -26,6 +26,19 @@ import {
 } from "../memory-agent-filter.js";
 
 describe("MemoriesSubPage", () => {
+  it("shows source envelopes and adjacent requests in the user detail block", () => {
+    const detail = { ...memoryDetailFixture, item: { ...memoryDetailFixture.item,
+      metadata: { ...memoryDetailFixture.item.metadata, traceDetail: {
+        ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+        userQuery: '<in-app-browser-context>\n上下文\n</in-app-browser-context>\n请保留记忆请求。'
+      } }
+    } };
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([memoryListItemFixture]), detail: { status: "ready", data: detail } });
+    expect(html).toContain("请保留记忆请求。");
+    expect(html).toContain("&lt;in-app-browser-context&gt;");
+    expect(html).not.toContain("<in-app-browser-context>");
+  });
+
   it("把搜索转换为只读取原始记忆的 PanelItemsInput", () => {
     expect(buildPanelItemsInput({ query: "偏好" })).toEqual({
       q: "偏好",

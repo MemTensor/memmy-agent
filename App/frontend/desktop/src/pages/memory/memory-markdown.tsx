@@ -1,4 +1,5 @@
 import type { ComponentPropsWithoutRef } from "react";
+import type { Root, RootContent } from "hast";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -36,7 +37,7 @@ const components: Components = {
 export function MemoryMarkdown(props: MemoryMarkdownProps) {
   return (
     <div className="memory-markdown">
-      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks]} components={components} skipHtml>
+      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks]} rehypePlugins={[rehypeLiteralHtml]} components={components}>
         {props.text}
       </ReactMarkdown>
     </div>
@@ -45,4 +46,26 @@ export function MemoryMarkdown(props: MemoryMarkdownProps) {
 
 function MemoryMarkdownHeading(props: ComponentPropsWithoutRef<"h4">) {
   return <h4 className="memory-markdown__heading">{props.children}</h4>;
+}
+
+/** Preserve source HTML as inert text, including line breaks within raw blocks. */
+function rehypeLiteralHtml() {
+  return (tree: Root) => {
+    function preserve(nodes: RootContent[]): void {
+      for (const [index, node] of nodes.entries()) {
+        if (node.type === "raw") {
+          // Never parse source markup into elements or copy its attributes.
+          nodes[index] = {
+            type: "element",
+            tagName: "span",
+            properties: { className: ["memory-markdown__literal-html"] },
+            children: [{ type: "text", value: node.value }]
+          };
+        } else if ("children" in node) {
+          preserve(node.children);
+        }
+      }
+    }
+    preserve(tree.children);
+  };
 }
