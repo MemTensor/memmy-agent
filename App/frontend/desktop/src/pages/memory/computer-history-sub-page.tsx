@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileText } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, Info } from "lucide-react";
@@ -15,6 +15,7 @@ import { MemoryMarkdown } from "./memory-markdown.js";
 import { AppIcon } from "./app-icon.js";
 import { ScrollText, Trash2 } from "./memory-prototype-icons.js";
 import { ComputerHistoryPermissionGuide } from "./computer-history-permission-guide.js";
+import { ComputerHistoryPermissionsDialog } from "./computer-history-permissions.js";
 import { readHistoryPermissionSetup, saveHistoryPermissionSetup } from "./computer-history-permission-state.js";
 import { ComputerHistoryRecordingConfirmation } from "./computer-history-recording-confirmation.js";
 
@@ -161,6 +162,7 @@ function Prose(props: { text: string }) {
 
 export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   const { t } = useTranslation();
+  const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<ComputerHistorySnapshot | null>(null);
   const [pendingRecordingAction, setPendingRecordingAction] = useState<"start" | "resume" | null>(null);
   const [permissionSetup, setPermissionSetup] = useState(readHistoryPermissionSetup);
@@ -215,6 +217,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
 
   useEffect(() => {
     setPendingRecordingAction(null);
+    setPermissionsOpen(false);
   }, [props.client]);
 
   useEffect(() => {
@@ -385,6 +388,13 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         }}
       /> : null}
 
+      <div className="ch__recording-setting ch__permissions-setting flex items-center justify-between bg-background-paper rounded-card-lg border-content-panel">
+        <div><div className="text-sm text-text-ink">{t("computerHistory.permissions")}</div>
+          <p className="ch-permissions__note">{t("computerHistory.permissionsDescription")}</p></div>
+        <Button type="button" variant="ghost" size="sm" disabled={!props.client} onClick={() => setPermissionsOpen(true)}>{t("computerHistory.permissionsChoose")}</Button>
+      </div>
+      {permissionsOpen && props.client && <ComputerHistoryPermissionsDialog client={props.client} onClose={() => setPermissionsOpen(false)} />}
+
       <div className="ch__head">
         <h4 className="ch__history-title text-sm font-semibold text-text-ink">
           {t("computerHistory.history")}
@@ -485,7 +495,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
                               aria-label={t("computerHistory.openMarkdownLabel", { title: entry.title })}
                               onClick={() => void openMarkdown(entry)}
                             >
-                              <FileText size={14} aria-hidden />
+                              <FolderOpen size={14} aria-hidden />
                             </button>
                           </Tooltip>
                           {/* A six-hour summary has no raw events of its own to keep. */}

@@ -32,6 +32,8 @@ export interface ObservationSettings {
 }
 
 export interface ObservationSubject {
+  /** Native policy identity, retained through asynchronous writes. */
+  policyRevision?: string;
   bundleId?: string | null;
   /** The native recorder recognizes a browser even when URL lookup failed. */
   browser?: boolean;
@@ -194,7 +196,7 @@ export function parseObservationSettings(input: unknown): ObservationSettings {
   }
   const source = observation as Record<string, unknown>;
   const rawRules = source.rules ?? [];
-  if (!Array.isArray(rawRules)) {
+  if (!Array.isArray(rawRules) || rawRules.length > 1000) {
     throw new ObservationSettingsError("settings.observation.rules must be an array");
   }
 
@@ -206,7 +208,7 @@ export function parseObservationSettings(input: unknown): ObservationSettings {
     const behavior = assertBehavior(entry.behavior, `rules[${index}].behavior`);
     if (entry.scope === "app") {
       const bundleID = entry.bundleID;
-      if (typeof bundleID !== "string" || !bundleID.trim()) {
+      if (typeof bundleID !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(bundleID.trim())) {
         throw new ObservationSettingsError(`rules[${index}].bundleID is required for app rules`);
       }
       return { scope: "app", bundleID: bundleID.trim(), behavior };
@@ -221,7 +223,12 @@ export function parseObservationSettings(input: unknown): ObservationSettings {
           `rules[${index}].urlDomain must be a bare domain, not a URL`,
         );
       }
-      return { scope: "url", urlDomain: normalizeDomain(urlDomain), behavior };
+      const domain = normalizeDomain(urlDomain);
+      if (domain.length > 253 || !domain.split(".").every((label) =>
+        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))) {
+        throw new ObservationSettingsError(`rules[${index}].urlDomain must be a valid hostname`);
+      }
+      return { scope: "url", urlDomain: domain, behavior };
     }
     throw new ObservationSettingsError(`rules[${index}].scope must be "app" or "url"`);
   });

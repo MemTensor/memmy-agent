@@ -7,6 +7,10 @@
  */
 import { z } from "zod";
 import {
+  ComputerHistoryObservationPermissionsSchema,
+  ComputerHistoryApplicationsSchema,
+  type ComputerHistoryObservationPermissions,
+  type ComputerHistoryApplication,
   ApplicationIconSchema,
   ComputerHistorySnapshotSchema,
   ComputerHistoryPermissionsSchema,
@@ -708,6 +712,9 @@ export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
   getSettings(): Promise<MemmyAgentSettings>;
+  getComputerHistoryObservationPermissions(): Promise<ComputerHistoryObservationPermissions>;
+  saveComputerHistoryObservationPermissions(input: ComputerHistoryObservationPermissions): Promise<ComputerHistoryObservationPermissions>;
+  listComputerHistoryApplications(): Promise<ComputerHistoryApplication[]>;
   getComputerHistory(): Promise<ComputerHistorySnapshot>;
   setComputerHistoryModel(preset: string | null): Promise<ComputerHistorySnapshot>;
   checkComputerHistoryPermissions(): Promise<ComputerHistoryPermissions>;
@@ -1126,6 +1133,18 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       method: "POST",
       body: { history_id: historyId, user_request: userRequest }
     });
+  }
+
+  async getComputerHistoryObservationPermissions(): Promise<ComputerHistoryObservationPermissions> {
+    return this.request("/api/computer-history/permissions", ComputerHistoryObservationPermissionsSchema);
+  }
+
+  async saveComputerHistoryObservationPermissions(input: ComputerHistoryObservationPermissions): Promise<ComputerHistoryObservationPermissions> {
+    return this.request("/api/computer-history/permissions", ComputerHistoryObservationPermissionsSchema, { method: "POST", body: input });
+  }
+
+  async listComputerHistoryApplications(): Promise<ComputerHistoryApplication[]> {
+    return (await this.request("/api/computer-history/applications", ComputerHistoryApplicationsSchema)).applications;
   }
 
   async getApplicationIcon(bundleId: string): Promise<string | null> {

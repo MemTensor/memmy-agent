@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as historyPlatform from "../../../../src/tools/computer-history/platform.js";
-import { ObservationSettingsStore } from "../../../../src/tools/computer-history/mac/settings-store.js";
+import { ObservationSettingsConflict, ObservationSettingsStore } from "../../../../src/tools/computer-history/mac/settings-store.js";
 import {
   ComputerHistoryGetSettingsTool,
   ComputerHistoryStatusTool,
@@ -129,5 +129,27 @@ describe("Computer History settings tools", () => {
     const description = new ComputerHistoryUpdateSettingsTool(temporaryStore()).description;
     expect(description).toContain("replaces the whole document");
     expect(description).toContain("computer_history_get_settings first");
+  });
+});
+
+
+describe("Observation policy persistence", () => {
+  it("rejects stale editors and change-away-and-back without altering the current file", () => {
+    const store = temporaryStore();
+    const initial = store.snapshot();
+    store.write(initial.settings, initial.revision);
+    const first = store.snapshot();
+    store.write(first.settings, first.revision);
+    const current = fs.readFileSync(store.filePath, "utf8");
+    expect(() => store.write(first.settings, first.revision)).toThrow(ObservationSettingsConflict);
+    expect(fs.readFileSync(store.filePath, "utf8")).toBe(current);
+    expect(fs.readdirSync(path.dirname(store.filePath))).toEqual(["observation-settings.json"]);
+    expect(fs.statSync(store.filePath).mode & 0o777).toBe(0o600);
+  });
+  it("fails closed for corrupt settings and does not let an editor silently overwrite them", () => {
+    const store = temporaryStore();
+    fs.writeFileSync(store.filePath, "{broken");
+    expect(store.read().observation.defaultApplicationBehavior).toBe("do_not_observe");
+    expect(() => store.snapshot()).toThrow(/invalid/);
   });
 });

@@ -8,6 +8,27 @@ import Foundation
 // read, so reaching into Contents/Resources finds nothing for them, while
 // NSWorkspace returns the same icon the Dock and Finder draw.
 
+if CommandLine.arguments.contains("--list-apps") {
+  var applications: [String: String] = [:]
+  func add(_ url: URL) {
+    guard let bundle = Bundle(url: url), let id = bundle.bundleIdentifier else { return }
+    applications[id] = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+      ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+      ?? url.deletingPathExtension().lastPathComponent
+  }
+  for directory in ["/Applications", "/System/Applications", NSHomeDirectory() + "/Applications"] {
+    guard let items = FileManager.default.enumerator(at: URL(fileURLWithPath: directory),
+      includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+    for case let url as URL in items where url.pathExtension == "app" { add(url) }
+  }
+  for app in NSWorkspace.shared.runningApplications { if let url = app.bundleURL { add(url) } }
+  let rows = applications.map { ["bundleId": $0.key, "name": $0.value] }
+    .sorted { ($0["name"] ?? "").localizedCaseInsensitiveCompare($1["name"] ?? "") == .orderedAscending }
+  let data = try JSONSerialization.data(withJSONObject: rows)
+  FileHandle.standardOutput.write(data)
+  exit(0)
+}
+
 let size = 64
 
 guard let bundleId = CommandLine.arguments.dropFirst().first, !bundleId.isEmpty else {

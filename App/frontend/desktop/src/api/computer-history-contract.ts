@@ -83,3 +83,21 @@ export const ComputerHistorySnapshotSchema = z.object({
 export const ApplicationIconSchema = z.object({
   icon: z.string().nullable()
 }).strict();
+
+const ObservationBehaviorSchema = z.enum(["observe", "do_not_observe"]);
+export const ComputerHistoryObservationPermissionsSchema = z.object({
+  revision: z.string(),
+  settings: z.object({ observation: z.object({
+    defaultApplicationBehavior: ObservationBehaviorSchema,
+    defaultURLBehavior: ObservationBehaviorSchema,
+    rules: z.array(z.discriminatedUnion("scope", [
+      z.object({ scope: z.literal("app"), bundleID: z.string(), behavior: ObservationBehaviorSchema }),
+      z.object({ scope: z.literal("url"), urlDomain: z.string(), behavior: ObservationBehaviorSchema })
+    ]))
+  }) })
+}).strict();
+export const ComputerHistoryApplicationsSchema = z.object({
+  applications: z.array(z.object({ bundleId: z.string(), name: z.string() }))
+}).strict();
+export type ComputerHistoryObservationPermissions = z.infer<typeof ComputerHistoryObservationPermissionsSchema>;
+export type ComputerHistoryApplication = z.infer<typeof ComputerHistoryApplicationsSchema>["applications"][number];

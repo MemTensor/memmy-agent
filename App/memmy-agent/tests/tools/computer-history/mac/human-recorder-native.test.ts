@@ -26,7 +26,7 @@ class AXUIElement { var fields: [String: Any]; init(_ fields: [String: Any]) { s
 enum AXResult { case success, failure }
 let kAXTitleAttribute = "title", kAXRoleAttribute = "role", kAXChildrenAttribute = "children"
 func AXUIElementSetMessagingTimeout(_ element: AXUIElement, _ timeout: Double) {}
-func accessibilityString(_ element: AXUIElement, _ attribute: String) -> String? { element.fields[attribute] as? String }
+func identityString(_ element: AXUIElement, _ attribute: String) -> String? { element.fields[attribute] as? String }
 func webAreaUrl(_ element: AXUIElement) -> String? { element.fields["url"] as? String }
 func AXUIElementCopyAttributeValue(_ element: AXUIElement, _ attribute: String, _ result: inout Any?) -> AXResult {
   result = element.fields[attribute]
@@ -111,6 +111,11 @@ var focusedElementGeneration: UInt64 = 0
 var hitAvailable = true
 var hitTests = 0
 var emitted: [[String: Any]] = []
+var policyAllows = true
+var textReads = 0
+func observationPolicyBytes() -> Data? { Data() }
+func beginCapture(application: [String: Any], policy: Data?) -> Bool { policyAllows }
+func captureStillAllowed(_ element: String? = nil) -> Bool { policyAllows }
 func nodePayload(_ element: String) -> [String: Any] { ["role": "AXTextField", "title": element] }
 func hasSemanticLabel(_ payload: [String: Any]) -> Bool { payload["title"] != nil }
 func accessibilityHit(at point: CGPoint) -> (payload: [String: Any], pid: Int?)? {
@@ -121,7 +126,7 @@ func hitHasSemantics(_ payload: [String: Any]) -> Bool { hasSemanticLabel(payloa
 func modifierList(_ event: CGEvent) -> [String] { [] }
 func applicationPayload() -> [String: Any] { ["pid": pid_t(1)] }
 func secureInputActive() -> Bool { false }
-func characters(from event: CGEvent) -> String { event.text }
+func characters(from event: CGEvent) -> String { textReads += 1; return event.text }
 func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
   var payload = extra; payload["kind"] = kind; emitted.append(payload)
 }
@@ -170,7 +175,14 @@ let returnedWhileBlocked = tapReturned.wait(timeout: .now() + 1) == .success
 release.signal()
 if !returnedWhileBlocked { tapReturned.wait() }
 enrichmentQueue.sync {}
+let beforeBlocked = [hitTests, textReads, emitted.count]
+policyAllows = false
+_ = callback(0, .leftMouseDown, CGEvent(200, 200), nil)
+_ = callback(0, .keyDown, CGEvent(0, 0, text: "private"), nil)
+enrichmentQueue.sync {}
+let afterBlocked = [hitTests, textReads, emitted.count]
 let result: [String: Any] = [
+  "beforeBlocked": beforeBlocked, "afterBlocked": afterBlocked,
   "targeting": targeting, "keyboardHitTests": keyboardHitTests,
   "dragEvents": emitted, "dragOriginCleared": dragOrigin == nil,
   "callbackReturnedWhileBlocked": returnedWhileBlocked,
@@ -190,6 +202,7 @@ print(String(data: try JSONSerialization.data(withJSONObject: result), encoding:
     assert.equal(parsed.keyboardHitTests, 0);
     assert.deepEqual(parsed.targeting[3].mouse.target, { role: "AXUnknown" });
     assert.equal(parsed.callbackReturnedWhileBlocked, true);
+    assert.deepEqual(parsed.afterBlocked, parsed.beforeBlocked, "denied events must not read targets or keyboard text");
     assert.deepEqual(parsed.dragEvents.map((event: any) => event.kind), [
       "mouse.click", "mouse.drag", "mouse.click", "mouse.drag", "mouse.click",
     ]);

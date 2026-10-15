@@ -297,23 +297,22 @@ function prepareAuthorizedAxSnapshot(ax: unknown, previous: AxBaseline | null): 
 // describe. It used to carry a copy, because as a standalone script it could
 // not import one, and the copy drifted: it lacked the unconditional
 // exclusions, and read a missing default as "record nothing".
-function loadObservationSettings(file: string | undefined): ObservationSettings {
-  if (!file) return DEFAULT_OBSERVATION_SETTINGS;
+function loadObservationPolicy(file: string | undefined): { settings: ObservationSettings; version: string } {
+  if (!file) return { settings: DEFAULT_OBSERVATION_SETTINGS, version: JSON.stringify(DEFAULT_OBSERVATION_SETTINGS) };
   try {
-    return parseObservationSettings(JSON.parse(fs.readFileSync(file, "utf8")));
+    // Evaluate and identify the same read, even if an atomic replacement races it.
+    const raw = fs.readFileSync(file);
+    return { settings: parseObservationSettings(JSON.parse(raw.toString("utf8"))),
+      version: crypto.createHash("sha256").update(raw).digest("hex") };
   } catch {
-    // An explicit policy that is temporarily unreadable must not revert to
-    // recording everything. The next event retries the current file.
-    return { observation: {
-      defaultApplicationBehavior: "do_not_observe",
-      defaultURLBehavior: "do_not_observe",
-      rules: [],
-    } };
+    return { settings: { observation: { defaultApplicationBehavior: "do_not_observe",
+      defaultURLBehavior: "do_not_observe", rules: [] } }, version: "unreadable" };
   }
 }
 
 function observationSubject(event: HelperEvent): ObservationSubject {
   return {
+    policyRevision: typeof event.policyRevision === "string" ? event.policyRevision : undefined,
     bundleId: appFrom(event).bundleId,
     browser: event.window?.browser === true,
     url: typeof event.window?.url === "string" ? event.window.url : null,
@@ -476,6 +475,7 @@ export async function run(
   const permissions = await checkPermissions(binary, { screenshots: args.screenshots });
   const recordingId = `human:${crypto.randomUUID()}`;
   const contextUrl = normalizedContextUrl(args.contextUrl);
+  if (args.observationSettings) args.observationSettings = path.resolve(expandHome(args.observationSettings));
   const output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
   const recordingDir = path.dirname(output);
   const screenshotDir = path.join(recordingDir, "screenshots");
@@ -503,13 +503,12 @@ export async function run(
   let axBaseline: AxBaseline | null = null;
   let observationPolicyVersion: string | null = null;
   const canObserve = (subject: ObservationSubject) => {
-    const settings = loadObservationSettings(args.observationSettings);
-    const version = JSON.stringify(settings);
+    const { settings, version } = loadObservationPolicy(args.observationSettings);
     if (version !== observationPolicyVersion) {
       axBaseline = null;
       observationPolicyVersion = version;
     }
-    const allowed = shouldObserve(settings, subject);
+    const allowed = (!subject.policyRevision || subject.policyRevision === version) && shouldObserve(settings, subject);
     if (!allowed) axBaseline = null;
     return allowed;
   };
@@ -784,7 +783,7 @@ export async function run(
     return finishPromise;
   };
 
-  const helper = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
+  const helper = spawn(binary, args.observationSettings ? ["--observation-settings", path.resolve(expandHome(args.observationSettings))] : [], { stdio: ["ignore", "pipe", "pipe"] });
   helper.once("close", childClosedResolve);
   const lines = readline.createInterface({ input: helper.stdout });
   lines.on("line", (line: string) => {
