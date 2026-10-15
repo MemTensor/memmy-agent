@@ -1,3 +1,4 @@
+import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -160,6 +161,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
+    legacyDatabasePath: process.env.MEMMY_APP_DATABASE,
     scheduleWorker: autoWorker.schedule,
     memoryAddAnalytics
   });
@@ -233,6 +235,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           writeJson(response, viewerResult.status ?? 200, viewerResult.body, viewerResult.headers);
           return;
         }
+      }
+      if (isAgentSourceScanPath(url.pathname)) {
+        assertLocalAgentSourceRequest(request, principal.kind);
+        const scanResult = await routeAgentSourceScan(agentSources, request.method, url, body);
+        if (!scanResult) throw new MemoryServiceError("not_found", "Unknown Agent source operation");
+        writeJson(response, scanResult.status ?? 200, scanResult.body);
+        return;
       }
       const result = await routeRequest(
         options.service,

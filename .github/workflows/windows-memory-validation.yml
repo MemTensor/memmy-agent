@@ -6,7 +6,7 @@ on:
       - ".github/workflows/windows-memory-validation.yml"
       - "tests/windows-memory-workflow.test.ts"
       - "Memory/**"
-      - "AgentSourceCore/**"
+      - "Memory/AgentSourceCore/**"
       - "App/shell/desktop/build/**"
       - "App/shell/desktop/src/main/runtime-services.ts"
       - "App/shell/desktop/tests/runtime-memory-upgrade.test.ts"

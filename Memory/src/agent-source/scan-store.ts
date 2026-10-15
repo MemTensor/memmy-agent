@@ -9,7 +9,14 @@ const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 
 export interface MemoryScanJobMeta { jobId: string; sourceId: string; mode: string; phase: string; createdAt: string; updatedAt: string; error?: string; }
-export interface MemoryAgentSourceScanStore extends ScanStore { readonly path: string; saveMeta(meta: MemoryScanJobMeta): void; getMeta(): MemoryScanJobMeta | null; remove(): void; }
+export interface MemoryAgentSourceScanStore extends ScanStore { readonly path: string;
+  checkpoints(sourceId: string): Iterable<ConversationCheckpoint>;
+  resultSummary(sourceId: string): { conversations: number; memories: number; errors: number };
+  setWaitForProcessing(): void;
+  waitForProcessing(): boolean;
+  saveImportMemory(sourceId: string, memoryId: string): void;
+  importMemoryPages(sourceId: string): Iterable<string[]>;
+  importMemoryCount(sourceId: string): number; saveMeta(meta: MemoryScanJobMeta): void; getMeta(): MemoryScanJobMeta | null; remove(): void; }
 
 export async function openMemoryAgentSourceScanStore(path: string, job: MemoryScanJobMeta): Promise<MemoryAgentSourceScanStore> {
   await mkdir(dirname(path), { recursive: true });
@@ -20,6 +27,8 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
   db.exec(`CREATE TABLE IF NOT EXISTS scan_meta (id INTEGER PRIMARY KEY CHECK(id=1), job_id TEXT NOT NULL, source_id TEXT NOT NULL, mode TEXT NOT NULL, phase TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT);
     CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
     INSERT INTO schema_meta(version) SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);`);
+  db.exec("CREATE TABLE IF NOT EXISTS scan_import_memories (source_id TEXT NOT NULL, memory_id TEXT NOT NULL, PRIMARY KEY(source_id, memory_id))");
+  db.exec("CREATE TABLE IF NOT EXISTS scan_options (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   recoverPartialStagedMigration(db);
   db.exec(`CREATE TABLE IF NOT EXISTS staged_messages (job_id TEXT NOT NULL, source_id TEXT NOT NULL, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, workspace_path TEXT, git_root TEXT, raw_meta_json TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(job_id,source_id,conversation_id,message_id));
     CREATE TABLE IF NOT EXISTS scan_source_state (source_id TEXT PRIMARY KEY, mode TEXT NOT NULL, phase TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, scan_started_at TEXT, watermarked_since TEXT, updated_at TEXT NOT NULL, error TEXT);
@@ -63,6 +72,7 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     count(sourceId){const row=db.prepare(`SELECT COUNT(*) AS count FROM staged_messages WHERE job_id=?${sourceId?" AND source_id=?":""}`).get(job.jobId,...(sourceId?[sourceId]:[])) as {count:number}; return Number(row.count);},
     saveCheckpoint(c){db.prepare("INSERT INTO checkpoints(source_id,conversation_id,last_message_id,last_created_at,content_hash,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,conversation_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_created_at=excluded.last_created_at,content_hash=excluded.content_hash,updated_at=excluded.updated_at").run(c.sourceId,c.conversationId,c.lastMessageId,c.lastCreatedAt,c.contentHash,c.updatedAt);},
     getCheckpoint(s,c){return (db.prepare("SELECT source_id AS sourceId,conversation_id AS conversationId,last_message_id AS lastMessageId,last_created_at AS lastCreatedAt,content_hash AS contentHash,updated_at AS updatedAt FROM checkpoints WHERE source_id=? AND conversation_id=?").get(s,c) as ConversationCheckpoint|undefined)??null;},
+    checkpoints(sourceId) { return db.prepare("SELECT source_id AS sourceId,conversation_id AS conversationId,last_message_id AS lastMessageId,last_created_at AS lastCreatedAt,content_hash AS contentHash,updated_at AS updatedAt FROM checkpoints WHERE source_id=?").iterate(sourceId) as Iterable<ConversationCheckpoint>; },
     saveConversationMeta(m){db.prepare("INSERT INTO conversation_meta(source_id,conversation_id,last_message_id,last_created_at,content_hash,selected) VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,conversation_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_created_at=excluded.last_created_at,content_hash=excluded.content_hash,selected=excluded.selected").run(m.sourceId,m.conversationId,m.lastMessageId,m.lastCreatedAt,m.contentHash,m.selected?1:0);},
     getConversationMeta(s,c){const row=db.prepare("SELECT source_id AS sourceId,conversation_id AS conversationId,last_message_id AS lastMessageId,last_created_at AS lastCreatedAt,content_hash AS contentHash,selected FROM conversation_meta WHERE source_id=? AND conversation_id=?").get(s,c) as (Omit<PreparedConversation,"selected">&{selected:number})|undefined; return row?{...row,selected:row.selected===1}:null;}, selectAllConversations(s){db.prepare("UPDATE conversation_meta SET selected=1 WHERE source_id=?").run(s);},
     saveTurnMeta(m){db.prepare("INSERT INTO turn_meta(source_id,conversation_id,turn_id,first_message_id,first_created_at,last_message_id,last_created_at,selected) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(source_id,conversation_id,turn_id) DO UPDATE SET first_message_id=excluded.first_message_id,first_created_at=excluded.first_created_at,last_message_id=excluded.last_message_id,last_created_at=excluded.last_created_at,selected=excluded.selected").run(m.sourceId,m.conversationId,m.turnId,m.firstMessageId,m.firstCreatedAt,m.lastMessageId,m.lastCreatedAt,m.selected?1:0);},
@@ -79,6 +89,24 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     },
     saveResult(r){db.prepare("INSERT INTO scan_results(source_id,conversation_id,memory_id,error) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM scan_results WHERE source_id=? AND conversation_id=? AND memory_id IS ? AND error IS ?)").run(r.sourceId,r.conversationId,r.memoryId??null,r.error??null,r.sourceId,r.conversationId,r.memoryId??null,r.error??null);}, resultCount(s){const row=db.prepare(`SELECT COUNT(*) AS count FROM scan_results${s?" WHERE source_id=?":""}`).get(...(s?[s]:[])) as {count:number}; return Number(row.count);},
     results(sourceId,cursor,limit=100){const safeLimit=Math.min(500,Math.max(1,Math.floor(limit))); const numericCursor=Number(cursor); const safeCursor=Number.isFinite(numericCursor)&&numericCursor>=0?Math.floor(numericCursor):0; const rows=db.prepare("SELECT id,source_id AS sourceId,conversation_id AS conversationId,memory_id AS memoryId,error FROM scan_results WHERE source_id LIKE ? AND id>? ORDER BY id LIMIT ?").iterate(sourceId??"%",safeCursor,safeLimit) as Iterable<Record<string,unknown>>; return (function*(){for(const row of rows){const result={sourceId:String(row.sourceId),conversationId:String(row.conversationId),...(row.memoryId?{memoryId:String(row.memoryId)}:{}),...(row.error?{error:String(row.error)}:{})} as ScanStoredResult; Object.defineProperty(result,"cursor",{value:String(row.id),enumerable:false}); yield result;}})();},
+    resultSummary(sourceId) {
+      const row = db.prepare("SELECT COUNT(DISTINCT memory_id) AS memories, COALESCE(SUM(error IS NOT NULL),0) AS errors FROM scan_results WHERE source_id=?").get(sourceId) as { memories: number; errors: number };
+      const conversations = (db.prepare("SELECT COUNT(*) AS count FROM conversation_meta WHERE source_id=?").get(sourceId) as { count: number }).count;
+      return { ...row, conversations };
+    },
+    setWaitForProcessing() { db.prepare("INSERT OR REPLACE INTO scan_options VALUES ('waitForProcessing', 'true')").run(); },
+    waitForProcessing() { return Boolean(db.prepare("SELECT 1 FROM scan_options WHERE key='waitForProcessing' AND value='true'").get()); },
+    saveImportMemory(sourceId, memoryId) { db.prepare("INSERT OR IGNORE INTO scan_import_memories VALUES (?,?)").run(sourceId, memoryId); },
+    *importMemoryPages(sourceId) {
+      let cursor = "";
+      for (;;) {
+        const rows = db.prepare("SELECT memory_id FROM scan_import_memories WHERE source_id=? AND memory_id>? ORDER BY memory_id LIMIT 100").all(sourceId, cursor) as Array<{ memory_id: string }>;
+        if (!rows.length) return;
+        yield rows.map((row) => row.memory_id);
+        cursor = rows[rows.length - 1]!.memory_id;
+      }
+    },
+    importMemoryCount(sourceId) { return (db.prepare("SELECT COUNT(*) AS count FROM scan_import_memories WHERE source_id=?").get(sourceId) as { count: number }).count; },
     saveMeta(meta){db.prepare("UPDATE scan_meta SET job_id=@jobId,source_id=@sourceId,mode=@mode,phase=@phase,created_at=@createdAt,updated_at=@updatedAt,error=@error WHERE id=1").run({...meta,error:meta.error??null});},
     getMeta(){return (db.prepare("SELECT job_id AS jobId,source_id AS sourceId,mode,phase,created_at AS createdAt,updated_at AS updatedAt,error FROM scan_meta WHERE id=1").get() as MemoryScanJobMeta|undefined)??null;},
     close(){db.close();},

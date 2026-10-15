@@ -1,0 +1,20 @@
+{
+  "name": "@memmy/agent-source-readers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "exports": {
+    "./adapters/*": {
+      "types": "./dist/adapters/*.d.ts",
+      "default": "./dist/adapters/*.js"
+    }
+  },
+  "scripts": {
+    "build": "npm run build -w @memmy/agent-source-core && tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@memmy/agent-source-core": "0.0.0",
+    "better-sqlite3": "^12.6.3"
+  }
+}

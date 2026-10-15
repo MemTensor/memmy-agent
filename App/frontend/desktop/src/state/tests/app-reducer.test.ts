@@ -51,6 +51,17 @@ const bootstrap = AppBootstrapResponseSchema.parse({
 });
 
 describe("app reducer", () => {
+  it("keeps scanner availability across source refresh and clears it after service recovery", () => {
+    let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/memory-sources"));
+    const unavailable = { code: "memory_scan_upgrade_required" as const, message: "Update Memory" };
+    state = appReducer(state, appActions.agentSourceScanAvailability(unavailable));
+    state = appReducer(state, appActions.agentSourcesLoaded([]));
+    expect(state.startup.status).toBe("ready");
+    expect(state.agentSources.scanUnavailable).toEqual(unavailable);
+    expect(state.agentSources.lastFinishedScanJobId).toBeNull();
+    state = appReducer(state, appActions.agentSourceScanAvailability(null));
+    expect(state.agentSources.scanUnavailable).toBeNull();
+  });
   it("stores bootstrap state and marks startup ready", () => {
     const state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/welcome"));
 

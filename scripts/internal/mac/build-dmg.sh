@@ -857,10 +857,10 @@ mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 mkdir -p "$RUNTIME_DIR/memory/dist"
-if [ -d "$ROOT_DIR/AgentSourceCore/dist/src" ]; then
+if [ -d "$ROOT_DIR/Memory/AgentSourceCore/dist/src" ]; then
   mkdir -p "$RUNTIME_DIR/memory/AgentSourceCore/dist/src"
-  cp -R "$ROOT_DIR/AgentSourceCore/dist/src/." "$RUNTIME_DIR/memory/AgentSourceCore/dist/src/"
-  cp "$ROOT_DIR/AgentSourceCore/package.json" "$RUNTIME_DIR/memory/AgentSourceCore/package.json"
+  cp -R "$ROOT_DIR/Memory/AgentSourceCore/dist/src/." "$RUNTIME_DIR/memory/AgentSourceCore/dist/src/"
+  cp "$ROOT_DIR/Memory/AgentSourceCore/package.json" "$RUNTIME_DIR/memory/AgentSourceCore/package.json"
 fi
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
