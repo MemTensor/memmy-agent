@@ -5,6 +5,16 @@ export type FileMutationOutcome = {
   changed: boolean;
 };
 
+export type ToolOutputPersistenceOptions = {
+  suffix?: "json" | "txt";
+  contentType?: string;
+  complete?: boolean;
+  sourceTool?: string;
+  untrusted?: boolean;
+  force?: boolean;
+  preview?: string;
+};
+
 export type ToolExecutionContext = {
   abortSignal?: AbortSignal | null;
   toolName?: string;
@@ -12,6 +22,11 @@ export type ToolExecutionContext = {
   /** Stop this run without asking the model to select another executor. */
   stopTurn?: (message: string) => void;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
+  /** Persist complete output before a tool replaces it with a bounded preview. */
+  persistOutput?: (
+    content: string,
+    options?: ToolOutputPersistenceOptions,
+  ) => string | null;
 };
 
 const JSON_TYPE_MAP: Record<string, (value: any) => boolean> = {

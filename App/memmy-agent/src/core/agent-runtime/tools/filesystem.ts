@@ -9,6 +9,10 @@ import { isPathInside, resolveWorkspacePath, workspaceRelative } from "./path-ut
 import { extractText } from "../../../utils/document.js";
 import { getMediaDir } from "../../../config/paths.js";
 import { BUILTIN_SKILLS_DIR } from "../skills.js";
+import {
+  EXTERNAL_CONTENT_BANNER,
+  readPersistedToolResultMetadata,
+} from "../../../utils/helpers.js";
 
 const IGNORED_DIRS = new Set([".git", "node_modules"]);
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -681,7 +685,11 @@ export class ReadFileTool extends Tool {
           ? `\n\nUse offset=${nextOffset} to continue.`
           : "\n\nEnd of file";
       this.fileStates().recordRead(target, offset, limit);
-      return body + footer;
+      const metadata = readPersistedToolResultMetadata(target);
+      const provenance = metadata?.untrusted
+        ? `${EXTERNAL_CONTENT_BANNER}\nSource tool: ${metadata.sourceTool ?? "external"}\n\n`
+        : "";
+      return provenance + body + footer;
     } catch (error) {
       const msg = (error as NodeJS.ErrnoException).code === "ENOENT" ? "not found" : (error as Error).message;
       return `Error reading file: ${msg}`;
