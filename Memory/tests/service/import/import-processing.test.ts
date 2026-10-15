@@ -31,6 +31,60 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / import / processing", () => {
+  it("distinguishes new and interrupted work from failed automatic retries across all processing reads", async () => {
+    const root = createTestRoot("memmy-processing-retry-state-");
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const repos = new Repositories(db.db);
+    const baseLlm = createBatchReflectionLlm([], "summary recovered after retry");
+    let failSummary = true;
+    const llm: LlmClient = {
+      ...baseLlm,
+      async completeJson<T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions): Promise<T> {
+        if (failSummary) throw new Error("429 temporary provider failure");
+        return baseLlm.completeJson<T>(messages, options);
+      }
+    };
+    const service = createTestMemoryService({ db, mode: "dev", llm, embedder: createCapturingEmbedder([]) });
+    const namespace = { source: "codex", profileId: "default", userId: "retry-state-user" };
+    const added = addAgentSourceImport(service, namespace, "remember the import queue", "retry-state");
+    const expectAutomaticRetry = (expected: boolean) => {
+      const current = repos.processing.get(added.id)!;
+      expect(current.autoRetryScheduled).toBe(expected);
+      expect(repos.processing.getMany([added.id])[0]?.autoRetryScheduled).toBe(expected);
+      expect(repos.processing.listByStates([current.state]).find((item) => item.memoryId === added.id)?.autoRetryScheduled).toBe(expected);
+      expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.autoRetryScheduled).toBe(expected);
+    };
+
+    expectAutomaticRetry(false);
+    expect(repos.runtime.leaseQueuedJobs(1, 60, [added.id])).toHaveLength(1);
+    expectAutomaticRetry(false);
+    const recovered = repos.runtime.requeueLeasedJobsAfterRestart();
+    expect(recovered[0]?.after).toMatchObject({ status: "queued", attempts: 0, lastError: null });
+    expectAutomaticRetry(false);
+
+    await service.runWorkerOnce(1);
+    expect(repos.processing.get(added.id)).toMatchObject({ state: "summary_pending", errorCode: "transient_provider_error" });
+    expectAutomaticRetry(true);
+    expect(repos.runtime.requeueFailedJobs(1, undefined, [added.id])).toHaveLength(1);
+    expectAutomaticRetry(true);
+    expect(repos.runtime.leaseQueuedJobs(1, 60, [added.id])).toHaveLength(1);
+    expectAutomaticRetry(false);
+    repos.runtime.requeueLeasedJobsAfterRestart();
+    expectAutomaticRetry(true);
+
+    failSummary = false;
+    await service.runWorkerOnce(1);
+    // The next stage retains the old summary error but has a fresh embedding job.
+    expect(repos.processing.get(added.id)).toMatchObject({ state: "embedding_pending", errorCode: "transient_provider_error" });
+    expectAutomaticRetry(false);
+    await service.runWorkerOnce(1);
+    expect(repos.processing.get(added.id)).toMatchObject({ state: "ready", errorMessage: null, failedAt: null });
+    expectAutomaticRetry(false);
+    expect(repos.memories.get(added.id)?.memoryValue).toContain("summary recovered after retry");
+    expect(repos.memories.hasVector(added.id, "vec_summary")).toBe(true);
+    db.close();
+  });
+
   it("imports L1 memory with async summary, default score, and embedding only", async () => {
     const root = createTestRoot("mindock-memory-import-add-");
     const db = new MemoryDb({

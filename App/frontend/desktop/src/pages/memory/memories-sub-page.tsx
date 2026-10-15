@@ -721,18 +721,12 @@ function MemoryProcessingFailureCard(props: {
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
   const retryError = feedback?.status === "error" ? feedback : null;
   const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
-  const processingRetryInProgress = Boolean(
-    processing?.errorMessage &&
-    !processing.autoRetryScheduled &&
-    processing.state !== "failed" &&
-    processing.state !== "ready" &&
-    processing.state !== "ready_text_only"
-  );
-  const retryInProgress = feedback?.status === "running" || processingRetryInProgress;
+  // Background processing keeps its normal progress indicator, even when a
+  // previous attempt failed. Only an explicit manual retry needs this feedback.
+  const retryInProgress = feedback?.status === "running";
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
-    !processing?.autoRetryScheduled &&
     feedback?.status !== "succeeded" &&
     feedback?.status !== "error"
   ) {
@@ -753,13 +747,11 @@ function MemoryProcessingFailureCard(props: {
       ? t("memory.memories.processing.retrying")
       : processing?.errorCode === "40309"
         ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
-        : processing?.autoRetryScheduled
-          ? t(ERROR_NOTICE_KEYS.memory.autoRetryScheduled)
-          : t(ERROR_NOTICE_KEYS.memory.failed);
+        : t(ERROR_NOTICE_KEYS.memory.failed);
   return (
     <section
-      className={`agent-model-error-notice memory-processing-notice${feedback?.status === "succeeded" ? " memory-processing-notice--success" : ""}`}
-      role={feedback?.status === "succeeded" ? "status" : "alert"}
+      className={`agent-model-error-notice memory-processing-notice${feedback?.status === "succeeded" ? " memory-processing-notice--success" : retryInProgress ? " memory-processing-notice--progress" : ""}`}
+      role={feedback?.status === "succeeded" || retryInProgress ? "status" : "alert"}
     >
       <div className="agent-model-error-notice__header">
         {feedback?.status === "succeeded"
@@ -769,7 +761,7 @@ function MemoryProcessingFailureCard(props: {
             : <AlertTriangle size={16} className="agent-model-error-notice__icon" aria-hidden="true" />}
         <h5 className="agent-model-error-notice__title">{title}</h5>
       </div>
-      {displayedErrorMessage && feedback?.status !== "succeeded" ? (
+      {displayedErrorMessage && feedback?.status !== "succeeded" && !retryInProgress ? (
         <ErrorNoticeDetail
           showLabel={t("agent.error.showDetails")}
           hideLabel={t("agent.error.hideDetails")}

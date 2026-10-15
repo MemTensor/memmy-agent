@@ -579,19 +579,29 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("这条记忆处理失败");
   });
 
-  it("确有后台重试任务时提示稍后自动重试", () => {
+  it.each([
+    ["summary_pending", "summary", false, null],
+    // Older services also set autoRetryScheduled on the first queued attempt.
+    ["summary_pending", "summary", true, null],
+    ["summary_pending", "summary", true, "temporary provider failure"],
+    ["summarizing", "summary", false, "temporary provider failure"],
+    ["embedding_pending", "embedding", true, "temporary provider failure"],
+    ["embedding", "embedding", false, "temporary provider failure"],
+    ["ready", null, true, null],
+    ["ready_text_only", null, false, "input too long"]
+  ] as const)("后台状态 %s / %s / autoRetry=%s 不显示失败卡", (state, stage, autoRetryScheduled, errorMessage) => {
     const processing = {
       memoryId: memoryListItemFixture.id,
-      state: "summary_pending" as const,
-      stage: "summary" as const,
+      state,
+      stage,
       activeJobId: "summary-retry",
-      attemptCount: 1,
+      attemptCount: errorMessage ? 1 : 0,
       manualRetryCount: 0,
       retryAction: "retry" as const,
-      errorCode: "transient_provider_error",
-      errorMessage: "temporary provider failure",
-      failedAt: "2026-06-03T09:30:00.000Z",
-      autoRetryScheduled: true,
+      errorCode: errorMessage ? "transient_provider_error" : null,
+      errorMessage,
+      failedAt: errorMessage ? "2026-06-03T09:30:00.000Z" : null,
+      autoRetryScheduled,
       updatedAt: "2026-06-03T09:30:00.000Z"
     };
     const html = renderMemories({
@@ -606,13 +616,14 @@ describe("MemoriesSubPage", () => {
       }
     });
 
-    expect(html).toContain("记忆处理失败，稍后将自动重试");
-    expect(html).toContain("temporary provider failure");
-    expect(html).toContain("收起详情");
+    expect(html).not.toContain("memory-processing-notice");
+    expect(html).not.toContain("记忆处理失败");
+    expect(html).not.toContain("temporary provider failure");
     expect(html).not.toContain("正在重试");
+    if (stage) expect(html).toContain(stage === "summary" ? "摘要总结中" : "索引建立中");
   });
 
-  it("重试处理中持续展示上次失败原因", () => {
+  it("用户主动重试时展示进度，不再告警上次失败", () => {
     const processing = {
       memoryId: memoryListItemFixture.id,
       state: "embedding_pending" as const,
@@ -638,12 +649,15 @@ describe("MemoriesSubPage", () => {
       }
     }, "zh-CN", {
       onRetryProcessing: vi.fn(),
-      onOpenSettings: vi.fn()
+      onOpenSettings: vi.fn(),
+      retryFeedback: { memoryId: memoryListItemFixture.id, status: "running" }
     });
 
     expect(html).toContain("正在重试");
-    expect(html).toContain("摘要模型未配置");
-    expect(html).toContain("收起详情");
+    expect(html).toContain('role="status"');
+    expect(html).toContain("memory-processing-notice--progress");
+    expect(html).not.toContain("摘要模型未配置");
+    expect(html).not.toContain("收起详情");
     expect(html).not.toContain("上次失败原因");
     expect(html).not.toContain("上次失败时间");
     expect(html).not.toContain("已尝试次数");
@@ -651,10 +665,10 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("立即重试");
   });
 
-  it("重试接口失败时只在上方展示最新错误", () => {
+  it.each(["failed", "summary_pending"] as const)("重试接口失败时在 %s 状态仍展示最新错误", (state) => {
     const processing = {
       memoryId: memoryListItemFixture.id,
-      state: "failed" as const,
+      state,
       stage: "summary" as const,
       activeJobId: null,
       attemptCount: 3,

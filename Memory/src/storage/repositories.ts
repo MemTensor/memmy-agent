@@ -1678,7 +1678,9 @@ export class MemoryProcessingRepository {
                 SELECT 1 FROM evolution_jobs
                 WHERE evolution_jobs.id = memory_processing_state.active_job_id
                   AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts > 0
                   AND evolution_jobs.attempts < evolution_jobs.max_attempts
+                  AND evolution_jobs.last_error IS NOT NULL
               ) AS auto_retry_scheduled
        FROM memory_processing_state
        WHERE memory_id = ?`
@@ -1695,7 +1697,9 @@ export class MemoryProcessingRepository {
                 SELECT 1 FROM evolution_jobs
                 WHERE evolution_jobs.id = memory_processing_state.active_job_id
                   AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts > 0
                   AND evolution_jobs.attempts < evolution_jobs.max_attempts
+                  AND evolution_jobs.last_error IS NOT NULL
               ) AS auto_retry_scheduled
        FROM memory_processing_state
        WHERE memory_id IN (${placeholders})`
@@ -1715,7 +1719,9 @@ export class MemoryProcessingRepository {
                 SELECT 1 FROM evolution_jobs
                 WHERE evolution_jobs.id = memory_processing_state.active_job_id
                   AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts > 0
                   AND evolution_jobs.attempts < evolution_jobs.max_attempts
+                  AND evolution_jobs.last_error IS NOT NULL
               ) AS auto_retry_scheduled
        FROM memory_processing_state
        WHERE state IN (${placeholders})
