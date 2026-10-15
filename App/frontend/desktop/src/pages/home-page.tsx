@@ -187,6 +187,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendReadFailed",
   "home.media.error.sendFailed",
   "home.media.error.messageTooBig",
+  "home.asrNotConfigured",
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
@@ -3457,6 +3458,9 @@ export function agentErrorText(error: string | null, t: HomeTranslate = defaultH
   if (TRANSLATABLE_AGENT_ERROR_KEYS.has(error as MessageKey)) {
     return t(error as MessageKey);
   }
+  if (isAsrModelNotConfiguredError(error)) {
+    return t("home.asrNotConfigured");
+  }
   const stableCode = error.includes(":") ? error.slice(error.lastIndexOf(":") + 1) : error;
   const mapped = AGENT_OPERATION_ERROR_MESSAGE_KEYS[stableCode];
   if (mapped) return t(mapped);
@@ -3593,13 +3597,22 @@ function browserStorage(): SlashCommandStorageLike | null {
  * @param error An unknown exception.
  * @returns Error text or a MessageKey that can be shown to the user.
  */
-function toReadableAsrError(error: unknown, t: HomeTranslate = defaultHomeTranslate): string {
+export function toReadableAsrError(error: unknown, t: HomeTranslate = defaultHomeTranslate): string {
   if (error instanceof MicrophonePermissionError) {
     return microphonePermissionDeniedMessageKey();
+  }
+  if (isAsrModelNotConfiguredError(error)) {
+    return "home.asrNotConfigured";
   }
   return error instanceof Error && error.message
     ? t("home.asrFailedWithMessage", { message: error.message })
     : t("home.asrFailed");
+}
+
+/** Detects backend ASR configuration errors that should not fall through to the generic operation error. */
+function isAsrModelNotConfiguredError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ASR (?:model catalog|model|client) is not configured|Assigned ASR model is unavailable|ASR requires account or BYOK mode/i.test(message);
 }
 
 function readableError(error: unknown): string {
