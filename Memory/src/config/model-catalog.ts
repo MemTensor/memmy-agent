@@ -61,6 +61,9 @@ function upsertMemoryCatalogPreset(
   connection: Record<string, unknown>,
   capability: "memory_summary" | "memory_evolution" | "embedding"
 ): string | undefined {
+  // Platform projections already have managed presets and assignments. Never
+  // send them through the BYOK provider fallback when saving Memory settings.
+  if (connection.sourceProvider === "memmy_account" || connection.provider === "memmy_account") return undefined;
   const apiBase = stringValue(connection.endpoint)?.replace(/\/+$/, "");
   const model = stringValue(connection.model);
   if (!apiBase || !model) return undefined;

@@ -6,6 +6,7 @@ import {
 } from "../../runtime-config-writer.js";
 import { MigrationError, type AgentWorkspaceMigrationContext, type MigrationDefinition, type MigrationResult } from "../../types.js";
 import { flattenLegacyMemoryModelConfig } from "./legacy-memory-model-config.js";
+import { isPlatformMemoryConnection } from "../../platform-memory-connection.js";
 
 const MIGRATION_ID = "v1.0.7/0001-normalize-runtime-model-catalog";
 
@@ -21,6 +22,7 @@ export type LegacyCatalogConnection = {
   provider: string;
   apiBase: string;
   model: string;
+  sourceProvider?: string;
   protocol?: string;
   apiKey?: string;
   extraHeaders?: Record<string, unknown>;
@@ -479,6 +481,7 @@ export function mergeLegacyByokCatalog(config: RuntimeConfigDocument, legacy: Le
   ] as const) {
     const connection = legacy[capability];
     if (!connection?.provider || !connection.apiBase || !connection.model) continue;
+    if (isPlatformMemoryConnection(config, capability, connection)) continue;
     const presetId = ensurePreset(config, capability, connection);
     assignPreset(assignments, "byok", capability, presetId);
   }
@@ -490,6 +493,7 @@ function connectionFrom(value: JsonObject | null, fallbackProvider?: string | nu
   const model = stringAt(value, "model", "modelId", "model_id");
   if (!provider || !apiBase || !model) return null;
   const apiKey = stringAt(value, "apiKey", "api_key");
+  const sourceProvider = stringAt(value, "sourceProvider");
   const legacyProtocol = stringAt(value, "protocol", "apiType", "api_type");
   const extraHeaders = value && isObject(value.extraHeaders ?? value.extra_headers)
     ? (value.extraHeaders ?? value.extra_headers) as JsonObject
@@ -501,6 +505,7 @@ function connectionFrom(value: JsonObject | null, fallbackProvider?: string | nu
     provider,
     apiBase,
     model,
+    ...(sourceProvider ? { sourceProvider } : {}),
     ...(legacyProtocol ? { protocol: normalizeProtocol(legacyProtocol, canonicalProviderId(provider)) } : {}),
     ...(apiKey ? { apiKey } : {}),
     ...(extraHeaders ? { extraHeaders } : {}),
