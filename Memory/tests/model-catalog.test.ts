@@ -2,6 +2,23 @@ import { describe, expect, it } from "vitest";
 import { syncMemoryModelCatalog } from "../src/config/model-catalog.js";
 
 describe("Memory model catalog inheritance", () => {
+  it.each(["sourceProvider", "provider"])("does not copy a platform connection into BYOK when %s identifies its source", (field) => {
+    const root: Record<string, unknown> = {
+      app: { userMode: "account" },
+      modelAssignments: { account: { memorySummary: "platform-summary", memoryEvolution: "platform-evolution", embedding: "platform-embedding" } }
+    };
+    const connection = { provider: "openai_compatible", [field]: "memmy_account", endpoint: "https://platform.example.test/v1", apiKey: "fixture-token" };
+    const memory = {
+      roleRouting: { summary: "fixed", evolution: "fixed" },
+      evolution: { ...connection, model: "memory_evolution" },
+      embedding: { ...connection, model: "embedding", mode: "custom" }
+    };
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.providers).toBeUndefined();
+    expect(root.modelPresets).toBeUndefined();
+    expect((root.modelAssignments as any).account).toEqual({ memorySummary: "platform-summary", memoryEvolution: "platform-evolution", embedding: "platform-embedding" });
+  });
+
   it("forces account summaries to use a fixed route", () => {
     const root: Record<string, unknown> = {
       app: { userMode: "account" },

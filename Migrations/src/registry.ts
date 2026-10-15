@@ -7,6 +7,7 @@ import { repairRuntimeModelCatalogV109 } from "./migrations/v1.0.9/0001-repair-r
 import { upgradeSummaryTimeoutV112 } from "./migrations/v1.1.2/0001-upgrade-summary-timeout.js";
 import { addOpenComputerUseMcpV116 } from "./migrations/v1.1.6/0001-add-open-computer-use-mcp.js";
 import { removeLegacyMemoryEmbeddingV119 } from "./migrations/v1.1.9/0001-remove-legacy-memory-embedding.js";
+import { removePlatformMemoryDuplicatesV124 } from "./migrations/v1.2.4/0001-remove-platform-memory-duplicates.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
@@ -30,6 +31,7 @@ export const migrations: readonly MigrationDefinition[] = [
   upgradeSummaryTimeoutV112,
   addOpenComputerUseMcpV116,
   removeLegacyMemoryEmbeddingV119,
+  removePlatformMemoryDuplicatesV124,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {
