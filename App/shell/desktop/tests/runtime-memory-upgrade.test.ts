@@ -28,6 +28,7 @@ async function fixture(options: {
   delay?: number;
   independent?: boolean;
   identity?: boolean;
+  healthy?: boolean;
   shutdownDelay?: number;
   wrongConfig?: boolean;
   stopFails?: boolean;
@@ -70,7 +71,9 @@ async function fixture(options: {
     "const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || '2.1.1';",
     "fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, sqlitePath: db, host: '127.0.0.1', port }));",
     "const server = http.createServer((request, response) => {",
-    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')), protocolVersion: 1, serviceVersion: version })); return; }",
+    // Model health can be false while Memory still owns the endpoint. An
+    // unrelated service must omit the Memory identity fields instead.
+    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); const isMemory = process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')); response.end(JSON.stringify(isMemory ? { ok: process.env.FIXTURE_HEALTHY !== 'false', protocolVersion: 1, serviceVersion: version } : { status: 'ok' })); return; }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
     "});",
@@ -117,6 +120,7 @@ async function fixture(options: {
   const old = spawnNodeService("memory", entry, ["--config", config.configPath, "--db", config.memoryDatabasePath, "--port", String(port)], {
     FIXTURE_VERSION: options.version ?? "2.1.0", FIXTURE_DELAY: String(options.delay ?? 0),
     FIXTURE_IDENTITY: String(options.identity ?? true),
+    FIXTURE_HEALTHY: String(options.healthy ?? true),
     FIXTURE_SHUTDOWN_DELAY: String(options.shutdownDelay ?? 0), FIXTURE_WRONG_CONFIG: String(options.wrongConfig ?? false),
   }, { executablePath: process.execPath, logFilePath: join(root, "old.log"), logLevel: "info" });
   processes.push(old);
@@ -315,6 +319,15 @@ describe("bundled Memory upgrades", () => {
     expect(await running.version()).toBe("2.1.0");
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
+  });
+
+  it("reuses a compatible Memory endpoint when model health is degraded", async () => {
+    const running = await fixture({ version: "2.1.1", healthy: false });
+    await running.ensure();
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+    const health = await (await fetch(running.config.memoryBaseUrl + "/api/v1/health")).json();
+    expect(health).toMatchObject({ ok: false, protocolVersion: 1, serviceVersion: "2.1.1" });
   });
 
   it("rejects an endpoint without Memory identity without stopping it", async () => {
