@@ -336,6 +336,14 @@ export function polardbMigrationSql(): string[] {
   )`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_conversation
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_turn
+    ON source_turn_captures (source, profile_id, namespace_key, conversation_id, turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_conversation
+    ON source_turn_captures (source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_sessions_native_conversation
+    ON sessions (source, profile_id, conversation_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_sessions_native_host_key
+    ON sessions (source, profile_id, host_session_key)`,
 
     `CREATE TABLE IF NOT EXISTS runtime_kv (
       key TEXT PRIMARY KEY,

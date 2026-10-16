@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 import { npmInvocation } from "../../../scripts/internal/shared/npm-invocation.mjs";
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { bundleRuntime } from "../../../scripts/internal/shared/bundle-runtime.mjs";
+import { writeAgentRuntimeRelease } from "./write-runtime-release.mjs";
 
 if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("Agent runtime requires Node 22 or newer.");
 
@@ -48,12 +47,9 @@ try {
   const name = `memmy-agent-runtime-${manifest.version}-${target}.tgz`;
   const archive = join(outputRoot, name);
   run("tar", ["-czf", archive, "-C", destination, "package"], agentRoot);
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(archive)) hash.update(chunk);
-  await writeJson(join(outputRoot, `agent-release-${target}.json`), {
-    version: manifest.version, assets: { [target]: { name, sha256: hash.digest("hex"), size: (await stat(archive)).size } }
-  });
+  const asset = await writeAgentRuntimeRelease(archive, manifest.version, target);
   console.log(archive);
+  console.log(`SHA-256: ${asset.sha256}\nChecksum file: ${archive}.sha256`);
 } finally {
   // Windows may briefly lock freshly installed files (antivirus/indexer), so retry on EBUSY/EPERM.
   await rm(temporaryRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });

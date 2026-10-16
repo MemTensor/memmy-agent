@@ -271,7 +271,7 @@ describe("HomePage", () => {
     expect(source).toContain("const slashCommandsWithLocal = [");
     expect(source).toContain("lastCompactionSlashCommand,");
     expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
-    expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
+    expect(source).toContain('buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand, slashQuery ?? "")');
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (");

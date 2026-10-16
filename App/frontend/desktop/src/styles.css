@@ -5785,6 +5785,14 @@ body.memmy-platform-windows .memory-drawer {
   margin-top: 3px;
 }
 
+ul.memory-markdown__list {
+  list-style-type: disc;
+}
+
+ol.memory-markdown__list {
+  list-style-type: decimal;
+}
+
 .memory-markdown__quote,
 .memory-log-markdown blockquote {
   margin: 0 0 8px;

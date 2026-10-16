@@ -55,6 +55,7 @@ import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
+  defaultSlashCommandIndex,
   filterSlashCommands,
   localizeSlashCommands,
   readRecentSlashCommands,
@@ -1540,11 +1541,11 @@ export function HomePage() {
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
   ];
-  const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand);
+  const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand, slashQuery ?? "");
   const modeVisibleSlashCommands = selectedComposerCommand
     ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
     : visibleSlashCommands;
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands, state.agent.modelPresets);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -1588,10 +1589,8 @@ export function HomePage() {
   const composerSubmitDisabled = composerPrimaryAction === "stop" ? composerStopDisabled : composerSendDisabled;
 
   useEffect(() => {
-    if (selectedCommandIndex >= filteredSlashCommands.length) {
-      setSelectedCommandIndex(0);
-    }
-  }, [filteredSlashCommands.length, selectedCommandIndex]);
+    setSelectedCommandIndex(defaultSlashCommandIndex(slashQuery, filteredSlashCommands.length));
+  }, [slashQuery, filteredSlashCommands.length]);
 
   useEffect(() => {
     composerDraftsRef.current = composerDrafts;
@@ -2123,7 +2122,6 @@ export function HomePage() {
   function updateComposerInput(value: string) {
     setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
     setSlashMenuDismissed(false);
-    setSelectedCommandIndex(0);
     if (
       slashQueryFromInput(value) != null &&
       clients?.memmyAgent &&

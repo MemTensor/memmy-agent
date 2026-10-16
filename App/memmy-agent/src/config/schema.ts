@@ -1028,14 +1028,12 @@ export class HeartbeatConfig extends Base {
 export class ApiConfig extends Base {
   host = "127.0.0.1";
   port = 18990;
-  timeout = 120;
   apiKey: string | null = null;
 
   constructor(init: Dict = {}) {
     super();
     this.host = pick(init, ["host"], this.host);
     this.port = pick(init, ["port"], this.port);
-    this.timeout = pick(init, ["timeout"], this.timeout);
     this.apiKey = pick(init, ["apiKey"], null);
   }
 
@@ -1043,7 +1041,6 @@ export class ApiConfig extends Base {
     return {
       host: this.host,
       port: this.port,
-      timeout: this.timeout,
       apiKey: this.apiKey,
     };
   }

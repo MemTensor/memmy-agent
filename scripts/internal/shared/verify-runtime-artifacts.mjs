@@ -10,6 +10,8 @@ import { setTimeout as delay } from "node:timers/promises";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const directory = resolve(process.argv[2]);
 const target = process.argv[3];
+const selection = process.argv[4] ?? "both";
+if (!["both", "memory"].includes(selection)) throw new Error("Expected runtime selection: both or memory");
 const hostTarget = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 if (target !== hostTarget) throw new Error(`Expected ${target}, running on ${hostTarget}`);
 const agentVersion = JSON.parse(await readFile(join(repo, "App/memmy-agent/package.json"))).version;
@@ -19,19 +21,23 @@ let service;
 let serviceExit;
 let logs = "";
 try {
-  for (const [kind, version, extension] of [["agent", agentVersion, "tgz"], ["memory", memoryVersion, "tar.gz"]]) {
+  const runtimes = [["memory", memoryVersion, "tar.gz"]];
+  if (selection === "both") runtimes.unshift(["agent", agentVersion, "tgz"]);
+  for (const [kind, version, extension] of runtimes) {
     await mkdir(join(root, kind));
     run("tar", ["-xzf", join(directory, `memmy-${kind}-runtime-${version}-${target}.${extension}`), "-C", join(root, kind)]);
   }
   const agentRoot = join(root, "agent/package");
-  const agent = JSON.parse(await readFile(join(agentRoot, "agent-runtime.json")));
-  if (agent.target !== target || agent.version !== agentVersion || agent.nodeAbi !== process.versions.modules) {
-    throw new Error("Agent runtime metadata does not match the runner");
+  if (selection === "both") {
+    const agent = JSON.parse(await readFile(join(agentRoot, "agent-runtime.json")));
+    if (agent.target !== target || agent.version !== agentVersion || agent.nodeAbi !== process.versions.modules) {
+      throw new Error("Agent runtime metadata does not match the runner");
+    }
+    if (run(process.execPath, [join(agentRoot, "dist/main.js"), "--version"]).trim() !== agentVersion) {
+      throw new Error("Agent runtime version check failed");
+    }
   }
-  if (run(process.execPath, [join(agentRoot, "dist/main.js"), "--version"]).trim() !== agentVersion) {
-    throw new Error("Agent runtime version check failed");
-  }
-  for (const packageRoot of [agentRoot, join(root, "memory")]) {
+  for (const packageRoot of selection === "memory" ? [join(root, "memory")] : [agentRoot, join(root, "memory")]) {
     const require = createRequire(join(packageRoot, "package.json"));
     const Database = require("better-sqlite3");
     const database = new Database(":memory:");
@@ -61,7 +67,7 @@ try {
     await delay(200);
   }
   if (!healthy) throw new Error(`Memory runtime failed health check: ${logs}`);
-  console.log(`Verified Agent ${agentVersion}, Memory ${memoryVersion}, target ${target}, Node ABI ${process.versions.modules}`);
+  console.log(`Verified ${selection === "both" ? `Agent ${agentVersion}, ` : ""}Memory ${memoryVersion}, target ${target}, Node ABI ${process.versions.modules}`);
 } finally {
   if (service) {
     service.kill();

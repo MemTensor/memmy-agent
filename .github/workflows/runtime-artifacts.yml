@@ -1,10 +1,16 @@
 name: Agent and Memory runtime artifacts
+run-name: runtime-artifacts-${{ github.ref_name }}
 
 on:
   workflow_dispatch:
+    inputs:
+      runtime:
+        description: Runtime packages to build
+        type: choice
+        options: [both, memory]
+        default: both
   push:
-    branches: [zy_runtime_artifacts]
-
+    branches: [zy_memory_runtime_*]
 permissions:
   contents: read
 
@@ -51,15 +57,17 @@ jobs:
           architecture: ${{ matrix.arch }}
           cache: npm
       - name: Install build dependencies
-        run: |
-          npm ci --no-audit --no-fund
-          npm --prefix App/memmy-agent install --ignore-scripts --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+      - name: Install Agent build dependencies
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime != 'memory'
+        run: npm --prefix App/memmy-agent install --ignore-scripts --no-audit --no-fund
       - name: Build Agent runtime
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime != 'memory'
         run: npm run agent:runtime:package -- --target "${{ matrix.target }}" --output "$RUNNER_TEMP/runtime-artifacts"
       - name: Build Memory runtime
         run: npm run runtime:package -w @memmy/memory -- --target "${{ matrix.target }}" --output "$RUNNER_TEMP/runtime-artifacts"
       - name: Verify unpacked runtimes and native dependencies
-        run: node scripts/internal/shared/verify-runtime-artifacts.mjs "$RUNNER_TEMP/runtime-artifacts" "${{ matrix.target }}"
+        run: node scripts/internal/shared/verify-runtime-artifacts.mjs "$RUNNER_TEMP/runtime-artifacts" "${{ matrix.target }}" "${{ inputs.runtime || 'memory' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: runtimes-${{ matrix.target }}
@@ -82,8 +90,8 @@ jobs:
         with:
           pattern: runtimes-*
           path: runtime-input
-      - name: Collect all twelve archives with checksums
-        run: node scripts/internal/shared/collect-runtime-artifacts.mjs runtime-input runtime-output
+      - name: Collect runtime archives with checksums
+        run: node scripts/internal/shared/collect-runtime-artifacts.mjs runtime-input runtime-output "${{ inputs.runtime || 'memory' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: all-platform-runtimes
