@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 
 export interface MemoryMarkdownProps {
   text: string;
+  literalHtml?: boolean;
 }
 
 const components: Components = {
@@ -37,7 +38,7 @@ const components: Components = {
 export function MemoryMarkdown(props: MemoryMarkdownProps) {
   return (
     <div className="memory-markdown">
-      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks]} rehypePlugins={[rehypeLiteralHtml]} components={components}>
+      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks]} rehypePlugins={props.literalHtml ? [rehypeLiteralHtml] : []} skipHtml={!props.literalHtml} components={components}>
         {props.text}
       </ReactMarkdown>
     </div>

@@ -16,16 +16,16 @@ export function firstSemanticUserLine(value: string): string {
 
 // Only source-protocol envelopes at the beginning of a message are recognized.
 // Once ordinary prose, HTML, a quote or code starts, its contents stay literal.
-const SOURCE_ENVELOPE = /^(?:[ \t]*\r?\n)* {0,3}<(timestamp|system_notification|system_reminder|image_files|in-app-browser-context|user_query)(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/i;
+const SOURCE_ENVELOPE = /^(?:[ \t]*\r?\n)* {0,3}<(timestamp|system_notification|system_reminder|system-reminder|image_files|manually_attached_skills|attached_files|external_links|in-app-browser-context|user_query)(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/i;
 
 /** Remove whole injected blocks before selecting a line, without changing stored text. */
 export function semanticUserText(value: string): string {
-  let remaining = value;
+  let remaining = value.replace(/^\uFEFF/, "");
   while (remaining) {
     const opening = SOURCE_ENVELOPE.exec(remaining);
     if (!opening) {
       // A truncated opening tag is also context, not a useful preview.
-      return /^(?:[ \t]*\r?\n)* {0,3}<(timestamp|system_notification|system_reminder|image_files|in-app-browser-context|user_query)(?=[\s/>]|$)/i.test(remaining)
+      return /^(?:[ \t]*\r?\n)* {0,3}<(timestamp|system_notification|system_reminder|system-reminder|image_files|manually_attached_skills|attached_files|external_links|in-app-browser-context|user_query)(?=[\s/>]|$)/i.test(remaining)
         ? "" : remaining;
     }
     const tag = opening[1]!.toLowerCase();

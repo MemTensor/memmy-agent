@@ -357,6 +357,26 @@ describe("MemoriesSubPage", () => {
     }
   });
 
+  it.each(["failed", "ready"] as const)("%s 的 trace 使用语义预览或 ID，不能恢复历史标签", (state) => {
+    for (const summary of ["", "摘要总结中"]) {
+      for (const sourceText of ["请修复标题", undefined, "摘要总结中"]) {
+        const html = renderMemories({
+          status: "ready",
+          data: panelItemsOutput([{
+            ...memoryListItemFixture, kind: "trace", id: "trace_context_fallback",
+            title: "<timestamp>today</timestamp>", generatedTitle: undefined, summary, sourceText,
+            body: 'User:\n<in-app-browser-context source="ambient-ui-state">\n页面正文\n</in-app-browser-context>\nAssistant:\nDone',
+            processing: { ...processingRecord("trace_context_fallback", "ready", "summary"), state }
+          }]), detail: null
+        });
+        expect(html).toContain(`class="memory-card__title">${sourceText === "请修复标题" ? sourceText : "trace_context_fallback"}`);
+        expect(html).not.toContain("in-app-browser-context");
+        expect(html).not.toContain("timestamp");
+        expect(html).not.toContain("页面正文");
+      }
+    }
+  });
+
   it("摘要完成进入 embedding 阶段后使用生成标题，不继续显示预览", () => {
     const html = renderMemories({
       status: "ready",

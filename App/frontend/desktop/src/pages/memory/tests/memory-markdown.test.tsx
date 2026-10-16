@@ -3,10 +3,22 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { MemoryMarkdown } from "../memory-markdown.js";
 
-const render = (text: string) => renderToStaticMarkup(<MemoryMarkdown text={text} />);
+const render = (text: string) => renderToStaticMarkup(<MemoryMarkdown text={text} literalHtml />);
 const escape = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 
 describe("MemoryMarkdown literal HTML", () => {
+  it("keeps HTML hidden unless literal rendering is explicitly enabled", () => {
+    const text = '<div>旧页面隐藏内容</div>\n\n**正常正文**';
+    const html = renderToStaticMarkup(<MemoryMarkdown text={text} />);
+    expect(html).not.toContain("旧页面隐藏内容");
+    expect(html).not.toContain("literal-html");
+    expect(html).toContain("<strong>正常正文</strong>");
+    for (const file of ["world-model-sub-page.tsx", "computer-history-sub-page.tsx"]) {
+      const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      expect(source).not.toMatch(/<MemoryMarkdown[^>]*literalHtml/);
+    }
+  });
+
   it.each([
     '<in-app-browser-context source="ambient-ui-state">\n示例项目\n</in-app-browser-context>\n给搜索框增加清空按钮。',
     '<in-app-browser-context>\n示例项目\n</in-app-browser-context>\n\n给搜索框增加清空按钮。',

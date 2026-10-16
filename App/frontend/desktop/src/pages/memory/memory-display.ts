@@ -59,8 +59,9 @@ export function displayMemoryTitle(item: MemoryDisplayItem, ...candidates: Array
   if (generatedTitle) return generatedTitle;
 
   const summary = readySummary(item.summary);
-  if (item.kind === "trace" && summary) {
-    return summary;
+  if (item.kind === "trace") {
+    // All processing states use the read model preview, never raw source text.
+    return summary ?? waitingPrimaryText(item);
   }
 
   for (const value of [summary, ...candidates, firstUserQueryLine(item.body), firstReadableBodyLine(item.body), item.title]) {

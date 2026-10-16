@@ -951,7 +951,7 @@ function TraceTurnEventBlock(props: { event: TraceTurnEvent }) {
 
   return (
     <MemoryTurnBlock label={label} tone={event.kind}>
-      <MemoryMarkdown text={event.text} />
+      <MemoryMarkdown text={event.text} literalHtml />
     </MemoryTurnBlock>
   );
 }

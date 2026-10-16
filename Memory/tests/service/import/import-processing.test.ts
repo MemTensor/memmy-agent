@@ -293,6 +293,31 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
+  it.each([
+    '<manually_attached_skills><user_query>技能示例</user_query></manually_attached_skills>\n<timestamp>today</timestamp>\n<user_query>修复标题</user_query>',
+    '<attached_files>附件</attached_files>\n<user_query>修复标题</user_query>',
+    '\uFEFF<timestamp>today</timestamp>\n<external_links>链接</external_links>\n<user_query>修复标题</user_query>',
+    '<system-reminder>提醒</system-reminder>\n修复标题'
+  ])("persists a semantic import title and preview for source envelopes: %s", (userText) => {
+    const { db, service } = createTestService();
+    try {
+      const added = service.addMemory({
+        adapterId: "agent-source:cursor", requestId: "cursor-envelope-regression",
+        layer: "L1", source: "cursor", tags: ["agent-source", "cursor"],
+        title: "<attached_files>", turnId: "cursor:envelope-regression",
+        content: `## user\n\n${userText}\n\n## assistant\n\n已修复。`
+      });
+      expect(added.title).toBe("修复标题");
+      const stored = db.db.prepare("SELECT info_json, properties_json FROM memories WHERE id = ?").get(added.id) as { info_json: string; properties_json: string };
+      expect(JSON.parse(stored.info_json).title).toBe("修复标题");
+      // Import section parsing already trims leading whitespace, including BOM.
+      expect(JSON.parse(stored.properties_json).internal_info.trace.userText).toBe(userText.trim());
+      expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === added.id)?.sourceText).toBe("修复标题");
+    } finally {
+      db.close();
+    }
+  });
+
   it("uses the standard summary prompt for account summaries", async () => {
     const root = createTestRoot("mindock-memory-account-summary-");
     const db = new MemoryDb({

@@ -20,6 +20,11 @@ describe("waiting memory previews", () => {
   it.each([
     `<timestamp>Tuesday, Jun 16, 2026, 10:16 PM (UTC+8)</timestamp>\n${request}`,
     `${browser}\n${request}`,
+    `\uFEFF<timestamp>today</timestamp>\n${request}`,
+    `<attached_files>\n附件内容\n</attached_files>\n<user_query>${request}</user_query>`,
+    `<timestamp>today</timestamp>\n<external_links>链接</external_links>\n<user_query>${request}</user_query>`,
+    `<system-reminder>提醒</system-reminder>\n${request}`,
+    `<manually_attached_skills>\n<user_query>技能中的示例请求</user_query>\n</manually_attached_skills>\n<timestamp>today</timestamp>\n<user_query>${request}</user_query>`,
     `<timestamp timezone="UTC+8">today</timestamp><user_query>\n${request}\n</user_query>`,
     `<system_reminder>outer<system_reminder>inner</system_reminder>tail</system_reminder>\n${request}`,
     `<system_notification reason="a > b">status</system_notification>\n${request}`,
@@ -34,6 +39,8 @@ describe("waiting memory previews", () => {
 
   it.each([
     browser,
+    '<attached_files>未闭合附件\n<user_query>不能提取附件内请求</user_query>',
+    '<manually_attached_skills><user_query>技能内容</user_query></manually_attached_skills>',
     '<in-app-browser-context source="ambient-ui-state">\n未闭合页面正文',
     '<in-app-browser-context source="ambient-ui-state"',
     "<timestamp>today</timestamp>\n<system_notification>done</system_notification>",
@@ -46,6 +53,10 @@ describe("waiting memory previews", () => {
 
   it.each([
     '<div class="card">请修改这个元素</div>',
+    '<div>普通 HTML</div>\n<user_query>字面量</user_query>',
+    '<custom_element>自定义元素</custom_element>\n<user_query>字面量</user_query>',
+    '> <attached_files>引用内容</attached_files>\n<user_query>字面量</user_query>',
+    '```xml\n<attached_files>代码</attached_files>\n<user_query>字面量</user_query>\n```',
     "解释 <timestamp> 和 x < y 的含义",
     "> <timestamp>quoted example</timestamp>",
     "```xml\n<timestamp>code example</timestamp>\n```",
