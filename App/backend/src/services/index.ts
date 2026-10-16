@@ -1,5 +1,4 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
-import { dirname, join } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
@@ -8,7 +7,7 @@ import {
   createBuiltinOnboardingInsightSamplers,
   createSourceRegistryOnboardingConversationWindowReader
 } from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
-import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
+import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
 import { createHttpMemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
@@ -168,7 +167,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
     memoryAddAnalytics,
-    scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,

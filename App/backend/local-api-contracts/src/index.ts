@@ -513,7 +513,14 @@ export const AgentSourceScanProgressPayloadSchema = z.object({
 });
 export type AgentSourceScanProgressPayload = z.infer<typeof AgentSourceScanProgressPayloadSchema>;
 
+export const AgentSourceScanUnavailableSchema = z.object({
+    code: z.enum(["memory_scan_upgrade_required", "memory_layer_unavailable"]),
+    message: z.string()
+});
+export type AgentSourceScanUnavailable = z.infer<typeof AgentSourceScanUnavailableSchema>;
+
 export const AgentSourceScanStatusResponseSchema = z.object({
+    unavailable: AgentSourceScanUnavailableSchema.optional(),
     active: z.boolean(),
     progress: AgentSourceScanProgressPayloadSchema.nullable(),
     completion: z.object({
@@ -1680,3 +1687,22 @@ export const TokenQuotaEligibilitySchema = z.object({
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
+
+/** Memory owns scan execution; desktop translates this state into its existing events. */
+export const MemoryAgentSourceScanStateSchema = z.object({
+    running: z.boolean(),
+    jobId: z.string().nullable(),
+    sourceId: z.string().nullable(),
+    mode: AgentSourceScanModeSchema.nullable(),
+    progress: AgentSourceScanProgressPayloadSchema.omit({ jobId: true }).nullable(),
+    startedAt: z.string().nullable(),
+    completedAt: z.string().nullable(),
+    error: z.string().nullable(),
+    results: z.array(ScanResultSchema).optional()
+});
+export type MemoryAgentSourceScanState = z.infer<typeof MemoryAgentSourceScanStateSchema>;
+export const MemoryAgentSourceListSchema = z.object({
+    executorAvailable: z.literal(true),
+    sources: z.array(AgentSourceViewSchema)
+});
+export type MemoryAgentSourceList = z.infer<typeof MemoryAgentSourceListSchema>;

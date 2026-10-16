@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
-  it("also waits for a canceled scan when a replacement scan starts before disposal", async () => {
+  it("waits for cancellation to release its writer before allowing a replacement", async () => {
     const root = tempRoot();
     let finishFirst!: () => void;
     let finishSecond!: () => void;
@@ -43,15 +43,16 @@ describe("standalone Agent source executor", () => {
     try {
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(1));
-      await executor.cancelScan();
+      const cancellation = executor.cancelScan();
+      await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Canceling");
+      finishFirst();
+      await cancellation;
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
       let completed = false;
       const disposal = Promise.resolve(executor.dispose()).then(() => { completed = true; });
-      finishSecond();
-      await new Promise((done) => setTimeout(done, 20));
       expect(completed).toBe(false);
-      finishFirst();
+      finishSecond();
       await disposal;
     } finally {
       finishFirst();
@@ -545,6 +546,10 @@ describe("standalone Agent source executor", () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
+    const turns = [
+      completeTurn("conversation-old", "2026-08-28T01:00:00.000Z"),
+      completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
+    ];
     const executor = createAgentSourceExecutor({
       service: {
         addMemory,
@@ -552,10 +557,7 @@ describe("standalone Agent source executor", () => {
       } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       statePath: join(root, "agent-sources.json"),
-      sourceRegistry: createSourceRegistry([createFixtureAdapter(root, [
-        completeTurn("conversation-old", "2026-08-28T01:00:00.000Z"),
-        completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
-      ])]),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root, turns)]),
       memoryAddAnalytics: createAddAnalyticsRecorder(events)
     });
 
@@ -567,9 +569,14 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
     await waitForScan(executor);
 
+    expect(events).toEqual([]);
+    expect(addMemory).toHaveBeenCalledTimes(2);
+    turns.push(completeTurn("conversation-latest", "2026-08-28T03:00:00.000Z"));
+    await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+    await waitForScan(executor);
     expect(events.map((event) => event.payload.conversationId)).toEqual([
-      "conversation-new",
-      "conversation-new"
+      "conversation-latest",
+      "conversation-latest"
     ]);
     await executor.dispose();
   });

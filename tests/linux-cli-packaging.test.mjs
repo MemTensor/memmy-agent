@@ -358,7 +358,7 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
-    expect(existsSync(path.join(extracted, "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(existsSync(path.join(extracted, "Memory", "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
     expect(existsSync(path.join(extracted, "node_modules", "@memmy", "agent-source-core"))).toBe(true);
 
     const migrationModuleUrl = pathToFileURL(path.join(

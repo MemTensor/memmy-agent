@@ -966,6 +966,7 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
   "scan_not_permitted",

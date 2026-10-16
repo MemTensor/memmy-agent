@@ -396,6 +396,21 @@ export async function preparePackagedRuntimeConfig(
     setMissing(storage, "backend", "sqlite");
     setMissing(storage, "sqlitePath", memoryDatabasePath);
     setMissing(storage, "endpoint", DEFAULT_MEMORY_URL);
+    const memoryUrl = parseHttpUrl(
+      stringValue(env.MEMMY_MEMORY_URL) ?? stringValue(env.MEMORY_SERVICE_URL) ??
+        stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL,
+      "Memory endpoint"
+    );
+    // The unified scan API requires a local principal. Persist the credential
+    // before starting either client or server so legacy tokenless installations
+    // and Hooks reading the shared config use the same token on the next start.
+    // Remote services and explicit credentials remain owned by their operator.
+    if (shouldWriteConfig && storage.mode === "local" && storage.backend === "sqlite"
+      && ["127.0.0.1", "localhost", "::1"].includes(listenHostFromUrl(memoryUrl))
+      && !stringValue(env.MEMMY_MEMORY_TOKEN) && !stringValue(env.MEMORY_SERVICE_TOKEN)
+      && !stringValue(storage.token)) {
+      storage.token = secretFactory();
+    }
     setMissing(websocket, "host", LOCAL_HOST);
     setMissing(websocket, "port", DEFAULT_AGENT_WEBSOCKET_PORT);
     if (shouldFillMissingAgentSecret && !stringValue(websocket.tokenIssueSecret) && !stringValue(websocket.token)) {
@@ -1142,6 +1157,7 @@ async function startManagedMemoryService(
     MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,
     MEMMY_MEMORY_TOKEN: runtimeConfig.memoryToken,
     MEMMY_MEMORY_DB: runtimeConfig.memoryDatabasePath,
+    MEMMY_APP_DATABASE: options.appDatabaseFile,
     MEMMY_EMBEDDING_MODEL_ROOT: join(runtimeDir ?? options.resourcesPath, "embedding-models"),
     MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
     MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,

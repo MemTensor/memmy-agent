@@ -1,5 +1,5 @@
 /** App reducer module. */
-import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
+import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AgentSourceScanUnavailable, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
 import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
@@ -23,6 +23,7 @@ export interface NavigationState {
 
 /** Contract for agent sources state. */
 export interface AgentSourcesState {
+  scanUnavailable: AgentSourceScanUnavailable | null;
   items: AgentSourceView[];
   isLoading: boolean;
   isScanning: boolean;
@@ -119,6 +120,7 @@ export function createInitialAppState(): AppState {
       preferredMode: null
     },
     agentSources: {
+      scanUnavailable: null,
       items: [],
       isLoading: false,
       isScanning: false,
@@ -259,6 +261,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         agentSources: { ...state.agentSources, items: action.sources, isLoading: false, error: null }
       };
+    case "agentSources/scanAvailability":
+      return { ...state, agentSources: { ...state.agentSources, scanUnavailable: action.unavailable } };
     case "agentSources/error":
       return {
         ...state,

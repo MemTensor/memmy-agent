@@ -1,3 +1,4 @@
+import { routeAgentSourceScan } from "./agent-source-api.js";
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { parse as parseYaml } from "yaml";
@@ -199,9 +200,8 @@ export async function routeViewerRequest(
   if (method === "PATCH" && path === "/api/v1/config") {
     return { body: await patchViewerConfig(context, body) };
   }
-  if (method === "GET" && path === "/api/v1/agent-sources") {
-    return { body: await context.agentSources.list() };
-  }
+  const scanResult = await routeAgentSourceScan(context.agentSources, method, url, body);
+  if (scanResult) return scanResult;
   if (method === "GET" && path === "/api/v1/system/cli") {
     return { body: await viewerCliStatus(context.viewerCli) };
   }
@@ -217,24 +217,6 @@ export async function routeViewerRequest(
       body: { accepted: true, serverTime: new Date().toISOString() },
       afterResponse: context.restartService,
     };
-  }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan") {
-    return { status: 202, body: await context.agentSources.startScan(body) };
-  }
-  if (method === "GET" && path === "/api/v1/agent-sources/scan/status") {
-    return { body: context.agentSources.scanStatus() };
-  }
-  const scanResults = path.match(/^\/api\/v1\/agent-sources\/scan\/jobs\/([^/]+)\/results$/);
-  if (method === "GET" && scanResults?.[1]) {
-    return { body: context.agentSources.scanResults
-      ? await context.agentSources.scanResults(decodeURIComponent(scanResults[1]), query(url, "cursor") ?? "0", numberQuery(url, "limit") ?? 100)
-      : { items: [], nextCursor: null } };
-  }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan/stop") {
-    return { body: await context.agentSources.pauseScan() };
-  }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan/cancel") {
-    return { body: await context.agentSources.cancelScan() };
   }
   const sourceConnection = path.match(/^\/api\/v1\/agent-sources\/([^/]+)\/(plugin|skill)$/);
   if ((method === "POST" || method === "DELETE") && sourceConnection?.[1] && sourceConnection[2]) {

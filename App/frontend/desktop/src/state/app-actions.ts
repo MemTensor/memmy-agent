@@ -1,6 +1,7 @@
 /** App actions module. */
 import type {
   AgentSourceView,
+  AgentSourceScanUnavailable,
   AppBootstrapResponse,
   AppSettingsDto,
   OnboardingStateDto,
@@ -94,6 +95,7 @@ export type AppAction =
   | { type: "agentSources/loaded"; sources: AgentSourceView[] }
   | { type: "agentSources/refreshed"; sources: AgentSourceView[] }
   | { type: "agentSources/error"; message: string }
+  | { type: "agentSources/scanAvailability"; unavailable: AgentSourceScanUnavailable | null }
   | { type: "agentSources/scanStarted"; sourceId: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
   | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
@@ -173,6 +175,10 @@ export const appActions = {
 
   agentSourcesRefreshed(sources: AgentSourceView[]): AppAction {
     return { type: "agentSources/refreshed", sources };
+  },
+
+  agentSourceScanAvailability(unavailable: AgentSourceScanUnavailable | null): AppAction {
+    return { type: "agentSources/scanAvailability", unavailable };
   },
 
   /** Handles agent sources failed. */

@@ -12,6 +12,21 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
+    const calls: string[] = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ error: { code: "not_found", message: "route is not registered", requestId: "old-memory" } }), { status: 404 });
+      }) as typeof fetch
+    });
+    await expect(client.agentSources!.status()).rejects.toMatchObject({ code: "memory_scan_upgrade_required", status: 503 });
+    expect(calls).toHaveLength(1);
+    await expect(client.agentSources!.list()).rejects.toMatchObject({ code: "memory_scan_upgrade_required" });
+    expect(calls).toHaveLength(2);
+    // A missing memory record is not a scanner compatibility failure.
+    await expect(client.getMemory({ memoryId: "missing" })).rejects.not.toMatchObject({ code: "memory_scan_upgrade_required" });
+  });
   it("posts a native turn without a Runtime Session and preserves pending reasons", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
@@ -32,6 +47,12 @@ describe("HttpMemoryClient", () => {
   });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
+      "/api/v1/agent-sources",
+      "/api/v1/agent-sources/scan",
+      "/api/v1/agent-sources/scan/status",
+      "/api/v1/agent-sources/scan/jobs/:jobId/results",
+      "/api/v1/agent-sources/scan/stop",
+      "/api/v1/agent-sources/scan/cancel",
       "/api/v1/health",
       "/api/v1/admin/reload-config",
       "/api/v1/admin/memory-token-budget",
