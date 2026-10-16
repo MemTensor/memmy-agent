@@ -70,7 +70,12 @@ async function fixture(options: {
     "const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || '2.1.1';",
     "fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, sqlitePath: db, host: '127.0.0.1', port }));",
     "const server = http.createServer((request, response) => {",
-    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')), protocolVersion: 1, serviceVersion: version })); return; }",
+    "  if (request.url === '/api/v1/health') {",
+    "    const hasMemoryIdentity = process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service'));",
+    // A non-Memory endpoint lacks the health contract; `ok: false` is valid for a degraded Memory service.
+    "    const health = hasMemoryIdentity ? { ok: true, protocolVersion: 1, serviceVersion: version } : { serviceVersion: version };",
+    "    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(health)); return;",
+    "  }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
     "});",
