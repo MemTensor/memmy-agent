@@ -5,7 +5,6 @@ export function renderMemmyOpencodePlugin(): string {
   return String.raw`import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { tool } from "@opencode-ai/plugin";
 import {
   closeRuntimeSession,
   completeSourceTurn,
@@ -27,6 +26,9 @@ const RESUME_CONTEXT_MAX_CHARS = 24000;
 const TOOL_OUTPUT_MAX_CHARS = 12000;
 
 export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
+  // Loaded lazily: OpenCode V1 provides this package at runtime, while V2 never runs
+  // this path and a static import would fail resolution before the default export loads.
+  const { tool } = await import("@opencode-ai/plugin");
   const sessionCache = new Map();
   const l3InjectOnce = new Map();
   const pendingTurns = new Map();
@@ -1046,6 +1048,396 @@ function hashText(value) {
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
+
+// --- OpenCode V2 entrypoint -------------------------------------------------
+//
+// OpenCode V2 calls setup() and never runs the V1 function above; V1 (>= 1.18.29)
+// calls server() instead. The default export below carries both, so one installed
+// file supports either generation. The V2 plugin context APIs are feature-detected
+// and every Memmy failure degrades to a log line so a turn is never interrupted.
+
+export default {
+  id: "memmy-memory",
+  async server(context) {
+    return MemmyMemoryPlugin(context);
+  },
+  async setup(context) {
+    const directory = context && context.location && typeof context.location.directory === "string"
+      ? context.location.directory
+      : null;
+    const sessionCache = new Map();
+    const pendingTurns = new Map();
+    const pendingResumeSelections = new Map();
+    const latestRequests = new Map();
+    const l3InjectOnce = new Map();
+    const firstTurnSeen = new Set();
+    const captureJobs = new Set();
+    const controller = new AbortController();
+
+    function log(level, message, extra) {
+      try {
+        const line = "[memmy-memory] " + message + (extra ? " " + JSON.stringify(extra) : "");
+        if (level === "warn" || level === "error") {
+          console.error(line);
+        } else {
+          console.log(line);
+        }
+      } catch {
+        // Logging must never interrupt an OpenCode turn.
+      }
+    }
+
+    async function ensureSession(externalSessionId, agent) {
+      const profileId = normalizeText(agent) || "main";
+      const cacheKey = externalSessionId + ":" + profileId;
+      const cached = sessionCache.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+      const opened = await openRuntimeSession({
+        configUrl: CONFIG_URL,
+        source: SOURCE,
+        adapterId: "memmy-opencode-plugin",
+        profileId,
+        sessionKey: "opencode-memory-" + externalSessionId,
+        workspaceRoot: directory,
+        transition: "allow_legacy_rollover"
+      });
+      if (!opened) throw new Error("Memmy session unavailable");
+      sessionCache.set(cacheKey, opened);
+      return opened;
+    }
+
+    async function beginTurn(sessionID, messageID, agent, query) {
+      const cleanQuery = sanitizeUserText(query);
+      if (!cleanQuery) {
+        return "";
+      }
+      latestRequests.set(sessionID, cleanQuery);
+      let recalledContext = "";
+      try {
+        const memmy = await createMemmyClient();
+        const runtimeSession = await ensureSession(sessionID, agent);
+        const sessionId = runtimeSession.sessionId;
+        const requestedTurnId = normalizeText(messageID);
+        const turn = await startRuntimeTurn(
+          runtimeSession,
+          requestedTurnId || "opencode-turn-" + hashText([sessionId, cleanQuery, String(Date.now())].join("\u0000")),
+          cleanQuery
+        );
+        const turnId = normalizeText(turn && turn.turnId) || requestedTurnId ||
+          "opencode-fallback-" + hashText([sessionId, sessionID, cleanQuery].join("\u0000"));
+        pendingTurns.set(sessionID, {
+          externalSessionId: sessionID,
+          sessionId,
+          turnId,
+          sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
+          userMessageId: requestedTurnId || turnId,
+          profileId: normalizeText(agent) || "main"
+        });
+        recalledContext = normalizeText(turn && turn.injectedContext && turn.injectedContext.markdown);
+      } catch (error) {
+        log("warn", "Memmy recall failed", { error: formatError(error), sessionID });
+      }
+      return recalledContext;
+    }
+
+    function queueTurnCompletion(sessionID) {
+      const pending = pendingTurns.get(sessionID);
+      if (!pending) {
+        return;
+      }
+      pendingTurns.delete(sessionID);
+      const job = completeTurn(pending)
+        .catch((error) => {
+          log("warn", "Memmy turn capture failed", { error: formatError(error), sessionID });
+        })
+        .finally(() => {
+          captureJobs.delete(job);
+        });
+      captureJobs.add(job);
+    }
+
+    // Capture reads the turn back from the OpenCode database through the same bridge
+    // reader the offline scan uses, so both channels resolve one turn to one identity.
+    async function completeTurn(pending) {
+      const conversationId = normalizeText(pending.externalSessionId);
+      const turnId = normalizeText(pending.userMessageId);
+      if (!conversationId || !turnId) {
+        return;
+      }
+      const parsed = await readOpencodeHookSourceTurn({ conversationId, turnId });
+      if (!parsed.turn) {
+        log("warn", "Memmy turn capture skipped", { reason: parsed.reason || "identity_unresolved", sessionID: conversationId });
+        return;
+      }
+      const result = await completeSourceTurn({
+        configUrl: CONFIG_URL,
+        turn: parsed.turn,
+        sessionId: normalizeText(pending.sessionId) || undefined,
+        sourceMemoryIds: pending.sourceMemoryIds,
+        profileId: normalizeText(parsed.turn.profileId) || normalizeText(pending.profileId) || "main",
+        adapterId: "memmy-opencode-plugin"
+      });
+      const status = normalizeText(result && result.status);
+      if (status !== "stored" && status !== "existing" && status !== "rejected") {
+        log("warn", "Memmy turn capture failed", { reason: normalizeText(result && result.reason) || status || "unexpected_response", sessionID: conversationId });
+      }
+    }
+
+    async function handleResumeSearch(sessionID, query, setText) {
+      if (!query) {
+        setText(renderCommandResult("Usage: /memmy-resume <query>"));
+        return;
+      }
+      if (query === "cancel") {
+        pendingResumeSelections.delete(sessionID);
+        setText(renderCommandResult("Memmy resume selection cancelled."));
+        return;
+      }
+      try {
+        const memmy = await createMemmyClient();
+        const result = await memmy.post("/api/v1/memory/search", {
+          query,
+          layers: ["L1"],
+          limit: SEARCH_LIMIT,
+          verbose: true
+        });
+        const candidates = await buildEpisodeCandidates(memmy, result);
+        pendingResumeSelections.set(sessionID, { createdAt: Date.now(), candidates });
+        setText(renderCommandResult(formatResumeSearchResult(query, candidates)));
+      } catch (error) {
+        setText(renderCommandResult("Memmy resume search failed: " + formatError(error)));
+      }
+    }
+
+    async function handleResumeSelection(sessionID, messageID, agent, selection, setText) {
+      const selected = resolveResumeSelection(pendingResumeSelections.get(sessionID), selection);
+      if (!selected) {
+        setText(renderCommandResult("No active Memmy resume selection. Run /memmy-resume <query> first."));
+        return;
+      }
+      try {
+        const memmy = await createMemmyClient();
+        const detail = await memmy.get("/api/v1/memory/" + encodeURIComponent(selected.episodeId));
+        pendingResumeSelections.delete(sessionID);
+        const context = buildResumeContext(selected, detail);
+        const title = normalizeText(detail && detail.title) || normalizeText(selected.title) || selected.episodeId;
+        const query = "Continue Memmy episode " + selected.episodeId + ": " + title;
+        const recalled = await beginTurn(sessionID, messageID, agent, query);
+        const packet = [
+          context ? "Selected episode context:\n" + context : "",
+          recalled ? "Additional relevant memory:\n" + recalled : ""
+        ].filter(Boolean).join("\n\n");
+        setText(renderMemmyContextPacket(packet || context, "resume", query));
+      } catch (error) {
+        setText(renderCommandResult("Memmy resume selection failed: " + formatError(error)));
+      }
+    }
+
+    function agentFromEvent(event) {
+      const candidate = event && (event.agent || (event.prompt && event.prompt.agent));
+      return typeof candidate === "string" ? candidate : "";
+    }
+
+    await context.tool.transform((editor) => {
+      editor.add({
+        name: "memmy_memory_search",
+        description: "Search Memmy local memory for relevant facts, preferences, decisions, procedures, and prior tasks.",
+        input: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            layers: { type: "array", items: { type: "string", enum: ["L1", "L2", "L3", "Skill"] } }
+          },
+          required: ["query"],
+          additionalProperties: false
+        },
+        async execute(args, toolContext) {
+          const memmy = await createMemmyClient();
+          const result = await memmy.post("/api/v1/memory/search", {
+            query: normalizeText(args && args.query),
+            layers: Array.isArray(args && args.layers) ? args.layers : undefined
+          });
+          return { content: renderMemmyContextPacket(
+            formatSearchResult(result),
+            "tool_search",
+            latestRequests.get(toolContext.sessionID) || normalizeText(args && args.query)
+          ) };
+        }
+      });
+      editor.add({
+        name: "memmy_memory_get",
+        description: "Read one Memmy memory detail by id.",
+        input: {
+          type: "object",
+          properties: { id: { type: "string" } },
+          required: ["id"],
+          additionalProperties: false
+        },
+        async execute(args, toolContext) {
+          const id = normalizeText(args && args.id);
+          if (!id) {
+            throw new Error("Missing required parameter: id");
+          }
+          const memmy = await createMemmyClient();
+          const result = await memmy.get("/api/v1/memory/" + encodeURIComponent(id));
+          return { content: renderMemmyContextPacket(
+            formatMemoryDetail(result),
+            "tool_get",
+            latestRequests.get(toolContext.sessionID) || "Read Memmy memory " + id
+          ) };
+        }
+      });
+      editor.add({
+        name: "memmy_memory_add",
+        description: "Write an important durable fact, preference, decision, reusable procedure, or unresolved follow-up into Memmy.",
+        input: {
+          type: "object",
+          properties: {
+            content: { type: "string" },
+            title: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+            layer: { type: "string", enum: ["L1", "L2", "L3", "Skill"] }
+          },
+          required: ["content"],
+          additionalProperties: false
+        },
+        async execute(args, toolContext) {
+          const content = sanitizeCaptureText(args && args.content);
+          if (!content) {
+            throw new Error("Missing required parameter: content");
+          }
+          const memmy = await createMemmyClient();
+          const sessionId = (await ensureSession(toolContext.sessionID, toolContext.agent)).sessionId;
+          const result = await memmy.post("/api/v1/memory/add", {
+            content,
+            title: normalizeText(args && args.title) || undefined,
+            tags: Array.isArray(args && args.tags) ? args.tags.filter((item) => typeof item === "string") : undefined,
+            layer: normalizeText(args && args.layer) || "L1",
+            sessionId
+          });
+          return { content: "Stored Memmy memory " + normalizeText(result && result.id) + ": " +
+            (normalizeText(result && result.summary) || content) };
+        }
+      });
+    });
+
+    await context.session.hook("prompt", async (event) => {
+      try {
+        const prompt = event && event.prompt;
+        if (!prompt || typeof prompt.text !== "string") {
+          return;
+        }
+        const sessionID = normalizeText(event.sessionID);
+        const messageID = normalizeText(event.messageID);
+        const rawPrompt = prompt.text;
+
+        // A previous turn in this session may not have been captured yet.
+        queueTurnCompletion(sessionID);
+
+        const commandArguments = parseResumeCommandArguments(rawPrompt);
+        const selection = parseResumeSelection(commandArguments === null ? rawPrompt : commandArguments);
+        const hasPendingSelection = Boolean(resolveResumeSelection(pendingResumeSelections.get(sessionID), selection));
+        const setText = (text) => { prompt.text = text; };
+        const agent = agentFromEvent(event);
+
+        if (selection && (commandArguments !== null || hasPendingSelection)) {
+          await handleResumeSelection(sessionID, messageID, agent, selection, setText);
+          return;
+        }
+        if (commandArguments !== null) {
+          await handleResumeSearch(sessionID, normalizeText(commandArguments), setText);
+          return;
+        }
+
+        if (!firstTurnSeen.has(sessionID)) {
+          firstTurnSeen.add(sessionID);
+          try {
+            const runtimeSession = await ensureSession(sessionID, agent);
+            const loaded = await loadRuntimeL3(runtimeSession);
+            if (loaded && loaded.additionalContext) l3InjectOnce.set(sessionID, normalizeText(loaded.additionalContext));
+          } catch (error) {
+            log("warn", "Memmy L3 preload failed", { error: formatError(error), sessionID });
+          }
+        }
+        const l3Context = l3InjectOnce.get(sessionID) || "";
+        l3InjectOnce.delete(sessionID);
+        const recalled = await beginTurn(sessionID, messageID, agent, rawPrompt);
+        const packet = [
+          l3Context ? "Additional relevant memory:\n" + l3Context : "",
+          recalled ? "Additional relevant memory:\n" + recalled : ""
+        ].filter(Boolean).join("\n\n");
+        if (packet) {
+          setText(renderMemmyContextPacket(packet, "turn_start", rawPrompt));
+        }
+      } catch (error) {
+        log("warn", "Memmy prompt hook failed", { error: formatError(error) });
+      }
+    });
+
+    void (async () => {
+      try {
+        for await (const event of context.event.subscribe({ signal: controller.signal })) {
+          const type = event && event.type;
+          const properties = event && event.properties && typeof event.properties === "object"
+            ? event.properties
+            : (event && event.data && typeof event.data === "object" ? event.data : {});
+          if (type === "session.compacted") {
+            const sessionID = normalizeText(properties.sessionID || properties.id);
+            for (const key of [...sessionCache.keys()]) {
+              if (key !== sessionID + ":main" && !key.startsWith(sessionID + ":")) continue;
+              const runtimeSession = sessionCache.get(key);
+              await notifyRuntimeBoundary(runtimeSession, "token_compaction").catch(() => undefined);
+              const loaded = await loadRuntimeL3(runtimeSession).catch(() => null);
+              if (loaded && loaded.additionalContext) l3InjectOnce.set(sessionID, normalizeText(loaded.additionalContext));
+            }
+            continue;
+          }
+          if (type === "session.deleted") {
+            const sessionID = normalizeText(properties.sessionID || properties.id);
+            queueTurnCompletion(sessionID);
+            for (const key of [...sessionCache.keys()]) {
+              if (!key.startsWith(sessionID + ":")) continue;
+              const runtimeSession = sessionCache.get(key);
+              sessionCache.delete(key);
+              await closeRuntimeSession(runtimeSession).catch(() => undefined);
+            }
+            l3InjectOnce.delete(sessionID);
+            firstTurnSeen.delete(sessionID);
+            continue;
+          }
+          if (type === "session.idle") {
+            queueTurnCompletion(normalizeText(properties.sessionID || properties.id));
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          log("warn", "Memmy event stream failed", { error: formatError(error) });
+        }
+      }
+    })();
+
+    log("info", "Memmy plugin active (OpenCode V2)", { directory });
+
+    return () => {
+      controller.abort();
+      for (const sessionID of [...pendingTurns.keys()]) {
+        queueTurnCompletion(sessionID);
+      }
+      // Snapshot before clearing: the close loop runs after the last capture settles.
+      const sessionsToClose = [...sessionCache.values()];
+      void Promise.allSettled([...captureJobs]).then(() => {
+        for (const session of sessionsToClose) {
+          void closeRuntimeSession(session).catch(() => undefined);
+        }
+      });
+      sessionCache.clear();
+      l3InjectOnce.clear();
+      firstTurnSeen.clear();
+    };
+  }
+};
 `;
 }
 
