@@ -2,8 +2,13 @@
 import { DatabaseSync } from "node:sqlite";
 import {
   readOpencodeSessions,
+  toOpencodeV2MessageParts,
+  toOpencodeV2MessageView,
+  toOpencodeV2Session,
   type OpencodeSession,
   type OpencodeSource,
+  type OpencodeV2MessageRow,
+  type OpencodeV2SessionRow,
   type RawSourceMessage
 } from "@memmy/agent-source-core";
 
@@ -41,7 +46,14 @@ export async function* streamOpencodeDatabase(path: string, signal?: AbortSignal
 
 /** A database without the conversation tables is not a conversation store. */
 function createSource(db: DatabaseSync): OpencodeSource | null {
-  if (!hasTable(db, "session") || !hasTable(db, "message") || !hasTable(db, "part")) return null;
+  if (hasTable(db, "session") && hasTable(db, "message") && hasTable(db, "part")) {
+    return createOpencodeV1Source(db);
+  }
+  // OpenCode V2 renamed the conversation tables and inlined message parts.
+  return createOpencodeV2Source(db);
+}
+
+function createOpencodeV1Source(db: DatabaseSync): OpencodeSource {
   const columns = tableColumns(db, "session");
   const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session ORDER BY time_created ASC, id ASC`);
   const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
@@ -52,6 +64,31 @@ function createSource(db: DatabaseSync): OpencodeSource | null {
       .map((row) => ({ id: row.id, data: parseJson(row.data) })),
     parts: (messageId) => (parts.all(messageId) as unknown as Array<{ id: string; data: string }>)
       .map((row) => ({ id: row.id, data: parseJson(row.data) }))
+  };
+}
+
+/** Projects OpenCode V2 (`session_v2`/`session_message`) rows through the shared V2 mappers. */
+function createOpencodeV2Source(db: DatabaseSync): OpencodeSource | null {
+  if (!hasTable(db, "session_v2") || !hasTable(db, "session_message")) return null;
+  const sessions = db.prepare("SELECT id, parent_id AS parentId, directory, agent, revert FROM session_v2 ORDER BY time_created ASC, id ASC");
+  const messages = db.prepare("SELECT id, type, seq, data FROM session_message WHERE session_id = ? ORDER BY seq ASC, id ASC");
+  const messageById = db.prepare("SELECT id, type, seq, data FROM session_message WHERE id = ?");
+  const toRow = (row: { id: string; type: string; seq: number; data: string }): OpencodeV2MessageRow => ({
+    id: row.id,
+    type: row.type,
+    seq: Number(row.seq),
+    data: parseJson(row.data)
+  });
+  return {
+    sessions: () => (sessions.all() as unknown as Array<Record<string, unknown>>)
+      .map((row) => toOpencodeV2Session(row as unknown as OpencodeV2SessionRow)),
+    messages: (sessionId) => toOpencodeV2MessageView(
+      (messages.all(sessionId) as unknown as Array<{ id: string; type: string; seq: number; data: string }>).map(toRow)
+    ),
+    parts: (messageId) => {
+      const row = messageById.get(messageId) as unknown as { id: string; type: string; seq: number; data: string } | undefined;
+      return row ? toOpencodeV2MessageParts(toRow(row)) : [];
+    }
   };
 }
 

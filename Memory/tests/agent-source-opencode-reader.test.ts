@@ -31,6 +31,41 @@ describe("OpenCode Memory SQLite reader", () => {
   });
 });
 
+describe("OpenCode Memory SQLite reader (V2 schema)", () => {
+  it("captures completed turns from session_v2/session_message and skips subagent branches", async () => {
+    directory = mkdtempSync(join(tmpdir(), "memmy-opencode-v2-"));
+    const databasePath = join(directory, "v2.sqlite");
+    writeOpencodeV2Database(databasePath);
+    const main = await selectSourceTurn(readOpencodeDatabase(databasePath), {
+      conversationId: "ses_main",
+      turnId: "u1"
+    });
+    expect(main.turn).toBeDefined();
+    expect(main.turn?.query).toBe(OPENCODE_QUERY);
+    expect(main.turn?.answer).toBe(STRUCTURED_OUTPUT.result);
+    expect(main.turn?.profileId).toBe("build");
+    expect(main.turn?.toolCalls[0]).toMatchObject({ name: "read", status: "completed" });
+    expect(main.turn?.completionEvidence).toBe("assistant_completed:a2");
+    const subagent = await selectSourceTurn(readOpencodeDatabase(databasePath), {
+      conversationId: "ses_branch",
+      turnId: "u2"
+    });
+    expect(subagent.turn).toBeNull();
+  });
+
+  it("leaves a turn whose last assistant never completed for a later attempt", async () => {
+    directory = mkdtempSync(join(tmpdir(), "memmy-opencode-v2-open-"));
+    const databasePath = join(directory, "v2-open.sqlite");
+    writeOpencodeV2Database(databasePath, { openEnded: true });
+    const result = await selectSourceTurn(readOpencodeDatabase(databasePath), {
+      conversationId: "ses_main",
+      turnId: "u1"
+    });
+    expect(result.turn).toBeNull();
+    expect(result.reason).toBe("turn_incomplete");
+  });
+});
+
 const STRUCTURED_OUTPUT = { verified: true, result: "The configuration was verified and documented." };
 const OPENCODE_QUERY = "Inspect the configuration and report the verified result.";
 interface OpencodeTerminalCase {
@@ -128,6 +163,81 @@ function writeOpencodeTerminalDatabase(
     }
     for (const [index, row] of parts.entries()) {
       db.prepare("INSERT INTO part VALUES(?,?,?,?)").run(row.id, row.messageId, index, JSON.stringify(row.data));
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/** Builds an OpenCode V2 database: `session_v2` + `session_message` with inline content. */
+function writeOpencodeV2Database(path: string, options?: { openEnded?: boolean }): void {
+  const rows: Array<{ id: string; sessionId: string; type: string; seq: number; data: unknown }> = [
+    {
+      id: "u1",
+      sessionId: "ses_main",
+      type: "user",
+      seq: 1,
+      data: { time: { created: 4_070_944_800_000 }, text: OPENCODE_QUERY, files: [], agents: [] }
+    },
+    {
+      id: "a1",
+      sessionId: "ses_main",
+      type: "assistant",
+      seq: 2,
+      data: {
+        agent: "build",
+        time: { created: 4_070_944_801_000, completed: 4_070_944_801_500 },
+        content: [
+          {
+            type: "tool",
+            id: "call1",
+            name: "read",
+            state: { status: "completed", input: { path: "config" }, output: "Configuration verified." }
+          }
+        ]
+      }
+    },
+    {
+      id: "a2",
+      sessionId: "ses_main",
+      type: "assistant",
+      seq: 3,
+      data: {
+        agent: "build",
+        ...(options?.openEnded
+          ? { time: { created: 4_070_944_801_600 } }
+          : { time: { created: 4_070_944_801_600, completed: 4_070_944_802_000 } }),
+        content: [{ type: "reasoning", text: "internal" }, { type: "text", text: STRUCTURED_OUTPUT.result }]
+      }
+    },
+    { id: "i1", sessionId: "ses_main", type: "idle", seq: 4, data: {} },
+    {
+      id: "u2",
+      sessionId: "ses_branch",
+      type: "user",
+      seq: 5,
+      data: { time: { created: 4_070_944_803_000 }, text: "branch prompt", files: [], agents: [] }
+    },
+    {
+      id: "a3",
+      sessionId: "ses_branch",
+      type: "assistant",
+      seq: 6,
+      data: {
+        agent: "build",
+        time: { created: 4_070_944_804_000, completed: 4_070_944_805_000 },
+        content: [{ type: "text", text: "branch answer" }]
+      }
+    }
+  ];
+  const db = new Database(path);
+  try {
+    db.exec("CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, agent TEXT, revert TEXT, time_created INTEGER); CREATE TABLE session_message(id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)");
+    db.prepare("INSERT INTO session_v2 VALUES(?,?,?,?,?,?)").run("ses_main", null, "/work/project", "build", null, 4_070_944_800_000);
+    db.prepare("INSERT INTO session_v2 VALUES(?,?,?,?,?,?)").run("ses_branch", "ses_main", "/work/project", "build", null, 4_070_944_801_000);
+    for (const row of rows) {
+      db.prepare("INSERT INTO session_message VALUES(?,?,?,?,?,?)")
+        .run(row.id, row.sessionId, row.type, row.seq, row.seq, JSON.stringify(row.data));
     }
   } finally {
     db.close();

@@ -9,9 +9,14 @@ import {
   readDeepseekHarnessSourceTurn,
   readOpenclawSourceTurn,
   readOpencodeSourceTurn,
+  toOpencodeV2MessageParts,
+  toOpencodeV2MessageView,
+  toOpencodeV2Session,
   type CursorVscdbSource,
   type OpenclawTranscriptSource,
   type OpencodeSource,
+  type OpencodeV2MessageRow,
+  type OpencodeV2SessionRow,
   type SourceTurn
 } from "@memmy/agent-source-core";
 export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
@@ -412,10 +417,6 @@ export async function readOpencodeHookSourceTurn(input: {
     return { turn: null, reason: "source_store_unavailable" };
   }
   try {
-    const columns = new Set((db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name));
-    const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session WHERE id = ?`);
-    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
-    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC");
     const parse = (value: unknown): unknown => {
       if (typeof value !== "string") return undefined;
       try {
@@ -424,8 +425,31 @@ export async function readOpencodeHookSourceTurn(input: {
         return undefined;
       }
     };
-    const source: OpencodeSource = {
-      sessions: () => (sessions.all(input.conversationId) as unknown as Array<Record<string, unknown>>).map((row) => {
+    const source = createOpencodeHookSource(db, input.conversationId, parse);
+    if (!source) return { turn: null, reason: "source_store_unavailable" };
+    return await readOpencodeSourceTurn(source, input);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * One row-access layer per OpenCode schema generation. V1 keeps part rows and the
+ * assistant `parentID` link; V2 inlines content in `session_message` and drops the
+ * link, so its rows are projected onto the shared turn parser through the V2 mappers.
+ */
+function createOpencodeHookSource(
+  db: NodeSqliteDatabase,
+  conversationId: string,
+  parse: (value: unknown) => unknown
+): OpencodeSource | null {
+  if (hasSqliteTable(db, "session") && hasSqliteTable(db, "message") && hasSqliteTable(db, "part")) {
+    const columns = new Set((db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name));
+    const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session WHERE id = ?`);
+    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
+    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC");
+    return {
+      sessions: () => (sessions.all(conversationId) as unknown as Array<Record<string, unknown>>).map((row) => {
         const revert = typeof row.revert === "string" ? parse(row.revert) : row.revert;
         const messageId = revert && typeof revert === "object" && !Array.isArray(revert)
           ? (revert as { messageID?: unknown }).messageID
@@ -443,10 +467,32 @@ export async function readOpencodeHookSourceTurn(input: {
       parts: (messageId) => (parts.all(messageId) as unknown as Array<{ id: string; data: string }>)
         .map((row) => ({ id: row.id, data: parse(row.data) }))
     };
-    return await readOpencodeSourceTurn(source, input);
-  } finally {
-    db.close();
   }
+  if (!hasSqliteTable(db, "session_v2") || !hasSqliteTable(db, "session_message")) return null;
+  const sessions = db.prepare("SELECT id, parent_id AS parentId, directory, agent, revert FROM session_v2 WHERE id = ?");
+  const messages = db.prepare("SELECT id, type, seq, data FROM session_message WHERE session_id = ? ORDER BY seq ASC, id ASC");
+  const messageById = db.prepare("SELECT id, type, seq, data FROM session_message WHERE id = ?");
+  const toRow = (row: { id: string; type: string; seq: number; data: string }): OpencodeV2MessageRow => ({
+    id: row.id,
+    type: row.type,
+    seq: Number(row.seq),
+    data: parse(row.data)
+  });
+  return {
+    sessions: () => (sessions.all(conversationId) as unknown as Array<Record<string, unknown>>)
+      .map((row) => toOpencodeV2Session(row as unknown as OpencodeV2SessionRow)),
+    messages: (sessionId) => toOpencodeV2MessageView(
+      (messages.all(sessionId) as unknown as Array<{ id: string; type: string; seq: number; data: string }>).map(toRow)
+    ),
+    parts: (messageId) => {
+      const row = messageById.get(messageId) as unknown as { id: string; type: string; seq: number; data: string } | undefined;
+      return row ? toOpencodeV2MessageParts(toRow(row)) : [];
+    }
+  };
+}
+
+function hasSqliteTable(db: NodeSqliteDatabase, tableName: string): boolean {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName));
 }
 
 /**
