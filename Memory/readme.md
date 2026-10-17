@@ -88,6 +88,33 @@ When `storage.token`, `MEMMY_MEMORY_TOKEN`, or `MEMORY_SERVICE_TOKEN` is set,
 all HTTP routes except `GET /api/v1/health` require that token as a bearer token
 or `x-api-key`.
 
+### Per-agent scoped API keys
+
+Installations that need per-agent credentials can configure
+`storage.scopedApiKeys` without a storage token. Each map key is the API key
+itself; `namespace.source` and `namespace.profileId` are required, and
+`scopes` defaults to read and write (`memory:read`, `memory:write`) when
+omitted:
+
+```yaml
+memmyMemory:
+  storage:
+    scopedApiKeys:
+      "agent-a-readonly-key":
+        namespace:
+          source: agent-a
+          profileId: default
+        scopes: [memory:read]
+```
+
+Requests authenticate with the key as a bearer token or `x-api-key`. A key
+whose scopes do not cover a route is rejected with `403`, and requests without
+a valid key are rejected with `401`: while any scoped key is configured the
+service never falls back to anonymous access. A storage token, when also
+configured, keeps full `*` access and takes precedence. Scoped API keys
+restrict access at the service HTTP boundary only; they are not an OS-level
+security boundary for local agents that can read the config file.
+
 ## CLI
 
 Run the CLI directly from source inside the `Memory/` directory:

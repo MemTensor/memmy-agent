@@ -178,6 +178,57 @@ describe("memmy memory config", () => {
     expect(config.storage.sqlitePath).toBe(join(homedir(), ".memmy", "memory-service", "memory.sqlite"));
   });
 
+  it("normalizes storage scoped api keys and drops malformed entries", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        storage: {
+          endpoint: "http://127.0.0.1:18960",
+          scopedApiKeys: {
+            "valid-key": {
+              namespace: { source: "agent-a", profileId: "default" },
+              scopes: ["memory:read", 42, " "]
+            },
+            "missing-profile": { namespace: { source: "agent-b" } },
+            "missing-namespace": { scopes: ["memory:read"] },
+            "empty-namespace": { namespace: {}, scopes: ["memory:read"] },
+            "scopeless-key": { namespace: { source: "agent-c", profileId: "default" } }
+          }
+        }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.storage.scopedApiKeys).toEqual({
+      "valid-key": {
+        namespace: { source: "agent-a", profileId: "default" },
+        scopes: ["memory:read"]
+      },
+      "scopeless-key": {
+        namespace: { source: "agent-c", profileId: "default" }
+      }
+    });
+
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        storage: {
+          endpoint: "http://127.0.0.1:18960",
+          scopedApiKeys: { "broken-key": { namespace: { source: "agent-d" } } }
+        }
+      }
+    }));
+    expect(loadMemmyConfig(configPath).config.storage.scopedApiKeys).toEqual({});
+
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        storage: { endpoint: "http://127.0.0.1:18960" }
+      }
+    }));
+    expect(loadMemmyConfig(configPath).config.storage.scopedApiKeys).toBeUndefined();
+  });
+
   it("reads user id from memmyMemory config and environment aliases", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
