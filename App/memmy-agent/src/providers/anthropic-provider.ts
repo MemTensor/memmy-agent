@@ -367,7 +367,10 @@ export class AnthropicProvider extends LLMProvider {
       [system, messages, tools] = AnthropicProvider.applyCacheControl(system, messages, tools);
     }
 
-    const thinkingEnabled = Boolean(reasoningEffort) && String(reasoningEffort).toLowerCase() !== "none";
+    const isMiniMaxM3 = modelName.toLowerCase() === "minimax-m3";
+    const effort = String(reasoningEffort ?? "").toLowerCase();
+    const thinkingEnabled = Boolean(reasoningEffort) && effort !== "none"
+      && !(isMiniMaxM3 && ["minimal", "minimum"].includes(effort));
     const omitTemperature = AnthropicProvider.omitsTemperature(modelName);
     const kwargs: Record<string, any> = {
       model: modelName,
@@ -376,7 +379,10 @@ export class AnthropicProvider extends LLMProvider {
     };
     if (system && (!Array.isArray(system) || system.length)) kwargs.system = system;
 
-    if (reasoningEffort === "adaptive") {
+    if (isMiniMaxM3 && reasoningEffort) {
+      kwargs.thinking = { type: thinkingEnabled ? "adaptive" : "disabled" };
+      if (!omitTemperature) kwargs.temperature = temperature;
+    } else if (reasoningEffort === "adaptive") {
       kwargs.thinking = { type: "adaptive" };
       if (!omitTemperature) kwargs.temperature = 1.0;
     } else if (thinkingEnabled) {
