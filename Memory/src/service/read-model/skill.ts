@@ -245,7 +245,9 @@ export class SkillReadModel {
     if (!memory || memory.memoryLayer !== "Skill") {
       throw this.deps.createError("not_found", `skill not found: ${skillId}`);
     }
-    this.deps.assertMemoryInScope(memory, request.namespace);
+    // Shared-resource read: skill details sit beside the namespace-unfiltered
+    // skills list (GET /api/v1/skills), so cross-namespace reads stay allowed.
+    // Boundaries are enforced on mutations (invoke/archive/delete).
     const detail = this.deps.detailFromMemory(memory);
     const skill = this.deps.skillMetaFromMemory(memory);
     const usageStats = this.skillUsageStats(skillId);
