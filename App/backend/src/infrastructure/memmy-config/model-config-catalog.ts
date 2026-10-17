@@ -72,15 +72,19 @@ export async function writeModelConfigCatalog(
   input: ModelConfigInput
 ): Promise<ModelConfigView> {
   const target = resolve(configPath);
+  const endpointAliases: NonNullable<ModelConfigView["endpointAliases"]> = {};
   try {
     const result = await mutateRuntimeConfig(target, (current) => {
       if (input.configRevision !== revisionFor(current)) throw new ModelConfigChangedError();
-      const next = mergeModelConfig(current, input);
+      const next = mergeModelConfig(current, input, endpointAliases);
       for (const key of Object.keys(current)) delete current[key];
       Object.assign(current, next);
       return next;
     });
-    return buildModelConfigView(result.value, revisionFor(result.value), new Date().toISOString());
+    return {
+      ...buildModelConfigView(result.value, revisionFor(result.value), new Date().toISOString()),
+      ...(Object.keys(endpointAliases).length ? { endpointAliases } : {})
+    };
   } catch (error) {
     if (isErrorCode(error, "migration_lock_timeout")) {
       throw Object.assign(new Error("Model configuration is busy; try again"), {
@@ -97,7 +101,9 @@ export function generateDesktopPresetName(provider: string, model: string): stri
   return `desktop-${readableIdPart(provider, 24) || "provider"}-${readableIdPart(model, 48) || "model"}-${hash}`;
 }
 
-function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): ConfigRecord {
+function mergeModelConfig(
+  config: ConfigRecord, input: ModelConfigInput, endpointAliases: NonNullable<ModelConfigView["endpointAliases"]>
+): ConfigRecord {
   const existingProviders = record(config.providers);
   const existingPresets = record(config.modelPresets);
   const existingAssignments = normalizeStoredAssignments(config.modelAssignments);
@@ -134,7 +140,7 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
     if (providerInput.provider === ACCOUNT_PROVIDER) continue;
     const previousProvider = record(existingProviders[providerInput.provider]);
     const provider = mergeProvider(previousProvider, providerInput);
-    const modelInputs = canonicalizeEndpointDefinitions(providerInput, provider);
+    const modelInputs = canonicalizeEndpointDefinitions(providerInput, provider, previousProvider, endpointAliases);
     nextProviders[providerInput.provider] = provider;
 
     for (const modelInput of modelInputs) {
@@ -446,11 +452,18 @@ function mergeEndpoint(previous: ConfigRecord, input: CatalogEndpointInput): Con
   return next;
 }
 
-function canonicalizeEndpointDefinitions(input: TextModelProviderInput, provider: ConfigRecord): TextModelItemInput[] {
+function canonicalizeEndpointDefinitions(
+  input: TextModelProviderInput, provider: ConfigRecord, previous: ConfigRecord,
+  aliases: NonNullable<ModelConfigView["endpointAliases"]>
+): TextModelItemInput[] {
   const canonicalIds = new Map<string, string>();
   const redirects = new Map<string, string>();
   const endpoints = record(provider.endpoints);
-  for (const endpoint of input.endpoints) {
+  const previousEndpoints = record(previous.endpoints);
+  // Keep persisted connection identities even if a new duplicate is submitted first.
+  const ordered = [...input.endpoints].sort((left, right) =>
+    Number(right.endpointId in previousEndpoints) - Number(left.endpointId in previousEndpoints));
+  for (const endpoint of ordered) {
     const merged = record(endpoints[endpoint.endpointId]);
     const signature = stableJson({
       provider: input.provider,
@@ -468,10 +481,24 @@ function canonicalizeEndpointDefinitions(input: TextModelProviderInput, provider
       canonicalIds.set(signature, endpoint.endpointId);
     }
   }
-  return input.models.map((model) => {
-    const endpointId = redirects.get(model.endpointId);
-    return endpointId ? { ...model, endpointId } : model;
-  });
+  if (redirects.size) aliases[input.provider] = Object.fromEntries(redirects);
+  const models = input.models.map((model) => ({
+    ...model, endpointId: redirects.get(model.endpointId) ?? model.endpointId
+  }));
+  // Only coalesce a new model made redundant by credential-based endpoint merging.
+  // Existing preset IDs and ordinary duplicate-model validation remain intact.
+  const removed = new Set<number>();
+  for (const [index, original] of input.models.entries()) {
+    if (original.presetId || original.ownerAccountId || original.source !== "byok" || !redirects.has(original.endpointId)) continue;
+    const duplicate = models.findIndex((model, candidate) => candidate !== index
+      && !removed.has(candidate)
+      && model.endpointId === models[index]!.endpointId
+      && model.model === original.model && model.source === original.source);
+    if (duplicate < 0) continue;
+    models[duplicate]!.capabilities = [...new Set([...models[duplicate]!.capabilities, ...models[index]!.capabilities])];
+    removed.add(index);
+  }
+  return models.filter((_, index) => !removed.has(index));
 }
 
 function validatePresetEndpoint(providerId: CatalogProviderId, model: TextModelItemInput, endpoint: ConfigRecord): void {

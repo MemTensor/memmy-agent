@@ -1127,6 +1127,8 @@ export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettin
 
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
+    /** Write-response-only aliases, resolved by the server using real credentials. */
+    endpointAliases: z.record(z.string(), z.record(z.string(), z.string())).optional(),
     configRevision: z.string().min(1),
     providers: z.array(TextModelProviderViewSchema),
     modelAssignments: ModelAssignmentsSchema,

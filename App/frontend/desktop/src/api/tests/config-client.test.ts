@@ -218,6 +218,7 @@ describe("config-client canonical model catalog", () => {
         const body = JSON.parse(String(init?.body));
         bodies.push(body);
         const response = catalog(bodies.length === 1 ? "revision-2" : "revision-3");
+        response.endpointAliases = { openai: { "chat-duplicate": "chat" } };
         response.providers[0]!.apiKeyMasked = "sk-••••1234";
         for (const endpoint of response.providers[0]!.endpoints) endpoint.apiKeyMasked = "sk-••••1234";
         response.providers[0]!.models.push({
@@ -272,6 +273,55 @@ describe("config-client canonical model catalog", () => {
         default: serverPresetId
       });
       expect(saved.catalog?.modelAssignments.byok.agent.default).toBe(serverPresetId);
+    }
+  );
+
+  it.each(["missing alias", "endpoint changed after assignment"] as const)(
+    "%s: 相同地址和密钥掩码不能代替后端确认的连接身份",
+    async (scenario) => {
+      const bodies: ModelConfigInput[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)) as ModelConfigInput);
+        const response = catalog(`revision-${bodies.length + 1}`);
+        const provider = response.providers[0]!;
+        const endpoint = provider.endpoints[0]!;
+        endpoint.apiKeyMasked = "sk-••••1234";
+        provider.endpoints.push({ ...endpoint, endpointId: "other-key" });
+        if (scenario === "endpoint changed after assignment" && bodies.length === 1) {
+          response.endpointAliases = { openai: { "chat-copy": "chat" } };
+        }
+        provider.models.push({
+          ...provider.models[0]!,
+          presetId: "server-new-model",
+          endpointId: bodies.length === 1 ? "chat" : "other-key",
+          model: "gpt-new"
+        });
+        return jsonResponse(response);
+      }));
+      const input = inputFromCatalog(catalog("revision-1"));
+      const clientId = `${CLIENT_PRESET_ID_PREFIX}identity-check`;
+      input.providers[0]!.endpoints.push({
+        ...input.providers[0]!.endpoints[0]!,
+        endpointId: "chat-copy",
+        apiKey: "sk-different-secret1234"
+      });
+      input.providers[0]!.models.push({
+        presetId: clientId,
+        endpointId: "chat-copy",
+        model: "gpt-new",
+        source: "byok",
+        capabilities: ["agent"]
+      });
+      input.modelAssignments.byok.agent = { candidates: [clientId], default: clientId };
+
+      await expect(createHttpConfigClient(config).saveModelCatalog(input)).rejects.toThrow(
+        scenario === "missing alias" ? "Unable to resolve server preset" : "Created model preset changed before assignment"
+      );
+      expect(bodies).toHaveLength(scenario === "missing alias" ? 1 : 2);
+      if (scenario === "endpoint changed after assignment") {
+        expect(bodies[1]!.modelAssignments.byok.agent.default).toBe("server-new-model");
+        expect(bodies[1]!.providers[0]!.models.find((model) => model.presetId === "server-new-model")?.endpointId).toBe("chat");
+      }
     }
   );
 

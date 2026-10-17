@@ -121,6 +121,10 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(container.querySelector(".model-capability-select")?.textContent).toContain("Embedding");
 
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="添加模型"]')!.click());
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.disabled).toBe(true);
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "测试")!.click();
+    });
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
 
     await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));

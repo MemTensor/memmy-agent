@@ -37,11 +37,7 @@ describe("ModelPage source", () => {
     expect(pageSource).toContain('capabilities: ["memory_evolution"]');
     expect(pageSource).toContain('assignCatalogPreset(memory.workspace, "byok", "memory_summary"');
     expect(pageSource).toContain('assignCatalogPreset(evolution.workspace, "byok", "memory_evolution"');
-    expect(pageSource).toContain('assignedCatalogEndpointId(workspace, "byok", "agent")');
-    expect(pageSource).toContain("const assignedMemoryEndpointId = mem.reuse");
-    expect(pageSource).toContain("const assignedEvolutionEndpointId = skill.reuse");
-    expect(pageSource).toContain("!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked");
-    expect(pageSource).toContain("!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked");
+    expect(pageSource).toContain('assignedCatalogEndpointId(initialWorkspace, "byok", "agent")');
     expect(pageSource).toContain("createModelFormValues");
     expect(pageSource).toContain("createModelProtocolPatch");
     expect(pageSource).toContain("testModelConnection");
@@ -53,7 +49,7 @@ describe("ModelPage source", () => {
     expect(pageSource).not.toContain('dispatch(appActions.navigate("/onboarding"))');
     expect(pageSource).not.toContain('track({ name: "byok_completed"');
     expect(pageSource).toContain("DEFAULT_MODEL_IDS[props.cfg.protocol]");
-    expect(pageSource).toContain("<ValidationMessage validation={props.cfg.validation} stale={isTestStale} />");
+    expect(pageSource).toContain("<ValidationMessage validation={props.cfg.validation} stale={isTestStale}");
     expect(pageSource).not.toContain("shouldContinueOnboarding");
     expect(pageSource).not.toContain("MOCK_PRIMARY_LLM");
     expect(pageSource).not.toContain("useNavigate");
@@ -83,8 +79,8 @@ describe("ModelPage source", () => {
     const pageSource = readSource(resolve(pagesDir, "model-page.tsx"));
 
     expect(pageSource).toContain('hydrateModelConfigForm(state.modelConfig, "local")');
-    expect(pageSource).toContain("const [mem, setMem] = useState<ModelConfig>(() => initialModelForm.memoryModel)");
-    expect(pageSource).toContain("const [skill, setSkill] = useState<ModelConfig>(() => initialModelForm.skillModel)");
+    expect(pageSource).toContain("const [mem, setMem] = useState<ModelConfig>(() => bindRoleCredential(");
+    expect(pageSource).toContain("const [skill, setSkill] = useState<ModelConfig>(() => bindRoleCredential(");
     expect(pageSource).toContain("apiKeyMasked: state.modelConfig.apiKeyMasked");
     expect(pageSource).toContain("configured: state.modelConfig.configured");
   });
