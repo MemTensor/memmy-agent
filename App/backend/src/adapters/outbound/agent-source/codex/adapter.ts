@@ -49,7 +49,10 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
       const sessions = await discoverCodexSessions({
         root: sessionsRoot,
         order: options.order === "recent_first" ? "recent_first" : "path_asc",
-        maxSessions: options.maxScanTargets
+        maxSessions: options.maxScanTargets,
+        // Initial and full scans keep the whole tree; incremental resumes only
+        // need files that could still contain messages after the watermark.
+        ...(options.since && !options.fullHistory ? { modifiedSince: options.since } : {})
       });
       options.onProgress?.({ sourceId: descriptor.sourceId, phase: "discover", current: sessions.length, total: sessions.length });
 

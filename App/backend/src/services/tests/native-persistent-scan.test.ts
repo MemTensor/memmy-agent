@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -90,7 +90,11 @@ describe("persistent Codex scan", () => {
     }));
     expect(repository.getConversationCheckpoint("codex", "complete-session")).not.toBeNull();
     expect(repository.getConversationCheckpoint("codex", "incomplete-session")).toBeNull();
-    expect(repository.getScanWatermark("codex")).toBeNull();
+    // The complete sibling still advances the watermark so the next incremental
+    // scan does not re-read the whole history; the incomplete turn after that
+    // cursor stays retryable.
+    expect(repository.getScanWatermark("codex")).not.toBeNull();
+    expect(repository.getScanWatermark("codex")?.latestSeenCreatedAt).toBe(at);
   });
 
   it("counts skipped cancelled messages in add progress and still writes the watermark", async () => {
@@ -226,7 +230,8 @@ describe("nonpersistent Codex scan window", () => {
     const repository = store.repositories.agentSources;
     const writeTurn = (file: string, conversationId: string, start: string, end: string) => {
       const event = (timestamp: string, type: string, payload: Record<string, unknown>) => ({ timestamp, type, payload });
-      writeFileSync(join(root, file), [
+      const filePath = join(root, file);
+      writeFileSync(filePath, [
         event(start, "session_meta", { id: conversationId }),
         event(start, "event_msg", { type: "task_started", turn_id: `${conversationId}-turn` }),
         event(start, "response_item", { type: "message", role: "user", content: [{ text: "Inspect the complete source before changing it." }] }),
@@ -235,6 +240,10 @@ describe("nonpersistent Codex scan window", () => {
         event(end, "response_item", { type: "message", role: "assistant", content: [{ text: "I inspected the complete source and fixed it." }] }),
         event(end, "event_msg", { type: "task_complete", turn_id: `${conversationId}-turn` })
       ].map(record => JSON.stringify(record)).join("\n") + "\n");
+      // Incremental discovery skips rollouts whose mtime is older than the
+      // cursor; keep fixture mtimes aligned with the logical timestamps.
+      const endDate = new Date(end);
+      utimesSync(filePath, endDate, endDate);
     };
     writeTurn("rollout-a-old.jsonl", "old-conversation", "2099-09-09T09:00:00.000Z", "2099-09-09T09:01:00.000Z");
     writeTurn("rollout-b-new.jsonl", "new-conversation", "2099-09-09T10:01:00.000Z", "2099-09-09T10:03:00.000Z");

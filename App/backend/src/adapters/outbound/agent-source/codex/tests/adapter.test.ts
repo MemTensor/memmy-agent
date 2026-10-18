@@ -1,5 +1,5 @@
 /** Adapter tests. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -71,6 +71,34 @@ describe("codex source adapter", () => {
       expect.objectContaining({ sourceId: "codex", role: "assistant" })
     ]);
     expect(messages.some((message) => message.content.includes(SYNTHETIC_API_KEY))).toBe(false);
+  });
+
+  it("skips rollout files clearly older than the incremental cursor", async () => {
+    const fixture = createFixture();
+    const oldRolloutPath = join(
+      fixture.sessionsRoot,
+      "2026",
+      "05",
+      "28",
+      "rollout-2026-05-28T10-00-00-019e72be-500b-7f02-9400-112c5a194e5b.jsonl"
+    );
+    mkdirSync(join(fixture.sessionsRoot, "2026", "05", "28"), { recursive: true });
+    writeFileSync(
+      oldRolloutPath,
+      JSON.stringify({ timestamp: "2026-05-28T10:00:00.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Old" }] } }),
+      "utf8"
+    );
+    const longAgo = new Date("2020-01-01T00:00:00.000Z");
+    utimesSync(oldRolloutPath, longAgo, longAgo);
+
+    const skipped = await discoverCodexSessions({
+      root: fixture.sessionsRoot,
+      modifiedSince: "2026-05-29T00:00:00.000Z"
+    });
+    expect(skipped.map((session) => session.sessionFilePath)).toEqual([fixture.rolloutPath]);
+
+    const all = await discoverCodexSessions({ root: fixture.sessionsRoot });
+    expect(all.map((session) => session.sessionFilePath).sort()).toEqual([fixture.rolloutPath, oldRolloutPath].sort());
   });
 
   it("ignores backup copies of rollout files", async () => {

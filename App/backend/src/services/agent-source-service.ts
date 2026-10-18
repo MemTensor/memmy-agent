@@ -735,7 +735,15 @@ async function ingestPersistentStagedSource(
   const scannedAt = now();
   options.agentSourceRepository.setLastScannedAt(sourceId, scannedAt);
   const skillResult = await ingestSourceSkills(options, sourceId, scanOptions, store, mode);
-  if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0 && !ingestion.hasUncommittedSkips) {
+  // A clean scan still advances from latestSeenAt (covers empty runs and
+  // fully deduplicated turns). When some turns fail, advance only to the last
+  // successfully committed turn so the next incremental scan resumes there
+  // instead of re-reading the whole history; incomplete turns after that
+  // cursor are retried, and dead historical incompletes are abandoned the
+  // same way turn_cancelled already is.
+  if (ingestion.latestCommittedAt) {
+    updatePersistentWatermark(options, sourceId, mode, ingestion.latestCommittedAt, scannedAt, since);
+  } else if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0 && !ingestion.hasUncommittedSkips) {
     updatePersistentWatermark(options, sourceId, mode, ingestion.latestSeenAt, scannedAt, since);
   }
   const allErrors = [...stage.errors, ...ingestion.errors, ...skillResult.errors];
@@ -842,7 +850,7 @@ async function ingestPersistentSource(
   sourceId: string,
   scanOptions: AgentSourceScanOptions,
   initialErrors: readonly { conversationId: string; reason: string }[]
-): Promise<{ memoryIds: string[]; memoryIdCount: number; deduped: number; errorCount: number; errors: Array<{ conversationId: string; reason: string }>; latestSeenAt: string | null; hasUncommittedSkips: boolean }> {
+): Promise<{ memoryIds: string[]; memoryIdCount: number; deduped: number; errorCount: number; errors: Array<{ conversationId: string; reason: string }>; latestSeenAt: string | null; latestCommittedAt: string | null; hasUncommittedSkips: boolean }> {
   const memoryIds: string[] = [];
   let memoryIdCount = 0;
   const pendingIds: string[] = [];
@@ -850,6 +858,7 @@ async function ingestPersistentSource(
   let errorCount = initialErrors.length;
   let deduped = 0;
   let latestSeenAt: string | null = null;
+  let latestCommittedAt: string | null = null;
   let activeConversationId: string | null = null;
   let activeConversationFailed = false;
   let hasUncommittedSkips = false;
@@ -965,6 +974,9 @@ async function ingestPersistentSource(
         } else {
           deduped += turn.messages.length;
         }
+        if (turnLatest) {
+          latestCommittedAt = maxIso(latestCommittedAt, turnLatest);
+        }
         // The Memory transaction already registered normal capture jobs. Do not enqueue import summaries.
         if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
         for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
@@ -1032,6 +1044,9 @@ async function ingestPersistentSource(
           for (const failure of failures) recordScanItemSkip(store, sourceId, failure.memoryId, failure.reason);
         }
       }
+      if (turnLatest) {
+        latestCommittedAt = maxIso(latestCommittedAt, turnLatest);
+      }
       store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
     } catch (error) {
       turnSucceeded = false;
@@ -1062,7 +1077,7 @@ async function ingestPersistentSource(
     for (const failure of failures) recordScanItemSkip(store, sourceId, failure.memoryId, failure.reason);
   }
   commitConversation();
-  return { memoryIds, memoryIdCount, deduped, errorCount, errors, latestSeenAt, hasUncommittedSkips };
+  return { memoryIds, memoryIdCount, deduped, errorCount, errors, latestSeenAt, latestCommittedAt, hasUncommittedSkips };
 }
 
 function readScanPage(store: AppAgentSourceScanStore, sourceId: string, cursor?: { conversationId: string; createdAt: string; messageId: string; ordinal: number }): ConversationMessage[] {
