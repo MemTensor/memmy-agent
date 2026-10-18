@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { trustMemmyCodexHooks } from "../hook-trust.js";
+import { resolveCodexAppServerLaunch, trustMemmyCodexHooks } from "../hook-trust.js";
 
 let tempDir: string | undefined;
 
@@ -15,6 +15,37 @@ afterEach(() => {
 });
 
 describe("Codex hook trust", () => {
+  it("spawns an explicit codex executable without a shell wrapper", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-hook-launch-"));
+
+    expect(resolveCodexAppServerLaunch({
+      codexHomeDirectory: tempDir,
+      hooksFilePath: join(tempDir, "hooks.json"),
+      hookCommand: "node hook.mjs",
+      codexExecutable: "C:/tools/codex.exe"
+    })).toEqual({ command: "C:/tools/codex.exe", args: ["app-server", "--stdio"] });
+  });
+
+  it("routes the default codex command through cmd.exe on Windows so npm shims resolve", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-hook-launch-win-"));
+
+    const launch = resolveCodexAppServerLaunch({
+      codexHomeDirectory: tempDir,
+      hooksFilePath: join(tempDir, "hooks.json"),
+      hookCommand: "node hook.mjs"
+    });
+
+    if (process.platform === "win32") {
+      expect(launch.command.toLowerCase()).toBe((process.env.ComSpec ?? "cmd.exe").toLowerCase());
+      expect(launch.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+      expect(launch.args[3]).toContain("codex");
+      expect(launch.args[3]).toContain("app-server");
+      expect(launch.args[3]).toContain("--stdio");
+    } else {
+      expect(launch).toEqual({ command: "codex", args: ["app-server", "--stdio"] });
+    }
+  });
+
   it("persists and verifies trust for only the five Memmy user hooks", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-hook-trust-"));
 

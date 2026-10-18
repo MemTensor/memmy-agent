@@ -153,14 +153,49 @@ function parseHookMetadata(value: unknown): CodexHookMetadata | null {
 }
 
 function createCodexAppServerClient(options: TrustMemmyCodexHooksOptions): CodexAppServerClient {
-  const executable = options.codexExecutable ?? resolveCodexExecutable(options.codexHomeDirectory);
-  const args = options.appServerArguments ?? ["app-server", "--stdio"];
-  const child = spawn(executable, args, {
+  const launch = resolveCodexAppServerLaunch(options);
+  const child = spawn(launch.command, launch.args, {
     cwd: options.codexHomeDirectory,
     env: { ...process.env, CODEX_HOME: options.codexHomeDirectory },
     stdio: ["pipe", "pipe", "pipe"]
   });
   return createJsonLineClient(child);
+}
+
+interface CodexAppServerLaunch {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Windows CreateProcess cannot execute the npm `codex.cmd` / `codex.ps1` shims
+ * that most installs put on PATH. Routing through cmd.exe lets PATHEXT resolve
+ * the shim while an explicit executable path (tests, bundled app-server) is
+ * still spawned directly.
+ */
+export function resolveCodexAppServerLaunch(options: TrustMemmyCodexHooksOptions): CodexAppServerLaunch {
+  const args = options.appServerArguments ?? ["app-server", "--stdio"];
+  if (options.codexExecutable) {
+    return { command: options.codexExecutable, args };
+  }
+
+  const executableName = process.platform === "win32" ? "codex.exe" : "codex";
+  const bundledExecutable = join(options.codexHomeDirectory, "plugins", ".plugin-appserver", executableName);
+  if (isExecutableFile(bundledExecutable)) {
+    return { command: bundledExecutable, args };
+  }
+
+  if (process.platform === "win32") {
+    const commandLine = ["codex", ...args]
+      .map((part) => /[\s"\\/]/.test(part) ? `"${part.replace(/"/g, '\\"')}"` : part)
+      .join(" ");
+    return {
+      command: process.env.ComSpec ?? "cmd.exe",
+      args: ["/d", "/s", "/c", commandLine]
+    };
+  }
+
+  return { command: "codex", args };
 }
 
 function createJsonLineClient(child: ChildProcessWithoutNullStreams): CodexAppServerClient {
@@ -279,12 +314,6 @@ function handleResponseLine(line: string, pending: Map<number, PendingRequest>):
     return;
   }
   request.resolve(message.result);
-}
-
-function resolveCodexExecutable(codexHomeDirectory: string): string {
-  const executableName = process.platform === "win32" ? "codex.exe" : "codex";
-  const bundledExecutable = join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName);
-  return isExecutableFile(bundledExecutable) ? bundledExecutable : executableName;
 }
 
 function isExecutableFile(filePath: string): boolean {
