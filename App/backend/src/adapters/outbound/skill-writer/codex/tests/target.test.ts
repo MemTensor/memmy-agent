@@ -220,6 +220,7 @@ describe("codex skill target", () => {
         hooks: {
           Stop: Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>;
           UserPromptSubmit: Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>;
+          SessionEnd: Array<{ hooks: Array<{ command: string; timeout: number; type: string }> }>;
         };
       };
       expect(hooksConfig.hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({
@@ -235,6 +236,11 @@ describe("codex skill target", () => {
       });
       expect(hooksConfig.hooks.Stop[0].hooks[0].command).toContain("memmy-resume-hook.mjs");
       expect(hooksConfig.hooks.Stop[0].hooks[0].command).not.toContain("Electron.app");
+      // Codex caps SessionEnd at 3s; a larger value logs a clamp warning on every discovery.
+      expect(hooksConfig.hooks.SessionEnd[0].hooks[0]).toMatchObject({
+        type: "command",
+        timeout: 3
+      });
 
       const run = await runNodeHook(
         hookScriptPath,
