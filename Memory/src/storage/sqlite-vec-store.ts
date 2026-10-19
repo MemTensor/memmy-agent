@@ -34,6 +34,14 @@ export interface SerializedMemoryVector {
   updated_at: string;
 }
 
+export interface EmbeddingMaintenanceEntry {
+  id: string;
+  kind: "memory" | "user_memory";
+  dimension: number;
+  embeddingModel: string | null;
+  embeddingProvider: string | null;
+}
+
 export interface EmbeddingDimensionCounts {
   totalSlots: number;
   dimensions: Array<{ dimension: number; count: number }>;
@@ -42,6 +50,18 @@ export interface EmbeddingDimensionCounts {
 /** Keeps sqlite-vec details out of the repository and retrieval layers. */
 export class SqliteVecStore {
   constructor(private readonly db: Database.Database) {}
+
+  maintenanceEntries(): EmbeddingMaintenanceEntry[] {
+    return this.db.prepare(`
+      SELECT m.id, 'memory' AS kind, COALESCE(v.embedding_dim, 0) AS dimension,
+             v.embedding_model AS embeddingModel, v.embedding_provider AS embeddingProvider
+      FROM memories m LEFT JOIN memory_vector_entries v
+        ON v.memory_id = m.id
+        AND v.vector_field = CASE WHEN m.memory_layer = 'L1' THEN 'vec_summary' ELSE 'vec' END
+      WHERE m.deleted_at IS NULL AND m.status != 'deleted'
+      ORDER BY m.id
+    `).all() as EmbeddingMaintenanceEntry[];
+  }
 
   replace(memoryId: string, vectors: MemoryVectorValue[], updatedAt: string): void {
     this.db.transaction(() => {

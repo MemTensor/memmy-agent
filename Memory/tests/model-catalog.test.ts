@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { syncMemoryModelCatalog } from "../src/config/model-catalog.js";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "@memmy/local-api-contracts";
 
 describe("Memory model catalog inheritance", () => {
+  it("persists an explicit account local choice and allows switching back to its cloud model", () => {
+    const root: any = {
+      app: { userMode: "account", userId: "owner-a" },
+      modelAssignments: { account: { ownerAccountId: "owner-a", embedding: "platform-a" } },
+      modelPresets: {
+        "platform-b": { source: "account", ownerAccountId: "owner-b", capabilities: ["embedding"] },
+        "platform-a": { source: "account", ownerAccountId: "owner-a", capabilities: ["embedding"] }
+      }
+    };
+    const memory = { embedding: { mode: "local" } };
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account).toMatchObject({
+      ownerAccountId: "owner-a", embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+    });
+    memory.embedding.mode = "cloud";
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account.embedding).toBe("platform-a");
+  });
+
   it("forces account summaries to use a fixed route", () => {
     const root: Record<string, unknown> = {
       app: { userMode: "account" },
