@@ -29,6 +29,11 @@ const LEGACY_HOOK_SCRIPT_FILE_NAME = "memmy-memory-resume-hook.mjs";
 const HOOK_CONFIG_FILE_NAME = "memmy-memory-config.json";
 const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
 const HOOK_TIMEOUT_SECONDS = 60;
+// Codex caps SessionEnd at 3s (SESSION_END_MAX_TIMEOUT_SEC; default 1s) and
+// clamps anything larger with "clamping SessionEnd hook timeout to 3s". The
+// trust hash uses the normalized value, so writing the cap directly keeps
+// hooks.json warning-free without changing the trusted declaration.
+const SESSION_END_TIMEOUT_SECONDS = 3;
 const START_MARKER = "<!-- memmy:start v=1 -->";
 const END_MARKER = "<!-- memmy:end v=1 -->";
 const LEGACY_CLI_START_MARKER = "<!-- memmy-memory cli : start -->";
@@ -253,7 +258,7 @@ async function upsertCodexHookConfig(filePath: string, hookCommand: string): Pro
   ];
   hooks.SessionStart = codexHookEntries(hooks.SessionStart, hookCommand, "Loading Memmy world model");
   hooks.PostCompact = codexHookEntries(hooks.PostCompact, hookCommand, "Updating Memmy world model");
-  hooks.SessionEnd = codexHookEntries(hooks.SessionEnd, hookCommand, "Closing Memmy memory session");
+  hooks.SessionEnd = codexHookEntries(hooks.SessionEnd, hookCommand, "Closing Memmy memory session", SESSION_END_TIMEOUT_SECONDS);
   config.hooks = hooks;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -293,10 +298,10 @@ async function removeCodexHookConfig(filePath: string): Promise<void> {
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
-function codexHookEntries(value: unknown, hookCommand: string, statusMessage: string): Record<string, unknown>[] {
+function codexHookEntries(value: unknown, hookCommand: string, statusMessage: string, timeoutSeconds = HOOK_TIMEOUT_SECONDS): Record<string, unknown>[] {
   return [
     ...removeCodexResumeHookEntries(value),
-    { hooks: [{ type: "command", command: hookCommand, timeout: HOOK_TIMEOUT_SECONDS, statusMessage }] },
+    { hooks: [{ type: "command", command: hookCommand, timeout: timeoutSeconds, statusMessage }] },
   ];
 }
 

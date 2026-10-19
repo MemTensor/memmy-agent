@@ -23,6 +23,7 @@
     "pretest": "npm run version:sync",
     "dev": "npm run memory:dev",
     "dev:desktop": "concurrently -k -n renderer,desktop -c cyan,magenta \"npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1\" \"wait-on http://127.0.0.1:19000 && npm run dev -w @memmy/desktop\"",
+    "dev:desktop:exe": "node scripts/dev-desktop-exe-data.mjs",
     "build": "npm run memory:build && npm run workspace:build",
     "lint": "npm run memory:lint && npm run workspace:lint",
     "typecheck": "npm run memory:lint && npm run workspace:typecheck",

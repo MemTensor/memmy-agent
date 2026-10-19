@@ -19,11 +19,22 @@ export interface DiscoverCodexSessionsOptions {
   root: string;
   order?: "path_asc" | "recent_first";
   maxSessions?: number;
+  /**
+   * Incremental cursor. Files whose mtime is clearly older than this ISO time
+   * are skipped so a watermark resume does not re-read the whole sessions tree.
+   */
+  modifiedSince?: string;
 }
+
+/**
+ * Filesystem timestamps can lag the message clock by a few seconds; keep a
+ * small buffer so a just-written rollout is never filtered out by skew.
+ */
+const MTIME_SKIP_SKEW_MS = 120_000;
 
 /** Handles discover codex sessions. */
 export async function discoverCodexSessions(options: DiscoverCodexSessionsOptions): Promise<CodexSessionFile[]> {
-  const files = await listRolloutFiles(options.root, options.order ?? "path_asc", options.maxSessions);
+  const files = await listRolloutFiles(options.root, options.order ?? "path_asc", options.maxSessions, options.modifiedSince);
   const sessions: CodexSessionFile[] = [];
 
   for (const filePath of files) {
@@ -42,10 +53,13 @@ export async function discoverCodexSessions(options: DiscoverCodexSessionsOption
 async function listRolloutFiles(
   root: string,
   order: "path_asc" | "recent_first",
-  maxSessions: number | undefined
+  maxSessions: number | undefined,
+  modifiedSince?: string
 ): Promise<string[]> {
   const files: Array<{ path: string; mtimeMs: number }> = [];
   const directories = [root];
+  const modifiedSinceMs = modifiedSince ? Date.parse(modifiedSince) : Number.NaN;
+  const skipBeforeMs = Number.isFinite(modifiedSinceMs) ? modifiedSinceMs - MTIME_SKIP_SKEW_MS : Number.NaN;
 
   for (let directoryIndex = 0; directoryIndex < directories.length; directoryIndex += 1) {
     const currentDirectory = directories[directoryIndex]!;
@@ -60,6 +74,9 @@ async function listRolloutFiles(
 
       if (entry.isFile() && isPrimaryRolloutFile(entry.name)) {
         const fileStat = await stat(path);
+        if (Number.isFinite(skipBeforeMs) && fileStat.mtimeMs < skipBeforeMs) {
+          continue;
+        }
         files.push({ path, mtimeMs: fileStat.mtimeMs });
       }
     }
