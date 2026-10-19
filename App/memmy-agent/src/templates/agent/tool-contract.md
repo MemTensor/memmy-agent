@@ -37,7 +37,9 @@ records general tool contracts and less obvious usage patterns.
 
 - For code or configuration changes, the default loop is: locate (`find_files`/`grep`), inspect (`read_file`), edit (`apply_patch`), then verify (`exec` or reread).
 - Use `apply_patch` as the default code editing tool, especially for multi-file changes, structural edits, generated code, moves, additions, or deletions.
-- Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`; when ambiguity matters, add `occurrence`, `line_hint`, or `expected_replacements`.
+- Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`. With no selector, the text must match once. To handle multiple matches, choose only one of `occurrence` (1-based match index), `line_hint` (nearest 1-based start line; ties fail), or `replace_all=true` (all matches). These three selectors are mutually exclusive; omit unused selectors or use `null` for `occurrence`/`line_hint`.
+- `expected_replacements` is an independent count assertion, compatible with every selection mode; it does not select a match. For example, use `occurrence=2, expected_replacements=1` for the second match, or `replace_all=true, expected_replacements=3` for all three matches.
+- If `edit_file` uses `old_text=""` to create a missing file or fill an empty/whitespace-only file, omit selectors and leave `replace_all` false. In this mode, `expected_replacements` may be omitted/null or set to `1`, including a no-op.
 - Use `write_file` for new files or intentional full-file rewrites, not routine local edits.
 - If a write tool returns `No changes made`, do not repeat the same tool call with identical arguments. Re-read the target and change the arguments or editing strategy.
 - If `apply_patch` or `edit_file` fails, reread with `force=true`, narrow the context, and try a smaller patch instead of switching to shell `sed` or `echo`.
