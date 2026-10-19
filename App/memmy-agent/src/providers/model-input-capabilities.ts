@@ -168,13 +168,14 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["groq/compound-mini", TEXT],
   ["qwen/qwen3.6-27b", TEXT_IMAGE],
 
-  // DeepSeek. Reviewed 2026-09-15.
+  // DeepSeek. Reviewed 2026-10-19.
   // Source: https://api-docs.deepseek.com/quick_start/pricing
   // Source: https://api-docs.deepseek.com/guides/vision/
-  // Official API ID is deepseek-flash (DeepSeek-V4.1-Flash) with native vision.
-  // deepseek-v4.1-flash is the Hugging Face / informal ID; lookup is exact, so register both.
+  // Official API ID remains deepseek-flash, now served by DeepSeek-V4.1-Flash-1017, with native vision.
+  // deepseek-v4.1-flash and deepseek-v4.1-flash-1017 are Hugging Face / informal IDs; lookup is exact.
   ["deepseek-flash", TEXT_IMAGE],
   ["deepseek-v4.1-flash", TEXT_IMAGE],
+  ["deepseek-v4.1-flash-1017", TEXT_IMAGE],
   ["deepseek-v4-pro", TEXT],
   ["deepseek-v4-flash", TEXT],
   ["deepseek-v4-flash-0731", TEXT],

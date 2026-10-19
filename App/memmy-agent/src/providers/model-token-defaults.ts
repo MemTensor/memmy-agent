@@ -269,13 +269,16 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   },
   { models: ["qwen/qwen3.6-27b"], contextWindowTokens: 131_072, maxTokens: 16_384 },
 
-  // DeepSeek. Reviewed 2026-09-15.
+  // DeepSeek. Reviewed 2026-10-19.
   // Source: https://api-docs.deepseek.com/quick_start/pricing
+  // Official API ID remains deepseek-flash, now served by DeepSeek-V4.1-Flash-1017.
   // Official Flash/Pro limits are 1M context and 384K max output.
+  // deepseek-v4.1-flash and deepseek-v4.1-flash-1017 are Hugging Face / informal IDs.
   {
     models: [
       "deepseek-flash",
       "deepseek-v4.1-flash",
+      "deepseek-v4.1-flash-1017",
       "deepseek-v4-pro",
       "deepseek-v4-flash",
       "deepseek-v4-flash-0731",

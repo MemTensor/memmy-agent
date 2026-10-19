@@ -957,7 +957,7 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kwargs.messages[1]).not.toHaveProperty("reasoning_content");
   });
 
-  it.each(["deepseek-v4-pro", "deepseek-flash", "deepseek-v4.1-flash"])(
+  it.each(["deepseek-v4-pro", "deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017"])(
     "backfills DeepSeek reasoning history for %s when effort is implicit",
     (model) => {
       const kwargs = providerFor("deepseek", model).buildKwargs({
