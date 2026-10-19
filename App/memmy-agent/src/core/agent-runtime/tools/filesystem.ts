@@ -903,7 +903,7 @@ export class EditFileTool extends Tool {
         oldText: { type: "string", description: "Alias of old_text; prefer old_text. The snake_case value takes precedence when both are supplied." },
         new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
         newText: { type: "string", description: "Alias of new_text; prefer new_text. The snake_case value takes precedence when both are supplied." },
-        replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. Cannot be combined with non-null occurrence or line_hint, or used in create mode." },
+        replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. When true, cannot be combined with non-null occurrence or line_hint, or used in create mode. When false, may be combined with occurrence or line_hint, or used in create mode." },
         replaceAll: { type: "boolean", description: "Alias of replace_all, with the same restrictions; prefer replace_all. The snake_case value takes precedence when both are supplied." },
         occurrence: { type: ["integer", "null"], minimum: 1, description: "Select the 1-based occurrence of old_text in file order. Omit or use null when unused. Cannot be combined with line_hint or replace_all=true, or used in create mode." },
         line_hint: { type: ["integer", "null"], minimum: 1, description: "Select the match whose start is nearest this 1-based line number; equal-distance ties fail. Omit or use null when unused. Cannot be combined with occurrence or replace_all=true, or used in create mode." },
