@@ -55,6 +55,7 @@ interface TestButtonProps {
 interface ValidationMessageProps {
   validation: ModelConfigValidationState;
   stale: boolean;
+  credentialRequired?: boolean;
 }
 
 /** Handles config field. */
@@ -152,12 +153,12 @@ export function TestButton(props: TestButtonProps) {
 export function ValidationMessage(props: ValidationMessageProps) {
   const { t } = useTranslation();
 
-  if (props.validation.status === "idle" && !props.stale) {
+  if (props.validation.status === "idle" && !props.stale && !props.credentialRequired) {
     return null;
   }
 
-  const isSuccess = props.validation.status === "success" && !props.stale;
-  const message = props.stale ? t("apiKey.testStale") : props.validation.message;
+  const isSuccess = props.validation.status === "success" && !props.stale && !props.credentialRequired;
+  const message = props.credentialRequired ? t("apiKey.credentialsChanged") : props.stale ? t("apiKey.testStale") : props.validation.message;
 
   return (
     <OverflowTooltipText

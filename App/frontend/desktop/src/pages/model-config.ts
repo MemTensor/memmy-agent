@@ -1,4 +1,5 @@
 /** Model config module. */
+import { resolveModelCredentials, type SavedEndpointIdentity } from "./model-credentials.js";
 import { ASR_DEFAULT_BASE_URL, ASR_PROVIDER, QWEN_ASR_MODEL_ID, type ModelConfigTestSecretTarget } from "@memmy/local-api-contracts";
 import type {
   AsrProviderConfig,
@@ -24,6 +25,7 @@ export type Protocol = "openai" | "anthropic" | "gemini" | "deepseek" | "zhipu" 
 
 /** Contract for model config. */
 export interface ModelConfig {
+  credentialSource?: SavedEndpointIdentity | null;
   reuse: boolean;
   protocol: Protocol;
   modelId: string;
@@ -48,6 +50,7 @@ export interface TextProviderOption {
 
 /** Contract for primary model values. */
 export interface PrimaryModelValues {
+  credentialSource?: SavedEndpointIdentity | null;
   protocol: Protocol;
   modelId: string;
   endpoint: string;
@@ -100,6 +103,7 @@ export interface TestModelConnectionInput {
 /** Contract for test model connection messages. */
 export interface TestModelConnectionMessages {
   missingFields: string;
+  credentialsChanged?: string;
   localApiUnavailable: string;
   testing: string;
   success: string;
@@ -195,6 +199,7 @@ export const IMAGE_DEFAULT_MODEL_IDS: Record<ImageProtocol, string> = {
 export function createTestModelConnectionMessages(t: (key: MessageKey) => string): TestModelConnectionMessages {
   return {
     missingFields: t("apiKey.testMissingFields"),
+    credentialsChanged: t("apiKey.credentialsChanged"),
     localApiUnavailable: t("apiKey.testLocalApiUnavailable"),
     testing: t("apiKey.testConnecting"),
     success: t("apiKey.testSuccess"),
@@ -236,30 +241,24 @@ export function createModelProtocolPatch(protocol: Protocol): Pick<ModelConfig, 
 
 /** Creates create model form values. */
 export function createModelFormValues(config: ModelConfig, primary: PrimaryModelValues): ModelConfigFormValues {
-  if (config.reuse) {
-    return {
-      provider: fromProtocol(primary.protocol),
-      endpoint: primary.endpoint,
-      model: primary.modelId,
-      apiKey: primary.apiKey,
-      apiKeyMasked: primary.apiKeyMasked,
-      hasExistingApiKey: Boolean(primary.configured || primary.apiKeyMasked)
-    };
-  }
-
-  return {
-    provider: fromProtocol(config.protocol),
-    endpoint: config.endpoint,
-    model: config.modelId,
-    apiKey: config.apiKey,
-    apiKeyMasked: config.apiKeyMasked,
-    hasExistingApiKey: Boolean(config.configured || config.apiKeyMasked)
+  const selected = config.reuse ? primary : config;
+  const values: ModelConfigFormValues = {
+    provider: fromProtocol(selected.protocol),
+    endpoint: selected.endpoint,
+    model: selected.modelId,
+    apiKey: selected.apiKey,
+    apiKeyMasked: selected.apiKeyMasked,
+    hasExistingApiKey: Boolean(selected.configured || selected.apiKeyMasked)
   };
+  return selected.credentialSource === undefined
+    ? values
+    : resolveModelCredentials(values, selected.credentialSource);
 }
 
 /** Converts resolved form values into the inheritance source for a weaker model role. */
 export function modelFormValuesAsPrimary(values: ModelConfigFormValues): PrimaryModelValues {
   return {
+    ...(values.credentialSource !== undefined ? { credentialSource: values.credentialSource } : {}),
     protocol: toProtocol(values.provider),
     modelId: values.model,
     endpoint: values.endpoint,
@@ -491,17 +490,8 @@ function toRoleModelProviderConfig(values: ModelConfigFormValues): RoleModelProv
 }
 
 function hydrateRoleModelConfig(role: RoleModelProviderConfig | undefined, primary: PrimaryModelValues): ModelConfig {
-  if (!role || role.mode === "follow" || (!role.configured && !role.apiKeyMasked)) {
+  if (!role || role.mode === "follow" || (role.mode !== "fixed" && !role.configured && !role.apiKeyMasked && !role.apiKey.trim())) {
     return createModelConfig(primary.protocol);
-  }
-
-  if (isReusingPrimaryModel(role, primary)) {
-    return {
-      ...createModelConfig(primary.protocol),
-      configured: true,
-      apiKeyMasked: primary.apiKeyMasked ?? "",
-      validation: createSavedValidation(createModelFormValues(createModelConfig(primary.protocol), primary))
-    };
   }
 
   const protocol = toProtocol(role.provider);
@@ -518,12 +508,6 @@ function hydrateRoleModelConfig(role: RoleModelProviderConfig | undefined, prima
   };
   config.validation = createSavedValidation(createModelFormValues(config, primary));
   return config;
-}
-
-function isReusingPrimaryModel(role: RoleModelProviderConfig, primary: PrimaryModelValues): boolean {
-  return role.provider === fromProtocol(primary.protocol)
-    && role.endpoint === primary.endpoint
-    && role.model === primary.modelId;
 }
 
 function resolveEmbeddingMode(
@@ -573,7 +557,9 @@ export function testModelConnection(input: TestModelConnectionInput): void {
   if (!hasRequiredModelConfigValues(input.values)) {
     input.setValidation({
       status: "error",
-      message: input.messages.missingFields,
+      message: input.values.requiresApiKey
+        ? input.messages.credentialsChanged ?? input.messages.missingFields
+        : input.messages.missingFields,
       testedKey: null
     });
     return;
