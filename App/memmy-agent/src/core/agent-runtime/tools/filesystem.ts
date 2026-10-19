@@ -798,6 +798,31 @@ export class WriteFileTool extends Tool {
   }
 }
 
+const EDIT_FILE_ALIASES = [
+  ["old_text", "oldText"],
+  ["new_text", "newText"],
+  ["replace_all", "replaceAll"],
+  ["line_hint", "lineHint"],
+  ["expected_replacements", "expectedReplacements"],
+] as const;
+
+/** Keep legacy inputs out of the model schema without silently discarding conflicting values. */
+function normalizeEditAliases(params: Record<string, any>): { params: Record<string, any>; error: string | null } {
+  const normalized = { ...params };
+  for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+    const value = params[canonical];
+    const legacy = params[alias];
+    // Nullish values are unset for compatibility; empty text and false are explicit values.
+    if (value != null && legacy != null && value !== legacy) {
+      return { params, error: `Conflicting parameters: ${canonical} and ${alias} must have the same value when both are provided.` };
+    }
+    if (value == null && legacy !== undefined) normalized[canonical] = legacy;
+    if (normalized[canonical] === undefined) delete normalized[canonical];
+    delete normalized[alias];
+  }
+  return { params: normalized, error: null };
+}
+
 export class EditFileTool extends Tool {
   static scopes = new Set(["core", "subagent", "memory"]);
   static MAX_EDIT_FILE_SIZE = 1024 * 1024 * 1024;
@@ -848,19 +873,35 @@ export class EditFileTool extends Tool {
       properties: {
         path: { type: "string" },
         old_text: { type: "string" },
-        oldText: { type: "string" },
-        new_text: { type: "string" },
-        newText: { type: "string" },
+        new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
         replace_all: { type: "boolean" },
-        replaceAll: { type: "boolean" },
         occurrence: { type: ["integer", "null"], minimum: 1 },
         line_hint: { type: ["integer", "null"], minimum: 1 },
-        lineHint: { type: ["integer", "null"], minimum: 1 },
         expected_replacements: { type: ["integer", "null"], minimum: 1 },
-        expectedReplacements: { type: ["integer", "null"], minimum: 1 },
       },
-      required: ["path"],
+      required: ["path", "old_text", "new_text"],
     };
+  }
+
+  castParams(params: Record<string, any>): Record<string, any> {
+    const cast = super.castParams(params);
+    if (!cast || typeof cast !== "object" || Array.isArray(cast)) return cast;
+    for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+      if (alias in cast) {
+        cast[alias] = super.castParams({ [canonical]: cast[alias] })[canonical];
+      }
+    }
+    // On conflict, preserve both cast values so validateParams can report the error.
+    return normalizeEditAliases(cast).params;
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    if (!params || typeof params !== "object" || Array.isArray(params)) return super.validateParams(params);
+    const normalized = normalizeEditAliases(params);
+    if (normalized.error) return [normalized.error];
+    const errors = super.validateParams(normalized.params);
+    if (errors.length) return errors;
+    return [];
   }
 
   setContext(ctx: any): void {
@@ -885,15 +926,21 @@ export class EditFileTool extends Tool {
     expected_replacements?: number | null;
     expectedReplacements?: number | null;
   } = {}, context?: ToolExecutionContext): Promise<string> {
+    params = this.castParams(params);
+    if (!params || typeof params !== "object" || Array.isArray(params)) return "Error editing file: parameters must be an object.";
+    const aliasError = normalizeEditAliases(params).error;
+    if (aliasError) return `Error: ${aliasError}`;
     if (!params.path) return "Error editing file: Unknown path";
-    const oldText = params.old_text ?? params.oldText;
-    const newText = params.new_text ?? params.newText;
+    const oldText = params.old_text;
+    const newText = params.new_text;
     if (oldText == null) return "Error editing file: Unknown old_text";
     if (newText == null) return "Error editing file: Unknown new_text";
-    const replaceAll = params.replace_all ?? params.replaceAll ?? false;
+    const parameterErrors = this.validateParams(params);
+    if (parameterErrors.length) return `Error: ${parameterErrors.join("; ")}`;
+    const replaceAll = params.replace_all ?? false;
     const occurrence = params.occurrence ?? null;
-    const lineHint = params.line_hint ?? params.lineHint ?? null;
-    const expectedReplacements = params.expected_replacements ?? params.expectedReplacements ?? null;
+    const lineHint = params.line_hint ?? null;
+    const expectedReplacements = params.expected_replacements ?? null;
     if (occurrence != null && occurrence < 1) return "Error: occurrence must be >= 1.";
     if (lineHint != null && lineHint < 1) return "Error: line_hint must be >= 1.";
     if (expectedReplacements != null && expectedReplacements < 1) return "Error: expected_replacements must be >= 1.";

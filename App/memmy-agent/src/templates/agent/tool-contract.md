@@ -38,6 +38,7 @@ records general tool contracts and less obvious usage patterns.
 - For code or configuration changes, the default loop is: locate (`find_files`/`grep`), inspect (`read_file`), edit (`apply_patch`), then verify (`exec` or reread).
 - Use `apply_patch` as the default code editing tool, especially for multi-file changes, structural edits, generated code, moves, additions, or deletions.
 - Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`; when ambiguity matters, add `occurrence`, `line_hint`, or `expected_replacements`.
+- For `edit_file`, use only the declared snake_case fields. `old_text` and `new_text` are required strings; an explicit `new_text=""` deletes the selected text.
 - Use `write_file` for new files or intentional full-file rewrites, not routine local edits.
 - If a write tool returns `No changes made`, do not repeat the same tool call with identical arguments. Re-read the target and change the arguments or editing strategy.
 - If `apply_patch` or `edit_file` fails, reread with `force=true`, narrow the context, and try a smaller patch instead of switching to shell `sed` or `echo`.
@@ -88,3 +89,8 @@ records general tool contracts and less obvious usage patterns.
 - Use `cron` for scheduled reminders or recurring tasks; do not run `memmy cron`, and do not run it through `exec`.
 - For heartbeat tasks, update `HEARTBEAT.md` according to the agent instructions.
 - When the user expects an actual notification, do not only write the reminder into a memory file.
+
+## Execution Parameters
+
+- Use only the declared fields for `exec`: `command` is required; use `cwd`, `timeout` (seconds), `shell`, `login`, `yield_time_ms`, and `max_output_chars` as needed. Conflicting aliases are rejected before execution; correct the arguments before retrying.
+- For `exec` and `write_stdin`, `max_output_chars` limits retained output in UTF-16 code units (JavaScript string length), not tokens. It defaults to 10,000; truncation notices and status metadata are additional.
