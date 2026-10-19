@@ -1,3 +1,4 @@
+import { ModelHttpError } from "../../model/http.js";
 /**
  * Worker scheduling and execution domain.
  *
@@ -545,8 +546,7 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
-        const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" && batch.length > 1) {
+        if (batch.length > 1 && shouldIsolateEmbeddingBatch(error)) {
           for (const item of batch) results.push(await this.runLeasedEmbeddingItem(item));
           continue;
         }
@@ -733,8 +733,7 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
-        const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" && batch.length > 1) {
+        if (batch.length > 1 && shouldIsolateEmbeddingBatch(error)) {
           for (const item of batch) {
             results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
           }
@@ -932,4 +931,13 @@ function embeddingRetryLogFields(retry: EmbeddingRetryRecord): Record<string, un
     maxAttempts: retry.maxAttempts,
     nextAttemptAt: retry.nextAttemptAt
   };
+}
+
+// A rejected input can poison a whole provider request. Probe each original
+// item once; do not split authentication, quota, rate-limit or server failures.
+function shouldIsolateEmbeddingBatch(error: unknown): boolean {
+  const classification = classifyProcessingError(error);
+  return classification.code === "model_input_too_long" ||
+    (classification.code === "invalid_model_request" && error instanceof ModelHttpError &&
+      [400, 413, 422].includes(error.httpStatus));
 }

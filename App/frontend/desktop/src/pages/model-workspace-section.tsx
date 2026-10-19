@@ -4,7 +4,7 @@ import {
   MODEL_NAME_MAX_LENGTH,
   type ModelEndpointProtocol
 } from "@memmy/local-api-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -51,6 +51,8 @@ import {
   type StoredConnectionTestState,
   type StoredConnectionTestStatus
 } from "./model-workspace-connection-test-state.js";
+
+import { endpointCredentialSignature, resolveModelCredentials } from "./model-credentials.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 export type ModelKind = "text" | "embedding" | "asr" | "image";
@@ -113,8 +115,17 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [workspace, setWorkspace] = useState(() => createModelWorkspace(props.seedConfig));
   const [modelsExpanded, setModelsExpanded] = useState(true);
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
-  const [editor, setEditor] = useState<ConnectionEditorState | null>(null);
+  const [editor, setEditorState] = useState<ConnectionEditorState | null>(null);
+  const editorRevision = useRef(0);
+  const editorRequest = useRef(0);
   const [editorTest, setEditorTest] = useState<ConnectionTestState>({ status: "idle", message: null });
+  // Every edit (including closing/reopening) invalidates pending responses, even
+  // when the user later restores the same field values.
+  const setEditor: Dispatch<SetStateAction<ConnectionEditorState | null>> = useCallback((update) => {
+    editorRevision.current += 1;
+    setEditorState(update);
+    setEditorTest({ status: "idle", message: null });
+  }, []);
   const [showEditorApiKey, setShowEditorApiKey] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ModelConnection | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -272,9 +283,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     const provider = protocolFromConnection(connection.provider);
     const savedTest = connectionTestState(connection, testStates);
     setFormError(null);
-    setEditorTest(savedTest
-      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
-      : { status: "idle", message: null });
     setShowEditorApiKey(false);
     setEditor({
       connectionId: connection.id,
@@ -291,6 +299,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       addingModel: false,
       editingModelIndex: null
     });
+    setEditorTest(savedTest
+      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
+      : { status: "idle", message: null });
   }
 
   function resolveEditorModels() {
@@ -333,24 +344,15 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setFormError(resolved.error);
       return;
     }
-    const existing = editor.connectionId
-      ? space.connections.find((connection) => connection.id === editor.connectionId)
-      : undefined;
-    const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
-    );
-    const capabilities = resolved.models.flatMap((model) => model.capabilities);
+    const credentials = editorCredentials;
+    if (!canSaveConnection || !credentials) return;
     const result = upsertModelConnection(workspace, props.mode, {
       id: editor.connectionId ?? undefined,
-      provider: editor.provider,
-      endpoint: editor.endpoint,
-      protocol: editorProtocolForCapabilities(
-        editor.provider,
-        capabilities,
-        providerChanged ? undefined : existing?.protocol
-      ),
-      apiKey: editor.apiKey || undefined,
-      apiKeyMasked: providerChanged ? undefined : existing?.apiKeyMasked,
+      provider: credentials.provider,
+      endpoint: credentials.endpoint,
+      protocol: credentials.protocol,
+      apiKey: credentials.apiKey || undefined,
+      apiKeyMasked: credentials.apiKeyMasked || undefined,
       models: resolved.models.map((model) => model.name),
       modelEntries: resolved.models.map((model) => ({
         ...(model.presetId ? { presetId: model.presetId } : {}),
@@ -551,39 +553,31 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testNoModel") });
       return;
     }
-    const existing = editor.connectionId
-      ? space.connections.find((connection) => connection.id === editor.connectionId)
-      : undefined;
-    const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
-    );
-    if (!editor.apiKey.trim() && (!existing?.apiKeyMasked || providerChanged)) {
-      setEditorTest({ status: "error", message: t("settings.modelWorkspace.testKeyRequired") });
+    const credentials = editorCredentials;
+    if (!credentials || (!credentials.apiKey && !credentials.hasExistingApiKey)) {
+      setEditorTest({ status: "error", message: t(credentials?.requiresApiKey
+        ? "apiKey.credentialsChanged" : "settings.modelWorkspace.testKeyRequired") });
       return;
     }
+    const revision = editorRevision.current;
+    const request = ++editorRequest.current;
+    const isCurrent = () => revision === editorRevision.current && request === editorRequest.current;
     setEditorTest({ status: "testing", message: t("settings.modelWorkspace.testing") });
     try {
       const result = props.configClient
         ? await props.configClient.testModelConfig({
-          provider: fromProtocol(editor.provider),
-          endpointId: existing?.endpointId ?? editor.connectionId ?? "connection-test-new",
-          protocol: editorProtocolForCapabilities(
-            editor.provider,
-            selectedModel.capabilities,
-            providerChanged ? undefined : existing?.protocol
-          ),
-          endpoint: editor.endpoint,
-            model: selectedModel.name,
-            apiKey: editor.apiKey,
-            apiKeyMasked: providerChanged ? "" : existing?.apiKeyMasked ?? "",
-            configured: true
-          }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
+          ...credentials,
+          apiKeyMasked: credentials.apiKeyMasked ?? "",
+          configured: true
+        }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
         : await simulateConnectionTest();
+      if (!isCurrent()) return;
       setEditorTest({
         status: result.ok ? "success" : "error",
         message: result.ok ? t("settings.modelWorkspace.testSuccess") : t("settings.modelWorkspace.testFailed")
       });
     } catch {
+      if (!isCurrent()) return;
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testFailed") });
     }
   }
@@ -683,21 +677,36 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const editorExistingConnection = editor?.connectionId
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
-  const editorOriginalProvider = editorExistingConnection
-    ? protocolFromConnection(editorExistingConnection.provider)
-    : null;
-  const editorProviderChanged = Boolean(
-    editor && editorOriginalProvider && editor.provider !== editorOriginalProvider
-  );
-  const editorHasUsableKey = Boolean(
-    editor?.apiKey.trim()
-    || (editorExistingConnection?.apiKeyMasked && !editorProviderChanged)
-  );
+  const editorModels = resolveEditorModels().models;
+  const editorSelectedModel = editorModels.find((model) => model.capabilities.includes("chat")) ?? editorModels[0];
+  const editorProviderChanged = Boolean(editorExistingConnection && editor
+    && protocolFromConnection(editorExistingConnection.provider) !== editor.provider);
+  const editorCredentials = editor ? resolveModelCredentials({
+    provider: fromProtocol(editor.provider),
+    protocol: editorProtocolForCapabilities(editor.provider,
+      editorModels.flatMap((model) => model.capabilities),
+      editorProviderChanged ? undefined : editorExistingConnection?.protocol),
+    endpoint: editor.endpoint,
+    model: editorSelectedModel?.name ?? "",
+    apiKey: editor.apiKey,
+    apiKeyMasked: editorExistingConnection?.apiKeyMasked ?? ""
+  }, editorExistingConnection ? {
+    endpointId: editorExistingConnection.endpointId,
+    credentialSignature: endpointCredentialSignature(editorExistingConnection.provider,
+      editorExistingConnection.protocol, editorExistingConnection.endpoint, "", editorExistingConnection.apiKeyMasked)
+  } : null) : null;
+  const editorHasUsableKey = Boolean(editorCredentials?.apiKey || editorCredentials?.hasExistingApiKey);
+  const editorDetailsChanged = Boolean(editorExistingConnection && editorCredentials && (
+    editorCredentials.apiKey || !editorCredentials.hasExistingApiKey
+    || JSON.stringify(editorModels.map((model) => [model.name, [...model.capabilities].sort()])) !==
+       JSON.stringify(editorExistingConnection.modelEntries.map((model) => [model.model,
+         normalizeEditorCapabilities(model.capabilities.map(fromCatalogCapability)).sort()]))
+  ));
   const canSaveConnection = Boolean(
-    editor
-    && editor.endpoint.trim()
-    && editorHasUsableKey
-    && (editor.models.length > 0 || (editor.addingModel && editor.modelDraft.trim()))
+    editor && editorCredentials?.endpoint && editorHasUsableKey
+    && editorModels.length && !resolveEditorModels().error
+    && editorTest.status !== "error"
+    && (!editorDetailsChanged || editorTest.status === "success")
   );
   const selectedTaskModelsText = taskCandidates.length > 0
     ? taskCandidates.map((candidate) => candidate.model).join("、")
@@ -1096,7 +1105,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             placeholder={DEFAULT_ENDPOINTS[editor.provider]}
           />
           <PasswordConfigField
-            label={editor.connectionId && !editorProviderChanged
+            label={editorCredentials?.hasExistingApiKey
               ? t("settings.modelWorkspace.replaceKey")
               : t("apiKey.key")}
             value={editor.apiKey}
@@ -1104,15 +1113,19 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               setEditor((current) => current ? { ...current, apiKey: value } : current);
               setEditorTest({ status: "idle", message: null });
             }}
-            maskedValue={editor.connectionId && !editorProviderChanged
-              ? editorExistingConnection?.apiKeyMasked
-              : undefined}
-            placeholder={editor.connectionId && !editorProviderChanged
+            maskedValue={editorCredentials?.apiKeyMasked}
+            placeholder={editorCredentials?.hasExistingApiKey
               ? t("settings.modelWorkspace.replaceKeyPlaceholder")
               : "sk-..."}
             showPassword={showEditorApiKey}
             onTogglePassword={() => setShowEditorApiKey((show) => !show)}
           />
+          {editorCredentials?.requiresApiKey && (
+            <p className="text-xs text-status-error" role="alert">{t("apiKey.credentialsChanged")}</p>
+          )}
+          {editorDetailsChanged && editorHasUsableKey && editorTest.status === "idle" && (
+            <p className="text-xs text-text-ink/65" role="status">{t("apiKey.testStale")}</p>
+          )}
           <div className="grid gap-1.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-xs text-text-ink/65">

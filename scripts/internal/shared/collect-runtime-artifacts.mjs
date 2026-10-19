@@ -5,13 +5,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const [input, output] = process.argv.slice(2).map((value) => resolve(value));
+const [inputPath, outputPath, selection = "both"] = process.argv.slice(2);
+if (!inputPath || !outputPath || !["both", "memory"].includes(selection)) {
+  throw new Error("Usage: collect-runtime-artifacts.mjs <input-directory> <output-directory> [both|memory]");
+}
+const [input, output] = [inputPath, outputPath].map((value) => resolve(value));
 if (!input || !output || input === output) throw new Error("Usage: collect-runtime-artifacts.mjs <input-directory> <output-directory>");
 const targets = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
 const manifest = { sourceCommit: process.env.GITHUB_SHA ?? null, nodeVersion: process.versions.node, nodeAbi: process.versions.modules, runtimes: {} };
 const checksums = [];
 await mkdir(output, { recursive: true });
-for (const kind of ["agent", "memory"]) {
+for (const kind of selection === "memory" ? ["memory"] : ["agent", "memory"]) {
   const packageFile = kind === "agent" ? "App/memmy-agent/package.json" : "Memory/package.json";
   const version = JSON.parse(await readFile(join(repo, packageFile))).version;
   const assets = {};

@@ -350,18 +350,6 @@ const SlashCommandsResponseSchema = z.object({
   commands: z.array(SlashCommandSchema)
 });
 
-const WEBUI_HIDDEN_SLASH_COMMANDS = new Set([
-  "/stop",
-  "/restart",
-  "/dream",
-  "/dream-log",
-  "/dream-restore",
-  "/history",
-  "/pairing",
-  "/help",
-  "/model"
-]);
-
 const SidebarStateSchema = z.object({
   schema_version: z.literal(1),
   pinned_keys: z.array(z.string()),
@@ -1186,7 +1174,6 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
   async listSlashCommands(): Promise<MemmyAgentSlashCommand[]> {
     const response = await this.request("/api/commands", SlashCommandsResponseSchema);
     return response.commands
-      .filter((command) => !WEBUI_HIDDEN_SLASH_COMMANDS.has(command.command))
       .map((command) => ({
         command: command.command,
         title: command.title,

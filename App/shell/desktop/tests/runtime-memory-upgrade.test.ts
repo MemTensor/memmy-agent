@@ -71,9 +71,12 @@ async function fixture(options: {
     "const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || '2.1.1';",
     "fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, sqlitePath: db, host: '127.0.0.1', port }));",
     "const server = http.createServer((request, response) => {",
-    // Model health can be false while Memory still owns the endpoint. An
-    // unrelated service must omit the Memory identity fields instead.
-    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); const isMemory = process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')); response.end(JSON.stringify(isMemory ? { ok: process.env.FIXTURE_HEALTHY !== 'false', protocolVersion: 1, serviceVersion: version } : { status: 'ok' })); return; }",
+    "  if (request.url === '/api/v1/health') {",
+    "    const hasMemoryIdentity = process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service'));",
+    // A non-Memory endpoint lacks the health contract; `ok: false` is valid for a degraded Memory service.
+    "    const health = hasMemoryIdentity ? { ok: process.env.FIXTURE_HEALTHY !== 'false', protocolVersion: 1, serviceVersion: version } : { serviceVersion: version };",
+    "    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(health)); return;",
+    "  }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
     "});",

@@ -1,0 +1,69 @@
+---
+title: 斜杠命令一览
+icon: Terminal
+---
+
+本文整理聊天输入框中的全部 14 个斜杠命令，包括 13 个 Agent 内置命令和桌面专用的 `/last-compaction`，不包含终端里的 `memmy` CLI 子命令。
+
+## 输入与提示
+
+- 输入 `/` 后，面板默认显示最多 5 行，其余命令可滚动查看。较小窗口下可见行数会进一步减少。
+- 继续输入名称可按命令名前缀筛选，不匹配说明文字。例如 `/s` 匹配 `/stop` 和 `/status`，`/stop` 只匹配 `/stop`。筛选不会截断结果。
+- 主命令、完整子命令和可用模型预设处于同一候选列表，统一按完整输入做前缀匹配，不限制层级。例如 `/g` 同时匹配 `/goal`、`/goal pause`、`/goal budget none` 等所有相关项；`/goal ` 只匹配带空格的子命令；`/goal b` 同时匹配 `/goal budget` 和 `/goal budget none`。
+- 查询时按剩余补全文字的长度排列：完全匹配或更接近输入的候选放在底部，靠近输入框，并默认选中底部候选；只输入 `/` 时仍按最近使用记录排列。
+- 继续输入可按子命令前缀筛选。例如 `/goal p` 匹配 `/goal pause`，`/pairing a` 匹配 `/pairing approve`，`/goal budget n` 匹配 `/goal budget none`。`/model` 还会展示当前可用的模型预设，支持按预设名前缀筛选。
+- 选中子命令后会填入完整命令；需要参数时保留空格供继续填写。目标内容、数字、配对码、用户 ID 和版本 SHA 是自由参数，不会被替换成子命令。填写完成后发送执行。
+- 使用上下方向键选择，Enter 或 Tab 选中，Escape 关闭提示。带参数的命令可继续填写参数后发送。
+- 空闲时，默认列表不显示 `/stop`；输入 `/s` 或 `/stop` 时仍会显示匹配提示。任务运行时，默认列表也会显示 `/stop`。
+- 最近使用的命令优先排列，`/stop` 不计入最近使用记录。
+
+## 完整命令表
+
+方括号表示可选参数，尖括号表示需要替换为实际内容的参数。
+
+| 命令 | 用途 | 参数与可用条件 |
+| --- | --- | --- |
+| `/new` | 停止当前任务并开始全新对话。 | 无参数。桌面中选择后直接执行新会话操作。 |
+| `/stop` | 停止当前任务；后端也支持暂停当前活跃 Goal。 | 无参数。桌面提示项在有任务运行时执行停止，空闲时选中不会创建任务。 |
+| `/restart` | 重启 Agent 进程。 | 无参数。桌面托管运行时由桌面管理器处理重启。 |
+| `/status` | 查看运行时、模型供应商及频道状态。 | 无参数。桌面中打开状态面板。 |
+| `/model [list\|preset]` | 查看当前模型预设、列出预设或切换模型预设。 | 无参数查看当前配置；`/model list` 列出预设；`/model <preset>` 切换至已配置的预设。 |
+| `/history [n]` | 查看已保存的对话消息。 | 默认 10 条，最多 50 条；例如 `/history 5`。不包含命令消息及内部 Goal 续跑上下文。 |
+| `/history-dag` | 查看当前会话的任务状态 DAG。 | 需要启用 `sessionDag.enabled`；关闭时不会出现在后端提供的命令列表中。桌面中打开 DAG 面板。 |
+| `/goal [子命令或目标]` | 创建、查询、暂停、恢复或调整长期目标。 | 完整子命令见下表。桌面中从提示选中 `/goal` 后，会进入目标输入模式。 |
+| `/dream` | 手动触发文件记忆整合。 | 仅在 `fileMemory.enabled=true` 时提供。 |
+| `/dream-log [sha]` | 查看最近一次 Dream 修改，或指定版本的修改。 | 需要启用文件记忆，并已有可用的记忆版本记录。 |
+| `/dream-restore [sha]` | 列出最近 10 个记忆版本，或撤销指定 Dream 修改。 | 需要启用文件记忆及版本记录；指定 `sha` 后恢复到该次修改之前的状态，并创建新的安全提交。 |
+| `/help` | 列出 Agent 内置斜杠命令及说明。 | 不包含桌面本地命令 `/last-compaction`。Dream 命令随文件记忆配置显示。 |
+| `/pairing [子命令]` | 管理频道接入配对请求与授权。 | 支持列出、批准、拒绝及撤销，完整子命令见下表。 |
+| `/last-compaction` | 查看当前会话最近一次文本压缩或 DAG 上下文摘要。 | 桌面专用，打开本地面板；内容取决于当前会话是否已有压缩快照。 |
+
+## Goal 子命令
+
+| 写法 | 行为 |
+| --- | --- |
+| `/goal` 或 `/goal status` | 查看当前 Goal 状态。 |
+| `/goal help` | 查看 Goal 使用说明。 |
+| `/goal <objective>` 或 `/goal create <objective>` | 创建长期目标。 |
+| `/goal pause` | 暂停 Goal，并停止当前 Goal 回合。 |
+| `/goal resume` | 恢复可续跑的 Goal。达到用量限制时需先恢复供应商容量；达到预算限制时需先提高或移除预算。 |
+| `/goal edit <objective>` | 修改非运行状态的 Goal 目标。 |
+| `/goal budget <正整数>` | 设置累计 token 预算。 |
+| `/goal budget none` | 移除累计 token 预算。 |
+| `/goal clear` | 取消并移除当前 Goal。 |
+
+桌面中从提示选中 `/goal` 会将其显示为目标标签，后续输入作为目标内容。若需要执行管理子命令，可直接输入完整命令及参数后发送。目标标签模式只提供状态、DAG 和压缩摘要等辅助命令。
+
+## Pairing 子命令
+
+| 写法 | 行为 |
+| --- | --- |
+| `/pairing` 或 `/pairing list` | 列出待处理配对请求。 |
+| `/pairing approve <code>` | 批准指定配对码。 |
+| `/pairing deny <code>` | 拒绝指定配对码。 |
+| `/pairing revoke <user_id>` | 撤销当前频道中该用户的授权。 |
+| `/pairing revoke <channel> <user_id>` | 撤销指定频道中该用户的授权。 |
+
+## 维护来源
+
+命令定义和执行逻辑位于 `App/memmy-agent/src/command/builtin.ts`，配对子命令位于 `App/memmy-agent/src/integrations/channel-auth/store.ts`。桌面本地命令及交互位于 `App/frontend/desktop/src/pages/home-page.tsx`，提示过滤和展示位于 `App/frontend/desktop/src/pages/agent-command-palette.tsx`。

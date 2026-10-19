@@ -10,6 +10,8 @@ export interface ModelConfigFormValues {
   apiKey: string;
   apiKeyMasked?: string;
   hasExistingApiKey?: boolean;
+  credentialSource?: import("./model-credentials.js").SavedEndpointIdentity | null;
+  requiresApiKey?: boolean;
 }
 
 /** Type definition for model config validation status. */
@@ -26,7 +28,9 @@ export interface ModelConfigValidationState {
 export function createModelConfigValidationKey(values: ModelConfigFormValues): string {
   return JSON.stringify({
     provider: values.provider.trim(),
-    endpoint: values.endpoint.trim(),
+    endpoint: values.endpoint.trim().replace(/\/+$/, ""),
+    protocol: values.protocol,
+    endpointId: values.apiKey.trim() ? undefined : values.endpointId,
     model: values.model.trim(),
     apiKey: values.apiKey.trim() || existingSecretKey(values)
   });

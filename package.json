@@ -55,6 +55,7 @@
     "memory:pack": "npm run pack:npm -w @memmy/memory",
     "memory:binary": "npm run binary -w @memmy/memory",
     "memory:runtime:package": "npm run runtime:package -w @memmy/memory",
+    "memory:runtime:package:all": "node scripts/internal/shared/build-memory-all.mjs",
     "agent:package": "npm --prefix App/memmy-agent run package:npm",
     "agent:pack": "npm --prefix App/memmy-agent run pack:npm",
     "agent:runtime:package": "node App/memmy-agent/scripts/build-runtime.mjs",

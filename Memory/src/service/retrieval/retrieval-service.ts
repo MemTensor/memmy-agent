@@ -69,6 +69,7 @@ import {
   normalizeRetrievalExtractKeywords
 } from "../turn/turn-normalization.js";
 import { IndexedCandidatePool } from "./indexed-candidate-pool.js";
+import { deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 import { filterL1TraceSpanRecallHits } from "./l1-trace-span-filter.js";
 
 type InternalMemorySearchRequest = MemorySearchRequest & {
@@ -1941,7 +1942,8 @@ export class RetrievalService {
       ? this.retrieveTimeFilteredTraceMemories({
           timeFilter,
           tags: request.tags,
-          limit: retrievalLimit
+          limit: retrievalLimit,
+          preferredUserId: context.userId
         })
       : await this.retrieveSearchMemories({
           userId: context.userId,
@@ -2165,6 +2167,7 @@ export class RetrievalService {
     timeFilter: RetrievalTimeFilter;
     tags?: string[];
     limit: number;
+    preferredUserId: string;
   }): { retrieval: RetrievalResult; memories: MemoryRow[] } {
     const filter: MemoryFilter = {
       memoryLayer: "L1",
@@ -2174,10 +2177,15 @@ export class RetrievalService {
       ...(input.tags?.length ? { tags: input.tags } : {})
     };
     const candidateCount = this.deps.repos.memories.count(filter);
-    const candidates = this.deps.repos.memories
+    const loadedCandidates = this.deps.repos.memories
       .list(filter, candidateCount)
       .filter((memory) => this.isMemoryReadyForRetrieval(memory))
       .filter((memory) => Boolean(traceMetaFromMemory(memory)?.summary.trim()));
+    const candidates = deduplicateCrossAccountMemoryCandidates({
+      memories: loadedCandidates,
+      repos: this.deps.repos,
+      preferredUserId: input.preferredUserId
+    }).memories;
     const selected = [...candidates]
       .sort(compareTimeFilteredTraceRecency)
       .slice(0, Math.max(0, input.limit))

@@ -41,6 +41,7 @@ import {
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
+  toReadableAsrError,
   updateAgentComposerOverlayHeight,
   updateComposerDraftForScope,
   fileToPendingAttachment,
@@ -270,7 +271,7 @@ describe("HomePage", () => {
     expect(source).toContain("const slashCommandsWithLocal = [");
     expect(source).toContain("lastCompactionSlashCommand,");
     expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
-    expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
+    expect(source).toContain('buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand, slashQuery ?? "")');
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (");
@@ -1161,6 +1162,12 @@ describe("HomePage", () => {
     );
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
+  });
+
+  it("shows a dedicated message when voice input has no ASR model configured", () => {
+    expect(toReadableAsrError(new Error("Assigned ASR model is unavailable"))).toBe("home.asrNotConfigured");
+    expect(agentErrorText("home.asrNotConfigured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
+    expect(agentErrorText("语音识别失败：ASR model catalog is not configured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
   });
 
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {

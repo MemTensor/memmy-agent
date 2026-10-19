@@ -92,6 +92,7 @@ export interface EmbeddingConfig {
   actualModelContext?: ActualModelContext;
   selectionError?: "model_selection_unavailable";
   maxInputTokens?: number;
+  maxInputBytes?: number;
   batchSize: number;
   timeoutMs: number;
   maxRetries: number;
@@ -626,6 +627,7 @@ function configFromEnv(): Record<string, unknown> {
       model: process.env.MEMMY_EMBEDDING_MODEL,
       apiKey: process.env.MEMMY_EMBEDDING_API_KEY,
       maxInputTokens: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS"),
+      maxInputBytes: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_BYTES"),
       batchSize: numberEnv("MEMMY_EMBEDDING_BATCH_SIZE"),
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
@@ -797,6 +799,7 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
       ? input.selectionError
       : undefined,
     maxInputTokens: positiveInteger(input.maxInputTokens),
+    maxInputBytes: positiveInteger(input.maxInputBytes),
     batchSize: numberValue(input.batchSize, DEFAULT_MEMMY_CONFIG.embedding.batchSize),
     timeoutMs: numberValue(input.timeoutMs, DEFAULT_MEMMY_CONFIG.embedding.timeoutMs),
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),

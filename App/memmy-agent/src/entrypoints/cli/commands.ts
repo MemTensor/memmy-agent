@@ -597,7 +597,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .description("Start the OpenAI-compatible API server.")
     .option("-p, --port <port>", "API server port")
     .option("-H, --host <host>", "Bind address")
-    .option("-t, --timeout <seconds>", "Per-request timeout")
+    .option("-t, --timeout <seconds>", "Deprecated; agent turns have no total time limit")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
     .option("-v, --verbose", "Enable verbose runtime logs", false)
@@ -896,6 +896,10 @@ async function writeNodeResponse(res: http.ServerResponse, response: Response): 
     return;
   }
   const nodeStream = Readable.fromWeb(response.body as any);
+  // A silent tool may run for a long time. Expose admission before the first delta.
+  res.flushHeaders();
+  nodeStream.on("error", () => res.destroy());
+  res.once("close", () => nodeStream.destroy());
   nodeStream.pipe(res);
 }
 
@@ -923,7 +927,7 @@ export async function serve({
   const appServer = createApp(
     loop,
     resolved.model,
-    timeout == null ? loaded.api.timeout : Number(timeout),
+
   );
   const bindHost = host ?? loaded.api.host;
   const bindPort = port == null ? loaded.api.port : Number(port);

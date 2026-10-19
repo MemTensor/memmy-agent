@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SSE_DONE, sseChunk, sseMemmyEvent, createApp } from "../../../src/entrypoints/openai-like-api/server.js";
 
 function request(body: unknown): Request {
@@ -306,4 +306,107 @@ describe("SSE chat completions", () => {
     expect(JSON.parse(ssePayloads(body)[0]).error).toMatchObject({ code: "model_selection_unavailable" });
     expect(body).not.toContain("[DONE]");
   });
+});
+
+for (const stream of [true, false]) {
+  it(`keeps a silent long-running task alive (stream=${stream})`, async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const app = createApp({ processDirect: async () => {
+        started();
+        await gate;
+        return "long tool finished";
+      } }, "m", 600);
+      let settled = false;
+      const result = app.fetch(request({ messages: [{ role: "user", content: "long tool" }], stream }))
+        .then((response) => response.text());
+      void result.then(() => { settled = true; });
+      await entered;
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+      expect(settled).toBe(false);
+      release();
+      expect(await result).toContain("long tool finished");
+      expect(app.context.sessionLocks.size).toBe(0);
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+}
+
+function cancelRequest(sessionId: string, requestId: string): Request {
+  return new Request("http://localhost/v1/chat/cancel", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, request_id: requestId }),
+  });
+}
+
+it("only an explicit stop cancels its matching request, including after disconnect", async () => {
+  const signals = new Map<string, AbortSignal>();
+  const releases = new Map<string, () => void>();
+  const app = createApp({
+    processMessageInternal() {},
+    async processDirect(_content: string, options: any) {
+      const signal: AbortSignal = options.abortSignal;
+      signals.set(options.sessionKey, signal);
+      await new Promise<void>((resolve) => {
+        releases.set(options.sessionKey, resolve);
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return "finished";
+    },
+  }, "m");
+  const start = (session_id: string, request_id: string) => app.fetch(request({
+    messages: [{ role: "user", content: "long tool" }], stream: true, session_id, request_id,
+  }));
+  const first = await start("a", "run-a");
+  const second = await start("b", "run-b");
+  await first.body!.cancel();
+  expect(signals.get("api:a")!.aborted).toBe(false);
+  expect(app.context.activeRequests.size).toBe(2);
+  expect((await start("a", "run-a")).status).toBe(409);
+  expect((await app.fetch(cancelRequest("a", "run-b"))).status).toBe(404);
+  expect(signals.get("api:b")!.aborted).toBe(false);
+  expect((await app.fetch(cancelRequest("a", "run-a"))).status).toBe(200);
+  expect(signals.get("api:a")!.aborted).toBe(true);
+  expect(signals.get("api:b")!.aborted).toBe(false);
+  releases.get("api:b")!();
+  expect(await second.text()).toContain("[DONE]");
+  expect(app.context.activeRequests.size).toBe(0);
+  expect(app.context.sessionLocks.size).toBe(0);
+  const next = await start("a", "run-next");
+  expect((await app.fetch(cancelRequest("a", "run-a"))).status).toBe(404);
+  expect(signals.get("api:a")!.aborted).toBe(false);
+  releases.get("api:a")!();
+  expect(await next.text()).toContain("[DONE]");
+});
+
+it("explicit cancellation ends SSE as cancelled, never as successful completion", async () => {
+  const app = createApp({ processDirect: async (args: any) => {
+    await new Promise<void>((resolve) => args.abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+    return "must not become a successful reply";
+  } }, "m");
+  const response = await app.fetch(request({ messages: [{ role: "user", content: "go" }], stream: true, session_id: "s", request_id: "r" }));
+  const output = response.text();
+  await app.fetch(cancelRequest("s", "r"));
+  const text = await output;
+  expect(text).toContain('"code":"cancelled"');
+  expect(text).not.toContain("[DONE]");
+  expect(text).not.toContain("successful reply");
+});
+
+it("a model or tool error remains a failure, not user cancellation", async () => {
+  let signal!: AbortSignal;
+  const app = createApp({ processDirect: async (args: any) => {
+    signal = args.abortSignal;
+    throw new Error("tool timed out");
+  } }, "m");
+  const response = await app.fetch(request({ messages: [{ role: "user", content: "go" }], stream: true }));
+  expect(await response.text()).toContain('"code":"server_error"');
+  expect(signal.aborted).toBe(false);
+  expect(app.context.activeRequests.size).toBe(0);
 });

@@ -338,7 +338,7 @@ describe("model config helpers", () => {
         apiKeyMasked: "sk-m••••mory"
       },
       skillModel: {
-        reuse: true,
+        reuse: false,
         apiKeyMasked: "sk-m••••main"
       }
     });

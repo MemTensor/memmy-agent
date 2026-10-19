@@ -147,12 +147,16 @@ describe("memmy memory config", () => {
           provider: "openai_compatible",
           endpoint: "https://embedding.example/v1",
           model: "deployment-alias",
-          maxInputTokens: 1_200
+          maxInputTokens: 1_200,
+          maxInputBytes: 8_000
         }
       }
     }));
 
     expect(loadMemmyConfig(configPath).config.embedding.maxInputTokens).toBe(1_200);
+    expect(loadMemmyConfig(configPath).config.embedding.maxInputBytes).toBe(8_000);
+    setEnv("MEMMY_EMBEDDING_MAX_INPUT_BYTES", "2048");
+    expect(loadMemmyConfig(configPath).config.embedding.maxInputBytes).toBe(2048);
     setEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS", "640");
     expect(loadMemmyConfig(configPath).config.embedding.maxInputTokens).toBe(640);
   });

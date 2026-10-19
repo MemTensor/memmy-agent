@@ -560,6 +560,31 @@ describe("model config catalog", () => {
     expect(saved.providers[0]?.models.map((model) => model.model)).toEqual(["embedding-a", "embedding-b"]);
   });
 
+  it.each([false, true])("coalesces a reentered key and identical model while retaining the saved preset (new endpoint first: %s)", async (newFirst) => {
+    const file = fixture();
+    const first = await writeModelConfigCatalog(file, openAiInput((await readModelConfigCatalog(file)).configRevision));
+    const originalId = first.providers[0]!.models[0]!.presetId;
+    const input = openAiInput(first.configRevision);
+    input.providers[0]!.models[0]!.presetId = originalId;
+    input.providers[0]!.models[0]!.capabilities = ["agent"];
+    input.providers[0]!.endpoints.push({ ...input.providers[0]!.endpoints[0]!, endpointId: "chat-copy" });
+    input.providers[0]!.models.push({
+      ...input.providers[0]!.models[0]!, presetId: undefined, endpointId: "chat-copy", capabilities: ["memory_evolution"]
+    });
+    if (newFirst) {
+      input.providers[0]!.endpoints.reverse();
+      input.providers[0]!.models.reverse();
+    }
+    const saved = await writeModelConfigCatalog(file, input);
+    expect(saved.endpointAliases).toEqual({ openai: { "chat-copy": "chat" } });
+    expect(saved.providers[0]!.models).toHaveLength(1);
+    expect(saved.providers[0]!.models[0]).toMatchObject({
+      presetId: originalId, endpointId: "chat", capabilities: ["agent", "memory_evolution"]
+    });
+    // Aliases describe this write only; neither transient metadata nor plaintext is added to GET views.
+    expect((await readModelConfigCatalog(file)).endpointAliases).toBeUndefined();
+  });
+
   it("keeps endpoints with different credentials even when their route is the same", async () => {
     const file = fixture();
     const input = openAiInput((await readModelConfigCatalog(file)).configRevision);

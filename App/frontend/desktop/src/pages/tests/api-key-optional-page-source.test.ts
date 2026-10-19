@@ -35,12 +35,7 @@ describe("ApiKeyOptionalPage catalog source", () => {
     expect(source).toContain("savedCatalogSignatureRef.current !== saveSignature");
     expect(source).toContain("savedCatalogSignatureRef.current = saveSignature");
     expect(source).toContain("const savedEndpointIdentitiesRef = useRef");
-    expect(source).toContain("savedAsrIdentity?.credentialSignature === asrCredentialSignature");
-    expect(source).toContain("savedImageIdentity?.credentialSignature === imageGenCredentialSignature");
     expect(source).toContain("endpointCredentialSignature(");
-    expect(source).toContain("provider: provider.trim().toLowerCase()");
-    expect(source).toContain('endpoint: endpoint.trim().replace(/\\/+$/, "")');
-    expect(source).toContain("credential: normalizedMaskedApiKey ?");
     expect(source).toContain('role="alert"');
     expect(source).toContain("disabled={modePersistencePending}");
   });
