@@ -1974,7 +1974,8 @@ export class RetrievalService {
       ? this.retrieveTimeFilteredTraceMemories({
           timeFilter,
           tags: request.tags,
-          limit: retrievalLimit
+          limit: retrievalLimit,
+          preferredUserId: context.userId
         })
       : await this.retrieveSearchMemories({
           userId: context.userId,

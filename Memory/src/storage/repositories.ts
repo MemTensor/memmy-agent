@@ -977,7 +977,7 @@ export class MemoryRepository {
         AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
         AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1
       ORDER BY created_at DESC, id DESC LIMIT ?`).all(Math.min(Math.max(limit, 0), 1000)) as MemorySqlRow[];
-    return this.hydrateMany(rows.map(memoryFromSql));
+    return this.hydrateMany(rows.map((row) => memoryFromSql(row, this.db)));
   }
 
   listUnindexedL1Imports(limit = 10000): MemoryRow[] {

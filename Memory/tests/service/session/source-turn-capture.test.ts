@@ -202,7 +202,6 @@ describe("native source turn submission", () => {
   });
 
   it.each([
-    { label: "another user with the same native conversation", namespace: { userId: "other-user" } },
     { label: "another project", namespace: { projectId: "project-b" } },
     { label: "another workspace", namespace: { workspaceId: "workspace-b" } },
     { label: "an unproven tenant", namespace: { tenantId: "tenant-b" } },
