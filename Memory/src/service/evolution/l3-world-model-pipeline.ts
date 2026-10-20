@@ -130,6 +130,8 @@ export class L3WorldModelTraceFieldPipeline {
   private loadEvidence(batchId: string): TraceEvidence {
     const batch = this.deps.repos.l3WorldModels.getBatch(batchId);
     if (!batch) throw new L3WorldModelTerminalEvidenceError(`missing batch: ${batchId}`);
+    const deletedAt = this.deps.repos.l3WorldModels.latestDeletion(batch.projectId);
+    if (deletedAt && batch.createdAt <= deletedAt) return {rawTurns:[],eligibleL1MemoryIds:[]};
     const session = this.deps.repos.runtime.getSession(batch.sessionId);
     if (!session || (session.projectId ?? null) !== (batch.projectId ?? null)) {
       throw new L3WorldModelTerminalEvidenceError("L3 World Model batch session scope mismatch");

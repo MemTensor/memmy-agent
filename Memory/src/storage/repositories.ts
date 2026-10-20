@@ -5336,6 +5336,15 @@ export class L3WorldModelRepository {
       .map(l3WorldModelInputTraceFromSql);
   }
 
+  latestDeletion(projectId?: string | null): string | undefined {
+    const row = this.db.prepare(`SELECT MAX(COALESCE(deleted_at, updated_at)) AS deleted_at
+      FROM memories WHERE memory_layer = 'L3' AND (deleted_at IS NOT NULL OR status = 'deleted')
+        AND json_extract(properties_json, '$.internal_info.schema_version') = 2
+        AND memory_project_id(json_extract(info_json, '$.project_id')) IS ?`)
+      .get(canonicalProjectId(this.db, projectId)) as {deleted_at: string | null};
+    return row.deleted_at ?? undefined;
+  }
+
   getMemory(_userId: string | null, projectId?: string | null): MemoryRow | undefined {
     projectId = canonicalProjectId(this.db, projectId);
     const scopes = this.db.prepare(`SELECT * FROM l3_world_model_scopes
@@ -5352,12 +5361,15 @@ export class L3WorldModelRepository {
     const overrides = this.db.prepare(`SELECT field, deleted FROM memory_l3_overrides WHERE project_key = ?`)
       .all(projectId ?? '') as Array<{field: keyof L3WorldModelFields; deleted: number}>;
     const fields = emptyL3WorldModelFields();
+    const deletedAt = this.latestDeletion(projectId);
     let profileScanId: unknown;
     for (const property of Object.keys(fields) as Array<keyof L3WorldModelFields>) {
       const override = overrides.find(row => row.field === property);
       if (override?.deleted) continue;
       for (const candidate of candidates) {
         if (override && !candidate.canonical) continue;
+        if (deletedAt && (candidate.memory.updatedAt < deletedAt ||
+          (!candidate.canonical && candidate.memory.updatedAt === deletedAt))) continue;
         const value = fieldsFromL3WorldModelMemory(candidate.memory)[property];
         if (value !== null) {
           fields[property] = value;
@@ -5372,7 +5384,7 @@ export class L3WorldModelRepository {
       ...base, memoryValue, contentHash: sha256Hex(memoryValue),
       info: {...base.info, project_environment_applied_scan_id: profileScanId},
       status: memoryValue ? "activated" : "archived",
-      version: candidates.length > 1 ? Number.parseInt(sha256Hex(canonicalJson(fields)).slice(0, 12), 16) : base.version,
+      version: candidates.length > 1 || deletedAt ? Number.parseInt(sha256Hex(canonicalJson(fields)).slice(0, 12), 16) : base.version,
       properties: { ...base.properties, internal_info: {
         ...base.properties.internal_info, body: memoryValue,
         world_model: {
@@ -5452,7 +5464,11 @@ export class L3WorldModelRepository {
 
       let noChange = false;
       let memory = this.getMemory(batch.userId, batch.projectId);
-      if (input.operation === "noop") {
+      const deletedAt = this.latestDeletion(batch.projectId);
+      if (deletedAt && batch.createdAt <= deletedAt) {
+        // An immutable pre-upgrade batch must not recreate a subsequently deleted scope.
+        noChange = true;
+      } else if (input.operation === "noop") {
         if (input.value !== "") throw new TypeError("noop L3 World Model output must be empty");
         noChange = true;
       } else if (input.operation === "create") {

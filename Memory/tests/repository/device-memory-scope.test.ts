@@ -158,6 +158,24 @@ describe("device memory / preserved schema-v9 history", () => {
     service.deleteMemory(a.items[0]!.id,{namespace:{...namespace,userId:"account-b"}});
     expect(service.panelItems({layer:"UserMemory",namespace}).items).toEqual([]);
   });
+  it("respects pre-upgrade L3 deletion and does not replay older batches into another account's copy", async () => {
+    const root = mkdtempSync(join(tmpdir(),"memmy-uid-tombstone-")), path = join(root,"memory.sqlite");
+    try {
+      const old = seedV9(path);
+      old.prepare("UPDATE memories SET deleted_at='2026-10-02T00:00:00.000Z',status='deleted',updated_at='2026-10-02T00:00:00.000Z' WHERE id='L3-account-a'").run();
+      old.prepare("UPDATE l3_world_model_scopes SET memory_id=NULL WHERE user_id='account-a'").run();
+      old.close();
+      const db = new MemoryDb({path}), repos = new Repositories(db.db);
+      expect(repos.l3WorldModels.fields("account-c",identity.projectId).domainKnowledge).toBeNull();
+      const complete = vi.fn();
+      await new L3WorldModelTraceFieldPipeline({repos,skillLlm:{complete} as unknown as LlmClient}).updateField(repos.runtime.getJob("job-account-b")!);
+      expect(complete).not.toHaveBeenCalled();
+      expect(repos.l3WorldModels.getTarget("batch-account-b","project_contract")).toMatchObject({status:"applied",noChange:true});
+      repos.l3WorldModels.upsertField({userId:"account-c",projectId:identity.projectId,targetField:"domain_knowledge",value:"New evidence",at:"2026-10-03T00:00:00.000Z"});
+      expect(repos.l3WorldModels.fields("account-d",identity.projectId).domainKnowledge).toBe("New evidence");
+      db.close();
+    } finally {rmSync(root,{recursive:true,force:true});}
+  });
   it("retries new and historical idempotency entries across accounts without accepting changed content", () => {
     const {db,service} = fixture.createTestService();
     const repos = new Repositories(db.db);
