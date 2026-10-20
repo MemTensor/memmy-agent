@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OutputLocationPolicy } from "../../../../src/core/agent-runtime/tools/output-location.js";
-import { WriteFileTool } from "../../../../src/core/agent-runtime/tools/filesystem.js";
+import { EditFileTool, WriteFileTool } from "../../../../src/core/agent-runtime/tools/filesystem.js";
 let root: string, workspace: string, policy: OutputLocationPolicy;
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "memmy-delivery-manifest-"));
@@ -32,6 +32,27 @@ describe("complete delivery manifest", () => {
     const scratch = path.join(workspace, "README.md");
     await new WriteFileTool({ workspace, postWriteValidation: false }).execute({ path: scratch, content: "internal" }, { outputLocation: policy });
     await fs.rm(scratch); expect(await policy.checkDelivery(`[internal](${scratch})`)).toEqual([]);
+  });
+  it("keeps the complete manifest when a validated edit selects one occurrence", async () => {
+    const report = path.join(workspace, "report.md"), summary = path.join(workspace, "summary.csv");
+    await fs.writeFile(report, "draft draft");
+    await new EditFileTool({ workspace, postWriteValidation: false }).execute({
+      path: report, old_text: "draft", new_text: "final", occurrence: 2, expected_replacements: 1,
+      output_paths: [report, summary],
+    }, { outputLocation: policy });
+    expect(await fs.readFile(report, "utf8")).toBe("draft final");
+    expect(await policy.checkDelivery(`[report](${report})`)).toEqual([summary]);
+  });
+  it("rejects incompatible edit selectors before registering outputs or changing files", async () => {
+    const report = path.join(workspace, "report.md"), summary = path.join(workspace, "summary.csv");
+    await fs.writeFile(report, "draft");
+    const result = await new EditFileTool({ workspace, postWriteValidation: false }).execute({
+      path: report, old_text: "draft", new_text: "final", occurrence: 1, replace_all: true,
+      output_paths: [report, summary],
+    }, { outputLocation: policy });
+    expect(result).toContain("occurrence cannot be used with replace_all=true");
+    expect(await fs.readFile(report, "utf8")).toBe("draft");
+    expect(policy.hasOutputs).toBe(false);
   });
   it("merges child obligations into the parent while children check their own subset", async () => {
     const parentFile = path.join(workspace, "report.pdf"), childFile = path.join(workspace, "summary.xlsx");
