@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ENDPOINTS,
+  DEFAULT_MODEL_IDS,
   IMAGE_DEFAULT_ENDPOINTS,
   IMAGE_DEFAULT_MODEL_IDS,
   IMAGE_PROTOCOL_OPTIONS,
@@ -30,6 +31,18 @@ import { canSaveModelConfig, createModelConfigValidationKey, type ModelConfigVal
 import { zhCNMessages } from "../../i18n/messages.js";
 
 describe("model config helpers", () => {
+  it("defaults new MiniMax configurations to Flash without rewriting saved IDs", () => {
+    expect(DEFAULT_MODEL_IDS.minimax).toBe("MiniMax-M3.1-Flash");
+    expect(createModelConfig("minimax").modelId).toBe("MiniMax-M3.1-Flash");
+    expect(createModelProtocolPatch("minimax").modelId).toBe("MiniMax-M3.1-Flash");
+    expect(DEFAULT_ENDPOINTS.minimax).toBe("https://api.minimax.io/v1");
+    for (const model of ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-Text-01", "my-custom-model"]) {
+      const form = hydrateModelConfigForm({ provider: "minimax", model, endpoint: "https://custom.example/v1", apiKey: "", apiKeyMasked: "", configured: true }, "local");
+      expect(form.modelId).toBe(model);
+      expect(form.endpoint).toBe("https://custom.example/v1");
+    }
+  });
+
   it("严格映射并过滤桌面不支持或没有模型的 Provider", () => {
     const provider = (
       name: string,

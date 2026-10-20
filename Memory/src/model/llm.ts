@@ -682,6 +682,15 @@ function openAiCompatibleThinkingControl(input: {
     case "enable_thinking":
       return { enabled, fields: { enable_thinking: enabled } };
     case "minimax_direct":
+      if (modelSlug(input.model) === "minimax-m3.1-flash") {
+        return {
+          enabled: true,
+          fields: {
+            thinking: { type: "adaptive" },
+            reasoning_effort: input.requested ? "max" : "low"
+          }
+        };
+      }
       if (isMiniMaxM2ThinkingOnlyModel(input.model)) {
         return {
           enabled: true,
@@ -794,6 +803,22 @@ function geminiThinkingControl(model: string, requested: boolean): ThinkingContr
 }
 
 function anthropicThinkingControl(model: string, requested: boolean, maxTokens: number): ThinkingControl {
+  if (modelSlug(model) === "minimax-m3.1-flash") {
+    return {
+      enabled: true,
+      fields: {
+        max_tokens: maxTokens,
+        thinking: { type: "adaptive" },
+        output_config: { effort: requested ? "max" : "low" }
+      }
+    };
+  }
+  if (modelSlug(model) === "minimax-m3") {
+    return {
+      enabled: requested,
+      fields: { max_tokens: maxTokens, thinking: { type: requested ? "adaptive" : "disabled" } }
+    };
+  }
   if (!isAnthropicThinkingCapableModel(model)) {
     return { enabled: false, fields: { max_tokens: maxTokens } };
   }

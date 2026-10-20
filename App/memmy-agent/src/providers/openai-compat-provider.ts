@@ -640,6 +640,21 @@ export class OpenAICompatProvider extends LLMProvider {
       if (KIMI_THINKING_MODELS.has(modelSlug(modelName))) delete kwargs.reasoning_effort;
     }
 
+    if (specName(this.spec) === "minimax") {
+      if (modelSlug(modelName) === "minimax-m3.1-flash") {
+        // Flash always thinks; legacy off/minimal preferences use its lowest effort.
+        kwargs.reasoning_effort = ["none", "minimal"].includes(semanticEffort ?? "")
+          ? "low"
+          : ["low", "medium", "high", "xhigh", "max"].includes(semanticEffort ?? "")
+            ? semanticEffort
+            : "max";
+        kwargs.extra_body = { ...kwargs.extra_body, thinking: { type: "adaptive" } };
+        delete kwargs.extra_body.reasoning_split;
+      } else if (modelSlug(modelName) === "minimax-m3") {
+        delete kwargs.reasoning_effort;
+      }
+    }
+
     if (tools?.length) {
       kwargs.tools = chatCompletionToolsForProvider(tools, specName(this.spec));
       kwargs.tool_choice = args.toolChoice ?? "auto";
@@ -1294,7 +1309,7 @@ export function modelThinkingStyle(modelName: string): string {
 }
 
 export function thinkingStylesFor(spec: any, modelName: string): string[] {
-  if (["minimax", "minimax_cn"].includes(spec?.name) && modelSlug(modelName) === "minimax-m3") {
+  if (spec?.name === "minimax" && modelSlug(modelName) === "minimax-m3") {
     return ["thinking_adaptive"];
   }
   const styles: string[] = [];

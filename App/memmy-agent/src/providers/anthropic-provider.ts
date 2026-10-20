@@ -369,8 +369,9 @@ export class AnthropicProvider extends LLMProvider {
 
     const isMiniMaxM3 = modelName.toLowerCase() === "minimax-m3";
     const effort = String(reasoningEffort ?? "").toLowerCase();
-    const thinkingEnabled = Boolean(reasoningEffort) && effort !== "none"
-      && !(isMiniMaxM3 && ["minimal", "minimum"].includes(effort));
+    const isMiniMaxFlash = modelName.toLowerCase() === "minimax-m3.1-flash";
+    const thinkingEnabled = isMiniMaxFlash || (Boolean(reasoningEffort) && effort !== "none"
+      && !(isMiniMaxM3 && ["minimal", "minimum"].includes(effort)));
     const omitTemperature = AnthropicProvider.omitsTemperature(modelName);
     const kwargs: Record<string, any> = {
       model: modelName,
@@ -379,7 +380,15 @@ export class AnthropicProvider extends LLMProvider {
     };
     if (system && (!Array.isArray(system) || system.length)) kwargs.system = system;
 
-    if (isMiniMaxM3 && reasoningEffort) {
+    if (isMiniMaxFlash) {
+      kwargs.thinking = { type: "adaptive" };
+      kwargs.output_config = {
+        effort: ["none", "minimal", "minimum"].includes(effort)
+          ? "low"
+          : ["low", "medium", "high", "xhigh", "max"].includes(effort) ? effort : "max",
+      };
+      if (!omitTemperature) kwargs.temperature = temperature;
+    } else if (isMiniMaxM3 && reasoningEffort) {
       kwargs.thinking = { type: thinkingEnabled ? "adaptive" : "disabled" };
       if (!omitTemperature) kwargs.temperature = temperature;
     } else if (reasoningEffort === "adaptive") {

@@ -130,7 +130,7 @@ export const DEFAULT_ENDPOINTS: Record<Protocol, string> = {
   zhipu: "https://open.bigmodel.cn/api/paas/v4",
   qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   moonshot: "https://api.moonshot.ai/v1",
-  minimax: "https://api.minimax.chat/v1",
+  minimax: "https://api.minimax.io/v1",
   baidu: "https://qianfan.baidubce.com/v2",
   doubao: "https://ark.cn-beijing.volces.com/api/v3"
 };
@@ -143,7 +143,7 @@ export const DEFAULT_MODEL_IDS: Record<Protocol, string> = {
   zhipu: "glm-4",
   qwen: "qwen-max",
   moonshot: "moonshot-v1-128k",
-  minimax: "MiniMax-Text-01",
+  minimax: "MiniMax-M3.1-Flash",
   baidu: "ernie-x1.1",
   doubao: "doubao-pro-256k"
 };
@@ -202,7 +202,7 @@ export function createModelConfig(protocol: Protocol): ModelConfig {
   return {
     reuse: true,
     protocol,
-    modelId: "",
+    modelId: protocol === "minimax" ? DEFAULT_MODEL_IDS.minimax : "",
     endpoint: DEFAULT_ENDPOINTS[protocol],
     apiKey: "",
     apiKeyMasked: "",
@@ -221,7 +221,7 @@ export function createModelProtocolPatch(protocol: Protocol): Pick<ModelConfig, 
   return {
     protocol,
     endpoint: DEFAULT_ENDPOINTS[protocol],
-    modelId: "",
+    modelId: protocol === "minimax" ? DEFAULT_MODEL_IDS.minimax : "",
     apiKey: "",
     apiKeyMasked: "",
     configured: false

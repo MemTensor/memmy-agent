@@ -68,7 +68,7 @@ const providerOptions: ProviderOption[] = [
   { value: "zhipu", labelKey: "apiKey.provider.zhipu", endpoint: "https://open.bigmodel.cn/api/paas/v4", defaultModelId: "glm-4" },
   { value: "qwen", labelKey: "apiKey.provider.qwen", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1", defaultModelId: "qwen-max" },
   { value: "kimi", labelKey: "apiKey.provider.kimi", endpoint: "https://api.moonshot.ai/v1", defaultModelId: "moonshot-v1-128k" },
-  { value: "minimax", labelKey: "apiKey.provider.minimax", endpoint: "https://api.minimax.chat/v1", defaultModelId: "MiniMax-Text-01" },
+  { value: "minimax", labelKey: "apiKey.provider.minimax", endpoint: "https://api.minimax.io/v1", defaultModelId: "MiniMax-M3.1-Flash" },
   { value: "baidu", labelKey: "apiKey.provider.baidu", endpoint: "https://qianfan.baidubce.com/v2", defaultModelId: "ernie-x1.1" },
   { value: "doubao", labelKey: "apiKey.provider.doubao", endpoint: "https://ark.cn-beijing.volces.com/api/v3", defaultModelId: "doubao-pro-256k" }
 ];
@@ -158,7 +158,7 @@ export function ApiKeyPage() {
     const next = providerOptions.find((option) => option.value === nextProvider) ?? defaultProvider;
     setProvider(next.value);
     setEndpoint(next.endpoint);
-    setModel("");
+    setModel(next.value === "minimax" ? next.defaultModelId : "");
     setApiKey("");
     setApiKeyMasked("");
   }

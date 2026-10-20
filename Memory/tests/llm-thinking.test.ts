@@ -7,6 +7,29 @@ afterEach(() => {
 });
 
 describe("memory LLM thinking configuration", () => {
+  it.each(["openai_compatible", "anthropic"] as const)("keeps Flash thinking enabled over %s", async (provider) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(provider === "anthropic"
+      ? { content: [{ type: "text", text: "ok" }] }
+      : { choices: [{ message: { content: "ok" } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      provider,
+      vendor: "minimax",
+      endpoint: provider === "anthropic" ? "https://api.minimax.cn/anthropic" : "https://api.minimax.io/v1",
+      model: "MiniMax-M3.1-Flash"
+    }));
+    for (const thinkingMode of ["disabled", "enabled"] as const) {
+      fetchMock.mockClear();
+      await client.complete([{ role: "user", content: "summarize" }], { operation: "test.flash", thinkingMode });
+      const body = requestBody(fetchMock);
+      expect(body).toMatchObject({ model: "MiniMax-M3.1-Flash", thinking: { type: "adaptive" } });
+      const effort = thinkingMode === "enabled" ? "max" : "low";
+      expect(body).toMatchObject(provider === "anthropic" ? { output_config: { effort } } : { reasoning_effort: effort });
+      expect(body).not.toHaveProperty("reasoning_split");
+      expect(body).not.toHaveProperty("service_tier");
+    }
+  });
+
   it("sends the selected endpoint headers and body options", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);

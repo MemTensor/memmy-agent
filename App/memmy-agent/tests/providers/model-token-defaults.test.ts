@@ -18,7 +18,7 @@ describe("model token defaults", () => {
       .sort();
     const tokenDefaultModels = Object.keys(MODEL_TOKEN_DEFAULTS).sort();
 
-    expect(tokenDefaultModels).toHaveLength(241);
+    expect(tokenDefaultModels).toHaveLength(242);
     expect(tokenDefaultModels).toEqual(inputCapabilityModels);
     expect(MODEL_TOKEN_DEFAULTS_REVIEWED_AT >= MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe(true);
     expect(Object.isFrozen(MODEL_TOKEN_DEFAULTS)).toBe(true);

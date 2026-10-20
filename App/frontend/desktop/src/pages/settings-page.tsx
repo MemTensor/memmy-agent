@@ -946,7 +946,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   function handleProtocolChange(nextProtocol: Protocol) {
     setProtocol(nextProtocol);
     setEndpoint(DEFAULT_ENDPOINTS[nextProtocol]);
-    setModelId("");
+    setModelId(nextProtocol === "minimax" ? DEFAULT_MODEL_IDS.minimax : "");
     setApiKey("");
     setApiKeyMasked("");
   }
