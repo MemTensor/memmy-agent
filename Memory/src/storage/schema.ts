@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 9;
-export const SCHEMA_MIGRATION_ID = "009_token_usage_outbox";
+export const SCHEMA_VERSION = 10;
+export const SCHEMA_MIGRATION_ID = "010_device_memory_scope";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -25,7 +25,7 @@ const statements = [
   `CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     timeline TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     conversation_id TEXT,
     session_id TEXT,
     agent_id TEXT,
@@ -64,7 +64,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     workspace_uri TEXT,
     memory_id TEXT UNIQUE REFERENCES memories(id) ON DELETE SET NULL,
@@ -82,7 +82,7 @@ const statements = [
   `CREATE TABLE IF NOT EXISTS user_memories (
     id TEXT PRIMARY KEY,
     source_turn_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     memory_types_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(memory_types_json)),
     content TEXT NOT NULL,
     normalized_user_text_hash TEXT NOT NULL,
@@ -135,7 +135,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     source TEXT NOT NULL,
     profile_id TEXT NOT NULL,
@@ -173,7 +173,7 @@ const statements = [
   `CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     conversation_id TEXT,
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'processing', 'closed')),
@@ -209,7 +209,7 @@ const statements = [
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     conversation_id TEXT,
     user_text TEXT,
     assistant_text TEXT,
@@ -245,7 +245,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     conversation_id TEXT,
     session_id TEXT,
@@ -277,7 +277,7 @@ const statements = [
     id TEXT PRIMARY KEY,
     scope_key TEXT NOT NULL REFERENCES l3_world_model_scopes(scope_key) ON DELETE CASCADE,
     scope_seq INTEGER NOT NULL CHECK (scope_seq >= 1),
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     trigger TEXT NOT NULL CHECK (trigger IN (
@@ -323,7 +323,7 @@ const statements = [
     session_id TEXT,
     episode_id TEXT,
     raw_turn_id TEXT,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     context_hash TEXT,
     issue TEXT NOT NULL,
@@ -346,7 +346,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS l2_candidate_pool (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     session_id TEXT,
     source_memory_id TEXT NOT NULL,
     candidate_key TEXT NOT NULL,
@@ -365,7 +365,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS trace_policy_links (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     l1_memory_id TEXT NOT NULL,
     l2_memory_id TEXT NOT NULL,
     relation TEXT NOT NULL DEFAULT 'supports',
@@ -380,7 +380,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS skill_trials (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     skill_memory_id TEXT NOT NULL,
     session_id TEXT,
@@ -410,7 +410,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS skill_clusters (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT,
     tools_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tools_json)),
     artifacts_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(artifacts_json)),
@@ -446,7 +446,7 @@ const statements = [
     session_id TEXT,
     episode_id TEXT,
     turn_id TEXT,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     query TEXT NOT NULL,
     query_hash TEXT,
     layers_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(layers_json)),
@@ -488,7 +488,7 @@ const statements = [
     kind TEXT,
     op TEXT,
     entity_id TEXT,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     change_type TEXT NOT NULL,
     version INTEGER,
     before_json TEXT,
@@ -510,7 +510,7 @@ const statements = [
   )`,
 
   `CREATE TABLE IF NOT EXISTS source_turn_captures (
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     source TEXT NOT NULL,
     profile_id TEXT NOT NULL,
     namespace_key TEXT NOT NULL,
@@ -531,7 +531,7 @@ const statements = [
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
 
   `CREATE TABLE IF NOT EXISTS memory_capture_claims (
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     source TEXT NOT NULL,
     qa_hash TEXT NOT NULL,
     primary_memory_id TEXT NOT NULL,
@@ -543,7 +543,7 @@ const statements = [
     ON memory_capture_claims (primary_memory_id)`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_state (
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     project_id TEXT NOT NULL,
     project_kind TEXT NOT NULL DEFAULT 'unknown' CHECK (project_kind IN ('unknown', 'code', 'folder')),
     status TEXT NOT NULL DEFAULT 'uninitialized' CHECK (status IN (
@@ -565,7 +565,7 @@ const statements = [
     status TEXT NOT NULL DEFAULT 'queued'
       CHECK (status IN ('queued', 'leased', 'succeeded', 'failed', 'dead_letter')),
     dedupe_key TEXT,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     session_id TEXT,
     episode_id TEXT,
     target_memory_id TEXT,
@@ -642,7 +642,7 @@ const statements = [
     session_id TEXT,
     episode_id TEXT,
     raw_turn_id TEXT,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     kind TEXT NOT NULL,
     uri TEXT,
     payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
@@ -659,7 +659,7 @@ const statements = [
 
   `CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     session_id TEXT,
     actor_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(actor_json)),
     action TEXT NOT NULL,
@@ -687,7 +687,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -709,6 +709,7 @@ export function migrate(db: Database.Database): void {
         addColumnIfMissing(db, "evolution_jobs", "scope_key", "TEXT");
         addColumnIfMissing(db, "evolution_jobs", "scope_seq", "INTEGER");
       }
+      if (hasMemories && version < 10) relaxLegacyUserColumns(db);
       for (const statement of statements) {
         db.prepare(statement).run();
       }
@@ -724,6 +725,29 @@ export function migrate(db: Database.Database): void {
          ON evolution_jobs (dedupe_key)
          WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`
       ).run();
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_project_aliases (
+          legacy_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_uri TEXT NOT NULL,
+          workspace_host_id TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_project_alias_target ON memory_project_aliases(project_id);
+        CREATE TABLE IF NOT EXISTS memory_l3_overrides (
+          project_key TEXT NOT NULL, field TEXT NOT NULL, memory_id TEXT, deleted INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(project_key, field)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_device_l3_scope
+          ON l3_world_model_scopes(COALESCE(project_id, '')) WHERE user_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_device_project_environment
+          ON l3_world_model_project_environment_state(project_id) WHERE user_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_device_capture_claim ON memory_capture_claims(source, qa_hash) WHERE user_id IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_device_source_turn ON source_turn_captures(source, profile_id, namespace_key, conversation_id, turn_id) WHERE user_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_raw_turns_turn ON raw_turns(turn_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_native_turn ON memories(memory_layer,
+          COALESCE(json_extract(info_json, '$.turn_id'), json_extract(properties_json, '$.internal_info.trace.turn_id')));
+        CREATE INDEX IF NOT EXISTS idx_user_memories_device_text ON user_memories(normalized_user_text_hash, status, updated_at);
+
+      `);
 
       // This boundary belongs to the Memory database and is shared by Hook and scanners.
       db.prepare(`INSERT INTO runtime_kv (key, value_json, updated_at)
@@ -754,6 +778,33 @@ export function migrate(db: Database.Database): void {
   } finally {
     db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
   }
+}
+
+/** SQLite cannot drop NOT NULL in place. Copy rows verbatim; never rewrite legacy identities or content. */
+function relaxLegacyUserColumns(db: Database.Database): void {
+  const sequences = db.prepare("SELECT name, seq FROM sqlite_sequence").all() as Array<{name:string;seq:number}>;
+  const tables = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL")
+    .all() as Array<{ name: string; sql: string }>;
+  for (const { name, sql } of tables) {
+    if (!/\buser_id TEXT NOT NULL\b/i.test(sql)) continue;
+    const dependent = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL")
+      .all(name) as Array<{ sql: string }>;
+    const temporary = `${name}_device_upgrade`;
+    const definition = sql.replace(/^(CREATE TABLE(?: IF NOT EXISTS)?\s+)(?:"[^"]+"|`[^`]+`|\w+)/i, `$1"${temporary}"`)
+      .replace(/\buser_id TEXT NOT NULL\b/gi, "user_id TEXT");
+    db.exec(definition);
+    db.exec(`INSERT INTO "${temporary}" SELECT * FROM "${name}"`);
+    db.exec(`DROP TABLE "${name}"`);
+    db.exec(`ALTER TABLE "${temporary}" RENAME TO "${name}"`);
+    for (const item of dependent) db.exec(item.sql);
+  }
+  for (const row of sequences) {
+    const exists = db.prepare("SELECT 1 FROM sqlite_sequence WHERE name = ?").get(row.name);
+    if (exists) db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?").run(row.seq,row.name);
+    else db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES (?,?)").run(row.name,row.seq);
+  }
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length) throw new Error("Memory scope schema upgrade failed foreign-key validation");
 }
 
 function backfillMemoryCaptureClaims(db: Database.Database): void {
@@ -856,7 +907,6 @@ function backfillLegacyAdapterHostSessionKeys(db: Database.Database, now: string
          FROM sessions AS existing
          WHERE existing.id != candidate.id
            AND existing.status = 'open'
-           AND existing.user_id = candidate.user_id
            AND existing.source = candidate.source
            AND existing.profile_id = candidate.profile_id
            AND existing.host_session_key = candidate.id

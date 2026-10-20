@@ -334,7 +334,7 @@ function setupMemmyMemoryConfig(
   const memmyMemory: Record<string, unknown> = {
     ...existing,
     version: 1,
-    userId: optionalString(existing.userId) ?? options.appUserId ?? "local-user",
+    userId: undefined,
     roleRouting: {
       ...roleRouting,
       // Account mode has platform-owned models for both memory roles. Never

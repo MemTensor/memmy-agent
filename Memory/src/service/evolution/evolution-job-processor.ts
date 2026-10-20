@@ -67,7 +67,7 @@ export interface EvolutionJobProcessorDeps {
     trigger: "episode_rewarded"
   ): EvolutionJobRecord[];
   resolvePendingSkillTrialsForReward(input: {
-    userId: string;
+    userId: string | null;
     episodeId: string;
     rHuman: number;
     feedbackId?: string;

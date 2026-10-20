@@ -196,7 +196,7 @@ describe("memmy memory config", () => {
     expect(config.storage.sqlitePath).toBe(join(homedir(), ".memmy", "memory-service", "memory.sqlite"));
   });
 
-  it("reads user id from memmyMemory config and environment aliases", () => {
+  it("ignores memory user id from config and environment aliases", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -208,10 +208,10 @@ describe("memmy memory config", () => {
       }
     }));
 
-    expect(loadMemmyConfig(configPath).config.userId).toBe("user_from_memory");
+    expect(loadMemmyConfig(configPath).config.userId).toBeUndefined();
 
     setEnv("MEMMY_MEMORY_USER_ID", "user_from_env");
-    expect(loadMemmyConfig(configPath).config.userId).toBe("user_from_env");
+    expect(loadMemmyConfig(configPath).config.userId).toBeUndefined();
   });
 
   it("reads memory gates from memmyMemory algorithm config", () => {
@@ -396,7 +396,7 @@ describe("memmy memory config", () => {
     const { config } = loadMemmyConfig(configPath);
 
     expect(config.roleRouting).toEqual({ summary: "fixed", evolution: "fixed" });
-    expect(config.userId).toBe("user_account");
+    expect(config.userId).toBeUndefined();
     expect(config.summary).toMatchObject({
       provider: "openai_compatible",
       sourceProvider: "memmy_account",

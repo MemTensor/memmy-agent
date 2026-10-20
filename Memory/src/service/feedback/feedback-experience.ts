@@ -63,7 +63,7 @@ import {
 
 
 export interface ResolvedContext {
-  userId: string;
+  userId: string | null;
   conversationId?: string;
   namespace: RuntimeNamespace;
 }
@@ -614,7 +614,7 @@ maybeCreateDecisionRepair(
   }
 
   enqueueDeferredDecisionRepair(input: {
-    userId: string;
+    userId: string | null;
     sessionId?: string;
     episodeId?: string;
     repairId: string;
@@ -642,7 +642,7 @@ maybeCreateDecisionRepair(
   }
 
   enqueueDeferredFeedbackExperience(input: {
-    userId: string;
+    userId: string | null;
     sessionId?: string;
     episodeId?: string;
     feedbackId: string;

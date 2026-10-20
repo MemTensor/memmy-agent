@@ -55,7 +55,7 @@ export interface TraceMemoryMeta {
   rawTurnId?: string;
   episodeId?: string;
   sessionId?: string;
-  userId: string;
+  userId: string | null;
   summary: string;
   userText: string;
   agentText: string;

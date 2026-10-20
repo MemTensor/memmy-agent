@@ -118,8 +118,8 @@ describe("account model projection current catalog", () => {
       });
     }
     expect(saved.modelAssignments.byok).toEqual(beforeByok);
+    expect(saved.memmyMemory).not.toHaveProperty("userId");
     expect(saved.memmyMemory).toMatchObject({
-      userId: "owner-a",
       roleRouting: { summary: "fixed", evolution: "fixed" },
       summary: {
         provider: "openai_compatible",

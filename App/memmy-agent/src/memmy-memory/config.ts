@@ -7,13 +7,9 @@ export function resolveMemmyMemoryConfig(config: Config | Record<string, any> | 
   const raw = (config as any)?.memmyMemory ?? {};
   return {
     enabled: Boolean(raw?.enabled ?? raw?.enable ?? true),
-    userId: stringOrUndefined(raw?.userId) ?? "local-user",
+    userId: "local-user",
     retrievalLayers: memoryLayersOrUndefined(raw?.retrievalLayers),
   };
-}
-
-function stringOrUndefined(value: any): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function memoryLayersOrUndefined(value: any): MemmyMemoryLayer[] | undefined {

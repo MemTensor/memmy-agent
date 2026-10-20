@@ -1338,7 +1338,7 @@ def _load_runtime() -> Dict[str, str]:
     return {
         "baseUrl": base_url,
         "token": token,
-        "userId": _clean_text(app.get("userId")) or _clean_text(memory.get("userId")) or _clean_text(plugin_config.get("userId")) or "local-user",
+        "userId": "local-user",
         "workspaceHostId": _clean_text(plugin_config.get("workspaceHostId")),
     }
 

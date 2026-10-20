@@ -589,7 +589,7 @@ function parseConfigFile(path: string): Record<string, unknown> {
 function configFromEnv(): Record<string, unknown> {
   return compactRecord({
     domain: process.env.MEMMY_MEMORY_DOMAIN ?? process.env.MEMMY_DOMAIN,
-    userId: process.env.MEMMY_MEMORY_USER_ID ?? process.env.MEMMY_USER_ID ?? process.env.MEMORY_SERVICE_USER_ID,
+    userId: undefined,
     storage: compactRecord({
       mode: process.env.MEMMY_MEMORY_MODE,
       backend: process.env.MEMMY_MEMORY_BACKEND,
@@ -689,7 +689,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     version: 1,
     domain: memoryDomainName(input.domain, DEFAULT_MEMMY_CONFIG.domain),
     roleRouting: normalizeRoleRouting(asRecord(input.roleRouting)),
-    userId: optionalString(input.userId),
+    userId: undefined,
     ...(language ? { language } : {}),
     storage,
     summary,

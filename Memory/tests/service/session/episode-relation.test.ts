@@ -406,8 +406,8 @@ describe("MemoryService / session / episode relation", () => {
       l1_memory_ids_json: JSON.stringify([first.l1MemoryId, completed.l1MemoryId])
     });
     expect(db.db.prepare(
-      `SELECT content, source_turn_id FROM user_memories WHERE user_id = ? AND status = 'active'`
-    ).all("user-end-topic-feedback")).toEqual([{
+      `SELECT content, source_turn_id FROM user_memories WHERE user_id IS ? AND status = 'active'`
+    ).all(null)).toEqual([{
       content: closingQuery,
       source_turn_id: completed.rawTurnId
     }]);
@@ -827,7 +827,7 @@ describe("MemoryService / session / episode relation", () => {
     const feedbackCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM feedback
-       WHERE user_id = 'user-relation-follow-up'`
+       WHERE user_id IS NULL`
     ).get() as { count: number };
     expect(feedbackCount.count).toBe(0);
 
@@ -1227,7 +1227,7 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(prepared).not.toHaveProperty("episodeId");
     expect(db.db.prepare(
-      "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
+      "SELECT COUNT(*) AS count FROM feedback WHERE user_id IS NULL"
     ).get()).toEqual({ count: 0 });
     const correction = service.completeTurn("turn-relation-revision-fix", {
       sessionId: session.sessionId,
@@ -1236,13 +1236,13 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(correction.episodeId).toBe(first.episodeId);
     expect(db.db.prepare(
-      "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
+      "SELECT COUNT(*) AS count FROM feedback WHERE user_id IS NULL"
     ).get()).toEqual({ count: 1 });
 
     const feedback = db.db.prepare(
       `SELECT id, l1_memory_id, raw_turn_id, polarity, raw_payload_json
        FROM feedback
-       WHERE user_id = 'user-relation-revision'`
+       WHERE user_id IS NULL`
     ).get() as {
       id: string;
       l1_memory_id: string | null;
@@ -1410,7 +1410,7 @@ describe("MemoryService / session / episode relation", () => {
     expect(prepared).not.toHaveProperty("episodeId");
     expect(prepared).not.toHaveProperty("closedEpisodeIds");
     expect(db.db.prepare(
-      "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-implicit-turn-feedback'"
+      "SELECT COUNT(*) AS count FROM feedback WHERE user_id IS NULL"
     ).get()).toEqual({ count: 0 });
     expect(service.getMemory(first.episodeId)).toMatchObject({
       kind: "episode",
@@ -1426,7 +1426,7 @@ describe("MemoryService / session / episode relation", () => {
     const feedback = db.db.prepare(
       `SELECT id, channel, polarity, magnitude, l1_memory_id, raw_turn_id, raw_payload_json
        FROM feedback
-       WHERE user_id = 'user-implicit-turn-feedback'`
+       WHERE user_id IS NULL`
     ).get() as {
       id: string;
       channel: string;

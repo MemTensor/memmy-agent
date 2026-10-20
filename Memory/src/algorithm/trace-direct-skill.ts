@@ -91,7 +91,7 @@ export interface OutcomeThresholds {
 
 export interface EpisodeSkillFeatures {
   episodeId: string;
-  userId: string;
+  userId: string | null;
   projectId?: string;
   tools: string[];
   artifacts: string[];
@@ -104,7 +104,7 @@ export interface EpisodeSkillFeatures {
 
 export interface SkillClusterFeatures {
   id: string;
-  userId: string;
+  userId: string | null;
   projectId?: string;
   tools: string[];
   artifacts: string[];
@@ -282,7 +282,7 @@ export function firstUserQuery(turns: RawTurnLike[]): string {
 
 export function extractEpisodeSkillFeatures(input: {
   episodeId: string;
-  userId: string;
+  userId: string | null;
   projectId?: string;
   rTask?: number;
   turns: RawTurnLike[];
@@ -421,7 +421,7 @@ export function decideClusterAssignment(
     stage: "coarse" | "fine";
   } | undefined;
   for (const cluster of clusters) {
-    if (cluster.userId !== episode.userId) continue;
+
     if (episode.projectId && cluster.projectId && episode.projectId !== cluster.projectId) continue;
     const scored = scoreClusterJoin(episode, cluster, config);
     if (scored.score === null) continue;

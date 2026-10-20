@@ -72,7 +72,6 @@ export class ProjectEnvironmentProfilePipeline {
 
   async process(job: EvolutionJobRecord, derived: ProjectEnvironmentDerivedEvidence): Promise<void> {
     const payload = projectEnvironmentProfileJobPayload(job.payload);
-    if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     const state = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
     if (!state || state.currentScanId !== payload.scanId) return;
 
@@ -132,16 +131,16 @@ export class ProjectEnvironmentProfilePipeline {
 }
 
 export function projectEnvironmentProfileJobPayload(value: Record<string, unknown>): {
-  userId: string;
+  userId: string | null;
   projectId: string;
   scanId: string;
   trigger: "session_start" | "token_compaction";
 } {
-  const userId = stringValue(value.userId);
+  const userId = null;
   const projectId = stringValue(value.projectId);
   const scanId = stringValue(value.scanId);
   const trigger = value.trigger;
-  if (!userId || !projectId || !scanId || (trigger !== "session_start" && trigger !== "token_compaction")) {
+  if (!projectId || !scanId || (trigger !== "session_start" && trigger !== "token_compaction")) {
     throw new TypeError(`invalid project environment job payload: ${canonicalJson(value as never)}`);
   }
   return { userId, projectId, scanId, trigger };

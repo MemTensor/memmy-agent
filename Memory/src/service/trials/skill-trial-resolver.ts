@@ -211,7 +211,7 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
   }
 
 resolvePendingSkillTrialsForReward(input: {
-    userId: string;
+    userId: string | null;
     episodeId: string;
     rHuman: number;
     feedbackId?: string;

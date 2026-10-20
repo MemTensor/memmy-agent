@@ -189,8 +189,10 @@ describe("codex skill target", () => {
   it("installs a UserPromptSubmit hook that blocks resume commands with top L1 candidates", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
+    let requestCount = 0;
     let authorization = "";
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      requestCount += 1;
       authorization = String(request.headers.authorization || "");
       const url = new URL(request.url || "/", "http://127.0.0.1");
       if (request.method === "POST" && url.pathname === "/api/v1/memory/search") {
@@ -295,6 +297,11 @@ describe("codex skill target", () => {
       };
       expect(hooksAfter.hooks?.UserPromptSubmit).toBeUndefined();
       expect(hooksAfter.hooks?.Stop).toBeUndefined();
+      const requestsBeforeRestart = requestCount;
+      const afterUninstall = await runNodeHook(hookScriptPath, JSON.stringify({hook_event_name:"Stop",session_id:"fresh-process"}));
+      expect(afterUninstall.status).not.toBe(0);
+      expect(afterUninstall.stderr).toContain("MODULE_NOT_FOUND");
+      expect(requestCount).toBe(requestsBeforeRestart);
       expect(readFileSync(join(rootDirectory, "AGENTS.md"), "utf8")).toBe(existingTargetFile);
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
       expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);

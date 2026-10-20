@@ -28,7 +28,7 @@ export async function readMemmyMemoryServiceConfig(configPath: string): Promise<
     token: normalizeString(storage.token) ||
       normalizeString(memmyMemory.token) ||
       normalizeString(legacyStorage.token),
-    userId: normalizeString(app.userId) || normalizeString(memmyMemory.userId) || "local-user",
+    userId: "local-user",
     workspaceHostId: deriveWorkspaceHostId(getOrCreateInstallationId())
   };
 }

@@ -662,7 +662,7 @@ export async function writeAccountModelProjectionToMemmyConfig(
     // inherit agent_chat or retain a stale BYOK memory endpoint.
     roleRouting.summary = "fixed";
     roleRouting.evolution = "fixed";
-    memory.userId = ownerAccountId;
+    delete memory.userId;
     memory.roleRouting = roleRouting;
     memory.summary = {
       ...withoutMemoryConnection(previousMemoryRecord(existingMemory.summary)),
@@ -683,7 +683,7 @@ export async function writeAccountModelProjectionToMemmyConfig(
           mode: "cloud"
         };
     memoryConfigAffected = memoryConfigAffected
-      || existingString(existingMemory.userId) !== ownerAccountId
+      || existingMemory.userId !== undefined
       || !accountMemoryConnectionMatches(
         existingMemory.summary,
         ACCOUNT_MODELS.memory_summary,

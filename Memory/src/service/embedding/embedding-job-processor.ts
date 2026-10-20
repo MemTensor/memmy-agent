@@ -83,7 +83,7 @@ export interface PreparedEmbeddingJob {
 
 export interface EnqueueWorkerJobInput {
   jobType: JobType;
-  userId: string;
+  userId: string | null;
   sessionId?: string;
   episodeId?: string;
   targetMemoryId?: string;
@@ -495,7 +495,7 @@ export class EmbeddingJobProcessor {
       : undefined;
     if (
       decision.userMemoryAction === "correct_existing" &&
-      (!correctionTarget || correctionTarget.userId !== sourceMemory.userId || correctionTarget.status !== "active")
+      (!correctionTarget || correctionTarget.status !== "active")
     ) return undefined;
     const candidate = buildUserMemory({
       id: `user_memory_${stableHash(`${sourceTurnId}:${content}`).slice(0, 20)}`,

@@ -1826,8 +1826,8 @@ interface RetrievalDependencies {
   memorySearchEnabled(): boolean;
   queryRewriteEnabled(): boolean;
   requireEpisode(episodeId: string): EpisodeRecord;
-  resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string }): {
-    userId: string;
+  resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string | null }): {
+    userId: string | null;
     conversationId?: string;
     namespace: RuntimeNamespace;
   };
@@ -2198,6 +2198,7 @@ export class RetrievalService {
     timeFilter: RetrievalTimeFilter;
     tags?: string[];
     limit: number;
+    preferredUserId: string | null;
   }): { retrieval: RetrievalResult; memories: MemoryRow[] } {
     const filter: MemoryFilter = {
       memoryLayer: "L1",
@@ -2241,7 +2242,7 @@ export class RetrievalService {
   }
 
   private async retrieveUserMemories(input: {
-    userId: string;
+    userId: string | null;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -2298,7 +2299,7 @@ export class RetrievalService {
   }
 
   private async retrieveSearchMemories(input: {
-    userId: string;
+    userId: string | null;
     projectId?: string | null;
     query: string;
     queryVectorText: string;

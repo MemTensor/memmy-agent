@@ -28,7 +28,7 @@ const L3WorldModelRuntimeNamespaceShape = {
   workspaceId: OptionalNonEmptyStringSchema,
   workspacePath: OptionalNonEmptyStringSchema,
   sessionKey: OptionalNonEmptyStringSchema,
-  userId: OptionalNonEmptyStringSchema,
+  userId: OptionalNonEmptyStringSchema.nullable(),
   tenantId: OptionalNonEmptyStringSchema
 } as const;
 

@@ -162,7 +162,7 @@ export class WorkMemoryPipeline {
    */
   private takeWindow(
     chunk: readonly L3WorldModelInputTraceRecord[],
-    scope: { userId: string; sessionId: string }
+    scope: { userId: string | null; sessionId: string }
   ): { qa: WorkMemoryQaPair[]; throughTraceSeq: number; truncated: boolean } {
     const rawTurnIds = [...new Set(chunk.map((trace) => trace.rawTurnId))];
     const lastTraceByRawTurnId = new Map<string, number>();
@@ -244,17 +244,23 @@ export class WorkMemoryPipeline {
       throw new Error(`work memory trajectory hash mismatch: ${job.id}`);
     }
     const session = job.sessionId ? this.deps.repos.runtime.getSession(job.sessionId) : undefined;
-    if (!session || session.userId !== job.userId) {
+    if (!session) {
       throw new Error(`work memory job session scope mismatch: ${job.id}`);
     }
     const projectId = normalizeProjectId(session.projectId);
     const source = session.source.trim() || "unknown";
-    const expectedScopeKey = stableHash(["work_memory", job.userId, projectId]);
+    const stored = this.deps.repos.db.prepare(`SELECT job.user_id, session.project_id
+      FROM evolution_jobs job JOIN sessions session ON session.id = job.session_id WHERE job.id = ?`)
+      .get(job.id) as {user_id: string | null; project_id: string | null} | undefined;
+    // Immutable legacy jobs retain their original hash; new jobs use device identity,
+    // including when their session was created before the schema upgrade.
+    const hashProjectId = stored?.user_id != null ? stored.project_id : projectId;
+    const expectedScopeKey = stableHash(["work_memory", stored?.user_id ?? null, hashProjectId]);
     const expectedDedupeKey = stableHash([
       "work_memory_extract",
-      job.userId,
+      stored?.user_id ?? null,
       source,
-      projectId,
+      hashProjectId,
       payload.trajectoryHash
     ]);
     if (job.scopeKey !== expectedScopeKey || job.dedupeKey !== expectedDedupeKey) {
@@ -293,7 +299,7 @@ export class WorkMemoryPipeline {
     const batch = this.deps.repos.l3WorldModels.getBatch(batchId);
     if (!batch) throw new Error(`work memory batch not found: ${batchId}`);
     const session = this.deps.repos.runtime.getSession(batch.sessionId);
-    if (!session || session.userId !== batch.userId || normalizeProjectId(session.projectId) !== normalizeProjectId(batch.projectId)) {
+    if (!session || normalizeProjectId(session.projectId) !== normalizeProjectId(batch.projectId)) {
       throw new Error(`work memory batch session scope mismatch: ${batchId}`);
     }
     return this.scheduleQaInTransaction({
@@ -315,11 +321,11 @@ export class WorkMemoryPipeline {
    */
   private qaForRawTurn(
     rawTurnId: string,
-    scope: { userId: string; sessionId: string }
+    scope: { userId: string | null; sessionId: string }
   ): WorkMemoryQaPair | undefined {
     const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
     if (!rawTurn || rawTurn.deletedAt || rawTurn.redactedAt) return undefined;
-    if (rawTurn.userId !== scope.userId || rawTurn.sessionId !== scope.sessionId) {
+    if (rawTurn.sessionId !== scope.sessionId) {
       throw new Error(`work memory RawTurn scope mismatch: ${rawTurnId}`);
     }
     const user = normalizeQaText(rawTurn.userText ?? "");
@@ -332,14 +338,14 @@ export class WorkMemoryPipeline {
   private scheduleQaInTransaction(
     input: {
       qa: readonly WorkMemoryQaPair[];
-      userId: string;
+      userId: string | null;
       sessionId: string;
       projectId: string | null;
     },
     at: string
   ): EvolutionJobRecord | undefined {
     const session = this.deps.repos.runtime.getSession(input.sessionId);
-    if (!session || session.userId !== input.userId) {
+    if (!session) {
       throw new Error(`work memory session scope mismatch: ${input.sessionId}`);
     }
     const qa = input.qa;
@@ -353,7 +359,12 @@ export class WorkMemoryPipeline {
       projectId,
       trajectoryHash
     ]);
-    const existing = this.deps.repos.runtime.getJobByDedupeKey(dedupeKey);
+    const historical = this.deps.repos.db.prepare(`SELECT job.id FROM evolution_jobs job
+      JOIN sessions session ON session.id = job.session_id
+      WHERE job.job_type = 'work_memory_extract' AND session.source = ?
+        AND memory_project_id(session.project_id) IS ? AND json_extract(job.payload_json, '$.trajectoryHash') = ?
+      ORDER BY job.created_at, job.id LIMIT 1`).get(source, projectId, trajectoryHash) as {id: string} | undefined;
+    const existing = historical ? this.deps.repos.runtime.getJob(historical.id) : this.deps.repos.runtime.getJobByDedupeKey(dedupeKey);
     if (existing?.status === "queued" || existing?.status === "leased" || existing?.status === "succeeded" || existing?.status === "dead_letter") {
       return existing;
     }
@@ -773,7 +784,6 @@ function validateDecisionOutput(
 
 function isWorkMemoryInScope(memory: MemoryRow, filter: MemoryFilter): boolean {
   if (memory.memoryLayer !== "L1" || memory.properties.internal_info.memory_kind !== "work_memory") return false;
-  if (filter.workMemoryUserId !== undefined && memory.userId !== filter.workMemoryUserId) return false;
   const project = normalizeProjectId(typeof memory.info.project_id === "string" ? memory.info.project_id : null);
   return filter.workMemoryProjectId === undefined || project === filter.workMemoryProjectId;
 }

@@ -6,7 +6,7 @@ import {
   type ResolvedWorkspaceIdentity
 } from "./workspace-identity.js";
 
-export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespace & { userId: string; source: string; profileId: string } {
+export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespace & { userId: string | null; source: string; profileId: string } {
   return {
     source: namespace?.source ?? DEFAULT_NAMESPACE_SOURCE,
     profileId: namespace?.profileId ?? "default",
@@ -15,7 +15,7 @@ export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespa
     workspaceId: namespace?.workspaceId,
     workspacePath: namespace?.workspacePath,
     sessionKey: namespace?.sessionKey,
-    userId: namespace?.userId ?? "local-user",
+    userId: null,
     tenantId: namespace?.tenantId
   };
 }
@@ -32,7 +32,7 @@ export function sessionScopeForOpenRequest(request: SessionOpenRequest, namespac
 
 export function resolveV2WorkspaceIdentityForOpenRequest(
   request: SessionOpenRequest,
-  namespace: RuntimeNamespace & { userId: string }
+  namespace: RuntimeNamespace & { userId: string | null }
 ): ResolvedWorkspaceIdentity {
   return resolveWorkspaceIdentity(namespace.userId, {
     workspaceUri: request.workspaceUri,

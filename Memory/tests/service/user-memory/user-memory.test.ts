@@ -936,7 +936,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("lists User Memory in its own panel layer with user isolation and search", () => {
+  it("lists User Memory in its own panel layer across accounts with search", () => {
     const { db, service } = createTestService();
     const session = open(service, "panel-user");
     service.completeTurn("turn-panel-user-memory", {
@@ -961,13 +961,13 @@ describe("User Memory", () => {
     expect(service.panelItems({
       namespace: { source: "codex", profileId: "default", userId: "another-user" },
       layer: "UserMemory"
-    }).items).toEqual([]);
+    }).items).toEqual(panel.items);
     expect(service.panelOverviewSummary({
       namespace: { source: "codex", profileId: "default", userId: "panel-user" }
     }).counts.userMemories).toBe(1);
     expect(service.panelOverviewSummary({
       namespace: { source: "codex", profileId: "default", userId: "another-user" }
-    }).counts.userMemories).toBe(0);
+    }).counts.userMemories).toBe(1);
     db.close();
   });
 

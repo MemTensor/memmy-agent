@@ -54,7 +54,7 @@ export interface RewardPipelineDeps {
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   finalizeClosedEpisode(episode: EpisodeRecord, at: string, trigger: "episode_rewarded"): EvolutionJobRecord[];
   resolvePendingSkillTrialsForReward(input: {
-    userId: string;
+    userId: string | null;
     episodeId: string;
     rHuman: number;
     feedbackId?: string;

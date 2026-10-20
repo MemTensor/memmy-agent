@@ -35,11 +35,7 @@ export function loadCliMemoryConfig(configPath?: string): {
         optionalString(process.env.MEMORY_SERVICE_TOKEN) ??
         optionalString(storage.token) ??
         optionalString(memmyMemory.token),
-      userId: optionalString(process.env.MEMMY_MEMORY_USER_ID) ??
-        optionalString(process.env.MEMMY_USER_ID) ??
-        optionalString(process.env.MEMORY_SERVICE_USER_ID) ??
-        optionalString(memmyMemory.userId) ??
-        optionalString(app.userId)
+      userId: undefined
     },
     path: selectedPath
   };

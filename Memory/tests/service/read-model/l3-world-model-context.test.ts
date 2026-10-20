@@ -89,8 +89,8 @@ describe("Session L3 World Model context read model", () => {
     db.db.prepare(
       `UPDATE l3_world_model_project_environment_state
        SET project_kind = 'code', status = 'clean', applied_scan_id = 'scan-1', updated_at = ?
-       WHERE user_id = ? AND project_id = ?`
-    ).run("2026-01-01T00:00:00.000Z", namespace.userId, projectId);
+       WHERE user_id IS ? AND project_id = ?`
+    ).run("2026-01-01T00:00:00.000Z", null, projectId);
 
     const context = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
     expect(context).toMatchObject({
@@ -102,8 +102,8 @@ describe("Session L3 World Model context read model", () => {
     const before = repos.memories.get(memory.id)!;
     db.db.prepare(
       `UPDATE l3_world_model_project_environment_state
-       SET applied_scan_id = 'scan-2' WHERE user_id = ? AND project_id = ?`
-    ).run(namespace.userId, projectId);
+       SET applied_scan_id = 'scan-2' WHERE user_id IS ? AND project_id = ?`
+    ).run(null, projectId);
     const projected = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
     expect(projected.projectEnvironmentProfile).toBeNull();
     expect(projected.projectContract).toBe("提交前运行测试。");

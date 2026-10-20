@@ -11,7 +11,7 @@ import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../src/agent-source/integr
 const directories: string[] = [];
 afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const createdAt = "2026-09-09T10:00:00.000Z";
-const expectedNamespace = { source: "codex", profileId: "default", userId: "fixture-owner", sessionKey: "native-session" };
+const expectedNamespace = { source: "codex", profileId: "default", userId: "local-user", sessionKey: "native-session" };
 function record(type: string, payload: unknown) { return JSON.stringify({ type, timestamp: createdAt, payload }); }
 function transcript(complete = true) {
   return [record("session_meta", { id: "native-session", cwd: "/project" }), record("event_msg", { type: "task_started", turn_id: "native-turn" }),

@@ -52,7 +52,7 @@ export function userMemoryTextHash(text: string): string {
 export function buildUserMemory(input: {
   id: string;
   sourceTurnId: string;
-  userId: string;
+  userId: string | null;
   memoryTypes: UserMemoryType[];
   content: string;
   createdAt: string;

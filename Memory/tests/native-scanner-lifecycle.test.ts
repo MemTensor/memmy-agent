@@ -47,8 +47,8 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE memory_layer = 'L1'").get()).toEqual({ n: 1 });
       const captured = hook().result!;
       const repos = new Repositories(db.db);
-      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe("scan-owner");
-      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe("scan-owner");
+      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe(null);
+      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe(null);
       expect(repos.runtime.getEpisode(captured.episodeId)?.l1MemoryIds).toEqual([captured.l1MemoryId]);
       expect(repos.runtime.getRawTurn(captured.rawTurnId)?.toolCalls[0]).toMatchObject({ id: "read", input: { path: "src/main.ts" }, output: expect.stringContaining("source contents") });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'import_summary'").get()).toEqual({ n: 0 });

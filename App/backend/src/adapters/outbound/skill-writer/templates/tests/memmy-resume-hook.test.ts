@@ -294,7 +294,7 @@ describe("memmy resume hook stop capture", () => {
         workspaceHostId: "a".repeat(64),
         namespace: {
           source,
-          userId: "installed-owner",
+          userId: "local-user",
           sessionKey: `${source}-memory-host-session`,
         },
       });

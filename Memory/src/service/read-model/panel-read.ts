@@ -74,8 +74,8 @@ export interface PanelReadModelDependencies {
   schemaVersion: () => { version: number; lastMigrationId?: string };
   health: (routes?: string[]) => HealthResponse;
   models: () => HealthResponse["models"];
-  resolveContext: (request: RequestEnvelope & { sessionId?: string; userId?: string }) => {
-    userId: string;
+  resolveContext: (request: RequestEnvelope & { sessionId?: string; userId?: string | null }) => {
+    userId: string | null;
     conversationId?: string;
     namespace: RuntimeNamespace;
   };
@@ -94,7 +94,7 @@ export class PanelReadModel {
   }
 
   auditLogs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     targetKind?: string;
     targetId?: string;
     limit?: number;
@@ -114,7 +114,7 @@ export class PanelReadModel {
   }
 
   serviceLogs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     limit?: number;
     cursor?: string;
   } = {}): {
@@ -123,7 +123,7 @@ export class PanelReadModel {
       type: "change" | "audit" | "job";
       id: string;
       at: string;
-      userId?: string;
+      userId?: string | null;
       action: string;
       targetKind?: string;
       targetId?: string;
@@ -262,7 +262,7 @@ export class PanelReadModel {
     return typeof goal === "string" && goal.trim() ? goal.trim() : undefined;
   }
 
-  serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
+  serviceMetrics(input: RequestEnvelope & { userId?: string | null } = {}): {
     storage: StorageBackendCapabilities;
     schema: { version: number; lastMigrationId?: string };
     memory: ReturnType<PanelReadModel["panelOverview"]>["stats"];
@@ -287,7 +287,7 @@ export class PanelReadModel {
     };
   }
 
-  adminStatus(input: RequestEnvelope & { userId?: string } = {}, routes: string[] = []): {
+  adminStatus(input: RequestEnvelope & { userId?: string | null } = {}, routes: string[] = []): {
     health: HealthResponse;
     overview: ReturnType<PanelReadModel["panelOverview"]>;
     failedJobs: EvolutionJobRecord[];
@@ -318,7 +318,7 @@ export class PanelReadModel {
     };
   }
 
-  panelOverview(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverview(_input: RequestEnvelope & { userId?: string | null } = {}): {
     stats: {
       byLayer: Record<MemoryLayer, number>;
       byStatus: Record<"activated" | "resolving" | "archived" | "deleted", number>;
@@ -357,19 +357,19 @@ export class PanelReadModel {
     };
   }
 
-  panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverviewSummary(input: RequestEnvelope & { userId?: string | null } = {}): {
     counts: { memories: number; userMemories: number; skills: number; experiences: number; worldModels: number };
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
     const memories = this.deps.repos.memories.listStats();
-    const userId = input.userId ?? input.namespace?.userId;
+    const userId = null;
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
     return {
       counts: {
         memories: memories.filter((memory) => memory.memoryLayer === "L1").length,
-        userMemories: userId ? this.deps.repos.userMemories.countForPanel({ userId }) : 0,
+        userMemories: this.deps.repos.userMemories.countForPanel({ userId }),
         skills: memories.filter((memory) => memory.memoryLayer === "Skill").length,
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
@@ -379,7 +379,7 @@ export class PanelReadModel {
     };
   }
 
-  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
+  panelAnalysis(input: RequestEnvelope & { userId?: string | null } = {}): {
     metrics: {
       avgRecallScore: number;
       recallEvents: number;
@@ -422,7 +422,7 @@ export class PanelReadModel {
   }
 
   panelItems(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
@@ -446,9 +446,9 @@ export class PanelReadModel {
   } {
     const pageSize = normalizePanelItemsLimit(input.limit);
     if (input.layer === "UserMemory") {
-      const userId = input.userId ?? input.namespace?.userId;
+      const userId = null;
       const requestedPage = normalizePageNumber(input.page);
-      if (!userId || input.status === "resolving") {
+      if (input.status === "resolving") {
         return emptyPanelItems(requestedPage, pageSize, this.now());
       }
       const status = input.status === "activated"
@@ -493,14 +493,27 @@ export class PanelReadModel {
       agentId: input.sourceAgent,
       excludedAgentIds: input.excludedSourceAgents
     };
-    const total = input.q?.trim()
+    const projectedWorlds = input.layer === "L3" ? (() => {
+      const seen = new Set<string>();
+      return this.deps.repos.memories.list(filter, 100000, 0).flatMap(memory => {
+        if (memory.properties.internal_info.schema_version !== 2) return [memory];
+        const project = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
+        if (seen.has(project ?? "")) return [];
+        seen.add(project ?? "");
+        const shared = this.deps.repos.l3WorldModels.getMemory(null, project);
+        if (!shared) return [memory];
+        if (shared.status === "archived" && input.status !== "archived") return [];
+        return [shared];
+      }).filter(memory => !input.q?.trim() || memory.memoryValue.toLowerCase().includes(input.q.trim().toLowerCase()));
+    })() : undefined;
+    const total = projectedWorlds ? projectedWorlds.length : input.q?.trim()
       ? this.deps.repos.memories.searchCount(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] })
       : this.deps.repos.memories.count(filter);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const requestedPage = normalizePageNumber(input.page);
     const page = Math.min(requestedPage, totalPages);
     const offset = normalizeOffsetCursor(input.cursor) ?? ((page - 1) * pageSize);
-    const memories = input.q?.trim()
+    const memories = projectedWorlds ? projectedWorlds.slice(offset, offset + pageSize) : input.q?.trim()
       ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(
           input.q,
           { ...filter, status: filter.status ?? ["activated", "resolving"] },
@@ -537,7 +550,7 @@ export class PanelReadModel {
         const item = sourceText ? { ...listed, sourceText } : listed;
         const scope = scopesByMemoryId.get(memory.id);
         const worldModelScope = memory.memoryLayer === "L3" && scope &&
-          scope.memoryId === memory.id && scope.userId === memory.userId
+          scope.memoryId === memory.id && (scope.projectId ?? null) === (memory.info.project_id ?? null)
           ? panelWorldModelScope(scope)
           : undefined;
         return worldModelScope ? { ...item, worldModelScope } : item;
@@ -605,7 +618,7 @@ export class PanelReadModel {
   }
 
   panelChanges(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     limit?: number;
     cursor?: string;
   } = {}): {
@@ -629,7 +642,7 @@ export class PanelReadModel {
   }
 
   panelJobs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     status?: "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
     limit?: number;
   } = {}): {

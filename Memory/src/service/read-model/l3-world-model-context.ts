@@ -39,7 +39,7 @@ export class L3WorldModelContextReadModel {
   }
 
   private environmentProfileIsApplied(
-    userId: string,
+    userId: string | null,
     projectId: string,
     memoryScanId: unknown
   ): boolean {
@@ -47,8 +47,8 @@ export class L3WorldModelContextReadModel {
     const row = this.repos.db.prepare(
       `SELECT applied_scan_id
        FROM l3_world_model_project_environment_state
-       WHERE user_id = ? AND project_id = ?`
-    ).get(userId, projectId) as { applied_scan_id: string | null } | undefined;
+       WHERE memory_project_id(project_id) = ? AND applied_scan_id = ? LIMIT 1`
+    ).get(projectId, memoryScanId) as { applied_scan_id: string | null } | undefined;
     return row?.applied_scan_id === memoryScanId;
   }
 }

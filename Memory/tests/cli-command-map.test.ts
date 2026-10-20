@@ -436,7 +436,7 @@ describe("memmy CLI command map", () => {
       fetch: mockFetch(requests)
     });
 
-    expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_from_memory");
+    expect(requests[0]?.headers["x-memmy-user-id"]).toBeUndefined();
   });
 
   it("uses the flat memory userId even when obsolete profile fields remain", async () => {
@@ -464,7 +464,7 @@ describe("memmy CLI command map", () => {
       fetch: mockFetch(requests)
     });
 
-    expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_from_flat_memory");
+    expect(requests[0]?.headers["x-memmy-user-id"]).toBeUndefined();
   });
 
   it("lets explicit user-id override memmyMemory.userId from config", async () => {
