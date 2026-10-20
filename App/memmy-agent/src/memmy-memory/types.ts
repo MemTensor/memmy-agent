@@ -30,7 +30,7 @@ export type MemmyMemoryRuntimeNamespace = {
   workspaceId?: string;
   workspacePath?: string;
   sessionKey?: string;
-  userId?: string;
+  userId?: string | null;
   tenantId?: string;
 };
 
