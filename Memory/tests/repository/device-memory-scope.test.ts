@@ -158,6 +158,28 @@ describe("device memory / preserved schema-v9 history", () => {
     service.deleteMemory(a.items[0]!.id,{namespace:{...namespace,userId:"account-b"}});
     expect(service.panelItems({layer:"UserMemory",namespace}).items).toEqual([]);
   });
+  it("keeps legacy native-capture identity after clear and restart", () => {
+    const root = mkdtempSync(join(tmpdir(),"memmy-uid-clear-")), path = join(root,"memory.sqlite");
+    try {
+      seedV9(path).close();
+      const db = new MemoryDb({path}), repos = new Repositories(db.db);
+      repos.clearAllMemoryData();
+      expect(db.db.prepare("SELECT COUNT(*) FROM sessions").pluck().get()).toBe(0);
+      const bundle = repos.runtime.exportBundleTables(true);
+      expect(bundle.memory_namespace_aliases?.length ?? 0).toBeGreaterThan(0);
+      db.close();
+      const reopened = new MemoryDb({path});
+      const capture = new Repositories(reopened.db).runtime.getSourceTurnCapture({userId:"account-c",source:"codex",profileId:"default",namespaceKey:stableHash({tenantId:null,projectId:identity.projectId,workspaceId:identity.workspaceId}),conversationId:"native-conversation"},"native-turn");
+      expect(capture).toBeDefined();
+      expect(capture?.sessionId).toBeUndefined();
+      reopened.close();
+      const imported = new MemoryDb({path:join(root,"imported.sqlite")});
+      const importedRepos = new Repositories(imported.db);
+      importedRepos.runtime.importBundleTables(bundle);
+      expect(importedRepos.runtime.getSourceTurnCapture({userId:"account-d",source:"codex",profileId:"default",namespaceKey:stableHash({tenantId:null,projectId:identity.projectId,workspaceId:identity.workspaceId}),conversationId:"native-conversation"},"native-turn")).toBeDefined();
+      imported.close();
+    } finally {rmSync(root,{recursive:true,force:true});}
+  });
   it("respects pre-upgrade L3 deletion and does not replay older batches into another account's copy", async () => {
     const root = mkdtempSync(join(tmpdir(),"memmy-uid-tombstone-")), path = join(root,"memory.sqlite");
     try {

@@ -60,6 +60,7 @@ import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memory_project_aliases",
+  "memory_namespace_aliases",
   "memory_l3_overrides",
   "memories",
   "memory_capture_claims",
@@ -91,8 +92,7 @@ const BUNDLE_TABLES = [
   "audit_logs"
 ] as const;
 const CLEAR_MEMORY_TABLES = [
-  "memory_l3_overrides",
-  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures" && table !== "memory_project_aliases"),
+  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures" && table !== "memory_project_aliases" && table !== "memory_namespace_aliases"),
   "memories_fts",
   "user_memories_fts",
   "memory_vector_entries",
@@ -8039,6 +8039,7 @@ function bundleIdentity(
 ): BundleIdentity | undefined {
   const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
     memory_project_aliases: ["legacy_id"],
+    memory_namespace_aliases: ["legacy_key"],
     memory_l3_overrides: ["project_key", "field"],
     memory_capture_claims: ["user_id", "source", "qa_hash"],
     source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],

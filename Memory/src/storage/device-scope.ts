@@ -36,7 +36,8 @@ export function registerProjectAlias(db: Database.Database, legacyId: string, ur
 }
 
 export function refreshProjectAliases(db: Database.Database): void {
-  namespaces.set(db, new Map());
+  const storedNamespaces = db.prepare("SELECT legacy_key, namespace_key FROM memory_namespace_aliases").all() as Array<{legacy_key:string;namespace_key:string}>;
+  namespaces.set(db, new Map(storedNamespaces.map(row=>[row.legacy_key,row.namespace_key])));
   aliases.set(db, new Map((db.prepare("SELECT legacy_id, project_id FROM memory_project_aliases").all() as Array<{legacy_id:string;project_id:string}>).map(row => [row.legacy_id,row.project_id])));
   const rows = db.prepare(`SELECT project_id, workspace_id, meta_json FROM sessions WHERE project_id IS NOT NULL`).all() as Array<{ project_id: string; workspace_id: string | null; meta_json: string }>;
   // Resolve all evidence before writing any mapping; conflicting identities remain isolated.
@@ -101,6 +102,10 @@ export function refreshProjectAliases(db: Database.Database): void {
     const tenantId = meta.tenant_id ?? meta.tenantId ?? null;
     const current = stableHash({tenantId, projectId, workspaceId: canonicalProjectId(db, row.workspace_id)});
     const old = stableHash({tenantId, projectId: row.project_id, workspaceId: row.workspace_id});
+    // These hashes cannot be reconstructed once clear removes their Sessions.
+    // Keep the alias with the native-capture tombstones, including across export/import.
+    if (!db.readonly) db.prepare(`INSERT INTO memory_namespace_aliases(legacy_key,namespace_key) VALUES (?,?)
+      ON CONFLICT(legacy_key) DO UPDATE SET namespace_key=excluded.namespace_key`).run(old,current);
     namespaces.get(db)?.set(old, current);
     if (meta.source_namespace_key === old) namespaces.get(db)?.set(meta.source_namespace_key, current);
   }

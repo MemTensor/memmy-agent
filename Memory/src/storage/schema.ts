@@ -732,6 +732,9 @@ export function migrate(db: Database.Database): void {
           workspace_host_id TEXT, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_memory_project_alias_target ON memory_project_aliases(project_id);
+        CREATE TABLE IF NOT EXISTS memory_namespace_aliases (
+          legacy_key TEXT PRIMARY KEY, namespace_key TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS memory_l3_overrides (
           project_key TEXT NOT NULL, field TEXT NOT NULL, memory_id TEXT, deleted INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(project_key, field)
