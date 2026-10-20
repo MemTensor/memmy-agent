@@ -369,6 +369,8 @@ describe("AgentLoop pending queues", () => {
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model", config: isolatedLoopConfig() });
     loop.unifiedSession = true;
+    // Queue routing is under test; desktop/browser startup is an external dependency.
+    vi.spyOn(loop, "initializeRuntimeTools").mockResolvedValue(undefined);
     loop.processMessageInternal = vi.fn(async () => null) as any;
     const pending = new AsyncQueue<InboundMessage>();
     loop.pendingQueues.set(UNIFIED_SESSION_KEY, pending);
@@ -415,6 +417,8 @@ describe("AgentLoop pending queues", () => {
     const root = tmpRoot();
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model", config: isolatedLoopConfig() });
+    // Queue routing does not require desktop/browser startup.
+    vi.spyOn(loop, "initializeRuntimeTools").mockResolvedValue(undefined);
     loop.processMessageInternal = vi.fn(async () => null) as any;
     loop.pendingQueues.set("cli:c", { put: () => { throw new Error("full"); } } as any);
 

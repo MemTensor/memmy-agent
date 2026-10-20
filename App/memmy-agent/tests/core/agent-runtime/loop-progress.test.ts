@@ -342,7 +342,7 @@ describe("AgentLoop progress integration", () => {
     fs.writeFileSync(path.join(root, "file.txt"), "fixture\n");
     const loop = makeLoop(root);
     loop.bus = bus;
-    const toolCall = new ToolCallRequest({ id: "tc1", name: "exec", arguments: { command: "ls file.txt" } });
+    const toolCall = new ToolCallRequest({ id: "tc1", name: "exec", arguments: { command: "ls file.txt", output_paths: [] } });
     const responses = [new LLMResponse({ content: "", toolCalls: [toolCall] }), new LLMResponse({ content: "Done", toolCalls: [] })];
     (loop.provider as any).chatWithRetry = vi.fn(async () => responses.shift());
 

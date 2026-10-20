@@ -290,6 +290,7 @@ export class ExecTool extends Tool {
         yield_time_ms: { type: "integer", minimum: 0, maximum: MAX_YIELD_MS },
         max_output_chars: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
         max_output_tokens: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
+        output_paths: { type: "array", items: { type: "string", minLength: 1 }, description: "All files this command will create/modify and deliver, relative to cwd or absolute. Use [] when there are no deliverables. Required when an output location policy is active." },
       },
     };
   }
@@ -512,6 +513,7 @@ export class ExecTool extends Tool {
     maxOutputChars?: number | null;
     max_output_tokens?: number | null;
     maxOutputTokens?: number | null;
+    output_paths?: string[];
   } = {}, context?: ToolExecutionContext): Promise<string> {
     const command = firstNonEmptyString(params.command, params.cmd);
     if (!command) return "Error: Missing command. Provide command or cmd.";
@@ -525,6 +527,11 @@ export class ExecTool extends Tool {
       params.login,
     );
     if (typeof prepared === "string") return prepared;
+    if (context?.outputLocation) {
+      if (!Array.isArray(params.output_paths)) return "Error: declare output_paths before executing (use [] for commands without deliverables). " + context.outputLocation.instruction();
+      const declarationError = await context.outputLocation.declareOutputs(params.output_paths, prepared.cwd, context);
+      if (declarationError) return declarationError;
+    }
 
     const maxOutputChars = clampSessionInt(maxOutputParam, ExecTool.DEFAULT_OUTPUT_CHARS, 1000, MAX_OUTPUT_CHARS);
     if (params.yield_time_ms != null || params.yieldTimeMs != null) {
@@ -532,6 +539,13 @@ export class ExecTool extends Tool {
         throwIfAborted(signal);
         const [sessionId, poll] = await this.sessionManager.start({
           command: prepared.command,
+          // Install before the first poll can finish and remove the manager entry.
+          onStart: (id, session) => {
+            if (params.output_paths?.length) {
+              context?.outputLocation?.trackProducer(`exec:${id}`, () => session.completion.done,
+                () => this.sessionManager.stop(id));
+            }
+          },
           cwd: prepared.cwd,
           env: prepared.env,
           timeout: prepared.timeout,

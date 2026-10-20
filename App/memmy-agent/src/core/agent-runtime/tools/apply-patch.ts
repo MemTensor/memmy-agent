@@ -1,3 +1,4 @@
+import { OUTPUT_PATHS_SCHEMA } from "./output-location.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -292,6 +293,7 @@ export class ApplyPatchTool extends Tool {
       type: "object",
       additionalProperties: false,
       properties: {
+        output_paths: OUTPUT_PATHS_SCHEMA,
         input: {
           type: "string",
           minLength: 1,
@@ -525,6 +527,10 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       return "No changes made by patch:\n" + plan.summaries.map(formatSummary).join("\n");
     }
 
+    for (const change of actionable) {
+      const locationError = await context?.outputLocation?.checkWrite(change.target, context);
+      if (locationError) return locationError;
+    }
     const attemptedPaths: string[] = [];
     const attempted = new Set<string>();
     const markAttempted = (target: string): void => {
@@ -577,6 +583,9 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       throwIfAborted(signal);
       const lintResults = await lintFiles(lintRequests, { abortSignal: signal });
       throwIfAborted(signal);
+      for (const change of actionable) {
+        if (change.kind !== "delete") context?.outputLocation?.recordFile(change.target);
+      }
       const success = "Patch applied:\n" + plan.summaries.map(formatSummary).join("\n");
       const result = appendFileLintResults(success, lintResults);
       for (const change of unchanged) {
@@ -602,8 +611,8 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
     ) {
       return "Error applying patch: input must be a non-empty string";
     }
-    if (Object.keys(params).length !== 1 || !("input" in params)) {
-      return "Error applying patch: apply_patch accepts only the input parameter";
+    if (Object.keys(params).some(key => key !== "input" && key !== "output_paths")) {
+      return "Error applying patch: apply_patch accepts only input and optional output_paths";
     }
 
     const signal = context?.abortSignal ?? null;
@@ -617,6 +626,8 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       if (isAbortError(error)) throw error;
       return "Error applying patch: " + errorMessage(error);
     }
+    const declarationError = await context?.outputLocation?.declareOutputs(params.output_paths, this.workspace, context);
+    if (declarationError) return declarationError;
     return this.applyChanges(plan, context);
   }
 }

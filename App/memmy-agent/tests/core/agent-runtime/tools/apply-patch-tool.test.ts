@@ -37,7 +37,7 @@ describe("ApplyPatchTool contract", () => {
       required: ["input"],
       properties: { input: { type: "string", minLength: 1 } },
     });
-    expect(Object.keys(tool.parameters.properties)).toEqual(["input"]);
+    expect(Object.keys(tool.parameters.properties)).toEqual(["output_paths", "input"]);
     expect(tool.parameters.properties.input.description).toContain("*** Begin Patch");
     expect(tool.parameters.properties.input.description).toContain("*** Add File:");
     expect(tool.parameters.properties.input.description).toContain("*** Update File:");
@@ -76,7 +76,7 @@ describe("ApplyPatchTool contract", () => {
   ])("rejects extra parameters %#", async (extra) => {
     const tool = new ApplyPatchTool({ workspace: workspace() });
     const result = await tool.execute({ ...input("*** Add File: a", "+x"), ...extra });
-    expect(result).toBe("Error applying patch: apply_patch accepts only the input parameter");
+    expect(result).toBe("Error applying patch: apply_patch accepts only input and optional output_paths");
   });
 
   it("lets the normal registry validation reject the removed edits-only shape", () => {

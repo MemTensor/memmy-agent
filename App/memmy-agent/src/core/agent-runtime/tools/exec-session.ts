@@ -315,6 +315,11 @@ export class ExecSession {
     });
   }
 
+  get completion(): { done: boolean; exitCode: number | null; timedOut: boolean; lifecycleError: string | null } {
+    return { done: this.streamsClosed, exitCode: this.process.exitCode,
+      timedOut: this.timedOut, lifecycleError: this.lifecycleError };
+  }
+
   private isDone(): boolean {
     return processExited(this.process);
   }
@@ -450,8 +455,10 @@ export class ExecSessionManager {
     decoderOptions = {},
     spawnProcess = spawn,
     abortSignal = null,
+    onStart,
   }: {
     command: string;
+    onStart?: (id: string, session: ExecSession) => void;
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     timeout?: number | null;
@@ -469,6 +476,7 @@ export class ExecSessionManager {
     const sessionId = randomUUID().replace(/-/g, "").slice(0, 12);
     const session = new ExecSession({ command, cwd, env, timeoutS: timeout, shellProgram, login, decoderOptions, spawnProcess });
     this.sessions.set(sessionId, session);
+    onStart?.(sessionId, session);
     try {
       const poll = await session.poll(yieldTimeMs, maxOutputChars, {}, abortSignal);
       if (poll.done) this.sessions.delete(sessionId);

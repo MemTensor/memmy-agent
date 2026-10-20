@@ -1,3 +1,4 @@
+import { OutputLocationPolicy } from "./tools/output-location.js";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
@@ -260,6 +261,7 @@ export class SubagentManager {
     temperature?: number | null;
     workspace?: string | null;
     readonlySkillRoots?: readonly string[];
+    outputLocation?: OutputLocationPolicy;
     provider?: any;
     model?: string | null;
     contextWindowTokens?: number;
@@ -284,6 +286,7 @@ export class SubagentManager {
       contextWindowTokens: args.contextWindowTokens ?? this.contextWindowTokens,
       modelPreset: args.modelPreset ?? null,
       modelProvider: args.modelProvider ?? null,
+      outputTaskId: args.outputLocation?.taskId ?? null,
       actualModelContext: args.actualModelContext == null
         ? null
         : Object.freeze({
@@ -303,9 +306,12 @@ export class SubagentManager {
     this.taskOrigins.set(taskId, origin);
     const computerUseContext = resolveSubagentComputerUseAuthorization(args.computerUseAuthorization);
     if (computerUseContext) this.taskComputerUseContexts.set(taskId, computerUseContext);
+    let producerDone = false;
+
     try {
       await this.emitSubagentStart(taskId, task, displayLabel, origin, status);
     } catch (error) {
+      producerDone = true;
       this.taskStatuses.delete(taskId);
       this.tasks.delete(taskId);
       this.taskOrigins.delete(taskId);
@@ -324,10 +330,11 @@ export class SubagentManager {
       status,
       args.originMessageId ?? originMessageId,
       args.temperature ?? temperature,
-      { signal: controller.signal },
+      { signal: controller.signal, outputLocation: args.outputLocation, onGenerationEnded: () => { producerDone = true; } },
     )
       .finally(() => {
         settled = true;
+        producerDone = true;
         this.runningTasks.delete(taskId);
         this.taskStatuses.delete(taskId);
         this.tasks.delete(taskId);
@@ -352,6 +359,7 @@ export class SubagentManager {
     running.cancelled = () => cancelled || controller.signal.aborted;
     running.signal = controller.signal;
     this.runningTasks.set(taskId, running);
+    args.outputLocation?.trackDelegation(`subagent:${taskId}`, () => producerDone, async () => { abort(); await running; });
     if (origin.sessionKey) {
       const ids = this.sessionTasks.get(origin.sessionKey) ?? new Set<string>();
       ids.add(taskId);
@@ -368,7 +376,7 @@ export class SubagentManager {
     status: SubagentStatus,
     originMessageId: string | null = null,
     temperature: number | null = null,
-    { signal = null }: { signal?: AbortSignal | null } = {},
+    { signal = null, outputLocation, onGenerationEnded }: { signal?: AbortSignal | null; outputLocation?: OutputLocationPolicy; onGenerationEnded?: () => void } = {},
   ): Promise<void> {
     let finalStatus = "error";
     let resultText: string | null = null;
@@ -430,6 +438,7 @@ export class SubagentManager {
         },
         sessionKey: origin.sessionKey ?? null,
         workspace,
+        outputLocation: outputLocation ?? new OutputLocationPolicy(workspace),
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
         turnId,
@@ -448,17 +457,14 @@ export class SubagentManager {
         status.toolEvents = [...(result.toolEvents ?? [])];
         finalStatus = "error";
         resultText = SubagentManager.formatPartialProgress(result);
-        await this.announceResult(taskId, label, task, resultText, origin, "error", originMessageId);
       } else if (status.stopReason === "error") {
         finalStatus = "error";
         const errorText = (result as any).error ?? "Error: subagent execution failed.";
         resultText = errorText;
         stopError = errorText;
-        await this.announceResult(taskId, label, task, errorText, origin, "error", originMessageId);
       } else {
-        finalStatus = "ok";
+        finalStatus = status.stopReason === "deliveryPending" ? "pending" : "ok";
         resultText = result.finalContent || "Task completed but no final response was generated.";
-        await this.announceResult(taskId, label, task, resultText, origin, "ok", originMessageId);
       }
     } catch (error) {
       if (isCancelled()) {
@@ -471,7 +477,6 @@ export class SubagentManager {
       finalStatus = "error";
       stopError = (error as Error).message;
       resultText = `Error: ${(error as Error).message}`;
-      await this.announceResult(taskId, label, task, resultText, origin, "error", originMessageId);
     } finally {
       releaseInterrupt?.();
       boundary.close(isCancelled() ? 'aborted' : 'ended');
@@ -482,6 +487,10 @@ export class SubagentManager {
         finalStatus,
         error: stopError,
       });
+      onGenerationEnded?.();
+      if (!isCancelled() && resultText != null) {
+        await this.announceResult(taskId, label, task, resultText, origin, finalStatus, originMessageId);
+      }
     }
   }
 
@@ -494,7 +503,7 @@ export class SubagentManager {
     status: string,
     originMessageId: string | null = null,
   ): Promise<void> {
-    const statusText = status === "ok" ? "completed successfully" : "failed";
+    const statusText = status === "ok" ? "completed successfully" : status === "pending" ? "still in progress" : "failed";
     const template = readTemplate("agent/subagent-announce.md");
     const content = renderInlineTemplate(template, {
       label,
@@ -514,6 +523,7 @@ export class SubagentManager {
           }
         : {}),
     };
+    if (origin.outputTaskId) metadata.outputTaskId = origin.outputTaskId;
     if (originMessageId) metadata.originMessageId = originMessageId;
     const msg = new InboundMessage({
       channel: "system",

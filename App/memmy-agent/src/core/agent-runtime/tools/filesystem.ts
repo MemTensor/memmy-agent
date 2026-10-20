@@ -10,6 +10,8 @@ import { extractText } from "../../../utils/document.js";
 import { getMediaDir } from "../../../config/paths.js";
 import { BUILTIN_SKILLS_DIR } from "../skills.js";
 
+import { OUTPUT_PATHS_SCHEMA } from "./output-location.js";
+
 const IGNORED_DIRS = new Set([".git", "node_modules"]);
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const DOCUMENT_EXTS = new Set([".pdf", ".docx", ".xlsx", ".pptx"]);
@@ -742,7 +744,7 @@ export class WriteFileTool extends Tool {
   get parameters() {
     return {
       type: "object",
-      properties: { path: { type: "string" }, content: { type: "string" } },
+      properties: { path: { type: "string" }, content: { type: "string" }, output_paths: OUTPUT_PATHS_SCHEMA },
       required: ["path", "content"],
     };
   }
@@ -755,10 +757,14 @@ export class WriteFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: { path?: string; content?: string } = {}, context?: ToolExecutionContext): Promise<string> {
+  async execute(params: { path?: string; content?: string; output_paths?: string[] } = {}, context?: ToolExecutionContext): Promise<string> {
     if (!params.path) return "Error writing file: Unknown path";
     if (params.content == null) return "Error writing file: Unknown content";
     const target = resolveWorkspacePath(this.workspace, params.path);
+    const declarationError = await context?.outputLocation?.declareOutputs(params.output_paths, this.workspace, context);
+    if (declarationError) return declarationError;
+    const locationError = await context?.outputLocation?.checkWrite(target, context);
+    if (locationError) return locationError;
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error writing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;
     let writeStarted = false;
@@ -771,6 +777,7 @@ export class WriteFileTool extends Tool {
           const beforeBytes = await fs.readFile(target, { signal: signal ?? undefined });
           throwIfAborted(signal);
           if (beforeBytes.equals(finalBytes)) {
+            context?.outputLocation?.recordFile(target);
             context?.reportFileMutation?.({ path: target, changed: false });
             return `No changes made to ${target}: existing content is identical.`;
           }
@@ -784,6 +791,7 @@ export class WriteFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, params.content, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
+      context?.outputLocation?.recordFile(target);
       if (!this.postWriteValidation) return `Successfully wrote ${target}`;
       const content = await readBackWrittenFile(target, params.content, signal);
       const lint = await lintFile({ path: target, content }, { abortSignal: signal });
@@ -847,6 +855,7 @@ export class EditFileTool extends Tool {
       type: "object",
       properties: {
         path: { type: "string" },
+        output_paths: OUTPUT_PATHS_SCHEMA,
         old_text: { type: "string" },
         oldText: { type: "string" },
         new_text: { type: "string" },
@@ -873,6 +882,7 @@ export class EditFileTool extends Tool {
 
   async execute(params: {
     path?: string;
+    output_paths?: string[];
     old_text?: string;
     oldText?: string;
     new_text?: string;
@@ -898,6 +908,10 @@ export class EditFileTool extends Tool {
     if (lineHint != null && lineHint < 1) return "Error: line_hint must be >= 1.";
     if (expectedReplacements != null && expectedReplacements < 1) return "Error: expected_replacements must be >= 1.";
     const target = resolveWorkspacePath(this.workspace, params.path);
+    const declarationError = await context?.outputLocation?.declareOutputs(params.output_paths, this.workspace, context);
+    if (declarationError) return declarationError;
+    const locationError = await context?.outputLocation?.checkWrite(target, context);
+    if (locationError) return locationError;
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error editing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;
     let writeStarted = false;
@@ -913,6 +927,7 @@ export class EditFileTool extends Tool {
           if (existing.trim()) return `Error editing file: cannot create file; ${params.path} already exists and is not empty.`;
           throwIfAborted(signal);
           if (existingBytes.equals(Buffer.from(newText, "utf8"))) {
+            context?.outputLocation?.recordFile(target);
             context?.reportFileMutation?.({ path: target, changed: false });
             return `No changes made to ${target}: replacement produced identical content.`;
           }
@@ -923,6 +938,7 @@ export class EditFileTool extends Tool {
         writeStarted = true;
         await fs.writeFile(target, newText, { encoding: "utf8", signal: signal ?? undefined });
         this.fileStates().recordWrite(target);
+        context?.outputLocation?.recordFile(target);
         const success = exists ? "Successfully edited file" : `Successfully created ${target}`;
         if (!this.postWriteValidation) return success;
         const content = await readBackWrittenFile(target, newText, signal);
@@ -987,6 +1003,7 @@ export class EditFileTool extends Tool {
       updated = updated.replace(/\n/g, lineEnding);
       throwIfAborted(signal);
       if (raw.equals(Buffer.from(updated, "utf8"))) {
+        context?.outputLocation?.recordFile(target);
         context?.reportFileMutation?.({ path: target, changed: false });
         const noChange = `No changes made to ${target}: replacement produced identical content.`;
         return warning ? `${warning}\n${noChange}` : noChange;
@@ -994,6 +1011,7 @@ export class EditFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, updated, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
+      context?.outputLocation?.recordFile(target);
       const success = warning ? `${warning}\nSuccessfully edited file` : "Successfully edited file";
       if (!this.postWriteValidation) return success;
       const content = await readBackWrittenFile(target, updated, signal);

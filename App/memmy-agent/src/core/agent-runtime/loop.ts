@@ -1,3 +1,4 @@
+import { OutputLocationPolicy } from "./tools/output-location.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
 import fs from "node:fs";
@@ -754,6 +755,9 @@ export class AgentLoop {
   sessions: SessionManager;
   cronService: CronService;
   execSessionManager: ExecSessionManager;
+  private readonly outputTasks = new Map<string, OutputLocationPolicy>();
+  private readonly committedOutputResponses = new WeakSet<OutboundMessage>();
+  private readonly pendingOutputConversions = new Map<string, Set<InboundMessage>>();
   fileStateStore: FileStateStore;
   browserSessionManager: BrowserSessionManager;
   subagents: SubagentManager;
@@ -2635,6 +2639,8 @@ export class AgentLoop {
     }
 
     if (waits.length) await Promise.allSettled(waits);
+    const outputTask = this.outputTasks.get(key);
+    if (outputTask) { await outputTask.cancel(); this.outputTasks.delete(key); }
     const subagents = this.subagents as any;
     const subCancelled = subagents?.cancelBySession ? await subagents.cancelBySession(key) : subagents?.cancel_by_session ? await subagents.cancel_by_session(key) : 0;
     return cancelled + Number(subCancelled || 0);
@@ -2660,6 +2666,8 @@ export class AgentLoop {
     if (outcome !== "stopped") return outcome;
     if (!task || task.done() || task.cancel() === false) return "already_finished";
     await Promise.resolve(task).catch(() => undefined);
+    const outputTask = this.outputTasks.get(sessionKey);
+    if (outputTask) { await outputTask.cancel(); this.outputTasks.delete(sessionKey); }
     return "stopped";
   }
 
@@ -2699,6 +2707,8 @@ export class AgentLoop {
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
+      ...(!msg.internal && msg.channel !== "system" && !msg.metadata?.injectedEvent
+        ? { output_user_instruction: msg.content } : {}),
       ...(clientRequestId
         ? { client_request_id: clientRequestId }
         : {}),
@@ -2748,6 +2758,18 @@ export class AgentLoop {
     return true;
   }
 
+  private async convertPendingOutputInput(msg: InboundMessage): Promise<Record<string, any> | null> {
+    const key = this.effectiveSessionKey(msg);
+    const converting = this.pendingOutputConversions.get(key) ?? new Set<InboundMessage>();
+    converting.add(msg);
+    this.pendingOutputConversions.set(key, converting);
+    try { return await this.pendingToUserMessage(msg); }
+    finally {
+      converting.delete(msg);
+      if (!converting.size) this.pendingOutputConversions.delete(key);
+    }
+  }
+
   private async waitForPendingMessage(queue: AsyncQueue<InboundMessage>, timeoutMs: number): Promise<InboundMessage | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -2764,7 +2786,7 @@ export class AgentLoop {
     const injections: Record<string, any>[] = [];
     const appendPendingMessage = async (msg: InboundMessage): Promise<boolean> => {
       try {
-        const userMessage = await this.pendingToUserMessage(msg);
+        const userMessage = await this.convertPendingOutputInput(msg);
         if (userMessage) {
           injections.push(userMessage);
           onUserMessage?.(msg);
@@ -3657,6 +3679,63 @@ export class AgentLoop {
     return result;
   }
 
+  private hasPendingOutputInput(key: string, queue?: AsyncQueue<InboundMessage> | null): boolean {
+    return Boolean(queue?.size || this.pendingOutputConversions.get(key)?.size
+      || [...(this.queueSteerAdmissionsBySession.get(key)?.values() ?? [])]
+        .some(admission => admission.phase === "pending"));
+  }
+
+  /** Last barrier: no await between the final input check and first visibility. */
+  private async commitOutputResponse(
+    key: string, response: OutboundMessage | null, stopReason: string,
+    queue: AsyncQueue<InboundMessage> | null | undefined, publish: boolean,
+    session: Session | null, ctx?: TurnContext, abortSignal?: AbortSignal | null,
+  ): Promise<OutboundMessage | null> {
+    const policy = this.outputTasks.get(key);
+    if (!response || !policy) return response;
+    if (!policy.hasWork) {
+      policy.retire();
+      this.outputTasks.delete(key);
+      return response;
+    }
+    const pendingGenerators = policy.pendingProducers();
+    const invalid = pendingGenerators.length ? [] : await policy.checkDelivery();
+    return this.queueMutationLockFor(key).runExclusive(async () => {
+      if (ctx?.abortSignal?.aborted || abortSignal?.aborted) throw createTaskCancelledError();
+      if (this.hasPendingOutputInput(key, queue)) {
+        if (ctx?.slot) ctx.slot.stopReason = "maxIterations";
+        if (session?.messages.at(-1)?.role === "assistant") session.messages.pop();
+        if (session) this.sessions.save(session);
+        return null;
+      }
+      if (pendingGenerators.length || invalid.length) {
+        response.content = pendingGenerators.length ? policy.pendingMessage() : policy.rejection(invalid);
+        delete response.metadata.streamed;
+        if (ctx) { ctx.finalContent = response.content; ctx.stopReason = pendingGenerators.length ? "deliveryPending" : "toolError"; }
+        if (session?.messages.at(-1)?.role === "assistant") session.messages.at(-1)!.content = response.content;
+        if (session) this.sessions.save(session);
+        stopReason = pendingGenerators.length ? "deliveryPending" : "toolError";
+      }
+      if (ctx?.slot) {
+        ctx.slot.acceptingSteer = false;
+        ctx.slot.state = "settling";
+      }
+      if (ctx?.mirrorTurn) {
+        this.guiTranscriptMirror?.final(ctx.mirrorTurn, response.content, ctx.turnLatencyMs, null, ctx.errorCategory);
+      }
+      if (publish) {
+        this.bus.outbound.put(response);
+        this.committedOutputResponses.add(response);
+      }
+      if (!pendingGenerators.length && stopReason !== "deliveryPending") {
+        policy.retire();
+        this.outputTasks.delete(key);
+        if (session) this.sessions.save(session);
+      }
+      return response;
+    });
+  }
+
   async runAgentLoop(
     initialMessages: Record<string, any>[],
     {
@@ -3683,6 +3762,7 @@ export class AgentLoop {
       midTurnContext = null,
       consolidator = null,
       onTokenCompactionEvent = null,
+      outputInstruction = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3707,6 +3787,7 @@ export class AgentLoop {
       midTurnContext?: MidTurnContextDescriptor | null;
       consolidator?: Consolidator | null;
       onTokenCompactionEvent?: TokenCompactionEventCallback | null;
+      outputInstruction?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3740,6 +3821,12 @@ export class AgentLoop {
       },
     });
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
+    let outputLocation = activeSessionKey ? this.outputTasks.get(activeSessionKey) : undefined;
+    if (!outputLocation?.active || outputLocation.workspace !== path.resolve(sessionWorkspace)) {
+      outputLocation = new OutputLocationPolicy(sessionWorkspace, session?.metadata);
+      if (activeSessionKey) this.outputTasks.set(activeSessionKey, outputLocation);
+    }
+    if (outputInstruction) outputLocation.addUserRequest(outputInstruction);
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
@@ -3754,6 +3841,7 @@ export class AgentLoop {
         maxToolResultChars: this.maxToolResultChars,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
+        outputLocation,
         sessionKey: activeSessionKey,
         hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
@@ -3771,6 +3859,7 @@ export class AgentLoop {
         abortSignal,
         hook,
         concurrentTools: true,
+        hasPendingInput: () => activeSessionKey !== null && this.hasPendingOutputInput(activeSessionKey, pendingQueue),
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey, msg => {
           const request = computerUseRequestContext(msg, turnId);
           // A real user steer replaces the blocked/approved message scope.
@@ -4257,6 +4346,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
+      outputInstruction: ctx.msg.internal || ctx.msg.channel === "system" || ctx.msg.metadata?.injectedEvent ? null : ctx.msg.content,
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -4288,7 +4378,7 @@ export class AgentLoop {
     });
     ctx.stopReason = stopReason;
     if (ctx.slot) ctx.slot.stopReason = stopReason;
-    settleSlot();
+    if (!this.outputTasks.get(ctx.sessionKey)?.hasWork) settleSlot();
     ctx.errorCategory = errorCategory;
     ctx.failedProvider = failedProvider;
     ctx.failedModel = failedModel;
@@ -4388,7 +4478,7 @@ export class AgentLoop {
     } else {
       this.sessions.save(ctx.session!);
     }
-    if (ctx.mirrorTurn && ctx.finalContent) {
+    if (ctx.mirrorTurn && ctx.finalContent && !this.outputTasks.get(ctx.sessionKey)?.hasWork) {
       this.guiTranscriptMirror?.final(
         ctx.mirrorTurn,
         ctx.finalContent,
@@ -4456,6 +4546,7 @@ export class AgentLoop {
       abortSignal,
       turnId,
       sessionBindingOverride,
+      publishOutput = false,
     }: {
       onProgress?: (...args: any[]) => Promise<void> | void;
       onStream?: (delta: string) => Promise<void> | void;
@@ -4465,6 +4556,7 @@ export class AgentLoop {
       turnId?: string | null;
       boundary?: TurnCancellationBoundary | null;
       sessionBindingOverride?: WebuiSessionBinding | null;
+      publishOutput?: boolean;
     } = {},
   ): Promise<OutboundMessage | null> {
     turnId ??= firstString(msg.metadata?.turn_id, msg.metadata?.turnId) ?? cryptoRandomId();
@@ -4473,6 +4565,12 @@ export class AgentLoop {
     const channel = separator >= 0 ? rawChatId.slice(0, separator) : "cli";
     const chatId = separator >= 0 ? rawChatId.slice(separator + 1) : rawChatId;
     const key = sessionKey ?? msg.sessionKeyOverride ?? `${channel}:${chatId}`;
+    const originalTaskId = msg.metadata?.outputTaskId;
+    if (originalTaskId && this.outputTasks.get(key)?.taskId !== originalTaskId) {
+      if (this.outputTasks.has(key)) return null;
+      return new OutboundMessage({ channel, chatId,
+        content: "原文件任务的交付记录已结束或不可用，未确认本次后台结果可交付。继续该文件任务前需重新登记并核验最终产物。" });
+    }
     const existingSession = this.sessions.get(key);
     const hasRequestedPreset = Object.prototype.hasOwnProperty.call(
       msg.metadata ?? {},
@@ -4646,6 +4744,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(messages, {
+      outputInstruction: isSubagent || msg.internal ? null : msg.content,
       onProgress,
       onStream,
       onStreamEnd,
@@ -4717,12 +4816,12 @@ export class AgentLoop {
         failedModel,
       });
     }
-    return new OutboundMessage({
+    return this.commitOutputResponse(key, new OutboundMessage({
       channel,
       chatId,
       content: finalContent?.trim() || (stopReason === "error" ? EMPTY_FINAL_RESPONSE_MESSAGE : "Background task completed."),
       metadata,
-    });
+    }), stopReason, pendingQueue, publishOutput, session, undefined, abortSignal);
   }
 
   async processMessageInternal(
@@ -4739,6 +4838,7 @@ export class AgentLoop {
       messageSendCallback,
       sessionBindingOverride,
       slot,
+      publishOutput = false,
     }: {
       onProgress?: (...args: any[]) => Promise<void> | void;
       onStream?: (delta: string) => Promise<void> | void;
@@ -4750,6 +4850,7 @@ export class AgentLoop {
       messageSendCallback?: MessageSendCallback | null;
       sessionBindingOverride?: WebuiSessionBinding | null;
       slot?: TurnSlot | null;
+      publishOutput?: boolean;
     } = {},
   ): Promise<OutboundMessage | null> {
     if (!this.modelSelectionResolver) this.refreshProviderSnapshot();
@@ -4761,6 +4862,7 @@ export class AgentLoop {
         pendingQueue,
         abortSignal,
         sessionBindingOverride,
+        publishOutput,
       });
     }
     const key = sessionKey ?? this.sessionKey(message);
@@ -4816,7 +4918,7 @@ export class AgentLoop {
       await this.stateRun(ctx);
       await this.stateSave(ctx);
       await this.stateRespond(ctx);
-      return ctx.outbound;
+      return await this.commitOutputResponse(key, ctx.outbound, ctx.stopReason, ctx.pendingQueue, publishOutput, ctx.session, ctx);
     } catch (error) {
       if (isTaskCancelledError(error)) {
         try {
@@ -4918,6 +5020,8 @@ export class AgentLoop {
       throw new Error("session_deletion_in_progress");
     }
     const deferred: InboundMessage[] = [];
+    const outputTask = this.outputTasks.get(sessionKey);
+    if (outputTask) { await outputTask.cancel(); this.outputTasks.delete(sessionKey); }
     this.goalRuntime.beginSessionDeletion(sessionKey);
     this.sessionDeletionQueues.set(sessionKey, deferred);
     try {
@@ -5235,6 +5339,7 @@ export class AgentLoop {
             turnId,
             boundary,
             slot,
+            publishOutput: true,
           });
           if (
             typeof response?.metadata?.goalId === "string"
@@ -5245,7 +5350,7 @@ export class AgentLoop {
               goalOutcome: response.metadata.goalOutcome as GoalStatus,
             };
           }
-          if (!isCancelled() && response) await this.bus.publishOutbound(response);
+          if (!isCancelled() && response && !this.committedOutputResponses.has(response)) await this.bus.publishOutbound(response);
           if (!isCancelled() && effectiveMsg.channel === "cli") {
             await this.bus.publishOutbound(
               new OutboundMessage({
