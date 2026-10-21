@@ -1,3 +1,7 @@
+import { RecordingStartSchema } from "@memmy/local-api-contracts";
+import { handleRecordingHttp } from "../../tools/computer-recordings/http-api.js";
+import { getRecordingSessionService, shutdownRecordingService } from "../../tools/computer-recordings/service.js";
+import { CollectorBusyError } from "../../tools/computer-history/core/collector-gate.js";
 import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -113,8 +117,9 @@ import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
   clientSnapshot,
-} from "../../tools/computer-history/mac/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
+} from "../../tools/computer-history/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../tools/computer-history/core/computer-history-api.js";
+import { getWindowsComputerHistoryService } from "../../tools/computer-history/win/computer-history-api.js";
 import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 import {
   removeSessionDagFiles,
@@ -123,7 +128,7 @@ import {
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
-type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
+type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string; stream?: fs.ReadStream };
 type WorkspaceEnvironmentContextResult =
   | { ok: true; context: WorkspaceEnvironmentContext }
   | { ok: false; response: HttpLikeResponse };
@@ -977,6 +982,7 @@ export class WebSocketChannel extends BaseChannel {
     queueSurface,
     turnAdmission,
     expectedTurnId,
+    taskRecording,
   }: {
     chatId: string;
     content: string;
@@ -987,6 +993,7 @@ export class WebSocketChannel extends BaseChannel {
     queueSurface: "chat_composer" | null;
     turnAdmission: "queue" | "steer";
     expectedTurnId: string | null;
+    taskRecording?: unknown;
   }): string {
     return crypto.createHash("sha256").update(JSON.stringify({
       chat_id: chatId,
@@ -998,6 +1005,7 @@ export class WebSocketChannel extends BaseChannel {
       queue_surface: queueSurface,
       turn_admission: turnAdmission,
       expected_turn_id: expectedTurnId,
+      ...(taskRecording ? { task_recording: taskRecording } : {}),
     })).digest("hex");
   }
 
@@ -2923,6 +2931,11 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
+    if (got === "/api/computer-recordings" || got.startsWith("/api/computer-recordings/")) {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      return handleRecordingHttp(getRecordingSessionService(), request, true);
+    }
+    if (got === "/api/computer-history/windows/settings") return this.handleWindowsHistorySettings(request);
     if (got === "/api/computer-history/observation/status") return this.handleComputerHistory(request, "observation-status");
     if (got === "/api/computer-history/settings") return this.handleComputerHistory(request, "settings");
     if (got === "/api/computer-history/apps") return this.handleComputerHistory(request, "apps");
@@ -3006,6 +3019,7 @@ export class WebSocketChannel extends BaseChannel {
 
   override async start(): Promise<void> {
     this.running = true;
+    if (process.platform === "win32" || process.platform === "darwin") void getRecordingSessionService().list().catch(() => {});
     this.startComputerHistoryModelSync();
     await nativeExcelControl.start();
     if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === "1") {
@@ -3071,6 +3085,7 @@ export class WebSocketChannel extends BaseChannel {
     // Recording is scoped to the app: closing it finalizes the open segment
     // rather than leaving a recorder running behind the user's back.
     await this.computerHistory.shutdown();
+    await shutdownRecordingService();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
@@ -3101,7 +3116,7 @@ export class WebSocketChannel extends BaseChannel {
    */
   async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     // The router carries the path, query and all, on `request.path`; there is
     // no `request.url` here, and reading one silently loses every parameter.
@@ -3110,7 +3125,7 @@ export class WebSocketChannel extends BaseChannel {
     try {
       return httpJsonResponse({ icon: await this.computerHistory.applicationIcon(bundleId) });
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
     }
   }
@@ -3120,7 +3135,7 @@ export class WebSocketChannel extends BaseChannel {
     action: "snapshot" | "observation-status" | "settings" | "apps" | "model-select" | "permissions-check" | "permissions-open" | "wechat-consent" | "wechat-connect" | "wechat-prepare" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
     const method = (request.method ?? "GET").toUpperCase();
     if (action === "snapshot") {
       return method === "GET"
@@ -3173,7 +3188,7 @@ export class WebSocketChannel extends BaseChannel {
           snapshot = this.computerHistory.connectWeChat();
           break;
         case "settings":
-          return httpJsonResponse(this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
+          return httpJsonResponse(await this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
         case "model-select": {
           if (body.model_preset !== undefined && body.model_preset !== null
             && (typeof body.model_preset !== "string" || !body.model_preset.trim())) {
@@ -3235,8 +3250,26 @@ export class WebSocketChannel extends BaseChannel {
       }
       return httpJsonResponse(clientSnapshot(snapshot!) as unknown as Record<string, any>);
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async handleWindowsHistorySettings(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (process.platform !== "win32") return httpError(400, "Windows Computer History settings require Windows");
+    const service = getWindowsComputerHistoryService();
+    try {
+      if ((request.method ?? "GET").toUpperCase() === "GET") return httpJsonResponse(await service.getWindowsConfiguration());
+      if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+      const raw = requestBodyText(request);
+      if (Buffer.byteLength(raw, "utf8") > 256 * 1024) return httpError(413, "settings are too large");
+      let body;
+      try { body = JSON.parse(raw); } catch { return httpError(400, "body must be JSON"); }
+      return httpJsonResponse(await service.updateWindowsSettings(body?.settings));
+    } catch (error) {
+      return httpError(error instanceof ComputerHistoryApiError ? error.status : 503,
+        error instanceof ComputerHistoryApiError ? error.message : "Windows Computer History configuration is unavailable");
     }
   }
 
@@ -3560,6 +3593,11 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
+    const recording = envelope.task_recording == null ? null : RecordingStartSchema.safeParse(envelope.task_recording);
+    if (recording && !recording.success) {
+      await this.sendWebuiRequestError(connection, { chatId, clientRequestId, detail: "message_request_rejected", reason: "task_recording_consent_invalid" });
+      return;
+    }
     const digest = clientRequestId
       ? this.webuiMessageDigest({
           chatId,
@@ -3571,6 +3609,7 @@ export class WebSocketChannel extends BaseChannel {
           queueSurface,
           turnAdmission,
           expectedTurnId,
+          taskRecording: recording?.success ? recording.data : null,
         })
       : null;
     if (existing && clientRequestId) {
@@ -3673,6 +3712,7 @@ export class WebSocketChannel extends BaseChannel {
     }
     const metadata: Record<string, any> = {
       remote: connection?.remoteAddress ?? null,
+      ...(recording?.success ? { task_recording: recording.data } : {}),
       message_id: clientRequestId ?? crypto.randomUUID(),
       webui: envelope.webui === true,
       model_preset: modelSelection.preset,
@@ -4658,6 +4698,10 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
+    if (message.metadata?.taskRecordingStatus) {
+      await this.broadcast(message.chatId, { event: "task_recording", chat_id: message.chatId, ...message.metadata.taskRecordingStatus });
+      return;
+    }
     if (message.metadata?.turnEnd) {
       await this.sendTurnEnd(message.chatId, {
         latencyMs: numberOrNull(message.metadata.latencyMs),
@@ -5294,8 +5338,15 @@ function httpConnectionFromRequest(req: http.IncomingMessage): any {
 }
 
 function writeNodeResponse(res: http.ServerResponse, response: HttpLikeResponse): void {
+  if (response.stream) {
+    res.writeHead(response.status, response.headers);
+    response.stream.on("error", () => res.destroy());
+    res.on("close", () => response.stream?.destroy());
+    response.stream.pipe(res);
+    return;
+  }
   const body = typeof response.body === "string" ? Buffer.from(response.body, "utf8") : response.body;
-  const headers = { ...response.headers, "content-length": String(body.length) };
+  const headers = { "content-length": String(body.length), ...response.headers };
   res.writeHead(response.status, headers);
   res.end(body);
 }

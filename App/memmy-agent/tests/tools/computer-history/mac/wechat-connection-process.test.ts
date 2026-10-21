@@ -32,6 +32,9 @@ vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
   validateWindowsWeChatConsent: vi.fn(() => state.privateStateReady),
 }));
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { mockMacConsentPermissions } from "../private-consent-fixture.js";
+
+const windowsHost = process.platform === "win32";
 
 let root: string;
 let service: ComputerHistoryDemoService;
@@ -44,6 +47,7 @@ beforeEach(() => {
   vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
   vi.spyOn(process, "arch", "get").mockReturnValue("arm64");
   root = fs.mkdtempSync(path.join(os.tmpdir(), "wechat-process-"));
+  mockMacConsentPermissions(path.join(root, "wechat", "consent.json"));
   const library = path.join(root, "sqlcipher.dylib");
   fs.writeFileSync(library, "inert fixture: never loaded");
   vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", library);
@@ -108,7 +112,7 @@ describe("WeChat connection process diagnostics", () => {
     const file = path.join(root, "wechat", "last-connection-error.json");
     const saved = JSON.parse(fs.readFileSync(file, "utf8"));
     expect(saved).toEqual({ category, phase: "preparing_wechat_data", detail, failedAt: expect.any(String) });
-    expect(fs.statSync(file).mode & 0o077).toBe(0);
+    if (!windowsHost) expect(fs.statSync(file).mode & 0o077).toBe(0);
   });
 
   it.each([
@@ -256,7 +260,7 @@ describe("WeChat connection process diagnostics", () => {
     service.setWeChatChatAccess(false);
     expect(service.snapshot().wechat?.error).toBeNull();
     const info = fs.statSync(path.join(root, "wechat", "last-connection-error.json"));
-    expect(info.mode & 0o077).toBe(0);
+    if (!windowsHost) expect(info.mode & 0o077).toBe(0);
     expect(JSON.parse(fs.readFileSync(path.join(root, "wechat", "last-connection-error.json"), "utf8")))
       .toMatchObject({ category: "wechat_data_access_required", phase: "awaiting_wechat_login" });
   });

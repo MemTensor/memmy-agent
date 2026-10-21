@@ -2,6 +2,7 @@
 import { SseEventSchema, type SseEvent } from "@memmy/local-api-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
+import type { ServerResponse } from "node:http";
 import type { ManagedKnowledgeOptions } from "@memmy/knowledge";
 import { registerKnowledgeRoutes } from "@memmy/knowledge/routes";
 import type { PermissionManager } from "../../../permission/index.js";
@@ -54,6 +55,15 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   const app = Fastify({ logger: false });
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const authenticateRuntimeToken = createRuntimeTokenPreHandler(options.permissionManager);
+  const eventStreams = new Set<ServerResponse>();
+  let closing = false;
+
+  app.addHook("preClose", async () => {
+    closing = true;
+    // Hidden desktop windows keep EventSource connected during quit. End those
+    // responses before Fastify waits for active HTTP connections to drain.
+    for (const stream of eventStreams) stream.end();
+  });
 
   if (options.knowledge) {
     registerKnowledgeRoutes(app, { ...options.knowledge, authenticate: authenticateRuntimeToken });
@@ -149,10 +159,13 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   app.get<{ Querystring: EventsQuerystring }>("/api/events", async (request, reply) => {
     // EventSource cannot reliably carry custom headers, so the SSE channel validates the same runtime token via a query parameter.
     const { token } = request.query;
-    if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
+    const authorized = token && await options.permissionManager.verifyRuntimeToken(token);
+    // Authentication may finish after preClose has drained existing streams.
+    if (closing) return reply.header("connection", "close").code(503).send({ error: "server_closing" });
+    if (!authorized) return reply.code(401).send({ error: "unauthorized" });
 
+    eventStreams.add(reply.raw);
+    reply.raw.once("close", () => eventStreams.delete(reply.raw));
     startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus);
   });
 

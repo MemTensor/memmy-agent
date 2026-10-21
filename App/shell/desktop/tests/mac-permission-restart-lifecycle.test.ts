@@ -10,12 +10,12 @@ import { isMacPermissionSystemQuit, isMacSystemSessionQuit, MacPermissionRestart
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../src/main/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const functionNames = new Set([
   "captureMacPermissionRestartRequest", "shouldIgnoreStaleReopenQuit", "relaunchAfterQuitCleanupIfRequested",
-  "armQuitCleanupForceExitTimer", "clearQuitCleanupForceExitTimer",
+  "armQuitCleanupForceExitTimer", "clearQuitCleanupForceExitTimer", "forceQuitCleanup", "recordQuitDiagnostic",
   "isMacSystemSessionEnding", "readMacSystemSessionProbe", "readMacQuitContext",
 ]);
 const variableNames = new Set([
   "isQuitting", "isQuitCleanupInProgress", "isQuitCleanupComplete", "stopMemoryServiceForCurrentQuit",
-  "quitCleanupForceExitTimer", "APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS", "MACOS_STALE_REOPEN_QUIT_GRACE_MS",
+  "quitCleanupContext", "quitCleanupForceExitTimer", "APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS", "MACOS_STALE_REOPEN_QUIT_GRACE_MS",
   "hasSingleInstanceLock", "didWaitForSingleInstanceLock", "hasIgnoredStaleReopenQuit",
   "shouldRelaunchAfterQuitCleanup", "appProcessStartedAt",
   "macPermissionRestartIntent", "isMacSystemQuitInProgress", "hasCapturedMacPermissionRestart",
@@ -122,7 +122,7 @@ function setup(options: {
     app,
     process: { platform: options.platform ?? "darwin",
       argv: options.argv ?? ["Memmy", ...(options.relaunchMarker ? ["--memmy-permission-relaunch"] : [])] },
-    Date, setTimeout, clearTimeout, queueMicrotask,
+    Date, setTimeout, clearTimeout, queueMicrotask, randomUUID: () => "fixture-quit",
     console: { warn: vi.fn() },
     loadMenuBarAppearanceNative,
     isMacPermissionSystemQuit: policy,
@@ -236,7 +236,7 @@ describe("macOS system permission restart lifecycle", () => {
     const test = setup();
     test.requestQuit();
     await vi.advanceTimersByTimeAsync(5000);
-    expect(test.terminateSync).toHaveBeenCalledWith({ stopMemory: false });
+    expect(test.terminateSync).toHaveBeenCalledWith({ stopMemory: false, timeoutMs: 2_000 });
     expect(test.events).toEqual(["terminate", "relaunch", "exit"]);
     expect(test.app.exit).toHaveBeenCalledWith(0);
     expect(test.app.relaunch).toHaveBeenCalledOnce();
@@ -252,7 +252,7 @@ describe("macOS system permission restart lifecycle", () => {
     test.failCleanup(new Error("service close failed"));
     await vi.advanceTimersByTimeAsync(0);
     expect(test.logs).toContain("quit:cleanup-failed\nservice close failed");
-    expect(test.events).toEqual(["relaunch", "quit"]);
+    expect(test.events).toEqual(["terminate", "relaunch", "exit"]);
     expect(test.app.relaunch).toHaveBeenCalledOnce();
   });
 

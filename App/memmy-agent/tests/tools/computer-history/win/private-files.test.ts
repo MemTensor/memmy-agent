@@ -56,7 +56,8 @@ describe("reusing a passed consent check", () => {
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(1);
 
-    fs.chmodSync(file, 0o644);
+    const changed = new Date(fs.statSync(file).mtimeMs + 2_000);
+    fs.utimesSync(file, changed, changed);
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(2);
 
@@ -75,8 +76,8 @@ describe("reusing a passed consent check", () => {
     expect(validateWindowsWeChatConsent(file)).toBe(false);
     state.stdout = '{"private":true}';
     vi.mocked(execFileSync).mockImplementationOnce(() => {
-      fs.chmodSync(file, 0o600);
-      fs.chmodSync(file, 0o640);
+      const changed = new Date(fs.statSync(file).mtimeMs + 2_000);
+      fs.utimesSync(file, changed, changed);
       return state.stdout;
     });
     expect(validateWindowsWeChatConsent(file)).toBe(true);

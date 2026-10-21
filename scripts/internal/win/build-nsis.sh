@@ -480,9 +480,10 @@ verify_windows_computer_use_surface() {
 
 verify_windows_better_sqlite3_runtime() {
   local runtime_dir="$1"
-  local electron_executable="$DESKTOP_DIR/node_modules/electron/dist/electron.exe"
+  local electron_executable="${2:-$DESKTOP_DIR/node_modules/electron/dist/electron.exe}"
   local node_runtime_dir
-  node_runtime_dir="$(to_node_readable_path "$runtime_dir")"
+  # cygpath must see a real path: ASAR child paths are Electron virtual paths.
+  node_runtime_dir="$(to_node_readable_path "$runtime_dir")${3:-}"
 
   if [ "${MEMMY_WINDOWS_CROSS_BUILD:-0}" = "1" ] && [ "$(node -p 'process.platform')" != "win32" ]; then
     echo "Cross-build: Windows Electron SQLite smoke test requires a Windows guest; native PE files are verified separately."
@@ -645,12 +646,19 @@ verify_pruned_windows_runtime() {
 }
 
 verify_packaged_windows_unpacked_artifacts() {
+  local packaged_app="$DESKTOP_DIR/release/win-unpacked"
+  local packaged_archive="$packaged_app/resources/app.asar"
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
   local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
   local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  # Validate actual loading, including the desktop's hoisted dependency. A PE
+  # check and electron-rebuild metadata do not prove the packaged module's ABI.
+  verify_windows_better_sqlite3_runtime "$packaged_archive" "$packaged_app/Memmy.exe"
+  verify_windows_better_sqlite3_runtime "$packaged_archive" "$packaged_app/Memmy.exe" "/dist/runtime/memory"
+  verify_windows_better_sqlite3_runtime "$packaged_archive" "$packaged_app/Memmy.exe" "/dist/runtime/memmy-agent"
   node "$ROOT_DIR/scripts/internal/shared/verify-browser-extension.mjs" \
     "$(to_node_readable_path "$DESKTOP_DIR/extensions/memmy-browser")" \
     "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked/resources/browser-extension")"
@@ -706,10 +714,14 @@ verify_packaged_windows_unpacked_artifacts() {
   node "$ROOT_DIR/scripts/internal/win/verify-computer-history-runtime.mjs" \
     "$(to_node_readable_path "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe")" x64 \
     "$(to_node_readable_path "$ROOT_DIR/App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1")"
-  verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
-    "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
-    "Windows 11 native History recorder"
+  # Authenticode changes the PE headers and appends a certificate, just as it
+  # does for Computer Use above. Only unsigned executables can match byte-for-byte.
+  if [ "$PACKAGE_SIGNING" = "unsigned" ]; then
+    verify_packaged_file_matches_runtime \
+      "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
+      "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
+      "Windows 11 native History recorder"
+  fi
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1" \
@@ -874,6 +886,16 @@ if [ -n "${MEMMY_WECHAT_PYTHON_ARCHIVE:-}" ]; then
 fi
 node "$ROOT_DIR/scripts/internal/win/stage-wechat-python.mjs" "${WINDOWS_PYTHON_STAGE_ARGS[@]}"
 
+package_step_start "Build and stage Windows Computer History production helper"
+history_build_args=(-NoProfile -ExecutionPolicy Bypass -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/win/history-recorder-native.ps1")"
+  -Configuration Release -ProductionOnly
+  -BuildRoot "$(to_node_readable_path "$DESKTOP_DIR/release/history-native-build")"
+  -StageDirectory "$(to_node_readable_path "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win")")
+if [ -n "${MEMMY_HISTORY_JSON_HEADER:-}" ]; then
+  history_build_args+=(-JsonHeader "$(to_node_readable_path "$MEMMY_HISTORY_JSON_HEADER")")
+fi
+powershell.exe "${history_build_args[@]}"
+
 node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_DIR/memmy-agent"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
@@ -994,6 +1016,12 @@ cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
 package_step_start "Patch electron-builder NSIS template"
 patch_electron_builder_nsis_refresh
+
+package_step_start "Prepare desktop SQLite for Electron"
+# Development may have restored Node's binary while electron-rebuild still has
+# an Electron .forge-meta marker. Install the target ABI explicitly each time.
+install_better_sqlite3_win_x64 "$ROOT_DIR"
+verify_windows_better_sqlite3_runtime "$ROOT_DIR"
 
 package_step_start "Run electron-builder Windows NSIS packaging"
 cd "$DESKTOP_DIR"

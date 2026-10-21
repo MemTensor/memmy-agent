@@ -1,7 +1,8 @@
 import { Tool } from "../../../core/agent-runtime/tools/base.js";
-import { getComputerHistoryDemoService } from "./computer-history-api.js";
+import { getComputerHistoryDemoService } from "../computer-history-api.js";
 import type { ComputerHistoryDemoService } from "./computer-history-api.js";
 import { isComputerHistorySupported } from "../platform.js";
+import { collectorGate } from "../core/collector-gate.js";
 import {
   ObservationSettingsError,
   ObservationSettingsStore,
@@ -87,11 +88,13 @@ export class ComputerHistoryStatusTool extends Tool {
 
 export class ComputerHistoryGetSettingsTool extends Tool {
   static scopes = new Set(["core"]);
-  private readonly store: ObservationSettingsStore;
+  private readonly store?: ObservationSettingsStore;
+  private readonly service?: Pick<ComputerHistoryDemoService, "getObservationSettings">;
 
-  constructor(store = new ObservationSettingsStore()) {
+  constructor(store?: ObservationSettingsStore) {
     super();
     this.store = store;
+    this.service = store ? undefined : getComputerHistoryDemoService();
   }
 
   static enabled(): boolean {
@@ -111,7 +114,7 @@ export class ComputerHistoryGetSettingsTool extends Tool {
   get parameters() { return structuredClone(NO_PARAMETERS); }
 
   async execute(): Promise<string> {
-    return JSON.stringify({ status: "ok", settings: this.store.read() });
+    return JSON.stringify({ status: "ok", settings: this.store?.read() ?? this.service!.getObservationSettings() });
   }
 }
 
@@ -129,11 +132,13 @@ const UPDATE_PARAMETERS = {
 
 export class ComputerHistoryUpdateSettingsTool extends Tool {
   static scopes = new Set(["core"]);
-  private readonly store: ObservationSettingsStore;
+  private readonly store?: ObservationSettingsStore;
+  private readonly service?: Pick<ComputerHistoryDemoService, "updateObservationSettings">;
 
-  constructor(store = new ObservationSettingsStore()) {
+  constructor(store?: ObservationSettingsStore) {
     super();
     this.store = store;
+    this.service = store ? undefined : getComputerHistoryDemoService();
   }
 
   static enabled(): boolean {
@@ -147,6 +152,7 @@ export class ComputerHistoryUpdateSettingsTool extends Tool {
       "Replace the Computer History observation settings document.",
       "This replaces the whole document, so call computer_history_get_settings first and preserve every field and rule the user did not ask to change.",
       "defaultApplicationBehavior controls applications that match no app rule; defaultURLBehavior independently controls websites that match no URL rule.",
+      "On Windows, application identities use windows: IDs; an optional absolute executable path binds a rule to that exact application. Existing win32.* rules remain compatible.",
       "Ask the user before changing either default, because switching between default-observe and default-don't-observe materially changes how much is recorded.",
     ].join(" ");
   }
@@ -154,8 +160,9 @@ export class ComputerHistoryUpdateSettingsTool extends Tool {
   get parameters() { return structuredClone(UPDATE_PARAMETERS); }
 
   async execute(params: { settings: unknown }): Promise<string> {
+    if (collectorGate.taskActive) return "Error: stop task recording before changing Computer History settings";
     try {
-      const settings = this.store.write(params.settings);
+      const settings = this.store ? this.store.write(params.settings) : await this.service!.updateObservationSettings(params.settings);
       return JSON.stringify({ status: "ok", settings });
     } catch (error) {
       if (error instanceof ObservationSettingsError) {

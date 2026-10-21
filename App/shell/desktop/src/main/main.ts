@@ -1,5 +1,6 @@
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
+import { createRecordingMediaProxy } from "./recording-media-proxy.js";
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
 import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
 import { desktopSaveFileName } from './save-file-name.js';
@@ -55,7 +56,7 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { app, protocol, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -169,10 +170,15 @@ import {
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
 import { resolveComputerHistoryMarkdownPath } from "./computer-history-markdown.js";
+import { stopComputerHistoryBeforeExit } from "./computer-history-exit.js";
+import { stopTaskRecordingBeforeExit } from "./task-recording-exit.js";
+import { writeQuitDiagnostic, type QuitDiagnostic } from "./quit-diagnostics.js";
 import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js";
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
+
+protocol.registerSchemesAsPrivileged([{ scheme: "memmy-recording", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
@@ -340,6 +346,16 @@ let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
 let stopMemoryServiceForCurrentQuit = false;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
+interface QuitCleanupContext {
+  id: string;
+  startedAt: number;
+  stopMemory: boolean;
+  services: ManagedRuntimeServices | null;
+  servicesClose: Promise<void> | null;
+  phase: string;
+  outcome: "pending" | "complete" | "failed" | "forced";
+}
+let quitCleanupContext: QuitCleanupContext | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
 let bootStage = "pending";
@@ -854,8 +870,14 @@ async function boot(): Promise<void> {
         : undefined
     });
     if (isQuitting) {
-      await runtimeServices.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+      const lateServices = runtimeServices;
       runtimeServices = null;
+      if (quitCleanupContext) {
+        quitCleanupContext.services = lateServices;
+        await closeRuntimeForQuit(quitCleanupContext);
+      } else {
+        await lateServices.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+      }
       return;
     }
     const embeddedBrowserSession = session.fromPartition('persist:memmy-browser');
@@ -4444,6 +4466,9 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
     ...resolveFullWindowChromeOptions(process.platform),
     ...resolveFullWindowSize(screen.getPrimaryDisplay().workArea),
     ...(windowsTaskbarIconPath ? { icon: windowsTaskbarIconPath } : {}),
+    // On Windows, keep the splash until Chromium has actually painted a frame.
+    // HTML load completion can precede painting with the title-bar overlay.
+    show: process.platform !== "win32",
     // webPreferences: the renderer's security isolation and preload configuration.
     webPreferences: { ...createWebPreferences(), webviewTag: true }
   });
@@ -4483,10 +4508,15 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
   };
   mainWindowWithMinimize.on("minimize", handleMainWindowMinimize);
 
+  targetMainWindow.once("ready-to-show", () => {
+    if (isQuitting || targetMainWindow.isDestroyed()) return;
+    if (process.platform === "win32") targetMainWindow.show();
+    closeSplashWindow("main-ready-to-show");
+  });
+  if (process.platform !== "win32") {
+    targetMainWindow.webContents.once("did-finish-load", () => closeSplashWindow("main-did-finish-load"));
+  }
   void targetMainWindow.loadURL(resolveRendererUrl("full", target)).catch(handleRendererLoadFailure);
-  // The main window takes over from the splash when its renderer is ready.
-  targetMainWindow.once("ready-to-show", () => closeSplashWindow("main-ready-to-show"));
-  targetMainWindow.webContents.once("did-finish-load", () => closeSplashWindow("main-did-finish-load"));
 
   targetMainWindow.on("closed", () => {
     mainWindow = null;
@@ -5784,6 +5814,7 @@ app.on("child-process-gone", (_event, details) => {
 });
 
 app.whenReady().then(async () => {
+  protocol.handle("memmy-recording", createRecordingMediaProxy(() => runtimeServices?.agentGateway ?? null));
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
@@ -5993,15 +6024,30 @@ app.on("before-quit", (event) => {
 
   isQuitCleanupInProgress = true;
   stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
+  const quit: QuitCleanupContext = {
+    id: randomUUID(), startedAt: Date.now(), stopMemory: stopMemoryServiceForCurrentQuit,
+    services: runtimeServices, servicesClose: null, phase: "preparing", outcome: "pending"
+  };
+  quitCleanupContext = quit;
+  recordQuitDiagnostic(quit, "start");
   void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
-    .catch(async (error: unknown) => {
+    .catch((error: unknown) => {
+      if (quit.outcome !== "pending") return;
+      quit.outcome = "failed";
+      recordQuitDiagnostic(quit, "cleanup-failed");
       console.warn("quit cleanup failed:", error);
-      await writePackagedStartupLog(`quit:cleanup-failed\n${formatStartupError(error)}`);
+      void writePackagedStartupLog(`quit:cleanup-failed\n${formatStartupError(error)}`);
+      forceQuitCleanup(quit);
     })
     .finally(() => {
+      if (quit.outcome === "forced") return;
       clearQuitCleanupForceExitTimer();
+      if (quit.outcome === "pending") {
+        quit.outcome = "complete";
+        recordQuitDiagnostic(quit, "cleanup-complete");
+      }
       isQuitCleanupComplete = true;
       isQuitCleanupInProgress = false;
       relaunchAfterQuitCleanupIfRequested();
@@ -6031,16 +6077,70 @@ function relaunchAfterQuitCleanupIfRequested(): void {
   app.relaunch({ args });
 }
 
-function armQuitCleanupForceExitTimer(): void {
+function armQuitCleanupForceExitTimer(timeoutMs = APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS): void {
   clearQuitCleanupForceExitTimer();
+  const quit = quitCleanupContext;
   quitCleanupForceExitTimer = setTimeout(() => {
-    console.warn("quit cleanup timed out; forcing app exit");
-    // Apply the same service-lifecycle choice when graceful cleanup times out.
-    runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
+    if (quit) forceQuitCleanup(quit);
+  }, timeoutMs);
+  quitCleanupForceExitTimer.unref?.();
+}
+
+function forceQuitCleanup(quit: QuitCleanupContext): void {
+  if (quit.outcome === "complete" || quit.outcome === "forced") return;
+  quit.outcome = "forced";
+  clearQuitCleanupForceExitTimer();
+  recordQuitDiagnostic(quit, "force-start");
+  console.warn("quit cleanup timed out; forcing app exit");
+  try {
+    // Keep ownership even after the normal path detaches the global reference.
+    quit.services?.terminateSync({ stopMemory: quit.stopMemory, timeoutMs: 2_000 });
+    recordQuitDiagnostic(quit, "force-complete");
+  } catch {
+    recordQuitDiagnostic(quit, "force-failed");
+  } finally {
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
-  }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
-  quitCleanupForceExitTimer.unref?.();
+  }
+}
+
+function recordQuitDiagnostic(quit: QuitCleanupContext, event: QuitDiagnostic["event"]): void {
+  if (!app.isPackaged) return;
+  writeQuitDiagnostic(join(app.getPath("userData"), "quit-lifecycle.jsonl"), {
+    schemaVersion: 1, quitId: quit.id, pid: process.pid, timestamp: new Date().toISOString(),
+    elapsedMs: Date.now() - quit.startedAt, stopMemory: quit.stopMemory, phase: quit.phase, event
+  });
+}
+
+async function closeRuntimeForQuit(quit: QuitCleanupContext): Promise<void> {
+  const services = quit.services;
+  if (!services) return;
+  if (quit.outcome !== "pending") {
+    // Startup may materialize a service after shutdown has already settled.
+    services.terminateSync({ stopMemory: quit.stopMemory, timeoutMs: 2_000 });
+    return;
+  }
+  if (!quit.servicesClose) {
+    quit.servicesClose = (async () => {
+      if (process.platform === "win32" || process.platform === "darwin") {
+        quit.phase = "history-stop";
+        try { await stopTaskRecordingBeforeExit(services.agentGateway, () => armQuitCleanupForceExitTimer(30_000)); } catch { /* sealed parts recover on next startup */ }
+      }
+      if (process.platform === "win32") {
+        try {
+          await stopComputerHistoryBeforeExit(services.agentGateway);
+          if (quit.outcome === "pending") recordQuitDiagnostic(quit, "history-stopped");
+        } catch {
+          if (quit.outcome === "pending") recordQuitDiagnostic(quit, "history-stop-failed");
+        }
+      }
+      if (quit.outcome !== "pending") return;
+      quit.phase = "services-close";
+      await services.close({ stopMemory: quit.stopMemory });
+      if (quit.outcome === "pending") recordQuitDiagnostic(quit, "services-closed");
+    })();
+  }
+  await quit.servicesClose;
 }
 
 function hideAppShellForQuit(): void {
@@ -6143,7 +6243,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeListener("memmy:analytics-client-id", handleAnalyticsClientId);
   areIpcHandlersRegistered = false;
   destroyMenuBarTray();
-  const services = runtimeServices;
+  const quit = quitCleanupContext!;
   runtimeServices = null;
   memoryServiceControl = null;
   const backend = localBackend;
@@ -6152,7 +6252,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   browserWebviewDownloads = null;
   disposeBrowserWebviewPermissions?.();
   disposeBrowserWebviewPermissions = null;
-  await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+  await closeRuntimeForQuit(quit);
+  if (quit.outcome !== "pending") return;
+  quit.phase = "backend-close";
   // History permission checks run through the separate signed native app
   // agent. It can outlive Electron when macOS performs “Quit & Reopen”, and
   // then keeps the old TCC preflight result on the next launch. Stop any
@@ -6169,7 +6271,11 @@ async function cleanupBeforeQuit(): Promise<void> {
   computerUseSurfaceWindows?.dispose();
   computerUseSurfaceWindows = null;
   await backend?.close();
+  if (quit.outcome !== "pending") return;
+  quit.phase = "renderer-close";
   await stopPackagedRendererServer();
+  if (quit.outcome !== "pending") return;
+  quit.phase = "analytics";
   await sendAppExitEventBeforeQuit();
 }
 

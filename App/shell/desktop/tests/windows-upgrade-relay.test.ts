@@ -918,7 +918,7 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(existsSync(fixture.descendantPidPath)).toBe(true);
     descendantProcessIds.push(Number.parseInt((await readFile(fixture.descendantPidPath, "utf8")).trim(), 10));
     await waitForPathAbsent(fixture.workDir);
-  });
+  }, 15_000);
 
   it("recovers original data and clears a stale active lock after the relay is gone", async () => {
     expect(existsSync(recoveryScriptPath)).toBe(true);

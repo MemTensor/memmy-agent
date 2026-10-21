@@ -16,6 +16,24 @@ afterEach(() => {
 });
 
 describe("memory LLM thinking configuration", () => {
+  it("uses completion limits for GPT 6 summaries and honors endpoint reasoning overrides", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      sourceProvider: "openai",
+      model: "gpt-6.1-sol",
+      extraBody: { reasoning_effort: "low" }
+    }));
+    await client.completeJson([{ role: "user", content: "Summarize the PowerPoint activity." }], {
+      operation: "test.gpt6-summary", thinkingMode: "disabled", maxTokens: 512
+    });
+    expect(requestBody(fetchMock)).toMatchObject({
+      model: "gpt-6.1-sol", max_completion_tokens: 512, reasoning_effort: "low",
+      response_format: { type: "json_object" }
+    });
+    expect(requestBody(fetchMock)).not.toHaveProperty("max_tokens");
+    expect(requestBody(fetchMock)).not.toHaveProperty("temperature");
+  });
   it("sends every Bailian thinking switch to the Memmy account gateway", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);

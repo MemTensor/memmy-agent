@@ -34,6 +34,8 @@ files:
 
 asar: true
 asarUnpack:
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/win/memmy-history-recorder.exe"
+  - "**/node_modules/open-computer-use/dist/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/win/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py"

@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 // The desktop client validates every snapshot against this schema. Importing
 // it here checks the real contract rather than a hand-maintained list of field
 // names, which drifted twice before anything caught it.
-import { ComputerHistorySnapshotSchema } from "../App/frontend/desktop/src/api/computer-history-contract.js";
+import { ComputerHistorySnapshotSchema, WindowsHistoryConfigurationSchema, WindowsHistorySettingsSchema } from "../App/frontend/desktop/src/api/computer-history-contract.js";
+import { WindowsComputerHistoryService } from "../App/memmy-agent/src/tools/computer-history/win/computer-history-api.js";
+import * as windowsSettings from "../App/memmy-agent/src/tools/computer-history/win/settings.js";
 import { ComputerHistoryDemoService, clientSnapshot } from "../App/memmy-agent/src/tools/computer-history/mac/computer-history-api.js";
 
 const roots: string[] = [];
@@ -30,6 +32,34 @@ afterEach(() => {
 // it. Neither package can import the other, which is precisely why the two
 // sides were free to drift.
 describe("snapshot contract with the desktop client", () => {
+  it("preserves the scoped editor selector across the desktop settings boundary", () => {
+    const settings = windowsSettings.parseWindowsSettings({ version: 1, applications: [{ executable: "C:\\Apps\\Code.exe",
+      documentRegions: [{ controlType: "Edit", automationId: "", scope: "vscode.editor" }] }] });
+    expect(WindowsHistorySettingsSchema.parse(settings)).toEqual(settings);
+    const word = windowsSettings.parseWindowsSettings({ version: 1, applications: [{ executable: "C:\\Office\\WINWORD.EXE",
+      documentRegions: [{ controlType: "Document", automationId: "", scope: "word.document" }] }] });
+    expect(WindowsHistorySettingsSchema.parse(word)).toEqual(word);
+  });
+  it("validates real Windows consent, profiles and readiness against the desktop contract", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-windows-contract-")); roots.push(root);
+    const settingsFile = path.join(root, "windows.json");
+    const recorderScript = path.join(root, "recorder.mjs"); fs.writeFileSync(recorderScript, "unused");
+    const store = new windowsSettings.WindowsSettingsStore(settingsFile);
+    const executable = "C:\\Apps\\Fixture.exe";
+    const rule = { executable, searchFields: [{ controlType: "Edit" as const, automationId: "search" }], sensitiveAutomationIds: ["private"] };
+    store.write({ version: 1, applications: [rule] });
+    vi.spyOn(windowsSettings, "discoverApplications").mockResolvedValue([{ pid: 123, executable, processStart: "134000000000000001" }]);
+    const instance = new WindowsComputerHistoryService({ binary: process.execPath, recorderScript, windowsSettingsFile: settingsFile,
+      historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"), workflowDirectory: path.join(root, "workflows") });
+    try {
+      const result = WindowsHistoryConfigurationSchema.parse(await instance.getWindowsConfiguration());
+      expect(result.permissions).toMatchObject({ platform: "windows", ready: true, accessibility: false, inputMonitoring: false });
+      expect(result.applications[0]?.rule).toEqual({ ...rule, captureText: true });
+      await instance.checkPermissions();
+      const snapshot = ComputerHistorySnapshotSchema.parse(clientSnapshot(instance.snapshot()));
+      expect(snapshot.observation.permissions?.platform).toBe("windows");
+    } finally { await instance.shutdown(); vi.restoreAllMocks(); }
+  });
   it("accepts an empty snapshot", () => {
     expect(() => ComputerHistorySnapshotSchema.parse(service().snapshot())).not.toThrow();
   });

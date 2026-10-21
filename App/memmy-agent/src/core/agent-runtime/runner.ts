@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { markRecordingOcu } from "../../tools/computer-recordings/service.js";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
 import path from "node:path";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
@@ -1137,10 +1138,12 @@ export class AgentRunner {
           });
         },
       };
+      markRecordingOcu(spec.sessionKey, spec.turnId, call.name, "started");
       const run = tool && typeof tool.execute === "function"
         ? tool.execute(params, toolContext)
         : spec.tools.execute(call.name, params, toolContext);
       raw = await withAbort(Promise.resolve(run), spec.abortSignal);
+      markRecordingOcu(spec.sessionKey, spec.turnId, call.name, typeof raw === "string" && raw.startsWith("Error") ? "failed" : "finished");
       if (spec.abortSignal?.aborted) throw createAbortError();
       let event: Record<string, any>;
       let error: any = null;
@@ -1179,6 +1182,7 @@ export class AgentRunner {
       await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [result], toolEvents: [event] }), call, result);
       return { call, result, event, error, ...(stopTurn ? { stopTurn } : {}) };
     } catch (error) {
+      markRecordingOcu(spec.sessionKey, spec.turnId, call.name, "unknown");
       const message = isAbortError(error)
         ? "Error: task cancelled"
         : `Error: ${(error as Error).constructor?.name ?? "Error"}: ${(error as Error).message ?? error}`;

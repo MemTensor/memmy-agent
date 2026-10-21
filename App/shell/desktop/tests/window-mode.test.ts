@@ -19,6 +19,7 @@ import {
 } from "../src/main/window-mode.js";
 
 const mainSourcePath = fileURLToPath(new URL("../src/main/main.ts", import.meta.url));
+const readMainSource = () => readFileSync(mainSourcePath, "utf8").replaceAll("\r\n", "\n");
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
 
 describe("desktop pet window mode", () => {
@@ -45,7 +46,7 @@ describe("desktop pet window mode", () => {
       trafficLightPosition: { x: 14, y: 14 }
     });
 
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
     expect(source).toContain("...resolveFullWindowChromeOptions(process.platform)");
   });
 
@@ -69,7 +70,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("keeps the pet window below system input overlays while still above normal windows", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("targetWindow.setAlwaysOnTop(true, petWindowAlwaysOnTopLevel);");
     expect(source).not.toContain('targetWindow.setAlwaysOnTop(true, "screen-saver");');
@@ -118,7 +119,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("boots into the persisted launch mode instead of always creating the full window", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("createInitialWindow();");
     expect(source).toContain("resolveBootWindowMode({");
@@ -127,14 +128,14 @@ describe("desktop pet window mode", () => {
   });
 
   it("records the last used launch mode whenever the pet window mode is toggled", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain('recordLaunchMode(enabled ? "pet" : "full");');
     expect(source).toContain("localBackend?.recordLaunchMode(");
   });
 
   it("suspends the pet window before restoring the full window and async closing the IPC sender", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("suspendPetWindowBeforeFullMode();\n  showMainWindow(target);\n  queuePetWindowClose();");
     expect(source).toContain("function suspendPetWindowBeforeFullMode()");
@@ -146,7 +147,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("关闭桌宠时隐藏到后台并强制常驻托盘，不恢复完整主窗口", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain('ipcMain.handle("memmy:hide-pet-window", () => {');
     expect(source).toContain("hidePetWindowToBackground();");
@@ -160,7 +161,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("用户直接关闭桌宠时退回后台完整模式且不被 macOS activate 自动拉起", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("const programmaticPetWindowCloses = new WeakSet<BrowserWindow>();");
     expect(source).toContain("const wasProgrammaticClose = programmaticPetWindowCloses.delete(targetPetWindow);");
@@ -172,7 +173,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("retries the single-instance lock so macOS quit-and-reopen survives slow old-instance exit", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
     const secondInstanceIndex = source.indexOf('app.on("second-instance"');
     const secondInstanceBlock = source.slice(secondInstanceIndex, source.indexOf("app.whenReady()", secondInstanceIndex));
     const whenReadyIndex = source.indexOf("app.whenReady()", secondInstanceIndex);
@@ -240,7 +241,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("restores an existing full window without reloading the renderer", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).not.toContain("shouldReload = true");
     expect(source).toContain("let shouldNotifyRouteTarget = false;");
@@ -251,7 +252,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("leaves full-screen before hiding the main window when entering pet mode", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("function enterPetWindowMode(target: RendererRouteTarget | null = null)");
     expect(source).toContain('setMacOsActivationPolicy("accessory");');
@@ -265,7 +266,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("hides the opaque main window before switching activation policy and creating the pet window (non-fullscreen)", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     // Window mode tests.
     // Handles expect.
@@ -273,7 +274,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("waits for the pet renderer layout before showing the transparent pet window", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("let isPetWindowReadyToShow = false;");
     expect(source).toContain("showPetWindowAfterRendererLayout();");
@@ -284,7 +285,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("restores regular macOS activation policy before showing the full window", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain('function setMacOsActivationPolicy(policy: "regular" | "accessory"): void');
     expect(source).toContain("app.setActivationPolicy(policy);");
@@ -292,7 +293,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("forces the traffic-light buttons visible whenever it repositions them, so they survive a pet<->full round-trip", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("function updateFullWindowButtonPosition(targetWindow: BrowserWindow): void {");
     const updateBody = source.slice(source.indexOf("function updateFullWindowButtonPosition(targetWindow: BrowserWindow): void {"));
@@ -305,7 +306,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("pins the app to the light theme so inactive traffic-light buttons stay visible on the light background", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("function forceLightWindowChrome(): void {");
     const chromeBody = source.slice(source.indexOf("function forceLightWindowChrome(): void {"));
@@ -356,7 +357,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("uses setBounds for dynamic layouts and a main-process position loop while dragging", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain('ipcMain.on("memmy:update-pet-window-layout"');
     expect(source).toContain('ipcMain.on("memmy:start-pet-window-drag"');
@@ -368,7 +369,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("asks renderer before the first full-window close or minimize so the pet guide can appear once", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
 
     expect(source).toContain("setWindowButtonPosition(resolveFullWindowButtonPosition");
     expect(source).toContain("...resolveFullWindowSize(screen.getPrimaryDisplay().workArea)");
@@ -394,7 +395,7 @@ describe("desktop pet window mode", () => {
   });
 
   it("exits macOS fullscreen before hiding the main window for the tray close action", () => {
-    const source = readFileSync(mainSourcePath, "utf8");
+    const source = readMainSource();
     const hideBranchStart = source.indexOf('if (resolution === "hide")');
     const hideBranchEnd = source.indexOf("\n  replayMainWindowAction", hideBranchStart);
     const hideBranch = source.slice(hideBranchStart, hideBranchEnd);

@@ -3,7 +3,7 @@ import { isWindows11 } from "./win/win11.js";
 
 /** Windows support is limited to Windows 11's signed-in desktop session. */
 export function isComputerHistorySupported(): boolean {
-  return process.platform === "darwin" || isWindows11();
+  return process.platform === "darwin" || process.platform === "win32";
 }
 
 /** Personal WeChat History is available on Apple silicon macOS and Windows 11. */

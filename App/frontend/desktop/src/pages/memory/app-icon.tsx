@@ -4,6 +4,7 @@ import type { MemmyAgentClient } from "../../api/memmy-agent-client.js";
 export interface AppIconProps {
   bundleId: string;
   client: MemmyAgentClient | null;
+  displayName?: string;
 }
 
 // Keep successful icons for the renderer lifetime. A missing icon may become
@@ -81,16 +82,16 @@ export function AppIcon(props: AppIconProps) {
   }, [props.bundleId, props.client]);
 
   if (icon) {
-    return <img className="ch-app-icon" src={icon} alt={props.bundleId} title={props.bundleId} />;
+    return <img className="ch-app-icon" src={icon} alt={props.displayName ?? props.bundleId} title={props.displayName ?? props.bundleId} />;
   }
   return (
     <span
       className="ch-app-icon ch-app-icon--fallback"
-      title={props.bundleId}
-      aria-label={props.bundleId}
+      title={props.displayName ?? props.bundleId}
+      aria-label={props.displayName ?? props.bundleId}
       style={{ backgroundColor: `hsl(${hue(props.bundleId)} 42% 88%)`, color: `hsl(${hue(props.bundleId)} 45% 32%)` }}
     >
-      {initials(props.bundleId)}
+      {props.displayName ? props.displayName.replace(/\.exe$/iu, "").slice(0, 2).toUpperCase() : initials(props.bundleId)}
     </span>
   );
 }

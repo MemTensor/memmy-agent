@@ -262,7 +262,7 @@ describe("SkillsLoader listSkills", () => {
 });
 
 describe("SkillsLoader Computer History platform availability", () => {
-  it.each(["win32", "linux"] as const)("hides builtin Computer History from all skill entry points on %s", (platform) => {
+  it.each(["linux"] as const)("hides builtin Computer History from all skill entry points on %s", (platform) => {
     vi.spyOn(process, "platform", "get").mockReturnValue(platform);
     const { workspace, builtin } = makeWorkspace();
     writeSkill(builtin, "computer-history", { metadataJson: { always: true }, body: "# Computer History" });
@@ -280,8 +280,8 @@ describe("SkillsLoader Computer History platform availability", () => {
     expect(loader.loadSkill("general-helper")).toContain("# General Helper");
   });
 
-  it("retains all builtin Computer History entry points on macOS", () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+  it.each(["darwin", "win32"] as const)("retains all builtin Computer History entry points on %s", (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
     const { workspace, builtin } = makeWorkspace();
     const skillPath = writeSkill(builtin, "computer-history", { metadataJson: { always: true }, body: "# Computer History" });
     const loader = new SkillsLoader(workspace, builtin);

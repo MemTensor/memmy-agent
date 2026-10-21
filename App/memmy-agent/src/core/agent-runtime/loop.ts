@@ -82,6 +82,7 @@ import {
   type GoalStatus,
 } from "../session/goal-state.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
+import { startAgentRecording, finishAgentRecording } from "../../tools/computer-recordings/agent-lifecycle.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
@@ -5140,6 +5141,7 @@ export class AgentLoop {
       : null;
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
+    let taskRecordingId: string | null = null;
     let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
     if (slot) {
       let dequeuedDescriptor: QueueMessageDescriptor | null = null;
@@ -5183,6 +5185,11 @@ export class AgentLoop {
             }
           }
           if (publishRunStatus) {
+            taskRecordingId = await startAgentRecording({ runId: turnId, chatId: String(effectiveMsg.chatId),
+              messageId: String(effectiveMsg.metadata?.client_request_id ?? turnId), metadata: effectiveMsg.metadata ?? {},
+              notify: (payload) => this.bus.publishOutbound(new OutboundMessage({ channel: effectiveMsg.channel, chatId: effectiveMsg.chatId,
+                content: "", metadata: { ...(effectiveMsg.metadata ?? {}), taskRecordingStatus: payload } })) });
+            if (isCancelled()) return;
             await publishTurnRunStatus(this.bus, effectiveMsg, "running");
             didPublishRunning = true;
           }
@@ -5317,6 +5324,7 @@ export class AgentLoop {
       }
       throw error;
     } finally {
+      await finishAgentRecording(taskRecordingId, effectiveAbortSignal?.aborted === true || isCancelled());
       releaseComputerUseInterrupt?.();
       const surfaceScope = { sessionKey, channel: effectiveMsg.channel, chatId: effectiveMsg.chatId };
       await closeNativeSurfacesForTurn({ ...surfaceScope, turnId });

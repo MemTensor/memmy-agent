@@ -575,7 +575,7 @@ export class OpenAICompatProvider extends LLMProvider {
     if (reasoningEffort && reasoningEffort.toLowerCase() !== "none") return false;
     const name = modelName.toLowerCase();
     if (isKimiImmutableTemperatureModel(name)) return false;
-    return !["gpt-5", "o1", "o3", "o4"].some((token) => name.includes(token));
+    return !["gpt-5", "gpt-6", "o1", "o3", "o4"].some((token) => name.includes(token));
   }
 
   buildKwargs(args: ChatArgs): Record<string, any> {

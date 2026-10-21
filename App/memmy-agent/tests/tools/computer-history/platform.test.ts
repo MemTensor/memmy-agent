@@ -24,7 +24,6 @@ afterEach(() => {
 });
 
 describe.each([
-  { platform: "win32", release: "10.0.19045" },
   { platform: "linux", release: "6.0.0" },
 ] as const)("Computer History unavailable on $platform ($release)", ({ platform, release }) => {
   it.each([undefined, "1", "0"])("cannot register or invoke tools with MEMMY_COMPUTER_HISTORY=%s", async (enabled) => {
@@ -51,7 +50,8 @@ describe("Computer History Windows 11 availability", () => {
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", enabled);
 
     expect(isComputerHistorySupported()).toBe(true);
-    for (const cls of classes) expect(cls.enabled()).toBe(true);
+    expect(ComputerHistoryTool.enabled()).toBe(true);
+    for (const cls of classes.slice(1)) expect(cls.enabled()).toBe(true);
     const registry = new ToolLoader({ testClasses: classes }).loadRegistry();
     expect(registry.toolNames.sort()).toEqual([...names].sort());
   });
