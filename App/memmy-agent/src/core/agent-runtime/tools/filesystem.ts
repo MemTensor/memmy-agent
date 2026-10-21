@@ -798,6 +798,55 @@ export class WriteFileTool extends Tool {
   }
 }
 
+interface EditFileParams {
+  path?: string;
+  old_text?: string;
+  oldText?: string;
+  new_text?: string;
+  newText?: string;
+  replace_all?: boolean;
+  replaceAll?: boolean;
+  occurrence?: number | null;
+  line_hint?: number | null;
+  lineHint?: number | null;
+  expected_replacements?: number | null;
+  expectedReplacements?: number | null;
+}
+
+function resolveEditParams(params: EditFileParams) {
+  return {
+    oldText: params.old_text ?? params.oldText,
+    newText: params.new_text ?? params.newText,
+    replaceAll: params.replace_all ?? params.replaceAll ?? false,
+    occurrence: params.occurrence ?? null,
+    lineHint: params.line_hint ?? params.lineHint ?? null,
+    expectedReplacements: params.expected_replacements ?? params.expectedReplacements ?? null,
+  };
+}
+
+/** Pure validation shared by registry preparation and direct execution, before any file access. */
+function editOptionsError(options: ReturnType<typeof resolveEditParams>): string | null {
+  const { oldText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
+  for (const [name, value] of [
+    ["occurrence", occurrence], ["line_hint", lineHint], ["expected_replacements", expectedReplacements],
+  ] as const) {
+    if (value != null && value < 1) return `${name} must be >= 1.`;
+    if (value != null && !Number.isInteger(value)) return `${name} must be a positive integer.`;
+  }
+  if (replaceAll && occurrence != null) return "occurrence cannot be used with replace_all=true.";
+  if (replaceAll && lineHint != null) return "line_hint cannot be used with replace_all=true.";
+  if (occurrence != null && lineHint != null) return "line_hint cannot be used with occurrence.";
+  if (oldText === "") {
+    if (replaceAll || occurrence != null || lineHint != null) {
+      return "old_text is empty (create mode); omit occurrence and line_hint, and leave replace_all false.";
+    }
+    if (expectedReplacements != null && expectedReplacements !== 1) {
+      return `expected ${expectedReplacements} replacements but would make 1 (create mode).`;
+    }
+  }
+  return null;
+}
+
 export class EditFileTool extends Tool {
   static scopes = new Set(["core", "subagent", "memory"]);
   static MAX_EDIT_FILE_SIZE = 1024 * 1024 * 1024;
@@ -838,6 +887,9 @@ export class EditFileTool extends Tool {
     return (
       "Perform a small, exact replacement in one file by replacing old_text with new_text. " +
       "Use this for narrow text substitutions with old_text copied from read_file. " +
+      "Choose at most one selector: occurrence, line_hint, or replace_all=true; they are mutually exclusive. " +
+      "With no selector, old_text must match exactly once. expected_replacements is an independent count assertion. " +
+      "Empty old_text creates a missing file or fills an empty/whitespace-only file; omit selectors in this mode. " +
       "For multi-file, structural, or generated code edits, prefer apply_patch."
     );
   }
@@ -846,21 +898,28 @@ export class EditFileTool extends Tool {
     return {
       type: "object",
       properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        oldText: { type: "string" },
-        new_text: { type: "string" },
-        newText: { type: "string" },
-        replace_all: { type: "boolean" },
-        replaceAll: { type: "boolean" },
-        occurrence: { type: ["integer", "null"], minimum: 1 },
-        line_hint: { type: ["integer", "null"], minimum: 1 },
-        lineHint: { type: ["integer", "null"], minimum: 1 },
-        expected_replacements: { type: ["integer", "null"], minimum: 1 },
-        expectedReplacements: { type: ["integer", "null"], minimum: 1 },
+        path: { type: "string", description: "File path, absolute or relative to the workspace." },
+        old_text: { type: "string", description: "Required text to replace, copied from read_file. Empty string selects create mode: create a missing file or fill an empty/whitespace-only file, without selectors." },
+        oldText: { type: "string", description: "Alias of old_text; prefer old_text. The snake_case value takes precedence when both are supplied." },
+        new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
+        newText: { type: "string", description: "Alias of new_text; prefer new_text. The snake_case value takes precedence when both are supplied." },
+        replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. When true, cannot be combined with non-null occurrence or line_hint, or used in create mode. When false, may be combined with occurrence or line_hint, or used in create mode." },
+        replaceAll: { type: "boolean", description: "Alias of replace_all, with the same restrictions; prefer replace_all. The snake_case value takes precedence when both are supplied." },
+        occurrence: { type: ["integer", "null"], minimum: 1, description: "Select the 1-based occurrence of old_text in file order. Omit or use null when unused. Cannot be combined with line_hint or replace_all=true, or used in create mode." },
+        line_hint: { type: ["integer", "null"], minimum: 1, description: "Select the match whose start is nearest this 1-based line number; equal-distance ties fail. Omit or use null when unused. Cannot be combined with occurrence or replace_all=true, or used in create mode." },
+        lineHint: { type: ["integer", "null"], minimum: 1, description: "Alias of line_hint, with the same restrictions; prefer line_hint. A non-null line_hint takes precedence when both are supplied." },
+        expected_replacements: { type: ["integer", "null"], minimum: 1, description: "Independent assertion of the number of selected replacements, checked before writing. Works with every selection mode; does not select a match. Omit or use null to skip; create mode accepts only 1 when supplied, including a no-op." },
+        expectedReplacements: { type: ["integer", "null"], minimum: 1, description: "Alias of expected_replacements, with the same restrictions; prefer expected_replacements. A non-null snake_case value takes precedence when both are supplied." },
       },
       required: ["path"],
     };
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    const errors = super.validateParams(params);
+    if (errors.length) return errors;
+    const error = editOptionsError(resolveEditParams(params));
+    return error ? [error] : [];
   }
 
   setContext(ctx: any): void {
@@ -871,32 +930,14 @@ export class EditFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: {
-    path?: string;
-    old_text?: string;
-    oldText?: string;
-    new_text?: string;
-    newText?: string;
-    replace_all?: boolean;
-    replaceAll?: boolean;
-    occurrence?: number | null;
-    line_hint?: number | null;
-    lineHint?: number | null;
-    expected_replacements?: number | null;
-    expectedReplacements?: number | null;
-  } = {}, context?: ToolExecutionContext): Promise<string> {
+  async execute(params: EditFileParams = {}, context?: ToolExecutionContext): Promise<string> {
     if (!params.path) return "Error editing file: Unknown path";
-    const oldText = params.old_text ?? params.oldText;
-    const newText = params.new_text ?? params.newText;
+    const options = resolveEditParams(params);
+    const { oldText, newText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
     if (oldText == null) return "Error editing file: Unknown old_text";
     if (newText == null) return "Error editing file: Unknown new_text";
-    const replaceAll = params.replace_all ?? params.replaceAll ?? false;
-    const occurrence = params.occurrence ?? null;
-    const lineHint = params.line_hint ?? params.lineHint ?? null;
-    const expectedReplacements = params.expected_replacements ?? params.expectedReplacements ?? null;
-    if (occurrence != null && occurrence < 1) return "Error: occurrence must be >= 1.";
-    if (lineHint != null && lineHint < 1) return "Error: line_hint must be >= 1.";
-    if (expectedReplacements != null && expectedReplacements < 1) return "Error: expected_replacements must be >= 1.";
+    const parameterError = editOptionsError(options);
+    if (parameterError) return `Error: ${parameterError}`;
     const target = resolveWorkspacePath(this.workspace, params.path);
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error editing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;
@@ -944,9 +985,6 @@ export class EditFileTool extends Tool {
       throwIfAborted(signal);
       if (!matches.length) return notFoundMessage(normalizedOld, normalized, params.path);
       const count = matches.length;
-      if (replaceAll && occurrence != null) return "Error: occurrence cannot be used with replace_all=true.";
-      if (replaceAll && lineHint != null) return "Error: line_hint cannot be used with replace_all=true.";
-      if (occurrence != null && lineHint != null) return "Error: line_hint cannot be used with occurrence.";
       if (count > 1 && !replaceAll) {
         if (occurrence != null) {
           if (occurrence > count) return `Error: occurrence ${occurrence} is out of range; old_text appears ${count} times.`;
