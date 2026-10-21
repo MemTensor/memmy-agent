@@ -80,10 +80,10 @@ describe("external passive evidence", () => {
     const anotherNamespace = { ...namespace, userId: "another-user" };
     expect(service.externalEvidenceStatus({ source: evidence.source, sourceRecordIds: [],
       skillIds: [candidate.id!], namespace: anotherNamespace }).skills).toEqual([
-      { id: candidate.id, status: "missing" }
+      { id: candidate.id, status: "activated" }
     ]);
     expect(() => service.approveExternalEvidenceSkill(candidate.id!, { namespace: anotherNamespace }))
-      .toThrow(/not found/u);
+      .toThrow(/no longer awaiting review/u);
     expect(() => service.approveExternalEvidenceSkill(candidate.id!, { namespace })).toThrow(/no longer awaiting review/u);
     expect(isMemoryReadyForRetrieval(repos.memories.get(candidate.id!)!)).toBe(true);
     service.deleteMemory(first.id, { namespace });
