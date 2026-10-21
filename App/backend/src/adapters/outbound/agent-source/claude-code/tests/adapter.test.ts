@@ -1,9 +1,9 @@
 /** Adapter tests. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { sourceTurnFailureReason, sourceTurnFromMessages } from "@memmy/agent-source-core";
+import { readClaudeCodeSourceTurn, sourceTurnFailureReason, sourceTurnFromMessages } from "@memmy/agent-source-core";
 import { createClaudeCodeSourceAdapter } from "../index.js";
 import { discoverClaudeCodeSessions } from "../project-discovery.js";
 import { readClaudeCodeTranscript } from "../transcript-reader.js";
@@ -28,20 +28,65 @@ describe("claude code source adapter", () => {
       source: "claude_code",
       conversationId: "session-1",
       turnId: "prompt-1",
-      completionEvidence: "turn_duration:duration-uuid",
+      completionEvidence: "end_turn:assistant-final",
       startedAt: "2026-05-29T10:00:00.000Z",
       completedAt: "2026-05-29T10:00:03.000Z",
-      answer: "I will inspect files.\nThen patch.",
+      answer: "I will inspect files.\nThen patch.\n\nDone.",
       status: "succeeded"
     });
     expect(turn?.query).toBe("Please use ANTHROPIC_API_KEY=[REDACTED:anthropic_api_key]");
     expect(turn?.toolCalls).toEqual([
       expect.objectContaining({ id: "toolu_read_1", name: "Read", output: "file body" })
     ]);
+    const hookResult = await readClaudeCodeSourceTurn(fixture.sessionFilePath, {
+      conversationId: "session-1", promptId: "prompt-1", stop: true
+    });
+    expect(hookResult.turn).toEqual(turn);
   });
 
   it("keeps a turn with an unanswered tool call unsubmitted so the scan can retry it", async () => {
     const fixture = createFixture({ withToolResult: false });
+
+    const messages = await collect(readClaudeCodeTranscript(fixture.sessionFilePath));
+
+    expect(sourceTurnFromMessages(messages)).toBeNull();
+    expect(sourceTurnFailureReason(messages)).toBe("turn_incomplete");
+  });
+
+  it.each(["tool_use", "max_tokens", "pause_turn", null])(
+    "does not treat assistant stop_reason %s as successful completion",
+    async (stopReason) => {
+      const fixture = createFixture({ stopReason });
+
+      const messages = await collect(readClaudeCodeTranscript(fixture.sessionFilePath));
+
+      expect(sourceTurnFromMessages(messages)).toBeNull();
+      expect(sourceTurnFailureReason(messages)).toBe("turn_incomplete");
+    }
+  );
+
+  it("does not use turn_duration as completion evidence without end_turn", async () => {
+    const fixture = createFixture({ stopReason: null });
+    appendFileSync(fixture.sessionFilePath, `\n${JSON.stringify({
+      type: "system", subtype: "turn_duration", sessionId: "session-1",
+      uuid: "duration-uuid", timestamp: "2026-05-29T10:00:04.000Z"
+    })}`);
+
+    const messages = await collect(readClaudeCodeTranscript(fixture.sessionFilePath));
+
+    expect(sourceTurnFromMessages(messages)).toBeNull();
+    expect(sourceTurnFailureReason(messages)).toBe("turn_incomplete");
+  });
+
+  it("does not reuse an earlier end_turn when the SDK continues the same human turn", async () => {
+    const fixture = createFixture({ stopReason: "end_turn" });
+    appendFileSync(fixture.sessionFilePath, `\n${JSON.stringify({
+      type: "assistant",
+      sessionId: "session-1",
+      uuid: "assistant-continuation",
+      timestamp: "2026-05-29T10:00:04.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Still working." }], stop_reason: null }
+    })}`);
 
     const messages = await collect(readClaudeCodeTranscript(fixture.sessionFilePath));
 
@@ -75,7 +120,8 @@ describe("claude code source adapter", () => {
       }),
       expect.objectContaining({ sourceId: "claude_code", role: "assistant" }),
       expect.objectContaining({ sourceId: "claude_code", role: "tool" }),
-      expect.objectContaining({ sourceId: "claude_code", role: "tool" })
+      expect.objectContaining({ sourceId: "claude_code", role: "tool" }),
+      expect.objectContaining({ sourceId: "claude_code", role: "assistant", content: "Done." })
     ]);
     expect(messages.every((message) => message.rawMeta.sourceTurnState === "complete")).toBe(true);
     expect(phases).toEqual(expect.arrayContaining(["discover", "read", "redact", "emit", "done"]));
@@ -108,8 +154,8 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   return values;
 }
 
-/** Mirrors a Claude Code session file: a human prompt, assistant text, a tool exchange, then turn_duration. */
-function createFixture(options: { withToolResult?: boolean; sidechain?: boolean } = {}): {
+/** Mirrors a Claude Code session file ending with an assistant end_turn after the tool exchange. */
+function createFixture(options: { withToolResult?: boolean; sidechain?: boolean; stopReason?: string | null } = {}): {
   projectsRoot: string;
   workspacePath: string;
   sessionFilePath: string;
@@ -159,8 +205,15 @@ function createFixture(options: { withToolResult?: boolean; sidechain?: boolean 
       uuid: "tool-result-uuid",
       timestamp: "2026-05-29T10:00:02.000Z"
     });
-    rows.push({ ...shared, type: "system", subtype: "turn_duration", uuid: "duration-uuid", timestamp: "2026-05-29T10:00:03.000Z" });
   }
+  rows.push({
+    ...shared,
+    type: "assistant",
+    uuid: "assistant-final",
+    timestamp: "2026-05-29T10:00:03.000Z",
+    message: { role: "assistant", content: [{ type: "text", text: "Done." }],
+      stop_reason: options.stopReason === undefined ? "end_turn" : options.stopReason }
+  });
   writeFileSync(sessionFilePath, rows.map((row) => JSON.stringify(row)).join("\n"), "utf8");
 
   return { projectsRoot, workspacePath, sessionFilePath };

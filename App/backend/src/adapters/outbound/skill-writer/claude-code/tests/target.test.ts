@@ -341,8 +341,7 @@ describe("claude code skill target", () => {
       { ...shared, type: "user", origin: { kind: "human" }, promptId: "claude-prompt-1", uuid: "user-uuid",
         timestamp: "2026-09-16T10:00:00.000Z", message: { role: "user", content: "继续修复 episode 切换问题" } },
       { ...shared, type: "assistant", uuid: "assistant-uuid", timestamp: "2026-09-16T10:00:10.000Z",
-        message: { role: "assistant", content: [{ type: "text", text: "修复已经完成" }] } },
-      { ...shared, type: "system", subtype: "turn_duration", uuid: "duration-uuid", timestamp: "2026-09-16T10:00:11.000Z" }
+        message: { role: "assistant", content: [{ type: "text", text: "修复已经完成" }], stop_reason: "end_turn" } }
     ].map((row) => JSON.stringify(row)).join("\n"), "utf8");
 
     try {
@@ -405,7 +404,7 @@ describe("claude code skill target", () => {
           source: "claude_code",
           conversationId: "claude-session-1",
           turnId: "claude-prompt-1",
-          completionEvidence: "turn_duration:duration-uuid"
+          completionEvidence: "end_turn:assistant-uuid"
         }
       });
       expect(requests[3]?.body).not.toHaveProperty("episodeId");

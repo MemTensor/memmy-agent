@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["claude-code-sync.test.ts"]
+}

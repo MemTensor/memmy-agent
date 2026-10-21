@@ -39,7 +39,7 @@ interface ClaudeRow {
   toolCalls: SourceToolCall[];
   toolResults: SourceToolResult[];
   toolNames: Map<string, string>;
-  turnDuration: boolean;
+  endTurn: boolean;
 }
 
 /**
@@ -99,15 +99,7 @@ export async function* readClaudeCodeSession(
     if (!row || IGNORED_ROW_TYPES.has(row.type)) continue;
     // A sidechain row belongs to a subagent branch and never joins the main session.
     if (record.isSidechain === true) continue;
-    // Claude closes each turn with a turn_duration row. It carries no promptId, so it is
-    // attributed to the turn currently open.
-    if (row.type === "system") {
-      if (row.turnDuration && promptId) {
-        completedAt = row.timestamp || completedAt;
-        evidence = `turn_duration:${row.uuid}`;
-      }
-      continue;
-    }
+    if (row.type === "system") continue;
     if (row.isHuman) {
       yield* finish();
       promptId = row.promptId || row.uuid;
@@ -122,6 +114,10 @@ export async function* readClaudeCodeSession(
     }
     toolCalls.push(...row.toolCalls);
     toolResults.push(...row.toolResults);
+    if (row.type === "user" || row.type === "assistant") {
+      evidence = row.endTurn && row.uuid ? `end_turn:${row.uuid}` : "";
+      if (evidence) completedAt = row.timestamp || completedAt;
+    }
     for (const message of toStagedMessages(row, conversationId, lineNumber)) current.push(message);
   }
   yield* finish(stopEvidence && (!stopEvidence.conversationId || stopEvidence.conversationId === conversationId)
@@ -187,7 +183,7 @@ function toClaudeRow(record: Record<string, unknown>, toolNames: Map<string, str
     toolCalls,
     toolResults,
     toolNames,
-    turnDuration: type === "system" && text(record.subtype) === "turn_duration"
+    endTurn: type === "assistant" && text(message?.stop_reason) === "end_turn"
   };
 }
 
