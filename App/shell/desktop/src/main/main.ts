@@ -55,10 +55,10 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Certificate, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Certificate, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type Session, type WebContents } from "electron";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
+import { randomUUID, X509Certificate } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -173,27 +173,45 @@ import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
-import { COMPROMISED_ROOT_COMMON_NAMES, distrustCompromisedCAs } from './distrust-compromised-cas.js';
+import { COMPROMISED_ROOT_FINGERPRINTS, distrustCompromisedCAs } from './distrust-compromised-cas.js';
 
 // The main process also hosts the local backend (createLocalBackend runs in-process) and
 // update downloads, so this single call covers both.
 distrustCompromisedCAs();
 
-// Chromium verifies certificates on its own path, which Node's default TLS CA list does not
-// cover. Every session needs the check, not just the default one: the in-app browser runs on
-// the persist:memmy-browser partition and other surfaces create partitions at runtime.
-app.on('session-created', (created) => {
-  created.setCertificateVerifyProc((request, callback) => {
-    const names: string[] = [];
+const COMPROMISED_ROOT_FINGERPRINT_SET: ReadonlySet<string> = new Set(COMPROMISED_ROOT_FINGERPRINTS);
+
+function normalizeCertificateFingerprint(fingerprint: string): string {
+  return fingerprint.replaceAll(":", "").toUpperCase();
+}
+
+function installCertificateVerifyProc(targetSession: Session): void {
+  targetSession.setCertificateVerifyProc((request, callback) => {
     let cert: Certificate | undefined = request.certificate;
     for (let depth = 0; cert && depth < 16; depth += 1) {
-      names.push(cert.subjectName, cert.issuerName);
+      try {
+        if (COMPROMISED_ROOT_FINGERPRINT_SET.has(
+          normalizeCertificateFingerprint(new X509Certificate(cert.data).fingerprint256)
+        )) {
+          callback(-2);
+          return;
+        }
+      } catch {
+        // Keep Chromium's own result when a chain entry cannot be parsed locally.
+      }
       cert = cert.issuerCert;
     }
-    // -2 fails the request; -3 keeps Chromium's own result. Never 0 - that accepts any certificate.
-    callback(names.some((name) => COMPROMISED_ROOT_COMMON_NAMES.includes(name)) ? -2 : -3);
+    // -3 keeps Chromium's own result. Never 0 - that accepts any certificate.
+    callback(-3);
   });
-});
+}
+
+// Chromium verifies certificates on its own path, which Node's default TLS CA list does not
+// cover. Every session needs the check, including the already-created default session: the
+// in-app browser runs on the persist:memmy-browser partition and other surfaces create partitions
+// at runtime.
+app.on('session-created', installCertificateVerifyProc);
+installCertificateVerifyProc(session.defaultSession);
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;

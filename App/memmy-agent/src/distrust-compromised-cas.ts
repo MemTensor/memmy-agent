@@ -23,19 +23,29 @@ import tls from "node:tls";
  * AAA Certificate Services, so matching the advisory wording would miss it. The bundle
  * also carries three unaffected emSign roots (G1, C1 and ECC C3) that must be kept.
  */
-export const COMPROMISED_ROOT_COMMON_NAMES: readonly string[] = [
+export const COMPROMISED_ROOT_COMMON_NAMES = [
   "emSign ECC Root CA - G3",
   "AAA Certificate Services"
-];
+] as const;
 
-const COMPROMISED_SUBJECT_LINES = COMPROMISED_ROOT_COMMON_NAMES.map((cn) => `CN=${cn}`);
+/** SHA-256 fingerprints of the exact compromised root certificates. */
+export const COMPROMISED_ROOT_FINGERPRINTS = [
+  "86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B",
+  "D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4"
+] as const;
+
+const COMPROMISED_ROOT_FINGERPRINT_SET: ReadonlySet<string> = new Set(COMPROMISED_ROOT_FINGERPRINTS);
+
+function normalizeFingerprint(fingerprint: string): string {
+  return fingerprint.replaceAll(":", "").toUpperCase();
+}
 
 /** Whether a PEM root is one of the two compromised roots; input that fails to parse is kept. */
 export function isCompromisedRoot(pem: string): boolean {
   try {
-    return new X509Certificate(pem).subject
-      .split("\n")
-      .some((line) => COMPROMISED_SUBJECT_LINES.includes(line.trim()));
+    return COMPROMISED_ROOT_FINGERPRINT_SET.has(
+      normalizeFingerprint(new X509Certificate(pem).fingerprint256)
+    );
   } catch {
     return false;
   }
@@ -50,15 +60,16 @@ export function isCompromisedRoot(pem: string): boolean {
  * makes HTTPS requests would need its own call; none does today.
  */
 export function distrustCompromisedCAs(): number {
-  // Node < 22.15 cannot replace the default CA list; warn rather than crash the entrypoint.
+  // Node < 22.19 cannot replace the default CA list; warn rather than crash the entrypoint.
   if (typeof tls.setDefaultCACertificates !== "function") {
     process.emitWarning(
-      `Node ${process.versions.node} cannot drop the compromised eMudhra roots; upgrade to 22.23.4 or newer.`
+      `Node ${process.versions.node} cannot call tls.setDefaultCACertificates (added in 22.19.0); ` +
+      "upgrade to 22.23.4 or newer to include the security fixes."
     );
     return 0;
   }
-  const bundled = tls.getCACertificates("bundled");
-  const kept = bundled.filter((pem) => !isCompromisedRoot(pem));
-  if (kept.length < bundled.length) tls.setDefaultCACertificates(kept);
-  return bundled.length - kept.length;
+  const all = tls.getCACertificates("default");
+  const kept = all.filter((pem) => !isCompromisedRoot(pem));
+  if (kept.length < all.length) tls.setDefaultCACertificates(kept);
+  return all.length - kept.length;
 }

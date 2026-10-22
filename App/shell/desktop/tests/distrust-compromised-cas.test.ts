@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { COMPROMISED_ROOT_COMMON_NAMES, distrustCompromisedCAs, isCompromisedRoot } from "../src/main/distrust-compromised-cas.js";
+import {
+  COMPROMISED_ROOT_COMMON_NAMES,
+  COMPROMISED_ROOT_FINGERPRINTS,
+  distrustCompromisedCAs,
+  isCompromisedRoot
+} from "../src/main/distrust-compromised-cas.js";
 
 /** The three copies that must stay in sync, relative to this test file. */
 const COPIES = [
@@ -25,9 +30,13 @@ function read(relative: string): string {
 }
 
 function declaredRootNames(relative: string): string[] {
-  const block = /COMPROMISED_ROOT_COMMON_NAMES: readonly string\[\] = \[([^\]]*)\]/.exec(read(relative));
+  const block = /COMPROMISED_ROOT_COMMON_NAMES(?:\s*:\s*readonly string\[\])?\s*=\s*\[([^\]]*)\]/.exec(read(relative));
   if (!block) throw new Error(`no compromised root list in ${relative}`);
   return [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
+function normalizeFingerprint(fingerprint: string): string {
+  return fingerprint.replaceAll(":", "").toUpperCase();
 }
 
 describe("isCompromisedRoot", () => {
@@ -37,8 +46,13 @@ describe("isCompromisedRoot", () => {
     // The bundle currently carries exactly one affected root; AAA Certificate Services is not in it.
     expect(flagged.length).toBeGreaterThan(0);
     for (const pem of flagged) {
-      const subject = new X509Certificate(pem).subject;
-      expect(COMPROMISED_ROOT_COMMON_NAMES.some((cn) => subject.includes(`CN=${cn}`)), subject).toBe(true);
+      const certificate = new X509Certificate(pem);
+      expect(
+        (COMPROMISED_ROOT_FINGERPRINTS as readonly string[]).includes(
+          normalizeFingerprint(certificate.fingerprint256)
+        ),
+        certificate.subject
+      ).toBe(true);
     }
     const survivors = bundled.filter((pem) => !isCompromisedRoot(pem)).map((pem) => new X509Certificate(pem).subject);
     for (const cn of ["emSign Root CA - G1", "emSign Root CA - C1", "emSign ECC Root CA - C3"]) {
@@ -53,7 +67,7 @@ describe("isCompromisedRoot", () => {
 
 describe("distrustCompromisedCAs", () => {
   it("removes the flagged roots and leaves none in the default bundle", () => {
-    const expected = tls.getCACertificates("bundled").filter(isCompromisedRoot).length;
+    const expected = tls.getCACertificates("default").filter(isCompromisedRoot).length;
     expect(distrustCompromisedCAs()).toBe(expected);
     expect(tls.getCACertificates("default").filter(isCompromisedRoot)).toHaveLength(0);
   });
@@ -70,5 +84,12 @@ describe("copies and entrypoints", () => {
     for (const entry of ENTRYPOINTS) {
       expect(read(entry), entry).toContain("distrustCompromisedCAs();");
     }
+  });
+
+  it("installs Chromium verification for the default and newly-created sessions", () => {
+    const main = read(ENTRYPOINTS[0]);
+    expect(main).toContain("app.on('session-created', installCertificateVerifyProc);");
+    expect(main).toContain("installCertificateVerifyProc(session.defaultSession);");
+    expect(main).toContain("new X509Certificate(cert.data)");
   });
 });
