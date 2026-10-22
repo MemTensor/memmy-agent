@@ -171,6 +171,15 @@ function makeInstallerFixture(root) {
 function fakeLinuxTools(root) {
   const tools = path.join(root, "tools");
   mkdirSync(tools, { recursive: true });
+  const realNode = process.execPath.replaceAll("'", "'\\''");
+  const node = path.join(tools, "node");
+  writeFileSync(node, [
+    "#!/usr/bin/env bash",
+    "if [ \"${1:-}\" = \"-e\" ]; then exit 0; fi",
+    `exec '${realNode}' \"$@\"`,
+    "",
+  ].join("\n"));
+  chmodSync(node, 0o755);
   const uname = path.join(tools, "uname");
   writeFileSync(uname, [
     "#!/usr/bin/env bash",
