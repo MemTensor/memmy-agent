@@ -179,6 +179,22 @@ import { COMPROMISED_ROOT_COMMON_NAMES, distrustCompromisedCAs } from './distrus
 // update downloads, so this single call covers both.
 distrustCompromisedCAs();
 
+// Chromium verifies certificates on its own path, which Node's default TLS CA list does not
+// cover. Every session needs the check, not just the default one: the in-app browser runs on
+// the persist:memmy-browser partition and other surfaces create partitions at runtime.
+app.on('session-created', (created) => {
+  created.setCertificateVerifyProc((request, callback) => {
+    const names: string[] = [];
+    let cert: Certificate | undefined = request.certificate;
+    for (let depth = 0; cert && depth < 16; depth += 1) {
+      names.push(cert.subjectName, cert.issuerName);
+      cert = cert.issuerCert;
+    }
+    // -2 fails the request; -3 keeps Chromium's own result. Never 0 - that accepts any certificate.
+    callback(names.some((name) => COMPROMISED_ROOT_COMMON_NAMES.includes(name)) ? -2 : -3);
+  });
+});
+
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
 let pipScreenPermissionGuide: ReturnType<typeof createComputerUsePIPScreenPermissionGuide> | null = null;
@@ -5789,19 +5805,6 @@ app.on("child-process-gone", (_event, details) => {
 });
 
 app.whenReady().then(async () => {
-  // Chromium verifies certificates on its own path, which Node's default TLS CA list does
-  // not cover: the embedded browser and web scraping need their own check.
-  session.defaultSession.setCertificateVerifyProc((request, callback) => {
-    const names: string[] = [];
-    let cert: Certificate | undefined = request.certificate;
-    for (let depth = 0; cert && depth < 16; depth += 1) {
-      names.push(cert.subjectName, cert.issuerName);
-      cert = cert.issuerCert;
-    }
-    // -2 fails the request; -3 keeps Chromium's own result. Never 0 - that accepts any certificate.
-    callback(names.some((name) => COMPROMISED_ROOT_COMMON_NAMES.includes(name)) ? -2 : -3);
-  });
-
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
