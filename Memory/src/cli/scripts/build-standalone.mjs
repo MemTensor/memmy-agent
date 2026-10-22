@@ -12,10 +12,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-// `pkg` ships prebuilt Node binaries; these two constants must describe the same
-// release.
+// `pkg` ships a prebuilt Node 24 binary for the standalone runtime.
 const PKG_NODE_RANGE = "node24";
-const PKG_NODE_VERSION = "24.22.1";
 
 const require = createRequire(import.meta.url);
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -77,7 +75,7 @@ async function alignNativeModulesToPkgRuntime(root) {
   await Promise.all(
     (await readdir(prebuilds))
       .filter((entry) => !wanted.includes(entry))
-      .map((entry) => rm(join(prebuilds, entry), { recursive: true, force: true })),
+      .map((entry) => rm(join(prebuilds, entry), { force: true })),
   );
 
   const onnxBin = join(root, "node_modules", "onnxruntime-node", "bin", "napi-v3");

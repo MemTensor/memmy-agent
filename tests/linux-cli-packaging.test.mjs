@@ -175,8 +175,9 @@ function fakeLinuxTools(root) {
   const node = path.join(tools, "node");
   writeFileSync(node, [
     "#!/usr/bin/env bash",
-    "if [ \"${MEMMY_FIXTURE_NODE_TOO_OLD:-0}\" = \"1\" ] && [ \"${1:-}\" = \"-e\" ]; then exit 1; fi",
-    "if [ \"${1:-}\" = \"-e\" ]; then exit 0; fi",
+    "if [ \"${1:-}\" = \"-e\" ] && [ -n \"${MEMMY_FIXTURE_NODE_VERSION:-}\" ]; then",
+    `  exec '${realNode}' -e \"Object.defineProperty(process.versions, 'node', { value: '$MEMMY_FIXTURE_NODE_VERSION' }); $2\"`,
+    "fi",
     `exec '${realNode}' \"$@\"`,
     "",
   ].join("\n"));
@@ -235,6 +236,7 @@ function runInstaller(home, release, tools, overrides = {}) {
       MEMMY_INSTALL_COMPUTER_USE_DEPS: "0",
       MEMMY_RELEASE_BASE_URL: pathToFileURL(release).href.replace(/\/$/, ""),
       MEMMY_FIXTURE_MAIN_PID: String(process.pid),
+      MEMMY_FIXTURE_NODE_VERSION: "22.23.4",
       PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
       ...overrides,
     }),
@@ -461,10 +463,24 @@ describe("Linux one-line installer transaction", () => {
     mkdirSync(release);
     mkdirSync(home);
 
-    const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_TOO_OLD: "1" });
+    const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: "22.23.3" });
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("earlier releases still trust the compromised eMudhra roots");
+  });
+
+  it("rejects unverified future Node major lines", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-future-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    mkdirSync(release);
+    for (const version of ["27.0.0", "28.0.0"]) {
+      const home = path.join(root, `home-${version}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: version });
+      expect(result.status, version).not.toBe(0);
+      expect(result.stderr, version).toContain("earlier releases still trust the compromised eMudhra roots");
+    }
   });
 
   it("accepts stable and rc release versions while rejecting unsafe or malformed versions", () => {

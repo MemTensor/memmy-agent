@@ -742,6 +742,23 @@ npm_ci_win_x64() {
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
+prune_better_sqlite3_win_artifacts() {
+  local module_dir="$1"
+
+  rm -rf "$module_dir/build" "$module_dir/deps" "$module_dir/src"
+  if [ -d "$module_dir/prebuilds" ]; then
+    find "$module_dir/prebuilds" \
+      -mindepth 1 -maxdepth 1 ! -name "win32-x64.node" \
+      -exec rm -rf {} +
+  fi
+}
+
+prune_windows_better_sqlite3_artifacts() {
+  while IFS= read -r module_dir; do
+    prune_better_sqlite3_win_artifacts "$module_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
+}
+
 package_step_start "Validate Windows signing configuration"
 if [ "${MEMMY_SKIP_CODESIGN:-}" != "1" ]; then
   require_windows_signing_env
@@ -835,6 +852,8 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+package_step_start "Prune Windows better-sqlite3 native artifacts"
+prune_windows_better_sqlite3_artifacts
 package_step_start "Build Memmy Computer Use for Windows from source"
 bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-use.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" amd64

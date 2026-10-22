@@ -395,7 +395,7 @@ describe("Linux systemd Gateway root terminal flow", () => {
       runInteractive: vi.fn(async () => null),
     })).resolves.toBeNull();
 
-    expect(enableGatewayService).toHaveBeenCalledWith({ restart: true });
+    expect(enableGatewayService).toHaveBeenCalledWith({ restart: false });
   });
 
   it("leaves source-built Linux, non-Linux, and non-TTY invocations unchanged", async () => {

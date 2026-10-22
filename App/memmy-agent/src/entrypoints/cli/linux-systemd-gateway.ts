@@ -607,7 +607,8 @@ export async function runLinuxRootTerminal(
   const environmentChanged = dependencies.prepareGatewayEnvironment
     ? await dependencies.prepareGatewayEnvironment()
     : await prepareSystemdGatewayEnvironment();
-  restart ||= environmentChanged || result.status === "unexpected";
+  restart ||= environmentChanged
+    || (result.status === "unexpected" && !transientGatewayProbe(result));
   await (dependencies.enableGatewayService ?? enableSystemdGatewayService)({ restart });
   await waitForGatewayReady(config, dependencies);
 
