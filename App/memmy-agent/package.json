@@ -39,7 +39,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.18.1",
     "@wecom/aibot-node-sdk": "^1.0.7",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "botbuilder": "^4.23.3",
     "commander": "^14.0.2",
     "cron-parser": "^5.5.0",

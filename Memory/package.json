@@ -38,7 +38,7 @@
   "dependencies": {
     "@huggingface/transformers": "^3.8.0",
     "@memmy/agent-source-core": "0.0.0",
-    "better-sqlite3": "^12.6.3",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^16.6.1",
     "fast-xml-parser": "^5.8.0",
     "fzstd": "^0.1.1",

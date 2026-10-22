@@ -277,38 +277,6 @@ download_url_to_file() {
   return 1
 }
 
-install_better_sqlite3_prebuild_with_download_fallback() {
-  local electron_version="$1"
-  local install_output
-  local install_status
-  local prebuild_url
-  local prebuild_file
-
-  log "Trying direct better-sqlite3 prebuild download fallback"
-  set +e
-  install_output="$(../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" --verbose 2>&1)"
-  install_status=$?
-  set -e
-  printf '%s\n' "$install_output"
-
-  if [ "$install_status" -eq 0 ]; then
-    return
-  fi
-
-  prebuild_url="$(printf '%s\n' "$install_output" | sed -nE 's/.*(https:\/\/[^[:space:]]+\.tar\.gz).*/\1/p' | tail -n 1)"
-  if [ -z "$prebuild_url" ]; then
-    echo "Unable to locate better-sqlite3 prebuild URL in prebuild-install output." >&2
-    return "$install_status"
-  fi
-
-  mkdir -p prebuilds
-  prebuild_file="prebuilds/$(basename "$prebuild_url")"
-  log "Downloading better-sqlite3 prebuild with fallback downloader: $prebuild_url"
-  download_url_to_file "$prebuild_url" "$prebuild_file"
-
-  ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version"
-}
-
 create_memory_runtime_manifest() {
   node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \
     "$MEMORY_DIR/package.json" \
@@ -774,18 +742,6 @@ npm_ci_win_x64() {
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
-install_better_sqlite3_win_x64() {
-  local runtime_dir="$1"
-  local electron_version
-  electron_version="${MEMMY_ELECTRON_VERSION:-$(read_package_version "$DESKTOP_DIR/node_modules/electron/package.json")}"
-
-  (
-    cd "$runtime_dir/node_modules/better-sqlite3"
-    run_with_retries 3 ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" ||
-      install_better_sqlite3_prebuild_with_download_fallback "$electron_version"
-  )
-}
-
 package_step_start "Validate Windows signing configuration"
 if [ "${MEMMY_SKIP_CODESIGN:-}" != "1" ]; then
   require_windows_signing_env
@@ -846,7 +802,6 @@ create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
 package_step_start "Stage Windows Memory workspace runtime packages"
 RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
 rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
@@ -880,7 +835,6 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
 package_step_start "Build Memmy Computer Use for Windows from source"
 bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-use.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" amd64

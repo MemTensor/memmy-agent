@@ -1049,14 +1049,6 @@ package_step_start "Resolve Memory runtime lockfile"
 npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Install Memory runtime production dependencies"
 npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"
-package_step_start "Rebuild Memory native modules for Electron"
-ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
-node_modules/.bin/electron-rebuild \
-  -f \
-  -v "$ELECTRON_VERSION" \
-  -a "$TARGET_CPU" \
-  -w better-sqlite3 \
-  -m "$RUNTIME_DIR/memory"
 package_step_start "Install memmy-agent runtime production dependencies"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
@@ -1147,13 +1139,6 @@ package_step_start "Verify memmy-agent runtime exports"
     if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
   '
 )
-package_step_start "Rebuild memmy-agent native modules for Electron"
-node_modules/.bin/electron-rebuild \
-  -f \
-  -v "$ELECTRON_VERSION" \
-  -a "$TARGET_CPU" \
-  -w better-sqlite3 \
-  -m "$RUNTIME_DIR/memmy-agent"
 package_step_start "Create CLI launchers"
 create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/src/cli/index.js" resource
 create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"

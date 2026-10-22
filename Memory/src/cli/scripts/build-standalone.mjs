@@ -13,8 +13,8 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
 // `pkg` ships prebuilt Node binaries; these two constants must describe the same
-// release, because better-sqlite3 prebuilds are keyed by Node's ABI version.
-const PKG_NODE_RANGE = "node22";
+// release.
+const PKG_NODE_RANGE = "node24";
 const PKG_NODE_VERSION = "24.22.1";
 
 const require = createRequire(import.meta.url);
@@ -57,15 +57,17 @@ try {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
 
-// better-sqlite3 links against Node's V8 ABI, and the bundle carries whichever
-// prebuild matched the build host. Swap it for the one `pkg`'s Node can load.
-// onnxruntime-node and sharp use N-API, so only their platform slice matters.
+// better-sqlite3 13 ships N-API prebuilds inside the package, one file per platform and
+// architecture, so nothing has to be fetched for the runtime's ABI; drop the other slices.
+// onnxruntime-node and sharp use N-API too, so only their platform slice matters.
 async function alignNativeModulesToPkgRuntime(root) {
-  const betterSqlite3 = join(root, "node_modules", "better-sqlite3");
-  await rm(join(betterSqlite3, "build", "Release"), { recursive: true, force: true });
-  run("node", [require.resolve("prebuild-install/bin.js", { paths: [betterSqlite3] }), "--runtime=node", `--target=${PKG_NODE_VERSION}`, `--platform=${npmPlatform(platform)}`, `--arch=${arch}`], betterSqlite3);
-  if (!existsSync(join(betterSqlite3, "build", "Release", "better_sqlite3.node"))) {
-    throw new Error(`better-sqlite3 has no Node ${PKG_NODE_VERSION} prebuild for ${target}`);
+  const prebuilds = join(root, "node_modules", "better-sqlite3", "prebuilds");
+  const wanted = `${npmPlatform(platform)}-${arch}.node`;
+  if (!existsSync(join(prebuilds, wanted))) {
+    throw new Error(`better-sqlite3 has no ${wanted} prebuild for ${target}`);
+  }
+  for (const entry of await readdir(prebuilds)) {
+    if (entry !== wanted) await rm(join(prebuilds, entry), { recursive: true, force: true });
   }
 
   const onnxBin = join(root, "node_modules", "onnxruntime-node", "bin", "napi-v3");
