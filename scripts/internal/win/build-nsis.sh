@@ -491,7 +491,7 @@ verify_packaged_file_matches_runtime() {
 
 verify_windows_native_module() {
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3"
 }
 
@@ -564,7 +564,7 @@ verify_windows_agent_native_artifacts() {
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3"
   require_packaged_runtime_file "$node_pty_dir/conpty.node"
   require_packaged_runtime_file "$node_pty_dir/conpty/conpty.dll"
@@ -644,18 +644,18 @@ verify_packaged_windows_unpacked_artifacts() {
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3 module"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"

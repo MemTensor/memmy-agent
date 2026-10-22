@@ -525,20 +525,12 @@ NODE
 
 prune_better_sqlite3_build_artifacts() {
   local module_dir="$1"
-  local native_file="$module_dir/build/Release/better_sqlite3.node"
+  local target_cpu="$2"
 
-  if [ ! -f "$native_file" ]; then
-    return
+  rm -rf "$module_dir/build" "$module_dir/deps" "$module_dir/src"
+  if [ -d "$module_dir/prebuilds" ]; then
+    find "$module_dir/prebuilds" -mindepth 1 -type f ! -name "darwin-$target_cpu.node" -delete
   fi
-
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  mkdir -p "$tmp_dir/build/Release"
-  cp "$native_file" "$tmp_dir/build/Release/better_sqlite3.node"
-  rm -rf "$module_dir/build" "$module_dir/deps"
-  mkdir -p "$module_dir/build/Release"
-  cp "$tmp_dir/build/Release/better_sqlite3.node" "$native_file"
-  rm -rf "$tmp_dir"
 }
 
 prune_onnxruntime_native_artifacts() {
@@ -696,7 +688,7 @@ verify_desktop_native_deployment_target() {
 verify_mac_memory_native_artifacts() {
   local target_cpu="$1"
 
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"
   require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
   require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
@@ -851,7 +843,7 @@ PY
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
   fi
-  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
@@ -928,7 +920,7 @@ prune_mac_runtime_artifacts() {
   rm -f "$RUNTIME_DIR/memmy-agent/dist/skills/README.md"
 
   while IFS= read -r module_dir; do
-    prune_better_sqlite3_build_artifacts "$module_dir"
+    prune_better_sqlite3_build_artifacts "$module_dir" "$TARGET_CPU"
   done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
 
   while IFS= read -r napi_dir; do

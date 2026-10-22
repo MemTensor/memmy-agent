@@ -175,6 +175,7 @@ function fakeLinuxTools(root) {
   const node = path.join(tools, "node");
   writeFileSync(node, [
     "#!/usr/bin/env bash",
+    "if [ \"${MEMMY_FIXTURE_NODE_TOO_OLD:-0}\" = \"1\" ] && [ \"${1:-}\" = \"-e\" ]; then exit 1; fi",
     "if [ \"${1:-}\" = \"-e\" ]; then exit 0; fi",
     `exec '${realNode}' \"$@\"`,
     "",
@@ -452,6 +453,20 @@ describe("Linux CLI package boundary", () => {
 });
 
 describe("Linux one-line installer transaction", () => {
+  it("rejects a host Node release without the fixed root store", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-gate-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    const home = path.join(root, "home");
+    mkdirSync(release);
+    mkdirSync(home);
+
+    const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_TOO_OLD: "1" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("earlier releases still trust the compromised eMudhra roots");
+  });
+
   it("accepts stable and rc release versions while rejecting unsafe or malformed versions", () => {
     const root = temporaryRoot("memmy-linux-installer-version-");
     const release = path.join(root, "release");

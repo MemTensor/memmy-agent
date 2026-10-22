@@ -53,8 +53,9 @@ node -e '
 const fixed = { 22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1] };
 const current = process.versions.node.split(".").map(Number);
 const minimum = fixed[current[0]];
-// Lines without a listed fix are either too old or newer than every fixed release.
-if (!minimum) process.exit(current[0] > 26 ? 0 : 1);
+// Future even-numbered major lines are assumed to inherit the fixed root store;
+// reject odd-numbered non-LTS lines until their root store is explicitly verified.
+if (!minimum) process.exit(current[0] > 26 && current[0] % 2 === 0 ? 0 : 1);
 for (let i = 0; i < 3; i += 1) {
   if (current[i] !== minimum[i]) process.exit(current[i] > minimum[i] ? 0 : 1);
 }

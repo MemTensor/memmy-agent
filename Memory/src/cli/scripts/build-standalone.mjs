@@ -74,17 +74,24 @@ async function alignNativeModulesToPkgRuntime(root) {
       throw new Error(`better-sqlite3 has no ${name} prebuild for ${target}`);
     }
   }
-  for (const entry of await readdir(prebuilds)) {
-    if (!wanted.includes(entry)) await rm(join(prebuilds, entry), { recursive: true, force: true });
-  }
+  await Promise.all(
+    (await readdir(prebuilds))
+      .filter((entry) => !wanted.includes(entry))
+      .map((entry) => rm(join(prebuilds, entry), { recursive: true, force: true })),
+  );
 
   const onnxBin = join(root, "node_modules", "onnxruntime-node", "bin", "napi-v3");
-  for (const entry of await readdir(onnxBin)) {
-    if (entry !== npmPlatform(platform)) await rm(join(onnxBin, entry), { recursive: true, force: true });
-  }
-  for (const entry of await readdir(join(onnxBin, npmPlatform(platform)))) {
-    if (entry !== arch) await rm(join(onnxBin, npmPlatform(platform), entry), { recursive: true, force: true });
-  }
+  await Promise.all(
+    (await readdir(onnxBin))
+      .filter((entry) => entry !== npmPlatform(platform))
+      .map((entry) => rm(join(onnxBin, entry), { recursive: true, force: true })),
+  );
+  const platformBin = join(onnxBin, npmPlatform(platform));
+  await Promise.all(
+    (await readdir(platformBin))
+      .filter((entry) => entry !== arch)
+      .map((entry) => rm(join(platformBin, entry), { recursive: true, force: true })),
+  );
 }
 
 // `scripts` are parsed and snapshotted as code; `assets` are copied verbatim.
