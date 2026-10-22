@@ -55,7 +55,7 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Certificate, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -173,6 +173,11 @@ import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
+import { COMPROMISED_ROOT_COMMON_NAMES, distrustCompromisedCAs } from './distrust-compromised-cas.js';
+
+// The main process also hosts the local backend (createLocalBackend runs in-process) and
+// update downloads, so this single call covers both.
+distrustCompromisedCAs();
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
@@ -5784,6 +5789,19 @@ app.on("child-process-gone", (_event, details) => {
 });
 
 app.whenReady().then(async () => {
+  // Chromium verifies certificates on its own path, which Node's default TLS CA list does
+  // not cover: the embedded browser and web scraping need their own check.
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    const names: string[] = [];
+    let cert: Certificate | undefined = request.certificate;
+    for (let depth = 0; cert && depth < 16; depth += 1) {
+      names.push(cert.subjectName, cert.issuerName);
+      cert = cert.issuerCert;
+    }
+    // -2 fails the request; -3 keeps Chromium's own result. Never 0 - that accepts any certificate.
+    callback(names.some((name) => COMPROMISED_ROOT_COMMON_NAMES.includes(name)) ? -2 : -3);
+  });
+
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.

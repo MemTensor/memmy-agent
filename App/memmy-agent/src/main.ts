@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // Must load first: resolve MEMMY_CLOUD_SERVICE from external env, packaged manifest, or development .env.
 import "./load-env.js";
+import { distrustCompromisedCAs } from "./distrust-compromised-cas.js";
+
+// agent-gateway is a separate child process and does not inherit the main process's
+// default TLS CA list, so it has to drop the compromised roots itself.
+distrustCompromisedCAs();
 
 try {
   // Desktop runs migrations before showing its main window. Keep this command

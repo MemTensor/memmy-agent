@@ -14,6 +14,10 @@ import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 import { SCHEMA_VERSION } from "../storage/schema.js";
 import { MEMORY_RUNTIME_BUILD_ID } from "../runtime-build.js";
+import { distrustCompromisedCAs } from "../distrust-compromised-cas.js";
+
+// memory is a separate child process; summary and evolution model requests go through here.
+distrustCompromisedCAs();
 
 const logger = createMemoryLogger("server");
 

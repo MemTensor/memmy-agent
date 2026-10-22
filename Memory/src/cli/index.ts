@@ -14,6 +14,10 @@ import {
   type CliLifecycleAnalytics,
 } from "./analytics.js";
 import { formatOutput, runCommand } from "./commands.js";
+import { distrustCompromisedCAs } from "../distrust-compromised-cas.js";
+
+// The standalone Memory CLI (npm package and pkg binary) is its own process as well.
+distrustCompromisedCAs();
 
 export type MainDeps = {
   analytics?: CliLifecycleAnalytics;
