@@ -367,6 +367,37 @@ describe("Linux systemd Gateway root terminal flow", () => {
     expect(enableGatewayService).not.toHaveBeenCalled();
   });
 
+  it("retries a transient Gateway 5xx response during service startup", async () => {
+    let serviceRunning = false;
+    const enableGatewayService = vi.fn(async () => {
+      serviceRunning = true;
+    });
+    const probes: GatewayProbe[] = [
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "ready" },
+    ];
+
+    await expect(runLinuxRootTerminal({
+      platform: "linux",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      systemdGatewayEnabled: true,
+      loadConfig: configured,
+      onboardWizard: vi.fn(),
+      prepareGatewayConfig: vi.fn(async () => configured()),
+      prepareGatewayEnvironment: async () => false,
+      enableGatewayService,
+      probeGateway: vi.fn(async (): Promise<GatewayProbe> => probes.shift() ?? { status: "ready" }),
+      gatewayServiceMainPid: vi.fn(async () => serviceRunning ? 123 : null),
+      sleep: async () => undefined,
+      runInteractive: vi.fn(async () => null),
+    })).resolves.toBeNull();
+
+    expect(enableGatewayService).toHaveBeenCalledWith({ restart: true });
+  });
+
   it("leaves source-built Linux, non-Linux, and non-TTY invocations unchanged", async () => {
     const loadConfig = vi.fn(configured);
     const runInteractive = vi.fn(async () => null);
