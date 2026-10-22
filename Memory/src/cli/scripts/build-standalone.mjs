@@ -62,12 +62,20 @@ try {
 // onnxruntime-node and sharp use N-API too, so only their platform slice matters.
 async function alignNativeModulesToPkgRuntime(root) {
   const prebuilds = join(root, "node_modules", "better-sqlite3", "prebuilds");
-  const wanted = `${npmPlatform(platform)}-${arch}.node`;
-  if (!existsSync(join(prebuilds, wanted))) {
-    throw new Error(`better-sqlite3 has no ${wanted} prebuild for ${target}`);
+  // better-sqlite3 resolves its binary at runtime and decides between the glibc and musl
+  // build from process.report, which a `pkg` binary does not always populate. Keep both
+  // Linux variants so a wrong guess still finds a file instead of falling through to the
+  // node-gyp path, which 13.x no longer produces.
+  const wanted = npmPlatform(platform) === "linux"
+    ? [`linux-${arch}.node`, `linuxmusl-${arch}.node`]
+    : [`${npmPlatform(platform)}-${arch}.node`];
+  for (const name of wanted) {
+    if (!existsSync(join(prebuilds, name))) {
+      throw new Error(`better-sqlite3 has no ${name} prebuild for ${target}`);
+    }
   }
   for (const entry of await readdir(prebuilds)) {
-    if (entry !== wanted) await rm(join(prebuilds, entry), { recursive: true, force: true });
+    if (!wanted.includes(entry)) await rm(join(prebuilds, entry), { recursive: true, force: true });
   }
 
   const onnxBin = join(root, "node_modules", "onnxruntime-node", "bin", "napi-v3");
