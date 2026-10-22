@@ -14,7 +14,9 @@ export function upsertMemoryVectorForTest(
   new Repositories(db.db).vectors.upsert(memoryId, {
     vectorField,
     vector,
-    embeddingModel: "test"
+    // Match the synthetic model used by createMemoryServiceFixture.
+    embeddingModel: "capturing-test-embedding",
+    embeddingProvider: "local"
   }, now);
 }
 

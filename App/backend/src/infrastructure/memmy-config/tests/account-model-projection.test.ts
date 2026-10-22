@@ -244,6 +244,27 @@ describe("account model projection current catalog", () => {
       .toBe(accountId("owner-b", "embedding"));
   });
 
+  it.each(["platform", "missing"])("preserves a legacy explicit local choice with a %s assignment across same-account refresh", async (assignment) => {
+    const file = await configFile(currentByokCatalog());
+    const identity = { cloudUuid: "token-a", userId: "owner-a" };
+    await writeAccountModelProjectionToMemmyConfig(identity, file);
+    const local = await readConfig(file);
+    local.memmyMemory.embedding = { mode: "local", provider: "local", model: "Xenova/all-MiniLM-L6-v2" };
+    if (assignment === "missing") local.modelAssignments.account.embedding = null;
+    await writeFile(file, YAML.stringify(local), "utf8");
+
+    await writeAccountModelProjectionToMemmyConfig(identity, file);
+    const refreshed = await readConfig(file);
+    expect(refreshed.modelAssignments.account.embedding).toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+    expect(refreshed.memmyMemory.embedding).toMatchObject({ mode: "local", provider: "local" });
+    expect(refreshed.memmyMemory.embedding.endpoint).toBeUndefined();
+    await expect(writeAccountModelProjectionToMemmyConfig(identity, file))
+      .resolves.toEqual({ changed: false, memoryConfigAffected: false });
+
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-b", userId: "owner-b" }, file);
+    expect((await readConfig(file)).memmyMemory.embedding.mode).toBe("cloud");
+  });
+
   it("switches owners without reviving the previous owner's platform definitions", async () => {
     const file = await configFile(currentByokCatalog());
     await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);

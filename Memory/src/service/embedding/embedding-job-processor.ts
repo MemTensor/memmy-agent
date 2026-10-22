@@ -1,3 +1,4 @@
+import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
 import { isRecord } from "../../utils/json.js";
 
 export class SummaryModelUnconfiguredError extends Error {
@@ -183,8 +184,7 @@ export class EmbeddingJobProcessor {
     if (!current || (contentHash && contentHash !== stableHash(current.content))) return;
     const at = this.deps.nowIso();
     const saved = this.deps.repos.userMemories.updateEmbedding(current.id, vector, {
-      model: this.deps.embedder.config.model,
-      provider: this.deps.embedder.config.provider,
+      ...(vectorEmbeddingIdentity(vector) ?? embeddingIdentity(this.deps.embedder.config)),
       updatedAt: at
     });
     if (!saved) return;
@@ -283,8 +283,7 @@ export class EmbeddingJobProcessor {
     let saved = current;
     this.deps.repos.transaction(() => {
       const vectorized = updateMemoryVectorField(current, input.vectorField, input.vector, {
-        model: this.deps.embedder.config.model ?? this.deps.embedder.config.provider,
-        provider: this.deps.embedder.config.provider,
+        ...(vectorEmbeddingIdentity(input.vector) ?? embeddingIdentity(this.deps.embedder.config)),
         updatedAt: at,
         sourceHash: input.sourceHash
       });

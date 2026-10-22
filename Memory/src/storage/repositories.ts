@@ -1,3 +1,5 @@
+import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
+import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
 import type Database from "better-sqlite3";
 import {
   canonicalJson,
@@ -425,6 +427,7 @@ export interface MemorySearchIdHit {
 export type MemorySearchChannel = EmbeddingRetryVectorField | "fts" | "pattern" | "structural";
 
 export interface MemoryVectorSearchOptions {
+  identity?: EmbeddingIdentity;
   anyOfTags?: string[];
 }
 
@@ -1122,6 +1125,7 @@ export class MemoryRepository {
       status: filter.status ?? ["activated", "resolving"]
     });
     const anyTag = buildAnyTagWhere(options.anyOfTags);
+    const identity = options.identity ?? vectorEmbeddingIdentity(query);
     const candidateWindow = VECTOR_SEARCH_WINDOW;
     const rows = this.db
       .prepare(
@@ -1132,11 +1136,13 @@ export class MemoryRepository {
          JOIN memories ON memories.id = memory_vector_entries.memory_id
          WHERE ${built.where}
            AND memory_vector_entries.vector_field = ?
+           AND memory_vector_entries.embedding_dim = ?
+           ${identity ? "AND memory_vector_entries.embedding_provider = ? AND memory_vector_entries.embedding_model = ?" : ""}
            ${anyTag.where ? `AND ${anyTag.where}` : ""}
          ORDER BY memory_vector_entries.updated_at DESC, memory_vector_entries.id DESC
          LIMIT ?`
       )
-      .all(...built.params, vectorField, ...anyTag.params, candidateWindow) as Array<{
+      .all(...built.params, vectorField, query.length, ...(identity ? [identity.provider, identity.model] : []), ...anyTag.params, candidateWindow) as Array<{
         id: string;
         vector_id: number;
         embedding_dim: number;
@@ -1552,6 +1558,15 @@ export class UserMemoryRepository {
     return row.count;
   }
 
+  embeddingMaintenanceEntries(userId: string): EmbeddingMaintenanceEntry[] {
+    return this.db.prepare(`
+      SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
+             embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
+      FROM user_memories WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+      ORDER BY id
+    `).all(userId) as EmbeddingMaintenanceEntry[];
+  }
+
   embeddingDimensionCounts(userId: string): {
     totalSlots: number;
     dimensions: Array<{ dimension: number; count: number }>;
@@ -1659,10 +1674,10 @@ export class UserMemoryRepository {
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
   }
 
-  searchVectorIds(userId: string, query: readonly number[], limit: number): MemorySearchIdHit[] {
+  searchVectorIds(userId: string, query: readonly number[], limit: number, identity = vectorEmbeddingIdentity(query)): MemorySearchIdHit[] {
     if (query.length === 0 || limit <= 0) return [];
     return this.listActive(userId)
-      .flatMap((memory) => memory.embedding?.length === query.length
+      .flatMap((memory) => memory.embedding?.length === query.length && (!identity || sameEmbeddingIdentity(memory, identity))
         ? [{ id: memory.id, score: cosineVectors(query, memory.embedding), channel: "vec" as const }]
         : [])
       .filter((hit) => hit.score > 0)

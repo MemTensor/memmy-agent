@@ -11,7 +11,7 @@ import {
   adaptViewerResponse,
   localViewerResponse,
   prepareViewerRequest,
-} from "./memmy-adapter";
+} from "./memmy-adapter.js";
 
 const DEFAULT_HEADERS: Record<string, string> = {
   "content-type": "application/json",
