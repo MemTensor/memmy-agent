@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 // `pkg` ships prebuilt Node binaries; these two constants must describe the same
 // release, because better-sqlite3 prebuilds are keyed by Node's ABI version.
 const PKG_NODE_RANGE = "node22";
-const PKG_NODE_VERSION = "22.23.2";
+const PKG_NODE_VERSION = "24.22.1";
 
 const require = createRequire(import.meta.url);
 const scriptDir = dirname(fileURLToPath(import.meta.url));

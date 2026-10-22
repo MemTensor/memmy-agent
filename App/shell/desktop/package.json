@@ -30,7 +30,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "electron": "38.4.0",
+    "electron": "43.8.1",
     "electron-builder": "^26.0.12"
   }
 }
