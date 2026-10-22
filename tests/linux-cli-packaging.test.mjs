@@ -267,7 +267,7 @@ describe("Linux CLI package boundary", () => {
     expect(installer).toContain("gateway --config %s --workspace %s");
     expect(installer).toContain("x86_64|amd64");
     expect(installer).toContain("aarch64|arm64");
-    expect(installer).toContain("Node.js 22 or newer is required");
+    expect(installer).toContain("Node.js 22.23.4, 24.22.1 or 26.12.1 or newer is required");
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
   });
 
