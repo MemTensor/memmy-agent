@@ -46,7 +46,8 @@ export function isCompromisedRoot(pem: string): boolean {
  * were removed.
  *
  * Every entrypoint has to call this on its own: child processes do not inherit the
- * parent's default TLS CA list.
+ * parent's default TLS CA list. Worker threads do not inherit it either, so one that
+ * makes HTTPS requests would need its own call; none does today.
  */
 export function distrustCompromisedCAs(): number {
   // Node < 22.15 cannot replace the default CA list; warn rather than crash the entrypoint.
