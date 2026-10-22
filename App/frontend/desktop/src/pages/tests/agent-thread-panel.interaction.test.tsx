@@ -13,7 +13,7 @@ import {
   useAgentThreadPanel,
   type AgentThreadPanelController,
 } from "../agent-thread-panel.js";
-import type { ThreadPreviewContext } from "../agent-thread-panel-preview.js";
+import { THREAD_TEXT_PREVIEW_MAX_BYTES, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
 import { requestBrowserNewTab, takePendingBrowserNewTab } from "../browser-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -490,6 +490,25 @@ describe("AgentThreadPanel", () => {
     expect(offset()).toBe(0);
   });
 
+  it("downloads a URL-only PPTX from the artifact side panel without changing chat preview routing", async () => {
+    const saveFile = vi.fn(async () => ({ canceled: false as const, filePath: "/tmp/deck.pptx", bytes: 4 }));
+    Object.defineProperty(window, "memmy", { configurable: true, value: { saveFile } });
+    render({
+      messages: [{ id: "a1", role: "assistant", content: "附件已生成。", media: [
+        { kind: "file", url: "https://fixture.test/deck.pptx", name: "deck.pptx" },
+      ] }],
+      context: emptyContext(),
+    });
+    await act(async () => clickText(".thread-overview-item", "deck.pptx"));
+    expect(document.querySelector(".thread-preview")?.textContent).toContain("暂不支持在侧栏中预览此格式");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('[aria-label="下载文件"]')!.click();
+      await Promise.resolve();
+    });
+    expect(saveFile).toHaveBeenCalledWith({ url: "https://fixture.test/deck.pptx", name: "deck.pptx" });
+    expect(document.querySelector('.thread-preview [role="status"]')?.textContent).toBe("文件已保存");
+  });
+
   it("switches to changes and opens the git diff for a changed file", async () => {
     const readWorkspaceEnvironmentDiff = vi.fn(async () => ({
       path: "src/a.ts",
@@ -588,6 +607,39 @@ describe("AgentThreadPanel", () => {
 
     expect(document.querySelectorAll(".thread-preview .workspace-diff-view__line--addition")).toHaveLength(2);
     expect(document.querySelector(".thread-preview__notice")).toBeNull();
+  });
+
+  it("bounds the fallback body read for change previews", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const getReader = vi.fn();
+    render({
+      messages: [
+        { id: "a1", role: "assistant", content: "Done", fileEdits: [{ call_id: "1", tool: "write", path: "large.ts", absolute_path: "/repo/large.ts", added: 1, status: "done" }] },
+      ],
+      context: {
+        ...emptyContext(),
+        artifactClient: artifactClient(),
+        agentClient: {
+          readWorkspaceEnvironmentDiff: async () => ({ path: "large.ts", diff: "", truncated: false, unavailable_reason: "untracked_diff_unavailable" }),
+        },
+        sessionScope: { kind: "session", key: "session-1" },
+        environment: readyEnvironment,
+        fetchFn: vi.fn(async () => ({
+          ok: true,
+          headers: new Headers({ "content-length": String(THREAD_TEXT_PREVIEW_MAX_BYTES + 1) }),
+          body: { cancel, getReader },
+        } as unknown as Response)) as typeof fetch,
+      },
+    });
+
+    act(() => document.querySelector<HTMLButtonElement>(".thread-view-pill")!.click());
+    act(() => clickText(".thread-view-menu__item", "变更"));
+    await act(async () => clickText(".thread-changes__button", "large.ts"));
+    await flush();
+
+    expect(document.querySelector(".thread-preview")?.textContent).toContain("文件较大，暂不在侧栏中预览");
+    expect(getReader).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it("loads the Windows diff after the git snapshot arrives", async () => {

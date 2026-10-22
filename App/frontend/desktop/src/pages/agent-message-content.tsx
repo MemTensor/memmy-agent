@@ -22,6 +22,10 @@ export type AgentArtifactClient = {
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
 export type AttachmentDownloadStarter = (url: string, name: string) => boolean;
+export type AttachmentSaveResult =
+  | { status: "saved"; path: string }
+  | { status: "cancelled" | "started" }
+  | { status: "failed"; error: string };
 export type InAppFilePreview = {
   name: string;
   path?: string;
@@ -658,6 +662,22 @@ export function startBrowserDownload(url: string, name: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Uses the native save flow when available; browser fallback only confirms dispatch. */
+export async function saveAttachmentFile(url: string, name: string): Promise<AttachmentSaveResult> {
+  const saveFile = typeof window === "undefined" ? undefined : window.memmy?.saveFile;
+  if (saveFile) {
+    try {
+      const result = await saveFile({ url, name });
+      return result.canceled ? { status: "cancelled" } : { status: "saved", path: result.filePath };
+    } catch (cause) {
+      return { status: "failed", error: cause instanceof Error ? cause.message : String(cause) };
+    }
+  }
+  return startBrowserDownload(url, name)
+    ? { status: "started" }
+    : { status: "failed", error: "Attachment download could not be started" };
 }
 
 export async function writeClipboardText(value: string): Promise<boolean> {

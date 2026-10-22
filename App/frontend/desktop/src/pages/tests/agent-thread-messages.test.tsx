@@ -617,6 +617,36 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("10:01");
   });
 
+  it("does not reserve final-answer actions for an interrupted draft followed by activity", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-interrupted-draft"
+          isSending={false}
+          messages={[
+            { id: "question", role: "user", content: "开始任务" },
+            { id: "draft", role: "assistant", content: "我会先建目录大纲，然后开始写正文。" },
+            {
+              id: "trace",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              traces: [],
+              toolEvents: [{ phase: "end", call_id: "call-edit", name: "edit_file", arguments: { path: "draft.md" } }],
+              activitySegmentId: "activity-interrupted",
+              stoppedByUser: true
+            },
+            { id: "steer", role: "user", content: "换一个主题" }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("我会先建目录大纲，然后开始写正文。");
+    expect(html).toContain("已停止，保留活动");
+    expect(html).not.toContain("agent-message-copy-cluster--left");
+  });
+
   it("renders short narration drafts inside the run cluster in answer style without chrome", () => {
     const draft = "好的！我来帮你规划国庆出行方案。先查一下几个热门目的地的天气情况，再搜索一些出行信息。";
     const html = renderToString(

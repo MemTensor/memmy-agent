@@ -2993,7 +2993,7 @@ export class WebSocketChannel extends BaseChannel {
       }
     }
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleMediaFetch(match[1], match[2]);
+    if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
       const clientId = (queryFirst(query, "client_id") ?? "").slice(0, 128);
       if (!this.isAllowed(clientId)) return connectionRespond(connection, 403, "Forbidden");
@@ -4348,7 +4348,7 @@ export class WebSocketChannel extends BaseChannel {
     };
   }
 
-  handleMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = crypto.createHmac("sha256", this.mediaSecret).update(payload).digest().subarray(0, 16);
     let provided: Buffer;
     try {
@@ -4370,6 +4370,29 @@ export class WebSocketChannel extends BaseChannel {
     if (!pathIsInside(candidate, mediaRoot)) return httpError(404, "not found");
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return httpError(404, "not found");
     const mime = String(lookupMime(candidate) || "application/octet-stream");
+    const size = fs.statSync(candidate).size;
+    const range = getHeader(request?.headers, "range");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const suffix = match && !match[1];
+      const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+      const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+        || start < 0 || start >= size || requestedEnd < start) {
+        return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+      }
+      const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+      const body = Buffer.alloc(end - start + 1);
+      const descriptor = fs.openSync(candidate, "r");
+      try { fs.readSync(descriptor, body, 0, body.length, start); }
+      finally { fs.closeSync(descriptor); }
+      return { status: 206, headers: {
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) ? mime : "application/octet-stream",
+        "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+      }, body };
+    }
+
     return {
       status: 200,
       headers: {
@@ -5337,6 +5360,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
       "x-memmy-agent-auth",
       MCP_VALUES_HEADER,
     ].join(", "),
+    "access-control-expose-headers": "Content-Range, Accept-Ranges",
     "access-control-max-age": "600",
   };
 }

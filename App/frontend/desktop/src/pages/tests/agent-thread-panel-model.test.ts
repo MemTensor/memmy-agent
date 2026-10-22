@@ -55,6 +55,7 @@ describe("thread panel model", () => {
     expect(threadTabForInAppPreview({ name: "notes.md", url: "http://127.0.0.1/api/media/notes" })?.id).toBe("file:http://127.0.0.1/api/media/notes");
     expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toBeNull();
     expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toBeNull();
+    expect(threadTabForInAppPreview({ name: "deck.pptx", url: "http://127.0.0.1/api/media/deck" })).toBeNull();
   });
 
   it("collects assistant artifacts once, in conversation order", () => {
