@@ -21,6 +21,7 @@ import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { MessageTool } from "./message.js";
 import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
+import { SetOutputDirectoryTool } from "./output-location.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
 import { BROWSER_TOOL_CLASSES } from "./browser.js";
@@ -67,6 +68,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   GetGoalTool,
   MessageTool,
   ReadFileTool,
+  SetOutputDirectoryTool,
   SpawnTool,
   WebFetchTool,
   WebSearchTool,

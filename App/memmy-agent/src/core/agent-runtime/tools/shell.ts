@@ -570,6 +570,9 @@ export class ExecTool extends Tool {
           decoderOptions: this.outputDecoderOptions(),
           abortSignal: signal,
         });
+        if (!poll.done) {
+          context?.trackOutputProducer?.(() => this.sessionManager.get(sessionId)?.finished === false);
+        }
         return formatSessionPoll(sessionId, poll);
       } catch (error) {
         if (isToolAbortError(error)) throw error;
