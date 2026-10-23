@@ -28,7 +28,8 @@ afterEach(() => {
   while (roots.length) rmSync(roots.pop(), { recursive: true, force: true });
 });
 
-describe("packaged desktop runtime configuration", () => {
+// These cases stage ASAR fixtures and launch independent verification processes.
+describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
   it("writes exactly the public allowlist and never serializes env decoys", async () => {
     const root = fixtureRoot();
     const envFile = join(root, ".env");

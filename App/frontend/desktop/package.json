@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
     "typecheck": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && vitest run"
+    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && vitest run --reporter=dot --silent=true"
   },
   "dependencies": {
     "@memmy/desktop-interface": "0.0.0",

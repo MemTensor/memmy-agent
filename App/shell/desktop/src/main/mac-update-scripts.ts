@@ -64,7 +64,7 @@ validate_app_bundle() {
     echo "Memmy update version $bundle_version does not follow installed $CURRENT_VERSION"
     exit 1
   fi
-  if ! /usr/bin/lipo -verify_arch "$EXPECTED_ARCH" "$app_path/Contents/MacOS/$bundle_executable"; then
+  if ! /usr/bin/lipo "$app_path/Contents/MacOS/$bundle_executable" -verify_arch "$EXPECTED_ARCH"; then
     echo "Memmy update does not support $EXPECTED_ARCH"
     exit 1
   fi

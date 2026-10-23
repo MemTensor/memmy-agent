@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAgentSourceExecutor,
@@ -408,7 +410,7 @@ describe("standalone Agent source executor", () => {
   });
 
   it("owns startup and recurring scans in the Memory process", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, [
@@ -467,22 +469,27 @@ describe("standalone Agent source executor", () => {
       scheduleWorker
     });
 
-    executor.startAutomation();
-    await vi.advanceTimersByTimeAsync(9);
-    expect(addMemory).not.toHaveBeenCalled();
+    try {
+      executor.startAutomation();
+      await vi.advanceTimersByTimeAsync(9);
+      expect(addMemory).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(1);
-    await waitForFakeTimerScan(executor);
-    expect(addMemory).toHaveBeenCalledTimes(1);
-    expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
-    expect(scheduleWorker).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await waitForScanIo(executor);
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+      expect(addMemory).toHaveBeenCalledTimes(1);
+      expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
+      expect(scheduleWorker).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(100);
-    await waitForFakeTimerScan(executor);
-    expect(addMemory).toHaveBeenCalledTimes(2);
-    expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
-    expect(scheduleWorker).toHaveBeenCalledTimes(2);
-    executor.dispose();
+      await vi.advanceTimersByTimeAsync(100);
+      await waitForScanIo(executor);
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+      expect(addMemory).toHaveBeenCalledTimes(2);
+      expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
+      expect(scheduleWorker).toHaveBeenCalledTimes(2);
+    } finally {
+      await executor.dispose();
+    }
   });
 
   it("emits memory_desktop add analytics for standalone scan writes", async () => {
@@ -893,12 +900,13 @@ function fixtureMessage(
   } as const;
 }
 
-async function waitForFakeTimerScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (!executor.scanStatus().running) return;
-    await vi.advanceTimersByTimeAsync(1);
+async function waitForScanIo(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (executor.scanStatus().running) {
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
+    // Let real filesystem and SQLite work finish without firing the next scan timer.
+    await yieldToIo();
   }
-  throw new Error("automatic scan did not complete");
 }
 
 function tempRoot(): string {

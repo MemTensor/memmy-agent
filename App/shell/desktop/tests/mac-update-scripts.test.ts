@@ -53,7 +53,7 @@ describe.runIf(process.platform === "darwin")("macOS automatic update validation
     fs.writeFileSync(marker, "pending");
     tools = {
       "/usr/bin/pgrep": mockTool("pgrep", "exit 1"),
-      "/usr/bin/lipo": mockTool("lipo", 'case " $(cat "$(dirname "$3")/architecture") " in *" $2 "*) exit 0;; *) exit 1;; esac'),
+      "/usr/bin/lipo": mockTool("lipo", 'if [ "$1" = "-verify_arch" ]; then exit 2; fi; case " $(cat "$(dirname "$1")/architecture") " in *" $3 "*) exit 0;; *) exit 1;; esac'),
       "/usr/bin/sw_vers": mockTool("sw_vers", "echo 14.0"),
       "/usr/bin/xattr": mockTool("xattr", "exit 0"),
       "/usr/bin/codesign": mockTool("codesign", `for arg in "$@"; do app="$arg"; done
@@ -162,5 +162,14 @@ exec /bin/rm "$@"`);
     expect(result.status).not.toBe(0);
     expect(fs.existsSync(`${staged}.ready`)).toBe(false);
     expect(fs.readFileSync(path.join(destination, "tag"), "utf8")).toBe("original");
+  });
+});
+
+describe("macOS update architecture command", () => {
+  it("passes the executable to lipo before -verify_arch", () => {
+    const options = { architecture: "arm64" as const, teamIdentifier: "MEMMYTEAM1", expectedVersion: "1.2.4", currentVersion: "1.2.3" };
+    for (const script of [createMacDmgUpdateStageScript(options), createMacDmgUpdateInstallScript(options)]) {
+      expect(script).toContain('/usr/bin/lipo "$app_path/Contents/MacOS/$bundle_executable" -verify_arch "$EXPECTED_ARCH"');
+    }
   });
 });

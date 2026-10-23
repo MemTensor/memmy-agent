@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.2.4",
+  "version": "1.2.401",
   "description": "TypeScript refactor of memmy's agent runtime.",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,7 @@
     "package:npm": "node scripts/build-npm-package.mjs",
     "pack:npm": "npm run package:npm && npm pack ./npm-packages/memmy-agent --pack-destination ./npm-packages",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4 --reporter=dot --silent=true",
     "test:tui-cursor": "vitest run tests/entrypoints/cli/tui-cursor.test.ts",
     "test:watch": "vitest"
   },
@@ -42,7 +42,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.18.1",
     "@wecom/aibot-node-sdk": "^1.0.7",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "botbuilder": "^4.23.3",
     "commander": "^14.0.2",
     "cron-parser": "^5.5.0",

@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
@@ -309,23 +311,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('cp "$MEMORY_DIR/package-lock.json"');
   });
 
-  it("installs and verifies better-sqlite3 for both Windows runtimes", () => {
+  it("installs and verifies SQLite N-API prebuilds for both Windows runtimes", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
 
-    expect(source).toContain('install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"');
-    expect(source).toContain('install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"');
-    expect(source).toContain(
-      '$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
-    );
-    expect(source).toContain(
-      '$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
-    );
+    expect(source).toContain('npm_ci_win_x64 "$RUNTIME_DIR/memory"');
+    expect(source).toContain('npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"');
+    for (const runtime of ["$RUNTIME_DIR/memory", "$RUNTIME_DIR/memmy-agent", "$packaged_memory_runtime", "$unpacked_runtime/memmy-agent"]) {
+      expect(source).toContain(`${runtime}/node_modules/better-sqlite3/prebuilds/win32-x64.node`);
+    }
+    expect(source).toContain("verify_windows_x64_native_module");
+    expect(source).not.toContain("better-sqlite3/build/Release/better_sqlite3.node");
     const agentDependenciesIndex = source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"');
-    const agentInstallIndex = source.indexOf(
-      'install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"',
+    const pruneIndex = source.indexOf(
+      "\nprune_windows_better_sqlite3_artifacts\n",
       agentDependenciesIndex,
     );
-    const agentVerifyIndex = source.indexOf("verify_windows_agent_native_artifacts", agentInstallIndex);
+    const agentVerifyIndex = source.indexOf("verify_windows_agent_native_artifacts", pruneIndex);
     const agentSmokeIndex = source.indexOf(
       'verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memmy-agent"',
       agentVerifyIndex,
@@ -333,8 +334,8 @@ describe("desktop packaged runtime boundaries", () => {
     const builderIndex = source.lastIndexOf("npx electron-builder");
     const finalVerifyIndex = source.lastIndexOf("verify_packaged_windows_unpacked_artifacts");
     expect(agentDependenciesIndex).toBeGreaterThanOrEqual(0);
-    expect(agentInstallIndex).toBeGreaterThan(agentDependenciesIndex);
-    expect(agentVerifyIndex).toBeGreaterThan(agentInstallIndex);
+    expect(pruneIndex).toBeGreaterThan(agentDependenciesIndex);
+    expect(agentVerifyIndex).toBeGreaterThan(pruneIndex);
     expect(agentSmokeIndex).toBeGreaterThan(agentVerifyIndex);
     expect(builderIndex).toBeGreaterThan(agentSmokeIndex);
     expect(finalVerifyIndex).toBeGreaterThan(builderIndex);
@@ -1694,7 +1695,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("memory-service/config.yaml");
   });
 
-  it("packages Memory from its own workspace with an Electron-rebuilt sqlite addon", () => {
+  it("packages Memory from its own workspace with the target SQLite N-API prebuild", () => {
     const source = readFileSync(packageMacDmgPath, "utf8");
 
     expect(source).toContain('MEMORY_DIR="$ROOT_DIR/Memory"');
@@ -1721,8 +1722,19 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"');
     expect(source).not.toContain('MEMORY_RUNTIME_CONTRACTS_DIR');
     expect(source).not.toContain('MEMORY_RUNTIME_MIGRATIONS_DIR');
-    expect(source).toContain("node_modules/.bin/electron-rebuild");
-    expect(source).toContain('-m "$RUNTIME_DIR/memory"');
+    expect(source).toContain('prune_better_sqlite3_build_artifacts "$module_dir" "$TARGET_CPU"');
+    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"');
+    expect(source).toContain('require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"');
+    const pruneIndex = source.lastIndexOf('prune_mac_runtime_artifacts "$TARGET_CPU"');
+    const nativeVerifyIndex = source.lastIndexOf('verify_mac_memory_native_artifacts "$TARGET_CPU"');
+    const builderIndex = source.lastIndexOf("npx electron-builder");
+    const finalVerifyIndex = source.lastIndexOf('verify_packaged_mac_unpacked_artifacts "$TARGET_CPU"');
+    expect(pruneIndex).toBeGreaterThanOrEqual(0);
+    expect(nativeVerifyIndex).toBeGreaterThan(pruneIndex);
+    expect(builderIndex).toBeGreaterThan(nativeVerifyIndex);
+    expect(finalVerifyIndex).toBeGreaterThan(builderIndex);
+    expect(source).not.toContain("node_modules/.bin/electron-rebuild");
+    expect(source).not.toContain("better-sqlite3/build/Release/better_sqlite3.node");
     expect(source).not.toContain('cp -R "$ROOT_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
   });
 
@@ -1887,10 +1899,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("to_node_readable_path");
     expect(source).toContain("cygpath -w");
     expect(source).toContain('DESKTOP_VERSION="$(read_package_version "$DESKTOP_DIR/package.json")"');
-    expect(source).toContain(
-      'electron_version="${MEMMY_ELECTRON_VERSION:-$(read_package_version "$DESKTOP_DIR/node_modules/electron/package.json")}"'
-    );
+    expect(source).toContain('MEMORY_VERSION="$(read_package_version "$MEMORY_DIR/package.json")"');
+    expect(source).toContain('package_json_path="$(to_node_readable_path "$1")"');
     expect(source).not.toContain("require('$DESKTOP_DIR/package.json')");
+    expect(source).not.toContain("require('$MEMORY_DIR/package.json')");
     expect(source).not.toContain("require('$DESKTOP_DIR/node_modules/electron/package.json')");
   });
 
@@ -1929,15 +1941,46 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('BUILDER_ARGS+=(--config.electronDist="$ELECTRON_DIST")');
   });
 
-  it("retries flaky native prebuild downloads during Windows packaging", () => {
+  it("keeps only target SQLite N-API prebuilds without Electron ABI downloads", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
 
     expect(source).toContain("run_with_retries");
-    expect(source).toContain("run_with_retries 3 ../.bin/prebuild-install");
-    expect(source).toContain("install_better_sqlite3_prebuild_with_download_fallback");
-    expect(source).toContain("--verbose 2>&1");
     expect(source).toContain("Invoke-WebRequest");
-    expect(source).toContain('prebuild_file="prebuilds/$(basename "$prebuild_url")"');
+    expect(source).toContain("curl.exe -L --fail --retry 3");
+    expect(source).not.toContain("prebuild-install");
+    expect(source).not.toContain("install_better_sqlite3_prebuild_with_download_fallback");
+
+    const windowsPrune = source.match(/^prune_better_sqlite3_win_artifacts\(\) \{\n[\s\S]*?^\}/m)?.[0];
+    const macPrune = macSource.match(/^prune_better_sqlite3_build_artifacts\(\) \{\n[\s\S]*?^\}/m)?.[0];
+    expect(windowsPrune).toBeDefined();
+    expect(macPrune).toBeDefined();
+    const root = mkdtempSync(join(tmpdir(), "memmy-sqlite-napi-boundary-"));
+    try {
+      for (const target of ["win32-x64", "darwin-arm64", "darwin-x64"]) {
+        for (const runtime of ["memory", "memmy-agent"]) {
+          const moduleDir = join(root, target, runtime, "node_modules", "better-sqlite3");
+          const prebuilds = join(moduleDir, "prebuilds");
+          mkdirSync(prebuilds, { recursive: true });
+          for (const name of ["win32-x64.node", "win32-arm64.node", "darwin-arm64.node", "darwin-x64.node", "linux-x64.node"]) {
+            writeFileSync(join(prebuilds, name), name);
+          }
+          for (const directory of ["build", "deps", "src"]) mkdirSync(join(moduleDir, directory));
+          writeFileSync(join(moduleDir, "package.json"), '{"name":"better-sqlite3"}\n');
+
+          const prune = target === "win32-x64" ? windowsPrune : macPrune;
+          const command = target === "win32-x64" ? "prune_better_sqlite3_win_artifacts" : "prune_better_sqlite3_build_artifacts";
+          execFileSync("bash", ["-c", `${prune}\n${command} "$1" "$2"`, "--", moduleDir, target.split("-")[1]]);
+
+          expect(readdirSync(prebuilds)).toEqual([`${target}.node`]);
+          expect(readFileSync(join(prebuilds, `${target}.node`), "utf8")).toBe(`${target}.node`);
+          for (const directory of ["build", "deps", "src"]) expect(existsSync(join(moduleDir, directory))).toBe(false);
+          expect(readFileSync(join(moduleDir, "package.json"), "utf8")).toBe('{"name":"better-sqlite3"}\n');
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps Windows packaging from mutating memmy-agent dependency locks", () => {

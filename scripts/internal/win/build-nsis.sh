@@ -76,13 +76,42 @@ npm_with_configured_script_shell() {
 resolve_electron_dist() {
   local electron_dist="${MEMMY_ELECTRON_DIST:-}"
 
-  if [ -z "$electron_dist" ] && [ -f "$DESKTOP_DIR/node_modules/electron/dist/electron.exe" ]; then
-    electron_dist="$DESKTOP_DIR/node_modules/electron/dist"
+  if [ -z "$electron_dist" ]; then
+    for candidate in \
+      "$DESKTOP_DIR/node_modules/electron/dist" \
+      "$ROOT_DIR/node_modules/electron/dist"; do
+      if [ -f "$candidate/electron.exe" ]; then
+        electron_dist="$candidate"
+        break
+      fi
+    done
   fi
 
   if [ -n "$electron_dist" ]; then
     to_node_readable_path "$electron_dist"
   fi
+}
+
+restore_electron_dist() {
+  if [ -f "$DESKTOP_DIR/node_modules/electron/dist/electron.exe" ] || \
+     [ -f "$ROOT_DIR/node_modules/electron/dist/electron.exe" ]; then
+    return
+  fi
+
+  local install_script=""
+  for candidate in \
+    "$ROOT_DIR/node_modules/electron/install.js" \
+    "$DESKTOP_DIR/node_modules/electron/install.js"; do
+    if [ -f "$candidate" ]; then
+      install_script="$candidate"
+      break
+    fi
+  done
+  if [ -z "$install_script" ]; then
+    echo "Electron install.js is missing; cannot materialize the Windows Electron runtime." >&2
+    exit 1
+  fi
+  node "$install_script"
 }
 
 if [ -n "${MEMMY_DESKTOP_VERSION:-}" ]; then
@@ -277,38 +306,6 @@ download_url_to_file() {
   return 1
 }
 
-install_better_sqlite3_prebuild_with_download_fallback() {
-  local electron_version="$1"
-  local install_output
-  local install_status
-  local prebuild_url
-  local prebuild_file
-
-  log "Trying direct better-sqlite3 prebuild download fallback"
-  set +e
-  install_output="$(../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" --verbose 2>&1)"
-  install_status=$?
-  set -e
-  printf '%s\n' "$install_output"
-
-  if [ "$install_status" -eq 0 ]; then
-    return
-  fi
-
-  prebuild_url="$(printf '%s\n' "$install_output" | sed -nE 's/.*(https:\/\/[^[:space:]]+\.tar\.gz).*/\1/p' | tail -n 1)"
-  if [ -z "$prebuild_url" ]; then
-    echo "Unable to locate better-sqlite3 prebuild URL in prebuild-install output." >&2
-    return "$install_status"
-  fi
-
-  mkdir -p prebuilds
-  prebuild_file="prebuilds/$(basename "$prebuild_url")"
-  log "Downloading better-sqlite3 prebuild with fallback downloader: $prebuild_url"
-  download_url_to_file "$prebuild_url" "$prebuild_file"
-
-  ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version"
-}
-
 create_memory_runtime_manifest() {
   node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \
     "$MEMORY_DIR/package.json" \
@@ -480,7 +477,9 @@ verify_windows_computer_use_surface() {
 
 verify_windows_better_sqlite3_runtime() {
   local runtime_dir="$1"
-  local electron_executable="$DESKTOP_DIR/node_modules/electron/dist/electron.exe"
+  local electron_dist
+  electron_dist="$(resolve_electron_dist)"
+  local electron_executable="$electron_dist/electron.exe"
   local node_runtime_dir
   node_runtime_dir="$(to_node_readable_path "$runtime_dir")"
 
@@ -523,7 +522,7 @@ verify_packaged_file_matches_runtime() {
 
 verify_windows_native_module() {
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3"
 }
 
@@ -596,7 +595,7 @@ verify_windows_agent_native_artifacts() {
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3"
   require_packaged_runtime_file "$node_pty_dir/conpty.node"
   require_packaged_runtime_file "$node_pty_dir/conpty/conpty.dll"
@@ -676,18 +675,18 @@ verify_packaged_windows_unpacked_artifacts() {
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3 module"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
@@ -774,16 +773,21 @@ npm_ci_win_x64() {
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
-install_better_sqlite3_win_x64() {
-  local runtime_dir="$1"
-  local electron_version
-  electron_version="${MEMMY_ELECTRON_VERSION:-$(read_package_version "$DESKTOP_DIR/node_modules/electron/package.json")}"
+prune_better_sqlite3_win_artifacts() {
+  local module_dir="$1"
 
-  (
-    cd "$runtime_dir/node_modules/better-sqlite3"
-    run_with_retries 3 ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" ||
-      install_better_sqlite3_prebuild_with_download_fallback "$electron_version"
-  )
+  rm -rf "$module_dir/build" "$module_dir/deps" "$module_dir/src"
+  if [ -d "$module_dir/prebuilds" ]; then
+    find "$module_dir/prebuilds" \
+      -mindepth 1 -maxdepth 1 ! -name "win32-x64.node" \
+      -exec rm -rf {} +
+  fi
+}
+
+prune_windows_better_sqlite3_artifacts() {
+  while IFS= read -r module_dir; do
+    prune_better_sqlite3_win_artifacts "$module_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
 }
 
 package_step_start "Validate Windows signing configuration"
@@ -796,12 +800,13 @@ fi
 package_step_start "Install root workspace dependencies if needed"
 if [ ! -d "$ROOT_DIR/node_modules" ]; then
   log "Installing root workspace dependencies"
-  npm_with_configured_script_shell install
+  npm_with_configured_script_shell install --ignore-scripts --package-lock=false --no-audit --no-fund
 else
   log "Root workspace dependencies already available"
 fi
+restore_electron_dist
 package_step_start "Install migrations workspace dev dependencies"
-npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
+npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev --ignore-scripts --package-lock=false --no-audit --no-fund
 
 package_step_start "Build migrations package"
 npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
@@ -810,7 +815,7 @@ package_step_start "Build local API contracts package"
 npm_with_configured_script_shell run build -w @memmy/local-api-contracts
 
 package_step_start "Install memmy-agent workspace dependencies"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR" --ignore-scripts --no-audit --no-fund --os=win32 --cpu=x64
 
 package_step_start "Build Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
@@ -846,7 +851,6 @@ create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
 package_step_start "Stage Windows Memory workspace runtime packages"
 RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
 rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
@@ -880,7 +884,8 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
+package_step_start "Prune Windows better-sqlite3 native artifacts"
+prune_windows_better_sqlite3_artifacts
 package_step_start "Build Memmy Computer Use for Windows from source"
 bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-use.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" amd64
