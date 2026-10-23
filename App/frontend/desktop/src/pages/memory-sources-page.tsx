@@ -507,8 +507,17 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       return;
     }
 
-    void clients.config
-      .updateScanPreferences(preferences)
+    void (async () => {
+      // Enabling automation is an explicit grant; a one-off manual scan does
+      // not itself enable these switches.
+      if (preferences.autoInjectSkill === true) {
+        const onboarding = await clients.config.updateOnboarding({ scanPermission: "scan_and_write_skill" });
+        dispatch(appActions.onboardingUpdated(onboarding));
+      } else if (preferences.autoScanKnownAgents === true || preferences.watchFileChanges === true) {
+        await ensureScanPermission();
+      }
+      return clients.config.updateScanPreferences(preferences);
+    })()
       .then((persisted) => dispatch(appActions.scanPreferencesUpdated(persisted)))
       .catch((error) => {
         dispatch(appActions.scanPreferencesUpdated(previous));

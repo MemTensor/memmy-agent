@@ -567,6 +567,7 @@ async function routeRequest(
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
     const request = asObject(body, "admin.reload-config") as MemoryReloadConfigRequest;
+    await agentSources.reconcileScanPermission?.();
     const result = service.reloadConfig({
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,

@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
-import type { PatchScanPreferencesInput, ScanPreferences } from "@memmy/local-api-contracts";
+import type { PatchScanPreferencesInput, ScanPreferences, ScanPermission } from "@memmy/local-api-contracts";
 import { ScanPreferencesSchema } from "@memmy/local-api-contracts";
 import { mutateRuntimeConfig } from "@memmy/migrations";
 import YAML from "yaml";
 
 export interface ScanPreferencesStore {
   getScanPreferences(): ScanPreferences;
+  getScanPermission(): ScanPermission | undefined;
+  setScanPermission(permission: ScanPermission, enableAutomation?: boolean): Promise<void>;
   updateScanPreferences(patch: PatchScanPreferencesInput): Promise<ScanPreferences>;
 }
 
@@ -17,16 +19,19 @@ export const DEFAULT_MEMORY_SCAN_PREFERENCES: ScanPreferences = {
 
 export async function ensureMemoryScanPreferences(
   configPath: string,
-  legacyPreferences: ScanPreferences
+  legacyPreferences: ScanPreferences,
+  scanPermission?: ScanPermission
 ): Promise<void> {
   await mutateRuntimeConfig(configPath, (root) => {
     const memory = record(root.memmyMemory);
-    if (isCompletePreferences(memory.agentAccess)) return;
+    const access = record(memory.agentAccess);
+    if (isCompletePreferences(access) && (scanPermission === undefined || access.scanPermission !== undefined)) return;
     root.memmyMemory = {
       ...memory,
       agentAccess: {
         ...legacyPreferences,
-        ...record(memory.agentAccess)
+        ...access,
+        ...(scanPermission !== undefined && access.scanPermission === undefined ? { scanPermission } : {})
       }
     };
   });
@@ -34,6 +39,37 @@ export async function ensureMemoryScanPreferences(
 
 export function createMemoryScanPreferencesStore(configPath: string): ScanPreferencesStore {
   return {
+    async setScanPermission(permission, enableAutomation = false) {
+      await mutateRuntimeConfig(configPath, (root) => {
+        const memory = record(root.memmyMemory);
+        root.memmyMemory = {
+          ...memory,
+          agentAccess: {
+            ...record(memory.agentAccess),
+            scanPermission: permission,
+            ...(permission === "none" || permission === "unset"
+              ? { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false }
+              : enableAutomation ? {
+                autoScanKnownAgents: true,
+                watchFileChanges: true,
+                autoInjectSkill: permission === "scan_and_write_skill"
+              } : {})
+          }
+        };
+      });
+    },
+    getScanPermission() {
+      try {
+        const root = record(YAML.parse(readFileSync(configPath, "utf8")));
+        const permission = record(record(root.memmyMemory).agentAccess).scanPermission;
+        if (permission === undefined) return undefined;
+        return permission === "none" || permission === "scan_only" || permission === "scan_and_write_skill"
+          ? permission : "unset";
+      } catch (error) {
+        if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    },
     getScanPreferences() {
       return readMemoryScanPreferences(configPath);
     },
@@ -44,7 +80,7 @@ export function createMemoryScanPreferencesStore(configPath: string): ScanPrefer
         root.memmyMemory = {
           ...memory,
           agentAccess: {
-            ...readPreferencesRecord(memory.agentAccess),
+            ...record(memory.agentAccess),
             ...patch
           }
         };

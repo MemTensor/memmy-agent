@@ -123,6 +123,7 @@ export interface AgentSourceExecutor {
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null; attemptId?: string }>;
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
   startAutomation(): void;
+  reconcileScanPermission?(): Promise<void>;
   dispose(): void | Promise<void>;
 }
 
@@ -245,7 +246,22 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     return { executorAvailable: true, sources };
   }
 
+  function canScan(): boolean {
+    const permission = loadMemmyConfig(configPath).config.agentAccess.scanPermission;
+    return permission === undefined || permission === "scan_only" || permission === "scan_and_write_skill";
+  }
+
+  async function reconcileScanPermission(): Promise<void> {
+    if (!canScan() && (scan.running || scanPaused || scan.progress?.phase === "stopped")) {
+      const result = await cancelScan();
+      if (result.outcome === "conflict") {
+        throw new MemoryServiceError("conflict", "Agent source cancellation is already in progress; retry saving permission");
+      }
+    }
+  }
+
   async function startScan(input: unknown): Promise<{ accepted: true; jobId: string; attemptId?: string; attemptStartedAt?: string; version?: ScanVersion }> {
+    if (!canScan()) throw new MemoryServiceError("forbidden", "Agent source scanning is not authorized");
     if (clearing) throw new MemoryServiceError("conflict", "Clearing Memory data; try again after it completes");
     if (canceling) throw new MemoryServiceError("conflict", "Canceling the previous scan");
     if (disposed) throw new MemoryServiceError("conflict", "Agent source executor is shutting down");
@@ -635,6 +651,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   async function waitWhilePaused(signal: AbortSignal): Promise<void> {
     if (++unitsSinceYield >= 100 || performance.now() - lastYieldAt >= 16) {
       await yieldEventLoop();
+      if (!canScan()) throw new MemoryServiceError("forbidden", "Agent source scanning permission revoked");
       unitsSinceYield = 0;
       lastYieldAt = performance.now();
     }
@@ -710,6 +727,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   async function runAutomation(startup: boolean): Promise<void> {
     if (disposed || clearing || scan.running || scanPaused || scan.progress?.phase === "stopped") return;
     const config = loadMemmyConfig(configPath).config.agentAccess;
+    if (!canScan()) return;
     if (config.autoInjectSkill) {
       const discovered = await list();
       for (const source of discovered.sources) {
@@ -785,6 +803,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     cancelScan,
     scanResults,
     mutateConnection,
+    reconcileScanPermission,
     startAutomation() {
       automationStarted = true;
       if (scanTimer || disposed) return;
