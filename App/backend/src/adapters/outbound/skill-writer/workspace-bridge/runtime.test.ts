@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 describe("Memory lifecycle runtime", () => {
-  it("reads Memory connection and owner settings without a workspace scanning flag", async () => {
+  it("reads Memory connection with account-independent identity without a workspace scanning flag", async () => {
     const fixture = createFixture();
     const configUrl = pathToFileURL(join(fixture, "memmy-memory-config.json"));
     const configPath = join(fixture, "config.yaml");
@@ -45,12 +45,12 @@ describe("Memory lifecycle runtime", () => {
     await expect(readRuntimeConfig(configUrl, true)).resolves.toEqual({
       endpoint: "http://127.0.0.1:18888",
       token: "test-token",
-      userId: "installed-owner",
+      userId: "local-user",
       workspaceHostId: "a".repeat(64),
     });
   });
 
-  it.each([undefined, "pending-session"])("submits the pinned owner with pending Session %s across account changes", async (sessionId) => {
+  it.each([undefined, "pending-session"])("submits device identity with pending Session %s across account changes", async (sessionId) => {
     const fixture = createFixture();
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const server = createServer(async (request, response) => {
@@ -77,7 +77,7 @@ describe("Memory lifecycle runtime", () => {
       for (const request of requests) {
         expect(request.path).toBe("/api/v1/source-turns/complete");
         expect(request.body.namespace).toEqual({
-          source: "codex", profileId: "work", userId: "installed-owner", sessionKey: "native-conversation",
+          source: "codex", profileId: "work", userId: "local-user", sessionKey: "native-conversation",
         });
         expect(request.body).toMatchObject({
           sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },

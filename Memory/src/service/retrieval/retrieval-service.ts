@@ -1,3 +1,4 @@
+import { deduplicateSameSourceL1Candidates } from "./same-source-l1-dedup.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -1826,8 +1827,8 @@ interface RetrievalDependencies {
   memorySearchEnabled(): boolean;
   queryRewriteEnabled(): boolean;
   requireEpisode(episodeId: string): EpisodeRecord;
-  resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string }): {
-    userId: string;
+  resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string | null }): {
+    userId: string | null;
     conversationId?: string;
     namespace: RuntimeNamespace;
   };
@@ -2207,10 +2208,14 @@ export class RetrievalService {
       ...(input.tags?.length ? { tags: input.tags } : {})
     };
     const candidateCount = this.deps.repos.memories.count(filter);
-    const candidates = this.deps.repos.memories
+    const rawCandidates = this.deps.repos.memories
       .list(filter, candidateCount)
       .filter((memory) => this.isMemoryReadyForRetrieval(memory))
       .filter((memory) => kindFromMemory(memory) === "observed_activity" || Boolean(traceMetaFromMemory(memory)?.summary.trim()));
+    const { memories: candidates } = deduplicateSameSourceL1Candidates({
+      memories: rawCandidates,
+      repos: this.deps.repos
+    });
     const selected = [...candidates]
       .sort(compareTimeFilteredTraceRecency)
       .slice(0, Math.max(0, input.limit))
@@ -2241,7 +2246,7 @@ export class RetrievalService {
   }
 
   private async retrieveUserMemories(input: {
-    userId: string;
+    userId: string | null;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -2298,7 +2303,7 @@ export class RetrievalService {
   }
 
   private async retrieveSearchMemories(input: {
-    userId: string;
+    userId: string | null;
     projectId?: string | null;
     query: string;
     queryVectorText: string;
@@ -2341,7 +2346,11 @@ export class RetrievalService {
         currentAgentId: input.currentAgentId,
         config
       });
-      const memories = candidatePool.memories;
+      const { memories, channelScoresByMemory } = deduplicateSameSourceL1Candidates({
+        ...candidatePool,
+        repos: this.deps.repos,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds
+      });
       if (memories.length === 0) {
         return { retrieval: emptyRetrievalResult(), memories };
       }
@@ -2357,7 +2366,7 @@ export class RetrievalService {
           mode: input.mode,
           excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
           targetSkillId: input.targetSkillId,
-          channelScoresByMemory: candidatePool.channelScoresByMemory,
+          channelScoresByMemory,
           config
         })
       };
@@ -2384,9 +2393,28 @@ export class RetrievalService {
         query === input.query ? input.queryExtract : null
       )
     ));
+    // Different rewrites may retrieve different copies of one native turn.
+    // Normalize their hit identities before RRF and its final limit as well.
+    const allMemories = uniqMemories(outputs.flatMap(output => output.memories));
+    const hitsById = new Map(outputs.flatMap(output => output.retrieval.hits).map(hit => [hit.id, hit]));
+    const dedup = deduplicateSameSourceL1Candidates({
+      memories: allMemories.filter(memory => hitsById.has(memory.id)),
+      repos: this.deps.repos
+    });
+    const retrievals = outputs.map(output => {
+      const seen = new Set<string>();
+      const hits = output.retrieval.hits.flatMap(hit => {
+        const id = dedup.memoryIdByMemoryId.get(hit.id) ?? hit.id;
+        if (seen.has(id)) return [];
+        seen.add(id);
+        return [{ ...hitsById.get(id)!, score: hit.score }];
+      });
+      return { ...output.retrieval, hits };
+    });
     return {
-      retrieval: mergeRetrievalResults(outputs.map((output) => output.retrieval), input.limit, QUERY_REWRITE_RRF_CONSTANT, QUERY_REWRITE_PER_QUERY_MIN_KEEP),
-      memories: uniqMemories(outputs.flatMap((output) => output.memories))
+      retrieval: mergeRetrievalResults(retrievals, input.limit, QUERY_REWRITE_RRF_CONSTANT, QUERY_REWRITE_PER_QUERY_MIN_KEEP),
+      memories: allMemories.filter(memory => !dedup.memoryIdByMemoryId.has(memory.id) ||
+        dedup.memoryIdByMemoryId.get(memory.id) === memory.id)
     };
   }
 

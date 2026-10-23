@@ -470,7 +470,6 @@ export class SkillPipeline {
       .map(skillMetaFromMemory)
       .filter((skill): skill is SkillMeta => Boolean(
         skill &&
-        skill.memory.userId === policy.memory.userId &&
         skill.status !== "archived" &&
         !isReadOnlySkillMemory(skill.memory)
       ));
@@ -1349,7 +1348,7 @@ function skillPolicyCompatibility(
   skill: NonNullable<ReturnType<typeof skillMetaFromMemory>>,
   policy: PolicyMeta
 ): number {
-  if (skill.memory.userId !== policy.memory.userId) return 0;
+
   const skillProject = projectIdFromMemory(skill.memory);
   const policyProject = projectIdFromMemory(policy.memory);
   if (skillProject && policyProject && skillProject !== policyProject) return 0;
@@ -1371,7 +1370,7 @@ function skillPolicyCompatibility(
 }
 
 function skillsAreCompatibleForMerge(left: SkillMeta, right: SkillMeta): boolean {
-  if (left.memory.userId !== right.memory.userId) return false;
+
   const leftProject = projectIdFromMemory(left.memory);
   const rightProject = projectIdFromMemory(right.memory);
   if (leftProject && rightProject && leftProject !== rightProject) return false;

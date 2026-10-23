@@ -95,21 +95,21 @@ describe("desktop task identity / issue 409", () => {
       expect(await panel.tasks({ q: "no-matching-task" }, ctx)).toMatchObject({ total: 0, tasks: [] });
     }
 
-    // Displaying local data must not migrate the original task ownership.
-    for (const [userId, total] of [["local-user", 21], ["account-user", 1], ["previous-account", 1]] as const) {
-      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(total);
+    // A legacy user namespace no longer partitions this device library.
+    for (const userId of ["local-user", "account-user", "previous-account"]) {
+      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(23);
     }
   });
 
-  it("preserves Memory service authentication and token-bound user scopes", async () => {
+  it("preserves authentication and operation permissions for the shared device library", async () => {
     const f = await fixture();
     const localId = f.addTask("local-user", "local-scope-task");
     const accountId = f.addTask("account-user", "account-scope-task");
     for (const token of ["scoped-panel-token", "cloud-panel-token"]) {
       const panel = f.panel(token, () => "account-user");
       const result = await panel.tasks({}, ctx);
-      expect(result.total).toBe(1);
-      expect(result.tasks.map(task => task.id)).toEqual([accountId]);
+      expect(result.total).toBe(2);
+      expect(result.tasks.map(task => task.id).sort()).toEqual([localId,accountId].sort());
       if (token === "scoped-panel-token") {
         await expect(panel.deleteTask(localId, ctx)).rejects.toMatchObject({ code: "forbidden" });
       }

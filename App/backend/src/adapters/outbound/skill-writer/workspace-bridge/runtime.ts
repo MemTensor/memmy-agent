@@ -83,9 +83,7 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   return {
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
-    userId: pinnedOwner
-      ? text(snapshot.userId) || "local-user"
-      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    userId: "local-user",
     workspaceHostId: text(snapshot.workspaceHostId),
   };
 }

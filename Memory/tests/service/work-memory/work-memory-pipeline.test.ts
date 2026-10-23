@@ -7,6 +7,7 @@ import {
   canonicalWorkMemoryText,
   WorkMemoryPipeline
 } from "../../../src/service/work-memory/work-memory-pipeline.js";
+import { refreshProjectAliases } from "../../../src/storage/device-scope.js";
 import { stableHash } from "../../../src/utils/id.js";
 import {
   createCapturingEmbedder,
@@ -73,7 +74,7 @@ describe("Work Memory pipeline", () => {
     }));
   });
 
-  it("第一阶段只抽取 requirement/reason，第二阶段 create 时生成 topic 并写入 L1 Work Memory", async () => {
+  it.each(["new", "new-on-legacy-session", "legacy-job"])("第一阶段抽取并写入 L1 Work Memory (%s)", async (mode) => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -104,7 +105,17 @@ describe("Work Memory pipeline", () => {
       throughL1MemoryId: completed.l1MemoryId
     });
     const repos = new Repositories(db.db);
-    const job = findWorkMemoryJob(repos);
+    let job = findWorkMemoryJob(repos);
+    if (mode !== "new") {
+      db.db.prepare("UPDATE sessions SET user_id='legacy-owner', project_id='legacy-project' WHERE id=?").run(opened.sessionId);
+      refreshProjectAliases(db.db);
+      if (mode === "legacy-job") {
+        db.db.prepare("UPDATE evolution_jobs SET user_id='legacy-owner', scope_key=?, dedupe_key=? WHERE id=?").run(
+          stableHash(["work_memory", "legacy-owner", "legacy-project"]),
+          stableHash(["work_memory_extract", "legacy-owner", "codex", "legacy-project", job.payload.trajectoryHash]), job.id);
+      }
+      job = repos.runtime.getJob(job.id)!;
+    }
     const completeJson = vi.fn()
       .mockResolvedValueOnce({ work_memories: [{ requirement: "固定数据清洗流水线", reason: "保证训练结果可复现" }] })
       .mockResolvedValueOnce({ decisions: [{
@@ -478,7 +489,7 @@ function workMemoryNamespace(
 ): {
   source: string;
   profileId: string;
-  userId: string;
+  userId: string | null;
   sessionKey: string;
   projectId?: string;
 } {
@@ -551,7 +562,7 @@ function testLlm(completeJson: LlmClient["completeJson"]): LlmClient {
   };
 }
 
-function workMemoryRow(userId: string, projectId: string | null): MemoryRow {
+function workMemoryRow(userId: string | null, projectId: string | null): MemoryRow {
   const at = "2026-01-01T00:00:00.000Z";
   const topic = "SFT training pipeline";
   const requirement = "固定 SFT 数据清洗流程";

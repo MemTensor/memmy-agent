@@ -74,7 +74,7 @@ export interface SkillRuntimeRepository {
   } | undefined;
   saveIdempotency(key: string, requestHash: string, response: unknown): void;
   listSkillTrials(input?: {
-    userId?: string;
+    userId?: string | null;
     skillMemoryId?: string;
     sessionId?: string;
     episodeId?: string;
@@ -84,7 +84,7 @@ export interface SkillRuntimeRepository {
     outcome?: SkillTrialRecord["outcome"];
     limit?: number;
   }): SkillTrialRecord[];
-  latestChangeSeq(userId?: string, namespaceId?: string): number;
+  latestChangeSeq(userId?: string | null, namespaceId?: string): number;
   insertSkillTrial(trial: SkillTrialRecord): SkillTrialRecord;
   appendEpisodeDerivedMemory(
     episodeId: string,
@@ -98,7 +98,7 @@ export interface SkillRuntimeRepository {
     kind: "skill_trial";
     op: "created";
     entityId: string;
-    userId: string;
+    userId: string | null;
     changeType: "skill_trial";
     after: SkillTrialRecord;
     source: "skill.use";
@@ -144,7 +144,7 @@ export interface SkillReadModelDeps {
 }
 
 export interface ListSkillsRequest extends RequestEnvelope {
-  userId?: string;
+  userId?: string | null;
   q?: string;
   tags?: string[];
   limit?: number;

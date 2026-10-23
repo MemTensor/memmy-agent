@@ -58,7 +58,7 @@ export interface ProjectEnvironmentDerivedEvidence {
 }
 
 export interface ProjectEnvironmentStateRecord {
-  userId: string;
+  userId: string | null;
   projectId: string;
   projectKind: ProjectEnvironmentKind;
   status: ProjectEnvironmentScanStatus;

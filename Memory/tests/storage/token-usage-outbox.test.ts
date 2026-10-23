@@ -64,8 +64,8 @@ describe("token usage outbox", () => {
 
     const upgraded = new MemoryDb({ path: dbPath });
     expect(upgraded.schemaVersion()).toMatchObject({
-      version: 9,
-      lastMigrationId: "009_token_usage_outbox"
+      version: 10,
+      lastMigrationId: "010_device_memory_scope"
     });
     expect(upgraded.db.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "memory-keep" });
     expect(upgraded.db.prepare(
@@ -75,7 +75,7 @@ describe("token usage outbox", () => {
     upgraded.close();
 
     const reopened = new MemoryDb({ path: dbPath });
-    expect(reopened.schemaVersion().version).toBe(9);
+    expect(reopened.schemaVersion().version).toBe(10);
     expect(reopened.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 1 });
     reopened.close();
   });

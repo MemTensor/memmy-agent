@@ -35,7 +35,7 @@ export class IndexedCandidatePool {
   constructor(private readonly deps: IndexedCandidatePoolDependencies) {}
 
   retrievalCandidateCount(input: {
-    userId: string;
+    userId: string | null;
     layers: MemoryLayer[];
     tags?: string[];
     projectId?: string | null;
@@ -51,7 +51,7 @@ export class IndexedCandidatePool {
   }
 
   hasRetrievalVectorCandidates(input: {
-    userId: string;
+    userId: string | null;
     layers: MemoryLayer[];
     tags?: string[];
     projectId?: string | null;
@@ -68,7 +68,7 @@ export class IndexedCandidatePool {
   }
 
   async indexedRetrievalCandidatePool(input: {
-    userId: string;
+    userId: string | null;
     compiledQuery: CompiledRetrievalQuery;
     queryVector?: number[];
     layers: MemoryLayer[];

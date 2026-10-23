@@ -69,7 +69,7 @@ export type MemoryGetResponse = MemoryDetailResponse | (EpisodeDetailItem & {
 });
 
 export interface TimelineRequest extends RequestEnvelope {
-  userId?: string;
+  userId?: string | null;
   sessionId?: string;
   episodeId?: string;
   layers?: MemoryLayer[];
@@ -95,13 +95,13 @@ export interface EpisodeReadModelRepositories {
     getRawTurn(id: string): RawTurnRecord | undefined;
     listRawTurnsByEpisode(episodeId: string, limit?: number): RawTurnRecord[];
     listTracePolicyLinks(input: {
-      userId?: string;
+      userId?: string | null;
       l1MemoryId?: string;
       l2MemoryId?: string;
       limit?: number;
     }): TracePolicyLinkRecord[];
     listSkillTrials(input: {
-      userId?: string;
+      userId?: string | null;
       skillMemoryId?: string;
       sessionId?: string;
       episodeId?: string;
@@ -121,6 +121,7 @@ export interface EpisodeReadModelRepositories {
  */
 export interface EpisodeReadModelDependencies {
   repos: EpisodeReadModelRepositories;
+  projectMemory?(memory: MemoryRow): MemoryRow;
   assertMemorySearchEnabled(): void;
   resolveContext(request: RequestEnvelope): unknown;
   requireSession(id: string): SessionRecord;
@@ -226,7 +227,8 @@ export class EpisodeReadModel {
       throw this.deps.invalidArgument("raw turn ids are internal; use the containing trace_ or episode_ id");
     }
 
-    const memory = this.deps.repos.memories.get(id);
+    const storedMemory = this.deps.repos.memories.get(id);
+    const memory = storedMemory && (this.deps.projectMemory?.(storedMemory) ?? storedMemory);
     if (!memory) throw this.deps.notFound(`memory not found: ${id}`);
     this.deps.assertMemoryInScope(memory, request.namespace);
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));

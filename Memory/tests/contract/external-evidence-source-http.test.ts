@@ -267,7 +267,7 @@ describe("external evidence producer identity over HTTP", () => {
     expect(repos.memories.get(sourceB.id)?.status).toBe("activated");
     const tombstone = service.syncExternalEvidence({ action: "delete", source: "computer_history", namespace: scopeA,
       sourceRecordId: "2026-09-27T11-00-00Z-10min-summary", revision: record.revision });
-    expect(externalEvidenceNamespaceForMemory(repos.memories.getIncludingDeleted(tombstone.id)!)).toMatchObject(scopeA);
+    expect(externalEvidenceNamespaceForMemory(repos.memories.getIncludingDeleted(tombstone.id)!)).toMatchObject({ ...scopeA, userId: null });
   });
 
   it("keeps Skill review and status in the source tenant", async () => {

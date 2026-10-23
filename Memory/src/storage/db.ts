@@ -1,3 +1,4 @@
+import { installDeviceScope } from "./device-scope.js";
 import Database from "better-sqlite3";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -38,6 +39,7 @@ export class MemoryDb {
         this.createPreMigrationBackup();
         migrate(this.db);
       }
+      installDeviceScope(this.db);
     } catch (error) {
       this.db.close();
       throw error;

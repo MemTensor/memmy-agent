@@ -649,7 +649,7 @@ describe("MemoryService / read model / panel", () => {
       targetField: "project_environment_profile",
       value: "Project profile."
     })!;
-    db.db.prepare(`UPDATE memories SET user_id = 'different-owner' WHERE id = ?`).run(project.id);
+    db.db.prepare(`UPDATE memories SET info_json = json_set(info_json, '$.project_id', 'different-project') WHERE id = ?`).run(project.id);
 
     expect(service.panelItems({ layer: "L3" }).items.find((item) => item.id === project.id))
       .not.toHaveProperty("worldModelScope");

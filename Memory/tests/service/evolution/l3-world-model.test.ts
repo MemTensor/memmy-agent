@@ -525,8 +525,8 @@ describe("L3 World Model trace field pipeline", () => {
       status: "succeeded"
     });
     service.closeSession(opened.sessionId);
-    db.db.prepare(`UPDATE raw_turns SET user_id = 'another-user' WHERE id = ?`)
-      .run(completed.rawTurnId);
+    const other = service.openSession({namespace:{source:"codex",profileId:"default",sessionKey:"other-session"}});
+    db.db.prepare(`UPDATE raw_turns SET session_id = ? WHERE id = ?`).run(other.sessionId,completed.rawTurnId);
     const repos = new Repositories(db.db);
     const job = repos.runtime.listJobs("queued", 100).find(
       (candidate) => candidate.jobType === "l3_world_model_update"

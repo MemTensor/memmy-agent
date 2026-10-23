@@ -189,12 +189,12 @@ describe("native source turn submission", () => {
     expect(second).toMatchObject({ status: "existing", result: { sessionId: opened.sessionId, l1MemoryId: first.result!.l1MemoryId } });
     expect(counts(db).sessions).toBe(1);
     expect(runtime.getSession(opened.sessionId)).toMatchObject({
-      userId: "source-user", hostSessionKey: original.hostSessionKey, conversationId: input.sourceTurn.conversationId,
+      userId: null, hostSessionKey: original.hostSessionKey, conversationId: input.sourceTurn.conversationId,
       projectId: original.projectId, workspaceId: original.workspaceId, meta: original.meta
     });
-    expect(runtime.getRawTurn(first.result!.rawTurnId)).toMatchObject({ userId: "source-user", conversationId: input.sourceTurn.conversationId });
+    expect(runtime.getRawTurn(first.result!.rawTurnId)).toMatchObject({ userId: null, conversationId: input.sourceTurn.conversationId });
     const memory = new Repositories(db.db).memories.get(first.result!.l1MemoryId)!;
-    expect(memory).toMatchObject({ userId: "source-user", conversationId: input.sourceTurn.conversationId, appId: original.workspaceId });
+    expect(memory).toMatchObject({ userId: null, conversationId: input.sourceTurn.conversationId, appId: original.workspaceId });
     expect(memory.info.project_id).toBe(original.projectId);
     service.closeSession(opened.sessionId, { namespace: input.namespace });
     expect(runtime.getEpisode(first.result!.episodeId)?.status).toBe("closed");
@@ -202,7 +202,6 @@ describe("native source turn submission", () => {
   });
 
   it.each([
-    { label: "another user with the same native conversation", namespace: { userId: "other-user" } },
     { label: "another project", namespace: { projectId: "project-b" } },
     { label: "another workspace", namespace: { workspaceId: "workspace-b" } },
     { label: "an unproven tenant", namespace: { tenantId: "tenant-b" } },
@@ -280,7 +279,7 @@ describe("native source turn submission", () => {
     expect(new Repositories(db.db).memories.get(completed.result!.l1MemoryId)?.conversationId).toBe(input.sourceTurn.conversationId);
   });
 
-  it.each(["user", "conversation"] as const)("refuses an observed RawTurn with a conflicting %s", async (conflict) => {
+  it.each(["user", "conversation"] as const)("handles observed RawTurn legacy %s identity", async (conflict) => {
     const { db, service } = createTestService();
     const input = request();
     const opened = service.openSession({ namespace: { ...input.namespace!, sessionKey: `codex-memory-${input.sourceTurn.conversationId}` } });
@@ -291,6 +290,11 @@ describe("native source turn submission", () => {
     const runtime = new Repositories(db.db).runtime;
     const original = runtime.getRawTurn(observed.rawTurnId!)!;
     const before = counts(db);
+    if (conflict === "user") {
+      expect(service.completeSourceTurn(request({ sessionId: opened.sessionId })).status).toBe("stored");
+      expect(runtime.getRawTurn(observed.rawTurnId!)?.userId).toBeNull();
+      return;
+    }
     expect(() => service.completeSourceTurn(request({ sessionId: opened.sessionId }))).toThrow("source_raw_turn_scope_conflict");
     expect(counts(db)).toEqual(before);
     expect(runtime.getRawTurn(observed.rawTurnId!)).toEqual(original);
@@ -315,7 +319,74 @@ describe("native source turn submission", () => {
     const first = service.completeSourceTurn(request());
     const second = service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, turnId: "native-turn-2", sequence: 2, startedAt: "2099-01-01T10:02:00.000Z", completedAt: "2099-01-01T10:03:00.000Z" } }));
     const otherUser = service.completeSourceTurn(request({ namespace: { ...request().namespace!, userId: "other-user" } }));
-    expect(new Set([first.result?.l1MemoryId, second.result?.l1MemoryId, otherUser.result?.l1MemoryId]).size).toBe(3);
+    expect(otherUser).toMatchObject({ status: "existing", result: { l1MemoryId: first.result!.l1MemoryId, jobs: [] } });
+    expect(second.result?.l1MemoryId).not.toBe(first.result?.l1MemoryId);
+  });
+
+  it.each(["codex", "claude_code", "cursor", "opencode"])(
+    "keeps one %s conversation across accounts and capture channels",
+    async (source) => {
+      for (const firstChannel of ["hook", "agent_source_scan"] as const) {
+        const { db, service } = createTestService();
+        const input = request({ source, channel: firstChannel,
+          namespace: { source, profileId: "default", userId: "installed-owner" },
+          sourceTurn: { ...request().sourceTurn, source } });
+        const opened = service.openSession({ namespace: { ...input.namespace!,
+          sessionKey: `${source}-memory-${input.sourceTurn.conversationId}` } });
+        const first = service.completeSourceTurn(input);
+        expect(first).toMatchObject({ status: "stored", result: { sessionId: opened.sessionId } });
+        const before = counts(db);
+        const switched = { ...input, channel: firstChannel === "hook" ? "agent_source_scan" as const : "hook" as const,
+          namespace: { ...input.namespace!, userId: "current-owner" } };
+        expect(service.completeSourceTurn(switched)).toMatchObject({ status: "existing", result: {
+          sessionId: first.result!.sessionId, episodeId: first.result!.episodeId,
+          rawTurnId: first.result!.rawTurnId, l1MemoryIds: first.result!.l1MemoryIds, jobs: []
+        } });
+        expect(counts(db)).toEqual(before);
+        const secondInput = { ...switched, sourceTurn: { ...input.sourceTurn, turnId: "native-turn-2", sequence: 2,
+          startedAt: "2099-01-01T10:02:00.000Z", completedAt: "2099-01-01T10:03:00.000Z" } };
+        const second = service.completeSourceTurn(secondInput);
+        expect(second).toMatchObject({ status: "stored", result: {
+          sessionId: opened.sessionId, episodeId: first.result!.episodeId
+        } });
+        expect(second.result!.l1MemoryId).not.toBe(first.result!.l1MemoryId);
+        expect(db.db.prepare("SELECT DISTINCT user_id FROM source_turn_captures").all()).toEqual([{ user_id: null }]);
+        expect(counts(db)).toMatchObject({ sessions: 1, episodes: 1, raw_turns: 2, source_turn_captures: 2 });
+        await runWorkerRounds(service, 4);
+        const recall = await service.search({ query: input.query, layers: ["L1"], limit: 10 });
+        expect(recall.hits.filter(hit => hit.id === first.result!.l1MemoryId)).toHaveLength(1);
+        const afterWorker = counts(db);
+        service.completeSourceTurn(switched);
+        service.completeSourceTurn(secondInput);
+        expect(counts(db)).toEqual(afterWorker);
+      }
+    }
+  );
+
+  it("lets the first scanner completion reuse a Hook Session from the installed account", () => {
+    const { service, db } = createTestService();
+    const input = request();
+    const opened = service.openSession({ namespace: { ...input.namespace!,
+      sessionKey: `codex-memory-${input.sourceTurn.conversationId}` } });
+    const scanned = service.completeSourceTurn({ ...input, channel: "agent_source_scan",
+      namespace: { ...input.namespace!, userId: "new-account" } });
+    expect(scanned).toMatchObject({ status: "stored", result: { sessionId: opened.sessionId } });
+    expect(service.completeSourceTurn(input).status).toBe("existing");
+    expect(counts(db)).toMatchObject({ sessions: 1, episodes: 1, raw_turns: 1, source_turn_captures: 1 });
+    expect(new Repositories(db.db).memories.get(scanned.result!.l1MemoryId)?.userId).toBe(null);
+  });
+
+  it("retains cross-account conflicts and tombstones after the Episode closes", () => {
+    const { service, db } = createTestService();
+    const first = service.completeSourceTurn(request());
+    service.closeSession(first.result!.sessionId);
+    const switched = request({ namespace: { ...request().namespace!, userId: "switched-owner" }, channel: "agent_source_scan" });
+    const before = counts(db);
+    expect(service.completeSourceTurn(switched)).toMatchObject({ status: "existing", result: { jobs: [] } });
+    expect(service.completeSourceTurn({ ...switched, answer: "A different answer" })).toMatchObject({ status: "conflict", reason: "source_turn_content_conflict" });
+    db.db.prepare("UPDATE memories SET status = 'deleted', deleted_at = ? WHERE id = ?").run("2099-01-02", first.result!.l1MemoryId);
+    expect(service.completeSourceTurn(switched)).toMatchObject({ status: "rejected", reason: "capture_deleted" });
+    expect(counts(db)).toEqual(before);
   });
 
   it("reports conflicting content and keeps deleted capture identities", () => {

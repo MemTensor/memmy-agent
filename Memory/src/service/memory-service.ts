@@ -1,3 +1,4 @@
+import { deviceNamespace, memoryFingerprint, matchesLegacyMemoryFingerprint } from "../storage/device-scope.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -276,6 +277,10 @@ function isAbortError(error: unknown): boolean {
 }
 
 export class MemoryService {
+  private normalizeDeviceNamespace(namespace?: RuntimeNamespace) {
+    return normalizeNamespace(deviceNamespace(this.repos.db, normalizeNamespace(namespace)));
+  }
+
   private readonly embeddingJobs: EmbeddingJobProcessor;
   private readonly evolutionJobs: EvolutionJobProcessor;
   private readonly feedbackExperience: FeedbackExperienceService;
@@ -579,6 +584,9 @@ export class MemoryService {
     });
     this.episodeReadModel = new EpisodeReadModel({
       repos: this.repos,
+      projectMemory: (memory) => isStrictL3WorldModelV2Memory(memory)
+        ? this.repos.l3WorldModels.getMemory(null, typeof memory.info.project_id === "string" ? memory.info.project_id : null) ?? memory
+        : memory,
       assertMemorySearchEnabled: this.assertMemorySearchEnabled.bind(this),
       resolveContext: this.resolveContext.bind(this),
       requireSession: this.requireSession.bind(this),
@@ -1117,10 +1125,11 @@ export class MemoryService {
     if (!idempotencyKey) {
       return scopedRun();
     }
-    const requestHash = stableHash({ operation, fingerprint });
+    const hashFingerprint = (value: unknown) => stableHash({ operation, fingerprint: value });
+    const requestHash = hashFingerprint(memoryFingerprint(this.repos.db, fingerprint));
     const existing = this.repos.runtime.getIdempotency(idempotencyKey);
     if (existing) {
-      if (existing.requestHash !== requestHash) {
+      if (existing.requestHash !== requestHash && !matchesLegacyMemoryFingerprint(this.repos.db, fingerprint, existing.requestHash, hashFingerprint)) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
       return withDuplicateFlag(existing.response) as T;
@@ -1142,10 +1151,11 @@ export class MemoryService {
       ? `${operation}:${request.adapterId}:${request.requestId}`
       : undefined;
     if (!idempotencyKey) return scopedRun();
-    const requestHash = sha256Hex(canonicalJson(assertJsonValue({ operation, fingerprint })));
+    const hashFingerprint = (value: unknown) => sha256Hex(canonicalJson(assertJsonValue({ operation, fingerprint: value })));
+    const requestHash = hashFingerprint(memoryFingerprint(this.repos.db, fingerprint));
     const existing = this.repos.runtime.getIdempotency(idempotencyKey);
     if (existing) {
-      if (existing.requestHash !== requestHash) {
+      if (existing.requestHash !== requestHash && !matchesLegacyMemoryFingerprint(this.repos.db, fingerprint, existing.requestHash, hashFingerprint)) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
       return existing.response as T;
@@ -1172,7 +1182,7 @@ export class MemoryService {
       panel: boolean;
     };
     effectiveNamespace: {
-      userId: string;
+      userId: string | null;
       projectId?: string;
       workspaceId?: string;
       profileId?: string;
@@ -1180,7 +1190,7 @@ export class MemoryService {
     expiresAt?: string;
     serverTime: string;
   } {
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
     return {
       adapterId: request.adapterId ?? "anonymous",
       serviceVersion: PROJECT_VERSION,
@@ -1202,7 +1212,7 @@ export class MemoryService {
 
   openSession(request: SessionOpenRequest): {
     sessionId: string;
-    userId: string;
+    userId: string | null;
     source: string;
     profileId: string;
     projectId?: string | null;
@@ -1355,8 +1365,7 @@ export class MemoryService {
   }
 
   completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
-    // Native scans have no Hook envelope. Use the configured owner only when
-    // the request (including authenticated scope) did not provide one.
+    // Old scanners may still send an account UID; local memory has no account owner.
     const response = this.sessionTurns.completeSourceTurn(this.withTimeZone({
       ...request,
       namespace: {
@@ -1364,7 +1373,7 @@ export class MemoryService {
         profileId: request.sourceTurn?.profileId,
         sessionKey: request.sourceTurn?.conversationId,
         ...request.namespace,
-        userId: request.namespace?.userId ?? this.config.userId
+        userId: null
       }
     }));
     serviceLogger.info("source_turn.complete", {
@@ -2119,7 +2128,7 @@ export class MemoryService {
   }
 
   timeline(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     sessionId?: string;
     episodeId?: string;
     layers?: MemoryLayer[];
@@ -2161,7 +2170,7 @@ export class MemoryService {
   }
 
   listSkills(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     q?: string;
     tags?: string[];
     limit?: number;
@@ -2467,10 +2476,6 @@ export class MemoryService {
     this.assertMemoryAddEnabled();
     const userMemory = this.repos.userMemories.get(id);
     if (userMemory) {
-      const namespaceUserId = request.namespace?.userId;
-      if (namespaceUserId && namespaceUserId !== userMemory.userId) {
-        throw new MemoryServiceError("forbidden", "user memory belongs to a different user");
-      }
       const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
       if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
       const changeSeq = this.repos.runtime.appendChange({
@@ -2523,12 +2528,8 @@ export class MemoryService {
       throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
     }
     if (strictV2WorldModel) {
-      const effectiveUserId = normalizeNamespace(request.namespace).userId;
       const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
-      if (effectiveUserId !== memory.userId) {
-        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
-      }
-      if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
+      if (request.namespace?.projectId && this.normalizeDeviceNamespace(request.namespace).projectId !== projectId) {
         throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
       }
     } else {
@@ -2605,9 +2606,6 @@ export class MemoryService {
     this.assertMemorySearchEnabled();
     const event = this.repos.runtime.getRecallEventByQueryId(queryId);
     if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
-    if (request.namespace?.userId && request.namespace.userId !== event.userId) {
-      throw new MemoryServiceError("forbidden", "recall event belongs to a different user");
-    }
     const eventRequest = isRecord(event.request) ? event.request : {};
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
@@ -2761,7 +2759,7 @@ export class MemoryService {
   }
 
   auditLogs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     targetKind?: string;
     targetId?: string;
     limit?: number;
@@ -2773,7 +2771,7 @@ export class MemoryService {
   }
 
   serviceLogs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     limit?: number;
     cursor?: string;
   } = {}): {
@@ -2782,7 +2780,7 @@ export class MemoryService {
       type: "change" | "audit" | "job";
       id: string;
       at: string;
-      userId?: string;
+      userId?: string | null;
       action: string;
       targetKind?: string;
       targetId?: string;
@@ -2814,7 +2812,7 @@ export class MemoryService {
     return this.panelReadModel.apiLogs(input);
   }
 
-  serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
+  serviceMetrics(input: RequestEnvelope & { userId?: string | null } = {}): {
     storage: StorageBackendCapabilities;
     schema: { version: number; lastMigrationId?: string };
     memory: ReturnType<MemoryService["panelOverview"]>["stats"];
@@ -2830,7 +2828,7 @@ export class MemoryService {
     return this.panelReadModel.serviceMetrics(input);
   }
 
-  adminStatus(input: RequestEnvelope & { userId?: string } = {}, routes: string[] = []): {
+  adminStatus(input: RequestEnvelope & { userId?: string | null } = {}, routes: string[] = []): {
     health: HealthResponse;
     overview: ReturnType<MemoryService["panelOverview"]>;
     failedJobs: EvolutionJobRecord[];
@@ -2849,7 +2847,7 @@ export class MemoryService {
     return this.panelReadModel.configStatus(_input);
   }
 
-  panelOverview(input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverview(input: RequestEnvelope & { userId?: string | null } = {}): {
     stats: {
       byLayer: Record<MemoryLayer, number>;
       byStatus: Record<"activated" | "resolving" | "archived" | "deleted", number>;
@@ -2868,7 +2866,7 @@ export class MemoryService {
     return this.panelReadModel.panelOverview(this.withTimeZone(input));
   }
 
-  panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverviewSummary(input: RequestEnvelope & { userId?: string | null } = {}): {
     counts: {
       memories: number;
       userMemories: number;
@@ -2886,7 +2884,7 @@ export class MemoryService {
     return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
   }
 
-  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
+  panelAnalysis(input: RequestEnvelope & { userId?: string | null } = {}): {
     metrics: {
       avgRecallScore: number;
       recallEvents: number;
@@ -2906,7 +2904,7 @@ export class MemoryService {
   }
 
   panelItems(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
@@ -2951,7 +2949,7 @@ export class MemoryService {
   }
 
   panelChanges(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     limit?: number;
     cursor?: string;
   } = {}): {
@@ -2973,7 +2971,7 @@ export class MemoryService {
   }
 
   panelJobs(input: RequestEnvelope & {
-    userId?: string;
+    userId?: string | null;
     status?: "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
     limit?: number;
   } = {}): {
@@ -3024,7 +3022,7 @@ export class MemoryService {
       if (memories.length < 250) break;
       offset += memories.length;
     }
-    const userId = this.config.userId?.trim() || "local-user";
+    const userId = null;
     offset = 0;
     for (;;) {
       const userMemories = this.repos.userMemories.listForPanel({
@@ -3059,7 +3057,7 @@ export class MemoryService {
     dimMismatch: number;
     needsRepair: number;
   } {
-    const userId = this.config.userId?.trim() || "local-user";
+    const userId = null;
     const regular = this.repos.vectors.maintenanceDimensionCounts();
     const user = this.repos.userMemories.embeddingDimensionCounts(userId);
     const dimensions = new Map<number, number>();
@@ -3161,7 +3159,7 @@ export class MemoryService {
 
   private buildMemory(input: {
     id?: string;
-    userId: string;
+    userId: string | null;
     conversationId?: string;
     sessionId?: string;
     agentId?: string;
@@ -3238,7 +3236,7 @@ export class MemoryService {
   }
 
   private readOnlyCursor(namespace?: RuntimeNamespace): { changeSeq: number; syncCursor: string } {
-    const scoped = namespace ? normalizeNamespace(namespace) : undefined;
+    const scoped = namespace ? this.normalizeDeviceNamespace(namespace) : undefined;
     const changeSeq = this.repos.runtime.latestChangeSeq(
       scoped?.userId,
       scoped ? namespaceIdFromContext(scoped) : undefined
@@ -3250,7 +3248,7 @@ export class MemoryService {
   }
 
   private openSessionNoWrite(request: SessionOpenRequest): ReturnType<MemoryService["openSession"]> {
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
     const existing = request.sessionId
       ? this.repos.runtime.getSession(request.sessionId)
       : namespace.sessionKey
@@ -3493,9 +3491,8 @@ export class MemoryService {
     if (session.meta.l3_world_model_protocol_version !== 2) {
       throw new MemoryServiceError("conflict", "l3_world_model_protocol_v2_required");
     }
-    const normalized = normalizeNamespace(namespace);
+    const normalized = this.normalizeDeviceNamespace(namespace);
     const conflicts = [
-      normalized.userId !== session.userId,
       normalized.source !== session.source,
       normalized.profileId !== session.profileId,
       (normalized.projectId ?? null) !== (session.projectId ?? null),
@@ -3535,7 +3532,7 @@ export class MemoryService {
       v: 1,
       backendId: capabilities.backendId,
       schemaVersion: capabilities.schemaVersion,
-      namespaceId: namespace ? namespaceIdFromContext(normalizeNamespace(namespace)) : "",
+      namespaceId: namespace ? namespaceIdFromContext(this.normalizeDeviceNamespace(namespace)) : "",
       seq
     };
     return `cur_${Buffer.from(JSON.stringify(payload)).toString("base64url")}`;
@@ -3571,8 +3568,8 @@ export class MemoryService {
     return this.sessionTurns.ensureEpisode(session, episodeId);
   }
 
-  private resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string }): {
-    userId: string;
+  private resolveContext(request: RequestEnvelope & { sessionId?: string; userId?: string | null }): {
+    userId: string | null;
     conversationId?: string;
     namespace: RuntimeNamespace;
   } {
@@ -3587,8 +3584,8 @@ export class MemoryService {
         };
       }
     }
-    const namespace = normalizeNamespace(request.namespace);
-    const userId = request.userId ?? namespace.userId;
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
+    const userId = null;
     return {
       userId,
       namespace: {

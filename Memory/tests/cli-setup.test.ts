@@ -54,7 +54,6 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved).toMatchObject({
       memmyMemory: {
         version: 1,
-        userId: "local-user",
         roleRouting: {
           summary: "follow",
           evolution: "follow"
@@ -410,7 +409,6 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved.memmyMemory).toMatchObject({
       futureMemoryField: "keep-memory",
       version: 1,
-      userId: "user_123",
       roleRouting: {
         summary: "follow",
         evolution: "follow"

@@ -177,8 +177,8 @@ describe("MemoryService / evolution / negative experience", () => {
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
        WHERE job_type = 'negative_experience'
-         AND user_id = ?`
-    ).get(namespace.userId) as { count: number };
+         AND user_id IS ?`
+    ).get(null) as { count: number };
     expect(negativeJobCount.count).toBe(1);
 
     await service.runWorkerOnce(50);

@@ -38,7 +38,7 @@ export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episod
 
 export interface EnqueueJobInput {
   jobType: JobType;
-  userId: string;
+  userId: string | null;
   sessionId?: string;
   episodeId?: string;
   targetMemoryId?: string;

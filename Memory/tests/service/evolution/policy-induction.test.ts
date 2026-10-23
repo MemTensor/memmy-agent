@@ -167,19 +167,19 @@ describe("MemoryService / evolution / policy induction", () => {
     expect(rows).toEqual([
       {
         source_memory_id: "mem_candidate-user-a",
-        user_id: "candidate-user-a",
+        user_id: null,
         status: "promoted",
         policy_id: "policy-user-a"
       },
       {
         source_memory_id: "mem_candidate-user-a_other-profile",
-        user_id: "candidate-user-a",
+        user_id: null,
         status: "pending",
         policy_id: null
       },
       {
         source_memory_id: "mem_candidate-user-b",
-        user_id: "candidate-user-b",
+        user_id: null,
         status: "pending",
         policy_id: null
       }
@@ -625,7 +625,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const policies = db.db.prepare(
       `SELECT memory_key, info_json
        FROM memories
-       WHERE user_id = 'shared-key-user'
+       WHERE user_id IS NULL
          AND memory_layer = 'L2'
        ORDER BY memory_key`
     ).all() as Array<{ memory_key: string; info_json: string }>;
@@ -949,7 +949,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const row = db.db.prepare(
       `SELECT properties_json
        FROM memories
-       WHERE user_id = 'user-l2-support-subset'
+       WHERE user_id IS NULL
          AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { properties_json: string } | undefined;
@@ -1051,18 +1051,18 @@ describe("MemoryService / evolution / policy induction", () => {
     const l2Count = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'L2'`
-    ).get(userId) as { count: number };
+       WHERE user_id IS ? AND memory_layer = 'L2'`
+    ).get(null) as { count: number };
     expect(l2Count.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE user_id IS ?
          AND kind = 'policy'
          AND op = 'skipped'
          AND change_type = 'l2_induction_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all(null) as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
@@ -1072,10 +1072,10 @@ describe("MemoryService / evolution / policy induction", () => {
     const job = db.db.prepare(
       `SELECT status, attempts, last_error
        FROM evolution_jobs
-       WHERE user_id = ? AND job_type = 'l2_induction'
+       WHERE user_id IS ? AND job_type = 'l2_induction'
        ORDER BY created_at DESC
        LIMIT 1`
-    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    ).get(null) as { status: string; attempts: number; last_error: string | null };
     expect(job).toMatchObject({
       status: "succeeded",
       attempts: 1,
@@ -1084,7 +1084,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const downstreamCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
-       WHERE user_id = ?
+       WHERE user_id IS ?
          AND (
            job_type IN ('l3_abstraction', 'skill_crystallization')
            OR (
@@ -1092,7 +1092,7 @@ describe("MemoryService / evolution / policy induction", () => {
              AND json_extract(payload_json, '$.reason') = 'l2.upserted'
            )
          )`
-    ).get(userId) as { count: number };
+    ).get(null) as { count: number };
     expect(downstreamCount.count).toBe(0);
 
     db.close();
@@ -1183,23 +1183,23 @@ describe("MemoryService / evolution / policy induction", () => {
     const l2Rows = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'L2'`
-    ).all(userId) as Array<{ id: string }>;
+       WHERE user_id IS ? AND memory_layer = 'L2'`
+    ).all(null) as Array<{ id: string }>;
     expect(l2Rows).toHaveLength(1);
     const skippedCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE user_id IS ?
          AND change_type = 'l2_induction_skipped'`
-    ).get(userId) as { count: number };
+    ).get(null) as { count: number };
     expect(skippedCount.count).toBe(0);
     const job = db.db.prepare(
       `SELECT status, attempts, last_error
        FROM evolution_jobs
-       WHERE user_id = ? AND job_type = 'l2_induction'
+       WHERE user_id IS ? AND job_type = 'l2_induction'
        ORDER BY created_at DESC
        LIMIT 1`
-    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    ).get(null) as { status: string; attempts: number; last_error: string | null };
     expect(job).toMatchObject({
       status: "succeeded",
       attempts: 1,
@@ -1208,7 +1208,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const downstreamJobs = db.db.prepare(
       `SELECT job_type
        FROM evolution_jobs
-       WHERE user_id = ?
+       WHERE user_id IS ?
          AND (
            job_type = 'l3_abstraction'
            OR (
@@ -1218,7 +1218,7 @@ describe("MemoryService / evolution / policy induction", () => {
            )
          )
        ORDER BY job_type`
-    ).all(userId, l2Rows[0]!.id) as Array<{ job_type: string }>;
+    ).all(null, l2Rows[0]!.id) as Array<{ job_type: string }>;
     expect(downstreamJobs.map((item) => item.job_type)).toEqual(["embedding"]);
 
     db.close();

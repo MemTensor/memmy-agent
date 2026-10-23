@@ -99,7 +99,7 @@ export interface RuntimeNamespace {
   workspaceId?: string;
   workspacePath?: string;
   sessionKey?: string;
-  userId?: string;
+  userId?: string | null;
   tenantId?: string;
 }
 
@@ -137,7 +137,7 @@ export interface JobRef {
 export interface MemoryRow {
   id: string;
   timeline: IsoTime;
-  userId: string;
+  userId: string | null;
   conversationId?: string;
   sessionId?: string;
   agentId?: string;
@@ -184,7 +184,7 @@ export interface MemoryStatsRow {
 }
 
 export interface MemoryFilter {
-  userId?: string;
+  userId?: string | null;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
@@ -197,7 +197,7 @@ export interface MemoryFilter {
   tags?: string[];
   ids?: string[];
   memoryKind?: MemoryKind | MemoryKind[];
-  workMemoryUserId?: string;
+  workMemoryUserId?: string | null;
   workMemoryProjectId?: string | null;
 }
 
@@ -433,7 +433,7 @@ export type UserMemoryStatus = "active" | "archived" | "deleted";
 export interface UserMemoryRecord {
   id: string;
   sourceTurnId: string;
-  userId: string;
+  userId: string | null;
   memoryTypes: UserMemoryType[];
   content: string;
   normalizedUserTextHash: string;

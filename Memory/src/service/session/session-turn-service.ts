@@ -1,3 +1,5 @@
+import type { RuntimeNamespace } from "../../types.js";
+import { canonicalProjectId, deviceNamespace } from "../../storage/device-scope.js";
 import {
   captureTurnSteps,
   classifyIntent,
@@ -467,6 +469,29 @@ export function failureBurstAntiPattern(burst: ToolFailureBurst, reason: string)
 }
 
 export class SessionTurnService {
+  private normalizeDeviceNamespace(namespace?: RuntimeNamespace) {
+    return normalizeNamespace(deviceNamespace(this.deps.repos.db, normalizeNamespace(namespace)));
+  }
+
+  private idempotencyRequest<T extends RequestEnvelope>(request: T): T {
+    return { ...request, namespace: this.normalizeDeviceNamespace(request.namespace) };
+  }
+
+  private legacyIdempotencyMatches(
+    savedHash: string, request: RequestEnvelope, sessionId: string | undefined,
+    hash: (request: RequestEnvelope) => string
+  ): boolean {
+    if (savedHash === hash(request)) return true;
+    if (!sessionId || !request.namespace) return false;
+    const original = this.deps.repos.db.prepare("SELECT user_id FROM sessions WHERE id = ?")
+      .get(sessionId) as { user_id: string | null } | undefined;
+    // Only substitute the historical owner, leaving every semantic request field
+    // intact. A reused request ID with different content must still conflict.
+    return original?.user_id != null && savedHash === hash({
+      ...request, namespace: { ...request.namespace, userId: original.user_id }
+    });
+  }
+
   private readonly toolFailureStates = new Map<string, ToolFailureState>();
   private readonly toolSuccessSteps = new Map<string, number>();
   private readonly toolStepCounters = new Map<string, number>();
@@ -475,7 +500,7 @@ export class SessionTurnService {
 
   openSession(request: SessionOpenRequest, options: { createNew?: boolean; at?: string } = {}): {
     sessionId: string;
-    userId: string;
+    userId: string | null;
     source: string;
     profileId: string;
     projectId?: string | null;
@@ -495,17 +520,22 @@ export class SessionTurnService {
     const idempotencyKey = request.adapterId && request.requestId
       ? `session.open:${request.adapterId}:${request.requestId}`
       : undefined;
-    const requestHash = stableHash({ operation: "session.open", request });
+    const hashRequest = (body: RequestEnvelope) => stableHash({ operation: "session.open", request: body });
+    const requestHash = hashRequest(this.idempotencyRequest(request));
     if (idempotencyKey) {
       const existing = this.deps.repos.runtime.getIdempotency(idempotencyKey);
       if (existing) {
-        if (existing.requestHash !== requestHash) {
+        const response = existing.response as ReturnType<SessionTurnService["openSession"]>;
+        if (existing.requestHash !== requestHash && !this.legacyIdempotencyMatches(existing.requestHash, request, response.sessionId, hashRequest)) {
           throw new MemoryServiceError("conflict", "idempotency key reused with different session.open request body");
         }
-        return this.deps.withDuplicateFlag(existing.response) as ReturnType<SessionTurnService["openSession"]>;
+        return this.deps.withDuplicateFlag({ ...response, userId: null,
+          projectId: canonicalProjectId(this.deps.repos.db, response.projectId),
+          workspaceId: canonicalProjectId(this.deps.repos.db, response.workspaceId) ?? undefined
+        }) as ReturnType<SessionTurnService["openSession"]>;
       }
     }
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
     const at = options.at ?? nowIso();
     if (request.l3WorldModelProtocolVersion === undefined && (
       request.l3WorldModelTransition !== undefined ||
@@ -671,7 +701,8 @@ export class SessionTurnService {
             userId: namespace.userId,
             source,
             profileId,
-            hostSessionKey: namespace.sessionKey!
+            hostSessionKey: namespace.sessionKey!,
+            projectId: workspace.projectId ?? namespace.projectId
           });
 
       if (request.sessionId && !existing) {
@@ -774,10 +805,9 @@ export class SessionTurnService {
   ): void {
     const savedWorkspaceUri = optionalMetaString(session.meta, "workspace_uri");
     const savedWorkspaceHostId = optionalMetaString(session.meta, "workspace_host_id");
-    const requestProjectId = request.projectId ?? request.namespace?.projectId;
-    const requestWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
-    const mismatch = session.userId !== namespace.userId ||
-      session.source !== (request.source ?? namespace.source) ||
+    const requestProjectId = request.projectId === undefined ? namespace.projectId : canonicalProjectId(this.deps.repos.db, request.projectId) ?? undefined;
+    const requestWorkspaceId = request.workspaceId === undefined ? namespace.workspaceId : canonicalProjectId(this.deps.repos.db, request.workspaceId) ?? undefined;
+    const mismatch = session.source !== (request.source ?? namespace.source) ||
       session.profileId !== (request.profileId ?? namespace.profileId) ||
       session.hostSessionKey !== namespace.sessionKey ||
       (requestProjectId !== undefined && requestProjectId !== session.projectId) ||
@@ -1234,7 +1264,7 @@ export class SessionTurnService {
     if (request.channel !== "hook" && request.channel !== "agent_source_scan") {
       throw new MemoryServiceError("invalid_argument", "invalid source capture channel");
     }
-    const namespace = normalizeNamespace(request.namespace ?? {
+    const namespace = this.normalizeDeviceNamespace(request.namespace ?? {
       source: identity.source, profileId: identity.profileId, sessionKey: identity.conversationId
     });
     if (namespace.source !== identity.source || namespace.profileId !== identity.profileId ||
@@ -1356,7 +1386,7 @@ export class SessionTurnService {
       const episode = requestedEpisodeId
         ? this.deps.repos.runtime.getEpisode(requestedEpisodeId)
         : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-      if (request.episodeId && (!episode || episode.sessionId !== session.id || episode.userId !== session.userId)) {
+      if (request.episodeId && (!episode || episode.sessionId !== session.id)) {
         throw new MemoryServiceError("forbidden", "source_episode_scope_conflict");
       }
       if (episode && episode.status !== "open") {
@@ -1417,8 +1447,13 @@ export class SessionTurnService {
       `memory.add:agent-source:${source}:turn:${legacyTurnId}`
     ).filter((memory) => legacyImportMatchesScope(memory, namespace, source, legacyTurnId));
     if (memories.length === 0) return undefined;
-    if (memories.length > 1) return { status: "pending", reason: "legacy_identity_unresolved" };
-    const memory = memories[0]!;
+    const distinctContent = new Set(memories.filter(memory => !memory.deletedAt && memory.status !== "deleted")
+      .map(memory => stableHash(legacyImportTexts(memory))));
+    if (distinctContent.size > 1) return { status: "pending", reason: "legacy_identity_unresolved" };
+    // An explicit deletion wins over another account's historical copy.
+    const memory = [...memories].sort((a, b) =>
+      Number(Boolean(b.deletedAt || b.status === "deleted")) - Number(Boolean(a.deletedAt || a.status === "deleted")) ||
+      a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0]!;
     const texts = legacyImportTexts(memory);
     const deleted = memory.status === "deleted" || Boolean(memory.deletedAt);
     if (!deleted && texts.user && texts.agent && (texts.user !== normalized.query || texts.agent !== normalized.answer)) {
@@ -1447,7 +1482,7 @@ export class SessionTurnService {
     scope: SourceTurnCaptureScope,
     contentHash: string
   ): SourceTurnCompleteResponse {
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
     this.assertExplicitEpisodeInSourceScope(request, namespace, sourceTurn, scope);
     if (this.completedLegacySourceTurn(namespace, scope, sourceTurn.turnId)) {
       return { status: "pending", reason: "legacy_source_turn_already_completed" };
@@ -1500,8 +1535,6 @@ export class SessionTurnService {
     const episode = this.deps.repos.runtime.getEpisode(request.episodeId);
     const episodeSession = episode ? this.deps.repos.runtime.getSession(episode.sessionId) : undefined;
     const inScope = Boolean(episode && episodeSession &&
-      episode.userId === namespace.userId &&
-      episodeSession.userId === namespace.userId &&
       episodeSession.source === sourceTurn.source &&
       episodeSession.profileId === sourceTurn.profileId &&
       (!episodeSession.conversationId || episodeSession.conversationId === sourceTurn.conversationId) &&
@@ -1580,7 +1613,7 @@ export class SessionTurnService {
     scope: SourceTurnCaptureScope,
     mappedSessionId?: string
   ): SessionRecord | { status: "pending"; reason: string } {
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = this.normalizeDeviceNamespace(request.namespace);
     const inScope = (candidate: SessionRecord): boolean =>
       candidate.userId === namespace.userId && candidate.source === identity.source && candidate.profileId === identity.profileId &&
       (!candidate.conversationId || candidate.conversationId === identity.conversationId) &&
@@ -1650,15 +1683,13 @@ export class SessionTurnService {
     const idempotencyKey = !sourceTurn && request.adapterId && request.requestId
       ? `turn.complete:${request.adapterId}:${request.requestId}`
       : undefined;
-    const requestHash = stableHash({
-      turnId,
-      request
-    });
+    const hashRequest = (body: RequestEnvelope) => stableHash({ turnId, request: body });
+    const requestHash = hashRequest(this.idempotencyRequest(request));
 
     if (idempotencyKey) {
       const existing = this.deps.repos.runtime.getIdempotency(idempotencyKey);
       if (existing) {
-        if (existing.requestHash !== requestHash) {
+        if (existing.requestHash !== requestHash && !this.legacyIdempotencyMatches(existing.requestHash, request, request.sessionId, hashRequest)) {
           throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
         }
         return {
@@ -3076,7 +3107,7 @@ export class SessionTurnService {
     const correction = request.userMemoryCorrection;
     if (correction) {
       const target = this.deps.repos.userMemories.get(correction.targetMemoryId);
-      if (!target || target.userId !== rawTurn.userId || target.status !== "active") {
+      if (!target || target.status !== "active") {
         throw new MemoryServiceError("not_found", `active user memory not found: ${correction.targetMemoryId}`);
       }
       const content = correction.revisedContent.trim();
@@ -3139,7 +3170,7 @@ export class SessionTurnService {
   }
 
   private userMemoryEmbeddingJobs(
-    memory: { id: string; userId: string; content: string },
+    memory: { id: string; userId: string | null; content: string },
     rawTurn: RawTurnRecord,
     at: string
   ): EvolutionJobRecord[] {
@@ -3157,7 +3188,7 @@ export class SessionTurnService {
   }
 
   private appendUserMemoryChange(
-    memory: { id: string; userId: string },
+    memory: { id: string; userId: string | null },
     before: unknown,
     op: "created" | "updated" | "archived",
     at: string

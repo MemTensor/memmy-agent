@@ -43,7 +43,7 @@ export const IMPORT_DEFAULT_PRIORITY = 0.5;
 
 type EnqueueInput = {
   jobType: JobType;
-  userId: string;
+  userId: string | null;
   sessionId?: string;
   episodeId?: string;
   targetMemoryId?: string;
@@ -62,7 +62,7 @@ export interface ImportJobProcessorDeps {
   assertMemoryAddEnabled(): void;
   assertMemoryInScope(memory: MemoryRow, namespace: unknown): void;
   sanitizeMemoryAddRequest(request: MemoryAddRequest): MemoryAddRequest;
-  resolveContext(request: MemoryAddRequest): { userId: string; namespace: { source?: string; projectId?: string; profileId?: string } };
+  resolveContext(request: MemoryAddRequest): { userId: string | null; namespace: { source?: string; projectId?: string; profileId?: string } };
   requireSession(id: string): SessionRecord;
   assertSessionInScope(session: ReturnType<ImportJobProcessorDeps["requireSession"]>, namespace: unknown): void;
   normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined;
@@ -113,7 +113,7 @@ export interface ImportJobProcessorDeps {
   };
   captureClaims: {
     claim(input: {
-      userId: string;
+      userId: string | null;
       source: string;
       qaHash: string;
       primaryMemoryId: string;

@@ -137,7 +137,7 @@ describe("memory token budget review regressions", () => {
       payload: {
         feedbackId: feedback.feedbackId,
         contextHash: "ctx-budget-revision",
-        namespace
+        namespace: { ...namespace, userId: null }
       }
     });
     await service.runWorkerOnce(10);
@@ -150,7 +150,7 @@ describe("memory token budget review regressions", () => {
     expect(repairs()).toHaveLength(1);
     expect(repairs()[0]).toMatchObject({
       feedbackId: feedback.feedbackId,
-      userId: namespace.userId,
+      userId: null,
       projectId: namespace.projectId,
       preference: expect.stringContaining("Inspect migration output"),
       source: { synthesis: "llm" }
@@ -158,7 +158,7 @@ describe("memory token budget review regressions", () => {
     expect(repos.runtime.listChanges(undefined, 50)
       .filter((change) => change.changeType === "decision_repair_created")
       .map((change) => change.namespaceId)).toEqual([
-      "user-budget-revision:project-budget-revision:codex:budget-revision-profile"
+      "project-budget-revision:codex:budget-revision-profile"
     ]);
     await service.runWorkerOnce(10);
     expect(calls.filter((operation) => operation === "decision.repair.v1")).toHaveLength(1);
@@ -524,7 +524,7 @@ describe("memory token budget review regressions", () => {
     const row = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = 'user-feedback-rule'
+       WHERE user_id IS NULL
          AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { id: string } | undefined;

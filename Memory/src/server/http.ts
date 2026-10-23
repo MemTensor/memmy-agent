@@ -1555,6 +1555,7 @@ function strictEnvelopeWithPrincipal(
     "source"
   ];
   for (const field of fields) {
+    if (field === "userId" && (principal.kind === "local" || principal.kind === "anonymous")) continue;
     const requested = requestNamespace?.[field];
     const scoped = principalNamespace?.[field];
     if (typeof requested === "string" && requested && typeof scoped === "string" && scoped && requested !== scoped) {

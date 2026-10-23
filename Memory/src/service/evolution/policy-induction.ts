@@ -69,13 +69,13 @@ type ReposPort = {
   runtime: {
     pruneCandidatePool(now: string): number;
     listPendingCandidatePool(input: {
-      userId?: string;
+      userId?: string | null;
       now?: string;
       limit?: number;
     }): CandidatePoolRecord[];
     upsertCandidatePoolTrace(input: {
       id: string;
-      userId: string;
+      userId: string | null;
       sessionId?: string;
       sourceMemoryId: string;
       candidateKey: string;
@@ -87,20 +87,20 @@ type ReposPort = {
       expiresAt?: string | null;
     }): void;
     markCandidatePoolPromoted(input: {
-      userId?: string;
+      userId?: string | null;
       candidateKey: string;
       sourceMemoryIds: string[];
       policyId: string;
       at: string;
     }): void;
     listTracePolicyLinks(input: {
-      userId?: string;
+      userId?: string | null;
       l1MemoryId?: string;
       l2MemoryId?: string;
       limit?: number;
     }): PolicyTraceLink[];
     insertTracePolicyLink(input: {
-      userId: string;
+      userId: string | null;
       l1MemoryId: string;
       l2MemoryId: string;
       relation?: string;
@@ -137,7 +137,7 @@ export interface PolicyInductionDeps {
     kind: string;
     op: JobChangeKind;
     entityId: string;
-    userId: string;
+    userId: string | null;
     changeType: string;
     before?: unknown;
     after: unknown;
@@ -828,7 +828,7 @@ export class PolicyInductionEngine {
   }
 
   private markCandidatePoolPromoted(
-    userId: string,
+    userId: string | null,
     signature: string,
     sourceMemoryIds: string[],
     policyId: string,

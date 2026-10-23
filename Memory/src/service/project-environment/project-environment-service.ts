@@ -63,10 +63,9 @@ export class ProjectEnvironmentService {
 
   async processProfileJob(job: EvolutionJobRecord): Promise<void> {
     const payload = projectEnvironmentProfileJobPayload(job.payload);
-    if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     if (!this.deps.repos.projectEnvironments.beginScan(payload.userId, payload.projectId, payload.scanId)) return;
     try {
-      const scope = this.deps.repos.l3WorldModels.getScope(payload.userId, payload.projectId);
+      const scope = this.deps.repos.l3WorldModels.ensureScope(payload.userId, payload.projectId);
       if (!scope?.workspaceUri) throw new Error("project_environment_workspace_uri_missing");
       const scan = await scanLocalProject(scope.workspaceUri);
       const classification = classifyProjectInventory(scan.entries);

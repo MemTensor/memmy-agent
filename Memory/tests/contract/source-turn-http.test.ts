@@ -32,7 +32,7 @@ describe("source turn HTTP contract", () => {
       expect(bodies.map((body) => body.status).sort()).toEqual(["existing", "stored"]);
       expect(bodies[0]!.result.rawTurnId).toBe(bodies[1]!.result.rawTurnId);
       expect(bodies[0]!.result.l1MemoryId).toBe(bodies[1]!.result.l1MemoryId);
-      expect(new Repositories(db.db).runtime.getSession(bodies[0]!.result.sessionId)).toMatchObject({ userId: "http-user", source: "codex", profileId: "default" });
+      expect(new Repositories(db.db).runtime.getSession(bodies[0]!.result.sessionId)).toMatchObject({ userId: null, source: "codex", profileId: "default" });
       const forbidden = await submit({ ...payload, sourceTurn: { ...payload.sourceTurn, profileId: "foreign-profile" } });
       expect(forbidden.status).toBe(403);
       const foreignUser = await submit({ ...payload, namespace: { source: "codex", profileId: "default", userId: "foreign-user" } });
@@ -72,7 +72,7 @@ describe("source turn HTTP contract", () => {
       expect(first.result.sessionId).toBe(opened.sessionId);
       expect(second.result.l1MemoryId).toBe(first.result.l1MemoryId);
       const repos = new Repositories(db.db);
-      expect(repos.memories.get(first.result.l1MemoryId)).toMatchObject({ userId: "configured-owner", sessionId: opened.sessionId,
+      expect(repos.memories.get(first.result.l1MemoryId)).toMatchObject({ userId: null, sessionId: opened.sessionId,
         info: { project_id: repos.runtime.getSession(opened.sessionId)!.projectId } });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 1 });
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
