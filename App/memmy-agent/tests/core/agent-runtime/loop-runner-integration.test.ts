@@ -621,7 +621,7 @@ describe("AgentLoop direct processing", () => {
 
   it("falls back to the empty-response message and truncates oversized tool outputs when saving turns", async () => {
     const p = provider([""]);
-    const agent = loop(p, { maxToolResultChars: 20 });
+    const agent = loop(p, { maxToolResultChars: 20, toolResultCompressionEnabled: true });
 
     const outbound = await agent.processDirect("hello", { sessionKey: "cli:test" });
 

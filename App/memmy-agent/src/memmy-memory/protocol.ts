@@ -9,36 +9,42 @@ const MEMORY_CONTEXT_TAGS = [
   "memory_context",
 ] as const;
 
+export type MemmyMemoryReplaySnapshot = { turnId: string; content: Record<string, any>[] };
+
+export function turnIdAttribute(turnId?: string | null): string {
+  return turnId ? ` turn_id="${escapeAttribute(turnId)}"` : "";
+}
+
 export type MemmyMemoryContextSource = "turn_start" | "tool_search" | "tool_get" | string;
 
-export function renderMemmyMemoryContext(markdown: string, source: MemmyMemoryContextSource): string {
+export function renderMemmyMemoryContext(markdown: string, source: MemmyMemoryContextSource, turnId?: string | null): string {
   const body = markdown.trim();
   if (!body) return "";
   return [
-    `<${MEMMY_MEMORY_CONTEXT_TAG} source="${escapeAttribute(source)}">`,
+    `<${MEMMY_MEMORY_CONTEXT_TAG} source="${escapeAttribute(source)}"${turnIdAttribute(turnId)}>`,
     body,
     `</${MEMMY_MEMORY_CONTEXT_TAG}>`,
   ].join("\n");
 }
 
-export function renderCurrentUserRequest(userText: string): string {
+export function renderCurrentUserRequest(userText: string, turnId?: string | null): string {
   const body = extractCurrentUserRequestText(userText).trim() || "(conversation continued)";
   return [
-    `<${CURRENT_USER_REQUEST_TAG}>`,
+    `<${CURRENT_USER_REQUEST_TAG}${turnIdAttribute(turnId)}>`,
     body,
     `</${CURRENT_USER_REQUEST_TAG}>`,
   ].join("\n");
 }
 
-export function renderMemmyContextPacket(markdown: string, source: MemmyMemoryContextSource, currentUserRequest: string): string {
-  const context = renderMemmyMemoryContext(markdown, source);
-  const request = renderCurrentUserRequest(currentUserRequest);
+export function renderMemmyContextPacket(markdown: string, source: MemmyMemoryContextSource, currentUserRequest: string, turnId?: string | null): string {
+  const context = renderMemmyMemoryContext(markdown, source, turnId);
+  const request = renderCurrentUserRequest(currentUserRequest, turnId);
   return context ? `${context}\n\n${request}` : request;
 }
 
-export function renderMemmyMemoryUnavailableNotice(): string {
+export function renderMemmyMemoryUnavailableNotice(turnId?: string | null): string {
   return [
-    `<${MEMMY_MEMORY_STATUS_TAG} status="unavailable">`,
+    `<${MEMMY_MEMORY_STATUS_TAG} status="unavailable"${turnIdAttribute(turnId)}>`,
     "IMPORTANT:",
     "- The Memmy long-term memory service is currently unreachable.",
     "- No memory recall or write was performed for this turn. This is NOT the same as \"memory was searched and nothing relevant was found\" — memory was simply not checked.",
@@ -96,7 +102,7 @@ function normalizeProtocolWhitespace(value: string): string {
 }
 
 function escapeAttribute(value: string): string {
-  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function escapeRegExp(value: string): string {

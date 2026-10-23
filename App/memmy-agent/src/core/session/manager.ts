@@ -139,6 +139,11 @@ function hasAssistantReplayState(message: Record<string, any>): boolean {
 
 function synthesizeContent(message: Record<string, any>, includeTimestamps: boolean): Record<string, any> | null {
   const role = message.role;
+  const memory = message.memmy_memory;
+  if (role === "user" && memory?.turnId === message.turn_id
+    && typeof memory?.turnId === "string" && Array.isArray(memory.content)) {
+    return { role, content: structuredClone(memory.content) };
+  }
   let content = Object.prototype.hasOwnProperty.call(message, "content") ? message.content : "";
   if (role === "assistant" && typeof content === "string") {
     content = sanitizeAssistantReplayText(content);
@@ -241,13 +246,13 @@ export class Session {
       ? { maxMessages: maxMessagesOrOptions, ...options }
       : maxMessagesOrOptions;
     const {
-      maxMessages = 120,
+      maxMessages = 80,
       maxTokens,
       includeTimestamps = false,
       targetProvider = null,
     } = historyOptions ?? {};
     const visibleMessages = this.messages.slice(this.lastConsolidated);
-    const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 120;
+    const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 80;
     let window = visibleMessages.slice(-effectiveMsgLimit);
     window = alignWindowToUserTurn(window);
     const legalStart = findLegalMessageStart(window);

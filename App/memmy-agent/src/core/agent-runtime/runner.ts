@@ -151,6 +151,8 @@ export class AgentRunSpec {
   temperature: number | null;
   reasoningEffort?: string | null;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
+  memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
   toolResultMaxCharsByName: ToolResultMaxCharsByName;
   failOnToolError: boolean;
   concurrentTools: boolean;
@@ -190,6 +192,8 @@ export class AgentRunSpec {
     temperature?: number | null;
     reasoningEffort?: string | null;
     maxToolResultChars?: number;
+    toolResultCompressionEnabled?: boolean;
+    memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
     toolResultMaxCharsByName?: ToolResultMaxCharsByName;
     failOnToolError?: boolean;
     concurrentTools?: boolean;
@@ -227,6 +231,8 @@ export class AgentRunSpec {
     this.temperature = init.temperature ?? 0.7;
     this.reasoningEffort = init.reasoningEffort ?? null;
     this.maxToolResultChars = init.maxToolResultChars ?? 100_000;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? false;
+    this.memoryContextCallback = init.memoryContextCallback;
     this.toolResultMaxCharsByName = init.toolResultMaxCharsByName ?? {};
     this.failOnToolError = init.failOnToolError ?? false;
     this.concurrentTools = init.concurrentTools ?? false;
@@ -1014,6 +1020,7 @@ export class AgentRunner {
         content = converted;
       }
     }
+    if (!spec.toolResultCompressionEnabled) return content;
     const maxChars = resolveToolResultMaxChars(name, spec.maxToolResultChars, spec.toolResultMaxCharsByName);
     try {
       content = maybePersistToolResult(
@@ -1366,7 +1373,7 @@ export class AgentRunner {
     let prepared = this.applyToolResultBudget(spec, messages);
     prepared = AgentRunner.dropOrphanToolResults(prepared);
     prepared = AgentRunner.backfillMissingToolResults(prepared);
-    prepared = AgentRunner.microcompact(prepared);
+    if (spec.toolResultCompressionEnabled) prepared = AgentRunner.microcompact(prepared);
     return prepared;
   }
 
