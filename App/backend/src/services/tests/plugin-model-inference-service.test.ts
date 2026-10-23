@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from "vitest";
 import { createPluginModelInferenceService } from "../plugin-model-inference-service.js";
 
 describe("plugin model inference Host service", () => {
+  it.each([
+    { code: 40308, data: null, message: "quota insufficient" },
+    { error: { code: "40309", type: "insufficient_quota" } }
+  ])("reports account quota errors without JSON fallback or model retries: %j", async (body) => {
+    const account = resolved();
+    if (!account.ok) throw new Error("fixture");
+    account.context.protocol = "memmy-account";
+    const fetch = vi.fn(async () => new Response(JSON.stringify(body)));
+    const service = createPluginModelInferenceService({ resolveModel: async () => account, fetch: fetch as typeof globalThis.fetch });
+    await expect(service.invoke({ pluginId: "literature-review", callId: "quota", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }], responseFormat: "json" }
+    })).rejects.toMatchObject({ code: "model_quota_exhausted", retryable: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the current user model without exposing credentials", async () => {
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toMatchObject({ authorization: "Bearer secret-key" });
@@ -277,7 +292,7 @@ describe("plugin model inference Host service", () => {
     expect(secondBody.response_format).toBeUndefined();
   });
 
-  it("leaves the account gateway's reasoning alone and budgets it like a chat turn", async () => {
+  it("honors disabled thinking for the legacy account alias without changing inherited requests", async () => {
     const account = resolved();
     if (!account.ok) throw new Error("fixture");
     account.context.protocol = "memmy-account";
@@ -287,24 +302,31 @@ describe("plugin model inference Host service", () => {
     account.provider.protocol = "memmy-account";
     account.provider.provider = "memmy_account";
     account.provider.apiBase = "https://account.example/api/agentExternal/v1";
+    const defaults = { enable_thinking: true, reasoning_effort: "high", max_tokens: 32000 };
+    account.provider.extraBody = { ...defaults };
     let body: Record<string, unknown> = {};
     const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
       return new Response(JSON.stringify({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }));
     });
-    await createPluginModelInferenceService({
+    const service = createPluginModelInferenceService({
       resolveModel: async () => account,
       fetch: fetch as typeof globalThis.fetch
-    }).invoke({
-      pluginId: "legal-labor", callId: "account-thinking", conversationId: "v", service: "model-inference",
-      input: { messages: [{ role: "user", content: "Diagnose" }], thinkingMode: "disabled" }
     });
-    // The slug is opaque, so no vendor switch is guessed at: the model reasons
-    // as it would in an ordinary chat turn, on the same 4096-token budget.
-    expect(body).toMatchObject({ max_tokens: 4_096 });
-    for (const key of ["thinking", "enable_thinking", "reasoning_effort", "reasoning"]) {
+    await service.invoke({
+      pluginId: "legal-labor", callId: "account-thinking", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write one paragraph" }], thinkingMode: "disabled", maxOutputTokens: 1100 }
+    });
+    expect(body).toMatchObject({ max_tokens: 1100, enable_thinking: false });
+    for (const key of ["thinking", "reasoning_effort", "reasoning", "max_completion_tokens"]) {
       expect(body).not.toHaveProperty(key);
     }
+    await service.invoke({
+      pluginId: "literature-review", callId: "account-inherit", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Plan research" }] }
+    });
+    expect(body).toMatchObject(defaults);
+    expect(account.provider.extraBody).toEqual(defaults);
   });
 
   it("reports a JSON response cut off at the token ceiling instead of returning half of it", async () => {
@@ -347,7 +369,8 @@ describe("plugin model inference Host service", () => {
     await expect(service.invoke({
       pluginId: "legal-labor", callId: "reasoned-away", conversationId: "v", service: "model-inference",
       input: { messages: [{ role: "user", content: "Diagnose" }], maxOutputTokens: 512 }
-    })).rejects.toMatchObject({ code: "model_response_truncated", retryable: false });
+    })).rejects.toMatchObject({ code: "model_response_truncated", retryable: false,
+      message: expect.stringContaining("contentCharacters=0; outputTokens=512; reasoningTokens=512; thinkingStrategy=inherit") });
     // Nothing about this is a JSON compatibility problem, so dropping the JSON
     // constraint and asking again would only spend the same budget twice.
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -449,6 +472,45 @@ describe("plugin model inference Host service", () => {
     controller.abort();
     await expect(pending).rejects.toMatchObject({ code: "plugin_call_cancelled", retryable: false });
     expect(receivedSignal?.aborted).toBe(true);
+  });
+
+  it("isolates an opted-out plugin cancellation from concurrent and subsequent inherited model calls", async () => {
+    const model = resolved();
+    if (!model.ok) throw new Error("fixture");
+    model.context.model = "qwen3.8-max-0902";
+    const defaults = { enable_thinking: true, reasoning_effort: "high", max_tokens: 8192 };
+    model.provider.extraBody = structuredClone(defaults);
+    const started = Promise.withResolvers<void>();
+    const bodies: Record<string, any>[] = [];
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (body.messages[0].content === "cancel this call") {
+        started.resolve();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "unaffected" }, finish_reason: "stop" }] }));
+    });
+    const service = createPluginModelInferenceService({ resolveModel: async () => model, fetch: fetch as typeof globalThis.fetch });
+    const controller = new AbortController();
+    const call = { pluginId: "literature-review", callId: "cancel-one", conversationId: "v", service: "model-inference" };
+    const pending = service.invoke({ ...call, signal: controller.signal,
+      input: { messages: [{ role: "user", content: "cancel this call" }], thinkingMode: "disabled" } });
+    const cancelled = expect(pending).rejects.toMatchObject({ code: "plugin_call_cancelled", retryable: false });
+    await started.promise;
+    await expect(service.invoke({ ...call, pluginId: "legal-labor", callId: "concurrent-other-plugin",
+      input: { messages: [{ role: "user", content: "inherited concurrent call" }] } })).resolves.toMatchObject({ content: "unaffected" });
+    controller.abort();
+    await cancelled;
+    await expect(service.invoke({ ...call, pluginId: "other-plugin", callId: "after-cancel",
+      input: { messages: [{ role: "user", content: "inherited subsequent call" }] } })).resolves.toMatchObject({ content: "unaffected" });
+    expect(bodies[0]).toMatchObject({ enable_thinking: false });
+    expect(bodies[1]).toMatchObject(defaults);
+    expect(bodies[2]).toMatchObject(defaults);
+    expect(model.provider.extraBody).toEqual(defaults);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("honors a bounded per-request timeout requested by a plugin", async () => {

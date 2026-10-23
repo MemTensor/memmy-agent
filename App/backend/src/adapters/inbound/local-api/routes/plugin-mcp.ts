@@ -3,7 +3,7 @@ import { SkillRefSchema, type PluginSkillContentService } from "../../../../serv
 import { createHash, randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CapabilityCall, CapabilityEvent, InstalledPlugin, JsonSchema } from "@memmy/local-api-contracts";
 import type { PluginService } from "../../../../services/plugin-service.js";
@@ -157,12 +157,54 @@ export function buildPluginMcpServer(
 }
 
 export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterPluginMcpRoutesOptions): void {
+  // SDK cancellation is a separate HTTP notification. It must reach the same
+  // Server that owns the in-flight tools/call, rather than a fresh stateless
+  // Server whose request-controller map is empty.
+  const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport; active: number; lastUsed: number }>();
+  const cleanup = setInterval(() => {
+    for (const [id, session] of sessions) {
+      if (session.active === 0 && Date.now() - session.lastUsed > 30 * 60_000) {
+        sessions.delete(id);
+        void session.server.close();
+      }
+    }
+  }, 60_000);
+  cleanup.unref();
+  app.addHook("preClose", async () => {
+    clearInterval(cleanup);
+    await Promise.all([...sessions.values()].map(session => session.server.close()));
+    sessions.clear();
+  });
   const handler = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     if (singleHeader(request.headers[MCP_TOKEN_HEADER]) !== options.mcpToken) {
       await reply.code(401).send({ error: "unauthorized" });
       return;
     }
 
+    const sessionId = singleHeader(request.headers["mcp-session-id"]);
+    if (sessionId && !sessions.has(sessionId)) {
+      await reply.code(404).send({ error: "MCP session not found" });
+      return;
+    }
+    let session = sessionId ? sessions.get(sessionId) : undefined;
+    if (!session && request.method === "POST" && isInitializeRequest(request.body)) {
+      const id = randomUUID();
+      const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => id });
+      session = { server, transport, active: 0, lastUsed: Date.now() };
+      transport.onclose = () => { sessions.delete(id); };
+      await server.connect(transport);
+      sessions.set(id, session);
+    }
+    if (session) {
+      const current = session;
+      current.active += 1;
+      reply.hijack();
+      reply.raw.once("close", () => { current.active -= 1; current.lastUsed = Date.now(); });
+      await current.transport.handleRequest(request.raw, reply.raw, request.body);
+      return;
+    }
+    // Preserve one-shot raw callers that do not initialize an MCP session.
     const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();

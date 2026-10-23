@@ -172,6 +172,14 @@ async function infer(
         true
       );
     }
+    if (protocol === "memmy-account") {
+      const envelope = record(body);
+      const error = record(envelope.error);
+      const code = String(envelope.code ?? error.code ?? "");
+      if (code === "40308" || code === "40309" || error.type === "insufficient_quota") {
+        throw serviceError("model_quota_exhausted", "Account Agent token quota is insufficient; replenish quota before resuming the saved task", false);
+      }
+    }
     const parsed = extractResponse(protocol, body);
     // An exhausted budget surfaces two ways, and a reasoning model reaches it
     // before writing anything: no content at all, or content cut mid-object.
@@ -183,7 +191,7 @@ async function infer(
     if (isTruncated(parsed.finishReason) && (!parsed.content.trim() || requestedFormat === "json")) {
       throw serviceError(
         "model_response_truncated",
-        `Model output was truncated after reaching this request's ${maxTokens}-token output budget (maxOutputTokens), not the user's global model setting`,
+        `Model output was truncated after reaching this request's ${maxTokens}-token output budget (maxOutputTokens), not the user's global model setting; finishReason=${parsed.finishReason}; contentCharacters=${parsed.content.length}; outputTokens=${parsed.usage.outputTokens ?? "unknown"}; reasoningTokens=${parsed.usage.reasoningTokens ?? "unknown"}; thinkingStrategy=${input.thinkingMode === "disabled" ? thinkingStrategyFor(resolved) : "inherit"}`,
         false
       );
     }
@@ -366,12 +374,11 @@ function thinkingStrategyFor(
       ? "reasoning-none"
       : "omit";
   }
-  // The account gateway hides the upstream model behind an opaque slug such as
-  // `agent_chat`, so no vendor rule below can match one. It is left alone on
-  // purpose: the gateway validates request fields, and a switch aimed at
-  // whichever model sits behind the slug today would start failing the day it
-  // fronts another one. Account callers get the same reasoning behaviour as an
-  // ordinary chat turn, which is what the budget below is sized for.
+  // Match ordinary account chat's explicit non-thinking contract for the legacy
+  // alias (providers/memmy-account.ts). Vendor detection cannot identify this
+  // opaque name; silently omitting the switch lets reasoning consume a plugin's
+  // answer-sized budget before any prose is returned.
+  if (context.protocol === "memmy-account" && slug === "agent_chat") return "enable-thinking-false";
   if (context.protocol !== "openai-chat-completions" && context.protocol !== "memmy-account") return "omit";
   return openAiChatThinkingStrategy(context.provider, provider.apiBase, slug);
 }

@@ -1,9 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@memmy/local-api-contracts";
 import { createProgressBus } from "../../../../services/progress-bus.js";
-import { buildPluginMcpServer, capabilityToolName, type PluginMcpService } from "../routes/plugin-mcp.js";
+import { buildPluginMcpServer, capabilityToolName, registerPluginMcpRoutes, type PluginMcpService } from "../routes/plugin-mcp.js";
 
 const connections: Array<{ client: Client; server: ReturnType<typeof buildPluginMcpServer> }> = [];
 
@@ -68,6 +70,69 @@ async function connect(
 }
 
 describe("plugin MCP bridge", () => {
+  it("closes live HTTP MCP sessions before shutting down the Host", async () => {
+    const { service } = createPlugins();
+    const app = Fastify();
+    registerPluginMcpRoutes(app, { plugins: service, progressBus: createProgressBus(), mcpToken: "test-secret" });
+    const url = await app.listen({ host: "127.0.0.1", port: 0 });
+    const transport = new StreamableHTTPClientTransport(new URL("/mcp/plugins", url), {
+      requestInit: { headers: { "x-memmy-mcp-token": "test-secret" } }
+    });
+    const client = new Client({ name: "shutdown-test", version: "1" });
+    try {
+      await client.connect(transport);
+      await expect(client.listTools()).resolves.toMatchObject({ tools: expect.any(Array) });
+      await app.close();
+    } finally {
+      await client.close();
+      await app.close();
+    }
+  });
+
+  it("routes HTTP cancellation to the owning request without cancelling another client's matching request ID", async () => {
+    const calls: string[] = [];
+    const releases = new Map<string, () => void>();
+    const plugins: PluginMcpService = {
+      list: () => [plugin],
+      invoke: async function* (call) {
+        calls.push(call.callId);
+        await new Promise<void>(resolve => { releases.set(call.callId, resolve); });
+        yield { type: "result", output: { done: true } };
+      },
+      cancel: vi.fn(async (_pluginId, callId) => { releases.get(callId)?.(); })
+    };
+    const app = Fastify();
+    registerPluginMcpRoutes(app, { plugins, progressBus: createProgressBus(), mcpToken: "test-secret" });
+    const url = await app.listen({ host: "127.0.0.1", port: 0 });
+    const transports = [0, 1].map(() => new StreamableHTTPClientTransport(new URL("/mcp/plugins", url), {
+      requestInit: { headers: { "x-memmy-mcp-token": "test-secret" } }
+    }));
+    const clients = [0, 1].map(() => new Client({ name: "cancellation-test", version: "1" }));
+    try {
+      await Promise.all(clients.map((client, i) => client.connect(transports[i]!)));
+      expect(transports[0]!.sessionId).toBeTruthy();
+      expect(transports[0]!.sessionId).not.toBe(transports[1]!.sessionId);
+      const abort = new AbortController();
+      const first = clients[0]!.callTool({ name: capabilityToolName(plugin.id, "run"), arguments: { topic: "first" } }, undefined, { signal: abort.signal });
+      const rejected = expect(first).rejects.toBeDefined();
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      let secondFinished = false;
+      const second = clients[1]!.callTool({ name: capabilityToolName(plugin.id, "run"), arguments: { topic: "second" } }).then(result => { secondFinished = true; return result; });
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      abort.abort();
+      await rejected;
+      await vi.waitFor(() => expect(plugins.cancel).toHaveBeenCalledExactlyOnceWith(plugin.id, calls[0]));
+      expect(secondFinished).toBe(false);
+      releases.get(calls[1]!)!();
+      await expect(second).resolves.toMatchObject({ structuredContent: { done: true } });
+    } finally {
+      for (const release of releases.values()) release();
+      await Promise.all(transports.map(transport => transport.terminateSession()));
+      await Promise.all(clients.map(client => client.close()));
+      await app.close();
+    }
+  });
+
   it("keeps similarly prefixed capability names readable after the Agent MCP prefix is added", () => {
     const updateSelection = capabilityToolName("literature-review", "review_update_paper_selection");
     const resolveMetadata = capabilityToolName("literature-review", "review_resolve_metadata");
