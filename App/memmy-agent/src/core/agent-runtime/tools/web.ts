@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { WebFailure, webFailure, formatWebFailure, withWebDeadline, webRequest, readWebBody, checkWebStatus, SearchHealth } from "./web-request.js";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
@@ -246,18 +248,22 @@ export async function validateUrlSafe(url: string): Promise<[boolean, string]> {
 export async function getWithSafeRedirects(
   url: string,
   headers: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<[Response | null, string | null]> {
   let current = url;
   for (let i = 0; i <= MAX_REDIRECTS; i += 1) {
+    signal?.throwIfAborted();
     const [ok, error] = await validateUrlSafe(current);
+    signal?.throwIfAborted();
     if (!ok) return [null, `Redirect blocked: ${error}`];
 
-    const response = await fetch(current, { headers, redirect: "manual" });
+    const response = await webRequest(current, { headers, redirect: "manual", signal });
     if (response.status < 300 || response.status >= 400) return [response, null];
 
     const location = response.headers.get("location");
     if (!location) return [response, null];
 
+    await response.body?.cancel().catch(() => {});
     const next = new URL(location, response.url || current).toString();
     const [nextOk, nextError] = await validateUrlSafe(next);
     if (!nextOk) return [null, `Redirect blocked: ${nextError}`];
@@ -269,8 +275,9 @@ export async function getWithSafeRedirects(
 export async function streamWithSafeRedirects(
   url: string,
   headers: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<[Response | null, null, string | null]> {
-  const [response, error] = await getWithSafeRedirects(url, headers);
+  const [response, error] = await getWithSafeRedirects(url, headers, signal);
   return [response, null, error];
 }
 
@@ -355,47 +362,30 @@ function extractReadableHtml(
   return { ...fallback, extractor: "raw-html" };
 }
 
-async function responseJson(response: Response): Promise<any> {
-  const text = await response.text();
-  return text ? JSON.parse(text) : {};
+async function responseJson(response: Response, signal?: AbortSignal): Promise<any> {
+  const text = await readWebBody<string>(response, "text", signal);
+  try { return text ? JSON.parse(text) : {}; }
+  catch (cause) { throw new WebFailure("parse", "Invalid JSON response", "parse", undefined, 0, { cause }); }
 }
 
-async function requestJson(
-  url: string,
-  init: RequestInit = {},
-  retryRateLimit = false,
-): Promise<any> {
-  const response = await fetch(url, init);
-  if (retryRateLimit && response.status === 429) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const retry = await fetch(url, init);
-    if (retry.status === 429) throw new Error("rate limited");
-    if (!retry.ok) throw new Error(`HTTP ${retry.status}`);
-    return responseJson(retry);
+function searchItems(value: unknown): Array<Record<string, any>> {
+  if (!Array.isArray(value) || value.some((item) => !item || typeof item !== "object" || Array.isArray(item))) {
+    throw new WebFailure("parse", "Unrecognized search response", "parse");
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return responseJson(response);
+  return value;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutS: number): Promise<T> {
-  const timeoutMs = Math.max(0, Number(timeoutS) || 0) * 1000;
-  if (!timeoutMs) return promise;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+async function requestJson(url: string, init: RequestInit = {}): Promise<any> {
+  const response = await webRequest(url, init);
   try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((resolve, reject) => {
-        void resolve;
-        timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+    checkWebStatus(response);
+    return await responseJson(response, init.signal ?? undefined);
+  } finally { await response.body?.cancel().catch(() => {}); }
 }
 
 export class WebSearchTool extends Tool {
   static configKey = "web";
+  private health = new SearchHealth();
   config: WebSearchConfig;
   configLoader?: (() => WebSearchConfig) | undefined;
   proxy?: string | null;
@@ -459,7 +449,7 @@ export class WebSearchTool extends Tool {
   get description(): string {
     return (
       "Search the web. Returns titles, URLs, and snippets. count defaults to 5 (max 10). " +
-      "Use web_fetch to read a specific page in full."
+      "Use web_fetch to read a specific page in full. On service errors, respect retry-after/cooldown; changing keywords cannot fix a network failure. If no configured service is available, explain the limitation instead of repeating searches."
     );
   }
 
@@ -468,7 +458,7 @@ export class WebSearchTool extends Tool {
   }
 
   get exclusive(): boolean {
-    return this.effectiveProvider() === "duckduckgo";
+    return this.effectiveProvider() === "duckduckgo" || this.config.fallbackProviders.some((provider) => provider.trim().toLowerCase() === "duckduckgo");
   }
 
   get parameters() {
@@ -493,215 +483,179 @@ export class WebSearchTool extends Tool {
 
   effectiveProvider(): string {
     this.refreshConfig();
-    const provider =
-      String(this.config.provider ?? "")
-        .trim()
-        .toLowerCase() || "brave";
-    if (provider === "duckduckgo") return "duckduckgo";
-    if (provider === "brave")
-      return this.config.apiKey || process.env.BRAVE_API_KEY ? "brave" : "duckduckgo";
-    if (provider === "tavily")
-      return this.config.apiKey || process.env.TAVILY_API_KEY ? "tavily" : "duckduckgo";
-    if (provider === "searxng") {
-      return (this.config.baseUrl || process.env.SEARXNG_BASE_URL || "").trim()
-        ? "searxng"
-        : "duckduckgo";
-    }
-    if (provider === "jina")
-      return this.config.apiKey || process.env.JINA_API_KEY ? "jina" : "duckduckgo";
-    if (provider === "kagi")
-      return this.config.apiKey || process.env.KAGI_API_KEY ? "kagi" : "duckduckgo";
-    if (provider === "olostep")
-      return this.config.apiKey || process.env.OLOSTEP_API_KEY ? "olostep" : "duckduckgo";
-    return provider;
+    return String(this.config.provider || "brave").trim().toLowerCase();
   }
 
-  async execute(params: SearchParams | string = {}): Promise<string> {
+  async execute(params: SearchParams | string = {}, context?: ToolExecutionContext): Promise<string> {
     this.refreshConfig();
     const query = typeof params === "string" ? params : params.query;
     if (!query) return "Error: missing query";
-    const count =
-      typeof params === "string"
-        ? this.config.maxResults
-        : (params.count ?? params.max_results ?? params.maxResults ?? this.config.maxResults);
-    const n = Math.min(Math.max(count, 1), 10);
-    const provider =
-      String(this.config.provider ?? "")
-        .trim()
-        .toLowerCase() || "brave";
-
-    if (provider === "olostep") return this.searchOlostep(query, n);
-    if (provider === "duckduckgo") return this.searchDuckduckgo(query, n);
-    if (provider === "tavily") return this.searchTavily(query, n);
-    if (provider === "searxng") return this.searchSearxng(query, n);
-    if (provider === "jina") return this.searchJina(query, n);
-    if (provider === "brave") return this.searchBrave(query, n);
-    if (provider === "kagi") return this.searchKagi(query, n);
-    return `Error: unknown search provider '${provider}'`;
-  }
-
-  async searchDuckduckgo(query: string, n: number): Promise<string> {
+    const n = Math.min(Math.max(typeof params === "string" ? this.config.maxResults : (params.count ?? params.max_results ?? params.maxResults ?? this.config.maxResults), 1), 10);
+    // Snapshot configuration so concurrent calls/hot reload cannot mix credentials or health keys.
+    const config = new WebSearchConfig(this.config);
+    const primary = String(config.provider || "brave").trim().toLowerCase();
+    const providers = [...new Set([primary, ...config.fallbackProviders.map((p) => p.trim().toLowerCase())])];
     try {
-      const raw = await withTimeout(this.duckduckgoText(query, n), this.config.timeout);
-      if (!raw.length) return `No results for: ${query}`;
-      const items = raw.map((item) => ({
-        title: item.title ?? "",
-        url: item.url ?? item.href ?? "",
-        content: item.content ?? item.body ?? "",
-      }));
-      return formatResults(query, items, n);
-    } catch (err) {
-      return `Error: DuckDuckGo search failed (${(err as Error).message})`;
-    }
+      return await withWebDeadline(config.timeout, context?.abortSignal, async (signal) => {
+        const failures: string[] = [];
+        for (const provider of providers) {
+          signal.throwIfAborted();
+          const worker = new WebSearchTool({ config: new WebSearchConfig({ ...config, provider,
+            apiKey: provider === primary ? config.apiKey : "",
+            baseUrl: provider === primary ? config.baseUrl : "",
+          }), userAgent: this.userAgent, proxy: this.proxy });
+          // Capture environment configuration once per attempt, never use the primary's key for a fallback.
+          worker.config.apiKey ||= process.env[`${provider.toUpperCase()}_API_KEY`] || "";
+          if (provider === "searxng") worker.config.baseUrl ||= process.env.SEARXNG_BASE_URL || "";
+          const key = createHash("sha256").update(JSON.stringify([provider, worker.config.baseUrl, worker.config.apiKey])).digest("hex");
+          try {
+            const methods: Record<string, (q: string, n: number, signal?: AbortSignal) => Promise<string>> = {
+              duckduckgo: worker.searchDuckduckgo, brave: worker.searchBrave, tavily: worker.searchTavily,
+              searxng: worker.searchSearxng, jina: worker.searchJina, kagi: worker.searchKagi, olostep: worker.searchOlostep,
+            };
+            if (!methods[provider]) throw new WebFailure("configuration", "Unknown search provider", "configuration");
+            if (provider !== "duckduckgo" && !(provider === "searxng" ? worker.config.baseUrl.trim() : worker.config.apiKey)) {
+              throw new WebFailure("configuration", "Missing search credentials or endpoint", "configuration");
+            }
+            return await this.health.run(key, signal, () => methods[provider].call(worker, query, n, signal));
+          } catch (error) {
+            if (signal.aborted) throw signal.reason;
+            failures.push(formatWebFailure(provider, error));
+          }
+        }
+        return failures.join("\n");
+      });
+    } catch (error) { return formatWebFailure(primary, error); }
   }
 
-  async duckduckgoText(query: string, n: number): Promise<Array<Record<string, string>>> {
+  async searchDuckduckgo(query: string, n: number, signal?: AbortSignal): Promise<string> {
+    const raw = await this.duckduckgoText(query, n, signal);
+    return formatResults(query, raw, n);
+  }
+
+  async duckduckgoText(query: string, n: number, signal?: AbortSignal): Promise<Array<Record<string, string>>> {
     const endpoints = [DUCKDUCKGO_HTML_ENDPOINT, DUCKDUCKGO_LITE_ENDPOINT];
-    const errors: string[] = [];
-    for (const endpoint of endpoints) {
+    for (const [index, endpoint] of endpoints.entries()) {
+      signal?.throwIfAborted();
       const url = new URL(endpoint);
       url.searchParams.set("q", query);
       url.searchParams.set("kp", "-1");
+      const response = await webRequest(url.toString(), {
+        signal, method: "GET",
+        headers: {
+          Accept: "text/html,application/xhtml+xml",
+          "User-Agent": this.userAgent === DEFAULT_USER_AGENT ? DUCKDUCKGO_USER_AGENT : this.userAgent,
+        },
+      });
       try {
-        const response = await fetch(url.toString(), {
-          method: "GET",
-          headers: {
-            Accept: "text/html,application/xhtml+xml",
-            "User-Agent": this.userAgent === DEFAULT_USER_AGENT ? DUCKDUCKGO_USER_AGENT : this.userAgent,
-          },
-        });
-        if (response.status === 202) {
-          throw new Error("HTTP 202, likely a bot-detection challenge");
+        if (response.status === 202) throw new WebFailure("challenge", "Search blocked by bot-detection challenge", "response", "HTTP_202");
+        checkWebStatus(response);
+        const html = await readWebBody<string>(response, "text", signal);
+        if (isDuckDuckGoBotChallenge(html)) throw new WebFailure("challenge", "Search blocked by bot-detection challenge", "parse");
+        const items = parseDuckDuckGoHtml(html).slice(0, n);
+        if (!items.length && !/class=["'][^"']*no-results|no results (?:found|for)|no more results/i.test(html)) {
+          throw new WebFailure("parse", "Unrecognized search response; cannot determine whether results are empty", "parse");
         }
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const html = await response.text();
-        if (isDuckDuckGoBotChallenge(html)) {
-          throw new Error("bot-detection challenge");
-        }
-        return parseDuckDuckGoHtml(html).slice(0, n);
-      } catch (err) {
-        errors.push(`${new URL(endpoint).hostname}: ${(err as Error).message}`);
-      }
+        return items;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        const failure = webFailure(error);
+        // Only an endpoint-specific challenge/format issue warrants a Lite attempt.
+        if (index === 0 && ["challenge", "parse"].includes(failure.category)) continue;
+        throw failure;
+      } finally { await response.body?.cancel().catch(() => {}); }
     }
-    throw new Error(errors.join("; "));
+    throw new WebFailure("parse", "No usable search response", "parse");
   }
 
-  async searchBrave(query: string, n: number): Promise<string> {
+  async searchBrave(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const apiKey = this.config.apiKey || process.env.BRAVE_API_KEY || "";
-    if (!apiKey) return this.searchDuckduckgo(query, n);
-    try {
+    if (!apiKey) throw new WebFailure("configuration", "Missing API key", "configuration");
       const data = await requestJson(
         `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${n}`,
         {
-          headers: {
+          signal, headers: {
             Accept: "application/json",
             "X-Subscription-Token": apiKey,
             "User-Agent": this.userAgent,
           },
         },
-        true,
       );
-      return formatResults(query, data.web?.results ?? [], n);
-    } catch (err) {
-      if ((err as Error).message === "rate limited") {
-        return "Error: Brave search rate limited after retry. Retry later or reduce consecutive web_search calls.";
-      }
-      return `Error: ${(err as Error).message}`;
-    }
+      return formatResults(query, searchItems(data.web?.results), n);
   }
 
-  async searchTavily(query: string, n: number): Promise<string> {
+  async searchTavily(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const apiKey = this.config.apiKey || process.env.TAVILY_API_KEY || "";
-    if (!apiKey) return this.searchDuckduckgo(query, n);
-    try {
+    if (!apiKey) throw new WebFailure("configuration", "Missing API key", "configuration");
       const data = await requestJson("https://api.tavily.com/search", {
         method: "POST",
-        headers: {
+        signal, headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
           "User-Agent": this.userAgent,
         },
         body: JSON.stringify({ query, max_results: n }),
       });
-      return formatResults(query, data.results ?? [], n);
-    } catch (err) {
-      return `Error: ${(err as Error).message}`;
-    }
+      return formatResults(query, searchItems(data.results), n);
   }
 
-  async searchSearxng(query: string, n: number): Promise<string> {
+  async searchSearxng(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const baseUrl = (this.config.baseUrl || process.env.SEARXNG_BASE_URL || "").trim();
-    if (!baseUrl) return this.searchDuckduckgo(query, n);
+    if (!baseUrl) throw new WebFailure("configuration", "Missing endpoint", "configuration");
     const endpoint = `${baseUrl.replace(/\/+$/, "")}/search`;
     const [isValid, error] = validateUrl(endpoint);
-    if (!isValid) return `Error: invalid SearXNG URL: ${error}`;
-    try {
+    if (!isValid) throw new WebFailure("configuration", `Invalid SearXNG URL: ${error}`, "configuration");
       const data = await requestJson(`${endpoint}?q=${encodeURIComponent(query)}&format=json`, {
-        headers: { "User-Agent": this.userAgent },
+        signal, headers: { "User-Agent": this.userAgent },
       });
-      return formatResults(query, data.results ?? [], n);
-    } catch (err) {
-      return `Error: ${(err as Error).message}`;
-    }
+      return formatResults(query, searchItems(data.results), n);
   }
 
-  async searchJina(query: string, n: number): Promise<string> {
+  async searchJina(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const apiKey = this.config.apiKey || process.env.JINA_API_KEY || "";
-    if (!apiKey) return this.searchDuckduckgo(query, n);
-    try {
+    if (!apiKey) throw new WebFailure("configuration", "Missing API key", "configuration");
       const encoded = encodeURIComponent(query);
       const data = await requestJson(`https://s.jina.ai/${encoded}`, {
-        headers: {
+        signal, headers: {
           Accept: "application/json",
           Authorization: `Bearer ${apiKey}`,
           "User-Agent": this.userAgent,
         },
       });
-      const items = (data.data ?? []).slice(0, n).map((item: Record<string, any>) => ({
+      const items = searchItems(data.data).slice(0, n).map((item: Record<string, any>) => ({
         title: item.title ?? "",
         url: item.url ?? "",
         content: String(item.content ?? "").slice(0, 500),
       }));
       return formatResults(query, items, n);
-    } catch {
-      return this.searchDuckduckgo(query, n);
-    }
   }
 
-  async searchKagi(query: string, n: number): Promise<string> {
+  async searchKagi(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const apiKey = this.config.apiKey || process.env.KAGI_API_KEY || "";
-    if (!apiKey) return this.searchDuckduckgo(query, n);
-    try {
+    if (!apiKey) throw new WebFailure("configuration", "Missing API key", "configuration");
       const data = await requestJson("https://kagi.com/api/v1/search", {
         method: "POST",
-        headers: {
+        signal, headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
           "User-Agent": this.userAgent,
         },
         body: JSON.stringify({ query, limit: n }),
       });
-      const items = (data.data?.search ?? []).map((item: Record<string, any>) => ({
+      const items = searchItems(data.data?.search).map((item: Record<string, any>) => ({
         title: item.title ?? "",
         url: item.url ?? "",
         content: item.snippet ?? "",
       }));
       return formatResults(query, items, n);
-    } catch (err) {
-      return `Error: ${(err as Error).message}`;
-    }
   }
 
-  async searchOlostep(query: string, n: number): Promise<string> {
+  async searchOlostep(query: string, n: number, signal?: AbortSignal): Promise<string> {
     const apiKey = this.config.apiKey || process.env.OLOSTEP_API_KEY || "";
-    if (!apiKey) return this.searchDuckduckgo(query, n);
-    try {
+    if (!apiKey) throw new WebFailure("configuration", "Missing API key", "configuration");
       const data = await requestJson("https://api.olostep.com/v1/answers", {
         method: "POST",
-        headers: {
+        signal, headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
           "User-Agent": this.userAgent,
@@ -721,9 +675,6 @@ export class WebSearchTool extends Tool {
         [{ title: data.answer || "Olostep answer", url: "", content: sourceLines.join("\n") }],
         n,
       );
-    } catch (err) {
-      return `Olostep search error: ${(err as Error).message}`;
-    }
   }
 }
 
@@ -807,6 +758,14 @@ export class WebFetchTool extends Tool {
   }
 
   async execute(params: FetchParams | string = {}, context?: ToolExecutionContext): Promise<any> {
+    try {
+      return await withWebDeadline(this.config.timeoutS, context?.abortSignal, (signal) =>
+        this.executeRequest(params, { ...context, abortSignal: signal }));
+    } catch (error) { return formatWebFailure("web_fetch", error); }
+  }
+
+  private async executeRequest(params: FetchParams | string, context: ToolExecutionContext): Promise<any> {
+    const signal = context.abortSignal ?? undefined;
     const rawUrl = typeof params === "string" ? params : params.url;
     if (!rawUrl) return JSON.stringify({ error: "missing url" });
     const url = cleanUrl(rawUrl);
@@ -827,17 +786,21 @@ export class WebFetchTool extends Tool {
     try {
       const [response, , redirectError] = await streamWithSafeRedirects(url, {
         "User-Agent": this.userAgent,
-      });
+      }, signal);
       if (redirectError) return JSON.stringify({ error: redirectError, url });
       if (!response) return JSON.stringify({ error: "Fetch failed", url });
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType.startsWith("image/")) {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const raw = new Uint8Array(await response.arrayBuffer());
+        checkWebStatus(response);
+        const raw = new Uint8Array(await readWebBody<ArrayBuffer>(response, "arrayBuffer", signal));
         return buildImageContentBlocks(raw, contentType, url, `(Image fetched from: ${url})`);
       }
-    } catch {
-      // Image preflight is best effort; readability/Jina fetch below reports final errors.
+      // Discard the preflight body before fetching readable content.
+      await response.body?.cancel().catch(() => {});
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      // Do not retry the same failing origin through readability after a network error.
+      throw error;
     }
 
     let result: any = null;
@@ -851,16 +814,17 @@ export class WebFetchTool extends Tool {
     maxChars: number,
     context?: ToolExecutionContext,
   ): Promise<string | null> {
+    const signal = context?.abortSignal ?? undefined;
     try {
       const headers: Record<string, string> = {
         Accept: "application/json",
         "User-Agent": this.userAgent,
       };
       if (process.env.JINA_API_KEY) headers.Authorization = `Bearer ${process.env.JINA_API_KEY}`;
-      const response = await fetch(`https://r.jina.ai/${url}`, { headers });
-      if (response.status === 429) return null;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = (await responseJson(response)).data ?? {};
+      const response = await webRequest(`https://r.jina.ai/${url}`, { headers, signal });
+      if (response.status === 429) { await response.body?.cancel().catch(() => {}); return null; }
+      checkWebStatus(response);
+      const data = (await responseJson(response, signal)).data ?? {};
       let text = String(data.content ?? "");
       if (!text) return null;
       if (data.title) text = `# ${data.title}\n\n${text}`;
@@ -874,6 +838,7 @@ export class WebFetchTool extends Tool {
         context,
       });
     } catch {
+      if (signal?.aborted) throw signal.reason;
       return null;
     }
   }
@@ -884,27 +849,28 @@ export class WebFetchTool extends Tool {
     maxChars: number,
     context?: ToolExecutionContext,
   ): Promise<any> {
+    const signal = context?.abortSignal ?? undefined;
     try {
       const [response, redirectError] = await getWithSafeRedirects(url, {
         "User-Agent": this.userAgent,
-      });
+      }, signal);
       if (redirectError) return JSON.stringify({ error: redirectError, url });
       if (!response) return JSON.stringify({ error: "Fetch failed", url });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      checkWebStatus(response);
 
       const contentType = response.headers.get("content-type") ?? "";
       if (contentType.startsWith("image/")) {
-        const raw = new Uint8Array(await response.arrayBuffer());
+        const raw = new Uint8Array(await readWebBody<ArrayBuffer>(response, "arrayBuffer", signal));
         return buildImageContentBlocks(raw, contentType, url, `(Image fetched from: ${url})`);
       }
 
       let text: string;
       let extractor: string;
       if (contentType.includes("application/json")) {
-        text = await response.text();
+        text = await readWebBody<string>(response, "text", signal);
         extractor = "json";
       } else {
-        const rawText = await response.text();
+        const rawText = await readWebBody<string>(response, "text", signal);
         if (
           htmlLooksLikeDocument(contentType, rawText)
         ) {
@@ -929,7 +895,8 @@ export class WebFetchTool extends Tool {
         context,
       });
     } catch (err) {
-      return JSON.stringify({ error: String((err as Error).message ?? err), url });
+      if (signal?.aborted) throw signal.reason;
+      return formatWebFailure("web_fetch", err);
     }
   }
 

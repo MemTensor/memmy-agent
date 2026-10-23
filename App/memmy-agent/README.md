@@ -235,3 +235,33 @@ Run the package checks:
 npm run typecheck
 npm test
 ```
+
+### Web request failures and search recovery
+
+`web_search` distinguishes network, timeout, HTTP/rate-limit, authentication,
+challenge, response parsing, configuration and user-cancellation failures from
+successful empty results. Error text includes the provider, known phase and safe
+nested transport codes; raw transport messages and credentials are not exposed.
+`tools.webSearch.timeout` bounds the entire call (including all fallback attempts),
+and `tools.webFetch.timeoutS` bounds page retrieval. Non-positive/non-finite values
+use 30 seconds. Deadlines and user cancellation abort fetch and body reads.
+
+Search health is retained across queries on the same tool instance, keyed by
+provider/endpoint/credential identity. Transient failures impose a 5-second
+cooldown, doubling after unsuccessful recovery probes up to 60 seconds.
+Authentication errors wait at least 60 seconds; `Retry-After` can extend the wait.
+After cooldown, only one recovery probe is admitted; success (including a valid
+empty result) resets the state. Cancellation does not count as service failure.
+Changing keywords cannot bypass cooldown. Configuration changes select independent
+health state. This state is in memory and resets when the tool is recreated.
+
+There is no implicit switch to DuckDuckGo when another provider is misconfigured
+or fails. To opt in, set `tools.webSearch.fallbackProviders`, for example
+`["duckduckgo"]`. Keyed fallbacks use their own provider environment variable
+(e.g. `TAVILY_API_KEY`), and SearXNG uses `SEARXNG_BASE_URL`; the primary API key is
+never forwarded to a different provider. Unconfigured or cooling-down providers
+are skipped. A first attempt establishes availability; this is not background
+health monitoring. DuckDuckGo HTML-to-Lite fallback is limited to challenge or
+format failures and shares the same call deadline. No fallback starts after
+cancellation. When all configured services are unavailable, report that limitation
+instead of repeatedly searching with different keywords.
