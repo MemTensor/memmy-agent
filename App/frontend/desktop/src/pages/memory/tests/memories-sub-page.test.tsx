@@ -38,6 +38,20 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("重复的窗口切换没有提供新上下文。");
     expect(html).not.toContain("memory-card__score");
   });
+
+  it("shows source envelopes and adjacent requests in the user detail block", () => {
+    const detail = { ...memoryDetailFixture, item: { ...memoryDetailFixture.item,
+      metadata: { ...memoryDetailFixture.item.metadata, traceDetail: {
+        ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+        userQuery: '<in-app-browser-context>\n上下文\n</in-app-browser-context>\n请保留记忆请求。'
+      } }
+    } };
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([memoryListItemFixture]), detail: { status: "ready", data: detail } });
+    expect(html).toContain("请保留记忆请求。");
+    expect(html).toContain("&lt;in-app-browser-context&gt;");
+    expect(html).not.toContain("<in-app-browser-context>");
+  });
+
   it("把搜索转换为只读取原始记忆的 PanelItemsInput", () => {
     expect(buildPanelItemsInput({ query: "偏好" })).toEqual({
       q: "偏好",
@@ -330,7 +344,7 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain('class="memory-card__title">trace_457c41a4ec1e730ecd39');
   });
 
-  it("waiting 列表的 RawTurn 标题不盖过正文里的用户原句", () => {
+  it("waiting 列表缺少 sourceText 时使用 id，不重新提取原始正文", () => {
     const html = renderMemories({
       status: "ready",
       data: panelItemsOutput([{
@@ -345,9 +359,63 @@ describe("MemoriesSubPage", () => {
       }]),
       detail: null
     });
-    expect(html).toContain('class="memory-card__title">请修复自动扫描卡顿');
+    expect(html).toContain('class="memory-card__title">trace_waiting_raw');
+    expect(html).not.toContain('class="memory-card__title">请修复自动扫描卡顿');
     expect(html).toContain("摘要总结中");
     expect(html).not.toContain("RawTurn: raw_pending");
+  });
+
+  it.each(["summary_pending", "summarizing"] as const)("%s 不从正文恢复已过滤的上下文或占位状态", (state) => {
+    for (const sourceText of [undefined, "摘要总结中"]) {
+      const html = renderMemories({
+        status: "ready",
+        data: panelItemsOutput([{
+          ...memoryListItemFixture,
+          id: "trace_context_only", title: "<timestamp>today</timestamp>",
+          generatedTitle: undefined, sourceText, summary: "",
+          body: 'User:\n<in-app-browser-context source="ambient-ui-state">\n页面正文\n</in-app-browser-context>\nAssistant:\nDone',
+          processing: processingRecord("trace_context_only", state, "summary")
+        }]), detail: null
+      });
+      expect(html).toContain('class="memory-card__title">trace_context_only');
+      expect(html).toContain("摘要总结中");
+      expect(html).not.toContain("in-app-browser-context");
+      expect(html).not.toContain("页面正文");
+      expect(html).not.toContain("timestamp");
+    }
+  });
+
+  it.each(["failed", "ready"] as const)("%s 的 trace 使用语义预览或 ID，不能恢复历史标签", (state) => {
+    for (const summary of ["", "摘要总结中"]) {
+      for (const sourceText of ["请修复标题", undefined, "摘要总结中"]) {
+        const html = renderMemories({
+          status: "ready",
+          data: panelItemsOutput([{
+            ...memoryListItemFixture, kind: "trace", id: "trace_context_fallback",
+            title: "<timestamp>today</timestamp>", generatedTitle: undefined, summary, sourceText,
+            body: 'User:\n<in-app-browser-context source="ambient-ui-state">\n页面正文\n</in-app-browser-context>\nAssistant:\nDone',
+            processing: { ...processingRecord("trace_context_fallback", "ready", "summary"), state }
+          }]), detail: null
+        });
+        expect(html).toContain(`class="memory-card__title">${sourceText === "请修复标题" ? sourceText : "trace_context_fallback"}`);
+        expect(html).not.toContain("in-app-browser-context");
+        expect(html).not.toContain("timestamp");
+        expect(html).not.toContain("页面正文");
+      }
+    }
+  });
+
+  it("摘要完成进入 embedding 阶段后使用生成标题，不继续显示预览", () => {
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        generatedTitle: "扫描标题修复", sourceText: "请修复扫描后的记忆标题",
+        processing: processingRecord(memoryListItemFixture.id, "embedding_pending", "embedding")
+      }]), detail: null
+    });
+    expect(html).toContain('class="memory-card__title">扫描标题修复');
+    expect(html).not.toContain('class="memory-card__title">请修复扫描后的记忆标题');
   });
 
   it("waiting 的记忆详情不显示标题，并把记忆摘要固定成摘要总结中", () => {
@@ -1037,7 +1105,7 @@ function renderMemories(
 
 function processingRecord(
   memoryId: string,
-  state: "summary_pending" | "embedding_pending" | "ready",
+  state: "summary_pending" | "summarizing" | "embedding_pending" | "ready",
   stage: "summary" | "embedding" | null
 ) {
   return {

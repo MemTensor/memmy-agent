@@ -7,6 +7,20 @@ describe("memory panel cache", () => {
     vi.unstubAllGlobals();
   });
 
+  it("discards fresh previews cached before source-envelope filtering", () => {
+    const storage = createMemoryStorage();
+    vi.stubGlobal("window", { sessionStorage: storage });
+    const key = memoryPanelCacheKey("memories", "latest");
+    storage.setItem(`memmy.memory-panel.${key}`, JSON.stringify({
+      version: 1, savedAt: new Date().toISOString(),
+      data: { sourceText: '<in-app-browser-context source="ambient-ui-state">' }
+    }));
+    expect(readMemoryPanelCache(key)).toBeNull();
+    expect(storage.getItem(`memmy.memory-panel.${key}`)).toBeNull();
+    writeMemoryPanelCache(key, { sourceText: "请修复标题" });
+    expect(readMemoryPanelCache(key)).toEqual({ sourceText: "请修复标题" });
+  });
+
   it("clears only memory panel cache entries", () => {
     const storage = createMemoryStorage();
     vi.stubGlobal("window", { sessionStorage: storage });

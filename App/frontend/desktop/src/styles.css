@@ -7308,6 +7308,10 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   overflow-wrap: anywhere;
 }
 
+.memory-markdown__literal-html {
+  white-space: pre-wrap;
+}
+
 .memory-markdown :first-child {
   margin-top: 0;
 }

@@ -1,5 +1,6 @@
 const CACHE_PREFIX = "memmy.memory-panel.";
-const CACHE_VERSION = 1;
+// Invalidate previews computed before source-envelope filtering.
+const CACHE_VERSION = 2;
 const CACHE_TTL_MS = 30_000;
 
 interface CacheEnvelope<T> {
