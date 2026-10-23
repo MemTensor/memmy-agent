@@ -7,6 +7,7 @@ import {
   type HealthStatus,
   type ScanPreferences
 } from "@memmy/local-api-contracts";
+import { scanPreferencesWriter } from "../api/scan-preferences-writer.js";
 import { ApiRequestError } from "../api/http.js";
 import type { AppClients } from "../api/client-types.js";
 import {
@@ -308,10 +309,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   useEffect(() => {
     if (!clients) return;
     let active = true;
+    const writer = scanPreferencesWriter(clients.config);
     const refresh = () => {
+      const revision = writer.revision;
+      if (!writer.canRefresh(revision)) return;
       void clients.config.getScanPreferences()
         .then((preferences) => {
-          if (active) dispatch(appActions.scanPreferencesUpdated(preferences));
+          if (active && writer.canRefresh(revision)) dispatch(appActions.scanPreferencesUpdated(preferences));
         })
         .catch(() => undefined);
     };
@@ -507,22 +511,14 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       return;
     }
 
-    void (async () => {
-      // Enabling automation is an explicit grant; a one-off manual scan does
-      // not itself enable these switches.
-      if (preferences.autoInjectSkill === true) {
-        const onboarding = await clients.config.updateOnboarding({ scanPermission: "scan_and_write_skill" });
-        dispatch(appActions.onboardingUpdated(onboarding));
-      } else if (preferences.autoScanKnownAgents === true || preferences.watchFileChanges === true) {
-        await ensureScanPermission();
-      }
-      return clients.config.updateScanPreferences(preferences);
-    })()
-      .then((persisted) => dispatch(appActions.scanPreferencesUpdated(persisted)))
-      .catch((error) => {
-        dispatch(appActions.scanPreferencesUpdated(previous));
-        dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)));
-      });
+    void scanPreferencesWriter(clients.config).write({
+      patch: preferences,
+      previous,
+      permission: state.bootstrap?.onboarding.scanPermission ?? "unset",
+      onOnboarding: (onboarding) => dispatch(appActions.onboardingUpdated(onboarding)),
+      onConfirmed: (persisted) => dispatch(appActions.scanPreferencesUpdated(persisted)),
+      onError: (error) => dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)))
+    });
   }
 
   function continueScan() {

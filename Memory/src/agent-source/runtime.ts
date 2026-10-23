@@ -195,6 +195,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   const activeScans = new Set<Promise<void>>();
   const canceledScanJobs = new Set<string>();
   let activeAutomation: Promise<void> | undefined;
+  let automationGeneration = 0;
 
   const readState = () => statePromise ??= loadState(statePath).then(async (state) => {
     if (!state.legacyRecoveryChecked && options.legacyDatabasePath) {
@@ -252,12 +253,19 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   }
 
   async function reconcileScanPermission(): Promise<void> {
-    if (!canScan() && (scan.running || scanPaused || scan.progress?.phase === "stopped")) {
+    if (canScan()) return;
+    // Invalidate even if permission is granted again while discovery is awaiting I/O.
+    automationGeneration += 1;
+    const automation = activeAutomation;
+    if (scan.running || scanPaused || scan.progress?.phase === "stopped") {
       const result = await cancelScan();
       if (result.outcome === "conflict") {
         throw new MemoryServiceError("conflict", "Agent source cancellation is already in progress; retry saving permission");
       }
     }
+    // Installation already started cannot be interrupted: acknowledge revocation
+    // only after it settles. No subsequent automatic installation may start.
+    await automation;
   }
 
   async function startScan(input: unknown): Promise<{ accepted: true; jobId: string; attemptId?: string; attemptStartedAt?: string; version?: ScanVersion }> {
@@ -675,18 +683,22 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   async function mutateConnection(
     sourceId: string,
     kind: "plugin" | "skill",
-    method: "POST" | "DELETE"
+    method: "POST" | "DELETE",
+    isAutomaticInstallAllowed?: () => boolean
   ): Promise<unknown> {
+    if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const adapter = registry.require(sourceId);
     if (!(await adapter.detect())) {
       throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
     }
+    if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
     if (method === "POST") {
       if (!(await target.resolveRootDirectory())) {
         throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
       if (kind === "plugin") {
         if (!target.installPlugin) {
           throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
@@ -728,20 +740,24 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (disposed || clearing || scan.running || scanPaused || scan.progress?.phase === "stopped") return;
     const config = loadMemmyConfig(configPath).config.agentAccess;
     if (!canScan()) return;
+    const generation = automationGeneration;
+    const isCurrent = () => !disposed && !clearing && generation === automationGeneration && canScan();
+    const canInstall = () => isCurrent() && loadMemmyConfig(configPath).config.agentAccess.autoInjectSkill;
     if (config.autoInjectSkill) {
       const discovered = await list();
       for (const source of discovered.sources) {
-        if (disposed || clearing) return;
+        if (!canInstall()) return;
         if (!source.available || source.status !== "not_connected") continue;
         try {
-          await mutateConnection(source.sourceId, agentConnectionKind(source.sourceId), "POST");
+          await mutateConnection(source.sourceId, agentConnectionKind(source.sourceId), "POST", canInstall);
         } catch (error) {
           logger.warn("connection.auto_install_failed", { sourceId: source.sourceId, ...memoryErrorFields(error) });
         }
       }
     }
-    const enabled = startup ? config.autoScanKnownAgents : config.watchFileChanges;
-    if (enabled && !disposed && !clearing) await startScan({ sourceId: "all" });
+    const current = loadMemmyConfig(configPath).config.agentAccess;
+    const enabled = startup ? current.autoScanKnownAgents : current.watchFileChanges;
+    if (enabled && isCurrent()) await startScan({ sourceId: "all" });
   }
 
   async function clearAllData(): Promise<ReturnType<MemoryService["clearAllData"]>> {
