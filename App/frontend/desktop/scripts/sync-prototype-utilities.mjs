@@ -2,7 +2,8 @@
 /** Derive additional variants from the checked-in prototype's canonical rules. */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import process from "node:process";
+import { fileURLToPath, URL } from "node:url";
 import postcss from "postcss";
 
 const args = process.argv.slice(2);
