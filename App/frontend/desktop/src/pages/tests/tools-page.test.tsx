@@ -67,10 +67,11 @@ describe("ToolsPageView", () => {
     const catalog = getAllIntegrationMeta();
 
     expect(catalog.filter((item) => item.isChannel)).toHaveLength(6);
-    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(118);
+    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(117);
     expect(html).toContain("Telegram");
     expect(html).toContain("WeChat");
     expect(html).toContain("GitHub");
+    expect(html).not.toContain("Strava");
     expect(html).toContain("integration-card-channel");
     expect(html).toContain("integration-card-integration");
     expect(html).not.toContain("ToolDetailDrawer");

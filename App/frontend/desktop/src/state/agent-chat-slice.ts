@@ -916,7 +916,10 @@ function promoteQueuedMessage(
   turnId: string | null = null,
   queueSteerPending = false
 ): AgentState {
-  const removed = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
+  const dequeued = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
+  const removed = queueSteerPending && turnId
+    ? promoteInterruptedNarrationForChat(dequeued, chatId, turnId)
+    : dequeued;
   if (chatMessagesForId(removed, chatId).some(
     (message) => message.clientRequestId === item.clientRequestId
   )) return removed;
@@ -2032,6 +2035,31 @@ function isChatBusy(state: AgentState, chatId: string): boolean {
 
 function chatMessagesForId(state: AgentState, chatId: string): AgentChatMessage[] {
   return chatId === state.currentChatId ? state.messages : state.messagesByChatId[chatId] ?? [];
+}
+
+function promoteInterruptedNarration(messages: AgentChatMessage[], turnId: string): AgentChatMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.turnId !== turnId || message.kind !== "narration" || !message.content.trim()) continue;
+    const promoted = [...messages];
+    const next = { ...message };
+    delete next.kind;
+    delete next.activitySegmentId;
+    promoted[index] = next;
+    return promoted;
+  }
+  return messages;
+}
+
+function promoteInterruptedNarrationForChat(state: AgentState, chatId: string, turnId: string): AgentState {
+  const current = chatMessagesForId(state, chatId);
+  const messages = promoteInterruptedNarration(current, turnId);
+  if (messages === current) return state;
+  return {
+    ...state,
+    messagesByChatId: { ...state.messagesByChatId, [chatId]: messages },
+    ...(chatId === state.currentChatId ? { messages } : {})
+  };
 }
 
 /**

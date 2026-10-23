@@ -15,6 +15,7 @@ import {
 } from "../src/index.js";
 import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 import type { ViewerCliOptions } from "../src/server/viewer-cli.js";
+import { prepareViewerRequest, adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 import { MEMORY_SERVICE_VERSION } from "../src/version.js";
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -206,6 +207,52 @@ describe("local Viewer API", () => {
     });
   });
 
+  it.each([
+    {},
+    { temperature: 0.3, maxTokens: 2200 },
+    { extraBody: { top_p: 0.7 } },
+    { endpoint: "https://personal.example.test/v1" },
+    { model: "personal-evolution" },
+    { apiKey: "personal-secret" },
+  ])("round-trips an edited platform model through the Viewer form adapter and runtime: %j", async edit => {
+    const fixture = await startFixture({ loadConfigFromDisk: true });
+    const root = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+    const platformConnection = { provider: "openai_compatible", sourceProvider: "memmy_account", endpoint: "https://platform.example.test/v1", model: "memory_evolution", apiKey: "platform-secret" };
+    root.app = { userMode: "account", userId: "owner" };
+    root.providers = { memmy_account: { ownerAccountId: "owner", apiKey: platformConnection.apiKey, endpoints: { platform: { apiBase: platformConnection.endpoint, protocol: "memmy-account" } } } };
+    root.modelPresets = { platform: { provider: "memmy_account", endpoint: "platform", model: "memory_evolution", source: "account", ownerAccountId: "owner", capabilities: ["memory_evolution"] } };
+    root.modelAssignments = { account: { ownerAccountId: "owner", memoryEvolution: "platform" } };
+    root.memmyMemory.roleRouting = { summary: "fixed", evolution: "fixed" };
+    root.memmyMemory.evolution = platformConnection;
+    writeFileSync(fixture.configPath, YAML.stringify(root));
+    fixture.service.reloadConfig({ reason: "test.platform" });
+    const before = await (await viewerFetch(fixture.baseUrl, "/api/v1/config")).json();
+    const form = adaptViewerResponse("GET", "/api/v1/config", undefined, before) as any;
+    expect(form.skillEvolver.sourceProvider).toBe("memmy_account");
+    // Match the settings form's merge: unedited metadata and masked secrets survive.
+    const request = prepareViewerRequest("PATCH", "/api/v1/config", { skillEvolver: { ...form.skillEvolver, ...edit } });
+    const response = await viewerFetch(fixture.baseUrl, request.path, { method: request.method, body: JSON.stringify(request.body) });
+    expect(response.status).toBe(200);
+    const after = await (await viewerFetch(fixture.baseUrl, "/api/v1/config")).json();
+    const saved = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+    const effective = loadMemmyConfig(fixture.configPath).config.evolution;
+    const expected = { ...platformConnection, ...edit };
+    expect(effective).toMatchObject({ endpoint: expected.endpoint, model: expected.model, apiKey: expected.apiKey });
+    expect(after.config.evolution).toMatchObject({ endpoint: expected.endpoint, model: expected.model });
+    const changedConnection = "endpoint" in edit || "model" in edit || "apiKey" in edit;
+    expect(saved.modelAssignments.account.memoryEvolution === "platform").toBe(!changedConnection);
+    expect(Object.keys(saved.modelPresets)).toHaveLength(changedConnection ? 2 : 1);
+    if (changedConnection) {
+      expect(effective.sourceProvider).toBe("openai");
+      expect(saved.memmyMemory.evolution.sourceProvider).toBe("openai");
+    }
+    expect(saved.providers.memmy_account).toEqual(root.providers.memmy_account);
+    const once = readFileSync(fixture.configPath, "utf8");
+    // Repeat the same stale form submission: no additional endpoint/preset may appear.
+    await viewerFetch(fixture.baseUrl, request.path, { method: request.method, body: JSON.stringify(request.body) });
+    expect(readFileSync(fixture.configPath, "utf8")).toBe(once);
+  });
+
   it("writes shared cross-Agent scan preferences to memmyMemory", async () => {
     const fixture = await startFixture();
     const response = await viewerFetch(fixture.baseUrl, "/api/v1/config", {
@@ -230,10 +277,12 @@ describe("local Viewer API", () => {
   });
 
   it("exposes standalone scan pause and cancel controls to the Viewer", async () => {
-    const pauseScan = vi.fn(async () => ({ ok: true as const }));
-    const cancelScan = vi.fn(async () => ({ ok: true as const }));
+    const snapshot = { running: false, jobId: "scan-1", attemptId: "attempt-1", sourceId: "codex", mode: null, progress: null, startedAt: null, completedAt: null, error: null, version: { generation: 1, sequence: 2 }, status: "cancelled" as const };
+    const pauseScan = vi.fn(async () => ({ ok: true as const, outcome: "applied" as const, snapshot }));
+    const cancelScan = vi.fn(async () => ({ ok: true as const, outcome: "applied" as const, snapshot }));
     const agentSourceExecutor: AgentSourceExecutor = {
       list: async () => ({ executorAvailable: true, sources: [] }),
+      clearAllData: async () => ({ ok: true, cleared: {}, clearedAt: new Date().toISOString(), serverTime: new Date().toISOString() }),
       startScan: async () => ({ accepted: true, jobId: "scan-1" }),
       scanStatus: () => ({
         running: true,
@@ -258,7 +307,7 @@ describe("local Viewer API", () => {
       body: "{}"
     });
     expect(paused.status).toBe(200);
-    expect(await paused.json()).toEqual({ ok: true });
+    expect(await paused.json()).toEqual({ ok: true, outcome: "applied", snapshot });
     expect(pauseScan).toHaveBeenCalledOnce();
 
     const canceled = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/scan/cancel", {
@@ -266,7 +315,7 @@ describe("local Viewer API", () => {
       body: "{}"
     });
     expect(canceled.status).toBe(200);
-    expect(await canceled.json()).toEqual({ ok: true });
+    expect(await canceled.json()).toEqual({ ok: true, outcome: "applied", snapshot });
     expect(cancelScan).toHaveBeenCalledOnce();
   });
 

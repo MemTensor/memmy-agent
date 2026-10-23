@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolveAssignedModel, type RuntimeModelCatalog } from "../contracts/model-catalog-resolver.js";
 
 export function syncMemoryModelCatalog(
   root: Record<string, unknown>,
@@ -65,11 +66,25 @@ function upsertMemoryCatalogPreset(
   connection: Record<string, unknown>,
   capability: "memory_summary" | "memory_evolution" | "embedding"
 ): string | undefined {
+  const platformSource = connection.sourceProvider === "memmy_account" || connection.provider === "memmy_account";
+  // A form can retain its source marker after editing the actual connection.
+  // Request options do not change platform identity; address/model/credentials do.
+  if (platformSource && matchesPlatformCatalog(root, connection, capability)) return undefined;
   const apiBase = stringValue(connection.endpoint)?.replace(/\/+$/, "");
   const model = stringValue(connection.model);
   if (!apiBase || !model) return undefined;
 
-  const providerId = catalogProviderId(connection);
+  const providerId = catalogProviderId(platformSource ? {
+    ...connection,
+    sourceProvider: undefined,
+    provider: connection.provider === "memmy_account" ? "openai_compatible" : connection.provider,
+  } : connection);
+  if (platformSource) {
+    connection.sourceProvider = providerId;
+    if (connection.provider === "memmy_account") connection.provider = "openai_compatible";
+    delete connection.actualModelContext;
+    delete connection.selectionError;
+  }
   const protocol = capability === "embedding"
     ? "openai-embeddings"
     : providerId === "anthropic"
@@ -138,6 +153,36 @@ function upsertMemoryCatalogPreset(
   }
   root.modelPresets = presets;
   return presetId;
+}
+
+function matchesPlatformCatalog(
+  root: Record<string, unknown>,
+  connection: Record<string, unknown>,
+  capability: "memory_summary" | "memory_evolution" | "embedding"
+): boolean {
+  if (!["memmy_account", "openai_compatible", "openai"].includes(String(connection.provider))) return false;
+  const activeAccountId = stringValue(record(root.app).userId);
+  const field = { memory_summary: "memorySummary", memory_evolution: "memoryEvolution", embedding: "embedding" }[capability];
+  // Startup can project a platform connection while the user's selection is
+  // BYOK. Validate the platform entries independently without changing that
+  // selection; the shared resolver still enforces account ownership/protocol.
+  return Object.entries(record(root.modelPresets)).some(([id, raw]) => {
+    const preset = record(raw);
+    if (preset.source !== "account" || preset.provider !== "memmy_account") return false;
+    const platform = resolveAssignedModel({
+      catalog: {
+        ...root,
+        modelAssignments: { account: { ownerAccountId: activeAccountId, [field]: id } },
+      } as RuntimeModelCatalog,
+      mode: "account",
+      activeAccountId,
+      capability,
+    });
+    return platform.ok
+      && stringValue(connection.endpoint)?.replace(/\/+$/, "") === platform.provider.apiBase.replace(/\/+$/, "")
+      && stringValue(connection.model) === platform.context.model
+      && stringValue(connection.apiKey) === stringValue(platform.provider.apiKey);
+  });
 }
 
 function catalogProviderId(connection: Record<string, unknown>): string {

@@ -3064,6 +3064,21 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   padding: 8px 24px 32px;
 }
 
+.agent-activity-output-file {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 13px;
+}
+.agent-activity-output-file__notice { margin-top: 6px; font-size: 12px; opacity: .65; }
+.thread-preview__paged { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.thread-preview__text-pager { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.thread-preview__text-pager button { flex-shrink: 0; white-space: nowrap; }
+.thread-preview__text-pager span { flex-basis: 100%; opacity: .65; }
+.thread-preview__text-page { flex: 1 1 auto; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 13px; }
+
 .thread-preview__code,
 .thread-preview__table-wrap {
   min-height: 0;
@@ -13951,6 +13966,13 @@ body.memmy-platform-windows :is(
   background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
 }
 
+.ch-source-dialog__list--apps {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 0;
+}
+
 .ch-source-dialog__add {
   display: flex;
   align-items: center;
@@ -13965,6 +13987,15 @@ body.memmy-platform-windows :is(
   font-size: 14px;
   font-weight: 550;
   cursor: pointer;
+}
+
+.ch-source-dialog__add--app {
+  flex: none;
+  z-index: 1;
+  border-bottom: 1px solid var(--ch-border);
+  border-radius: 0;
+  padding-block: 12px;
+  background: var(--ch-surface);
 }
 
 .ch-source-dialog__add-icon {
@@ -13983,18 +14014,15 @@ body.memmy-platform-windows :is(
 }
 
 .ch-source-dialog__app-menu {
-  position: absolute;
-  z-index: 5;
   display: flex;
   flex-direction: column;
-  width: 240px;
-  max-height: 350px;
+  flex: 0 1 220px;
+  min-height: 120px;
   overflow: auto;
-  padding: 4px;
-  border: 1px solid var(--ch-border);
-  border-radius: 12px;
-  background: var(--ch-surface);
-  box-shadow: 0 12px 32px rgb(22 24 31 / 16%);
+  margin-top: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-text-ink) 18%, var(--ch-surface));
+  background: color-mix(in srgb, var(--color-canvas-oat) 55%, var(--ch-surface));
 }
 
 .ch-source-dialog__app-search {
@@ -14080,6 +14108,12 @@ body.memmy-platform-windows :is(
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
+}
+
+.ch-source-dialog__list--apps .ch-source-dialog__rules {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ch-source-dialog__rules li {

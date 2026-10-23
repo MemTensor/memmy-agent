@@ -1000,7 +1000,7 @@ describe("native source turn submission", () => {
     expect(counts(db)).toEqual(before);
   });
 
-  it("preserves capture identities in bundles and across deleting all memory data", () => {
+  it("preserves capture identities in bundles but resets them when clearing all memory data", () => {
     const first = createTestService();
     const stored = first.service.completeSourceTurn(request());
     const activation = new Repositories(first.db.db).runtime.getKv("source_turn_capture_activated_at");
@@ -1015,9 +1015,28 @@ describe("native source turn submission", () => {
     expect(restored.service.completeSourceTurn(request())).toMatchObject({ status: "existing", result: { l1MemoryId: stored.result!.l1MemoryId } });
     new Repositories(first.db.db).clearAllMemoryData();
     expect(new Repositories(first.db.db).runtime.getKv("source_turn_capture_activated_at")).toEqual(activation);
-    expect(first.service.completeSourceTurn(request())).toMatchObject({ status: "rejected", reason: "capture_deleted" });
+    const reimported = first.service.completeSourceTurn(request());
+    expect(reimported.status).toBe("stored");
+    expect(reimported.result!.l1MemoryId).not.toBe(stored.result!.l1MemoryId);
+    expect(first.service.completeSourceTurn(request())).toMatchObject({ status: "existing", result: { l1MemoryId: reimported.result!.l1MemoryId } });
     expect(first.service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, turnId: "after-clear",
       startedAt: "2099-01-01T10:02:00.000Z", completedAt: "2099-01-01T10:03:00.000Z" } })).status).toBe("stored");
+  });
+
+  it("reimports pre-activation scan history after full clear while preserving the hook boundary", () => {
+    const { db, service } = createTestService();
+    const historical = request({ channel: "agent_source_scan", captureLegacyHistory: true,
+      sourceTurn: { ...request().sourceTurn, startedAt: "2000-01-01T10:00:00.000Z", completedAt: "2000-01-01T10:01:00.000Z" } });
+    const first = service.completeSourceTurn(historical);
+    expect(first.status).toBe("stored");
+    service.clearAllData();
+    expect(counts(db).source_turn_captures).toBe(0);
+    expect(service.completeSourceTurn({ ...historical, channel: "hook", captureLegacyHistory: false }))
+      .toMatchObject({ status: "rejected", reason: "legacy_before_activation" });
+    const restored = service.completeSourceTurn(historical);
+    expect(restored.status).toBe("stored");
+    expect(restored.result!.l1MemoryId).not.toBe(first.result!.l1MemoryId);
+    expect(service.completeSourceTurn(historical).status).toBe("existing");
   });
 
   it("does not widen either historical capture window when merging a bundle into existing data", () => {

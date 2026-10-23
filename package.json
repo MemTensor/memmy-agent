@@ -6,7 +6,8 @@
   "description": "Local-first agent memory substrate with desktop and CLI surfaces.",
   "workspaces": [
     "Migrations",
-    "AgentSourceCore",
+    "Memory/AgentSourceCore",
+    "Memory/AgentSourceReaders",
     "Knowledge",
     "Memory",
     "App/backend/local-api-contracts",

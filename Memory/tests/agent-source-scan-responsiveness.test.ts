@@ -16,18 +16,24 @@ afterEach(() => {
 });
 
 const TURN_COUNT = 4_000;
+// Reaching a phase includes discovery, staging and SQLite preparation. It is
+// setup work, not the HTTP responsiveness guarantee exercised once we get there.
+const PHASE_SETUP_TIMEOUT_MS = 10_000;
+const HTTP_RESPONSE_TIMEOUT_MS = 2_000;
 
 describe("standalone scan HTTP responsiveness", () => {
   it.each([
-    { phase: "stage", shape: "native" },
-    { phase: "prepare", shape: "native" },
-    { phase: "ingest", shape: "native" },
-    { phase: "ingest", shape: "incomplete" },
-    { phase: "ingest", shape: "long_turn" },
-  ] as const)("serves health and cancellation during $phase of $shape history", async ({ phase, shape }) => {
+    { phase: "stage", shape: "native", discoveryDelayMs: 0 },
+    { phase: "prepare", shape: "native", discoveryDelayMs: 0 },
+    { phase: "ingest", shape: "native", discoveryDelayMs: 0 },
+    { phase: "ingest", shape: "native", discoveryDelayMs: 1_200 },
+    { phase: "ingest", shape: "incomplete", discoveryDelayMs: 0 },
+    { phase: "ingest", shape: "long_turn", discoveryDelayMs: 0 },
+  ] as const)("serves health and cancellation during $phase of $shape history (discovery delay: $discoveryDelayMs ms)", async ({ phase, shape, discoveryDelayMs }) => {
     const root = tempRoot();
     let requestDuringScan!: () => Promise<void>;
     let check!: Promise<void>;
+    let lastPhase = "discovery";
     let closeObserved = false;
     const originalOpen = scanStore.openMemoryAgentSourceScanStore;
     vi.spyOn(scanStore, "openMemoryAgentSourceScanStore").mockImplementation(async (...args) => {
@@ -36,6 +42,7 @@ describe("standalone scan HTTP responsiveness", () => {
       let requested = false;
       store.saveMeta = (meta) => {
         saveMeta(meta);
+        lastPhase = meta.phase;
         if (meta.phase === phase && !requested) {
           requested = true;
           check = new Promise<void>((resolve, reject) => {
@@ -55,7 +62,13 @@ describe("standalone scan HTTP responsiveness", () => {
       service: { completeSourceTurn, addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       scanStoreDirectory: join(root, "scans"),
-      sourceRegistry: createSourceRegistry([syntheticAdapter(root, shape)]),
+      sourceRegistry: createSourceRegistry([{
+        ...syntheticAdapter(root, shape),
+        detect: async () => {
+          if (discoveryDelayMs) await new Promise((done) => setTimeout(done, discoveryDelayMs));
+          return true;
+        },
+      }]),
       resolveAgentSkillRoot: () => null,
     });
     const { server, url } = await listenMemoryHttpServer({
@@ -72,20 +85,23 @@ describe("standalone scan HTTP responsiveness", () => {
       port: 0,
     });
     requestDuringScan = async () => {
-      const response = await fetch(`${url}/api/v1/health`);
+      const response = await fetch(`${url}/api/v1/health`, { signal: AbortSignal.timeout(HTTP_RESPONSE_TIMEOUT_MS) });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ ok: true, scanRunning: true });
       const cancel = await fetch(`${url}/api/v1/agent-sources/scan/cancel`, {
         method: "POST",
+        signal: AbortSignal.timeout(HTTP_RESPONSE_TIMEOUT_MS),
         headers: { "x-memmy-viewer": "1", "content-type": "application/json" },
         body: "{}",
       });
       expect(cancel.status).toBe(200);
-      expect(executor.scanStatus()).toMatchObject({ running: false, jobId: null });
+      expect(executor.scanStatus()).toMatchObject({ running: false, status: "cancelled", jobId: expect.any(String), attemptId: expect.any(String) });
     };
     try {
       const { jobId } = await executor.startScan({ sourceId: "codex", mode: "full" });
-      await vi.waitFor(() => expect(check).toBeDefined());
+      await vi.waitFor(() => {
+        expect(check, `Waiting for ${phase}; last phase: ${lastPhase}; scan: ${JSON.stringify(executor.scanStatus())}`).toBeDefined();
+      }, { timeout: PHASE_SETUP_TIMEOUT_MS });
       await check;
       await executor.dispose();
       expect(completeSourceTurn.mock.calls.length).toBeLessThan(TURN_COUNT);
@@ -96,7 +112,7 @@ describe("standalone scan HTTP responsiveness", () => {
     } finally {
       await closeMemoryHttpServer(server);
     }
-  });
+  }, PHASE_SETUP_TIMEOUT_MS + 2 * HTTP_RESPONSE_TIMEOUT_MS + 1_000);
 
   it("does not write skills or replace progress after its job is cancelled", async () => {
     const root = tempRoot();
@@ -118,8 +134,15 @@ describe("standalone scan HTTP responsiveness", () => {
       resolveAgentSkillRoot: () => {
         if (!firstJob) return null;
         firstJob = false;
-        void executor.cancelScan();
-        replacement = executor.startScan({ sourceId: "codex", mode: "full" });
+        const cancellation = executor.cancelScan();
+        replacement = executor.startScan({ sourceId: "codex", mode: "full" }).then(
+          () => { throw new Error("replacement must wait for cancellation"); },
+          async (error: unknown) => {
+            expect(error).toMatchObject({ code: "conflict" });
+            await cancellation;
+            return executor.startScan({ sourceId: "codex", mode: "full" });
+          }
+        );
         return skillRoot;
       },
     });
@@ -172,7 +195,13 @@ describe("standalone scan HTTP responsiveness", () => {
       expect(completeSourceTurn).not.toHaveBeenCalled();
       expect(existsSync(join(root, "scans", `${initial.jobId}.sqlite`))).toBe(true);
       resumed = create();
-      expect((await resumed.startScan({ sourceId: "codex", mode: "initial_subset" })).jobId).toBe(initial.jobId);
+      const recovery = resumed.scanStatus();
+      expect(recovery.version!.generation).toBeGreaterThan(initial.version!.generation);
+      expect(recovery.attemptId).toBe(initial.attemptId);
+      expect(recovery.status).toBe("paused");
+      const continued = await resumed.startScan({ sourceId: "codex", mode: "initial_subset", expectedExecution: { jobId: initial.jobId, attemptId: initial.attemptId } });
+      expect(continued.jobId).toBe(initial.jobId);
+      expect(continued.attemptId).toBe(initial.attemptId);
       await vi.waitFor(() => expect(resumed!.scanStatus().running).toBe(false), { timeout: 10_000 });
       expect(resumed.scanStatus().error).toBeNull();
       expect(completeSourceTurn).toHaveBeenCalledTimes(1_000);

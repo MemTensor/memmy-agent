@@ -353,6 +353,10 @@ export class ImportJobProcessor {
           d.processing.update(inserted.id, { activeJobId: job.id, updatedAt: at }, ["summary_pending"]);
         }
       }
+      if (!importTrace && d.config.algorithm.capture.embedAfterCapture) {
+        d.enqueueJob({ jobType: "embedding", userId: inserted.userId, sessionId: inserted.sessionId, targetMemoryId: inserted.id,
+          payload: { source: "memory.add", changeSeq }, createdAt: at });
+      }
       return { upsert, changeSeq, duplicateMemory: undefined };
     });
     if (persisted.duplicateMemory) {
@@ -375,10 +379,6 @@ export class ImportJobProcessor {
       d.enqueueJob({ jobType: "episode_idle_close", userId: inserted.userId, sessionId: inserted.sessionId,
         dedupeKey: `episode_idle_close:memory.add:${inserted.id}`,
         payload: { triggerMemoryId: inserted.id, triggerSource: "memory.add", triggeredAt: receivedAt }, createdAt: receivedAt });
-    }
-    if (!importTrace && d.config.algorithm.capture.embedAfterCapture) {
-      d.enqueueJob({ jobType: "embedding", userId: inserted.userId, sessionId: inserted.sessionId, targetMemoryId: inserted.id,
-        payload: { source: "memory.add", changeSeq: persisted.changeSeq }, createdAt: at });
     }
     const item = d.memories.toListItem(inserted);
     const response = { id: item.id, kind: item.kind, memoryLayer: item.memoryLayer, status: item.status, title: item.title,
@@ -579,7 +579,9 @@ function repairPlaceholderImportSummary(
 ): void {
   if (!memoryNeedsImportSummary(memory)) return;
   const existing = d.processing.get(memory.id);
-  if (existing && (existing.state === "summary_pending" || existing.state === "summarizing")) return;
+  // A scan replay must not turn a terminal model failure into an implicit retry.
+  // Failed jobs retain their diagnostics and the explicit background retry policy.
+  if (existing && (existing.state === "summary_pending" || existing.state === "summarizing" || existing.state === "failed")) return;
   d.memories.deleteVector(memory.id, "vec_summary");
   const processing = d.processing.save({
     memoryId: memory.id,

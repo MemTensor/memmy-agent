@@ -58,7 +58,17 @@ export interface UpdateObservedSkillOutput extends ApproveObservedSkillOutput {
   version: number;
 }
 
+export interface AgentSourceScanClient {
+  list(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceList>;
+  start(input: import("@memmy/local-api-contracts").AgentSourceScanInput): Promise<import("@memmy/local-api-contracts").AgentSourceScanJobResponse>;
+  status(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceScanState>;
+  results(jobId: string, cursor?: string, limit?: number): Promise<import("@memmy/local-api-contracts").ScanResultPage>;
+  pause(input?: import("@memmy/local-api-contracts").ScanControlInput): Promise<import("@memmy/local-api-contracts").MemoryScanControlResponse>;
+  cancel(input?: import("@memmy/local-api-contracts").ScanControlInput): Promise<import("@memmy/local-api-contracts").MemoryScanControlResponse>;
+}
+
 export interface MemoryClient {
+  agentSources?: AgentSourceScanClient;
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;

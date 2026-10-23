@@ -295,6 +295,56 @@ describe("webui transcript replay", () => {
     expect(messages[1].activitySegmentId).toBe(messages[2].activitySegmentId);
   });
 
+  it("replays a draft interrupted by a same-turn steer as visible assistant text", () => {
+    const messages = replayTranscriptToUiMessages([
+      { event: "user", turn_id: "turn-steer", text: "开始" },
+      { event: "delta", turn_id: "turn-steer", text: "更早的过程说明" },
+      { event: "stream_end", turn_id: "turn-steer", text: "更早的过程说明", resuming: true },
+      { event: "delta", turn_id: "turn-steer", text: "已经生成的内容" },
+      { event: "stream_end", turn_id: "turn-steer", text: "已经生成的内容", resuming: true },
+      { event: "user", turn_id: "turn-steer", text: "调整主题" }
+    ]);
+
+    expect(messages.find((message) => message.content === "已经生成的内容")).toMatchObject({
+      role: "assistant"
+    });
+    expect(messages.find((message) => message.content === "已经生成的内容")?.kind).toBeUndefined();
+    expect(messages.find((message) => message.content === "更早的过程说明")?.kind).toBe("narration");
+  });
+
+  it("keeps the last draft visible when a stopped turn is followed by a new turn", () => {
+    const messages = replayTranscriptToUiMessages([
+      { event: "user", turn_id: "turn-old", text: "开始" },
+      { event: "delta", turn_id: "turn-old", text: "我立刻开工。先建目录和第一卷文件。" },
+      {
+        event: "stream_end",
+        turn_id: "turn-old",
+        text: "我立刻开工。先建目录和第一卷文件。",
+        resuming: true
+      },
+      {
+        event: "message",
+        turn_id: "turn-old",
+        kind: "progress",
+        tool_events: [{ phase: "end", call_id: "call-mkdir", name: "exec", arguments: { command: "mkdir draft" } }]
+      },
+      { event: "turn_end", turn_id: "turn-old" },
+      { event: "stop_result", turn_id: "turn-old", stopped: 1 },
+      { event: "user", turn_id: "turn-new", text: "换一个主题" },
+      { event: "turn_end", turn_id: "turn-new" }
+    ]);
+
+    expect(messages.find((message) => message.content === "我立刻开工。先建目录和第一卷文件。")).toMatchObject({
+      role: "assistant",
+      turnId: "turn-old"
+    });
+    expect(messages.find((message) => message.content === "我立刻开工。先建目录和第一卷文件。")?.kind).toBeUndefined();
+    expect(messages.find((message) => message.content === "换一个主题")).toMatchObject({
+      role: "user",
+      turnId: "turn-new"
+    });
+  });
+
   it("does not strand an answer prefix when reasoning interleaves with content", () => {
     const draft = "The document is complete and consistent. Let me finalize the deliverable.";
     const messages = replayTranscriptToUiMessages([

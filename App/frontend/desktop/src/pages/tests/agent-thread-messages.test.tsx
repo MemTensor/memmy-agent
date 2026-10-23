@@ -617,6 +617,36 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("10:01");
   });
 
+  it("does not reserve final-answer actions for an interrupted draft followed by activity", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-interrupted-draft"
+          isSending={false}
+          messages={[
+            { id: "question", role: "user", content: "开始任务" },
+            { id: "draft", role: "assistant", content: "我会先建目录大纲，然后开始写正文。" },
+            {
+              id: "trace",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              traces: [],
+              toolEvents: [{ phase: "end", call_id: "call-edit", name: "edit_file", arguments: { path: "draft.md" } }],
+              activitySegmentId: "activity-interrupted",
+              stoppedByUser: true
+            },
+            { id: "steer", role: "user", content: "换一个主题" }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("我会先建目录大纲，然后开始写正文。");
+    expect(html).toContain("已停止，保留活动");
+    expect(html).not.toContain("agent-message-copy-cluster--left");
+  });
+
   it("renders short narration drafts inside the run cluster in answer style without chrome", () => {
     const draft = "好的！我来帮你规划国庆出行方案。先查一下几个热门目的地的天气情况，再搜索一些出行信息。";
     const html = renderToString(
@@ -1898,7 +1928,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("const");
     expect(html).toContain("ok");
     expect(html).toContain("/Users/yuan/result.md");
-    expect(html).not.toContain('title="/Users/yuan/result.md"');
+    expect(html).toContain('title="/Users/yuan/result.md"');
     expect(html).not.toContain('href="file:///Users/yuan/result.md"');
   });
 
@@ -2004,7 +2034,11 @@ describe("AgentThreadMessages", () => {
   it("detects local artifact paths from markdown link hrefs", () => {
     expect(localArtifactPathFromHref("/Users/yuan/deck.pptx")).toBe("/Users/yuan/deck.pptx");
     expect(localArtifactPathFromHref("file:///Users/yuan/deck.pptx")).toBe("/Users/yuan/deck.pptx");
+    expect(localArtifactPathFromHref("C:\\Users\\yuan\\deck.pptx")).toBe("C:\\Users\\yuan\\deck.pptx");
     expect(localArtifactPathFromHref("/api/media/sig/payload")).toBeNull();
+    expect(localArtifactPathFromHref("/api/icon.png")).toBeNull();
+    expect(localArtifactPathFromHref("/assets/app.js")).toBeNull();
+    expect(localArtifactPathFromHref("/static/logo.svg")).toBeNull();
     expect(localArtifactPathFromHref("https://example.com/deck.pptx")).toBeNull();
   });
 
@@ -2038,7 +2072,7 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain('href="file:///Users/yuan/deck.pptx"');
   });
 
-  it("renders inline code local paths as normal markdown code", () => {
+  it("renders inline code local paths as clickable chips without changing ordinary inline code", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
@@ -2047,7 +2081,7 @@ describe("AgentThreadMessages", () => {
             {
               id: "answer",
               role: "assistant",
-              content: "`/Users/yuan/deck.pptx`"
+              content: "`/Users/yuan/deck.pptx` and `npm run test`"
             }
           ]}
         />
@@ -2056,11 +2090,13 @@ describe("AgentThreadMessages", () => {
 
     expect(html).toContain("agent-message-content__inline-code");
     expect(html).toContain("/Users/yuan/deck.pptx");
-    expect(html).not.toContain("agent-message-content__file-chip");
+    expect(html).toContain("npm run test");
+    expect(html).toContain("agent-message-content__file-chip");
+    expect(html).toContain('title="/Users/yuan/deck.pptx"');
     expect(html).not.toContain('href="file:///Users/yuan/deck.pptx"');
   });
 
-  it("renders bare local file and directory paths as plain text", () => {
+  it("renders bare local file paths as clickable chips without changing directories or relative paths", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
@@ -2069,7 +2105,8 @@ describe("AgentThreadMessages", () => {
             {
               id: "answer",
               role: "assistant",
-              content: "文件 /Users/yuan/deck.pptx\n目录 /Users/yuan/.memmy/workspace\n普通文本 foo/bar"
+              content:
+                "文件 /Users/yuan/deck.pptx）。\nWindows C:\\Users\\yuan\\result.png\n目录 /Users/yuan/.memmy/workspace\n普通文本 foo/bar\n接口 /api/icon.png\n资源 /assets/app.js\n静态 /static/logo.svg"
             }
           ]}
         />
@@ -2077,13 +2114,41 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html).toContain("/Users/yuan/deck.pptx");
+    expect(html).toContain("C:\\Users\\yuan\\result.png");
     expect(html).toContain("/Users/yuan/.memmy/workspace");
     expect(html).toContain("foo/bar");
-    expect(html).not.toContain('href="file:///Users/yuan/deck.pptx"');
-    expect(html).not.toContain('href="file:///Users/yuan/.memmy/workspace"');
-    expect(html).not.toContain('href="file://foo/bar"');
-    expect(html).not.toContain('href="file:///bar"');
-    expect(html).not.toContain("agent-message-content__file-chip");
+    expect(html).toContain("）。");
+    expect(html).toContain("/api/icon.png");
+    expect(html).toContain("/assets/app.js");
+    expect(html).toContain("/static/logo.svg");
+    expect(html.match(/agent-message-content__file-chip/g)).toHaveLength(2);
+    expect(html).toContain('title="/Users/yuan/deck.pptx"');
+    expect(html).toContain('title="C:\\Users\\yuan\\result.png"');
+    expect(html).not.toContain('title="/Users/yuan/.memmy/workspace"');
+    expect(html).not.toContain('title="foo/bar"');
+    expect(html).not.toContain('title="/api/icon.png"');
+    expect(html).not.toContain('title="/assets/app.js"');
+    expect(html).not.toContain('title="/static/logo.svg"');
+  });
+
+  it("renders bare local file paths in table cells as clickable chips", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-table-local-path"
+          messages={[
+            {
+              id: "answer",
+              role: "assistant",
+              content: "| 文件 |\n| --- |\n| /Users/yuan/table.csv |"
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("agent-message-content__file-chip");
+    expect(html).toContain('title="/Users/yuan/table.csv"');
   });
 
   it("renders structured file media as attachment chips instead of images", () => {

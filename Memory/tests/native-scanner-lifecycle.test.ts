@@ -52,6 +52,19 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
       expect(repos.runtime.getEpisode(captured.episodeId)?.l1MemoryIds).toEqual([captured.l1MemoryId]);
       expect(repos.runtime.getRawTurn(captured.rawTurnId)?.toolCalls[0]).toMatchObject({ id: "read", input: { path: "src/main.ts" }, output: expect.stringContaining("source contents") });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'import_summary'").get()).toEqual({ n: 0 });
+      for (const scan of [{ sourceId: "codex" }, { sourceId: "all" }, { sourceId: "all", mode: "full" as const }]) {
+        const previousId = hook().result!.l1MemoryId;
+        await executor.clearAllData();
+        expect(db.db.prepare("SELECT COUNT(*) AS n FROM source_turn_captures").get()).toEqual({ n: 0 });
+        expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories").get()).toEqual({ n: 0 });
+        await executor.startScan(scan); await wait(executor);
+        expect(executor.scanStatus().error).toBeNull();
+        expect(hook().status).toBe("existing");
+        expect(hook().result!.l1MemoryId).not.toBe(previousId);
+        expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE memory_layer = 'L1'").get()).toEqual({ n: 1 });
+        await executor.startScan(scan); await wait(executor);
+        expect(db.db.prepare("SELECT COUNT(*) AS n FROM source_turn_captures").get()).toEqual({ n: 1 });
+      }
     } finally { await executor.dispose(); }
   });
 

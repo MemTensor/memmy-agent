@@ -5,6 +5,8 @@ import type { ScanPhase, ScanResult } from "@memmy/local-api-contracts";
 /** Contract for agent source scan progress event. */
 export interface AgentSourceScanProgressEvent {
   jobId: string;
+  attemptId?: string;
+  attemptStartedAt?: string;
   sourceId: string;
   phase: ScanPhase;
   current: number;
@@ -15,8 +17,11 @@ export interface AgentSourceScanProgressEvent {
 /** Contract for agent source scan completed event. */
 export interface AgentSourceScanCompletedEvent {
   jobId: string;
+  attemptId?: string;
+  attemptStartedAt?: string;
   sourceId: string;
   results: ScanResult[];
+  succeeded?: boolean;
 }
 
 /** Contract for progress bus event map. */

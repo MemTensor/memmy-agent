@@ -1,5 +1,6 @@
+import { acceptsScanUpdate, compareScanVersions, type ScanStamp, type ScanVersion, agentSourceScanExecutionKey } from "@memmy/local-api-contracts";
 /** App reducer module. */
-import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
+import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AgentSourceScanUnavailable, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
 import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
@@ -24,6 +25,18 @@ export interface NavigationState {
 
 /** Contract for agent sources state. */
 export interface AgentSourcesState {
+  scanStamp?: ScanStamp;
+  scanRequestGeneration?: number;
+  memoryServiceRestarting: boolean;
+  memoryDataClearing: boolean;
+  scanStateSyncRequired: boolean;
+  scanStateSyncGeneration: number;
+  scanStateSyncBaseGeneration: number | null;
+  scanStateSyncBaseVersion: ScanVersion | null;
+  scanStateSyncReason: "restart" | "clear" | null;
+  scanStateSyncRequireVersionAdvance: boolean;
+  scanControl?: { control: "start" | "pause" | "resume" | "cancel"; token: string } | null;
+  scanUnavailable: AgentSourceScanUnavailable | null;
   items: AgentSourceView[];
   isLoading: boolean;
   isScanning: boolean;
@@ -31,6 +44,7 @@ export interface AgentSourcesState {
   error: string | null;
   scanProgress: AgentSourceScanProgress | null;
   cancellingScanJobId: string | null;
+  latestScanAttemptStartedAt?: string;
   lastFinishedScanJobId: string | null;
   finishedScanJobIds: string[];
   recentScanCompletions: AgentSourceScanCompletion[];
@@ -122,6 +136,15 @@ export function createInitialAppState(windowVisible = true): AppState {
       windowVisible
     },
     agentSources: {
+      memoryServiceRestarting: false,
+      memoryDataClearing: false,
+      scanStateSyncRequired: false,
+      scanStateSyncGeneration: 0,
+      scanStateSyncBaseGeneration: null,
+      scanStateSyncBaseVersion: null,
+      scanStateSyncReason: null,
+      scanStateSyncRequireVersionAdvance: false,
+      scanUnavailable: null,
       items: [],
       isLoading: false,
       isScanning: false,
@@ -258,41 +281,124 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             }
           }
         : state;
+    // List refreshes must not erase terminal scan failures; retry clears them.
     case "agentSources/loading":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isLoading: true, error: null }
+        agentSources: { ...state.agentSources, isLoading: true, error: state.agentSources.scanStamp?.status === "failed" ? state.agentSources.error : null }
       };
     case "agentSources/loaded":
       return {
         ...state,
-        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, isScanning: false, activeScanSourceId: null, error: null, scanProgress: null, cancellingScanJobId: null }
+        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, error: state.agentSources.scanStamp?.status === "failed" ? state.agentSources.error : null }
       };
     case "agentSources/refreshed":
       return {
         ...state,
-        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, error: null }
+        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, error: state.agentSources.scanStamp?.status === "failed" ? state.agentSources.error : null }
       };
+    case "agentSources/scanAvailability":
+      return { ...state, agentSources: { ...state.agentSources, scanUnavailable: action.unavailable } };
+    case "agentSources/restartStarted":
+      return { ...state, agentSources: { ...state.agentSources, memoryServiceRestarting: true,
+        scanStateSyncRequired: true, scanStateSyncGeneration: state.agentSources.scanStateSyncGeneration + 1,
+        scanStateSyncBaseGeneration: action.baseGeneration, scanStateSyncBaseVersion: null, scanStateSyncReason: "restart",
+        scanStateSyncRequireVersionAdvance: false } };
+    case "agentSources/restartFinished":
+      return { ...state, agentSources: { ...state.agentSources, memoryServiceRestarting: false } };
+    case "agentSources/clearStarted":
+      return { ...state, agentSources: { ...state.agentSources, memoryDataClearing: true,
+        scanStateSyncRequired: true, scanStateSyncGeneration: state.agentSources.scanStateSyncGeneration + 1,
+        scanStateSyncBaseGeneration: action.baseVersion?.generation ?? null,
+        scanStateSyncBaseVersion: action.baseVersion, scanStateSyncReason: "clear", scanStateSyncRequireVersionAdvance: false } };
+    case "agentSources/clearFinished":
+      return { ...state, agentSources: { ...state.agentSources, memoryDataClearing: false,
+        scanStateSyncRequireVersionAdvance: action.succeeded } };
+    case "agentSources/scanStateSynchronized": {
+      if (!state.agentSources.scanStateSyncRequired || !state.agentSources.scanStateSyncReason ||
+        action.generation !== state.agentSources.scanStateSyncGeneration || state.agentSources.memoryServiceRestarting || action.status.unavailable) return state;
+      const currentVersion = state.agentSources.scanStamp?.version;
+      const incomingVersion = action.status.version;
+      const baseGeneration = state.agentSources.scanStateSyncBaseGeneration;
+      const baseVersion = state.agentSources.scanStateSyncBaseVersion;
+      if (state.agentSources.scanStateSyncReason === "restart" && baseGeneration !== null && (!incomingVersion || incomingVersion.generation <= baseGeneration)) return state;
+      const minimumVersionComparison = state.agentSources.scanStateSyncRequireVersionAdvance ? 1 : 0;
+      if (state.agentSources.scanStateSyncReason === "clear" && baseVersion && (!incomingVersion || compareScanVersions(incomingVersion, baseVersion) < minimumVersionComparison)) return state;
+      if (state.agentSources.scanStateSyncReason === "clear" && (!incomingVersion || !action.sources)) return state;
+      const incomingIsStale = Boolean(currentVersion && (!incomingVersion || compareScanVersions(incomingVersion, currentVersion) < 0));
+      if (state.agentSources.scanStateSyncReason === "restart" && currentVersion && incomingIsStale) return state;
+      const reconciled = incomingIsStale ? state : appReducer(state, { type: "agentSources/scanStatus", status: action.status });
+      return { ...reconciled, agentSources: { ...reconciled.agentSources,
+        ...(action.sources ? { items: action.sources, isLoading: false } : {}),
+        // A successful clear invalidates earlier completion feedback. Keep feedback
+        // from scans completed at/after this snapshot (including newer SSE updates).
+        ...(state.agentSources.scanStateSyncReason === "clear" && state.agentSources.scanStateSyncRequireVersionAdvance && incomingVersion
+          ? { recentScanCompletions: reconciled.agentSources.recentScanCompletions.filter((completion) =>
+              completion.version && compareScanVersions(completion.version, incomingVersion) >= 0) }
+          : {}),
+        scanStateSyncRequired: false, scanStateSyncBaseGeneration: null, scanStateSyncBaseVersion: null, scanStateSyncReason: null,
+        scanStateSyncRequireVersionAdvance: false } };
+    }
     case "agentSources/error":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isLoading: false, isScanning: false, activeScanSourceId: null, error: action.message, scanProgress: null, cancellingScanJobId: null }
+        agentSources: { ...state.agentSources, isLoading: false, error: action.message }
       };
+    case "agentSources/scanControl":
+      if (!action.control && state.agentSources.scanControl?.token !== action.token) return state;
+      return { ...state, agentSources: { ...state.agentSources,
+        scanRequestGeneration: (state.agentSources.scanRequestGeneration ?? 0) + (action.control ? 1 : 0),
+        scanControl: action.control ? { control: action.control, token: action.token } : null } };
+    case "agentSources/scanStatus": {
+      if (action.status.unavailable) return state;
+      if ((!action.status.version || !state.agentSources.scanStamp?.version) && action.requestGeneration !== undefined && action.requestGeneration !== (state.agentSources.scanRequestGeneration ?? 0)) return state;
+      if (action.status.progress) return appReducer(state, { type: "agentSources/scanProgress", progress: action.status.progress });
+      if (action.status.completion) return appReducer(state, { type: "agentSources/scanCompleted", scan: action.status.completion });
+      const confirmedCancellation = action.cancelledExecution &&
+        state.agentSources.scanControl?.control === "cancel" &&
+        state.agentSources.scanControl.token === action.cancelledExecution.token &&
+        state.agentSources.scanProgress && agentSourceScanExecutionKey(state.agentSources.scanProgress) === agentSourceScanExecutionKey(action.cancelledExecution);
+      const reconciledExecution = confirmedCancellation ? action.cancelledExecution
+        : !action.status.version && action.requestGeneration !== undefined && !state.agentSources.scanControl
+          ? state.agentSources.scanProgress : undefined;
+      const stamp = { ...(reconciledExecution ? { jobId: reconciledExecution.jobId, attemptId: reconciledExecution.attemptId, status: "cancelled" as const } : {}),
+        ...action.status.execution, version: action.status.version, status: action.status.status ?? (reconciledExecution ? "cancelled" as const : undefined) };
+      if (!acceptsScanUpdate(state.agentSources.scanStamp, stamp)) return state;
+      // An unversioned idle reply needs a current query generation to reconcile an
+      // externally cancelled scan; it cannot acknowledge an in-flight control.
+      if (!stamp.version && !confirmedCancellation && (state.agentSources.scanControl ||
+        (state.agentSources.isScanning && action.requestGeneration === undefined))) return state;
+      const cancelled = stamp.status === "cancelled" && stamp.jobId ? agentSourceScanExecutionKey({ ...stamp, jobId: stamp.jobId }) : null;
+      return { ...state, agentSources: { ...state.agentSources, scanStamp: stamp,
+        scanRequestGeneration: (state.agentSources.scanRequestGeneration ?? 0) + (reconciledExecution && !stamp.version ? 1 : 0),
+        isScanning: false, activeScanSourceId: null, scanProgress: null, cancellingScanJobId: null, scanControl: null,
+        finishedScanJobIds: cancelled ? [...state.agentSources.finishedScanJobIds.filter((id) => id !== cancelled), cancelled].slice(-20) : state.agentSources.finishedScanJobIds } };
+    }
+    case "agentSources/scanResumeAcknowledged": {
+      const progress = state.agentSources.scanProgress;
+      if (state.agentSources.scanControl?.control !== "resume" || state.agentSources.scanControl.token !== action.token ||
+        !progress || progress.version || progress.attemptId || progress.phase !== "stopped" ||
+        agentSourceScanExecutionKey(progress) !== agentSourceScanExecutionKey(action)) return state;
+      // Only the matching successful resume can release a legacy paused-state guard.
+      return { ...state, agentSources: { ...state.agentSources, isScanning: true,
+        scanProgress: { ...progress, phase: "scan" } } };
+    }
     case "agentSources/scanStarted":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null, cancellingScanJobId: null }
+        agentSources: { ...state.agentSources, error: null, scanRequestGeneration: (state.agentSources.scanRequestGeneration ?? 0) + 1 }
       };
     case "agentSources/scanProgress":
-      if (
-        state.agentSources.finishedScanJobIds.includes(action.progress.jobId) ||
-        state.agentSources.cancellingScanJobId === action.progress.jobId
-      ) {
+      if (!acceptsScanUpdate(state.agentSources.scanStamp, action.progress)) return state;
+      if (!action.progress.version && action.progress.attemptStartedAt && state.agentSources.latestScanAttemptStartedAt &&
+        action.progress.attemptStartedAt < state.agentSources.latestScanAttemptStartedAt) return state;
+      if (state.agentSources.finishedScanJobIds.includes(agentSourceScanExecutionKey(action.progress)) ||
+        state.agentSources.cancellingScanJobId === action.progress.jobId) {
         return state;
       }
       if (
-        state.agentSources.scanProgress?.phase === "stopped" &&
-        state.agentSources.scanProgress.jobId === action.progress.jobId &&
+        !action.progress.version && !action.progress.attemptId && state.agentSources.scanProgress?.phase === "stopped" &&
+        agentSourceScanExecutionKey(state.agentSources.scanProgress) === agentSourceScanExecutionKey(action.progress) &&
         action.progress.phase !== "stopped"
       ) {
         return state;
@@ -302,9 +408,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         agentSources: {
           ...state.agentSources,
+          scanStamp: action.progress,
+          scanRequestGeneration: (state.agentSources.scanRequestGeneration ?? 0) + (!action.progress.version &&
+            (!state.agentSources.scanProgress || agentSourceScanExecutionKey(state.agentSources.scanProgress) !== agentSourceScanExecutionKey(action.progress)) ? 1 : 0),
           isScanning: action.progress.phase !== "stopped",
           activeScanSourceId: action.progress.sourceId,
           error: null,
+          latestScanAttemptStartedAt: action.progress.attemptStartedAt ?? state.agentSources.latestScanAttemptStartedAt,
           scanProgress: action.progress
         }
       };
@@ -327,24 +437,39 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         }
       };
     case "agentSources/scanCompleted": {
+      if (action.scan && !acceptsScanUpdate(state.agentSources.scanStamp, action.scan)) return state;
+      if (!action.scan && state.agentSources.scanStamp?.version) return state;
+      if (!action.scan?.version && action.scan?.attemptStartedAt && state.agentSources.latestScanAttemptStartedAt &&
+        action.scan.attemptStartedAt < state.agentSources.latestScanAttemptStartedAt) return state;
+      if (action.scan && !action.scan.version && state.agentSources.scanProgress &&
+        agentSourceScanExecutionKey(action.scan) !== agentSourceScanExecutionKey(state.agentSources.scanProgress) &&
+        (!action.scan.attemptStartedAt || !state.agentSources.scanProgress.attemptStartedAt ||
+          action.scan.attemptStartedAt <= state.agentSources.scanProgress.attemptStartedAt)) return state;
+      const alreadyFinished = action.scan && state.agentSources.finishedScanJobIds.includes(agentSourceScanExecutionKey(action.scan));
+      if (alreadyFinished && !action.scan?.version) return state;
       const finishedJobId = action.scan?.jobId ?? state.agentSources.cancellingScanJobId;
+      const finishedExecution = action.scan ?? (state.agentSources.scanProgress?.jobId === finishedJobId
+        ? state.agentSources.scanProgress : finishedJobId ? { jobId: finishedJobId } : undefined);
       return {
         ...state,
         agentSources: {
           ...state.agentSources,
           isScanning: false,
           activeScanSourceId: null,
-          error: null,
+          error: alreadyFinished ? state.agentSources.error : null,
           scanProgress: null,
           cancellingScanJobId: null,
+          scanStamp: action.scan ? { ...action.scan, status: action.scan.succeeded === false ? "failed" : "completed" } : state.agentSources.scanStamp,
+          scanControl: null,
+          latestScanAttemptStartedAt: action.scan?.attemptStartedAt ?? state.agentSources.latestScanAttemptStartedAt,
           lastFinishedScanJobId: finishedJobId ?? state.agentSources.lastFinishedScanJobId,
-          finishedScanJobIds: finishedJobId
-            ? [...state.agentSources.finishedScanJobIds.filter((jobId) => jobId !== finishedJobId), finishedJobId].slice(-20)
+          finishedScanJobIds: finishedExecution
+            ? [...state.agentSources.finishedScanJobIds.filter((jobId) => jobId !== agentSourceScanExecutionKey(finishedExecution)), agentSourceScanExecutionKey(finishedExecution)].slice(-20)
             : state.agentSources.finishedScanJobIds,
-          recentScanCompletions: action.scan
+          recentScanCompletions: action.scan && !alreadyFinished
             ? [
                 ...state.agentSources.recentScanCompletions.filter((item) => item.sourceId !== action.scan?.sourceId),
-                { jobId: action.scan.jobId, sourceId: action.scan.sourceId }
+                { ...action.scan }
               ]
             : state.agentSources.recentScanCompletions
         }
@@ -355,7 +480,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         agentSources: {
           ...state.agentSources,
-          recentScanCompletions: state.agentSources.recentScanCompletions.filter((item) => item.jobId !== action.jobId)
+          recentScanCompletions: state.agentSources.recentScanCompletions.filter((item) => agentSourceScanExecutionKey(item) !== agentSourceScanExecutionKey(action))
         }
       };
     case "scanPreferences/updated":

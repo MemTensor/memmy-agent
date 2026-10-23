@@ -1,5 +1,10 @@
 /** Memmy local API contract. */
 import { z } from "zod";
+export * from "@memmy/agent-source-core/scan-state";
+
+export const ScanVersionSchema = z.object({ generation: z.number().int().nonnegative(), sequence: z.number().int().nonnegative() });
+export const ScanLifecycleSchema = z.enum(["idle", "running", "paused", "completed", "failed", "cancelled"]);
+export const ScanControlInputSchema = z.object({ expectedExecution: z.object({ jobId: z.string().min(1), attemptId: z.string().optional() }).optional(), expectedVersion: ScanVersionSchema.optional() });
 import { normalizeOutputLanguage } from "./output-language.js";
 
 export { normalizeOutputLanguage } from "./output-language.js";
@@ -454,10 +459,14 @@ export const AgentSourceScanInputSchema = z.preprocess(
     (value) => value ?? {},
     z.object({
         sourceId: z.string().min(1).optional(),
-        mode: AgentSourceScanModeSchema.optional()
+        mode: AgentSourceScanModeSchema.optional(),
+        expectedExecution: ScanControlInputSchema.shape.expectedExecution,
+        expectedVersion: ScanVersionSchema.optional()
     }).transform((input) => ({
         sourceId: input.sourceId ?? "all",
-        ...(input.mode ? { mode: input.mode } : {})
+        ...(input.mode ? { mode: input.mode } : {}),
+        ...(input.expectedExecution ? { expectedExecution: input.expectedExecution } : {}),
+        ...(input.expectedVersion ? { expectedVersion: input.expectedVersion } : {})
     }))
 );
 export type AgentSourceScanInput = z.infer<typeof AgentSourceScanInputSchema>;
@@ -515,11 +524,21 @@ export type OnboardingInsightReportStreamEvent = z.infer<typeof OnboardingInsigh
 
 /** Schema for agent source scan job response. */
 export const AgentSourceScanJobResponseSchema = z.object({
+    version: ScanVersionSchema.optional(),
+    status: ScanLifecycleSchema.optional(),
+    attemptId: z.string().min(1).optional(),
+    attemptStartedAt: z.string().optional(),
     jobId: z.string().min(1)
 });
 export type AgentSourceScanJobResponse = z.infer<typeof AgentSourceScanJobResponseSchema>;
 
 export const AgentSourceScanProgressPayloadSchema = z.object({
+    requestedSourceId: z.string().min(1).optional(),
+    mode: AgentSourceScanModeSchema.optional(),
+    version: ScanVersionSchema.optional(),
+    status: ScanLifecycleSchema.optional(),
+    attemptId: z.string().min(1).optional(),
+    attemptStartedAt: z.string().optional(),
     jobId: z.string().min(1),
     sourceId: z.string().min(1),
     phase: ScanPhaseSchema,
@@ -529,10 +548,24 @@ export const AgentSourceScanProgressPayloadSchema = z.object({
 });
 export type AgentSourceScanProgressPayload = z.infer<typeof AgentSourceScanProgressPayloadSchema>;
 
+export const AgentSourceScanUnavailableSchema = z.object({
+    code: z.enum(["memory_scan_upgrade_required", "memory_layer_unavailable"]),
+    message: z.string()
+});
+export type AgentSourceScanUnavailable = z.infer<typeof AgentSourceScanUnavailableSchema>;
+
 export const AgentSourceScanStatusResponseSchema = z.object({
+    version: ScanVersionSchema.optional(),
+    status: ScanLifecycleSchema.optional(),
+    unavailable: AgentSourceScanUnavailableSchema.optional(),
     active: z.boolean(),
     progress: AgentSourceScanProgressPayloadSchema.nullable(),
+    execution: z.object({ jobId: z.string(), attemptId: z.string().optional(), attemptStartedAt: z.string().optional() }).optional(),
     completion: z.object({
+        version: ScanVersionSchema.optional(),
+        status: ScanLifecycleSchema.optional(),
+        attemptId: z.string().min(1).optional(),
+        attemptStartedAt: z.string().optional(),
         jobId: z.string().min(1),
         sourceId: z.string().min(1),
         succeeded: z.boolean(),
@@ -593,6 +626,7 @@ export type ScanResult = z.infer<typeof ScanResultSchema>;
 
 /** Schema for paged persisted scan details. */
 export const ScanResultPageSchema = z.object({
+    attemptId: z.string().optional(),
     items: z.array(z.object({
         sourceId: z.string().min(1),
         conversationId: z.string().min(1),
@@ -1642,6 +1676,11 @@ export const ScanCompletedSseEventSchema = z.object({
     type: z.literal("agent_source.scan_completed"),
     timestamp: z.string().datetime(),
     payload: z.object({
+        version: ScanVersionSchema.optional(),
+        status: ScanLifecycleSchema.optional(),
+        attemptId: z.string().min(1).optional(),
+        attemptStartedAt: z.string().optional(),
+        succeeded: z.boolean().optional(),
         jobId: z.string().min(1),
         sourceId: z.string().min(1),
         results: z.array(ScanResultSchema)
@@ -1695,3 +1734,36 @@ export const TokenQuotaEligibilitySchema = z.object({
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
+
+/** Memory owns scan execution; desktop translates this state into its existing events. */
+export const MemoryAgentSourceScanStateSchema = z.object({
+    version: ScanVersionSchema.optional(),
+    status: ScanLifecycleSchema.optional(),
+    running: z.boolean(),
+    attemptId: z.string().optional(),
+    jobId: z.string().nullable(),
+    sourceId: z.string().nullable(),
+    mode: AgentSourceScanModeSchema.nullable(),
+    progress: AgentSourceScanProgressPayloadSchema.omit({ jobId: true, attemptId: true, attemptStartedAt: true }).extend({
+        phase: z.enum(["discover", "read", "redact", "emit", "scan", "prepare", "add", "summarize", "done", "stopped"])
+    }).nullable(),
+    startedAt: z.string().nullable(),
+    completedAt: z.string().nullable(),
+    error: z.string().nullable(),
+    results: z.array(ScanResultSchema).optional()
+});
+export type MemoryAgentSourceScanState = z.infer<typeof MemoryAgentSourceScanStateSchema>;
+export const MemoryScanControlResponseSchema = z.object({ ok: z.literal(true), outcome: z.enum(["applied", "already_terminal", "conflict"]).optional(), snapshot: MemoryAgentSourceScanStateSchema.optional() });
+export type MemoryScanControlResponse = z.infer<typeof MemoryScanControlResponseSchema>;
+export const AgentSourceScanControlResponseSchema = z.object({ ok: z.literal(true), outcome: z.enum(["applied", "already_terminal", "conflict"]).optional(), snapshot: AgentSourceScanStatusResponseSchema.optional() });
+export type AgentSourceScanControlResponse = z.infer<typeof AgentSourceScanControlResponseSchema>;
+export const MemoryAgentSourceListSchema = z.object({
+    executorAvailable: z.literal(true),
+    sources: z.array(AgentSourceViewSchema)
+});
+export type MemoryAgentSourceList = z.infer<typeof MemoryAgentSourceListSchema>;
+
+/** A retry keeps its job storage but has a new execution identity. */
+export function agentSourceScanExecutionKey(scan: { jobId: string; attemptId?: string }): string {
+    return scan.attemptId ? JSON.stringify([scan.jobId, scan.attemptId]) : scan.jobId;
+}

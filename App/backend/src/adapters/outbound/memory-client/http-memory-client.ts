@@ -1,5 +1,11 @@
 /** Http memory client module. */
 import {
+  MemoryAgentSourceScanStateSchema,
+  MemoryScanControlResponseSchema,
+  MemoryAgentSourceListSchema,
+  AgentSourceScanJobResponseSchema,
+  ScanResultPageSchema,
+  OkResponseSchema,
   AddMemoryOutputSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
@@ -102,6 +108,12 @@ export function createHttpMemoryClient(
           return response.json();
         }
 
+        // Older protocol-1 services expose scanning only to Viewer. Their health
+        // version does not prove support for the authenticated desktop scan API.
+        if (response.status === 404 && pathKey.startsWith("agentSource")) {
+          throw new MemoryLayerError("memory_scan_upgrade_required", 503,
+            "The running Memory service does not support unified scanning. Update and restart that service, then try again.");
+        }
         if (response.status >= 500) {
           throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx");
         }
@@ -131,6 +143,14 @@ export function createHttpMemoryClient(
   }
 
   return {
+    agentSources: {
+      list: () => request("GET", "agentSources", MemoryAgentSourceListSchema),
+      start: (input) => request("POST", "agentSourceScan", AgentSourceScanJobResponseSchema, { body: input, maxRetries: 0 }),
+      status: () => request("GET", "agentSourceStatus", MemoryAgentSourceScanStateSchema),
+      results: (jobId, cursor = "0", limit = 100) => request("GET", "agentSourceResults", ScanResultPageSchema, { params: { jobId }, query: { cursor, limit } }),
+      pause: (input) => request("POST", "agentSourcePause", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 }),
+      cancel: (input) => request("POST", "agentSourceCancel", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 })
+    },
     async health() {
       return request("GET", "health", MemoryHealthSnapshotSchema);
     },
@@ -351,7 +371,7 @@ function isTimeoutError(error: unknown): boolean {
 function shouldRetryMemoryLayerError(error: unknown): boolean {
   return (
     error instanceof MemoryLayerNetworkError ||
-    (error instanceof MemoryLayerError && error.status >= 500)
+    (error instanceof MemoryLayerError && error.status >= 500 && error.code !== "memory_scan_upgrade_required")
   );
 }
 

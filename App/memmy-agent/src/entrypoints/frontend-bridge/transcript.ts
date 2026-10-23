@@ -996,6 +996,25 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     activeActivitySegmentId = segment;
   }
 
+  function promoteInterruptedNarration(turnId = activeReplayTurnId): void {
+    if (!turnId) return;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (
+        message.turnId !== turnId
+        || message.kind !== "narration"
+        || !String(message.content ?? "").trim()
+      ) {
+        continue;
+      }
+      const promoted = { ...message };
+      delete promoted.kind;
+      delete promoted.activitySegmentId;
+      messages[index] = promoted;
+      return;
+    }
+  }
+
   function detachOpenAnswerBeforeActivity(): void {
     closedAnswerMessageId = null;
     bufferMessageId = null;
@@ -1232,9 +1251,26 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   for (const [idx, rec] of lines.entries()) {
+    const previousReplayTurnId = activeReplayTurnId;
     activateReplayState(rec);
     const ev = rec.event;
     if (ev === "user") {
+      const interruptedTurnId = previousReplayTurnId && previousReplayTurnId !== activeReplayTurnId
+        ? previousReplayTurnId
+        : activeReplayTurnId;
+      if (
+        interruptedTurnId
+        && messages.some((message) => message.role === "user" && message.turnId === interruptedTurnId)
+        && !messages.some((message) => (
+          message.turnId === interruptedTurnId
+          && message.role === "assistant"
+          && message.kind !== "trace"
+          && message.kind !== "narration"
+          && String(message.content ?? "").trim()
+        ))
+      ) {
+        promoteInterruptedNarration(interruptedTurnId);
+      }
       suppressUntilTurnEnd = false;
       activeActivitySegmentId = null;
       activeFileEditSegmentId = null;

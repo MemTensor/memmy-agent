@@ -1,0 +1,27 @@
+{
+  "name": "@memmy/agent-source-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config ./vitest.config.ts src"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./scan-state": {
+      "types": "./dist/src/scan-state.d.ts",
+      "default": "./dist/src/scan-state.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

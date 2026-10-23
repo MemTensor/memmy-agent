@@ -6191,8 +6191,8 @@ export class Repositories {
             cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
           }
         }
-        // Keep source tombstones, but a deleted Session must not block future turns.
-        this.db.prepare(`UPDATE source_turn_captures SET session_id = NULL, episode_id = NULL, raw_turn_id = NULL`).run();
+        // A full clear resets capture identities so explicitly rescanning the same
+        // source history can import it again. Individual deletions keep tombstones.
         if (existing.has("sqlite_sequence")) {
           const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
           if (sequenceTables.length) {

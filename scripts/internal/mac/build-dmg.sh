@@ -1024,10 +1024,10 @@ mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 mkdir -p "$RUNTIME_DIR/memory/dist"
-if [ -d "$ROOT_DIR/AgentSourceCore/dist/src" ]; then
+if [ -d "$ROOT_DIR/Memory/AgentSourceCore/dist/src" ]; then
   mkdir -p "$RUNTIME_DIR/memory/AgentSourceCore/dist/src"
-  cp -R "$ROOT_DIR/AgentSourceCore/dist/src/." "$RUNTIME_DIR/memory/AgentSourceCore/dist/src/"
-  cp "$ROOT_DIR/AgentSourceCore/package.json" "$RUNTIME_DIR/memory/AgentSourceCore/package.json"
+  cp -R "$ROOT_DIR/Memory/AgentSourceCore/dist/src/." "$RUNTIME_DIR/memory/AgentSourceCore/dist/src/"
+  cp "$ROOT_DIR/Memory/AgentSourceCore/package.json" "$RUNTIME_DIR/memory/AgentSourceCore/package.json"
 fi
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
@@ -1077,6 +1077,12 @@ else
 fi
 bash "$ROOT_DIR/scripts/internal/mac/build-memmy-computer-use.sh" "$OCU_APP" "$TARGET_CPU" "$OCU_SIGNING_IDENTITY" cn.memtensor.memmy
 package_step_start "Stage memmy-agent workspace runtime packages"
+# local-api-contracts shares scan ordering with Memory through this browser-safe package.
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$MEMORY_DIR/AgentSourceCore/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$MEMORY_DIR/AgentSourceCore/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
 mkdir -p "$RUNTIME_LOCAL_API_CONTRACTS_DIR"

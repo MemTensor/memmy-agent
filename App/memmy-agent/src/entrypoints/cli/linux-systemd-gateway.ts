@@ -217,6 +217,12 @@ export async function probeGateway(
       signal: controller.signal,
     });
     if (!response.ok) {
+      // The bootstrap listener starts before the agent runtime is ready.
+      // Only this explicit startup response is retryable; other HTTP failures
+      // still indicate an incompatible endpoint or rejected authentication.
+      if (response.status === 503 && (await response.text()).trim() === "agent_runtime_initializing") {
+        return { status: "unavailable", detail: "agent runtime is initializing" };
+      }
       return {
         status: "unexpected",
         detail: `bootstrap HTTP ${response.status}`,
