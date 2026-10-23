@@ -107,7 +107,7 @@ describe("PluginMarketplaceSection", () => {
     await search("  oFFicE  ");
     expect(Array.from(container.querySelectorAll("article")).map((item) => item.getAttribute("aria-label"))).toEqual(["Office"]);
     expect(button("已安装 (1)")).toBeDefined();
-    await search("检索文献");
+    await search("检索论文");
     expect(Array.from(container.querySelectorAll("article")).map((item) => item.getAttribute("aria-label"))).toEqual(["文献综述"]);
     expect(button("已安装 (1)")).toBeDefined();
     expect(props.plugins).toHaveLength(2);
@@ -117,7 +117,7 @@ describe("PluginMarketplaceSection", () => {
 
   it("intersects search with the installed filter and preserves that filter when search is cleared", async () => {
     await render();
-    await search("办公文档");
+    await search("演示文稿");
     expect(container.querySelectorAll("article")).toHaveLength(1);
     await click("已安装 (1)");
     expect(container.querySelectorAll("article")).toHaveLength(0);
@@ -222,6 +222,9 @@ describe("PluginMarketplaceSection", () => {
     await render({ plugins: [installed(literature, "pending_approval")] });
     expect(container.querySelector("article")?.textContent).not.toContain("默认提供");
     expect(container.querySelector("article")?.textContent).not.toContain("需官方模型");
+    const summary = container.querySelector(".plugin-marketplace-description")!;
+    expect(summary.textContent).toBe("根据研究主题检索论文、整理证据，生成可继续编辑的文献综述和参考文献。 该插件推荐使用 Memmy 官方模型。");
+    expect(summary.getAttribute("title")).toBe(summary.textContent);
     await click("查看文献综述详情");
     const dialog = document.querySelector("[role=dialog]")!;
     expect(dialog.querySelector("figure")).not.toBeNull();
@@ -229,6 +232,7 @@ describe("PluginMarketplaceSection", () => {
     expect(dialog.textContent).toContain("需登录；推荐 Memmy 官方模型");
     expect(dialog.textContent).not.toContain("能力说明");
     expect(dialog.textContent).toContain("根据研究主题检索论文");
+    expect(dialog.querySelector(".plugin-marketplace-detail-description")?.textContent).toBe(summary.textContent);
     expect(dialog.textContent).toContain("安装未完成");
     expect(dialog.textContent).not.toContain("arxiv.org");
     expect(dialog.textContent).not.toContain("host-service");
