@@ -291,7 +291,7 @@ describe("MemoryService / facade / config and storage", () => {
     db.close();
   });
 
-  it("generates semantic ids for future memory writes", () => {
+  it("generates semantic ids for future memory writes", async () => {
     const { service } = createTestService();
     const namespace = {
       source: "codex",
@@ -299,11 +299,11 @@ describe("MemoryService / facade / config and storage", () => {
       userId: "user-id-prefix"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-id-prefix", {
+    const complete = (await service.completeTurn("turn-id-prefix", {
       sessionId: session.sessionId,
       query: "Remember that generated IDs should use semantic prefixes.",
       answer: "Trace memories and episodes should expose their entity type in the ID."
-    });
+    }));
 
     const policy = service.addMemory({
       namespace,
@@ -381,12 +381,12 @@ describe("MemoryService / facade / config and storage", () => {
     });
     expect(start.hits.map((hit) => hit.id)).toContain(seed.id);
     expect(start.status).toContain("memory_add:disabled:no_turn_write");
-    const complete = readOnly.completeTurn("readonly-turn", {
+    const complete = (await readOnly.completeTurn("readonly-turn", {
       namespace,
       sessionId: session.sessionId,
       query: "Use the banana routing fixture database memory.",
       answer: "Used the seed memory."
-    });
+    }));
     expect(complete.l1MemoryIds).toEqual([]);
     expect(complete.scheduledEvolution).toBe(false);
     expect(() => readOnly.addMemory({

@@ -28,7 +28,7 @@ describe("source turn HTTP contract", () => {
     try {
       const responses = await Promise.all([submit(payload), submit({ ...payload, channel: "agent_source_scan" })]);
       expect(responses.map((response) => response.status)).toEqual([200, 200]);
-      const bodies = await Promise.all(responses.map((response) => response.json())) as Array<{ status: string; result: { sessionId: string; rawTurnId: string; l1MemoryId: string } }>;
+      const bodies = await Promise.all((await Promise.all(responses.map((response) => response.json())))) as Array<{ status: string; result: { sessionId: string; rawTurnId: string; l1MemoryId: string } }>;
       expect(bodies.map((body) => body.status).sort()).toEqual(["existing", "stored"]);
       expect(bodies[0]!.result.rawTurnId).toBe(bodies[1]!.result.rawTurnId);
       expect(bodies[0]!.result.l1MemoryId).toBe(bodies[1]!.result.l1MemoryId);

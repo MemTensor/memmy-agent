@@ -40,6 +40,7 @@ function createFeedbackRefinerLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "failure.experience.sink.v5") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
@@ -88,12 +89,12 @@ describe("MemoryService / feedback / experience", () => {
         userId: "user-feedback-experience"
       }
     });
-    const complete = service.completeTurn("turn-feedback-experience", {
+    const complete = (await service.completeTurn("turn-feedback-experience", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-experience",
       query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
       answer: "Parsed the filing and validated the issuer field."
-    });
+    }));
 
     const ok = await service.feedback({
       sessionId: session.sessionId,
@@ -253,12 +254,12 @@ describe("MemoryService / feedback / experience", () => {
         userId: "user-feedback-refiner"
       }
     });
-    const complete = service.completeTurn("turn-feedback-refiner", {
+    const complete = (await service.completeTurn("turn-feedback-refiner", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-refiner",
       query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
       answer: "I parsed the filename as the issuer name."
-    });
+    }));
 
     const feedbackResponse = await service.feedback({
       sessionId: session.sessionId,

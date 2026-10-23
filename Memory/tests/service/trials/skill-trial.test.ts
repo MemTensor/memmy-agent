@@ -18,12 +18,12 @@ describe("MemoryService / trials / skill trial", () => {
       userId: "user-skill-neutral-reward"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-skill-neutral-reward", {
+    const complete = (await service.completeTurn("turn-skill-neutral-reward", {
       sessionId: session.sessionId,
       episodeId: "episode-skill-neutral-reward",
       query: "use a reusable sqlite migration checklist for the next step",
       answer: "applied the sqlite migration checklist and reported the neutral result"
-    });
+    }));
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
@@ -37,14 +37,14 @@ describe("MemoryService / trials / skill trial", () => {
       evidenceAnchorIds: [complete.l1MemoryId]
     });
 
-    const trial = service.useSkill(skillId, {
+    const trial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-neutral-reward-1",
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
       rawTurnId: complete.rawTurnId,
       turnId: complete.turnId
-    });
+    }));
     const feedback = await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -96,20 +96,20 @@ describe("MemoryService / trials / skill trial", () => {
         sessionKey: "retry"
       }
     });
-    const retryTurn = service.completeTurn("turn-skill-neutral-reward-retry", {
+    const retryTurn = (await service.completeTurn("turn-skill-neutral-reward-retry", {
       sessionId: retrySession.sessionId,
       episodeId: "episode-skill-neutral-reward-retry",
       query: "retry the reusable sqlite migration checklist",
       answer: "applied the checklist again"
-    });
-    const retryTrial = service.useSkill(skillId, {
+    }));
+    const retryTrial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-neutral-reward-2",
       sessionId: retrySession.sessionId,
       episodeId: retryTurn.episodeId,
       rawTurnId: retryTurn.rawTurnId,
       turnId: retryTurn.turnId
-    });
+    }));
     expect(retryTrial.trialId).not.toBe(trial.trialId);
     expect(retryTrial.duplicate).toBeUndefined();
     const trialCounts = db.db.prepare(

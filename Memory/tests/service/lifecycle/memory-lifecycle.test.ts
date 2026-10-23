@@ -21,7 +21,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / lifecycle / governance", () => {
-  it("restores missing Policy evidence links when the declared L1 source is still valid", () => {
+  it("restores missing Policy evidence links when the declared L1 source is still valid", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -29,12 +29,12 @@ describe("MemoryService / lifecycle / governance", () => {
       userId: "restorable-policy-user"
     };
     const session = service.openSession({ namespace, workspaceId: "restorable-policy-workspace" });
-    const trace = service.completeTurn("turn-restorable-policy", {
+    const trace = (await service.completeTurn("turn-restorable-policy", {
       sessionId: session.sessionId,
       episodeId: "episode-restorable-policy",
       query: "修复 pytest 失败并验证结果",
       answer: "已修复失败并验证测试通过。"
-    });
+    }));
     makeTraceEligibleForL2(db, trace.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy_restorable",
@@ -132,7 +132,7 @@ describe("MemoryService / lifecycle / governance", () => {
     db.close();
   });
 
-  it("[BC-11][BC-26] recomputes Policy, World Model, and Skill dependencies after deleting L1 evidence", () => {
+  it("[BC-11][BC-26] recomputes Policy, World Model, and Skill dependencies after deleting L1 evidence", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -141,18 +141,18 @@ describe("MemoryService / lifecycle / governance", () => {
       projectId: "dependency-project"
     };
     const session = service.openSession({ namespace, workspaceId: "dependency-workspace" });
-    const p1Trace = service.completeTurn("turn-dependency-p1", {
+    const p1Trace = (await service.completeTurn("turn-dependency-p1", {
       sessionId: session.sessionId,
       episodeId: "episode-dependency-p1",
       query: "修复迁移失败并运行测试验证结果",
       answer: "已定位迁移错误，修复后测试通过。"
-    });
-    const p2Trace = service.completeTurn("turn-dependency-p2", {
+    }));
+    const p2Trace = (await service.completeTurn("turn-dependency-p2", {
       sessionId: session.sessionId,
       episodeId: "episode-dependency-p2",
       query: "检查数据库回滚流程并验证结果",
       answer: "已验证回滚流程可用。"
-    });
+    }));
     const policyInput = {
       userId: namespace.userId,
       sessionId: session.sessionId,
@@ -249,11 +249,11 @@ describe("MemoryService / lifecycle / governance", () => {
       },
       workspaceId: "workspace-alpha"
     });
-    const complete = first.service.completeTurn("turn-governance", {
+    const complete = (await first.service.completeTurn("turn-governance", {
       sessionId: session.sessionId,
       query: "secret raw user text should not be exported by default",
       answer: "secret raw assistant text should stay in raw turn only"
-    });
+    }));
     first.service.closeSession(session.sessionId);
     await first.service.runWorkerOnce(20);
     await first.service.runWorkerOnce(20);
@@ -445,7 +445,7 @@ function memoryProperties(
 }
 
 describe("L3 project environment scan triggers", () => {
-  it("queues on project Session creation and only on successful compaction with an L1 head", () => {
+  it("queues on project Session creation and only on successful compaction with an L1 head", async () => {
     const { db, root, service } = createTestService();
     const projectRoot = join(root, "project");
     mkdirSync(projectRoot);
@@ -481,11 +481,11 @@ describe("L3 project environment scan triggers", () => {
     })).toThrow("through L1 memory was not registered");
     expect(jobCount()).toBe(1);
 
-    const completed = service.completeTurn("project-trigger-turn", {
+    const completed = (await service.completeTurn("project-trigger-turn", {
       sessionId: opened.sessionId,
       query: "Change one file",
       answer: "Changed one file"
-    });
+    }));
     expect(jobCount()).toBe(1);
     const envelope = {
       requestId: "89e0763c-a864-40f4-b6fd-98fb4af1f722",
@@ -572,7 +572,7 @@ describe("L3 project environment scan triggers", () => {
 
 
 describe("L3 World Model scope deletion", () => {
-  it("detaches the unique scope and makes already queued field work no-change", () => {
+  it("detaches the unique scope and makes already queued field work no-change", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -585,13 +585,13 @@ describe("L3 World Model scope deletion", () => {
       l3WorldModelTransition: "resume_only",
       namespace
     });
-    const completed = service.completeTurn("l3-delete-turn", {
+    const completed = (await service.completeTurn("l3-delete-turn", {
       sessionId: opened.sessionId,
       query: "Never destroy source data without confirmation.",
       answer: "The source data was preserved.",
       toolCalls: [{ name: "delete", input: { path: "source.csv" } }],
       toolResults: [{ name: "delete", output: "confirmation required", exitCode: 1 }]
-    });
+    }));
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "b14640a4-3f57-4fb4-9007-ad2f6bd22bc4",
       adapterId: "codex-memory",

@@ -173,6 +173,7 @@ describe("memory token budget review regressions", () => {
     });
     const { db, service } = createTestService({
       config: pausedConfig,
+      llm: createTrackingLlm([]),
       configLoader: () => ({
         config: byokRuntimeConfig({
           tokenBudget: { dailyLimitM: 0, totalLimitM: 0 }
@@ -181,17 +182,19 @@ describe("memory token budget review regressions", () => {
       skillLlm: createDecisionRepairLlm(calls)
     });
     const repos = new Repositories(db.db);
-    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
-      dailyUsed: 1_000_000,
-      lifetimeUsed: 1_000_000,
-      dailyDate: localCalendarDate()
-    });
     const session = service.openSession({
       namespace: {
         source: "codex",
         profileId: "jiang",
         userId: "user-budget-burst"
       }
+    });
+    // Existing tasks can still collect tool observations while model work is paused.
+    await service.completeTurn("setup", { sessionId: session.sessionId, episodeId: "episode-budget-burst", query: "Fix migration", answer: "Investigating" });
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
     });
     await service.observeTool({
       sessionId: session.sessionId,
@@ -302,11 +305,6 @@ describe("memory token budget review regressions", () => {
       })
     });
     const repos = new Repositories(db.db);
-    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
-      dailyUsed: 1_000_000,
-      lifetimeUsed: 1_000_000,
-      dailyDate: localCalendarDate()
-    });
     const session = service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId: "user-span-budget" }
     });
@@ -315,7 +313,7 @@ describe("memory token budget review regressions", () => {
       name: index < 4 ? "read_file" : "apply_patch",
       input: { index }
     }));
-    const completed = service.completeTurn("turn-span-budget", {
+    const completed = (await service.completeTurn("turn-span-budget", {
       sessionId: session.sessionId,
       query: "修复项目构建失败并完成测试验证",
       answer: "已经定位依赖冲突并完成修复。",
@@ -325,6 +323,11 @@ describe("memory token budget review regressions", () => {
         name: call.name,
         output: { ok: true, index }
       }))
+    }));
+    repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000,
+      dailyDate: localCalendarDate()
     });
     const at = new Date().toISOString();
     repos.runtime.enqueueJob({
@@ -375,7 +378,7 @@ describe("memory token budget review regressions", () => {
     const reverseSession = reverse.service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId: "user-span-platform-summary" }
     });
-    const reverseCompleted = reverse.service.completeTurn("turn-span-platform-summary", {
+    const reverseCompleted = (await reverse.service.completeTurn("turn-span-platform-summary", {
       sessionId: reverseSession.sessionId,
       query: "修复项目构建失败并完成测试验证",
       answer: "已经定位依赖冲突并完成修复。",
@@ -385,7 +388,7 @@ describe("memory token budget review regressions", () => {
         name: call.name,
         output: { ok: true, index }
       }))
-    });
+    }));
     reverseRepos.runtime.enqueueJob({
       id: "job-span-platform-summary",
       jobType: "span_big_turn",
@@ -428,18 +431,18 @@ describe("memory token budget review regressions", () => {
       })
     });
     const repos = new Repositories(db.db);
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId: "user-feedback-refine" }
+    });
+    const completed = (await service.completeTurn("turn-feedback-refine", {
+      sessionId: session.sessionId,
+      query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
+      answer: "I parsed the filename as the issuer name."
+    }));
     repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
       dailyUsed: 1_000_000,
       lifetimeUsed: 1_000_000,
       dailyDate: localCalendarDate()
-    });
-    const session = service.openSession({
-      namespace: { source: "codex", profileId: "jiang", userId: "user-feedback-refine" }
-    });
-    const completed = service.completeTurn("turn-feedback-refine", {
-      sessionId: session.sessionId,
-      query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
-      answer: "I parsed the filename as the issuer name."
     });
     const first = await service.feedback({
       sessionId: session.sessionId,
@@ -494,18 +497,18 @@ describe("memory token budget review regressions", () => {
       skillLlm: createTrackingLlm(calls)
     });
     const repos = new Repositories(db.db);
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId: "user-feedback-rule" }
+    });
+    const completed = (await service.completeTurn("turn-feedback-rule", {
+      sessionId: session.sessionId,
+      query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
+      answer: "I parsed the filename as the issuer name."
+    }));
     repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
       dailyUsed: 1_000_000,
       lifetimeUsed: 1_000_000,
       dailyDate: localCalendarDate()
-    });
-    const session = service.openSession({
-      namespace: { source: "codex", profileId: "jiang", userId: "user-feedback-rule" }
-    });
-    const completed = service.completeTurn("turn-feedback-rule", {
-      sessionId: session.sessionId,
-      query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
-      answer: "I parsed the filename as the issuer name."
     });
     const first = await service.feedback({
       sessionId: session.sessionId,
@@ -612,6 +615,7 @@ function createTrackingLlm(
       _messages: unknown,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       return (responses[options.operation] ?? {}) as T;
     },
@@ -644,6 +648,7 @@ function createDecisionRepairLlm(calls: string[]): LlmClient {
       _messages: unknown,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       if (options.operation === "decision.repair.v1") {
         return {

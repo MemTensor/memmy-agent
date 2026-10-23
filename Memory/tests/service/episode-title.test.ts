@@ -64,14 +64,14 @@ function titleJob(episodeId: string, stage: "provisional" | "final"): EvolutionJ
 }
 
 /** One completed turn, which is what makes the episode show up in the task panel. */
-function completeOneTurn(service: MemoryService, key = "episode-title"): { episodeId: string; l1MemoryIds: string[] } {
+async function completeOneTurn(service: MemoryService, key = "episode-title"): Promise<{ episodeId: string; l1MemoryIds: string[] }> {
   const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: key } });
-  const completed = service.completeTurn(`turn_${key}`, {
+  const completed = (await service.completeTurn(`turn_${key}`, {
     sessionId: opened.sessionId,
     query: FIRST_USER_TEXT,
     answer: FIRST_ASSISTANT_TEXT,
     status: "succeeded"
-  });
+  }));
   return { episodeId: completed.episodeId, l1MemoryIds: completed.l1MemoryIds };
 }
 
@@ -109,15 +109,15 @@ function episodeTitleJobs(db: MemoryDb): Array<{ stage: string; status: string }
 }
 
 describe("episode title generation", () => {
-  it("queues a provisional title job when the first turn of an episode completes", () => {
+  it("queues a provisional title job when the first turn of an episode completes", async () => {
     const { db, service } = createTestService();
-    completeOneTurn(service);
+    (await completeOneTurn(service));
     expect(episodeTitleJobs(db)).toEqual([{ stage: "provisional", status: "queued" }]);
   });
 
   it("writes a title that describes the task instead of echoing the first user message", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { llm, calls } = respondWith("修复打包脚本架构硬编码", "将 package-mac.mjs 中写死的 arm64 改为读取 process.arch，x64 构建恢复正常。");
     const { repos, titleService } = createTitleService(db, llm);
 
@@ -135,7 +135,7 @@ describe("episode title generation", () => {
 
   it("still titles an episode whose L1 memories were all soft-deleted", async () => {
     const { db, service } = createTestService();
-    const { episodeId, l1MemoryIds } = completeOneTurn(service);
+    const { episodeId, l1MemoryIds } = (await completeOneTurn(service));
     const { repos, titleService } = createTitleService(db, respondWith("清理墓碑 L1 的任务", "全部 L1 被拒绝捕获后仍然依据原文生成标题。").llm);
     for (const memoryId of l1MemoryIds) repos.memories.softDelete(memoryId, "2026-02-02T00:00:00.000Z");
     expect(l1MemoryIds.length).toBeGreaterThan(0);
@@ -148,16 +148,16 @@ describe("episode title generation", () => {
 
   it("never pulls text from memories injected into the turn by retrieval", async () => {
     const { db, service } = createTestService();
-    const earlier = completeOneTurn(service, "earlier-task");
+    const earlier = (await completeOneTurn(service, "earlier-task"));
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "later-task" } });
-    const later = service.completeTurn("turn_later-task", {
+    const later = (await service.completeTurn("turn_later-task", {
       sessionId: opened.sessionId,
       query: "顺便帮我看看 Memory 的检索注入有没有把旧任务带进来。",
       answer: "检索注入只用于上下文，不应参与任务命名。",
       status: "succeeded",
       // Retrieval injects the earlier task's L1 here; it must not reach the title input.
       sourceMemoryIds: earlier.l1MemoryIds
-    });
+    }));
     const { llm, calls } = respondWith("核对检索注入边界", "确认注入记忆不参与命名。");
     const { repos, titleService } = createTitleService(db, llm);
     expect(later.episodeId).not.toBe(earlier.episodeId);
@@ -174,14 +174,14 @@ describe("episode title generation", () => {
   it("sends the raw turn text and omits tool payloads", async () => {
     const { db, service } = createTestService();
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "tooling" } });
-    const completed = service.completeTurn("turn_tooling", {
+    const completed = (await service.completeTurn("turn_tooling", {
       sessionId: opened.sessionId,
       query: FIRST_USER_TEXT,
       answer: FIRST_ASSISTANT_TEXT,
       status: "succeeded",
       toolCalls: [{ id: "call-a", name: "read_file", input: { path: "scripts/package-mac.mjs" } }],
       toolResults: [{ id: "call-a", output: "const arch = \"arm64\";" }]
-    });
+    }));
     const { llm, calls } = respondWith("架构判断改为运行时读取", "摘要");
     const { titleService } = createTitleService(db, llm);
 
@@ -195,7 +195,7 @@ describe("episode title generation", () => {
 
   it("keeps an existing title when a second provisional pass runs, and lets the final pass replace it", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const provisional = respondWith("临时标题", "临时摘要");
     const { repos, titleService } = createTitleService(db, provisional.llm);
     await titleService.generate(titleJob(episodeId, "provisional"));
@@ -216,7 +216,7 @@ describe("episode title generation", () => {
 
   it("skips the model when the input fingerprint has not changed", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { llm, calls } = respondWith("单轮任务标题", "单轮任务摘要");
     const { repos, titleService } = createTitleService(db, llm);
     await titleService.generate(titleJob(episodeId, "final"));
@@ -230,7 +230,7 @@ describe("episode title generation", () => {
 
   it("leaves the columns empty and marks the episode waiting when no model is configured", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const unconfigured: LlmClient = {
       ...titleLlm(async () => { throw new Error("must not be called"); }),
       isConfigured: () => false
@@ -248,7 +248,7 @@ describe("episode title generation", () => {
 
   it("does not replace a generated episode title when the summary model is removed", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service, "keep-generated");
+    const { episodeId } = (await completeOneTurn(service, "keep-generated"));
     const unconfigured: LlmClient = {
       ...titleLlm(async () => { throw new Error("must not be called"); }),
       isConfigured: () => false
@@ -296,7 +296,7 @@ describe("episode title generation", () => {
     expect(episodeTitleMeta(finalEpisode)).toMatchObject(finalMeta);
     expect(episodeTitleDisplayState(finalEpisode, false)).toEqual({ titleGenerated: true, titlePending: false });
 
-    const bare = completeOneTurn(service, "repeat-unconfigured");
+    const bare = (await completeOneTurn(service, "repeat-unconfigured"));
     await expect(titleService.generate(titleJob(bare.episodeId, "final"))).rejects.toThrow("summary model is not configured");
     const skipped = episodeTitleMeta(repos.runtime.getEpisode(bare.episodeId)!);
     now = "2026-09-22T04:00:00.000Z";
@@ -309,7 +309,7 @@ describe("episode title generation", () => {
 
   it("rejects a model response that is missing a field instead of writing a partial row", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { repos, titleService } = createTitleService(db, titleLlm(async () => JSON.stringify({ title: "只有标题" })));
 
     await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow();
@@ -320,17 +320,17 @@ describe("episode title generation", () => {
   it("discards the model result when the episode gained a turn while the call was in flight", async () => {
     const { db, service } = createTestService();
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "racing" } });
-    const first = service.completeTurn("turn_racing_1", {
+    const first = (await service.completeTurn("turn_racing_1", {
       sessionId: opened.sessionId, query: FIRST_USER_TEXT, answer: FIRST_ASSISTANT_TEXT, status: "succeeded"
-    });
+    }));
     const slowLlm = titleLlm(async () => {
-      service.completeTurn("turn_racing_2", {
+      (await service.completeTurn("turn_racing_2", {
         sessionId: opened.sessionId,
         query: "再顺手把 x64 的构建也验证一遍。",
         answer: "x64 构建同样通过，两种架构都已确认。",
         status: "succeeded",
         episodeId: first.episodeId
-      });
+      }));
       return JSON.stringify({ title: "过期标题", summary: "只覆盖了第一轮的结论。" });
     });
     const { repos, titleService } = createTitleService(db, slowLlm);
@@ -346,13 +346,13 @@ describe("episode title generation", () => {
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "long" } });
     let episodeId = "";
     for (let turn = 1; turn <= 34; turn += 1) {
-      const completed = service.completeTurn(`turn_long_${turn}`, {
+      const completed = (await service.completeTurn(`turn_long_${turn}`, {
         sessionId: opened.sessionId,
         query: `第 ${turn} 轮的问题`,
         answer: turn === 34 ? "最后一轮的结论：迁移已全部完成。" : `第 ${turn} 轮的回答`,
         status: "succeeded",
         ...(episodeId ? { episodeId } : {})
-      });
+      }));
       episodeId = completed.episodeId;
     }
     const { llm, calls } = respondWith("长任务标题", "长任务摘要");
@@ -372,12 +372,12 @@ describe("episode title generation", () => {
     expect(episodeTitleMeta(repos.runtime.getEpisode(episodeId)!)?.sourceTurnCount).toBe(34);
   });
 
-  it("does not queue another final job once one succeeded over the same turns", () => {
+  it("does not queue another final job once one succeeded over the same turns", async () => {
     const { db, service } = createTestService();
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "requeue" } });
-    const completed = service.completeTurn("turn_requeue", {
+    const completed = (await service.completeTurn("turn_requeue", {
       sessionId: opened.sessionId, query: FIRST_USER_TEXT, answer: FIRST_ASSISTANT_TEXT, status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     repos.runtime.updateEpisodeTitle(completed.episodeId, {
       title: "已生成的终版标题",
@@ -399,9 +399,9 @@ describe("episode title generation", () => {
     expect(episodeTitleJobs(db)).toHaveLength(before);
   });
 
-  it("is queued ahead of background evolution work", () => {
+  it("is queued ahead of background evolution work", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     // The worker leases a single priority cohort per round, so a title ranked below
     // a stalled background job would never get its turn while that job keeps failing.
     db.db.prepare(
@@ -419,7 +419,7 @@ describe("episode title generation", () => {
 
   it("steers the model to Chinese for a Chinese task that quotes code", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { llm, calls } = respondWith("修复架构硬编码", "改为读取 process.arch。");
     const { titleService } = createTitleService(db, llm);
 
@@ -430,7 +430,7 @@ describe("episode title generation", () => {
 
   it("follows the interface language the host app is set to, over the language of the turns", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { llm, calls } = respondWith("Fix packaging arch", "Read process.arch instead.");
     const { titleService } = createTitleService(db, llm, { language: "en-US" });
 
@@ -443,7 +443,7 @@ describe("episode title generation", () => {
 
   it("falls back to the language of the turns when the host pins none", async () => {
     const { db, service } = createTestService();
-    const { episodeId } = completeOneTurn(service);
+    const { episodeId } = (await completeOneTurn(service));
     const { llm, calls } = respondWith("修复架构硬编码", "改为读取 process.arch。");
     const { titleService } = createTitleService(db, llm, { language: undefined });
 
@@ -452,15 +452,15 @@ describe("episode title generation", () => {
     expect(systemPromptOf(calls)).toContain("Simplified Chinese");
   });
 
-  it("queues the final title job even when the closing episode also schedules reflection or reward", () => {
+  it("queues the final title job even when the closing episode also schedules reflection or reward", async () => {
     const { db, service } = createTestService();
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "closing" } });
-    service.completeTurn("turn_closing", {
+    (await service.completeTurn("turn_closing", {
       sessionId: opened.sessionId,
       query: FIRST_USER_TEXT,
       answer: FIRST_ASSISTANT_TEXT,
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId, {});
 
     const stages = episodeTitleJobs(db).map((job) => job.stage);
@@ -478,12 +478,12 @@ describe("episode title generation", () => {
     llm.isConfigured = () => configured;
     const { service } = createTestService({ llm });
     const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "recover-title" } });
-    const completed = service.completeTurn("turn_recover-title", {
+    const completed = (await service.completeTurn("turn_recover-title", {
       sessionId: opened.sessionId,
       query: FIRST_USER_TEXT,
       answer: FIRST_ASSISTANT_TEXT,
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId, {});
     await service.runWorkerOnce(20);
     const waiting = service.panelTasks({}).tasks.find((task) => task.id === completed.episodeId);

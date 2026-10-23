@@ -1,7 +1,8 @@
 import {
   BATCH_REFLECTION_PROMPT,
-  REFLECTION_SCORE_PROMPT,
   languageSteeringLine,
+  normalizeToolCalls,
+  REFLECTION_SCORE_PROMPT,
   steeredPromptLanguage,
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
@@ -29,9 +30,21 @@ import {
 import { summarizeTurn as sessionSummarizeTurn } from "../session/session-turn-service.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import {
+  CAPTURE_SUMMARY_MAX_CHARS,
+  CAPTURE_TITLE_MAX_CHARS,
   normalizeCaptureSummaryUserText,
   sanitizeCaptureSummary
 } from "./capture-summary.js";
+import {
+  buildTurnJudgeMessages,
+  parseTurnJudgment,
+  TURN_JUDGE_INPUT_TOKEN_BUDGET,
+  TURN_JUDGE_MAX_TOKENS,
+  TURN_JUDGE_PROMPT_VERSION,
+  type TurnJudgeSnapshot,
+  type TurnJudgment
+} from "./turn-judge.js";
+import { loadTurnJudgeContext, type TurnJudgeContext } from "./turn-judge-context.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
@@ -48,11 +61,13 @@ export interface TurnMemoryCaptureDecision {
   correctedUserMemoryContent?: string;
   l1Evidence: Array<{ quote: string; sourceRole: "user" | "assistant" | "tool"; kind: string }>;
   reason: string;
+  // turn.judge.v1 only: the model's flag for an L1 holding only general facts
+  // the turn shows no support for.
+  unverifiedAnswer?: boolean;
 }
 
 const pipelineLogger = createMemoryLogger("pipeline");
-export const CAPTURE_TITLE_MAX_CHARS = 30;
-export const CAPTURE_SUMMARY_MAX_CHARS = 180;
+export { CAPTURE_SUMMARY_MAX_CHARS, CAPTURE_TITLE_MAX_CHARS };
 
 export interface TraceCaptureSummary {
   title: string;
@@ -859,6 +874,83 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
     };
   }
 
+  // turn.judge.v1: the single per-turn call on a stored input snapshot.
+  // Returns the parsed judgment; an answer the checks reject throws, which the
+  // job counts as a failed attempt.
+  async judgeTurnForCapture(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    snapshot: TurnJudgeSnapshot;
+  }): Promise<TurnJudgment> {
+    const { snapshot } = input;
+    const result = await this.deps.llm.completeJson<Record<string, unknown>>(snapshot.messages, {
+      operation: "capture.summarize",
+      thinkingMode: "disabled",
+      temperature: 0,
+      maxTokens: TURN_JUDGE_MAX_TOKENS,
+      inputTokenBudget: TURN_JUDGE_INPUT_TOKEN_BUDGET
+    });
+    const judgment = parseTurnJudgment(result, {
+      taskEmpty: snapshot.taskEmpty,
+      mustKeep: snapshot.mustKeep,
+      candidateIds: snapshot.candidateIds,
+      visible: snapshot.visible,
+      source: {
+        userText: input.rawTurn.userText ?? "",
+        agentText: input.rawTurn.assistantText ?? "",
+        toolCalls: rawTurnToolCalls(input.rawTurn)
+      }
+    });
+    if (judgment.diagnostics.violations.length > 0) {
+      pipelineLogger.warn("turn_judge.violations", {
+        sourceMemoryId: input.trace.id,
+        rawTurnId: input.rawTurn.id,
+        violations: judgment.diagnostics.violations
+      });
+    }
+    return judgment;
+  }
+
+  // Builds the input from the stored turns as they were before this turn.
+  buildTurnJudgeSnapshot(
+    input: { trace: TraceMeta; rawTurn: RawTurnRecord; mustKeep: boolean; catchUp?: boolean; at: string }
+  ): TurnJudgeSnapshot {
+    const toolCalls = rawTurnToolCalls(input.rawTurn);
+    const context: TurnJudgeContext = input.catchUp
+      ? { filedByRule: "catch_up" }
+      : loadTurnJudgeContext(this.deps.repos, input.rawTurn);
+    const candidates = this.userMemoryCandidatesForCapture(input.trace);
+    const userText = input.rawTurn.userText ?? "";
+    const assistantText = input.rawTurn.assistantText ?? "";
+    const built = buildTurnJudgeMessages({
+      taskSoFar: context.taskSoFar,
+      capturedAtMs: input.trace.ts,
+      timeZone: input.trace.timeZone,
+      userText,
+      assistantText,
+      toolCalls,
+      candidates,
+      mustKeep: input.mustKeep,
+      languageLine: languageSteeringLine(steeredPromptLanguage(this.deps.config.language, [userText, assistantText]))
+    });
+    return {
+      promptVersion: TURN_JUDGE_PROMPT_VERSION,
+      builtAt: input.at,
+      taskEmpty: !context.taskSoFar,
+      ...(context.filedByRule ? { filedByRule: context.filedByRule } : {}),
+      ...(context.baseEpisodeId ? { baseEpisodeId: context.baseEpisodeId } : {}),
+      ...(context.previousRawTurnId ? { previousRawTurnId: context.previousRawTurnId } : {}),
+      ...(context.previousL1MemoryId ? { previousL1MemoryId: context.previousL1MemoryId } : {}),
+      mustKeep: input.mustKeep,
+      candidateIds: candidates.map((candidate) => candidate.id),
+      messages: built.messages,
+      visible: built.visible,
+      inputTokens: built.inputTokens,
+      truncationSteps: built.truncationSteps,
+      overBudget: built.overBudget
+    };
+  }
+
   private userMemoryCandidatesForCapture(
     trace: NonNullable<ReturnType<typeof traceMetaFromMemory>>
   ): Array<{ id: string; memoryTypes: UserMemoryType[]; content: string; updatedAt: string }> {
@@ -1441,6 +1533,10 @@ function traceReflectionSynthPayload(input: {
     "DOWNSTREAM STEP PREVIEW:",
     input.downstreamPreview || "(none)"
   ].filter((line) => line !== "").join("\n");
+}
+
+function rawTurnToolCalls(rawTurn: RawTurnRecord): ToolCallPayload[] {
+  return normalizeToolCalls(rawTurn.toolCalls.filter(isToolCallPayload), rawTurn.toolResults);
 }
 
 function traceSummaryPayload(input: {

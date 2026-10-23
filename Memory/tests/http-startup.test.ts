@@ -7,9 +7,9 @@ import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 const servers: Server[] = [];
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
+  await Promise.all((await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
-  })));
+  })))));
 });
 
 describe("Memory HTTP startup", () => {

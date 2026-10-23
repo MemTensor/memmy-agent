@@ -121,11 +121,11 @@ describe("MemoryService / embedding / processing", () => {
         userId: "user-retry"
       }
     });
-    const complete = service.completeTurn("turn-retry-1", {
+    const complete = (await service.completeTurn("turn-retry-1", {
       sessionId: session.sessionId,
       query: "Remember that transient embedding failures should be retried.",
       answer: "I will keep the retry queue durable."
-    });
+    }));
     const initialMemory = db.db
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
@@ -216,16 +216,16 @@ describe("MemoryService / embedding / processing", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "batch-isolation", userId: "user-batch-isolation" }
     });
-    const good = service.completeTurn("turn-embedding-good", {
+    const good = (await service.completeTurn("turn-embedding-good", {
       sessionId: session.sessionId,
       query: "Remember the valid embedding item.",
       answer: "VALID_EMBEDDING_ITEM"
-    });
-    const bad = service.completeTurn("turn-embedding-bad", {
+    }));
+    const bad = (await service.completeTurn("turn-embedding-bad", {
       sessionId: session.sessionId,
       query: "Remember the oversized embedding item.",
       answer: "BAD_EMBEDDING_ITEM"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     const embeddingRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -400,11 +400,11 @@ describe("MemoryService / embedding / processing", () => {
         userId: "user-dual-embedding"
       }
     });
-    const complete = service.completeTurn("turn-dual-embedding", {
+    const complete = (await service.completeTurn("turn-dual-embedding", {
       sessionId: session.sessionId,
       query: "Remember the SQLite migration rule.",
       answer: "I will run the focused migration test before broad checks."
-    });
+    }));
 
     await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
@@ -461,13 +461,13 @@ describe("MemoryService / embedding / processing", () => {
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs").get()).toEqual({ count: 0 });
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM memory_processing_state").get()).toEqual({ count: 0 });
 
-    const complete = service.completeTurn("turn-live-trace-summary", {
+    const complete = (await service.completeTurn("turn-live-trace-summary", {
       sessionId: session.sessionId,
       query: "Remember the SQLite migration workflow.",
       answer: "Use focused checks first, then broaden only after the migration path is verified."
-    });
+    }));
 
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)).toMatchObject({
       state: "summary_pending",
       stage: "summary",
@@ -487,7 +487,7 @@ describe("MemoryService / embedding / processing", () => {
     const episodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
     expect(episodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
     const titleRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
-    expect(titleRun.jobs.map((job) => job.jobType)).toEqual(["episode_title"]);
+    expect(titleRun.jobs.map((job) => job.jobType)).toEqual([]);
     expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
@@ -532,7 +532,8 @@ describe("MemoryService / embedding / processing", () => {
       async complete() {
         return "{}";
       },
-      async completeJson<T extends Record<string, unknown>>() {
+      async completeJson<T extends Record<string, unknown>>(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         return { title: "生成标题", summary: "生成摘要" } as unknown as T;
       },
       status: () => ({
@@ -546,11 +547,11 @@ describe("MemoryService / embedding / processing", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "default", sessionKey: "unconfigured-summary" }
     });
-    service.completeTurn("turn-unconfigured-summary", {
+    (await service.completeTurn("turn-unconfigured-summary", {
       sessionId: session.sessionId,
       query: "请修复自动扫描卡顿并运行测试",
       answer: "已完成修复并运行测试。"
-    });
+    }));
     addAgentSourceImport(
       service,
       { source: "codex", profileId: "unconfigured-import", userId: "unconfigured-import" },

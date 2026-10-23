@@ -25,6 +25,7 @@ import type {
   SynthesizeDecisionRepairDraft
 } from "../feedback/feedback-experience.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { representativeEpisodeFeedback } from "./turn-judge.js";
 import {
   SPAN_BIG_TURN_ENABLED,
   SPAN_BIG_TURN_MIN_TOOL_CALLS
@@ -84,8 +85,9 @@ export class RewardPipeline {
     const episodeFeedback = episode?.feedbackIds
       .map((id) => this.deps.repos.runtime.getFeedback(id))
       .filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
-    const latestEpisodeFeedback = [...episodeFeedback].reverse().find((item) => item.channel === "explicit")
-      ?? episodeFeedback[episodeFeedback.length - 1];
+    // A neutral reaction (strength 0, written every turn by turn.judge.v1) does
+    // not stand in for an earlier positive or negative one.
+    const latestEpisodeFeedback = representativeEpisodeFeedback(episodeFeedback);
     const fallbackFeedback = heuristicHumanScore(latestEpisodeFeedback
       ? [latestEpisodeFeedback]
       : payloadHasFeedback

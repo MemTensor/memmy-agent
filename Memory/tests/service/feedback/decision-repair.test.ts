@@ -45,6 +45,7 @@ function createDecisionRepairLlm(
       messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
@@ -156,18 +157,18 @@ describe("MemoryService / feedback / decision repair", () => {
       workspaceId: "workspace-repair"
     });
     const completes = [
-      service.completeTurn("turn-repair-a", {
+      (await service.completeTurn("turn-repair-a", {
         sessionId: session.sessionId,
         episodeId: "episode-repair-a",
         query: "sqlite migration repair workflow should inspect schema first",
         answer: "Use deterministic sqlite schema repair and verify with tests."
-      }),
-      service.completeTurn("turn-repair-b", {
+      })),
+      (await service.completeTurn("turn-repair-b", {
         sessionId: session.sessionId,
         episodeId: "episode-repair-b",
         query: "sqlite schema repair workflow should inspect migrations first",
         answer: "Use deterministic sqlite schema repair and verify with tests."
-      })
+      }))
     ];
     for (const complete of completes) {
       await service.feedback({
@@ -284,11 +285,11 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: "user-repair-zero-failure"
       }
     });
-    const failed = service.completeTurn("turn-repair-zero-failure", {
+    const failed = (await service.completeTurn("turn-repair-zero-failure", {
       sessionId: session.sessionId,
       query: "install package through unstable network timeout path",
       answer: "The command failed with timeout while retrying the same network path."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,
@@ -321,17 +322,17 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: "user-repair-relaxed-session"
       }
     });
-    const success = service.completeTurn("turn-repair-relaxed-success", {
+    const success = (await service.completeTurn("turn-repair-relaxed-success", {
       sessionId: session.sessionId,
       query: "recover the local sqlite migration",
       answer: "Read the migration output first, then apply the deterministic fallback path."
-    });
+    }));
     makeTraceEligibleForL2(db, success.l1MemoryId);
-    const failure = service.completeTurn("turn-repair-relaxed-failure", {
+    const failure = (await service.completeTurn("turn-repair-relaxed-failure", {
       sessionId: session.sessionId,
       query: "recover the same local migration",
       answer: "The command failed with timeout while retrying the same path."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,
@@ -377,12 +378,12 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: "user-decision-repair-llm"
       }
     });
-    const complete = service.completeTurn("turn-decision-repair-llm", {
+    const complete = (await service.completeTurn("turn-decision-repair-llm", {
       sessionId: session.sessionId,
       episodeId: "episode-decision-repair-llm",
       query: "Fix a sqlite migration failure",
       answer: "Retry the same failing query without reading the migration output."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,
@@ -454,12 +455,12 @@ describe("MemoryService / feedback / decision repair", () => {
     });
     const tailMarker = "TAIL_TIMEOUT_MARKER";
     const longAssistantText = `${"blind retry without reading logs ".repeat(120)}final error ${tailMarker}`;
-    const complete = service.completeTurn("turn-decision-repair-tail", {
+    const complete = (await service.completeTurn("turn-decision-repair-tail", {
       sessionId: session.sessionId,
       episodeId: "episode-decision-repair-tail",
       query: "Fix a long sqlite migration failure",
       answer: longAssistantText
-    });
+    }));
 
     await service.feedback({
       sessionId: session.sessionId,
@@ -746,12 +747,12 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: positiveUserId
       }
     });
-    const positive = service.completeTurn("turn-value-distribution-positive", {
+    const positive = (await service.completeTurn("turn-value-distribution-positive", {
       sessionId: session.sessionId,
       episodeId: "episode-value-distribution-positive",
       query: "sqlite database sql migration workflow should inspect schema first",
       answer: "Inspect schema output before retrying the sqlite SQL migration."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: positive.episodeId,
@@ -773,12 +774,12 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: negativeUserId
       }
     });
-    const negative = service.completeTurn("turn-value-distribution-negative", {
+    const negative = (await service.completeTurn("turn-value-distribution-negative", {
       sessionId: negativeSession.sessionId,
       episodeId: "episode-value-distribution-negative",
       query: "sqlite database sql migration workflow should inspect schema first",
       answer: "Repeated the same SQL query without reading the migration output."
-    });
+    }));
     await service.feedback({
       sessionId: negativeSession.sessionId,
       episodeId: negative.episodeId,
@@ -875,7 +876,7 @@ describe("MemoryService / feedback / decision repair", () => {
       },
       workspaceId: "workspace-repair-retrieval"
     });
-    const complete = service.completeTurn("turn-repair-retrieval", {
+    const complete = (await service.completeTurn("turn-repair-retrieval", {
       sessionId: session.sessionId,
       query: "sqlite migration command failed",
       answer: "Need a repair hint for missing sqlite migration.",
@@ -885,7 +886,7 @@ describe("MemoryService / feedback / decision repair", () => {
         output: "error: missing sqlite migration 003",
         success: false
       }]
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
 
     const suggestion = await service.repairSuggestion({
@@ -914,7 +915,7 @@ describe("MemoryService / feedback / decision repair", () => {
         userId: "user-repair-plugin-query"
       }
     });
-    const complete = service.completeTurn("turn-repair-plugin-query", {
+    const complete = (await service.completeTurn("turn-repair-plugin-query", {
       sessionId: session.sessionId,
       query: "dependency install failed during setup",
       answer: "The installer could not reach the package index.",
@@ -925,7 +926,7 @@ describe("MemoryService / feedback / decision repair", () => {
         errorCode: "NETWORK_REFUSED",
         success: false
       }]
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const suggestion = await service.repairSuggestion({

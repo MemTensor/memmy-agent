@@ -28,6 +28,7 @@ import {
   type PreparedEmbeddingJob
 } from "../embedding/embedding-job-processor.js";
 import type { PolicyEvidencePreflightReport } from "../evolution/evolution-job-processor.js";
+import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import {
   embeddingTextForMemory,
   embeddingRetryBackoffMs,
@@ -114,6 +115,8 @@ type EmbeddingRetryResult = {
  */
 export interface WorkerRunnerDeps {
   repos: Pick<Repositories, "transaction" | "memories" | "processing" | "runtime">;
+  // A per-turn judgment that used up its attempts: mark it failed so the task can close.
+  onTurnJudgeDeadLetter?: (job: EvolutionJobRecord) => void;
   embedder: Embedder;
   capture: { embedAfterCapture: boolean };
   embeddingRetryWorkerId: string;
@@ -259,7 +262,10 @@ export class WorkerRunner {
             targetMemoryId: memory.id,
             payload: {
               source: "startup.processing_repair",
-              ...observationJobPayload(memory)
+              ...observationJobPayload(memory),
+              ...(jobType === "trace_summary"
+                ? turnJudgeJobFlags(this.deps.repos.runtime.latestJobForTarget(memory.id, jobType)?.payload)
+                : {})
             },
             maxAttempts: 3,
             createdAt: at
@@ -645,6 +651,9 @@ export class WorkerRunner {
     const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
     this.deps.appendJobChange(failedJob, failOp, job);
     this.updateProcessingAfterJobFailure(failedJob, error);
+    if (failedJob.status === "dead_letter" && failedJob.jobType === "trace_summary" && failedJob.payload.turnJudge === true) {
+      this.deps.onTurnJudgeDeadLetter?.(failedJob);
+    }
     workerLogger.error("job.failed", {
       ...workerJobLogFields(failedJob),
       terminal: failedJob.status === "dead_letter",

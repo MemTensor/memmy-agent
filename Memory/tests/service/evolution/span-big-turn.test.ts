@@ -63,6 +63,7 @@ function createSpanBigTurnLlm(
       messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.at(-1)?.content ?? "{}") as {
@@ -171,14 +172,14 @@ describe("MemoryService / evolution / span big turn", () => {
           }
         : { ok: true, index }
     }));
-    const completed = service.completeTurn("span-big-turn", {
+    const completed = (await service.completeTurn("span-big-turn", {
       namespace,
       sessionId: session.sessionId,
       query: "修复项目构建失败并完成测试验证",
       answer: "已经定位依赖冲突，完成修复并通过构建与测试。",
       toolCalls,
       toolResults
-    });
+    }));
     const invalidToolCall = `invalid-${"x".repeat(140)}`;
     const rawToolCalls: unknown[] = [...toolCalls];
     rawToolCalls[5] = invalidToolCall;
@@ -343,7 +344,7 @@ describe("MemoryService / evolution / span big turn", () => {
       name: "apply_migration_step",
       input: { index }
     }));
-    const completed = service.completeTurn("span-big-turn-no-split", {
+    const completed = (await service.completeTurn("span-big-turn-no-split", {
       namespace,
       sessionId: session.sessionId,
       query: "完成这一个数据库迁移目标",
@@ -354,7 +355,7 @@ describe("MemoryService / evolution / span big turn", () => {
         name: call.name,
         output: { ok: true, index }
       }))
-    });
+    }));
 
     service.closeSession(session.sessionId);
     await service.feedback({
@@ -409,7 +410,7 @@ describe("MemoryService / evolution / span big turn", () => {
       name: "task_step",
       input: { index }
     }));
-    const completed = service.completeTurn("span-big-turn-replace", {
+    const completed = (await service.completeTurn("span-big-turn-replace", {
       namespace,
       sessionId: session.sessionId,
       query: "完成需要多步处理的复杂任务",
@@ -420,7 +421,7 @@ describe("MemoryService / evolution / span big turn", () => {
         name: call.name,
         output: { ok: true, index }
       }))
-    });
+    }));
     service.closeSession(session.sessionId);
 
     await service.feedback({
@@ -478,7 +479,7 @@ describe("MemoryService / evolution / span big turn", () => {
         name: "task_step",
         input: { index }
       }));
-      const completed = service.completeTurn(`${scenario.userId}-turn`, {
+      const completed = (await service.completeTurn(`${scenario.userId}-turn`, {
         namespace,
         sessionId: session.sessionId,
         query: "执行复杂任务",
@@ -489,7 +490,7 @@ describe("MemoryService / evolution / span big turn", () => {
           name: call.name,
           output: { ok: scenario.polarity === "positive", index }
         }))
-      });
+      }));
       service.closeSession(session.sessionId);
       await service.feedback({
         namespace,
@@ -543,7 +544,7 @@ describe("MemoryService / evolution / span big turn", () => {
       name: "task_step",
       input: { index }
     }));
-    const completed = service.completeTurn("span-big-turn-overlap", {
+    const completed = (await service.completeTurn("span-big-turn-overlap", {
       namespace,
       sessionId: session.sessionId,
       query: "分析并修复构建失败",
@@ -554,7 +555,7 @@ describe("MemoryService / evolution / span big turn", () => {
         name: call.name,
         output: { ok: true, index }
       }))
-    });
+    }));
     service.closeSession(session.sessionId);
     await service.feedback({
       namespace,

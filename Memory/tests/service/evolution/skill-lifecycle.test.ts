@@ -31,12 +31,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       namespace: { source: "codex", profileId: "jiang", userId },
       workspaceId: "bc-24-workspace"
     });
-    const complete = service.completeTurn("bc-24-evidence", {
+    const complete = (await service.completeTurn("bc-24-evidence", {
       sessionId: session.sessionId,
       episodeId: "bc-24-episode",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, apply the fix, and verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy_bc24",
@@ -210,12 +210,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-fresh-skill"
     });
-    const complete = service.completeTurn("turn-fresh-skill-skip", {
+    const complete = (await service.completeTurn("turn-fresh-skill-skip", {
       sessionId: session.sessionId,
       episodeId: "episode-fresh-skill-skip",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_fresh_skill_skip",
       userId: "user-fresh-skill-skip",
@@ -313,12 +313,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-compatible-skill-merge"
     });
-    const complete = service.completeTurn("turn-compatible-skill-merge", {
+    const complete = (await service.completeTurn("turn-compatible-skill-merge", {
       sessionId: session.sessionId,
       episodeId: "episode-compatible-skill-merge",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy-compatible-skill-target",
@@ -433,12 +433,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       namespace: { source: "codex", profileId: "jiang", userId },
       workspaceId: "workspace-shared-policy-skill-fanout"
     });
-    const complete = service.completeTurn("turn-shared-policy-skill-fanout", {
+    const complete = (await service.completeTurn("turn-shared-policy-skill-fanout", {
       sessionId: session.sessionId,
       episodeId: "episode-shared-policy-skill-fanout",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     const policyId = "policy-shared-by-distinct-skills";
     insertActivePolicyMemory(db, {
@@ -547,12 +547,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-skill-cooldown"
     });
-    const complete = service.completeTurn("turn-skill-cooldown", {
+    const complete = (await service.completeTurn("turn-skill-cooldown", {
       sessionId: session.sessionId,
       episodeId: "episode-skill-cooldown",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_skill_cooldown",
       userId: "user-skill-cooldown",
@@ -648,12 +648,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-source-policy-skill"
     });
-    const complete = service.completeTurn("turn-source-policy-skill-skip", {
+    const complete = (await service.completeTurn("turn-source-policy-skill-skip", {
       sessionId: session.sessionId,
       episodeId: "episode-source-policy-skill-skip",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_source_policy_skill_skip",
       userId: "user-source-policy-skill-skip",
@@ -793,12 +793,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-archived-skill-recreate"
     });
-    const complete = service.completeTurn("turn-archived-skill-recreate", {
+    const complete = (await service.completeTurn("turn-archived-skill-recreate", {
       sessionId: session.sessionId,
       episodeId: "episode-archived-skill-recreate",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_archived_skill_recreate",
       userId: "user-archived-skill-recreate",
@@ -939,12 +939,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-skill-drift"
     });
-    const complete = service.completeTurn("turn-skill-reward-drift", {
+    const complete = (await service.completeTurn("turn-skill-reward-drift", {
       sessionId: session.sessionId,
       episodeId: "episode-skill-reward-drift",
       query: "python pytest inspect failure retry after fixing issue for reward drift",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy_skill_reward_drift",
@@ -1123,7 +1123,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-invalid-skill-draft-a", {
+    const first = (await service.completeTurn("turn-invalid-skill-draft-a", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-skill-draft-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1134,8 +1134,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-invalid-skill-draft-b", {
+    }));
+    const second = (await service.completeTurn("turn-invalid-skill-draft-b", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-skill-draft-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1146,7 +1146,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1317,7 +1317,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-invalid-string-skill-steps-a", {
+    const first = (await service.completeTurn("turn-invalid-string-skill-steps-a", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-string-skill-steps-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1328,8 +1328,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-invalid-string-skill-steps-b", {
+    }));
+    const second = (await service.completeTurn("turn-invalid-string-skill-steps-b", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-string-skill-steps-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1340,7 +1340,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1461,7 +1461,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-refusal-skill-draft-a", {
+    const first = (await service.completeTurn("turn-refusal-skill-draft-a", {
       sessionId: session.sessionId,
       episodeId: "episode-refusal-skill-draft-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1472,8 +1472,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-refusal-skill-draft-b", {
+    }));
+    const second = (await service.completeTurn("turn-refusal-skill-draft-b", {
       sessionId: session.sessionId,
       episodeId: "episode-refusal-skill-draft-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1484,7 +1484,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1556,6 +1556,7 @@ function createSkillRebuildLlm(): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "skill.rebuild.v3") {
         return {
           name: "pytest_retry_workflow",

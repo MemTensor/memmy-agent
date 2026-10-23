@@ -744,7 +744,7 @@ async function routeRequest(
         request,
         completeSourceTurn,
       )
-      : completeSourceTurn();
+      : await completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
     return result;
   }

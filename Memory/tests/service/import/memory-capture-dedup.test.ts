@@ -13,7 +13,7 @@ const namespace = {
 };
 
 describe("MemoryService / import / QA capture dedup", () => {
-  it("keeps the hook capture when an agent-source scan later sees the same QA", () => {
+  it("keeps the hook capture when an agent-source scan later sees the same QA", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       adapterId: "memmy-codex-hook",
@@ -22,7 +22,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     });
     const query = "检查项目配置并说明使用哪个包管理器。";
     const answer = "项目使用 pnpm workspace。";
-    const completed = service.completeTurn("hook-first-turn", {
+    const completed = (await service.completeTurn("hook-first-turn", {
       adapterId: "memmy-codex-hook",
       requestId: "hook-first-complete",
       sessionId: session.sessionId,
@@ -30,7 +30,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       answer,
       toolCalls: [{ id: "read-1", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read-1", name: "read_file", output: "packageManager: pnpm" }]
-    });
+    }));
     const beforeCount = l1Count(db.db);
 
     const scanned = addScannedTurn(service, {
@@ -50,7 +50,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     ).get(namespace.userId)).toEqual({ captured_by: "turn_complete" });
   });
 
-  it("keeps the scan capture and still records the hook raw turn and episode link", () => {
+  it("keeps the scan capture and still records the hook raw turn and episode link", async () => {
     const { db, service } = createTestService();
     const query = "汇总当前仓库的测试命令。";
     const answer = "运行 npm test 即可执行完整测试。";
@@ -67,7 +67,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       namespace
     });
 
-    const completed = service.completeTurn("scan-first-hook-turn", {
+    const completed = (await service.completeTurn("scan-first-hook-turn", {
       adapterId: "memmy-codex-hook",
       requestId: "scan-first-hook-complete",
       sessionId: session.sessionId,
@@ -75,7 +75,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       answer,
       toolCalls: [{ id: "read-2", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read-2", name: "read_file", output: "test: vitest run" }]
-    });
+    }));
 
     expect(l1Count(db.db)).toBe(1);
     expect(completed.l1MemoryIds).toEqual([scanned.id]);

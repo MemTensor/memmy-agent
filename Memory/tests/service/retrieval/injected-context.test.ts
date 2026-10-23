@@ -228,11 +228,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-injected-packet"
     };
     const session = service.openSession({ namespace });
-    service.completeTurn("turn-injected-packet", {
+    (await service.completeTurn("turn-injected-packet", {
       sessionId: session.sessionId,
       query: "Use the sqlite migration checklist and preserve local memory service state.",
       answer: "Applied the sqlite migration checklist and verified the local memory service state."
-    });
+    }));
     await service.runWorkerOnce(20);
     insertActiveSkillMemoryForTest(db, {
       id: "skill_injected_packet",
@@ -318,17 +318,17 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-episode-get-hint"
     };
     const session = service.openSession({ namespace });
-    const first = service.completeTurn("turn-episode-get-hint-a", {
+    const first = (await service.completeTurn("turn-episode-get-hint-a", {
       sessionId: session.sessionId,
       query: "sqlite migration pytest failed because migration table was missing",
       answer: "inspected the migration output and fixed the sqlite migration path"
-    });
-    service.completeTurn("turn-episode-get-hint-b", {
+    }));
+    (await service.completeTurn("turn-episode-get-hint-b", {
       sessionId: session.sessionId,
       episodeId: first.episodeId,
       query: "rerun the focused sqlite migration pytest after the fix",
       answer: "reran the focused pytest and verified the migration state"
-    });
+    }));
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
@@ -449,12 +449,12 @@ describe("MemoryService / retrieval / injected context", () => {
       }
     });
     for (const suffix of ["alpha", "beta", "gamma"]) {
-      service.completeTurn(`turn-budget-seed-${suffix}`, {
+      (await service.completeTurn(`turn-budget-seed-${suffix}`, {
         sessionId: seedSession.sessionId,
         episodeId: `episode-budget-seed-${suffix}`,
         query: `sqlite budget migration ${suffix}`,
         answer: `Remember sqlite budget migration ${suffix} with a deliberately long explanation ${"detail ".repeat(80)}`
-      });
+      }));
     }
     await runWorkerRounds(service, 2, 50);
     const activeSession = service.openSession({
@@ -495,11 +495,11 @@ describe("MemoryService / retrieval / injected context", () => {
       retrieval_mode: "turn_start"
     });
 
-    const completed = service.completeTurn("turn-budget-prepare", {
+    const completed = (await service.completeTurn("turn-budget-prepare", {
       sessionId: activeSession.sessionId,
       query: "fix sqlite budget migration",
       answer: "The sqlite budget migration is fixed."
-    });
+    }));
     expect(prepared).not.toHaveProperty("episodeId");
     expect(completed.episodeId).toMatch(/^episode_/u);
     const rawTurn = db.db.prepare(
@@ -528,11 +528,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-guidance-source"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-guidance-source", {
+    const complete = (await service.completeTurn("turn-guidance-source", {
       sessionId: session.sessionId,
       query: "visible alpha trace source",
       answer: "visible alpha trace result"
-    });
+    }));
     await service.runWorkerOnce(20);
     const at = new Date().toISOString();
     const policyId = "policy_guidance_source";
@@ -625,11 +625,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-guidance-ranking"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-guidance-ranking", {
+    const complete = (await service.completeTurn("turn-guidance-ranking", {
       sessionId: session.sessionId,
       query: "visible guidance ranking trace",
       answer: "visible guidance ranking result"
-    });
+    }));
 
     const base = {
       userId: namespace.userId,
@@ -876,7 +876,7 @@ describe("MemoryService / retrieval / injected context", () => {
       const { db, service } = createTestService({ llm, embedder });
       const namespace = { source: "memmy-agent", profileId: "default", userId: "self-introduction-user" };
       const session = service.openSession({ namespace });
-      const previous = service.completeTurn("turn-before-introduction", {
+      const previous = await service.completeTurn("turn-before-introduction", {
         sessionId: session.sessionId,
         query: "Fix the pytest failure and run the tests again.",
         answer: "The pytest failure is fixed and the tests pass."
@@ -904,7 +904,7 @@ describe("MemoryService / retrieval / injected context", () => {
       expect(prepared.status).toContain(
         query === "谢谢" ? "intent:chitchat:retrieval_skipped" : "intent:meta:retrieval_skipped"
       );
-      const completed = service.completeTurn("turn-self-introduction", {
+      const completed = await service.completeTurn("turn-self-introduction", {
         sessionId: session.sessionId,
         query,
         answer: "我是 Memmy，可以帮你处理任务。"

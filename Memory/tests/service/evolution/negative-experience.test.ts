@@ -42,6 +42,7 @@ function createCountingLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       operations.push(options.operation);
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -136,12 +137,12 @@ describe("MemoryService / evolution / negative experience", () => {
       userId: "negative-experience-user"
     };
     const session = service.openSession({ namespace });
-    const turn = service.completeTurn("negative-experience-turn", {
+    const turn = (await service.completeTurn("negative-experience-turn", {
       sessionId: session.sessionId,
       episodeId: "negative-experience-episode",
       query: "Configure TLS and verify the service port.",
       answer: "I configured port 80 and skipped TLS verification."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,
@@ -285,12 +286,12 @@ describe("MemoryService / evolution / negative experience", () => {
       userId: "negative-boundary-user"
     };
     const session = service.openSession({ namespace });
-    const turn = service.completeTurn("negative-boundary-turn", {
+    const turn = (await service.completeTurn("negative-boundary-turn", {
       sessionId: session.sessionId,
       episodeId: "negative-boundary-episode",
       query: "Configure TLS on the correct port and verify it.",
       answer: "Configured port 80 without verification."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: turn.episodeId,
@@ -364,12 +365,12 @@ describe("MemoryService / evolution / negative experience", () => {
     const policyIds: string[] = [];
     for (const suffix of ["one", "two"]) {
       const session = service.openSession({ namespace });
-      const turn = service.completeTurn(`negative-support-turn-${suffix}`, {
+      const turn = (await service.completeTurn(`negative-support-turn-${suffix}`, {
         sessionId: session.sessionId,
         episodeId: `negative-support-episode-${suffix}`,
         query: "Configure TLS and verify the service port.",
         answer: "I configured port 80 and skipped TLS verification."
-      });
+      }));
       await service.feedback({
         sessionId: session.sessionId,
         episodeId: turn.episodeId,
@@ -415,12 +416,12 @@ describe("MemoryService / evolution / negative experience", () => {
       userId: "negative-support-other-user"
     };
     const otherSession = service.openSession({ namespace: otherNamespace });
-    const otherTurn = service.completeTurn("negative-support-other-turn", {
+    const otherTurn = (await service.completeTurn("negative-support-other-turn", {
       sessionId: otherSession.sessionId,
       episodeId: "negative-support-other-episode",
       query: "Configure TLS and verify the service port.",
       answer: "I configured port 80 and skipped TLS verification."
-    });
+    }));
     await service.feedback({
       sessionId: otherSession.sessionId,
       episodeId: otherTurn.episodeId,
@@ -484,12 +485,12 @@ describe("MemoryService / evolution / negative experience", () => {
       userId: "negative-generic-user"
     };
     const session = service.openSession({ namespace });
-    const turn = service.completeTurn("negative-generic-turn", {
+    const turn = (await service.completeTurn("negative-generic-turn", {
       sessionId: session.sessionId,
       episodeId: "negative-generic-episode",
       query: "Review this implementation.",
       answer: "Reviewed."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: turn.episodeId,
@@ -543,12 +544,12 @@ describe("MemoryService / evolution / negative experience", () => {
         userId: index === 24 ? "negative-target-user" : `negative-other-user-${index}`
       };
       const session = service.openSession({ namespace });
-      const turn = service.completeTurn(`negative-candidate-turn-${index}`, {
+      const turn = (await service.completeTurn(`negative-candidate-turn-${index}`, {
         sessionId: session.sessionId,
         episodeId: `negative-candidate-episode-${index}`,
         query: "Verify TLS certificate rotation.",
         answer: "Skipped TLS certificate verification."
-      });
+      }));
       await service.feedback({
         sessionId: session.sessionId,
         episodeId: turn.episodeId,

@@ -350,7 +350,8 @@ export function createFailingLlm(): LlmClient {
     async complete() {
       throw new Error("llm filter unavailable");
     },
-    async completeJson() {
+    async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
       throw new Error("llm filter unavailable");
     },
     status() {
@@ -390,6 +391,7 @@ export function createBatchReflectionLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "测试任务", summary: "测试任务摘要" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
@@ -408,14 +410,14 @@ export function createBatchReflectionLlm(calls: Array<{
         if (!decisionCall) return { title: "测试捕获标题", summary: captureSummary } as unknown as T;
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/USER:\s*([^\n]+)/)?.[1]?.trim() ?? "";
-        return {
+        return withTurnJudgeKeys(messages, {
           l1: {
             title: "测试捕获标题",
             summary: captureSummary,
             evidence: [{ quote: evidenceQuote || userQuote, role: "user", kind: "task_outcome" }]
           },
           user: null
-        } as unknown as T;
+        }) as unknown as T;
       }
       return {
         summary: "fallback single reflection",
@@ -438,4 +440,48 @@ export function createBatchReflectionLlm(calls: Array<{
 
 export function stableTestVector(text: string): number[] {
   return [text.length % 7, text.length % 11, text.length % 13];
+}
+
+export function isTurnJudgeCall(messages: ReadonlyArray<{ role: string; content: string }>): boolean {
+  return messages[0]?.content.includes("Judge L1 and User Memory") === true &&
+    messages.some((message) => message.role === "user" && message.content.startsWith("TASK SO FAR"));
+}
+
+// USER as the per-turn judgment shows it: one line, followed by the next section label.
+export function turnJudgeUserText(messages: ReadonlyArray<{ role: string; content: string }>): string {
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  return payload.match(/\bUSER:\s*(.*?)\s+(?:ASSISTANT:|TOOLS:|ATTACHMENT METADATA|EXISTING_USER_MEMORY_CANDIDATES:)/)?.[1]?.trim() ?? "";
+}
+
+// Turns a capture-only answer into the per-turn judgment's five keys when the
+// call uses the turn.judge.v1 prompt; other calls get the answer unchanged.
+export function withTurnJudgeKeys(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  answer: { l1: Record<string, unknown> | null; user: Record<string, unknown> | null },
+  judgment: { relation?: string; feedback?: string; unverifiedAnswer?: boolean } = {}
+): Record<string, unknown> {
+  if (!isTurnJudgeCall(messages)) return answer;
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  const taskEmpty = payload.includes("<first_user_message></first_user_message>");
+  const userText = turnJudgeUserText(messages);
+  const l1 = answer.l1
+    ? {
+        ...answer.l1,
+        evidence: Array.isArray(answer.l1.evidence)
+          ? answer.l1.evidence.map((item) =>
+              typeof item === "object" && item && (item as { role?: unknown }).role === "user" &&
+              !userText.includes(String((item as { quote?: unknown }).quote))
+                ? { ...item, quote: userText }
+                : item)
+          : answer.l1.evidence,
+        unverified_answer: judgment.unverifiedAnswer ?? false
+      }
+    : null;
+  return {
+    relation: taskEmpty ? null : judgment.relation ?? "follow_up",
+    feedback: taskEmpty ? null : judgment.feedback ?? "neutral",
+    reason: "test judgment",
+    l1,
+    user: answer.user
+  };
 }

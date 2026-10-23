@@ -48,6 +48,7 @@ import {
   panelListItemFromMemory,
   panelSourceDistribution
 } from "./panel.js";
+import { feedbackPolarityCounts } from "./episode.js";
 
 const PANEL_ITEMS_PAGE_SIZE = 20;
 const PANEL_DAILY_ACTIVITY_DAYS = 371;
@@ -267,7 +268,7 @@ export class PanelReadModel {
     schema: { version: number; lastMigrationId?: string };
     memory: ReturnType<PanelReadModel["panelOverview"]>["stats"];
     changeSeq: number;
-    feedback: { recent: number };
+    feedback: { recent: number; positive: number; negative: number; neutral: number };
     jobs: Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number>;
     embeddingRetries: Record<"pending" | "in_progress" | "succeeded" | "failed", number>;
     models: HealthResponse["models"];
@@ -279,7 +280,10 @@ export class PanelReadModel {
       schema: this.deps.schemaVersion(),
       memory: overview.stats,
       changeSeq: overview.latestChangeSeq,
-      feedback: { recent: this.deps.repos.runtime.listFeedback({ limit: 1000 }).length },
+      feedback: (() => {
+        const recent = this.deps.repos.runtime.listFeedback({ limit: 1000 });
+        return { recent: recent.length, ...feedbackPolarityCounts(recent) };
+      })(),
       jobs: overview.stats.jobs,
       embeddingRetries: overview.stats.embeddingRetries,
       models: this.deps.models(),

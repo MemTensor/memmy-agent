@@ -271,9 +271,12 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
         feedback,
         feedbackContextHash
       );
-    const isRevisionFeedback = isRecord(request.rawPayload)
-      && request.rawPayload.source === "relation_classifier"
-      && request.rawPayload.relation === "revision";
+    // Model-judged negatives (old revision, turn.judge.v1 negative) get a repair
+    // only from a model draft, never one filled in by rules.
+    const isRevisionFeedback = isRecord(request.rawPayload) && (
+      (request.rawPayload.source === "relation_classifier" && request.rawPayload.relation === "revision") ||
+      (request.rawPayload.source === "turn_judge" && request.rawPayload.feedback === "negative")
+    );
     const repair = isRevisionFeedback && !repairDraft
       ? undefined
       : this.maybeCreateDecisionRepair(

@@ -42,30 +42,30 @@ describe("MemoryService / evolution / orchestration", () => {
       }
     });
     const completes = [
-      service.completeTurn("turn-python-test-a", {
+      (await service.completeTurn("turn-python-test-a", {
       sessionId: session.sessionId,
       episodeId: "episode-python-test-a",
       query: "python vitest test workflow should keep REST agent loop decoupled",
       answer: "Use prepare, complete, recall, then worker run for memory evolution."
-    }),
-      service.completeTurn("turn-python-test-b", {
+    })),
+      (await service.completeTurn("turn-python-test-b", {
         sessionId: session.sessionId,
         episodeId: "episode-python-test-b",
         query: "python unit test workflow should keep REST agent loop decoupled",
         answer: "Use prepare, complete, recall, then worker run for memory evolution."
-      }),
-      service.completeTurn("turn-python-error-a", {
+      })),
+      (await service.completeTurn("turn-python-error-a", {
         sessionId: session.sessionId,
         episodeId: "episode-python-error-a",
         query: "python error handling workflow should keep REST agent loop decoupled",
         answer: "Capture the error signature and reuse the successful recovery policy."
-      }),
-      service.completeTurn("turn-python-error-b", {
+      })),
+      (await service.completeTurn("turn-python-error-b", {
         sessionId: session.sessionId,
         episodeId: "episode-python-error-b",
         query: "python exception handling workflow should keep REST agent loop decoupled",
         answer: "Capture the error signature and reuse the successful recovery policy."
-      })
+      }))
     ];
 
     for (const complete of completes) {
@@ -184,38 +184,38 @@ describe("MemoryService / evolution / orchestration", () => {
         sessionKey: "skill-trial"
       }
     });
-    const trialTurn = service.completeTurn("turn-skill-trial", {
+    const trialTurn = (await service.completeTurn("turn-skill-trial", {
       sessionId: trialSession.sessionId,
       episodeId: "episode-skill-trial",
       query: "apply the recalled python REST memory workflow skill",
       answer: "applied the recalled workflow"
-    });
-    const trial = service.useSkill(skillId, {
+    }));
+    const trial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
       sessionId: trialSession.sessionId,
       episodeId: trialTurn.episodeId,
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
-    const duplicateTrial = service.useSkill(skillId, {
+    }));
+    const duplicateTrial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
       sessionId: trialSession.sessionId,
       episodeId: trialTurn.episodeId,
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
+    }));
     expect(duplicateTrial.trialId).toBe(trial.trialId);
     expect(duplicateTrial.duplicate).toBe(true);
-    const duplicateEpisodeTrial = service.useSkill(skillId, {
+    const duplicateEpisodeTrial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-2",
       sessionId: trialSession.sessionId,
       episodeId: trialTurn.episodeId,
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
+    }));
     expect(duplicateEpisodeTrial.trialId).toBe(trial.trialId);
     expect(duplicateEpisodeTrial.duplicate).toBe(true);
     const pendingTrialCount = db.db.prepare(
@@ -513,12 +513,12 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       workspaceId: "workspace-l2-activation"
     });
-    const first = service.completeTurn("turn-l2-activation-1", {
+    const first = (await service.completeTurn("turn-l2-activation-1", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-activation-1",
       query: "python pytest retry activation evidence one",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, session.sessionId, first);
     makeTraceEligibleForL2(db, first.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
@@ -532,12 +532,12 @@ describe("MemoryService / evolution / orchestration", () => {
       sourceTraceId: first.l1MemoryId,
       sourceEpisodeId: first.episodeId
     });
-    const second = service.completeTurn("turn-l2-activation-2", {
+    const second = (await service.completeTurn("turn-l2-activation-2", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-activation-2",
       query: "python pytest retry activation evidence two",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, session.sessionId, second);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     const signature = traceSignatureForTest(db, second.l1MemoryId);
@@ -634,18 +634,18 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       workspaceId: "workspace-shared"
     });
-    const completeA = service.completeTurn("turn-downstream-a", {
+    const completeA = (await service.completeTurn("turn-downstream-a", {
       sessionId: profileA.sessionId,
       episodeId: "episode-downstream-a",
       query: "python pytest inspect failure retry after fixing issue for profile a",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
-    const completeB = service.completeTurn("turn-downstream-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-downstream-b", {
       sessionId: profileB.sessionId,
       episodeId: "episode-downstream-b",
       query: "python pytest inspect failure retry after fixing issue for profile b",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     const at = new Date().toISOString();
     insertActivePolicyMemory(db, {
       id: "policy_downstream_profile_a",
@@ -798,7 +798,7 @@ describe("MemoryService / evolution / orchestration", () => {
         userId: "user-l3-skill-prompt"
       }
     });
-    const first = service.completeTurn("turn-l3-skill-prompt-a", {
+    const first = (await service.completeTurn("turn-l3-skill-prompt-a", {
       sessionId: session.sessionId,
       episodeId: "episode-l3-skill-prompt-a",
       query: `pytest sqlite migration workflow needs focused diagnostics ${"u".repeat(200)}`,
@@ -809,8 +809,8 @@ describe("MemoryService / evolution / orchestration", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-l3-skill-prompt-b", {
+    }));
+    const second = (await service.completeTurn("turn-l3-skill-prompt-b", {
       sessionId: session.sessionId,
       episodeId: "episode-l3-skill-prompt-b",
       query: `pytest sqlite schema migration workflow needs focused diagnostics ${"v".repeat(200)}`,
@@ -821,7 +821,7 @@ describe("MemoryService / evolution / orchestration", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,

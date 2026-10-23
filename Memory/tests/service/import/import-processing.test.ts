@@ -107,7 +107,7 @@ describe("MemoryService / import / processing", () => {
     expect(summaryCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCall?.options.maxTokens).toBe(512);
     expect(summaryCall?.messages[0]?.content).toContain("at most 30 characters");
-    expect(summaryCall?.messages[0]?.content).toContain("at most 180 characters");
+    expect(summaryCall?.messages[0]?.content).toContain("at most 300 characters");
     expect(summaryCall?.messages[0]?.content).toContain("future retrieval");
     expect(summaryCall?.messages[0]?.content).toContain("concrete retrieval anchors");
     expect(summaryCall?.messages[0]?.content).toContain("atomic real-world facts");
@@ -439,6 +439,7 @@ describe("MemoryService / import / processing", () => {
         messages: LlmMessage[],
         options: LlmCompletionOptions
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         summaryCalls.push({ messages, options });
         throw new Error("summary endpoint returned HTTP 405");
       }
@@ -498,6 +499,7 @@ describe("MemoryService / import / processing", () => {
         messages: LlmMessage[],
         options: LlmCompletionOptions
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         if (failureMessage) throw new Error(failureMessage);
         return baseLlm.completeJson<T>(messages, options);
       }
@@ -614,7 +616,8 @@ describe("MemoryService / import / processing", () => {
     const baseLlm = createFailingLlm();
     const llm: LlmClient = {
       ...baseLlm,
-      async completeJson() {
+      async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
         throw new ModelHttpError(
           "openai_compatible HTTP 403: quota exhausted",
           "openai_compatible",
@@ -678,7 +681,8 @@ describe("MemoryService / import / processing", () => {
     const baseLlm = createFailingLlm();
     const llm: LlmClient = {
       ...baseLlm,
-      async completeJson() {
+      async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
         throw new Error(
           "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response; check the configured model endpoint"
         );
@@ -998,13 +1002,13 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("clips imported L1 summaries to 180 characters", async () => {
+  it("clips imported L1 summaries to 300 characters", async () => {
     const root = createTestRoot("mindock-memory-import-summary-cap-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
-    const longSummary = "s".repeat(240);
+    const longSummary = "s".repeat(360);
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1033,9 +1037,9 @@ describe("MemoryService / import / processing", () => {
       };
     };
     expect(calls.find((call) => call.options.operation === "capture.summarize")?.messages[0]?.content)
-      .toContain("at most 180 characters");
-    expect(properties.internal_info.trace.summary).toHaveLength(180);
-    expect(properties.internal_info.trace.summary).toBe(`${"s".repeat(177)}...`);
+      .toContain("at most 300 characters");
+    expect(properties.internal_info.trace.summary).toHaveLength(300);
+    expect(properties.internal_info.trace.summary).toBe(`${"s".repeat(297)}...`);
     db.close();
   });
 
@@ -1392,11 +1396,11 @@ describe("MemoryService / import / processing", () => {
       "2026-06-10T12:00:00.000Z"
     );
     const session = service.openSession({ namespace });
-    const live = service.completeTurn("turn-live-priority", {
+    const live = (await service.completeTurn("turn-live-priority", {
       sessionId: session.sessionId,
       query: "Remember the new interactive preference.",
       answer: "The new interactive preference is dark mode."
-    });
+    }));
 
     const summaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
     const embeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
@@ -1441,11 +1445,11 @@ describe("MemoryService / import / processing", () => {
       "first-report-priority-scan"
     );
     const session = service.openSession({ namespace });
-    const live = service.completeTurn("turn-first-report-priority-live", {
+    const live = (await service.completeTurn("turn-first-report-priority-live", {
       sessionId: session.sessionId,
       query: "Remember this interactive task.",
       answer: "The interactive task is queued."
-    });
+    }));
     const firstReport = service.addMemory({
       namespace,
       adapterId: "agent-source:memmy-onboarding",

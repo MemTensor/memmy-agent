@@ -22,11 +22,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-idle-episode-old", {
+    const idleTurn = (await service.completeTurn("turn-idle-episode-old", {
       sessionId: idleSession.sessionId,
       query: "Prepare the old deployment checklist",
       answer: "The old deployment checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const idleAt = new Date(Date.now() - 2 * 60 * 60 * 1000 - 5_000).toISOString();
@@ -45,11 +45,11 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: triggerSession.sessionId,
       query: "Start a separate release task"
     });
-    const triggerTurn = service.completeTurn("turn-idle-episode-trigger", {
+    const triggerTurn = (await service.completeTurn("turn-idle-episode-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start a separate release task",
       answer: "The separate release task has started."
-    });
+    }));
 
     expect(triggerTurn.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
     const run = await service.runWorkerOnce(20);
@@ -111,11 +111,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "recent-session"
       }
     });
-    const recentTurn = service.completeTurn("turn-recent-episode", {
+    const recentTurn = (await service.completeTurn("turn-recent-episode", {
       sessionId: recentSession.sessionId,
       query: "Prepare a recent checklist",
       answer: "The recent checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recentAt = new Date(Date.now() - 90 * 60 * 1000).toISOString();
@@ -129,11 +129,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "recent-trigger-session"
       }
     });
-    service.completeTurn("turn-recent-episode-trigger", {
+    (await service.completeTurn("turn-recent-episode-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start another recent task",
       answer: "Another recent task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recentEpisode = db.db.prepare(
@@ -155,11 +155,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "cloud-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-cloud-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-cloud-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Prepare the cloud deployment checklist",
       answer: "The cloud deployment checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -175,11 +175,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "cloud-other-user-session"
       }
     });
-    service.completeTurn("turn-cloud-other-user", {
+    (await service.completeTurn("turn-cloud-other-user", {
       sessionId: otherUserSession.sessionId,
       query: "Start work for another cloud user",
       answer: "The other cloud user task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const closedEpisode = db.db.prepare(
@@ -210,11 +210,11 @@ describe("MemoryService / session / idle sweep", () => {
     expect(db.db.prepare(
       "SELECT episode_id, status FROM raw_turns WHERE session_id = ? AND turn_id = ?"
     ).get(longSession.sessionId, "turn-long-running")).toBeUndefined();
-    const completed = service.completeTurn("turn-long-running", {
+    const completed = (await service.completeTurn("turn-long-running", {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification",
       answer: "The long deployment verification completed."
-    });
+    }));
     expect(completed.episodeId).toMatch(/^episode_/u);
     db.db.prepare(
       `UPDATE episodes
@@ -230,11 +230,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "long-turn-trigger-session"
       }
     });
-    service.completeTurn("turn-long-running-trigger", {
+    (await service.completeTurn("turn-long-running-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start a new local task",
       answer: "The new local task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const episode = db.db.prepare(
@@ -299,11 +299,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "active-tool-trigger-session"
       }
     });
-    service.completeTurn("turn-active-tool-trigger", {
+    (await service.completeTurn("turn-active-tool-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Record another memory",
       answer: "Another memory was recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const episode = db.db.prepare(
@@ -324,18 +324,18 @@ describe("MemoryService / session / idle sweep", () => {
         userId: "user-direct-complete-retry"
       }
     });
-    const first = service.completeTurn("turn-direct-complete-retry", {
+    const first = (await service.completeTurn("turn-direct-complete-retry", {
       sessionId: session.sessionId,
       query: "Record the direct completion",
       answer: "The direct completion was recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
 
-    const retry = service.completeTurn("turn-direct-complete-retry", {
+    const retry = (await service.completeTurn("turn-direct-complete-retry", {
       sessionId: session.sessionId,
       query: "Record the direct completion",
       answer: "The direct completion was recorded."
-    });
+    }));
     expect(retry.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
     const idleCloseJobs = db.db.prepare(
       `SELECT COUNT(*) AS count

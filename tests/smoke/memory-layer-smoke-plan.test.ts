@@ -68,7 +68,7 @@ describe("memory layer smoke plan", () => {
         requestId: "smoke-session-open",
         namespace
       });
-      const completed = service.completeTurn("smoke-turn-1", {
+      const completed = await service.completeTurn("smoke-turn-1", {
         adapterId: "smoke-plan",
         requestId: "smoke-turn-complete",
         sessionId: session.sessionId,
@@ -214,7 +214,8 @@ function createSmokeSummaryLlm(): LlmClient {
     async complete() {
       return JSON.stringify({ title: "Smoke turn", summary: "Verified smoke summary" });
     },
-    async completeJson<T extends Record<string, unknown>>(messages) {
+    async completeJson<T extends Record<string, unknown>>(messages, options) {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Release verification", summary: "Verify the release workflow" } as unknown as T;
       const system = messages
         .filter((message) => message.role === "system")
         .map((message) => message.content)

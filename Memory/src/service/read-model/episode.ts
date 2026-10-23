@@ -11,6 +11,7 @@
 import { episodeTitleDisplayState } from "../episode-title/episode-title-service.js";
 import type {
   EpisodeRecord,
+  FeedbackRecord,
   RawTurnRecord,
   SessionRecord,
   SkillTrialRecord,
@@ -91,6 +92,7 @@ export interface EpisodeReadModelRepositories {
   };
   runtime: {
     getEpisode(id: string): EpisodeRecord | undefined;
+    getFeedback(id: string): FeedbackRecord | undefined;
     listEpisodesForSession(sessionId: string): EpisodeRecord[];
     getRawTurn(id: string): RawTurnRecord | undefined;
     listRawTurnsByEpisode(episodeId: string, limit?: number): RawTurnRecord[];
@@ -286,6 +288,8 @@ export class EpisodeReadModel {
       worldModelMemoryIds: episode.l3WorldModelIds,
       skillMemoryIds: episode.skillMemoryIds,
       feedbackIds: episode.feedbackIds,
+      // turn.judge.v1 writes a reaction every turn, mostly neutral: count each kind.
+      feedbackCounts: feedbackPolarityCounts(episode.feedbackIds.map((feedbackId) => this.deps.repos.runtime.getFeedback(feedbackId))),
       decisionRepairIds: episode.decisionRepairIds
     };
     const item = episodeDetailItem(episode, timeline, sourceMemoryIds, refs);
@@ -541,4 +545,12 @@ function dedupeStrings(values: readonly string[]): string[] {
 
 function truncateDetailTitle(value: string): string {
   return value.length <= 80 ? value : `${value.slice(0, 77)}...`;
+}
+
+export function feedbackPolarityCounts(
+  feedback: ReadonlyArray<{ polarity: "positive" | "negative" | "neutral" } | undefined>
+): { positive: number; negative: number; neutral: number } {
+  const counts = { positive: 0, negative: 0, neutral: 0 };
+  for (const item of feedback) if (item) counts[item.polarity] += 1;
+  return counts;
 }

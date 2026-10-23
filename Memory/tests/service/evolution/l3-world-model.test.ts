@@ -36,7 +36,7 @@ describe("L3 World Model trace field pipeline", () => {
         userId: "l3-world-model-user"
       }
     });
-    const completed = service.completeTurn("l3-world-model-turn", {
+    const completed = (await service.completeTurn("l3-world-model-turn", {
       sessionId: opened.sessionId,
       query: "这个项目必须先运行测试；在 Alpine 中加载 glibc wheel 失败了。",
       answer: "已记录测试约束和 Alpine 动态链接错误。",
@@ -51,7 +51,7 @@ describe("L3 World Model trace field pipeline", () => {
         assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
       }],
       toolResults: [{ id: "call-1", name: "exec", output: "dynamic linker error", exitCode: 1 }]
-    });
+    }));
     service.closeSession(opened.sessionId);
 
     const repos = new Repositories(db.db);
@@ -80,7 +80,7 @@ describe("L3 World Model trace field pipeline", () => {
       .map(({ id }) => repos.runtime.getJob(id))
       .filter((job): job is NonNullable<typeof job> => Boolean(job));
     const pipeline = new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm });
-    await Promise.all(jobs.map((job) => pipeline.updateField(job)));
+    await Promise.all((await Promise.all(jobs.map((job) => pipeline.updateField(job)))));
     jobs.forEach((job) => repos.runtime.completeJob(job.id));
 
     expect(repos.l3WorldModels.fields("l3-world-model-user", opened.projectId)).toEqual({
@@ -184,7 +184,7 @@ describe("L3 World Model trace field pipeline", () => {
         userId: "l3-world-model-repair-user"
       }
     });
-    service.completeTurn("l3-world-model-repair-turn", {
+    (await service.completeTurn("l3-world-model-repair-turn", {
       sessionId: opened.sessionId,
       query: "Always ask before destructive actions.",
       answer: "Understood.",
@@ -197,7 +197,7 @@ describe("L3 World Model trace field pipeline", () => {
         assistantTextBefore: "VISIBLE_REPAIR_PROGRESS"
       }],
       toolResults: [{ name: "delete_file", output: "confirmation required", exitCode: 1 }]
-    });
+    }));
     service.closeSession(opened.sessionId);
 
     const repos = new Repositories(db.db);
@@ -255,13 +255,13 @@ describe("L3 World Model trace field pipeline", () => {
         userId: "l3-world-model-general-user"
       }
     });
-    const completed = service.completeTurn("l3-world-model-general-turn", {
+    const completed = (await service.completeTurn("l3-world-model-general-turn", {
       sessionId: opened.sessionId,
       query: "Never delete files without confirmation.",
       answer: "Understood.",
       toolCalls: [{ name: "delete_file", input: { path: "important.txt" } }],
       toolResults: [{ name: "delete_file", output: "confirmation required", exitCode: 1 }]
-    });
+    }));
     service.closeSession(opened.sessionId);
     db.db.prepare(`UPDATE raw_turns SET redacted_at = ? WHERE id = ?`)
       .run("2026-01-01T00:00:00.000Z", completed.rawTurnId);
@@ -341,12 +341,12 @@ describe("L3 World Model trace field pipeline", () => {
     const { db, service } = createTestService({ skillLlm: llm });
     const opened = openProject(service, "source-order-user", "source-order-session");
     for (let index = 0; index < 257; index += 1) {
-      service.completeTurn(`source-order-turn-${index}`, {
+      (await service.completeTurn(`source-order-turn-${index}`, {
         sessionId: opened.sessionId,
         query: `Requirement ${index}`,
         answer: `Observed result ${index}`,
         status: "succeeded"
-      });
+      }));
     }
     service.closeSession(opened.sessionId);
 
@@ -400,12 +400,12 @@ describe("L3 World Model trace field pipeline", () => {
           value: "contract-v1"
         });
       }
-      service.completeTurn(`stale-${changedBase}-turn`, {
+      (await service.completeTurn(`stale-${changedBase}-turn`, {
         sessionId: opened.sessionId,
         query: "Keep the confirmed project boundary.",
         answer: "The boundary was checked.",
         status: "succeeded"
-      });
+      }));
       service.closeSession(opened.sessionId);
       const job = repos.runtime.listJobs("queued", 100).find(
         (candidate) => candidate.jobType === "l3_world_model_update" &&
@@ -464,12 +464,12 @@ describe("L3 World Model trace field pipeline", () => {
     const llm = strictCompletionLlm(complete);
     const { db, service } = createTestService({ skillLlm: llm });
     const opened = openProject(service, "invalid-output-user", "invalid-output-session");
-    service.completeTurn("invalid-output-turn", {
+    (await service.completeTurn("invalid-output-turn", {
       sessionId: opened.sessionId,
       query: "Follow this project constraint.",
       answer: "Acknowledged.",
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId);
     const repos = new Repositories(db.db);
     const job = repos.runtime.listJobs("queued", 100).find(
@@ -493,12 +493,12 @@ describe("L3 World Model trace field pipeline", () => {
     const llm = strictCompletionLlm(complete);
     const { db, service } = createTestService({ skillLlm: llm });
     const opened = openProject(service, "missing-reason-user", "missing-reason-session");
-    service.completeTurn("missing-reason-turn", {
+    (await service.completeTurn("missing-reason-turn", {
       sessionId: opened.sessionId,
       query: "Follow this project constraint.",
       answer: "Acknowledged.",
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId);
     const repos = new Repositories(db.db);
     const job = repos.runtime.listJobs("queued", 100).find(
@@ -518,12 +518,12 @@ describe("L3 World Model trace field pipeline", () => {
     const llm = fieldLlm();
     const { db, service } = createTestService({ skillLlm: llm });
     const opened = openProject(service, "terminal-user", "terminal-session");
-    const completed = service.completeTurn("terminal-turn", {
+    const completed = (await service.completeTurn("terminal-turn", {
       sessionId: opened.sessionId,
       query: "Record a project rule.",
       answer: "Recorded.",
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId);
     db.db.prepare(`UPDATE raw_turns SET user_id = 'another-user' WHERE id = ?`)
       .run(completed.rawTurnId);
@@ -608,14 +608,14 @@ describe("L3 World Model language steering", () => {
     const llm = fieldLlm();
     const { db, service } = createTestService({ skillLlm: llm });
     const opened = openProject(service, "l3-language-user", "l3-language-session");
-    service.completeTurn("l3-language-turn", {
+    (await service.completeTurn("l3-language-turn", {
       sessionId: opened.sessionId,
       query: "这个项目必须先运行测试。",
       answer: "已记录。",
       status: "succeeded",
       toolCalls: [{ name: "exec", input: { command: "npm test" } }],
       toolResults: [{ name: "exec", output: "ok", exitCode: 0 }]
-    });
+    }));
     service.closeSession(opened.sessionId);
 
     const repos = new Repositories(db.db);
@@ -733,12 +733,12 @@ async function captureAndApplyGeneral(
       userId
     }
   });
-  service.completeTurn(`general-reactivate-turn-${suffix}`, {
+  (await service.completeTurn(`general-reactivate-turn-${suffix}`, {
     sessionId: opened.sessionId,
     query: `General safety evidence ${suffix}`,
     answer: `Observed result ${suffix}`,
     status: "succeeded"
-  });
+  }));
   service.closeSession(opened.sessionId);
   const job = repos.runtime.listJobs("queued", 100).find(
     (candidate) => candidate.jobType === "l3_world_model_update"

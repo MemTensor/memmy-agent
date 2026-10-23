@@ -56,15 +56,15 @@ describe("MemoryService / read model / panel Agent filter", () => {
     db.close();
   });
 
-  it("matches user memories and tasks recorded under a related Agent source", () => {
+  it("matches user memories and tasks recorded under a related Agent source", async () => {
     const { db, service } = createTestService();
     const namespace = { source: "memmy", profileId: "default", userId: "local-user" };
     const session = service.openSession({ namespace });
-    const completed = service.completeTurn("turn-panel-agent-filter-user-memory", {
+    const completed = (await service.completeTurn("turn-panel-agent-filter-user-memory", {
       sessionId: session.sessionId,
       query: "我喜欢简洁代码，不要写不必要的兜底逻辑",
       answer: "好的，我会记住。"
-    });
+    }));
     expect(completed.userMemoryIds).toHaveLength(1);
 
     expect(service.panelItems({

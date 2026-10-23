@@ -41,6 +41,7 @@ function createEmptyRewardSummaryLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -96,6 +97,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
         maxTokens?: number;
       }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -157,6 +159,7 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       if (options.operation !== "capture.summarize") {
         throw new Error(`unexpected downstream model call: ${options.operation}`);
@@ -195,6 +198,7 @@ function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: num
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       const payload = messages.find((message) => message.role === "user")?.content ?? "";
       if (options.operation === "capture.reflection.batch.v13") {
         const parsed = JSON.parse(payload) as { steps?: Array<{ idx: number }> };
@@ -243,11 +247,11 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-implicit-reward", {
+    const complete = (await service.completeTurn("turn-implicit-reward", {
       sessionId: session.sessionId,
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
-    });
+    }));
     expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const rewardBeforeClose = db.db.prepare(
@@ -368,18 +372,18 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
     const firstQuery = `我喜欢吃的水果是西瓜，${"这是需要保留的较长用户补充说明。".repeat(12)}`;
-    const first = service.completeTurn("turn-reward-before-reflection-1", {
+    const first = (await service.completeTurn("turn-reward-before-reflection-1", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-before-reflection",
       query: firstQuery,
       answer: "记住了，你喜欢吃的水果是西瓜。"
-    });
-    const second = service.completeTurn("turn-reward-before-reflection-2", {
+    }));
+    const second = (await service.completeTurn("turn-reward-before-reflection-2", {
       sessionId: session.sessionId,
       episodeId: first.episodeId,
       query: "水果中和西瓜比较相似有哪些，推荐一个",
       answer: "我推荐哈密瓜。"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: second.episodeId,
@@ -399,12 +403,12 @@ describe("MemoryService / evolution / reward", () => {
     expect(calls.filter((call) => call.options.operation === "reward.reward.r_human.v7")).toEqual([]);
     expect(calls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(2);
 
-    const third = service.completeTurn("turn-reward-before-reflection-3", {
+    const third = (await service.completeTurn("turn-reward-before-reflection-3", {
       sessionId: session.sessionId,
       episodeId: first.episodeId,
       query: "哈密瓜和西瓜谁的营养价值更高",
       answer: "综合营养密度上哈密瓜通常更高一点。"
-    });
+    }));
 
     service.closeSession(session.sessionId);
     const queuedReflection = db.db.prepare(
@@ -468,11 +472,11 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-rejected-capture-barrier"
       }
     });
-    const complete = service.completeTurn("turn-rejected-capture-barrier", {
+    const complete = (await service.completeTurn("turn-rejected-capture-barrier", {
       sessionId: session.sessionId,
       query: "What did I ask before?",
       answer: "There is no durable task result in this turn."
-    });
+    }));
 
     service.closeSession(session.sessionId);
     expect(db.db.prepare(
@@ -550,18 +554,18 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-mixed-capture-barrier"
       }
     });
-    const accepted = service.completeTurn("turn-mixed-capture-accepted", {
+    const accepted = (await service.completeTurn("turn-mixed-capture-accepted", {
       sessionId: session.sessionId,
       episodeId: "episode-mixed-capture-barrier",
       query: "implement the durable migration",
       answer: "I will implement it."
-    });
-    const rejected = service.completeTurn("turn-mixed-capture-rejected", {
+    }));
+    const rejected = (await service.completeTurn("turn-mixed-capture-rejected", {
       sessionId: session.sessionId,
       episodeId: accepted.episodeId,
       query: "What did I ask before?",
       answer: "You asked about a migration."
-    });
+    }));
 
     service.closeSession(session.sessionId);
     expect(db.db.prepare(
@@ -600,11 +604,11 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-negative-l2"
       }
     });
-    const complete = service.completeTurn("turn-negative-l2", {
+    const complete = (await service.completeTurn("turn-negative-l2", {
       sessionId: session.sessionId,
       query: "fix the sqlite migration by reading the error first",
       answer: "I retried the same command without reading the error."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -651,11 +655,11 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-trivial-reward", {
+    const complete = (await service.completeTurn("turn-trivial-reward", {
       sessionId: session.sessionId,
       query: "hi",
       answer: "ok"
-    });
+    }));
     expect(complete.l1MemoryId).toBe("");
     expect(complete.l1MemoryIds).toEqual([]);
     service.closeSession(session.sessionId);
@@ -740,12 +744,12 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-empty-reward"
       }
     });
-    const complete = service.completeTurn("turn-empty-reward", {
+    const complete = (await service.completeTurn("turn-empty-reward", {
       sessionId: session.sessionId,
       episodeId: "episode-empty-reward",
       query: "verify the focused workflow",
       answer: "The focused workflow passed."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -832,7 +836,7 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-reward-llm"
       }
     });
-    service.completeTurn("turn-reward-llm-1", {
+    (await service.completeTurn("turn-reward-llm-1", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-llm",
       query: "verify reward scoring prompt",
@@ -843,13 +847,13 @@ describe("MemoryService / evolution / reward", () => {
         output: "ok",
         success: true
       }]
-    });
-    const complete = service.completeTurn("turn-reward-llm-2", {
+    }));
+    const complete = (await service.completeTurn("turn-reward-llm-2", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-llm",
       query: "now summarize the final reward result",
       answer: "summarized the final reward result"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -995,12 +999,12 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-feedback-attribution"
       }
     });
-    const complete = service.completeTurn("turn-feedback-attribution", {
+    const complete = (await service.completeTurn("turn-feedback-attribution", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-attribution",
       query: "Configure nginx TLS for the service and verify the port.",
       answer: "I configured the listener on port 80 and skipped the TLS verification step."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,

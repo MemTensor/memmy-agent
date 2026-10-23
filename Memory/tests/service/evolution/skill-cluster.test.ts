@@ -59,6 +59,7 @@ function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ operation: options.operation, messages });
       if (options.operation.startsWith("skill.batch_evolve.meta")) {
         return {
@@ -107,7 +108,7 @@ async function runDirectSkillEpisode(input: {
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
-  const complete = service.completeTurn(`${input.userId}-turn`, {
+  const complete = (await service.completeTurn(`${input.userId}-turn`, {
     sessionId: session.sessionId,
     query: input.query ?? "fill totals in report.xlsx with python openpyxl",
     answer: input.answer ?? "Opened report.xlsx with openpyxl and wrote the totals.",
@@ -117,7 +118,7 @@ async function runDirectSkillEpisode(input: {
       output: { ok: true },
       success: true
     }]
-  });
+  }));
   const repos = new Repositories(db.db);
   const at = new Date().toISOString();
   db.db.prepare(`UPDATE episodes SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`)
@@ -239,7 +240,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId }
     });
-    const complete = service.completeTurn(`${userId}-turn`, {
+    const complete = (await service.completeTurn(`${userId}-turn`, {
       sessionId: session.sessionId,
       episodeId: `${userId}-episode`,
       query: "fill totals in report.xlsx with python openpyxl",
@@ -250,7 +251,7 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -348,7 +349,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     const secondSession = service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId }
     });
-    const first = service.completeTurn(`${userId}-lookup`, {
+    const first = (await service.completeTurn(`${userId}-lookup`, {
       sessionId: firstSession.sessionId,
       query: "fix INDEX MATCH lookup in report.xlsx",
       answer: "Opened report.xlsx with openpyxl and rewrote the lookup.",
@@ -358,8 +359,8 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
-    const second = service.completeTurn(`${userId}-delete`, {
+    }));
+    const second = (await service.completeTurn(`${userId}-delete`, {
       sessionId: secondSession.sessionId,
       query: "delete filtered rows from report.xlsx",
       answer: "Opened report.xlsx and deleted the matching rows.",
@@ -369,7 +370,7 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
+    }));
     const repos = new Repositories(db.db);
     const at = new Date().toISOString();
     const pairs = [

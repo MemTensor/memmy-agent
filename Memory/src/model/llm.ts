@@ -156,7 +156,7 @@ class HttpLlmClient implements LlmClient {
     logger.debug("request.started", fields);
     try {
       const requestMessages = this.options.modelRole === "memory_summary"
-        ? constrainSummaryMessages(messages, callOptions.maxTokens!, fields)
+        ? constrainSummaryMessages(messages, callOptions.maxTokens!, fields, options.inputTokenBudget)
         : messages;
       const result = await this.completeOnce(requestMessages, callOptions);
       this.lastOkAt = new Date().toISOString();
@@ -637,14 +637,15 @@ function requiresTextResponseFormat(error: unknown): boolean {
 function constrainSummaryMessages(
   messages: LlmMessage[],
   outputTokens: number,
-  fields: Record<string, unknown>
+  fields: Record<string, unknown>,
+  inputTokenBudget?: number
 ): LlmMessage[] {
   summaryEncoder ??= get_encoding("cl100k_base");
   const encoded = messages.map((message) => summaryEncoder!.encode(message.content, [], []));
   const inputTokens = encoded.reduce((total, tokens) => total + tokens.length, 0);
   // cl100k_base is an estimate for compatible providers. The margin also
   // reserves space for their chat template and special tokens.
-  const budget = Math.min(
+  const budget = inputTokenBudget ?? Math.min(
     SUMMARY_INPUT_TOKEN_BUDGET,
     SUMMARY_CONTEXT_TOKEN_LIMIT - outputTokens - SUMMARY_CONTEXT_SAFETY_MARGIN
   );
@@ -696,6 +697,23 @@ function truncateSummaryContent(tokens: Uint32Array, budget: number, markerToken
     keep = Math.max(0, keep - Math.max(1, length - budget));
   }
 }
+
+// Callers that fit their own input to a token budget count and cut with the
+// same encoder and marker as the summary client, so the client keeps it intact.
+export function countSummaryTokens(text: string): number {
+  summaryEncoder ??= get_encoding("cl100k_base");
+  return summaryEncoder.encode(text, [], []).length;
+}
+
+export function truncateSummaryTextMiddle(text: string, budget: number): string {
+  summaryEncoder ??= get_encoding("cl100k_base");
+  const tokens = summaryEncoder.encode(text, [], []);
+  if (tokens.length <= budget) return text;
+  const markerTokens = summaryEncoder.encode(SUMMARY_INPUT_TRUNCATION_MARKER, [], []).length + 2;
+  return truncateSummaryContent(tokens, budget, markerTokens);
+}
+
+export const SUMMARY_TRUNCATION_MARKER = SUMMARY_INPUT_TRUNCATION_MARKER.trim();
 
 function decodeSummaryTokens(tokens: Uint32Array): string {
   const bytes = summaryEncoder!.decode(tokens);

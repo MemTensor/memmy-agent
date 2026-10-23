@@ -22,6 +22,7 @@ function model(generate: (input: Input) => unknown | Promise<unknown> = semantic
   return { config: DEFAULT_MEMMY_CONFIG.summary, isConfigured: () => true,
     complete: async () => "", status: () => ({ provider: "test", configured: true, remote: false }),
     async completeJson<T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions) {
+      if (options?.operation === "episode.select.v1") return { episodeId: null, title: "Cursor backfill", summary: "Old Cursor question and answer." } as unknown as T;
       if (options?.operation !== "capture.observation_extract") return {} as T;
       expect(options.retryTokenCeiling).toBe(2_400);
       return await generate(JSON.parse(String(messages[1]!.content)) as Input) as T;
@@ -220,9 +221,9 @@ describe("History meaningful-memory processing", () => {
   it("extracts a fresh History window before an older Agent-history backlog", async () => {
     const { service, db } = createTestService({ llm: model() });
     const session = service.openSession({ namespace: { ...namespace, source: "cursor" } });
-    const backlog = Array.from({ length: 3 }, (_value, index) => service.completeTurn(`cursor-backfill-${index}`, {
+    const backlog = await Promise.all(Array.from({ length: 3 }, async (_value, index) => (await service.completeTurn(`cursor-backfill-${index}`, {
       sessionId: session.sessionId, query: `Old Cursor question ${index}`, answer: `Old Cursor answer ${index}`
-    }).l1MemoryId);
+    })).l1MemoryId));
     const backdate = db.db.prepare("UPDATE memories SET created_at = ? WHERE id = ?");
     backlog.forEach((id, index) => backdate.run(`2026-08-18T0${index}:00:00.000Z`, id));
     const history = service.syncExternalEvidence(evidence);

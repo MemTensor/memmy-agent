@@ -11,7 +11,8 @@ import {
 import {
   createBatchReflectionLlm,
   createMemoryServiceFixture,
-  runWorkerRounds
+  runWorkerRounds,
+  withTurnJudgeKeys
 } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -50,6 +51,7 @@ function createUnusableReflectionLlm(): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
           steps?: Array<{ idx: number }>;
@@ -65,14 +67,14 @@ function createUnusableReflectionLlm(): LlmClient {
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
-        return {
+        return withTurnJudgeKeys(messages, {
           l1: {
             title: "Unusable reflection",
             summary: "unusable reflection summary",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
           user: null
-        } as unknown as T;
+        }) as unknown as T;
       }
       return {
         summary: "unusable reflection summary",
@@ -114,18 +116,19 @@ function createCapturingReflectionLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
-        return {
+        return withTurnJudgeKeys(messages, {
           l1: {
             title: "Sqlite migration reflection",
             summary: "sqlite migration reflection summary",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
           user: null
-        } as unknown as T;
+        }) as unknown as T;
       }
       return {
         summary: "sqlite migration reflection summary",
@@ -164,11 +167,11 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-alpha-user"
       }
     });
-    const complete = service.completeTurn("turn-reflection-alpha", {
+    const complete = (await service.completeTurn("turn-reflection-alpha", {
       sessionId: session.sessionId,
       query: "record an unusable reflection scorer result",
       answer: "done"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -218,11 +221,11 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-durable-user"
       }
     });
-    const complete = service.completeTurn("turn-reflection-durable", {
+    const complete = (await service.completeTurn("turn-reflection-durable", {
       sessionId: session.sessionId,
       query: "Record that the deployment verification command runs through zsh.",
       answer: "The deployment verification command runs through zsh."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -274,7 +277,7 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "inline-reflection-alpha-user"
       }
     });
-    const complete = service.completeTurn("turn-inline-reflection-alpha", {
+    const complete = (await service.completeTurn("turn-inline-reflection-alpha", {
       sessionId: session.sessionId,
       query: "record an inline reflection scorer result",
       answer: [
@@ -282,7 +285,7 @@ describe("MemoryService / evolution / reflection", () => {
         "### Reasoning:",
         "I did it because I did it, which is tautological and not useful."
       ].join("\n")
-    });
+    }));
 
     const before = service.getMemory(complete.l1MemoryId);
     const beforeTrace = (before.metadata.properties as {
@@ -332,11 +335,11 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-social-user"
       }
     });
-    const complete = service.completeTurn("turn-reflection-social", {
+    const complete = (await service.completeTurn("turn-reflection-social", {
       sessionId: session.sessionId,
       query: "谢谢，辛苦了",
       answer: "不客气。"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -389,11 +392,11 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-long-hi-user"
       }
     });
-    const complete = service.completeTurn("turn-reflection-long-hi", {
+    const complete = (await service.completeTurn("turn-reflection-long-hi", {
       sessionId: session.sessionId,
       query: "Hi I walked through the park all afternoon",
       answer: "That sounds like a long walk."
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -429,17 +432,17 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-mixed-social-user"
       }
     });
-    const social = service.completeTurn("turn-reflection-mixed-social", {
+    const social = (await service.completeTurn("turn-reflection-mixed-social", {
       sessionId: session.sessionId,
       query: "Hi, thanks",
       answer: "You're welcome."
-    });
-    const knowledge = service.completeTurn("turn-reflection-mixed-knowledge", {
+    }));
+    const knowledge = (await service.completeTurn("turn-reflection-mixed-knowledge", {
       sessionId: session.sessionId,
       episodeId: social.episodeId,
       query: "为什么黑美人西瓜不常见？",
       answer: "主要受市场偏好、运输和品种迭代影响。"
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -502,12 +505,12 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "reflection-this-regression-user"
       }
     });
-    const complete = service.completeTurn("turn-reflection-this-regression", {
+    const complete = (await service.completeTurn("turn-reflection-this-regression", {
       sessionId: session.sessionId,
       query: "黑美人都是黑籽的吗？但是好像不怎么买得到",
       answer: "黑美人通常是有籽二倍体品种，市场份额受无籽西瓜和新品种挤压。",
       reasoningSummary: "Let me think about this specific watermelon variety before answering."
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -550,11 +553,11 @@ describe("MemoryService / evolution / reflection", () => {
       }
     });
 
-    service.completeTurn("turn-reflection-evolution", {
+    (await service.completeTurn("turn-reflection-evolution", {
       sessionId: session.sessionId,
       query: "分析旅行规划任务中的自然景观筛选流程",
       answer: "先按季节和交通条件筛选自然景观，再核验开放状态。"
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -604,7 +607,7 @@ describe("MemoryService / evolution / reflection", () => {
       }
     });
 
-    service.completeTurn("turn-reflection-prompt", {
+    (await service.completeTurn("turn-reflection-prompt", {
       sessionId: session.sessionId,
       query: "debug a failing sqlite migration command",
       answer: [
@@ -618,7 +621,7 @@ describe("MemoryService / evolution / reflection", () => {
         output: "error: missing sqlite migration 003",
         success: false
       }]
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -675,7 +678,7 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "alpha-disabled-user"
       }
     });
-    const complete = service.completeTurn("turn-alpha-disabled", {
+    const complete = (await service.completeTurn("turn-alpha-disabled", {
       sessionId: session.sessionId,
       query: "record neutral alpha behavior",
       answer: [
@@ -683,7 +686,7 @@ describe("MemoryService / evolution / reflection", () => {
         "### Reasoning:",
         "I used the local migration output to avoid a broad retry."
       ].join("\n")
-    });
+    }));
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
 
@@ -743,7 +746,7 @@ describe("MemoryService / evolution / reflection", () => {
         userId: "downstream-preview-user"
       }
     });
-    const complete = service.completeTurn("turn-downstream-preview", {
+    const complete = (await service.completeTurn("turn-downstream-preview", {
       sessionId: session.sessionId,
       query: "debug migration and then run focused test",
       answer: "I reran the focused check after inspecting the migration output.",
@@ -761,7 +764,7 @@ describe("MemoryService / evolution / reflection", () => {
           success: true
         }
       ]
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -812,7 +815,7 @@ describe("MemoryService / evolution / reflection", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-reflection-batch", {
+    const complete = (await service.completeTurn("turn-reflection-batch", {
       sessionId: session.sessionId,
       query: "debug the sqlite migration and then run the focused test",
       answer: "I found the missing migration and reran the targeted check.",
@@ -830,7 +833,7 @@ describe("MemoryService / evolution / reflection", () => {
           success: true
         }
       ]
-    });
+    }));
     expect(complete.l1MemoryIds).toHaveLength(1);
     await service.feedback({
       sessionId: session.sessionId,

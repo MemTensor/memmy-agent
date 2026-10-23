@@ -60,7 +60,8 @@ function createDeterministicSummaryLlm(summary: string): LlmClient {
     async complete() {
       return "{}";
     },
-    async completeJson<T extends Record<string, unknown>>() {
+    async completeJson<T extends Record<string, unknown>>(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       return { title: "Beach trip", summary } as unknown as T;
     },
     status: () => ({
@@ -724,16 +725,16 @@ describe("MemoryService / REST contract", () => {
         userId: "auto-worker-l3-close-user"
       }
     });
-    const first = service.completeTurn("turn-auto-worker-l3-close", {
+    const first = (await service.completeTurn("turn-auto-worker-l3-close", {
       sessionId: opened.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
-    const ended = service.completeTurn("turn-auto-worker-l3-close-end", {
+    }));
+    const ended = (await service.completeTurn("turn-auto-worker-l3-close-end", {
       sessionId: opened.sessionId,
       query: "结束会话",
       answer: "好的，本话题到这里结束。"
-    });
+    }));
     expect(ended.closedEpisodeIds).toEqual([first.episodeId]);
     await service.runWorkerOnce(20);
     const l3Jobs = () => db.db.prepare(
@@ -788,11 +789,11 @@ describe("MemoryService / REST contract", () => {
         sessionKey: "auto-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-auto-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-auto-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Remember the old task",
       answer: "The old task is recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -864,11 +865,11 @@ describe("MemoryService / REST contract", () => {
         sessionKey: "memory-add-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-memory-add-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-memory-add-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Remember the old memory add task",
       answer: "The old memory add task is recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -947,11 +948,11 @@ describe("MemoryService / REST contract", () => {
       namespace,
       sessionId: "openclaw-memory-agent:auto-worker-start"
     });
-    const complete = service.completeTurn("turn-auto-worker-start", {
+    const complete = (await service.completeTurn("turn-auto-worker-start", {
       sessionId: session.sessionId,
       query: "remember queued startup embeddings",
       answer: "queued jobs should drain when the server starts"
-    });
+    }));
     const queuedRow = db.db.prepare(
       `SELECT embedding_dim
        FROM memory_vector_entries

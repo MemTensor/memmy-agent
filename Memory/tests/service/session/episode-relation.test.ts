@@ -48,6 +48,7 @@ function createRelationClassifierLlm(
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "retrieval.retrieval.query.extract.v3") {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
@@ -99,6 +100,7 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "retrieval.retrieval.query.extract.v3") {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
@@ -148,6 +150,7 @@ function createEndTopicCaptureLlm(
       messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return { queryVecText: "", keywords: [] } as unknown as T;
@@ -185,11 +188,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-end-topic"
       }
     });
-    const first = service.completeTurn("turn-end-topic-first", {
+    const first = (await service.completeTurn("turn-end-topic-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
+    }));
 
     const prepared = await service.startTurn({
       turnId: "turn-end-topic-close",
@@ -207,11 +210,11 @@ describe("MemoryService / session / episode relation", () => {
       status: "open"
     });
 
-    const completed = service.completeTurn("turn-end-topic-close", {
+    const completed = (await service.completeTurn("turn-end-topic-close", {
       sessionId: session.sessionId,
       query: "结束会话",
       answer: "好的，本话题到这里结束。"
-    });
+    }));
 
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.l1MemoryId).toBe("");
@@ -256,11 +259,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-explicit-end-topic"
       }
     });
-    const first = service.completeTurn("turn-explicit-end-topic-first", {
+    const first = (await service.completeTurn("turn-explicit-end-topic-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
 
     for (const query of ["结束话题", "如何结束进程？", "不要结束会话，继续说明证书续期", "不聊了吗？"]) {
       const prepared = await service.startTurn({
@@ -277,11 +280,11 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(prepared.status).toContain("relation:end_topic:proposed");
 
-    const completed = service.completeTurn("turn-explicit-end-topic-close", {
+    const completed = (await service.completeTurn("turn-explicit-end-topic-close", {
       sessionId: session.sessionId,
       query: "不聊了！",
       answer: "好的。"
-    });
+    }));
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.l1MemoryIds).toEqual([]);
   });
@@ -299,11 +302,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-llm-end-topic"
       }
     });
-    const first = service.completeTurn("turn-llm-end-topic-first", {
+    const first = (await service.completeTurn("turn-llm-end-topic-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     const started = await service.startTurn({
       turnId: "turn-llm-end-topic-close",
       sessionId: session.sessionId,
@@ -316,11 +319,11 @@ describe("MemoryService / session / episode relation", () => {
       status: "open"
     });
 
-    const completed = service.completeTurn("turn-llm-end-topic-close", {
+    const completed = (await service.completeTurn("turn-llm-end-topic-close", {
       sessionId: session.sessionId,
       query: closingQuery,
       answer: "Understood."
-    });
+    }));
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.l1MemoryIds).toHaveLength(1);
     expect(service.getMemory(first.episodeId)).toMatchObject({
@@ -367,11 +370,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-end-topic-feedback"
       }
     });
-    const first = service.completeTurn("turn-end-topic-feedback-first", {
+    const first = (await service.completeTurn("turn-end-topic-feedback-first", {
       sessionId: session.sessionId,
       query: "查看本地项目的版本号",
       answer: "读取 package.json 的 version 字段，当前版本是 1.1.8。"
-    });
+    }));
     const closingQuery = `很好，这个步骤很有用，谢谢。${END_TOPIC_CONVENTION}。结束会话`;
     const started = await service.startTurn({
       turnId: "turn-end-topic-feedback-close",
@@ -380,11 +383,11 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(started.status).toContain("relation:end_topic:proposed");
 
-    const completed = service.completeTurn("turn-end-topic-feedback-close", {
+    const completed = (await service.completeTurn("turn-end-topic-feedback-close", {
       sessionId: session.sessionId,
       query: closingQuery,
       answer: "好的，以后查看本地项目版本号都会按这个步骤来。"
-    });
+    }));
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.l1MemoryIds).toHaveLength(1);
     const episodeEvolutionJobs = () => db.db.prepare(
@@ -431,11 +434,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-end-topic-retry"
       }
     });
-    service.completeTurn("turn-end-topic-retry-first", {
+    (await service.completeTurn("turn-end-topic-retry-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     const request = {
       turnId: "turn-end-topic-retry-close",
       sessionId: session.sessionId,
@@ -458,8 +461,8 @@ describe("MemoryService / session / episode relation", () => {
       query: "结束会话",
       answer: "好的，本话题结束。"
     };
-    const firstComplete = service.completeTurn(request.turnId, completeRequest);
-    const secondComplete = service.completeTurn(request.turnId, completeRequest);
+    const firstComplete = (await service.completeTurn(request.turnId, completeRequest));
+    const secondComplete = (await service.completeTurn(request.turnId, completeRequest));
 
     expect(secondComplete.closedEpisodeIds).toEqual(firstComplete.closedEpisodeIds);
     expect(secondComplete.jobs).toEqual([]);
@@ -478,32 +481,32 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-end-topic-boundary"
       }
     });
-    const first = service.completeTurn("turn-end-topic-boundary-first", {
+    const first = (await service.completeTurn("turn-end-topic-boundary-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     await service.startTurn({
       turnId: "turn-end-topic-boundary-close",
       sessionId: session.sessionId,
       query: "结束会话"
     });
-    service.completeTurn("turn-end-topic-boundary-close", {
+    (await service.completeTurn("turn-end-topic-boundary-close", {
       sessionId: session.sessionId,
       query: "结束会话",
       answer: "好的，本话题结束。"
-    });
+    }));
 
     const nextStart = await service.startTurn({
       turnId: "turn-end-topic-boundary-next",
       sessionId: session.sessionId,
       query: "继续说明证书续期"
     });
-    const next = service.completeTurn("turn-end-topic-boundary-next", {
+    const next = (await service.completeTurn("turn-end-topic-boundary-next", {
       sessionId: session.sessionId,
       query: "继续说明证书续期",
       answer: "可以使用 certbot 自动续期。"
-    });
+    }));
 
     expect(nextStart).not.toHaveProperty("episodeId");
     expect(next.episodeId).not.toBe(first.episodeId);
@@ -529,11 +532,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-pending-end-topic"
       }
     });
-    const first = service.completeTurn("turn-pending-end-topic-first", {
+    const first = (await service.completeTurn("turn-pending-end-topic-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     await service.startTurn({
       turnId: "turn-pending-end-topic-close",
       sessionId: session.sessionId,
@@ -553,16 +556,16 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(relationCalls).toEqual(["relation.classify.v1"]);
 
-    service.completeTurn("turn-pending-end-topic-close", {
+    (await service.completeTurn("turn-pending-end-topic-close", {
       sessionId: session.sessionId,
       query: "结束会话",
       answer: "好的，本话题结束。"
-    });
-    const next = service.completeTurn("turn-after-pending-end-topic", {
+    }));
+    const next = (await service.completeTurn("turn-after-pending-end-topic", {
       sessionId: session.sessionId,
       query: "继续说明证书续期",
       answer: "可以使用 certbot 自动续期。"
-    });
+    }));
 
     expect(service.getMemory(first.episodeId)).toMatchObject({
       kind: "episode",
@@ -583,11 +586,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-split"
       }
     });
-    const first = service.completeTurn("turn-relation-first", {
+    const first = (await service.completeTurn("turn-relation-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443, install the certificate, and verify with curl."
-    });
+    }));
     const jobsBeforeStart = (db.db.prepare(
       "SELECT COUNT(*) AS count FROM evolution_jobs"
     ).get() as { count: number }).count;
@@ -608,11 +611,11 @@ describe("MemoryService / session / episode relation", () => {
     expect(db.db.prepare(
       "SELECT COUNT(*) AS count FROM evolution_jobs"
     ).get()).toEqual({ count: jobsBeforeStart });
-    const completed = service.completeTurn("turn-relation-new-task", {
+    const completed = (await service.completeTurn("turn-relation-new-task", {
       sessionId: session.sessionId,
       query: "new task: summarize the Q4 hiring plan",
       answer: "The Q4 hiring plan has been summarized."
-    });
+    }));
     expect(completed.episodeId).not.toBe(first.episodeId);
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.jobs.map((job) => job.jobType)).toContain("reflection");
@@ -651,11 +654,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-cancelled-route-proposal"
       }
     });
-    const first = service.completeTurn("turn-cancelled-proposal-first", {
+    const first = (await service.completeTurn("turn-cancelled-proposal-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
 
     await service.startTurn({
       turnId: "turn-cancelled-proposal",
@@ -676,11 +679,11 @@ describe("MemoryService / session / episode relation", () => {
       "SELECT COUNT(*) AS count FROM raw_turns WHERE session_id = ? AND turn_id = ?"
     ).get(session.sessionId, "turn-cancelled-proposal")).toEqual({ count: 0 });
 
-    const completed = service.completeTurn("turn-after-cancelled-proposal", {
+    const completed = (await service.completeTurn("turn-after-cancelled-proposal", {
       sessionId: session.sessionId,
       query: "那证书自动续期呢",
       answer: "Use certbot renewal hooks."
-    });
+    }));
     expect(completed.episodeId).toBe(first.episodeId);
     expect(completed.closedEpisodeIds).toEqual([]);
     db.close();
@@ -695,28 +698,28 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-stale-route-proposal"
       }
     });
-    const first = service.completeTurn("turn-stale-first", {
+    const first = (await service.completeTurn("turn-stale-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     await service.startTurn({
       turnId: "turn-stale-proposed",
       sessionId: session.sessionId,
       query: "new task: summarize the hiring plan"
     });
-    const intervening = service.completeTurn("turn-stale-intervening", {
+    const intervening = (await service.completeTurn("turn-stale-intervening", {
       sessionId: session.sessionId,
       query: "new task: audit database backups",
       answer: "The database backup audit is complete."
-    });
+    }));
     expect(intervening.episodeId).not.toBe(first.episodeId);
 
-    const completed = service.completeTurn("turn-stale-proposed", {
+    const completed = (await service.completeTurn("turn-stale-proposed", {
       sessionId: session.sessionId,
       query: "new task: summarize the hiring plan",
       answer: "The hiring plan is summarized."
-    });
+    }));
     expect(completed.episodeId).not.toBe(intervening.episodeId);
     expect(completed.closedEpisodeIds).toEqual([intervening.episodeId]);
     const raw = db.db.prepare(
@@ -743,23 +746,23 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-explicit-complete-episode"
       }
     });
-    const first = service.completeTurn("turn-explicit-episode-first", {
+    const first = (await service.completeTurn("turn-explicit-episode-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     await service.startTurn({
       turnId: "turn-explicit-episode",
       sessionId: session.sessionId,
       query: "new task: summarize the hiring plan"
     });
 
-    const completed = service.completeTurn("turn-explicit-episode", {
+    const completed = (await service.completeTurn("turn-explicit-episode", {
       sessionId: session.sessionId,
       episodeId: first.episodeId,
       query: "new task: summarize the hiring plan",
       answer: "The hiring plan is summarized."
-    });
+    }));
     expect(completed.episodeId).toBe(first.episodeId);
     expect(completed.closedEpisodeIds).toEqual([]);
     expect(db.db.prepare(
@@ -777,11 +780,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-follow-up"
       }
     });
-    const first = service.completeTurn("turn-relation-follow-up-first", {
+    const first = (await service.completeTurn("turn-relation-follow-up-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443, install the certificate, and verify with curl."
-    });
+    }));
 
     const prepared = await service.startTurn({ turnId: "turn-relation-follow-up-next",
       sessionId: session.sessionId,
@@ -800,11 +803,11 @@ describe("MemoryService / session / episode relation", () => {
     expect(rows[0]).toMatchObject({ id: first.episodeId, status: "open" });
     expect(JSON.parse(rows[0]!.meta_json)).not.toHaveProperty("relation");
 
-    const completed = service.completeTurn("turn-relation-follow-up-next", {
+    const completed = (await service.completeTurn("turn-relation-follow-up-next", {
       sessionId: session.sessionId,
       query: "那证书自动续期呢",
       answer: "Use systemd timers or certbot renewal hooks and verify nginx reloads cleanly."
-    });
+    }));
     expect(completed.episodeId).toBe(first.episodeId);
 
     const afterComplete = db.db.prepare(
@@ -834,7 +837,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("keeps direct turn-complete follow-ups in one episode when only tags differ", () => {
+  it("keeps direct turn-complete follow-ups in one episode when only tags differ", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -843,16 +846,16 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-direct-complete-follow-up"
       }
     });
-    const first = service.completeTurn("turn-direct-follow-up-first", {
+    const first = (await service.completeTurn("turn-direct-follow-up-first", {
       sessionId: session.sessionId,
       query: "修复 TypeScript hook 的 turn lifecycle",
       answer: "问题是 start 和 complete 没有绑定同一个 turnId。"
-    });
-    const second = service.completeTurn("turn-direct-follow-up-second", {
+    }));
+    const second = (await service.completeTurn("turn-direct-follow-up-second", {
       sessionId: session.sessionId,
       query: "修改起来麻烦吗？",
       answer: "不麻烦，需要补齐同一轮的状态关联。"
-    });
+    }));
 
     expect(second.episodeId).toBe(first.episodeId);
     const rows = db.db.prepare(
@@ -886,11 +889,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-turn-bind"
       }
     });
-    const first = service.completeTurn("turn-bind-first", {
+    const first = (await service.completeTurn("turn-bind-first", {
       sessionId: session.sessionId,
       query: "请记住：我叫林浩，喜欢简洁中文回答。我的项目代号是青竹，部署端口固定为 49231。",
       answer: "已记录：林浩偏好简洁中文回答；项目代号青竹；部署端口 49231。"
-    });
+    }));
 
     const prepared = await service.startTurn({
       turnId: "turn-bind-second",
@@ -906,11 +909,11 @@ describe("MemoryService / session / episode relation", () => {
     ).get(session.sessionId, "turn-bind-second") as { id: string; episode_id: string; status: string } | undefined;
     expect(reserved).toBeUndefined();
 
-    const completed = service.completeTurn("turn-bind-second", {
+    const completed = (await service.completeTurn("turn-bind-second", {
       sessionId: session.sessionId,
       query: "青竹项目的部署端口是多少？林浩偏好什么回答风格？",
       answer: "部署端口是 49231；林浩偏好简洁中文回答。"
-    });
+    }));
 
     expect(completed.episodeId).toBe(first.episodeId);
     expect(completed.rawTurnId).toMatch(/^raw_/u);
@@ -941,22 +944,22 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-book-follow-up"
       }
     });
-    const first = service.completeTurn("turn-book-first", {
+    const first = (await service.completeTurn("turn-book-first", {
       sessionId: session.sessionId,
       query: "我上个月读的一本书是百年孤独",
       answer: "记住了：你上个月读的是《百年孤独》。"
-    });
+    }));
 
     await service.startTurn({
       turnId: "turn-book-second",
       sessionId: session.sessionId,
       query: "有什么其他书和这本书比较相似的吗"
     });
-    const second = service.completeTurn("turn-book-second", {
+    const second = (await service.completeTurn("turn-book-second", {
       sessionId: session.sessionId,
       query: "有什么其他书和这本书比较相似的吗",
       answer: "可以看《霍乱时期的爱情》和其他家族史诗类作品。"
-    });
+    }));
     expect(second.episodeId).toBe(first.episodeId);
 
     await service.startTurn({
@@ -964,11 +967,11 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "有什么中国的书和这些书比较相似的吗"
     });
-    const third = service.completeTurn("turn-book-third", {
+    const third = (await service.completeTurn("turn-book-third", {
       sessionId: session.sessionId,
       query: "有什么中国的书和这些书比较相似的吗",
       answer: "可以看《白鹿原》《活着》和《平凡的世界》。"
-    });
+    }));
     expect(third.episodeId).toBe(first.episodeId);
 
     const episodes = db.db.prepare(
@@ -1010,11 +1013,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-llm"
       }
     });
-    const first = service.completeTurn("turn-relation-llm-first", {
+    const first = (await service.completeTurn("turn-relation-llm-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
+    }));
 
     const prepared = await service.startTurn({ turnId: "turn-relation-llm-next",
       sessionId: session.sessionId,
@@ -1030,11 +1033,11 @@ describe("MemoryService / session / episode relation", () => {
     ).get(session.sessionId) as { meta_json: string };
     expect(JSON.parse(beforeComplete.meta_json)).not.toHaveProperty("relationDecision");
 
-    const completed = service.completeTurn("turn-relation-llm-next", {
+    const completed = (await service.completeTurn("turn-relation-llm-next", {
       sessionId: session.sessionId,
       query: "Database certificate rotation details please",
       answer: "Rotate the certificate and reload the database client."
-    });
+    }));
     expect(completed.episodeId).toBe(first.episodeId);
     const rows = db.db.prepare(
       `SELECT meta_json
@@ -1079,6 +1082,7 @@ describe("MemoryService / session / episode relation", () => {
         _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string }
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         if (options.operation === "relation.classify.v1") {
           signalRelationStarted?.();
           await relationRelease;
@@ -1124,11 +1128,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-parallel-turn-start"
       }
     });
-    const first = service.completeTurn("turn-parallel-first", {
+    const first = (await service.completeTurn("turn-parallel-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
+    }));
 
     const startPromise = service.startTurn({
       turnId: "turn-parallel-next",
@@ -1153,11 +1157,11 @@ describe("MemoryService / session / episode relation", () => {
       }
     });
 
-    const completed = service.completeTurn("turn-parallel-next", {
+    const completed = (await service.completeTurn("turn-parallel-next", {
       sessionId: session.sessionId,
       query: "Database certificate rotation details please",
       answer: "Rotate the database certificate and reload the client."
-    });
+    }));
     expect(completed.episodeId).not.toBe(first.episodeId);
   });
 
@@ -1184,11 +1188,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-account-relation-model"
       }
     });
-    service.completeTurn("turn-account-relation-first", {
+    (await service.completeTurn("turn-account-relation-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
+    }));
 
     await service.startTurn({
       turnId: "turn-account-relation-next",
@@ -1215,11 +1219,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-revision"
       }
     });
-    const first = service.completeTurn("turn-relation-revision-first", {
+    const first = (await service.completeTurn("turn-relation-revision-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 80 and skip certificate verification."
-    });
+    }));
 
     const prepared = await service.startTurn({ turnId: "turn-relation-revision-fix",
       sessionId: session.sessionId,
@@ -1229,11 +1233,11 @@ describe("MemoryService / session / episode relation", () => {
     expect(db.db.prepare(
       "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
     ).get()).toEqual({ count: 0 });
-    const correction = service.completeTurn("turn-relation-revision-fix", {
+    const correction = (await service.completeTurn("turn-relation-revision-fix", {
       sessionId: session.sessionId,
       query: "wrong, use port 443 instead and verify TLS",
       answer: "Corrected: use port 443 and verify TLS."
-    });
+    }));
     expect(correction.episodeId).toBe(first.episodeId);
     expect(db.db.prepare(
       "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
@@ -1344,11 +1348,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-reopen-stale-reward"
       }
     });
-    const first = service.completeTurn("turn-reopen-stale-reward-first", {
+    const first = (await service.completeTurn("turn-reopen-stale-reward-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 80 and skip certificate verification."
-    });
+    }));
     const repos = new Repositories(db.db);
     const rewardDetail = {
       phase: "final",
@@ -1367,11 +1371,11 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "wrong, use port 443 instead and verify TLS"
     });
-    const correction = service.completeTurn("turn-reopen-stale-reward-fix", {
+    const correction = (await service.completeTurn("turn-reopen-stale-reward-fix", {
       sessionId: session.sessionId,
       query: "wrong, use port 443 instead and verify TLS",
       answer: "Corrected: use port 443 and verify TLS."
-    });
+    }));
 
     expect(correction.episodeId).toBe(first.episodeId);
     expect(repos.runtime.getEpisode(first.episodeId)).toMatchObject({
@@ -1397,11 +1401,11 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-implicit-turn-feedback"
       }
     });
-    const first = service.completeTurn("turn-implicit-feedback-first", {
+    const first = (await service.completeTurn("turn-implicit-feedback-first", {
       sessionId: session.sessionId,
       query: "Implement tree traversal",
       answer: "Use an iterative loop without recursion."
-    });
+    }));
 
     const prepared = await service.startTurn({ turnId: "turn-implicit-feedback-correction",
       sessionId: session.sessionId,
@@ -1416,11 +1420,11 @@ describe("MemoryService / session / episode relation", () => {
       kind: "episode",
       status: "open"
     });
-    const correction = service.completeTurn("turn-implicit-feedback-correction", {
+    const correction = (await service.completeTurn("turn-implicit-feedback-correction", {
       sessionId: session.sessionId,
       query: "不对，应该用递归实现，这样性能不好。换个任务：实现二叉树层序遍历",
       answer: "已改为递归，并开始实现二叉树层序遍历。"
-    });
+    }));
     expect(correction.episodeId).not.toBe(first.episodeId);
 
     const feedback = db.db.prepare(

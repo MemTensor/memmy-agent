@@ -524,11 +524,11 @@ describe("local Viewer API", () => {
     const session = fixture.service.openSession({
       namespace: { source: "memmy", profileId: "default", userId: "local-user" }
     });
-    const completed = fixture.service.completeTurn("turn-viewer-user-memory", {
+    const completed = (await fixture.service.completeTurn("turn-viewer-user-memory", {
       sessionId: session.sessionId,
       query: "我喜欢简洁代码，不要写不必要的兜底逻辑",
       answer: "好的，我会记住。"
-    });
+    }));
     expect(completed.userMemoryIds).toHaveLength(1);
 
     const response = await viewerFetch(fixture.baseUrl, "/api/v1/memories?q=简洁&limit=20&page=1");
@@ -564,19 +564,19 @@ describe("local Viewer API", () => {
     const hermesSession = fixture.service.openSession({
       namespace: { source: "hermes", profileId: "default", userId: "local-user" }
     });
-    const hermesTurn = fixture.service.completeTurn("turn-viewer-hermes-source", {
+    const hermesTurn = (await fixture.service.completeTurn("turn-viewer-hermes-source", {
       sessionId: hermesSession.sessionId,
       query: "我喜欢简洁代码",
       answer: "好的。"
-    });
+    }));
     const codexSession = fixture.service.openSession({
       namespace: { source: "codex", profileId: "default", userId: "local-user" }
     });
-    const codexTurn = fixture.service.completeTurn("turn-viewer-codex-source", {
+    const codexTurn = (await fixture.service.completeTurn("turn-viewer-codex-source", {
       sessionId: codexSession.sessionId,
       query: "我叫张三",
       answer: "你好，张三。"
-    });
+    }));
     expect(hermesTurn.userMemoryIds).toHaveLength(1);
     expect(codexTurn.userMemoryIds).toHaveLength(1);
 
