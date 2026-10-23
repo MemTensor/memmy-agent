@@ -12,6 +12,7 @@ import {
   type RuntimeModelCatalog
 } from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
+import type { RuntimeNamespace } from "../types.js";
 
 export type LlmProviderName =
   | ""
@@ -107,6 +108,13 @@ export interface StorageConfig {
   sqlitePath?: string;
   endpoint?: string;
   token?: string;
+  /** Per-agent API keys accepted by the packaged service entry. Map key is the API key itself. */
+  scopedApiKeys?: Record<string, ScopedApiKeyConfig>;
+}
+
+export interface ScopedApiKeyConfig {
+  namespace: RuntimeNamespace;
+  scopes?: string[];
 }
 
 export interface AgentAccessConfig {
@@ -325,7 +333,8 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     backend: "sqlite",
     sqlitePath: defaultMemoryDatabasePath(),
     endpoint: "http://127.0.0.1:18960",
-    token: undefined
+    token: undefined,
+    scopedApiKeys: undefined
   },
   summary: {
     provider: "",
@@ -769,8 +778,58 @@ function normalizeStorage(input: Record<string, unknown>): StorageConfig {
     backend: storageBackend(input.backend, DEFAULT_MEMMY_CONFIG.storage.backend),
     sqlitePath: optionalPathString(input.sqlitePath),
     endpoint: optionalString(input.endpoint) ?? DEFAULT_MEMMY_CONFIG.storage.endpoint,
-    token: optionalString(input.token)
+    token: optionalString(input.token),
+    scopedApiKeys: normalizeScopedApiKeys(input.scopedApiKeys)
   };
+}
+
+/**
+ * Parses `memmyMemory.storage.scopedApiKeys`. An entry is kept only when its
+ * namespace carries a non-empty `source` and `profileId`; malformed entries are
+ * dropped so an unusable key fails closed with 401 instead of granting access.
+ * A record that is present but entirely malformed still normalizes to an empty
+ * record so the entry point never falls back to anonymous access.
+ */
+function normalizeScopedApiKeys(input: unknown): StorageConfig["scopedApiKeys"] {
+  if (!isRecord(input)) return undefined;
+  const scopedApiKeys: Record<string, ScopedApiKeyConfig> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!key.trim() || !isRecord(value)) continue;
+    const namespace = scopedApiKeyNamespace(value.namespace);
+    if (!namespace) continue;
+    const scopes = scopedApiKeyScopes(value.scopes);
+    scopedApiKeys[key] = {
+      namespace,
+      ...(scopes ? { scopes } : {})
+    };
+  }
+  return scopedApiKeys;
+}
+
+function scopedApiKeyNamespace(input: unknown): RuntimeNamespace | undefined {
+  if (!isRecord(input)) return undefined;
+  const source = optionalString(input.source);
+  const profileId = optionalString(input.profileId);
+  if (!source || !profileId) return undefined;
+  return {
+    source,
+    profileId,
+    profileLabel: optionalString(input.profileLabel),
+    projectId: optionalString(input.projectId),
+    workspaceId: optionalString(input.workspaceId),
+    workspacePath: optionalString(input.workspacePath),
+    sessionKey: optionalString(input.sessionKey),
+    userId: optionalString(input.userId),
+    tenantId: optionalString(input.tenantId)
+  };
+}
+
+function scopedApiKeyScopes(input: unknown): string[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const scopes = input.filter((scope): scope is string =>
+    typeof scope === "string" && scope.trim().length > 0
+  );
+  return scopes.length > 0 ? scopes : undefined;
 }
 
 function normalizeLlm(input: Record<string, unknown>, defaults: LlmConfig): LlmConfig {
