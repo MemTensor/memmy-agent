@@ -1,9 +1,11 @@
 /** Sandboxed local command plugin runtime adapter. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import {
   CapabilityEventSchema,
@@ -17,11 +19,13 @@ import {
 import { z } from "zod";
 import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
 import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, PluginSession } from "./types.js";
+import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
+import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
-const CommandRuntimeDependencySchema = z.enum(["texlive"]);
+const CommandRuntimeDependencySchema = z.enum(["texlive", "office"]);
 
 const CommandRuntimeConfigSchema = z.object({
   command: z.string().trim().min(1),
@@ -46,6 +50,7 @@ const CommandRuntimeConfigSchema = z.object({
 export type CommandRuntimeConfig = z.infer<typeof CommandRuntimeConfigSchema>;
 
 export interface SandboxLaunch {
+  windowsAppContainer?: boolean;
   command: string;
   args: string[];
   cwd: string;
@@ -76,6 +81,8 @@ export interface CreateCommandPluginAdapterOptions {
   fileInputRoots?: readonly string[];
   /** Host-owned parent directory containing one writable data directory per plugin. */
   pluginDataRoot?: string;
+  /** Host-created dependency installer; null disables downloading (offline deployments/tests). */
+  officeRuntimeInstaller?: OfficeRuntimeInstaller | null;
   /** Host-owned services callable over the private command runtime protocol. */
   hostServices?: PluginHostServiceInvoker;
   /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
@@ -137,7 +144,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform);
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
+        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -151,8 +159,17 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       // compatibility mode.  The variable is harmless when process.execPath is
       // already a standalone Node binary.
       if (config.interpreter === "node") env.ELECTRON_RUN_AS_NODE = "1";
+      if (process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1") env.MEMMY_OFFICE_TRACE = "1";
       const pluginDataPath = await resolvePluginDataPath(context, options.pluginDataRoot);
-      if (pluginDataPath) env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
+      if (pluginDataPath) {
+        env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
+        if (platform === "win32") {
+          const temporary = resolve(pluginDataPath, "tmp"); await mkdir(temporary, { recursive: true });
+          env.TEMP = temporary; env.TMP = temporary;
+        }
+      }
+      if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
+        ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
       return {
         pluginId: context.plugin.id,
         launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
@@ -183,18 +200,29 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (session.config.inputMode === "argument-json") args.push(request);
       const child = spawnFn(session.launch.command, args, {
         cwd: session.launch.cwd,
-        env: session.env,
+        env: session.launch.windowsAppContainer ? windowsLauncherEnvironment(session.env) : session.env,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"]
       });
       session.children.set(call.callId, child);
+      // A write callback does not consume the stream's separate error event.
+      // Cancellation or an early plugin exit can close stdin during a reply.
+      let inputError: Error | undefined;
+      child.stdin.on("error", (error: Error) => {
+        inputError = error;
+        terminate(child);
+      });
       child.once("close", () => abortHostServices(session, call.callId));
       if (session.config.inputMode === "stdin-json") child.stdin.write(`${request}\n`);
       if (!session.config.interactive) child.stdin.end();
 
       let stderr = "";
       child.stderr.on("data", (chunk: Buffer) => {
-        if (stderr.length < MAX_STDERR_BYTES) stderr += chunk.toString("utf8", 0, MAX_STDERR_BYTES - stderr.length);
+        if (stderr.length < MAX_STDERR_BYTES) {
+          const diagnostic = chunk.toString("utf8", 0, MAX_STDERR_BYTES - stderr.length);
+          stderr += diagnostic;
+          if (process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1") console.info(`Plugin sandbox stderr: ${JSON.stringify(diagnostic)}`);
+        }
       });
       const exit = processExit(child);
       let timedOut = false;
@@ -271,6 +299,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         }
         const { code, signal } = await exit;
         if (timedOut) throw Object.assign(new Error("Plugin command timed out"), { code: "plugin_timeout" });
+        if (inputError) throw inputError;
         if (code !== 0) throw new Error(`Plugin command exited with ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
         if (jsonOutput) {
           const output = JSON.parse(jsonOutput.toString("utf8"));
@@ -399,7 +428,7 @@ async function writeChildMessage(child: ChildProcessWithoutNullStreams, message:
 }
 
 function isSandboxablePlatform(platform: NodeJS.Platform): boolean {
-  return platform === "darwin" || platform === "linux";
+  return platform === "darwin" || platform === "linux" || platform === "win32";
 }
 
 function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, platform: NodeJS.Platform): CommandRuntimeConfig {
@@ -459,13 +488,37 @@ export async function buildPluginSandboxLaunch(
   runtimeExecutableRoots: readonly string[] = []
 ): Promise<SandboxLaunch> {
   const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
-  const runtimeRoot = interpreter === "node" ? resolve(dirname(runtimeCommand), "..") : null;
+  const runtimeRoot = interpreter === "node" ? (platform === "win32" ? dirname(runtimeCommand) : resolve(dirname(runtimeCommand), "..")) : null;
   const filesystem = await filesystemRules(context, fileInputRoots, pluginDataRoot);
 
+  if (platform === "win32") {
+    if (networkEnabled) throw new Error("Windows AppContainer plugins currently require no network capability");
+    let script = fileURLToPath(new URL("./windows/launch.ps1", import.meta.url));
+    script = script.replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+    await access(script, fsConstants.R_OK);
+    await access(resolve(dirname(script), "Sandbox.cs"), fsConstants.R_OK);
+    const plan = {
+      profile: `memmy.plugin.${createHash("sha256").update(`${context.plugin.id}\0${root}`).digest("hex").slice(0, 32)}`,
+      // The Host has already canonicalized the entrypoint. Node's default CJS
+      // resolver otherwise lstats every ancestor up to C:\, outside the grant.
+      command: runtimeCommand, args: interpreter === "node" ? ["--preserve-symlinks", "--preserve-symlinks-main", ...runtimeArgs] : runtimeArgs, cwd,
+      readRoots: [...new Set([root, ...(runtimeRoot ? [runtimeRoot] : []), ...runtimeReadRoots,
+        ...filesystem.filter(rule => !rule.writable).map(rule => rule.path)])],
+      writeRoots: [...new Set(filesystem.filter(rule => rule.writable).map(rule => rule.path))]
+    };
+    return {
+      command: win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      windowsAppContainer: true,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+        "-Plan", Buffer.from(JSON.stringify(plan)).toString("base64")], cwd
+    };
+  }
+
   if (platform === "darwin") {
+    const ipcRoot = await resolvePluginDataPath(context, pluginDataRoot);
     return {
       command: "/usr/bin/sandbox-exec",
-      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots), "--", runtimeCommand, ...runtimeArgs],
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot), "--", runtimeCommand, ...runtimeArgs],
       cwd
     };
   }
@@ -485,9 +538,17 @@ export interface ResolvedCommandRuntimeDependencies {
 /** Resolve only Host-approved runtimes; plugin manifests cannot inject arbitrary executable roots. */
 export async function resolveCommandRuntimeDependencies(
   dependencies: readonly z.infer<typeof CommandRuntimeDependencySchema>[],
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  officeInstaller?: OfficeRuntimeInstaller
 ): Promise<ResolvedCommandRuntimeDependencies> {
   const resolved: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  if (dependencies.includes("office")) {
+    const office = await resolveOfficeRuntime(platform, officeInstaller);
+    resolved.pathEntries.push(...office.pathEntries);
+    resolved.readRoots.push(...office.readRoots);
+    resolved.executableRoots.push(...office.executableRoots);
+    Object.assign(resolved.environment, office.environment);
+  }
   if (!dependencies.includes("texlive")) return resolved;
 
   if (platform === "darwin") {
@@ -505,6 +566,64 @@ export async function resolveCommandRuntimeDependencies(
     }
   }
   return resolved;
+}
+
+/** Office is an optional Host dependency, never copied back into the App bundle.
+ * Only the Host environment or known installation roots can grant executable
+ * access. A plugin's manifest env/config cannot add roots to the OS sandbox.
+ */
+export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.platform, installer?: OfficeRuntimeInstaller): Promise<ResolvedCommandRuntimeDependencies> {
+  const result: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  const override = process.env.MEMMY_PLUGIN_OFFICE_ROOT;
+  if (override && !isAbsolute(override)) throw new Error("MEMMY_PLUGIN_OFFICE_ROOT must be absolute");
+  const defaults = platform === "darwin"
+    ? ["/Applications/LibreOffice.app", "/opt/homebrew", "/usr/local"]
+    : platform === "linux" ? ["/usr", "/opt/libreoffice"]
+      : platform === "win32" ? [win32.join(process.env.ProgramFiles ?? "C:\\Program Files", "LibreOffice")] : [];
+  const roots = process.env.MEMMY_OFFICE_RUNTIME_PREFER_MANAGED === "1" && installer ? [] : [...(override ? [override] : []), ...defaults];
+  const tools: Record<string, string> = {};
+  for (const configured of roots) {
+    const root = await realpath(configured).catch(() => null);
+    if (!root) continue;
+    for (const name of ["soffice", "pdfinfo", "pdftoppm", "pdftotext"]) {
+      if (tools[name]) continue;
+      // Desktop soffice uses global named pipes that AppContainer rejects.
+      // Windows requires the headless LibreOfficeKit bridge in our runtime.
+      const binaryName = platform === "win32" ? name === "soffice" ? "memmy-office-convert.exe" : `${name}.exe` : name;
+      const candidates = [resolve(root, "bin", binaryName), resolve(root, "MacOS", binaryName), resolve(root, "Contents", "MacOS", binaryName), resolve(root, "program", binaryName),
+        resolve(root, "libreoffice", "program", binaryName), resolve(root, "poppler", "Library", "bin", binaryName),
+        resolve(root, "bin", "override", binaryName), resolve(root, "native", "poppler", "bin", binaryName)];
+      const binary = await firstExecutable(candidates);
+      if (!binary) continue;
+      const canonical = await realpath(binary);
+      tools[name] = canonical;
+      // Homebrew's bin symlinks resolve inside Cellar. The Host-approved root
+      // includes associated dylibs, fonts and shared resources as well.
+      result.readRoots.push(root);
+      result.executableRoots.push(root);
+      result.pathEntries.push(dirname(canonical));
+    }
+  }
+  if (["soffice", "pdfinfo", "pdftoppm", "pdftotext"].some(name => !tools[name]) && installer) {
+    const installed = await installer.ensure(platform, process.arch);
+    Object.assign(tools, installed.tools);
+    result.readRoots.push(installed.root); result.executableRoots.push(installed.root);
+    result.pathEntries.push(...Object.values(installed.tools).map(file => dirname(file)));
+  }
+  result.readRoots = [...new Set(result.readRoots)];
+  result.executableRoots = [...new Set(result.executableRoots)];
+  result.pathEntries = [...new Set(result.pathEntries)];
+  result.environment.MEMMY_OFFICE_TOOLS = JSON.stringify(tools);
+  return result;
+}
+
+function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
+  if (!pluginDataRoot) return undefined;
+  const registry = resolvePluginRegistryBaseUrl(process.env);
+  const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
+    ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
+  if (!catalogUrl) return undefined;
+  return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
 }
 
 interface FilesystemRule {
@@ -569,13 +688,15 @@ function seatbeltProfile(
   networkEnabled: boolean,
   runtimeRoot: string | null,
   runtimeReadRoots: readonly string[],
-  runtimeExecutableRoots: readonly string[]
+  runtimeExecutableRoots: readonly string[],
+  ipcRoot: string | null
 ): string {
   const readPaths = [
     root,
     "/System",
     "/System/Volumes/Preboot/Cryptexes/OS",
     "/Library/Apple",
+    "/Library/Fonts",
     "/usr/lib",
     "/usr/libexec",
     "/usr/share",
@@ -597,6 +718,11 @@ function seatbeltProfile(
     `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
   ];
   if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
+  if (ipcRoot) clauses.push(
+    "(allow system-socket (socket-domain AF_UNIX))",
+    `(allow network-bind network-inbound (local unix-socket ${seatbeltSubpath(ipcRoot)}))`,
+    `(allow network-outbound (remote unix-socket ${seatbeltSubpath(ipcRoot)}))`
+  );
   if (networkEnabled) clauses.push("(allow network-outbound)");
   return clauses.join("\n");
 }
@@ -671,14 +797,27 @@ export function resolvePluginEnvironment(
   runtimePathEntries: readonly string[] = [],
   runtimeEnvironment: Readonly<Record<string, string>> = {}
 ): Record<string, string> {
-  const hostPath = [...new Set([...runtimePathEntries, "/usr/bin", "/bin"])].join(":");
-  const env: Record<string, string> = { PATH: hostPath, LANG: "C.UTF-8", ...configured, ...runtimeEnvironment };
+  const windowsRoot = process.env.SystemRoot ?? "C:\\Windows";
+  const hostPath = [...new Set([...runtimePathEntries, ...(process.platform === "win32" ? [win32.join(windowsRoot, "System32"), windowsRoot] : ["/usr/bin", "/bin"])])].join(process.platform === "win32" ? ";" : ":");
+  const env: Record<string, string> = { PATH: hostPath, LANG: "C.UTF-8",
+    ...(process.platform === "win32" ? { SystemRoot: windowsRoot, WINDIR: windowsRoot, ComSpec: win32.join(windowsRoot, "System32", "cmd.exe") } : {}),
+    ...configured, ...runtimeEnvironment };
   for (const [name, key] of Object.entries(secretEnv)) {
     const value = secrets[key];
     if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
     env[name] = value;
   }
   return env;
+}
+
+/** Never let plugin-supplied CLR/PowerShell variables affect the privileged launcher. */
+function windowsLauncherEnvironment(childEnvironment: Record<string, string>): Record<string, string> {
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  return { SystemRoot: systemRoot, WINDIR: systemRoot,
+    PATH: win32.join(systemRoot, "System32"),
+    PSModulePath: win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
+    ...(process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1" ? { MEMMY_SANDBOX_TRACE: "1" } : {}),
+    MEMMY_SANDBOX_CHILD_ENV: Buffer.from(JSON.stringify(childEnvironment)).toString("base64") };
 }
 
 function applyPlaceholders(value: string, call: CapabilityCall): string {

@@ -14,6 +14,7 @@ files:
   - "!**/node_modules/sqlite-vec-{darwin,linux}-*{,/**}"
   - "!**/node_modules/sqlite-vec-windows-arm64{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pdf{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
   - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
@@ -34,6 +35,7 @@ files:
 
 asar: true
 asarUnpack:
+  - "**/plugin-runtime/windows/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/win/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py"

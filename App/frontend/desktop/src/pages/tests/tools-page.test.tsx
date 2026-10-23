@@ -64,6 +64,7 @@ describe("ToolsPageView", () => {
     expect(html).toContain("应用工具");
     expect(html).toContain("聊天渠道");
     expect(html).toContain("任务插件");
+    expect(html).toMatch(/role="tablist"[^>]+data-window-drag-exclusion="tools-tabs"/);
     expect(html).toMatch(/id="tools-tab-connections"[^>]+aria-selected="true"/);
     expect(html.indexOf('id="tools-tab-connections"')).toBeLessThan(html.indexOf('id="tools-tab-channels"'));
     expect(html.indexOf('id="tools-tab-channels"')).toBeLessThan(html.indexOf('id="tools-tab-plugins"'));

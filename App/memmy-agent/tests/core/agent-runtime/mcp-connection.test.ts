@@ -177,6 +177,32 @@ describe("MCP connection helpers", () => {
     expect(closed).toEqual([]);
     await stack!.aclose();
   });
+  it("refreshes plugin tools in the current registry after runtime initialization replaces the connection registry", async () => {
+    const root = tempRoot();
+    setConfigPath(path.join(root, "config.yaml"));
+    const servers = { plugins: { command: "plugin-bridge" } };
+    saveConfig(new Config({ tools: { mcpServers: servers } }));
+    const names = ["read_plugin_skill"];
+    const closed: string[] = [];
+    setMcpRuntimeForTest(runtimeFor({ "plugin-bridge": fakeSession(names) }, { closed }) as any);
+    const initial = new ToolRegistry();
+    const state = { mcpServers: servers, mcpStacks: await connectMcpServers(servers, initial) };
+    // AgentLoop replaces this registry when adding browser tools during startup.
+    const current = new ToolRegistry();
+    for (const [, tool] of initial) current.register(tool);
+    expect(current.getDefinitions()).toHaveLength(1); // populate its schema cache
+    const connection = state.mcpStacks.plugins;
+    names.push("plugin_office_status");
+    await expect(reloadServers(state, current)).resolves.toMatchObject({ ok: true, tool_counts: { plugins: 2 } });
+    expect(current.has("mcp_plugins_plugin_office_status")).toBe(true);
+    expect(current.getDefinitions()).toHaveLength(2);
+    names.splice(1);
+    await reloadServers(state, current);
+    expect(current.has("mcp_plugins_plugin_office_status")).toBe(false);
+    expect(state.mcpStacks.plugins).toBe(connection);
+    expect(closed).toEqual([]);
+    await connection!.aclose();
+  });
   it("refreshes plugin tools into the replacement live registry", async () => {
     const root = tempRoot();
     setConfigPath(path.join(root, "config.yaml"));

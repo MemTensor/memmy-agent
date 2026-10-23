@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
@@ -17,6 +18,8 @@ let root: string | undefined;
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
   root = undefined;
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
@@ -67,6 +70,48 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
+    "allows private plugin IPC while denying sockets outside plugin-data and loopback TCP", async () => {
+      const data = realpathSync(mkdtempSync("/private/tmp/memmy-ipc-"));
+      const unix = createServer(socket => socket.end());
+      const tcp = createServer(socket => socket.end());
+      await new Promise<void>(ok => unix.listen(join(data, "host.sock"), ok));
+      await new Promise<void>(ok => tcp.listen(0, "127.0.0.1", ok));
+      try {
+        const pluginContext = context();
+        const permission = { type: "host-service" as const, services: ["plugin-data"] };
+        pluginContext.plugin.manifest.permissions = [permission];
+        pluginContext.plugin.approvedPermissions = [permission];
+        execFileSync("/usr/bin/clang", ["-x", "c", "-o", join(root!, "runtime/plugin"), "-"], { input: `
+          #include <sys/socket.h>
+          #include <sys/un.h>
+          #include <netinet/in.h>
+          #include <unistd.h>
+          #include <stdio.h>
+          #include <string.h>
+          int main(int argc,char **argv) {
+            chdir(argv[1]); struct sockaddr_un own={0}; own.sun_family=AF_UNIX; strcpy(own.sun_path,"inside.sock");
+            int a=socket(AF_UNIX,SOCK_STREAM,0); int bound=bind(a,(struct sockaddr*)&own,sizeof(own))==0;
+            struct sockaddr_un other={0}; other.sun_family=AF_UNIX; strcpy(other.sun_path,argv[2]);
+            int b=socket(AF_UNIX,SOCK_STREAM,0); int external=connect(b,(struct sockaddr*)&other,sizeof(other))==0;
+            struct sockaddr_in remote={0}; remote.sin_family=AF_INET; remote.sin_addr.s_addr=htonl(0x7f000001); remote.sin_port=htons(${(tcp.address() as { port: number }).port});
+            int c=socket(AF_INET,SOCK_STREAM,0); int network=connect(c,(struct sockaddr*)&remote,sizeof(remote))==0;
+            printf("{\\"bound\\":%s,\\"external\\":%s,\\"network\\":%s}\\n",bound?"true":"false",external?"true":"false",network?"true":"false");
+            close(a);close(b);close(c);return 0;
+          }` });
+        pluginContext.plugin.manifest.runtime.config = { command: "runtime/plugin", args: [join(data, pluginContext.plugin.id), join(data, "host.sock")] };
+        const adapter = createCommandPluginAdapter({ pluginDataRoot: data });
+        const session = await adapter.activate(pluginContext);
+        try {
+          expect(await collect(adapter.invoke(session, {callId:"ipc",pluginId:pluginContext.plugin.id,capabilityId:"run",conversationId:"test",input:{}})))
+            .toEqual([{ type: "result", output: { bound: true, external: false, network: false } }]);
+        } finally { await adapter.deactivate(session); }
+      } finally {
+        await Promise.all([new Promise<void>(ok => unix.close(() => ok())), new Promise<void>(ok => tcp.close(() => ok()))]);
+        rmSync(data, { recursive: true, force: true });
+      }
+    }, 30000
+  );
   it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
     "executes an artifact command through the macOS sandbox",
     async () => {
@@ -294,6 +339,38 @@ describe("CommandPluginAdapter", () => {
     await expect(pending).rejects.toBeDefined();
   });
 
+  it("reports a closed response pipe as a call failure without an uncaught stream error", async () => {
+    const invoke = vi.fn(async () => ({ ok: true }));
+    const adapter = createCommandPluginAdapter({
+      hostServices: { invoke },
+      buildLaunch: async () => ({
+        command: process.execPath,
+        args: ["-e", `
+          const fs=require('node:fs');
+          fs.readSync(0,Buffer.alloc(65536),0,65536,null);
+          fs.closeSync(0);
+          // Keep descriptor zero occupied so libuv cannot reuse it for an
+          // internal handle (some Node 24 builds assert when closing fd 0).
+          fs.openSync(process.platform==='win32'?'NUL':'/dev/null','r');
+          console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
+          setInterval(() => {}, 1000);
+        `], cwd: root!
+      })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const permission = { type: "host-service" as const, services: ["model-inference"] };
+    pluginContext.plugin.manifest.permissions = [permission];
+    pluginContext.plugin.approvedPermissions = [permission];
+    const session = await adapter.activate(pluginContext);
+    try {
+      await expect(collect(adapter.invoke(session, {
+        callId: "call-closed-pipe", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
+      }))).rejects.toMatchObject({ code: "EPIPE" });
+      expect(invoke).toHaveBeenCalledOnce();
+    } finally { await adapter.deactivate(session); }
+  });
+
   it("denies unapproved Host-service requests without invoking the service", async () => {
     const invoke = vi.fn();
     const adapter = createCommandPluginAdapter({
@@ -382,6 +459,59 @@ describe("CommandPluginAdapter", () => {
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.executableRoots[0])})`);
   });
 
+  it("builds a trusted Windows launcher plan with explicit roots and exact arguments", async () => {
+    const pluginContext = context();
+    const launch = await buildPluginSandboxLaunch(pluginContext, { command: "runtime/plugin", interpreter: "node", args: ["a b", "中文", 'quote"value'], cwd: "." }, "win32");
+    expect(launch.command).toMatch(/powershell\.exe$/);
+    const plan = JSON.parse(Buffer.from(launch.args[launch.args.indexOf("-Plan") + 1]!, "base64").toString("utf8"));
+    expect(plan.command).toBe(realpathSync(process.execPath));
+    expect(plan.args).toEqual(["--preserve-symlinks", "--preserve-symlinks-main", realpathSync(join(root!, "runtime/plugin")), "a b", "中文", 'quote"value']);
+    expect(plan.readRoots).toContain(realpathSync(root!)); expect(plan.writeRoots).toEqual([]);
+    expect(plan.profile).toMatch(/^memmy\.plugin\.[a-f0-9]{32}$/);
+    await expect(buildPluginSandboxLaunch(pluginContext, { command: "runtime/plugin", interpreter: "node", args: [], cwd: "." }, "win32", true)).rejects.toThrow(/no network/);
+  });
+
+  it("resolves the default runtime route against the registry origin, including bases with /api", async () => {
+    const pluginContext = context();
+    vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
+    vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    vi.stubEnv("MEMMY_OFFICE_RUNTIME_CATALOG_URL", "");
+    delete process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL;
+    const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["office"] };
+    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
+  });
+
+  it("keeps plugin CLR/PowerShell variables out of the privileged Windows launcher", async () => {
+    const pluginContext = context();
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interpreter: "node", env: { COR_ENABLE_PROFILING: "1", COR_PROFILER_PATH: "untrusted.dll", PSModulePath: "untrusted-modules", SystemRoot: "untrusted-root", LOCALAPPDATA: "untrusted-profile" } };
+    let launcherEnv: Record<string, string> = {};
+    const adapter = createCommandPluginAdapter({ platform: "win32", spawnFn: ((command, _args, options) => {
+      expect(command).toMatch(/powershell\.exe$/); launcherEnv = options?.env as Record<string, string>;
+      return spawn(process.execPath, ["-e", "console.log('{}')"], options as Parameters<typeof spawn>[2]);
+    }) as typeof spawn });
+    const session = await adapter.activate(pluginContext);
+    await collect(adapter.invoke(session, { callId: "env-test", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "test", input: {} }));
+    expect(launcherEnv.COR_ENABLE_PROFILING).toBeUndefined(); expect(launcherEnv.COR_PROFILER_PATH).toBeUndefined();
+    expect(launcherEnv.PSModulePath).toBe(`${launcherEnv.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\Modules`);
+    expect(launcherEnv.SystemRoot).not.toBe("untrusted-root");
+    expect(launcherEnv.LOCALAPPDATA).toBeUndefined();
+    const isolatedEnv = JSON.parse(Buffer.from(launcherEnv.MEMMY_SANDBOX_CHILD_ENV!, "base64").toString("utf8"));
+    expect(isolatedEnv.COR_PROFILER_PATH).toBe("untrusted.dll");
+    expect(isolatedEnv.LOCALAPPDATA).toBe("untrusted-profile");
+  });
+
+  it("injects only the Host-installed portable Office tools into the runtime", async () => {
+    context(); vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"].map(name => [name, join(root!, "runtime", `${name}.exe`)]));
+    const ensure = vi.fn(async () => ({ root: root!, version: "test-1", tools }));
+    const dependencies = await resolveCommandRuntimeDependencies(["office"], "win32", { ensure });
+    expect(ensure).toHaveBeenCalledWith("win32", process.arch);
+    expect(JSON.parse(dependencies.environment.MEMMY_OFFICE_TOOLS!)).toEqual(tools);
+    expect(dependencies.readRoots).toEqual([root]); expect(dependencies.executableRoots).toEqual([root]);
+  });
+
   describe("sandbox: none", () => {
     /**
      * Activates a `sandbox: "none"` plugin and reports the command that was
@@ -450,8 +580,7 @@ describe("CommandPluginAdapter", () => {
     });
 
     it.each(["plugin:legal-labor", "plugin:literature-review"])("runs unsandboxed on Windows with %s", async (entitlement) => {
-      // Windows has no sandbox implementation, so an entitled first-party
-      // plugin is the only way a command plugin runs there at all.
+      // Existing entitled exemptions remain compatible with Windows.
       const command = await spawnedCommandFor({
         entitlement,
         granted: [entitlement],
@@ -461,22 +590,9 @@ describe("CommandPluginAdapter", () => {
       expect(command).not.toMatch(/sandbox-exec|bwrap/u);
     });
 
-    it.each([null, "plugin:literature-review"])("refuses Windows activation without a grant for %s", async (entitlement) => {
-      const adapter = createCommandPluginAdapter({
-        platform: "win32",
-        isEntitlementGranted: () => false
-      });
-      const pluginContext = context();
-      pluginContext.plugin.manifest.runtime.config = {
-        ...pluginContext.plugin.manifest.runtime.config,
-        sandbox: "none"
-      };
-
-      if (entitlement) pluginContext.plugin.manifest.requiredEntitlement = entitlement;
-
-      // Falling back to an unsandboxed child process here would hand every
-      // third-party plugin the thing the sandbox exists to prevent.
-      await expect(adapter.activate(pluginContext)).rejects.toThrow(/unsupported on win32/u);
+    it.each([null, "plugin:literature-review"])("uses AppContainer on Windows without a grant for %s", async (entitlement) => {
+      const command = await spawnedCommandFor({ entitlement, granted: [], platform: "win32" });
+      expect(command).toMatch(/powershell\.exe$/u);
     });
   });
 });

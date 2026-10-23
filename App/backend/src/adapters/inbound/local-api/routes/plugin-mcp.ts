@@ -1,11 +1,12 @@
 import { SkillRefSchema, type PluginSkillContentService } from "../../../../services/plugin-skill-content-service.js";
 /** MCP bridge exposing active plugin capabilities to Memmy Agent. */
 import { createHash, randomUUID } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { CapabilityCall, CapabilityEvent, InstalledPlugin, JsonSchema } from "@memmy/local-api-contracts";
+import type { CapabilityCall, CapabilityEvent, InstalledPlugin, JsonSchema, PluginArtifactRef } from "@memmy/local-api-contracts";
 import type { PluginService } from "../../../../services/plugin-service.js";
 import type { ProgressBus } from "../../../../services/progress-bus.js";
 
@@ -13,7 +14,7 @@ const MCP_TOKEN_HEADER = "x-memmy-mcp-token";
 const MCP_ROUTE_PATH = "/mcp/plugins";
 const PLUGIN_MCP_KEEPALIVE_MS = 30_000;
 
-export type PluginMcpService = Pick<PluginService, "list" | "invoke" | "cancel">;
+export type PluginMcpService = Pick<PluginService, "list" | "invoke" | "cancel"> & Partial<Pick<PluginService, "openArtifact">>;
 
 export interface RegisterPluginMcpRoutesOptions {
   plugins: PluginMcpService;
@@ -123,6 +124,7 @@ export function buildPluginMcpServer(
     }, keepaliveIntervalMs);
     keepalive.unref?.();
     extra.signal.addEventListener("abort", cancel, { once: true });
+    const artifacts: PluginArtifactRef[] = [];
     try {
       for await (const event of plugins.invoke(call)) {
         progressBus.emit("plugin.capability_event", {
@@ -141,7 +143,31 @@ export function buildPluginMcpServer(
           event.type === "progress" ? event.current : undefined,
           event.type === "progress" ? event.total : undefined
         );
-        if (event.type === "result") return toolResult(event.output);
+        if (event.type === "artifact") artifacts.push(event.artifact);
+        if (event.type === "result") {
+          if (!artifacts.length) return toolResult(event.output);
+          const output = event.output && typeof event.output === "object" && !Array.isArray(event.output)
+            ? { ...event.output, artifacts } : { output: event.output, artifacts };
+          const result = toolResult(output);
+          // QA pages must reach the model as pixels, not merely a download URL.
+          // Resolve only Host-issued artifact tokens; never fetch plugin URLs.
+          const images: Array<{ type: "image"; mimeType: string; data: string }> = [];
+          let imageBytes = 0;
+          if (plugins.openArtifact) for (const artifact of artifacts) {
+            if (artifact.role !== "setup" || artifact.mediaType !== "image/png") continue;
+            const token = artifact.uri.match(/^\/api\/v1\/plugins\/[^/]+\/artifacts\/([a-f0-9-]+)\/preview$/)?.[1];
+            if (!token) continue;
+            const hosted = await plugins.openArtifact(tool.plugin.id, token);
+            const info = await stat(hosted.path);
+            if (info.size > 8 * 1024 * 1024 - imageBytes || images.length >= 4) return toolError("Too many QA images in one call; request one page at a time");
+            const bytes = await readFile(hosted.path);
+            if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return toolError("QA artifact is not a valid PNG image");
+            imageBytes += bytes.byteLength;
+            if (images.length >= 4 || imageBytes > 8 * 1024 * 1024) return toolError("Too many QA images in one call; request one page at a time");
+            images.push({ type: "image", mimeType: "image/png", data: bytes.toString("base64") });
+          }
+          return { ...result, content: [...result.content, ...images] };
+        }
         if (event.type === "error") return toolError(`${event.code}: ${event.message}`);
       }
       return toolError("Plugin ended without a terminal event");
