@@ -48,6 +48,7 @@ export class ExecToolConfig {
   timeoutS = 60;
   pathAppend = "";
   sandbox = "";
+  // Additional parent variables beyond the platform and selected runtime defaults.
   allowedEnvKeys: string[] = [];
   allowPatterns: string[] = [];
   denyPatterns: string[] = [];
@@ -104,6 +105,10 @@ const BENIGN_DEVICE_PATHS = new Set([
   "/dev/stderr",
   "/dev/tty",
 ]);
+
+// Keep the selected tool search order and environment identity in non-login shells.
+// Other variables, including interpreter hooks and secrets, require explicit opt-in.
+const UNIX_RUNTIME_ENV_KEYS = ["PATH", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL"];
 
 const WINDOWS_ENV_KEYS = [
   "APPDATA",
@@ -401,7 +406,7 @@ export class ExecTool extends Tool {
       LANG: process.env.LANG ?? "C.UTF-8",
       TERM: process.env.TERM ?? "dumb",
     };
-    for (const key of this.allowedEnvKeys) {
+    for (const key of [...UNIX_RUNTIME_ENV_KEYS, ...this.allowedEnvKeys]) {
       const value = process.env[key];
       if (value != null) env[key] = value;
     }

@@ -183,6 +183,19 @@ The configuration CLI currently supports setting the application user ID:
 memmy config set app.userId <user-id>
 ```
 
+### Shell Command Environments
+
+On Linux and macOS, the exec tool preserves the parent process's `PATH`,
+`VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, and `CONDA_SHLVL` when set,
+along with `HOME`, `LANG`, and `TERM`. Select the intended environment before
+starting Memmy. The inherited `PATH` keeps its original order, and
+`tools.exec.pathAppend` adds directories after it.
+
+`tools.exec.allowedEnvKeys` adds other variables to this built-in set. Sensitive
+variables and interpreter startup hooks remain excluded unless explicitly listed.
+Use `login: false` for exec calls that should retain the selected parent
+environment without running login-shell startup files, which may change it.
+
 ### Command Reference
 
 | Task                             | Command                                                   |

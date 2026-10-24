@@ -808,6 +808,7 @@ export class ExecToolConfig extends Base {
   timeout = 60;
   pathAppend = "";
   sandbox = "";
+  // Additional parent variables beyond the platform and selected runtime defaults.
   allowedEnvKeys: string[] = [];
   allowPatterns: string[] = [];
   denyPatterns: string[] = [];
