@@ -66,7 +66,7 @@ describe("PluginMarketplaceSection", () => {
     root = createRoot(container);
     props = {
       plugins: [installed(literature), office], officialModelReady: true,
-      onInstall: vi.fn(), onUninstall: vi.fn(), onEnable: vi.fn(), onAddToChat: vi.fn(), onConfigureModel: vi.fn(), onRefresh: vi.fn(), onSignIn: vi.fn()
+      onInstall: vi.fn(), onUpdate: vi.fn(), onUninstall: vi.fn(), onEnable: vi.fn(), onAddToChat: vi.fn(), onConfigureModel: vi.fn(), onRefresh: vi.fn(), onSignIn: vi.fn()
     };
   });
 
@@ -98,6 +98,41 @@ describe("PluginMarketplaceSection", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
+
+  it("offers updates on the card and in details while displaying the actual installed version", async () => {
+    const plugin = { ...installed(office), version: "1.1.0" };
+    await render({ plugins: [plugin] });
+    await click("更新Office");
+    expect(props.onUpdate).toHaveBeenCalledExactlyOnceWith(plugin);
+    await click("查看Office详情");
+    const dialog = document.querySelector("[role=dialog]")!;
+    expect(dialog.querySelector(".plugin-marketplace-detail-status")?.textContent).toBe("已安装 · v1.0.0 ｜ 最新版本 · v1.1.0");
+    await click("更新Office", dialog);
+    expect(props.onUpdate).toHaveBeenCalledTimes(2);
+    expect(dialog.isConnected).toBe(true);
+    await render({ busyId: plugin.id });
+    expect(button("更新Office", dialog).disabled).toBe(true);
+    await render({ busyId: null, actionErrorPluginId: plugin.id, actionError: "更新失败" });
+    expect(dialog.querySelector("[role=alert]")?.textContent).toBe("更新失败");
+    expect(dialog.querySelector(".plugin-marketplace-detail-status")?.textContent).toContain("已安装 · v1.0.0");
+  });
+
+  it.each(["1.0.0", "0.9.0", undefined])("does not offer an upgrade for market version %s", async (version) => {
+    await render({ plugins: [{ ...installed(office), version }] });
+    expect(container.querySelector('[aria-label="更新Office"]')).toBeNull();
+    await click("查看Office详情");
+    expect(document.querySelector("[role=dialog]")?.textContent).toContain("已安装 · v1.0.0");
+  });
+
+  it("labels an uninstalled market release separately and respects update eligibility", async () => {
+    await render({ plugins: [{ ...office, version: "1.1.0" }] }, "en-US");
+    await click("View Office details");
+    expect(document.querySelector(".plugin-marketplace-detail-status")?.textContent).toContain("Latest version · v1.1.0");
+    expect(document.querySelector(".plugin-marketplace-detail-status")?.textContent).not.toContain("Installed · v");
+    await click("Close", document.querySelector("[role=dialog]")!);
+    await render({ plugins: [{ ...installed(office), version: "1.1.0", installable: false }] });
+    expect(container.querySelector('[aria-label="更新Office"]')).toBeNull();
+  });
 
   it("presents task plugins and searches names and descriptions without changing installation counts", async () => {
     await render();

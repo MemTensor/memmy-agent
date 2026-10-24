@@ -22,6 +22,7 @@ export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
   catalog?(): Promise<PluginCatalogEntry[]>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
+  update(pluginId: string, version: string): Promise<InstalledPlugin>;
   approvePermissions(pluginId: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
   enable(pluginId: string): Promise<InstalledPlugin>;
   disable(pluginId: string): Promise<InstalledPlugin>;
@@ -37,6 +38,7 @@ export interface PluginsClient {
 export const pluginEndpointPaths = {
   list: "/api/v1/plugins",
   install: "/api/v1/plugins/install",
+  update: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/update`,
   permissions: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/permissions`,
   enable: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/enable`,
   disable: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/disable`,
@@ -67,6 +69,13 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
         schema: InstalledPluginSchema,
         body: { pluginId, ...(version ? { version } : {}) }
       });
+    },
+    async update(pluginId, version) {
+      const updated = await requestJson({ config, path: pluginEndpointPaths.update(pluginId), schema: InstalledPluginSchema, body: { version } });
+      for (const key of uiCache.keys()) {
+        if (key.startsWith(`${pluginId}:`)) uiCache.delete(key);
+      }
+      return updated;
     },
     approvePermissions(pluginId, permissions) {
       return requestJson({

@@ -41,6 +41,7 @@ describe("plugins client", () => {
     const client = createHttpPluginsClient(config);
 
     await client.install(plugin.id);
+    await client.update(plugin.id, "0.2.3");
     await client.approvePermissions(plugin.id, plugin.manifest.permissions);
     await client.enable(plugin.id);
     await client.disable(plugin.id);
@@ -48,6 +49,7 @@ describe("plugins client", () => {
 
     expect(calls).toEqual([
       { path: "/api/v1/plugins/install", method: "POST", body: { pluginId: plugin.id } },
+      { path: `/api/v1/plugins/${plugin.id}/update`, method: "POST", body: { version: "0.2.3" } },
       { path: `/api/v1/plugins/${plugin.id}/permissions`, method: "PUT", body: { permissions: plugin.manifest.permissions } },
       { path: `/api/v1/plugins/${plugin.id}/enable`, method: "POST", body: {} },
       { path: `/api/v1/plugins/${plugin.id}/disable`, method: "POST", body: {} },
@@ -67,6 +69,21 @@ describe("plugins client", () => {
     expect(await blob.text()).toBe("%PDF");
     await expect(client.readArtifact("https://example.test/review.pdf")).rejects.toThrow("untrusted");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads plugin UI slots after a successful update", async () => {
+    let version = "old";
+    const fetchMock = vi.fn(async (request: URL) => {
+      if (request.pathname.endsWith("/update")) { version = "new"; return Response.json(installedPlugin()); }
+      return Response.json({ html: version });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpPluginsClient(config);
+    await expect(client.getUi("literature-review", "renderer")).resolves.toBe("old");
+    await expect(client.getUi("literature-review", "renderer")).resolves.toBe("old");
+    await client.update("literature-review", "0.2.3");
+    await expect(client.getUi("literature-review", "renderer")).resolves.toBe("new");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 

@@ -48,6 +48,10 @@ describe("live marketplace controller", () => {
           rules: { requiresLogin: true, recommendsOfficialModel: true } },
           eligibility: { visible: true, canInstall: Boolean(context.state.account.userId), canUse: Boolean(context.state.account.userId), reason: context.state.account.userId ? null : "login_required" } }]),
         install: vi.fn(async () => { records = [pending]; return pending; }),
+        update: vi.fn(async (_id: string, version: string) => {
+          records = [{ ...records[0], version, manifest: { ...records[0].manifest, version } }];
+          return records[0];
+        }),
         approvePermissions: vi.fn(async (_pluginId: string, permissions: PluginPermission[]) => {
           records = [{ ...records[0], approvedPermissions: permissions, state: "installed" }];
           return records[0];
@@ -83,6 +87,49 @@ describe("live marketplace controller", () => {
   function addToChatButton() {
     return container.querySelector('article[aria-label="文献综述"] [aria-label="将文献综述加入对话"]');
   }
+
+  it.each(["list", "details"])("updates from %s and reads back the host version before removing the update action", async (source) => {
+    records = [{ ...pending, version: "0.5.17", manifest: { ...pending.manifest, version: "0.5.17" }, state: "active" }];
+    await render();
+    if (source === "details") await click("查看文献综述详情");
+    await click("更新文献综述", source === "details" ? document.querySelector("[role=dialog]")! : container);
+    expect(clients.plugins.update).toHaveBeenCalledExactlyOnceWith("literature-review", "0.5.18");
+    expect(clients.plugins.install).not.toHaveBeenCalled();
+    expect(clients.plugins.enable).not.toHaveBeenCalled();
+    expect(records[0].state).toBe("active");
+    expect(container.querySelector('[aria-label="更新文献综述"]')).toBeNull();
+    expect(addToChatButton()).not.toBeNull();
+    if (source === "details") expect(document.querySelector(".plugin-marketplace-detail-status")?.textContent).toContain("已安装 · v0.5.18");
+  });
+
+  it.each(["active", "disabled"] as const)("handles new update permissions and preserves the previous %s state", async (state) => {
+    records = [{ ...pending, version: "0.5.17", state }];
+    clients.plugins.update.mockImplementationOnce(async () => { records = [pending]; return pending; });
+    await render();
+    await click("更新文献综述");
+    expect(clients.plugins.approvePermissions).toHaveBeenCalledExactlyOnceWith(pending.id, pending.manifest.permissions);
+    expect(clients.plugins.enable).toHaveBeenCalledTimes(state === "active" ? 1 : 0);
+  });
+
+  it("blocks duplicate updates and refreshes the old version after a failed download", async () => {
+    records = [{ ...pending, version: "0.5.17", state: "active" }];
+    let rejectUpdate!: (error: Error) => void;
+    clients.plugins.update.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUpdate = reject; }));
+    await render();
+    await click("查看文献综述详情");
+    const dialog = document.querySelector("[role=dialog]")!;
+    await act(async () => { button("更新文献综述", dialog).click(); button("更新文献综述", dialog).click(); });
+    expect(clients.plugins.update).toHaveBeenCalledTimes(1);
+    expect(button("更新文献综述", dialog).disabled).toBe(true);
+    expect(button("刷新").disabled).toBe(true);
+    await act(async () => rejectUpdate(new Error("download failed")));
+    expect(dialog.querySelector("[role=alert]")?.textContent).toContain("操作未完成，请重试");
+    expect(dialog.querySelector(".plugin-marketplace-detail-status")?.textContent).toContain("已安装 · v0.5.17");
+    expect(button("更新文献综述", dialog).disabled).toBe(false);
+    await click("更新文献综述", dialog);
+    expect(records[0].version).toBe("0.5.18");
+    expect(dialog.querySelector("[role=alert]")).toBeNull();
+  });
 
   it("makes the catalog usable while the model configuration request is still pending", async () => {
     let resolveModel!: (value: Awaited<ReturnType<typeof clients.config.getModelConfig>>) => void;

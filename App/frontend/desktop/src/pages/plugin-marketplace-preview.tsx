@@ -87,7 +87,7 @@ export default function PluginMarketplacePreview() {
     {notice && <p role="status" className="mb-3 text-xs text-text-ink/60">{notice}</p>}
     <PluginMarketplaceSection plugins={plugins} officialModelReady={officialModelReady} signedIn={signedIn}
       onRefresh={() => setNotice(t("plugins.ui.previewStateRefreshed"))}
-      onInstall={install} onEnable={install}
+      onInstall={install} onUpdate={install} onEnable={install}
       onUninstall={(plugin) => {
         setInstalled((items) => items.filter((item) => item.id !== plugin.id));
         setNotice(t("plugins.ui.previewUninstalled", { name: plugin.name }));

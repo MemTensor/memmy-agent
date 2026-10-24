@@ -12,6 +12,10 @@ export const MEMORY_ADD_STATUS_SUMMARIES = [
 ] as const;
 
 export const zhCNMessages = {
+  "plugins.ui.update": "更新{name}",
+  "plugins.ui.updateButton": "更新",
+  "plugins.ui.updateToVersion": "更新至 v{version}",
+  "plugins.ui.latestVersion": "最新版本 · v{version}",
   "connections.catalog.searchChatChannels": "搜索聊天渠道",
   "connections.catalog.searchAppTools": "搜索应用工具",
   "connections.catalog.connectAChatChannelToSendTasksTo": "连接聊天渠道，从常用聊天应用向 Memmy 发送任务。",
@@ -2613,6 +2617,10 @@ export const zhCNMessages = {
 } as const;
 
 export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
+  "plugins.ui.update": "Update {name}",
+  "plugins.ui.updateButton": "Update",
+  "plugins.ui.updateToVersion": "Update to v{version}",
+  "plugins.ui.latestVersion": "Latest version · v{version}",
   "connections.catalog.searchChatChannels": "Search chat channels",
   "connections.catalog.searchAppTools": "Search app tools",
   "connections.catalog.connectAChatChannelToSendTasksTo": "Connect a chat channel to send tasks to Memmy from your messaging apps.",

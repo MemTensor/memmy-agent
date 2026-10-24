@@ -12,6 +12,7 @@ import {
   type MarketplacePlugin
 } from "./plugin-marketplace-section.js";
 import { writeSettingsTabHash } from "./settings-nav.js";
+import { isNewerPluginVersion } from "./plugin-version.js";
 
 /** Live marketplace: installed state is always read back from the plugin host. */
 export function PluginMarketplace() {
@@ -127,6 +128,18 @@ export function PluginMarketplace() {
       void mutate(plugin, async () => {
         const installedPlugin = await clients!.plugins.install(plugin.id, plugin.version);
         await activateOfficialPlugin(installedPlugin);
+      });
+    }}
+    onUpdate={(plugin) => {
+      if (!plugin.installable || !plugin.installed || !plugin.version || !isNewerPluginVersion(plugin.version, plugin.installed.version)) return;
+      void mutate(plugin, async () => {
+        const updated = await clients!.plugins.update(plugin.id, plugin.version!);
+        // The host preserves active/disabled state and rolls back failed updates.
+        // Official plugins with new permissions follow the same approval flow as installation.
+        if (updated.state === "pending_approval") {
+          await clients!.plugins.approvePermissions(updated.id, updated.manifest.permissions);
+          if (plugin.installed?.state === "active") await clients!.plugins.enable(updated.id);
+        }
       });
     }}
     onEnable={(plugin) => {
