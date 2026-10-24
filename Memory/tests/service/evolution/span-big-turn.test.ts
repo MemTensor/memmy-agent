@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
   type LlmClient,
@@ -16,7 +16,7 @@ const {
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 function createSpanBigTurnLlm(
   calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }>,
@@ -505,6 +505,7 @@ describe("MemoryService / evolution / span big turn", () => {
   });
 
   it("stores only the successful model result after a failed attempt", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const llm = createSpanBigTurnLlm(calls, [
       {
@@ -561,6 +562,12 @@ describe("MemoryService / evolution / span big turn", () => {
       magnitude: 1,
       rationale: "任务结果正确"
     });
+    await runWorkerRounds(service, 8);
+
+    const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+      WHERE job_type = 'span_big_turn' AND status = 'failed'`).get() as { available_at: string };
+    expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+    vi.setSystemTime(Date.parse(retry.available_at));
     await runWorkerRounds(service, 8);
 
     const spans = service.panelItems({ namespace, layer: "L1" }).items.filter(
@@ -640,6 +647,7 @@ describe("MemoryService / evolution / span big turn", () => {
   });
 
   it("rejects overlapping spans without storing partial results", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const llm = createSpanBigTurnLlm(calls, {
       shouldSplit: true,
@@ -694,7 +702,15 @@ describe("MemoryService / evolution / span big turn", () => {
       magnitude: 1,
       rationale: "任务结果正确"
     });
-    await runWorkerRounds(service, 8);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await runWorkerRounds(service, 8);
+      if (attempt < 2) {
+        const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+          WHERE job_type = 'span_big_turn' AND status = 'failed'`).get() as { available_at: string };
+        expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+        vi.setSystemTime(Date.parse(retry.available_at));
+      }
+    }
 
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(3);
     expect(service.panelItems({ namespace, layer: "L1" }).items.some(

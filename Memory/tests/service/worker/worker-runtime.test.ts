@@ -67,7 +67,7 @@ describe("MemoryService / worker / runtime", () => {
     const leased = runtime.leaseQueuedJobs(10, 60, undefined, true).map((job) => job.id);
 
     expect(leased).toEqual(["job_normal_reflection_before_startup_repairs"]);
-    runtime.completeJob("job_normal_reflection_before_startup_repairs");
+    runtime.completeJob("job_normal_reflection_before_startup_repairs", undefined, runtime.getJob("job_normal_reflection_before_startup_repairs"));
     const repairs = runtime.leaseQueuedJobs(10, 60, undefined, true);
     expect(repairs).toHaveLength(2);
     expect(repairs.every((job) => job.jobType === "import_summary")).toBe(true);
@@ -117,7 +117,7 @@ describe("MemoryService / worker / runtime", () => {
     expect(firstLease.map((job) => job.id).sort()).toEqual(["contract-1", "knowledge-1"]);
     expect(repos.runtime.leaseQueuedJobs(10, 60)).toEqual([]);
 
-    repos.runtime.completeJob("contract-1");
+    repos.runtime.completeJob("contract-1", undefined, firstLease.find((job) => job.id === "contract-1"));
     expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["contract-2"]);
 
     db.close();
@@ -148,12 +148,12 @@ describe("MemoryService / worker / runtime", () => {
     }
 
     expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-1"]);
-    expect(repos.runtime.failJob("field-1", "retry")?.status).toBe("failed");
+    expect(repos.runtime.failJob("field-1", "retry", undefined, false, repos.runtime.getJob("field-1"))?.status).toBe("failed");
     expect(repos.runtime.leaseQueuedJobs(10, 60)).toEqual([]);
 
     repos.runtime.requeueFailedJobs();
     expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-1"]);
-    expect(repos.runtime.failJob("field-1", "terminal")?.status).toBe("dead_letter");
+    expect(repos.runtime.failJob("field-1", "terminal", undefined, false, repos.runtime.getJob("field-1"))?.status).toBe("dead_letter");
     expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-2"]);
 
     db.close();
@@ -235,22 +235,26 @@ describe("MemoryService / worker / runtime", () => {
       })
     ]));
     const row = db.db.prepare(
-      `SELECT status, attempts, leased_until
+      `SELECT status, attempts, leased_until, failure_count, lease_recovery_count
        FROM evolution_jobs
        WHERE id = ?`
     ).get(jobId) as {
       status: string;
       attempts: number;
       leased_until: string | null;
+      failure_count: number;
+      lease_recovery_count: number;
     };
     expect(row.status).toBe("succeeded");
-    expect(row.attempts).toBe(2);
+    expect(row.attempts).toBe(1);
     expect(row.leased_until).toBeNull();
+    expect(row.failure_count).toBe(0);
+    expect(row.lease_recovery_count).toBe(1);
 
     db.close();
   });
 
-  it("persists retryable worker failures before requeueing them on the next tick", async () => {
+  it("dead-letters an unsupported job immediately instead of retrying it every tick", async () => {
     const { db, service } = createTestService();
     const jobId = "job_retryable_failure";
     const createdAt = new Date(Date.now() - 60_000).toISOString();
@@ -265,7 +269,7 @@ describe("MemoryService / worker / runtime", () => {
     expect(firstRun.jobs).toEqual([
       expect.objectContaining({
         jobId,
-        status: "failed"
+        status: "dead_letter"
       })
     ]);
     const failedRow = db.db.prepare(
@@ -278,18 +282,13 @@ describe("MemoryService / worker / runtime", () => {
       leased_until: string | null;
       last_error: string | null;
     };
-    expect(failedRow.status).toBe("failed");
+    expect(failedRow.status).toBe("dead_letter");
     expect(failedRow.attempts).toBe(1);
     expect(failedRow.leased_until).toBeNull();
-    expect(failedRow.last_error).toContain("unsupported job type");
+    expect(failedRow.last_error).toContain("No scheduling policy registered for job type");
 
     const secondRun = await service.runWorkerOnce(1);
-    expect(secondRun.jobs).toEqual([
-      expect.objectContaining({
-        jobId,
-        status: "failed"
-      })
-    ]);
+    expect(secondRun.jobs).toEqual([]);
     const retriedRow = db.db.prepare(
       `SELECT status, attempts, leased_until
        FROM evolution_jobs
@@ -299,8 +298,8 @@ describe("MemoryService / worker / runtime", () => {
       attempts: number;
       leased_until: string | null;
     };
-    expect(retriedRow.status).toBe("failed");
-    expect(retriedRow.attempts).toBe(2);
+    expect(retriedRow.status).toBe("dead_letter");
+    expect(retriedRow.attempts).toBe(1);
     expect(retriedRow.leased_until).toBeNull();
     const ops = db.db.prepare(
       `SELECT op
@@ -308,7 +307,7 @@ describe("MemoryService / worker / runtime", () => {
        WHERE entity_id = ?
        ORDER BY seq ASC`
     ).all(jobId) as Array<{ op: string }>;
-    expect(ops.map((row) => row.op)).toEqual(["leased", "failed", "queued", "leased", "failed"]);
+    expect(ops.map((row) => row.op)).toEqual(["leased", "dead_letter"]);
 
     db.close();
   });
@@ -344,7 +343,7 @@ describe("MemoryService / worker / runtime", () => {
     expect(row.status).toBe("dead_letter");
     expect(row.attempts).toBe(1);
     expect(row.leased_until).toBeNull();
-    expect(row.last_error).toContain("unsupported job type");
+    expect(row.last_error).toContain("No scheduling policy registered for job type");
 
     const ops = db.db.prepare(
       `SELECT op

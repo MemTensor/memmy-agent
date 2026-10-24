@@ -617,6 +617,7 @@ export class ProviderConfig extends Base {
 export class ModelEndpointConfig extends Base {
   apiBase: string;
   protocol: ModelEndpointProtocol;
+  inheritProviderDefaults?: boolean;
   apiKey: string | null;
   extraHeaders: Dict<string> | null;
   extraBody: Dict | null;
@@ -632,6 +633,8 @@ export class ModelEndpointConfig extends Base {
     super(init);
     this.apiBase = assertRequiredString("provider endpoint apiBase", init.apiBase);
     this.protocol = assertOneOf("provider endpoint protocol", init.protocol, ENDPOINT_PROTOCOLS);
+    this.inheritProviderDefaults = init.inheritProviderDefaults === undefined ? undefined
+      : assertBoolean("provider endpoint inheritProviderDefaults", init.inheritProviderDefaults);
     this.apiKey = pick(init, ["apiKey"], null);
     this.extraHeaders = pick(init, ["extraHeaders"], null);
     this.extraBody = pick(init, ["extraBody"], null);
@@ -642,6 +645,7 @@ export class ModelEndpointConfig extends Base {
   override toObject(): Dict {
     return omitUndefined({
       ...this,
+      inheritProviderDefaults: this.inheritProviderDefaults,
       apiKey: this.apiKey ?? undefined,
       extraHeaders: this.extraHeaders ?? undefined,
       extraBody: this.extraBody ?? undefined,
@@ -1447,7 +1451,10 @@ export class Config extends Base {
     model: string | null = null,
     opts: { preset?: ModelPresetConfig | null } = {},
   ): string | null {
-    return this.getProvider(model, opts)?.apiKey ?? null;
+    const preset = opts.preset ?? this.resolvePreset();
+    const provider = this.getProvider(model, { preset });
+    const endpoint = provider?.endpoints[preset.endpoint];
+    return endpoint?.inheritProviderDefaults === false ? endpoint.apiKey || null : provider?.apiKey ?? null;
   }
 
   getApiBase(

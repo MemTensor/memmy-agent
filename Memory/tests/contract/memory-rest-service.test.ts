@@ -20,6 +20,7 @@ import {
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
+  runWorkerRoundsWithDueRetries,
   setRawTurnActivityAt
 } from "../fixtures/memory-service-fixture.js";
 
@@ -400,7 +401,7 @@ describe("MemoryService / REST contract", () => {
     });
     const namespace = { source: "hermes", profileId: "default", userId: "http-retry-user" };
     const added = addAgentSourceImport(service, namespace, "retry through HTTP", "http-retry");
-    await runWorkerRounds(service, 3, 1);
+    await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
 
     const server = createMemoryHttpServer({ service });
@@ -1042,6 +1043,9 @@ describe("MemoryService / REST contract", () => {
     expect(repos.runtime.getPendingJob(interruptedMemory.id, "embedding")?.jobType).toBe("embedding");
     const [interruptedJob] = repos.runtime.leaseQueuedJobs(1, 600, [interruptedMemory.id]);
     expect(interruptedJob?.jobType).toBe("embedding");
+    // Startup recovery must wait for expiry rather than revoke a valid owner.
+    db.db.prepare("UPDATE evolution_jobs SET leased_until = ? WHERE id = ?")
+      .run(new Date(Date.now() - 1_000).toISOString(), interruptedJob!.id);
 
     const failedMemory = addAgentSourceImport(
       service,

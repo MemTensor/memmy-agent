@@ -31,6 +31,7 @@ let db: DatabaseSync | undefined;
 let tempDir: string | undefined;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   db?.close();
   db = undefined;
   if (tempDir) {
@@ -242,6 +243,70 @@ describe("agent source service", () => {
         syncBoundaryAt: "2026-07-01T10:00:00.000Z"
       })
     ]));
+  });
+
+  it("waits for managed import processing without bypassing the shared scheduler", async () => {
+    const base = createReadyMemoryClient();
+    const runWorker = vi.fn(base.runWorker);
+    const enqueueImportSummaries = vi.fn(base.enqueueImportSummaries);
+    let polls = 0;
+    const getMemoryProcessingStatus = vi.fn(async (ids: string[]) => {
+      const result = await base.getMemoryProcessingStatus(ids);
+      return ++polls === 1
+        ? { ...result, items: result.items.map(item => ({ ...item, state: "summary_pending" as const })) }
+        : result;
+    });
+    const memoryIds = ["managed-memory"];
+    const service = createService({
+      memoryClient: { ...base, runWorker, enqueueImportSummaries, getMemoryProcessingStatus },
+      ingestionService: ingestionWithMemoryIds(memoryIds)
+    });
+    const source = await service.addManual({ displayName: "Managed queue regression" });
+    await expect(service.importManaged(source.sourceId, { mode: "full", messages: [] }))
+      .resolves.toMatchObject({ memoryIds });
+    expect(enqueueImportSummaries).toHaveBeenCalledExactlyOnceWith(memoryIds);
+    expect(getMemoryProcessingStatus).toHaveBeenCalledTimes(2);
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
+  it("keeps managed imports bounded and deduplicated without targeted worker drains", async () => {
+    const base = createReadyMemoryClient();
+    const runWorker = vi.fn(base.runWorker);
+    const enqueueImportSummaries = vi.fn(base.enqueueImportSummaries);
+    const getMemoryProcessingStatus = vi.fn(base.getMemoryProcessingStatus);
+    const memoryIds = Array.from({ length: 205 }, (_, index) => `managed-${index}`);
+    const service = createService({
+      memoryClient: { ...base, runWorker, enqueueImportSummaries, getMemoryProcessingStatus },
+      ingestionService: ingestionWithMemoryIds([...memoryIds, memoryIds[0]!])
+    });
+    const source = await service.addManual({ displayName: "Managed cohort regression" });
+    await service.importManaged(source.sourceId, { mode: "full", messages: [] });
+    const batches = enqueueImportSummaries.mock.calls.map(([ids]) => ids!);
+    expect(batches.map(ids => ids.length)).toEqual([100, 100, 5]);
+    expect(batches.flat()).toEqual(memoryIds);
+    expect(getMemoryProcessingStatus.mock.calls.map(([ids]) => ids)).toEqual(batches);
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
+  it("reports a stalled managed processing queue without issuing a worker call", async () => {
+    const base = createReadyMemoryClient();
+    const runWorker = vi.fn(base.runWorker);
+    let clock = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const service = createService({
+      memoryClient: { ...base, runWorker,
+        async getMemoryProcessingStatus(ids) {
+          clock += 2_400_000;
+          const result = await base.getMemoryProcessingStatus(ids);
+          return { ...result, items: result.items.map(item => ({ ...item, state: "embedding_pending" as const })) };
+        }
+      },
+      ingestionService: ingestionWithMemoryIds(["managed-stalled"])
+    });
+    const source = await service.addManual({ displayName: "Managed timeout regression" });
+    await expect(service.importManaged(source.sourceId, { mode: "full", messages: [] }))
+      .rejects.toThrow("Timed out waiting for 1 imported memories to finish indexing");
+    expect(runWorker).not.toHaveBeenCalled();
   });
 
   it("persists the AI-discovered recipe and later syncs without another Agent session", async () => {
@@ -833,6 +898,13 @@ function createReadyMemoryClient(): MemoryClient {
       };
     }
   };
+}
+
+function ingestionWithMemoryIds(memoryIds: string[]): IngestionService {
+  const base = createFakeIngestionService();
+  return { async ingest(messages, context) {
+    return { ...await base.ingest(messages, context), memoryIds };
+  } };
 }
 
 function createFakeIngestionService(): IngestionService {

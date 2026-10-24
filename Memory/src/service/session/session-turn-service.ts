@@ -1398,7 +1398,8 @@ export class SessionTurnService {
         throw new MemoryServiceError("forbidden", "source_raw_turn_scope_conflict");
       }
       const result = this.completeTurn(identity.turnId, { ...normalized, sessionId: session.id,
-        ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn);
+        ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn,
+        allowsLegacyHistoryCapture(request) ? "agent_source_scan" : undefined);
       if (gapEpisode) this.deps.repos.runtime.orderEpisodeTurnsBySourceTime(gapEpisode.id);
       const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
         ? { status: "stored", result }
@@ -1480,7 +1481,7 @@ export class SessionTurnService {
     const result = this.completeTurn(sourceTurn.turnId, {
       ...withoutEpisode,
       sessionId: opened.sessionId
-    }, sourceTurn);
+    }, sourceTurn, allowsLegacyHistoryCapture(request) ? "agent_source_scan" : undefined);
     const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
       ? { status: "stored", result }
       : { status: "rejected", reason: "capture_policy", result };
@@ -1640,7 +1641,8 @@ export class SessionTurnService {
   completeTurn(
     turnId: string,
     request: TurnCompleteRequest & Record<string, unknown>,
-    sourceTurn?: SourceTurnIdentity
+    sourceTurn?: SourceTurnIdentity,
+    captureOrigin?: "agent_source_scan"
   ): CompleteTurnResponse {
     request = sanitizeTurnCompleteRequest(request);
     if (request.status === "cancelled") {
@@ -2038,6 +2040,8 @@ export class SessionTurnService {
             },
             error_signatures: step.errorSignatures,
             ...observation.internal,
+            // Scheduling provenance is separate from the native capture pipeline.
+            ...(captureOrigin ? { capture_origin: captureOrigin } : {}),
             trace: {
               key: step.key,
               ts: step.ts,

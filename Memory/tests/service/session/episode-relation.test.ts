@@ -8,6 +8,7 @@ import {
   type LlmMessage
 } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { WorkerConcurrencyController } from "../../../src/service/worker/worker-concurrency.js";
 import {
   accountRuntimeConfig,
   createBatchReflectionLlm,
@@ -1116,7 +1117,10 @@ describe("MemoryService / session / episode relation", () => {
         }
       }
     };
-    const { db, service } = createTestService({ llm, config });
+    // This case verifies orchestration overlap. Permit two local requests here;
+    // the production default of one is covered by concurrency admission tests.
+    const { db, service } = createTestService({ llm, config,
+      concurrency: new WorkerConcurrencyController({ localModelConcurrency: 2 }) });
     const session = service.openSession({
       namespace: {
         source: "codex",

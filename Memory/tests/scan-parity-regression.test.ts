@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -34,7 +35,7 @@ async function run(scan: ReturnType<typeof create>, sourceId = "fixture", mode: 
   return scan.scanStatus();
 }
 const state = (root: string) => JSON.parse(readFileSync(join(root, "state.json"), "utf8"));
-const stub = (overrides = {}) => ({ addMemory: vi.fn((input: { requestId: string }) => ({ id: input.requestId, duplicate: false })),
+const stub = (overrides = {}) => ({ withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory: vi.fn((input: { requestId: string }) => ({ id: input.requestId, duplicate: false })),
   enqueuePendingImportSummaries: vi.fn(), ...overrides }) as unknown as MemoryService;
 
 describe("backend scan behavior preserved in Memory", () => {

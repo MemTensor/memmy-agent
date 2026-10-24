@@ -23,9 +23,10 @@ function duplicateCapability(config: RuntimeConfigDocument, id: string, preset: 
   const provider = record(record(config.providers).openai);
   const endpoint = record(record(provider.endpoints)[endpointId]);
   if (endpoint.protocol !== (capability === "embedding" ? "openai-embeddings" : "openai-chat-completions")) return null;
-  if (Object.keys(endpoint).some((key) => !["apiBase", "protocol", "apiKey", "extraHeaders", "extraBody"].includes(key))) return null;
+  if (Object.keys(endpoint).some((key) => !["apiBase", "protocol", "apiKey", "extraHeaders", "extraBody", "inheritProviderDefaults"].includes(key))) return null;
   return isPlatformMemoryConnection(config, capability, {
-    provider: "openai", model: preset.model, apiBase: endpoint.apiBase,
+    provider: "openai", model: preset.model, apiBase: endpoint.apiBase, protocol: endpoint.protocol,
+    inheritProviderDefaults: endpoint.inheritProviderDefaults,
     apiKey: endpoint.apiKey ?? provider.apiKey,
     extraHeaders: { ...record(provider.extraHeaders), ...record(endpoint.extraHeaders) },
     extraBody: { ...record(provider.extraBody), ...record(endpoint.extraBody) },

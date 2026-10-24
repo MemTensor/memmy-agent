@@ -158,21 +158,13 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(feedback.jobs.map((job) => job.jobType)).not.toContain("reward");
 
     service.closeSession(session.sessionId);
-    await service.runWorkerOnce(50);
-    await service.runWorkerOnce(50);
-    expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
-    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ jobType: "reward" })
-      ])
-    );
-
-    await service.runWorkerOnce(50);
-    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ jobType: "negative_experience" })
-      ])
-    );
+    const run = await service.runWorkerOnce(50);
+    expect(run.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "reward", status: "succeeded" }),
+      expect.objectContaining({ jobType: "negative_experience", status: "succeeded" })
+    ]));
+    expect(run.jobs.findIndex(job => job.jobType === "reward"))
+      .toBeLessThan(run.jobs.findIndex(job => job.jobType === "negative_experience"));
     const negativeJobCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
@@ -181,7 +173,6 @@ describe("MemoryService / evolution / negative experience", () => {
     ).get(namespace.userId) as { count: number };
     expect(negativeJobCount.count).toBe(1);
 
-    await service.runWorkerOnce(50);
     const policies = service.panelItems({ namespace, layer: "L2" }).items;
     expect(policies).toHaveLength(1);
     const detail = service.getMemory(policies[0]!.id, { namespace });
@@ -301,20 +292,13 @@ describe("MemoryService / evolution / negative experience", () => {
     });
 
     service.closeSession(session.sessionId);
-    await service.runWorkerOnce(50);
-    await service.runWorkerOnce(50);
-    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ jobType: "reward" })
-      ])
-    );
-    await service.runWorkerOnce(50);
-    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ jobType: "negative_experience" })
-      ])
-    );
-    await service.runWorkerOnce(50);
+    const run = await service.runWorkerOnce(50);
+    expect(run.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "reward", status: "succeeded" }),
+      expect.objectContaining({ jobType: "negative_experience", status: "succeeded" })
+    ]));
+    expect(run.jobs.findIndex(job => job.jobType === "reward"))
+      .toBeLessThan(run.jobs.findIndex(job => job.jobType === "negative_experience"));
 
     const policies = service.panelItems({ namespace, layer: "L2" }).items;
     expect(policies).toHaveLength(1);

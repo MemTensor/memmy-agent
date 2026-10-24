@@ -246,6 +246,7 @@ function runtimeCatalog(config: Config): RuntimeModelCatalog {
           omitNullish({
             apiBase: endpoint.apiBase,
             protocol: endpoint.protocol,
+            inheritProviderDefaults: endpoint.inheritProviderDefaults,
             apiKey: endpoint.apiKey,
             extraHeaders: endpoint.extraHeaders,
             extraBody: endpoint.extraBody,

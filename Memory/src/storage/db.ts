@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import { getSchemaVersion, migrate, SCHEMA_VERSION } from "./schema.js";
 import { SQLITE_VEC_VERSION } from "./sqlite-vec-store.js";
+import { protectJobLeaseWrites } from "./job-lease-context.js";
 
 export interface MemoryDbOptions {
   path?: string;
@@ -38,6 +39,7 @@ export class MemoryDb {
         this.createPreMigrationBackup();
         migrate(this.db);
       }
+      protectJobLeaseWrites(this.db);
     } catch (error) {
       this.db.close();
       throw error;

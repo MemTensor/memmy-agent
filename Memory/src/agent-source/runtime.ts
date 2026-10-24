@@ -311,7 +311,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     progressBeforePause = null;
     const controller = new AbortController();
     scanAbortController = controller;
-    const activeScan = runScan(request, controller.signal, jobId).then(() => {
+    const sourceIds = request.sourceId === "all"
+      ? registry.list().map(adapter => adapter.descriptor.sourceId) : [request.sourceId];
+    const activeScan = options.service.withAgentSourceScanPermit(sourceIds, controller.signal,
+      () => runScan(request, controller.signal, jobId)).then(() => {
       if (scan.jobId !== jobId || controller.signal.aborted) return;
       setScan({ ...scan, running: false, completedAt: scan.completedAt ?? new Date().toISOString() });
       logger.info("scan.completed", { jobId, sourceId: request.sourceId });

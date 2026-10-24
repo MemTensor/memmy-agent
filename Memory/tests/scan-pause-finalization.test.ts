@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ it.each(["resume", "cancel"] as const)("keeps a pause during source publication 
   publication.wait = new Promise(resolve => { release = resolve; });
   const entered = new Promise<void>(resolve => { publication.entered = resolve; });
   const executor = createAgentSourceExecutor({ configPath: join(directory, "config.yaml"), statePath: publication.path,
-    service: {} as MemoryService, resolveAgentSkillRoot: () => null,
+    service: { withAgentSourceScanPermit: withUnrestrictedScanPermit } as MemoryService, resolveAgentSkillRoot: () => null,
     sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "fixture", displayName: "Fixture", builtin: true, dataPath: directory },
       detect: async () => true, async *scan() {} }]) });
   try {

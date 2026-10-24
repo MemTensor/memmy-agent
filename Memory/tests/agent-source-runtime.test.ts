@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -139,7 +140,7 @@ describe("standalone Agent source executor", () => {
       .mockImplementationOnce(async () => { await first; return true; })
       .mockImplementationOnce(async () => { await second; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
@@ -180,7 +181,7 @@ describe("standalone Agent source executor", () => {
     };
     const addMemory = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([adapter]),
     });
@@ -211,7 +212,7 @@ describe("standalone Agent source executor", () => {
     const detection = new Promise<void>((done) => { finishDetection = done; });
     const detect = vi.fn(async () => { await detection; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath,
       initialScanDelayMs: 0,
       sourceRegistry: createSourceRegistry([{
@@ -258,7 +259,7 @@ describe("standalone Agent source executor", () => {
       .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
-    const service = { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -367,7 +368,7 @@ describe("standalone Agent source executor", () => {
       }
     });
     const executor = createAgentSourceExecutor({
-      service: { addMemory, clearAllData: clearMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       statePath,
       scanStoreDirectory,
@@ -434,7 +435,7 @@ describe("standalone Agent source executor", () => {
     const clearingMemory = new Promise<typeof cleared>((resolve) => { finishClear = resolve; });
     const clearMemory = vi.fn(() => clearingMemory);
     const executor = createAgentSourceExecutor({
-      service: { addMemory, clearAllData: clearMemory } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
@@ -505,7 +506,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -551,7 +552,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -603,7 +604,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(),
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -678,7 +679,7 @@ describe("standalone Agent source executor", () => {
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
       configPath,
       statePath: join(root, "agent-sources.json"),
       sourceRegistry: createSourceRegistry([adapter]),
@@ -715,7 +716,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -751,7 +752,7 @@ describe("standalone Agent source executor", () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(() => {
           throw new Error("write failed");
         }),
@@ -781,7 +782,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -808,7 +809,7 @@ describe("standalone Agent source executor", () => {
       completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
     ];
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -846,7 +847,7 @@ describe("standalone Agent source executor", () => {
     writeFileSync(skillPath, "---\nname: sample-skill\nversion: 1\n---\n\nUse the sample procedure.\n");
     vi.stubEnv("CODEX_HOME", codexRoot);
     const addMemory = vi.fn(() => ({ id: "skill-memory-1" }));
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory,
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
@@ -885,7 +886,7 @@ describe("standalone Agent source executor", () => {
     }
     vi.stubEnv("CODEX_HOME", codexRoot);
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn((input: { sourceSkillId?: string }) => {
         if (input.sourceSkillId === "duplicate-skill") return { id: "dup", duplicate: true, status: "activated" };
         if (input.sourceSkillId === "deleted-skill") return { id: "gone", status: "deleted" };
@@ -943,7 +944,7 @@ describe("standalone Agent source executor", () => {
       detect: async () => true,
       async *scan() {}
     };
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn(),
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;

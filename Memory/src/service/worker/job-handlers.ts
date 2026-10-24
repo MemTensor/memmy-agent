@@ -25,7 +25,6 @@ import {
 import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
-import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
   namespaceForMemory,
   namespaceForSession
@@ -207,6 +206,16 @@ export function enqueueJob(
   input: EnqueueJobInput
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();
+  const payload = { ...input.payload };
+  if (input.jobType === "episode_title") {
+    // Title jobs have no target memory. Only a wholly historical episode can
+    // inherit the historical lane; mixed or incomplete episodes stay interactive.
+    delete payload.captureOrigin;
+    const episode = input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
+    if (episode && deps.repos.memories.areAllHistoricalCaptureMemories(episode.l1MemoryIds)) {
+      payload.captureOrigin = "agent_source_scan";
+    }
+  }
   const job = deps.repos.runtime.enqueueJob({
     id: newId("job"),
     jobType: input.jobType,
@@ -216,7 +225,7 @@ export function enqueueJob(
     sessionId: input.sessionId,
     episodeId: input.episodeId,
     targetMemoryId: input.targetMemoryId,
-    payload: input.payload ?? {},
+    payload,
     attempts: 0,
     maxAttempts: input.maxAttempts ?? 3,
     createdAt: at,
@@ -255,19 +264,7 @@ export async function processJob(
       await deps.processors.evolution.abstractL3(job);
       return;
     case "l3_world_model_update":
-      try {
-        await deps.processors.evolution.updateL3WorldModel(job);
-      } catch (error) {
-        if (isTerminalL3WorldModelError(error)) {
-          deps.repos.runtime.failJob(
-            job.id,
-            error instanceof Error ? error.message : String(error),
-            deps.nowIso(),
-            true
-          );
-        }
-        throw error;
-      }
+      await deps.processors.evolution.updateL3WorldModel(job);
       return;
     case "project_environment_profile":
       await deps.processors.evolution.updateProjectEnvironment(job);
@@ -610,8 +607,13 @@ export function classifyProcessingError(error: unknown): {
   if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
     return { code: "40309", retryAction: "open_settings" };
   }
-  // Providers can report shared model/account failures as HTTP 400. Classify
-  // their reason before generic 4xx handling, which permits item isolation.
+  // Temporary HTTP failures can mention API keys; keep their retry semantics.
+  if (error instanceof ModelHttpError && (error.httpStatus === 408 || error.httpStatus === 429 ||
+    (error.httpStatus >= 500 && error.httpStatus < 600))) {
+    return { code: "transient_provider_error", retryAction: "retry" };
+  }
+  // Shared HTTP 400 configuration/quota failures must not fan out into one
+  // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
     if (providerCode === "operationnotsupported" || providerCode === "insufficientquota" ||
@@ -621,6 +623,7 @@ export function classifyProcessingError(error: unknown): {
     if (providerCode === "ratelimitexceeded" || /rate[\s_-]*limit/.test(normalized)) {
       return { code: "transient_provider_error", retryAction: "retry" };
     }
+
   }
   if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };

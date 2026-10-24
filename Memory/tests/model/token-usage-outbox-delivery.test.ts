@@ -11,6 +11,7 @@ import {
 import { MemoryTokenBudgetLedger } from "../../src/service/memory-token-budget-ledger.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import { TokenUsageOutbox } from "../../src/storage/token-usage-outbox.js";
+import { JobLeaseLostError, withJobLeaseGuard } from "../../src/storage/job-lease-context.js";
 
 const roots: string[] = [];
 const recorders: HttpByokTokenUsageRecorder[] = [];
@@ -26,6 +27,62 @@ afterEach(() => {
 });
 
 describe("durable BYOK token usage delivery", () => {
+  it("accounts for consumed tokens after a task loses its lease while keeping business writes fenced", async () => {
+    const harness = createSqliteHarness();
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ ok: true }));
+    const recorder = sqliteRecorder(harness, fetchMock);
+    let held = true;
+    withJobLeaseGuard({ id: "late-model-result" }, () => held, () => {
+      held = false;
+      expect(recorder.record(usageEvent({ totalTokens: 37 }))).toBe("recorded");
+      expect(harness.ledger.snapshot().lifetimeUsed).toBe(37);
+      expect(() => harness.db.db.prepare("INSERT INTO runtime_kv(key, value_json, updated_at) VALUES ('obsolete', '{}', 'now')").run())
+        .toThrow(JobLeaseLostError);
+    });
+    await waitFor(() => fetchMock.mock.calls.length === 1 && !harness.outbox.hasPending());
+    expect(recorder.isPersistUnreliable()).toBe(false);
+  });
+
+  it("deletes an acknowledged outbox event after the producing task has finished", async () => {
+    let release!: (response: Response) => void;
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>((done) => { release = done; }));
+    const harness = createSqliteHarness();
+    const recorder = sqliteRecorder(harness, fetchMock);
+    let held = true;
+    withJobLeaseGuard({ id: "finished-job" }, () => held, () => {
+      expect(recorder.record(usageEvent({ totalTokens: 23 }))).toBe("recorded");
+    });
+    await waitFor(() => fetchMock.mock.calls.length === 1);
+    held = false;
+    release(jsonResponse({ ok: true }));
+    await waitFor(() => !harness.outbox.hasPending());
+    expect(harness.ledger.snapshot().lifetimeUsed).toBe(23);
+    expect(recorder.isPersistUnreliable()).toBe(false);
+  });
+
+  it("lets delivery retries outlive the producing task lease", async () => {
+    const harness = createSqliteHarness();
+    let firstResponse!: (response: Response) => void;
+    let requests = 0;
+    const fetchMock = vi.fn<typeof fetch>((): Promise<Response> => {
+      requests++;
+      return requests === 1
+        ? new Promise<Response>((done) => { firstResponse = done; })
+        : Promise.resolve(jsonResponse({ ok: true }));
+    });
+    const recorder = sqliteRecorder(harness, fetchMock);
+    let held = true;
+    withJobLeaseGuard({ id: "retry-producing-job" }, () => held, () => {
+      recorder.record(usageEvent({ totalTokens: 11 }));
+    });
+    await waitFor(() => fetchMock.mock.calls.length === 1);
+    held = false;
+    firstResponse(new Response("temporarily unavailable", { status: 503 }));
+    await waitFor(() => fetchMock.mock.calls.length === 2 && !harness.outbox.hasPending());
+    expect(harness.ledger.snapshot().lifetimeUsed).toBe(11);
+    expect(recorder.isPersistUnreliable()).toBe(false);
+  });
+
   it("persists then sends the original payload and deletes after { ok: true }", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ ok: true }));
     const { recorder, outbox, ledger } = createRecorder(fetchMock);

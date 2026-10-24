@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +29,7 @@ function adapter(messages = turn("one")): SourceAdapter {
   return { descriptor: { sourceId: "fixture", displayName: "Fixture", dataPath: "/fixture", builtin: true }, detect: async () => true, async *scan() { yield* messages; } };
 }
 function service(overrides: Record<string, unknown> = {}): MemoryService {
-  return { addMemory: vi.fn(() => ({ id: "memory-one", duplicate: false })), enqueuePendingImportSummaries: vi.fn(), ...overrides } as unknown as MemoryService;
+  return { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory: vi.fn(() => ({ id: "memory-one", duplicate: false })), enqueuePendingImportSummaries: vi.fn(), ...overrides } as unknown as MemoryService;
 }
 function executor(directory: string, source = adapter(), memory = service(), extra = {}) {
   const result = createAgentSourceExecutor({ service: memory, sourceRegistry: createSourceRegistry([source]), configPath: join(directory, "config.yaml"), statePath: join(directory, "state.json"), scanStoreDirectory: join(directory, "scans"), resolveAgentSkillRoot: () => null, ...extra });

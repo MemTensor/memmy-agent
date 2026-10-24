@@ -102,7 +102,8 @@ function upsertMemoryCatalogPreset(
     const endpoint = record(value);
     return stringValue(endpoint.apiBase)?.replace(/\/+$/, "") === apiBase
       && endpoint.protocol === protocol
-      && (stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey)) === apiKey
+      && endpoint.inheritProviderDefaults === false
+      && stringValue(endpoint.apiKey) === apiKey
       && stableJson(record(endpoint.extraHeaders)) === stableJson(extraHeaders)
       && stableJson(record(endpoint.extraBody)) === stableJson(extraBody);
   })?.[0];
@@ -112,6 +113,7 @@ function upsertMemoryCatalogPreset(
       endpoints
     );
     endpoints[endpointId] = {
+      inheritProviderDefaults: false,
       apiBase,
       protocol,
       ...(apiKey ? { apiKey } : {}),

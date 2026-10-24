@@ -6081,6 +6081,13 @@ function clearQuitCleanupForceExitTimer(): void {
   quitCleanupForceExitTimer = null;
 }
 
+async function traceQuitCleanup<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  console.info(`[quit] ${stage}:start`);
+  try { return await operation(); }
+  finally { console.info(`[quit] ${stage}:finished elapsedMs=${Date.now() - startedAt}`); }
+}
+
 async function cleanupBeforeQuit(): Promise<void> {
   if (requiredUpdateBackgroundFirstCheckTimer) {
     clearTimeout(requiredUpdateBackgroundFirstCheckTimer);
@@ -6095,7 +6102,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   }
   clearPetWindowCloseActivateSuppression();
   closePetWindow();
-  await installPreparedRequiredUpdateOnQuit();
+  await traceQuitCleanup("prepared-update", async () => { await installPreparedRequiredUpdateOnQuit(); });
   ipcMain.removeHandler("memmy:get-runtime-config");
   ipcMain.removeHandler("memmy:get-app-info");
   ipcMain.removeHandler("memmy:get-installation-id");
@@ -6170,15 +6177,17 @@ async function cleanupBeforeQuit(): Promise<void> {
   disposeBrowserWebviewPermissions?.();
   disposeBrowserWebviewPermissions = null;
   // Native app agents belong to LaunchServices, outside the gateway process tree.
-  // Start their shutdown before awaiting services, which may fail or hit the quit deadline.
+  // Start their bounded shutdown before awaiting services, which may fail or hit the quit deadline.
   const nativeAgentShutdown = process.platform === 'darwin'
-    ? stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
-      process.env.MEMMY_DEV_COMPUTER_USE_BINARY).catch(error => {
+    ? traceQuitCleanup("native-history-agent", () => stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
+      process.env.MEMMY_DEV_COMPUTER_USE_BINARY)).catch(error => {
         console.warn("Failed to stop the native Computer Use agent during quit cleanup:", error);
       })
     : Promise.resolve();
   try {
-    await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+    await traceQuitCleanup("runtime-services", async () => {
+      await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+    });
   } finally {
     await nativeAgentShutdown;
   }
@@ -6189,9 +6198,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   pipScreenPermissionGuide = null;
   computerUseSurfaceWindows?.dispose();
   computerUseSurfaceWindows = null;
-  await backend?.close();
-  await stopPackagedRendererServer();
-  await sendAppExitEventBeforeQuit();
+  await traceQuitCleanup("backend", async () => backend?.close());
+  await traceQuitCleanup("renderer", stopPackagedRendererServer);
+  await traceQuitCleanup("analytics", sendAppExitEventBeforeQuit);
 }
 
 function readStopMemoryServiceOnExitSetting(): boolean {

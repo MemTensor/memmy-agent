@@ -849,6 +849,19 @@ describe("MemoryService / evolution / orchestration", () => {
     }
     expect(policyCreated).toBe(true);
 
+    // Finish upstream L2 work before promoting its output for the downstream
+    // prompt contract. WRR can expose a policy before other older L2 updates
+    // finish; those updates legitimately revise its eligibility metadata.
+    const upstreamPending = () => (db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs
+       WHERE job_type IN ('l2_association', 'l2_induction')
+         AND target_memory_id IN (?, ?) AND status IN ('queued', 'leased', 'failed')`
+    ).get(first.l1MemoryId, second.l1MemoryId) as { count: number }).count;
+    for (let round = 0; round < 8 && upstreamPending() > 0; round++) {
+      await service.runWorkerOnce(100, { targetMemoryIds: [first.l1MemoryId, second.l1MemoryId] });
+    }
+    expect(upstreamPending()).toBe(0);
+
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories

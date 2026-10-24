@@ -11,12 +11,13 @@ import {
 import type { ActualModelContext } from "../../src/contracts/index.js";
 
 export function createMemoryServiceFixture(): {
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
   createTestMemoryService: (
     options: ConstructorParameters<typeof MemoryService>[0]
   ) => MemoryService;
   createTestRoot: (prefix?: string) => string;
   createTestService: (options?: {
+    concurrency?: ConstructorParameters<typeof MemoryService>[0]["concurrency"];
     mode?: "local" | "cloud" | "dev";
     config?: typeof DEFAULT_MEMMY_CONFIG;
     llm?: LlmClient;
@@ -57,6 +58,7 @@ export function createMemoryServiceFixture(): {
   }
 
   function createTestService(options: {
+    concurrency?: ConstructorParameters<typeof MemoryService>[0]["concurrency"];
     mode?: "local" | "cloud" | "dev";
     config?: typeof DEFAULT_MEMMY_CONFIG;
     llm?: LlmClient;
@@ -77,6 +79,7 @@ export function createMemoryServiceFixture(): {
       root,
       db,
       service: createTestMemoryService({
+        concurrency: options.concurrency,
         db,
         mode: options.mode ?? "dev",
         config: options.config,
@@ -89,18 +92,23 @@ export function createMemoryServiceFixture(): {
     };
   }
 
-  function cleanup(): void {
-    for (const service of services.splice(0)) {
-      void service.stop();
-    }
-    for (const database of databases.splice(0)) {
+  async function cleanup(): Promise<void> {
+    // Snapshot before awaiting: even callers which forget to await cleanup
+    // must never close the databases belonging to the next test's services.
+    const stoppingServices = services.splice(0);
+    const closingDatabases = databases.splice(0);
+    const removingRoots = roots.splice(0);
+    const stopped = await Promise.allSettled(stoppingServices.map(async service => { await service.stop(); }));
+    for (const database of closingDatabases) {
       if (database.db.open) {
         database.close();
       }
     }
-    for (const root of roots.splice(0)) {
+    for (const root of removingRoots) {
       rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
+    const failed = stopped.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   return {
@@ -119,6 +127,25 @@ export async function runWorkerRounds(
   for (let index = 0; index < rounds; index += 1) {
     await service.runWorkerOnce(limit);
   }
+}
+
+/** Lifecycle tests can explicitly make selected retries due without real sleeps.
+ * Backoff timing itself is covered by worker-lease-safety using a fake clock.
+ * Configuration blocks are never bypassed by this helper.
+ */
+export async function runWorkerRoundsWithDueRetries(
+  service: MemoryService, db: MemoryDb, memoryIds: readonly string[], rounds: number, limit = 100
+) {
+  if (memoryIds.length === 0) throw new Error("retry test requires explicit memory ids");
+  const placeholders = memoryIds.map(() => "?").join(", ");
+  const results = [];
+  for (let index = 0; index < rounds; index += 1) {
+    db.db.prepare(`UPDATE evolution_jobs SET available_at = ?
+      WHERE status = 'failed' AND blocked_reason IS NULL AND target_memory_id IN (${placeholders})`)
+      .run(new Date().toISOString(), ...memoryIds);
+    results.push(await service.runWorkerOnce(limit));
+  }
+  return results;
 }
 
 export function addAgentSourceImport(

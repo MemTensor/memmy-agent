@@ -694,6 +694,79 @@ describe("canonical model workspace adapter", () => {
     expect((YAML.parse(readFileSync(file, "utf8")) as any).agents.defaults.concurrentMarker).toBe("keep-me");
   });
 
+  it("真实 Backend catalog：独立无 Key 连接编辑保存保留 false，切换本地与清空不影响云端模型", async () => {
+    const file = catalogFixture(), current = await readModelConfigCatalog(file);
+    const created = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [{ provider: "openai", apiKey: "sk-cloud", extraHeaders: { Authorization: "Bearer cloud", "x-cloud": "cloud" }, extraBody: { cloudDefault: true },
+        endpoints: [
+          { endpointId: "chat", apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions" },
+          { endpointId: "memory-local", apiBase: "http://127.0.0.1:18789/v1", protocol: "openai-embeddings", inheritProviderDefaults: false, extraHeaders: { "x-local": "local" } }
+        ], models: [
+          { endpointId: "chat", model: "gpt-cloud", source: "byok", capabilities: ["agent"] },
+          { endpointId: "memory-local", model: "embed-local", source: "byok", capabilities: ["embedding"] }
+        ] }], modelAssignments: structuredClone(emptyAssignments)
+    });
+    const cloud = created.providers[0]!.models.find(model => model.model === "gpt-cloud")!.presetId;
+    const independent = created.providers[0]!.models.find(model => model.model === "embed-local")!.presetId;
+    let workspace = createModelWorkspace(created);
+    workspace = assignCatalogPreset(workspace, "byok", "agent", cloud);
+    workspace = setModelAssignment(workspace, "byok", "embedding", independent);
+    const assigned = await writeModelConfigCatalog(file, modelConfigInput(workspace));
+    workspace = createModelWorkspace(assigned);
+    const connection = workspace.spaces.byok.connections.find(connection => connection.endpointId === "memory-local")!;
+    expect(connection).toMatchObject({ inheritProviderDefaults: false, apiKeyMasked: "", available: true });
+    expect(modelConfigInput(workspace).providers[0]!.endpoints.find(endpoint => endpoint.endpointId === "memory-local"))
+      .toMatchObject({ inheritProviderDefaults: false });
+    const cloudBefore = (YAML.parse(readFileSync(file, "utf8")) as any).providers.openai;
+    const edited = upsertModelConnection(workspace, "byok", {
+      id: connection.id, provider: "openai", endpoint: connection.endpoint, protocol: connection.protocol,
+      apiKeyMasked: connection.apiKeyMasked, models: ["embed-local-edited"],
+      modelEntries: [{ presetId: independent, model: "embed-local-edited", capability: "embedding" }]
+    });
+    expect(edited.error).toBeNull();
+    const saved = await persistModelCatalogMutation(modelConfigInput(edited.workspace), {
+      read: () => readModelConfigCatalog(file), write: input => writeModelConfigCatalog(file, input)
+    }, assigned);
+    let raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.providers.openai.endpoints["memory-local"]).toMatchObject({ inheritProviderDefaults: false, extraHeaders: { "x-local": "local" } });
+    expect(raw.memmyMemory.embedding).toMatchObject({ mode: "custom", model: "embed-local-edited", extraHeaders: { "x-local": "local" } });
+    expect(raw.memmyMemory.embedding).not.toHaveProperty("apiKey");
+    expect(raw.memmyMemory.embedding.extraHeaders).not.toHaveProperty("Authorization");
+    expect(raw.memmyMemory.embedding).not.toHaveProperty("extraBody");
+    expect(raw.providers.openai.apiKey).toBe("sk-cloud");
+    expect(raw.providers.openai.endpoints.chat).toEqual(cloudBefore.endpoints.chat);
+    for (const candidate of [BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID, null]) {
+      const view = await readModelConfigCatalog(file);
+      const local = setModelAssignment(createModelWorkspace(view), "byok", "embedding", candidate);
+      await writeModelConfigCatalog(file, modelConfigInput(local));
+      raw = YAML.parse(readFileSync(file, "utf8")) as any;
+      expect(raw.memmyMemory.embedding).toMatchObject({ mode: "local", provider: "local" });
+      expect(raw.memmyMemory.embedding).not.toHaveProperty("endpoint");
+      expect(raw.providers.openai.endpoints.chat).toEqual(cloudBefore.endpoints.chat);
+      expect(raw.modelAssignments.byok.agent.default).toBe(cloud);
+    }
+    expect(saved.providers[0]!.endpoints.find(endpoint => endpoint.endpointId === "memory-local"))
+      .toMatchObject({ inheritProviderDefaults: false, hasApiKey: false, apiKeyMasked: "" });
+  });
+
+  it("独立连接标记在有并发配置更新的保存重试中保留", async () => {
+    const file = catalogFixture(), base = await deletionCatalogFixture(file);
+    const desired = modelConfigInput(createModelWorkspace(base));
+    desired.providers[0]!.endpoints.find(endpoint => endpoint.endpointId === "embedding")!.inheritProviderDefaults = false;
+    const concurrent = modelConfigInput(createModelWorkspace(base));
+    concurrent.providers[0]!.apiKey = "provider-rotated";
+    await writeModelConfigCatalog(file, concurrent);
+    const saved = await persistModelCatalogMutation(desired, {
+      read: () => readModelConfigCatalog(file), write: input => writeModelConfigCatalog(file, input)
+    }, base);
+    expect(saved.providers[0]!.endpoints.find(endpoint => endpoint.endpointId === "embedding"))
+      .toHaveProperty("inheritProviderDefaults", false);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.providers.openai.apiKey).toBe("provider-rotated");
+    expect(raw.providers.openai.endpoints.chat.inheritProviderDefaults).toBeUndefined();
+  });
+
   it("真实 Backend catalog：Provider 切换遇到目标同名 endpointId 时生成新 ID 并保留目标定义", async () => {
     const file = catalogFixture();
     const empty = await readModelConfigCatalog(file);

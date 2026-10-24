@@ -9,6 +9,7 @@ import { flattenLegacyMemoryModelConfig } from "./legacy-memory-model-config.js"
 import { isPlatformMemoryConnection } from "../../platform-memory-connection.js";
 
 const MIGRATION_ID = "v1.0.7/0001-normalize-runtime-model-catalog";
+const BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID = "memmy-builtin-local-embedding";
 
 export type CatalogCapability =
   | "agent"
@@ -24,6 +25,7 @@ export type LegacyCatalogConnection = {
   model: string;
   sourceProvider?: string;
   protocol?: string;
+  inheritProviderDefaults?: boolean;
   apiKey?: string;
   extraHeaders?: Record<string, unknown>;
   extraBody?: Record<string, unknown>;
@@ -182,10 +184,11 @@ function normalizedAuthValue(key: "apiKey" | "extraHeaders" | "extraBody", value
 }
 
 function effectiveAuth(provider: JsonObject, endpoint: JsonObject): JsonObject {
+  const defaults = endpoint.inheritProviderDefaults === false ? {} : provider;
   return {
-    apiKey: normalizedAuthValue("apiKey", endpoint.apiKey ?? provider.apiKey),
-    extraHeaders: normalizedAuthValue("extraHeaders", endpoint.extraHeaders ?? provider.extraHeaders),
-    extraBody: normalizedAuthValue("extraBody", endpoint.extraBody ?? provider.extraBody),
+    apiKey: normalizedAuthValue("apiKey", endpoint.apiKey ?? defaults.apiKey),
+    extraHeaders: normalizedAuthValue("extraHeaders", { ...objectAt(defaults, "extraHeaders"), ...objectAt(endpoint, "extraHeaders") }),
+    extraBody: normalizedAuthValue("extraBody", { ...objectAt(defaults, "extraBody"), ...objectAt(endpoint, "extraBody") }),
   };
 }
 
@@ -201,6 +204,7 @@ function endpointIdentity(provider: JsonObject, endpoint: JsonObject): string {
   return stableJson({
     protocol: endpoint.protocol,
     apiBase: normalizeApiBase(String(endpoint.apiBase ?? "")),
+    inheritProviderDefaults: endpoint.inheritProviderDefaults !== false,
     auth: effectiveAuth(provider, endpoint),
   });
 }
@@ -401,15 +405,26 @@ function ensureEndpoint(
   connection: LegacyCatalogConnection,
 ): string {
   const endpoints = objectAt(provider, "endpoints") ?? {};
+  const memoryCapability = ["memory_summary", "memory_evolution", "embedding"].includes(capability);
+  const independent = memoryCapability && connection.inheritProviderDefaults === false;
   const providerApiKey = stringAt(provider, "apiKey");
-  if (!providerApiKey && connection.apiKey) provider.apiKey = connection.apiKey;
+  if (!independent && !providerApiKey && connection.apiKey) provider.apiKey = connection.apiKey;
   const endpoint: JsonObject = {
     apiBase: normalizeApiBase(connection.apiBase),
-    protocol: (capability === "agent" || capability.startsWith("memory_")) && connection.protocol
+    protocol: (capability === "agent" || memoryCapability) && connection.protocol
       ? connection.protocol
       : protocolFor(canonicalProviderId(connection.provider), capability),
   };
+  if (independent) {
+    endpoint.inheritProviderDefaults = false;
+    endpoint.apiKey = connection.apiKey ?? "";
+    endpoint.extraHeaders = structuredClone(connection.extraHeaders ?? {});
+    endpoint.extraBody = structuredClone(connection.extraBody ?? {});
+  }
   if (connection.apiKey && stringAt(provider, "apiKey") !== connection.apiKey) endpoint.apiKey = connection.apiKey;
+  // Standalone Memory connections did not inherit another catalog provider's
+  // key. Materialize no-auth so endpoint reuse and later runs keep that meaning.
+  if (memoryCapability && connection.apiKey === "") endpoint.apiKey = "";
   if (connection.extraHeaders) endpoint.extraHeaders = structuredClone(connection.extraHeaders);
   if (connection.extraBody) endpoint.extraBody = structuredClone(connection.extraBody);
   const identity = endpointIdentity(provider, endpoint);
@@ -430,6 +445,7 @@ function ensurePreset(
   config: JsonObject,
   capability: CatalogCapability,
   connection: LegacyCatalogConnection,
+  extendExistingCapabilities = true,
 ): string {
   const providerId = canonicalProviderId(connection.provider);
   const providers = objectAt(config, "providers") ?? {};
@@ -443,7 +459,8 @@ function ensurePreset(
     value.provider === providerId &&
     value.endpoint === endpointId &&
     value.model === connection.model &&
-    value.source === "byok",
+    value.source === "byok" &&
+    (extendExistingCapabilities || (Array.isArray(value.capabilities) && value.capabilities.includes(capability))),
   );
   if (existing && isObject(existing[1])) {
     const capabilities = Array.isArray(existing[1].capabilities)
@@ -469,6 +486,48 @@ function ensurePreset(
   return presetId;
 }
 
+/** Forward-only repair: inspect active marked Memory fields, never renormalize
+ * unrelated providers, presets, assignments, or application configuration. */
+export function repairIndependentMemoryConnections(config: RuntimeConfigDocument): void {
+  if (objectAt(config, "app")?.userMode !== "byok") return;
+  const memory = objectAt(config, "memmyMemory");
+  if (!memory) return;
+  const routing = objectAt(memory, "roleRouting") ?? {};
+  const assignments = objectAt(config, "modelAssignments") ?? {};
+  const byok = objectAt(assignments, "byok") ?? {};
+  for (const [capability, role, field] of [
+    ["memory_summary", "summary", "memorySummary"],
+    ["memory_evolution", "evolution", "memoryEvolution"],
+    ["embedding", "embedding", "embedding"],
+  ] as const) {
+    const raw = objectAt(memory, role);
+    if (!raw) continue;
+    if (role === "embedding") {
+      // A missing/null/builtin-local selection deliberately means local, even
+      // if a stale custom connection remains in the file. Do not activate it.
+      const selected = byok.embedding;
+      if (raw.mode !== "custom" || typeof selected !== "string" || selected === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+        || !objectAt(objectAt(config, "modelPresets") ?? {}, selected)) continue;
+    } else if (routing[role] !== "fixed") continue;
+    const source = role === "embedding" ? objectAt(raw, "custom") ?? raw : raw;
+    const connection = connectionFrom(source, undefined, true);
+    if (!connection || !preservesIndependentMemoryConnection(capability, connection)
+      || isPlatformMemoryConnection(config, capability, connection)) continue;
+    const independent = { ...connection, provider: connection.provider === "memmy_account" ? "openai_compatible" : connection.provider,
+      inheritProviderDefaults: false, protocol: connection.protocol === "memmy-account" ? undefined : connection.protocol };
+    const presetId = ensurePreset(config, capability, independent, false);
+    if (isValidByokPresetForCapability(config, presetId, capability)) {
+      byok[field] = presetId;
+      assignments.byok = byok;
+      config.modelAssignments = assignments;
+    }
+    if (source.provider === "memmy_account") {
+      source.provider = "openai_compatible";
+      source.sourceProvider ??= "memmy_account";
+    }
+  }
+}
+
 export function mergeLegacyByokCatalog(config: RuntimeConfigDocument, legacy: LegacyByokCatalog): void {
   const assignments = ensureAssignments(config);
   for (const capability of [
@@ -482,17 +541,30 @@ export function mergeLegacyByokCatalog(config: RuntimeConfigDocument, legacy: Le
     const connection = legacy[capability];
     if (!connection?.provider || !connection.apiBase || !connection.model) continue;
     if (isPlatformMemoryConnection(config, capability, connection)) continue;
-    const presetId = ensurePreset(config, capability, connection);
+    // A retained platform marker is no longer authoritative once the
+    // real connection was edited. Import it as BYOK, not an account-only preset.
+    const byokConnection = (connection.provider === "memmy_account" || connection.sourceProvider === "memmy_account")
+      && ["memory_summary", "memory_evolution", "embedding"].includes(capability)
+      ? { ...connection, provider: connection.provider === "memmy_account" ? "openai_compatible" : connection.provider,
+          inheritProviderDefaults: false,
+          protocol: connection.protocol === "memmy-account" ? undefined : connection.protocol }
+      : connection;
+    const presetId = ensurePreset(config, capability, byokConnection);
     assignPreset(assignments, "byok", capability, presetId);
   }
 }
 
-function connectionFrom(value: JsonObject | null, fallbackProvider?: string | null): LegacyCatalogConnection | null {
+function preservesIndependentMemoryConnection(capability: CatalogCapability, connection: LegacyCatalogConnection): boolean {
+  return ["memory_summary", "memory_evolution", "embedding"].includes(capability)
+    && (connection.provider === "memmy_account" || connection.sourceProvider === "memmy_account");
+}
+
+function connectionFrom(value: JsonObject | null, fallbackProvider?: string | null, preserveMemoryAuth = false): LegacyCatalogConnection | null {
   const provider = stringAt(value, "provider", "vendor") ?? fallbackProvider;
   const apiBase = stringAt(value, "apiBase", "api_base", "baseUrl", "endpoint");
   const model = stringAt(value, "model", "modelId", "model_id");
   if (!provider || !apiBase || !model) return null;
-  const apiKey = stringAt(value, "apiKey", "api_key");
+  const apiKey = stringAt(value, "apiKey", "api_key") ?? (preserveMemoryAuth ? "" : null);
   const sourceProvider = stringAt(value, "sourceProvider");
   const legacyProtocol = stringAt(value, "protocol", "apiType", "api_type");
   const extraHeaders = value && isObject(value.extraHeaders ?? value.extra_headers)
@@ -505,9 +577,10 @@ function connectionFrom(value: JsonObject | null, fallbackProvider?: string | nu
     provider,
     apiBase,
     model,
+    ...(typeof value?.inheritProviderDefaults === "boolean" ? { inheritProviderDefaults: value.inheritProviderDefaults } : {}),
     ...(sourceProvider ? { sourceProvider } : {}),
     ...(legacyProtocol ? { protocol: normalizeProtocol(legacyProtocol, canonicalProviderId(provider)) } : {}),
-    ...(apiKey ? { apiKey } : {}),
+    ...(apiKey !== null ? { apiKey } : {}),
     ...(extraHeaders ? { extraHeaders } : {}),
     ...(extraBody ? { extraBody } : {}),
   };
@@ -543,15 +616,15 @@ function captureLegacyConnections(config: JsonObject): LegacyByokCatalog {
   if (agent) legacy.agent = agent;
 
   const memory = objectAt(config, "memmyMemory");
-  const summary = connectionFrom(memory ? objectAt(memory, "summary") : null);
-  const evolution = connectionFrom(memory ? objectAt(memory, "evolution") : null);
+  const summary = connectionFrom(memory ? objectAt(memory, "summary") : null, undefined, true);
+  const evolution = connectionFrom(memory ? objectAt(memory, "evolution") : null, undefined, true);
   if (summary) legacy.memory_summary = summary;
   if (evolution) legacy.memory_evolution = evolution;
   const embedding = memory ? objectAt(memory, "embedding") : null;
   const customEmbedding = embedding && isObject(embedding.custom) ? embedding.custom : embedding;
   const embeddingConnection = stringAt(embedding, "mode") === "local"
     ? null
-    : connectionFrom(customEmbedding);
+    : connectionFrom(customEmbedding, undefined, true);
   if (embeddingConnection) legacy.embedding = embeddingConnection;
 
   const tools = objectAt(config, "tools");
@@ -883,6 +956,7 @@ export function isValidByokPresetForCapability(
   presetId: string,
   capability: CatalogCapability,
 ): boolean {
+  if (capability === "embedding" && presetId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) return true;
   const presets = objectAt(config, "modelPresets");
   const preset = presets && isObject(presets[presetId]) ? presets[presetId] : null;
   if (!preset || preset.source !== "byok") return false;
@@ -983,7 +1057,27 @@ function hasCurrentAccountCatalog(config: RuntimeConfigDocument): boolean {
 function normalizeRuntimeCatalog(config: RuntimeConfigDocument, migrationId: string): void {
   flattenLegacyMemoryModelConfig(config);
   liftLegacyRoots(config);
+  const existingAssignments = objectAt(config, "modelAssignments");
+  const selectedEmbedding = existingAssignments ? objectAt(existingAssignments, "byok")?.embedding : undefined;
+  const preserveLocalEmbedding = existingAssignments !== null && objectAt(config, "app")?.userMode === "byok"
+    && (selectedEmbedding === undefined || selectedEmbedding === null || selectedEmbedding === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
   const legacy = captureLegacyConnections(config);
+  const memory = objectAt(config, "memmyMemory");
+  const independentMemory: JsonObject = {};
+  for (const [capability, role] of [["memory_summary", "summary"], ["memory_evolution", "evolution"], ["embedding", "embedding"]] as const) {
+    const connection = legacy[capability], raw = memory ? objectAt(memory, role) : null;
+    if (raw && connection && preservesIndependentMemoryConnection(capability, connection)
+      && !isPlatformMemoryConnection(config, capability, connection)) {
+      independentMemory[role] = { ...structuredClone(raw),
+        ...(raw.provider === "memmy_account" ? { provider: "openai_compatible", sourceProvider: raw.sourceProvider ?? "memmy_account" } : {}) };
+    }
+  }
+  // A real pre-catalog custom connection can be imported for the first time.
+  // An existing catalog's local choice must not be replaced by leftover raw
+  // custom fields when these historical migrations run or are repaired.
+  if (preserveLocalEmbedding && legacy.embedding && preservesIndependentMemoryConnection("embedding", legacy.embedding)) {
+    delete legacy.embedding;
+  }
   const assignmentsBefore = objectAt(config, "modelAssignments");
   const accountBefore = assignmentsBefore && isObject(assignmentsBefore.account)
     ? structuredClone(assignmentsBefore.account)
@@ -1005,6 +1099,10 @@ function normalizeRuntimeCatalog(config: RuntimeConfigDocument, migrationId: str
   ensureAccountCatalog(config);
   mergeLegacyByokCatalog(config, legacy);
   removeLegacyRuntimeModelFields(config);
+  // BYOK fixed/custom roles still read these established independent fields.
+  // Keep edited platform projections executable without inheriting catalog
+  // defaults or requiring a settings save to recreate the connection.
+  if (memory) Object.assign(memory, independentMemory);
   if (preserveDormantAccount && accountBefore) {
     const assignments = objectAt(config, "modelAssignments") ?? {};
     assignments.account = accountBefore;

@@ -5,17 +5,22 @@ import {
   MemoryDb,
   SCHEMA_MIGRATION_ID,
   SCHEMA_VERSION,
-  createStorageBackend
+  createStorageBackend,
+  type LlmCompletionOptions,
+  type LlmMessage
 } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { withJobLeaseGuard } from "../../../src/storage/job-lease-context.js";
 import {
   accountRuntimeConfig,
   addAgentSourceImport,
   configWithMemoryGates,
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
+  runWorkerRoundsWithDueRetries,
   tableCounts
 } from "../../fixtures/memory-service-fixture.js";
 
@@ -29,6 +34,51 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / facade / config and storage", () => {
+  it("resumes a configuration block when the effective loader config changes without reload", async () => {
+    let currentConfig = { ...DEFAULT_MEMMY_CONFIG, summary: { ...DEFAULT_MEMMY_CONFIG.summary, model: "before-repair" } };
+    let unauthorized = true;
+    const llm = createBatchReflectionLlm([]);
+    const completeJson = llm.completeJson.bind(llm);
+    llm.completeJson = async <T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions): Promise<T> => {
+      if (unauthorized) throw new Error("unauthorized API key");
+      return completeJson<T>(messages, options);
+    };
+    const { db, service } = createTestService({ config: currentConfig, configLoader: () => ({ config: currentConfig }), llm });
+    const namespace = { source: "codex", profileId: "config-recovery", userId: "config-recovery-user" };
+    const added = addAgentSourceImport(service, namespace, "config repair preserves this job", "effective-config");
+    await service.runWorkerOnce(1);
+    const repos = new Repositories(db.db);
+    const blocked = repos.runtime.listJobs("failed").find((job) => job.targetMemoryId === added.id)!;
+    expect(blocked).toMatchObject({ blockedReason: "configuration", failureCount: 0 });
+    expect(repos.processing.get(added.id)).toMatchObject({ state: "failed", retryAction: "open_settings" });
+    unauthorized = false;
+    expect(service.reconcileWorkerStartup(100).restartedFailedProcessing).toBe(0);
+    expect((await service.runWorkerOnce(1)).leased).toBe(0);
+    currentConfig = { ...currentConfig, summary: { ...currentConfig.summary, model: "after-repair" } };
+    await service.runWorkerOnce(1);
+    expect(repos.runtime.getJob(blocked.id)).toMatchObject({ status: "succeeded", failureCount: 0 });
+    expect(repos.processing.get(added.id)?.state).toBe("embedding_pending");
+  });
+
+  it("starts a new worker through the public service without inheriting an expired caller lease", async () => {
+    const { db, service } = createTestService({ llm: createBatchReflectionLlm([]) });
+    const repos = new Repositories(db.db);
+    const at = new Date().toISOString();
+    repos.runtime.enqueueJob({ id: "expired-caller", jobType: "reflection", status: "queued", userId: "detached-caller",
+      payload: {}, attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+    const [caller] = repos.runtime.leaseQueuedJobs(1, 60, undefined, false, ["reflection"]);
+    const child = addAgentSourceImport(service, { source: "codex", profileId: "detached", userId: "detached-caller" },
+      "a fresh drain gets its own lease", "detached-drain");
+    await withJobLeaseGuard(caller!, () => repos.runtime.isJobLeaseHeld(caller!), async () => {
+      db.db.prepare("UPDATE evolution_jobs SET leased_until = ? WHERE id = ?")
+        .run(new Date(Date.now() - 1_000).toISOString(), caller!.id);
+      const result = await service.runWorkerOnce(1, { targetMemoryIds: [child.id] });
+      expect(result.succeeded).toBe(1);
+    });
+    expect(repos.processing.get(child.id)?.state).toBe("embedding_pending");
+    expect(repos.runtime.getJob(caller!.id)?.failureCount).toBe(0);
+  });
+
   it("migrates the local sqlite schema", () => {
     const { db, root } = createTestService();
     const schema = db.schemaVersion();
@@ -257,7 +307,7 @@ describe("MemoryService / facade / config and storage", () => {
     });
     const namespace = { source: "hermes", profileId: "default", userId: "reload-failure-user" };
     const added = addAgentSourceImport(service, namespace, "retry after config reload", "reload-failure");
-    await runWorkerRounds(service, 3, 1);
+    await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     const failed = service.memoryProcessingStatus([added.id], { namespace }).items[0];
     expect(failed?.state).toBe("failed");
 

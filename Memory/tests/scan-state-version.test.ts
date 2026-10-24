@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ it("orders pause/resume/cancel, keeps snapshots immutable and rejects controls f
   const directory = root(); let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const detect = vi.fn(async () => { await gate; return true; });
-  const executor = createAgentSourceExecutor({ configPath: join(directory, "config.yaml"), service: {} as MemoryService,
+  const executor = createAgentSourceExecutor({ configPath: join(directory, "config.yaml"), service: { withAgentSourceScanPermit: withUnrestrictedScanPermit } as MemoryService,
     sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "fixture", displayName: "Fixture", builtin: true, dataPath: directory }, detect, async *scan() {} }]), resolveAgentSkillRoot: () => null });
   try {
     const idle = executor.scanStatus(); expect(idle.status).toBe("idle");

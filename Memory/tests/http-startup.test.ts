@@ -290,6 +290,7 @@ function stubService(reconcile: () => void): StartupServiceStub {
       return { ok: true };
     },
     reconcileWorkerStartup: reconcile,
+    notifyWorkerWorkAvailable() {},
     async runWorkerOnce() {
       return workerResult(0);
     },

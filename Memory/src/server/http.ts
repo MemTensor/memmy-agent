@@ -31,6 +31,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
+import { withoutWorkerSchedulerContext } from "../service/worker/worker-scheduler.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
@@ -369,8 +370,15 @@ function createAutoWorkerDrain(
   let activeDrain: Promise<void> | undefined;
   const maxCycles = 40;
   const workerBatchSize = 4;
+  const admissionAbort = new AbortController();
 
-  async function drain(): Promise<void> {
+  function drain(): Promise<void> {
+    // A wake-up can originate from a running job's async descendants. It queues
+    // independent work rather than awaiting that job's own execution boundary.
+    return withoutWorkerSchedulerContext(drainUnscoped);
+  }
+
+  async function drainUnscoped(): Promise<void> {
     if (disposed) {
       return;
     }
@@ -396,7 +404,12 @@ function createAutoWorkerDrain(
         for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
           const result = await service.runWorkerOnce(workerBatchSize, {
             priorityCohortOnly: true
-          });
+          }, { continuous: true, signal: admissionAbort.signal, onYieldToPendingRequests: () => {
+            // Keep an automatic continuation behind the accepted manual work.
+            // Awaiting the shared scheduler provides the wake-up; polling zero
+            // results would either lose the tail or spin while manual work runs.
+            requested = true;
+          } });
           if (result.leased === 0 && result.embeddingRetries.leased === 0) {
             break;
           }
@@ -448,6 +461,7 @@ function createAutoWorkerDrain(
     if (disposed) {
       return;
     }
+    service.notifyWorkerWorkAvailable();
     startupReleased = true;
     requested = true;
     if (startupTimer) {
@@ -477,7 +491,8 @@ function createAutoWorkerDrain(
       clearTimeout(delayedTimer);
       delayedTimer = undefined;
     }
-    scheduleNextDueJob();
+    service.notifyWorkerWorkAvailable();
+    if (!running) scheduleNextDueJob();
   });
 
   service.setPersistRecoveredListener(() => {
@@ -513,6 +528,7 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      admissionAbort.abort();
       service.setAppBudgetReconcileListener(undefined);
       service.setPersistRecoveredListener(undefined);
       requested = false;
@@ -927,9 +943,9 @@ async function routeRequest(
       "worker.import-summaries.enqueue.memoryIds"
     );
     const result = service.enqueuePendingImportSummaries(10_000, memoryIds);
-    if (result.enqueued > 0) {
-      autoWorker.schedule();
-    }
+    // An existing queued task also needs a wake-up. Producers enqueue and
+    // observe status instead of starting their own targeted worker execution.
+    autoWorker.schedule();
     return result;
   }
 

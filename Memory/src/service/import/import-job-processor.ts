@@ -133,6 +133,7 @@ export interface ImportJobProcessorDeps {
   };
   runtime: {
     appendChange(change: Record<string, unknown>): number;
+    getJob(id: string): EvolutionJobRecord | undefined;
   };
 }
 
@@ -426,7 +427,10 @@ export class ImportJobProcessor {
     if (!d.config.algorithm.enableMemoryAdd) return 0;
     let restarted = 0;
     for (const failed of d.processing.listByStates(["failed"], limit)) {
+      // Configuration blocks resume via the worker's configuration fingerprint
+      // change or an explicit manual retry, never on every service restart.
       if (!failed.stage || failed.retryAction === "none") continue;
+      if (failed.activeJobId && d.runtime.getJob(failed.activeJobId)?.blockedReason === "configuration") continue;
       const memory = d.memories.get(failed.memoryId);
       if (!memory) continue;
       if (failed.stage !== "summary" && d.memories.hasVector(memory.id, "vec_summary")) {

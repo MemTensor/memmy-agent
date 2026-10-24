@@ -1,3 +1,4 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,7 +60,7 @@ describe("standalone scan HTTP responsiveness", () => {
     const completeSourceTurn = vi.fn(() => ({ status: "existing" }));
     const addMemory = vi.fn(() => ({ id: "synthetic-memory" }));
     const executor = createAgentSourceExecutor({
-      service: { completeSourceTurn, addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, completeSourceTurn, addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       scanStoreDirectory: join(root, "scans"),
       sourceRegistry: createSourceRegistry([{
@@ -72,7 +73,7 @@ describe("standalone scan HTTP responsiveness", () => {
       resolveAgentSkillRoot: () => null,
     });
     const { server, url } = await listenMemoryHttpServer({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         health: () => ({ ok: true, scanRunning: executor.scanStatus().running }),
         setAppBudgetReconcileListener: () => undefined,
         setPersistRecoveredListener: () => undefined,
@@ -123,7 +124,7 @@ describe("standalone scan HTTP responsiveness", () => {
     let firstJob = true;
     const addMemory = vi.fn(() => ({ id: "synthetic-skill" }));
     const executor = createAgentSourceExecutor({
-      service: { addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       scanStoreDirectory: join(root, "scans"),
       sourceRegistry: createSourceRegistry([{
@@ -180,7 +181,7 @@ describe("standalone scan HTTP responsiveness", () => {
     });
     const completeSourceTurn = vi.fn(() => ({ status: "existing" }));
     const create = () => createAgentSourceExecutor({
-      service: { completeSourceTurn } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, completeSourceTurn } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       scanStoreDirectory: join(root, "scans"),
       sourceRegistry: createSourceRegistry([syntheticAdapter(root)]),
@@ -226,7 +227,7 @@ describe("standalone scan HTTP responsiveness", () => {
     });
     const completeSourceTurn = vi.fn((_request: Parameters<MemoryService["completeSourceTurn"]>[0]) => ({ status: "existing" }));
     const executor = createAgentSourceExecutor({
-      service: { completeSourceTurn } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, completeSourceTurn } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([syntheticAdapter(root)]),
       resolveAgentSkillRoot: () => null,
