@@ -138,7 +138,7 @@ const AGENT_CODE_THEME = {
 
 export const AgentMessageContent = memo(function AgentMessageContent(props: AgentMessageContentProps) {
   const source = useMemo(
-    () => unwrapSingleMarkdownResult(stripLeakedInternalTags(props.content, Boolean(props.isStreaming))),
+    () => normalizeLatexMathDelimiters(unwrapSingleMarkdownResult(stripLeakedInternalTags(props.content, Boolean(props.isStreaming)))),
     [props.content, props.isStreaming]
   );
   const deferred = useDeferredMarkdownRender(source, Boolean(props.deferRender), Boolean(props.isStreaming), props.deferredRevealDelayMs);
@@ -273,6 +273,115 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
 function agentMessageUrlTransform(value: string): string {
   return value === BROWSER_EXTENSION_SETTINGS_LINK || value === EXCEL_CONNECTION_SETTINGS_LINK
     ? value : defaultUrlTransform(value);
+}
+
+export function normalizeLatexMathDelimiters(content: string): string {
+  if (!content.includes("\\(") && !content.includes("\\[")) {
+    return content;
+  }
+
+  const output: string[] = [];
+  let index = 0;
+  let lineStart = true;
+  let fenceCharacter: "`" | "~" | null = null;
+  let fenceLength = 0;
+  let inlineCodeTicks = 0;
+  let mathCloser: ")" | "]" | null = null;
+  let mathOpenerIndex = -1;
+  let mathOpeningDelimiter = "";
+  let precedingBackslashes = 0;
+
+  while (index < content.length) {
+    if (lineStart && inlineCodeTicks === 0 && mathCloser === null) {
+      const newlineIndex = content.indexOf("\n", index);
+      const lineEnd = newlineIndex === -1 ? content.length : newlineIndex;
+      const line = content.slice(index, lineEnd);
+      const fenceMatch = /^(?: {0,3})(`{3,}|~{3,})/.exec(line);
+
+      if (fenceCharacter !== null) {
+        output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+        if (fenceMatch?.[1]?.[0] === fenceCharacter
+          && fenceMatch[1].length >= fenceLength
+          && line.slice(fenceMatch[0].length).trim() === "") {
+          fenceCharacter = null;
+          fenceLength = 0;
+        }
+        index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+        lineStart = true;
+        precedingBackslashes = 0;
+        continue;
+      }
+
+      if (fenceMatch?.[1]) {
+        fenceCharacter = fenceMatch[1][0] as "`" | "~";
+        fenceLength = fenceMatch[1].length;
+        output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+        index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+        lineStart = true;
+        precedingBackslashes = 0;
+        continue;
+      }
+    }
+
+    const character = content[index]!;
+    const isEscaped = precedingBackslashes % 2 === 1;
+    if (mathCloser !== null) {
+      if (character === "\\" && content[index + 1] === mathCloser && !isEscaped) {
+        const isDisplayMath = mathCloser === "]";
+        output[mathOpenerIndex] = mathOpeningDelimiter;
+        output.push(isDisplayMath
+          ? `${content[index - 1] === "\n" ? "" : "\n"}$$${content[index + 2] === "\n" || index + 2 === content.length ? "" : "\n"}`
+          : "$");
+        mathCloser = null;
+        mathOpenerIndex = -1;
+        mathOpeningDelimiter = "";
+        index += 2;
+        lineStart = false;
+        precedingBackslashes = 0;
+        continue;
+      }
+      output.push(character);
+      lineStart = character === "\n";
+      precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
+      index += 1;
+      continue;
+    }
+
+    if (character === "`" && !isEscaped) {
+      let runLength = 1;
+      while (content[index + runLength] === "`") runLength += 1;
+      if (inlineCodeTicks === 0) inlineCodeTicks = runLength;
+      else if (inlineCodeTicks === runLength) inlineCodeTicks = 0;
+      output.push(content.slice(index, index + runLength));
+      index += runLength;
+      lineStart = false;
+      precedingBackslashes = 0;
+      continue;
+    }
+
+    if (inlineCodeTicks === 0 && character === "\\" && !isEscaped) {
+      const opener = content[index + 1];
+      if (opener === "(" || opener === "[") {
+        output.push(content.slice(index, index + 2));
+        mathOpenerIndex = output.length - 1;
+        mathCloser = opener === "[" ? "]" : ")";
+        mathOpeningDelimiter = opener === "["
+          ? `${index === 0 || content[index - 1] === "\n" ? "" : "\n"}$$${content[index + 2] === "\n" ? "" : "\n"}`
+          : "$";
+        index += 2;
+        lineStart = false;
+        precedingBackslashes = 0;
+        continue;
+      }
+    }
+
+    output.push(character);
+    lineStart = character === "\n";
+    precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
+    index += 1;
+  }
+
+  return output.join("");
 }
 
 function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, next: AgentMessageContentProps): boolean {
