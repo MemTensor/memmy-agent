@@ -5,6 +5,7 @@ import {
   cosine,
   extractToolNamesFromTraces,
   languageSteeringLine,
+  skillOutputLanguageFor,
   steeredPromptLanguage,
   policyIsEligibleForDownstream,
   policyMetaFromMemory,
@@ -1077,11 +1078,6 @@ function coerceSkillProcedureJson(result: Record<string, unknown>): Record<strin
     tags: dedupeCaseInsensitiveStrings(tags),
     tools: dedupeCaseInsensitiveStrings(tools)
   };
-}
-
-function skillOutputLanguageFor(mode: "follow_policy" | "zh" | "en", steered: "auto" | "zh" | "en"): "zh" | "en" {
-  if (mode === "zh" || mode === "en") return mode;
-  return steered === "zh" ? "zh" : "en";
 }
 
 function skillEvidenceEpisode(

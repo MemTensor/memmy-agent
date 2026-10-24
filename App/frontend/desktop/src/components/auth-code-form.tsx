@@ -1,6 +1,12 @@
 /** Auth code form module. */
 import { useTranslation } from "../i18n/use-translation.js";
 
+export interface AuthCodeFormValues {
+  identifier: string;
+  code: string;
+  inviteCode: string;
+}
+
 /** Contract for auth code form props. */
 export interface AuthCodeFormProps {
   identifier: string;
@@ -10,6 +16,7 @@ export interface AuthCodeFormProps {
   inviteCode?: string;
   error?: string;
   disabled?: boolean;
+  pending?: boolean;
   sendCodeDisabled?: boolean;
   sendCodeLabel?: string;
   feedback?: { text: string; tone: "error" | "success" } | null;
@@ -17,7 +24,7 @@ export interface AuthCodeFormProps {
   onCodeChange: (value: string) => void;
   onInviteCodeChange?: (value: string) => void;
   onSendCode: () => void;
-  onSubmit: () => void;
+  onSubmit: (values: AuthCodeFormValues) => void;
   onOpenTerms?: () => void;
   onOpenDataAgreement?: () => void;
 }
@@ -29,8 +36,27 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
   const errorFeedback = props.feedback?.tone === "error" ? props.feedback : null;
 
   return (
-    <div className="space-y-3.5">
+    <form
+      noValidate
+      className="space-y-3.5"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (props.disabled || props.pending) return;
+        // Autofill can update native inputs before React receives a change event.
+        const data = new FormData(event.currentTarget);
+        const values: AuthCodeFormValues = {
+          identifier: String(data.get("identifier") ?? ""),
+          code: String(data.get("code") ?? ""),
+          inviteCode: String(data.get("inviteCode") ?? "")
+        };
+        props.onIdentifierChange(values.identifier);
+        props.onCodeChange(values.code);
+        props.onInviteCodeChange?.(values.inviteCode);
+        props.onSubmit(values);
+      }}
+    >
       <input
+        name="identifier"
         type={props.identifierType === "email" ? "email" : "tel"}
         inputMode={props.identifierType === "email" ? "email" : "tel"}
         autoComplete={props.identifierType === "email" ? "email" : "tel"}
@@ -42,17 +68,14 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
       />
       <div className="flex gap-4">
         <input
+          name="code"
           type="text"
           inputMode="numeric"
+          autoComplete="one-time-code"
           placeholder={t("login.codePlaceholder")}
           value={props.code}
           aria-invalid={hasError}
           onChange={(event) => props.onCodeChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !props.disabled) {
-              props.onSubmit();
-            }
-          }}
           className="auth-code-form-input flex-1 px-5 py-3 border rounded-input text-sm bg-canvas-oat/30 focus:outline-none"
         />
         <button
@@ -67,6 +90,7 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
 
       {props.onInviteCodeChange ? (
         <input
+          name="inviteCode"
           type="text"
           autoComplete="off"
           spellCheck={false}
@@ -74,11 +98,6 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
           placeholder={t("login.invitePlaceholder")}
           value={props.inviteCode ?? ""}
           onChange={(event) => props.onInviteCodeChange?.(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !props.disabled) {
-              props.onSubmit();
-            }
-          }}
           className="auth-code-form-input auth-code-form-input--optional w-full px-5 py-3 border rounded-input text-sm focus:outline-none"
         />
       ) : null}
@@ -113,13 +132,13 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
       )}
 
       <button
-        type="button"
-        disabled={props.disabled}
-        onClick={props.onSubmit}
+        type="submit"
+        disabled={props.disabled || props.pending}
+        aria-busy={props.pending || undefined}
         className="w-full py-3 bg-action-sky text-white font-semibold rounded-btn hover:bg-action-sky-hover transition-all cursor-pointer shadow-md hover:shadow-lg active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        {t("login.continue")}
+        {t(props.pending ? "login.processing" : "login.continue")}
       </button>
-    </div>
+    </form>
   );
 }

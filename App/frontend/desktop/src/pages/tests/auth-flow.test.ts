@@ -49,7 +49,8 @@ describe("auth flow pages", () => {
     expect(source).toContain("feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}");
     expect(source).toContain("sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}");
     expect(source).toContain("sendCodeLabel={verificationCodeAuth.sendCodeLabel}");
-    expect(source).toContain("disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}");
+    expect(source).toContain("disabled={verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}");
+    expect(source).toContain("pending={verificationCodeAuth.loginPending || modePersistencePending}");
     expect(hookSource).toContain("validateAuthIdentifier(channel, rawIdentifier)");
     expect(hookSource).toContain("resolveIdentifierValidationMessage(channel, validation.reason, t)");
     expect(hookSource).toContain('"login.error.invalidPhone"');

@@ -63,6 +63,8 @@ export interface CreateLocalBackendOptions {
   accountChannel?: AccountChannel;
   /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
+  /** Skip only the startup MCP reload when the caller will start the Agent after bridge config is written. */
+  skipAgentMcpReload?: boolean;
 }
 
 export interface LocalBackend {
@@ -183,13 +185,17 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
     });
-    if (options.memmyAgentAdminClient) {
-      try {
-        const result = await options.memmyAgentAdminClient.reloadMcpConfig();
-        if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
-      } catch (error) {
-        console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    const memmyAgentAdminClient = options.memmyAgentAdminClient;
+    if (memmyAgentAdminClient && !options.skipAgentMcpReload) {
+      // The bridge config must be written first, but MCP connections must not delay the first window.
+      void Promise.resolve()
+        .then(() => memmyAgentAdminClient.reloadMcpConfig())
+        .then((result) => {
+          if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+        })
+        .catch((error: unknown) => {
+          console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+        });
     }
 
     const runtimeConfig = RuntimeConfigSchema.parse({

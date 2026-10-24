@@ -27,6 +27,7 @@ import { desktopOnboardingClient } from "../../../src/tools/computer-use/desktop
 import * as permissionChecks from "../../../src/tools/computer-use/mac-permission-preflight.js";
 import { OCU_TOOLS } from "../../../src/tools/computer-use/managed-ocu-session.js";
 import * as nativeLifecycle from "../../../src/tools/computer-use/native-agent-lifecycle.js";
+import { nativeAppApprovalStore } from "../../../src/tools/computer-use/native-app-approvals.js";
 
 const roots: string[] = [];
 
@@ -34,6 +35,16 @@ function tempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-mcp-connection-"));
   roots.push(root);
   return root;
+}
+
+function bundledComputerUseBinary(): string {
+  if (process.platform === "darwin") {
+    const binary = path.join(tempRoot(), "Memmy Computer Use.app", "Contents", "MacOS", "MemmyComputerUse");
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, "fixture", { mode: 0o755 });
+    vi.stubEnv("MEMMY_DEV_COMPUTER_USE_BINARY", binary);
+  }
+  return resolveOpenComputerUseCommand("open-computer-use");
 }
 
 async function listen(server: ReturnType<typeof createServer>): Promise<number> {
@@ -137,31 +148,39 @@ afterEach(() => {
 });
 
 describe("MCP connection helpers", () => {
-  it.runIf(process.platform === 'darwin')('uses the private Desktop guide instead of doctor through the real MCP registration', async () => {
-    vi.stubEnv('MEMMY_DESKTOP_MANAGED_GATEWAY', '1');
+  it.runIf(process.platform === 'darwin')('asks before controlling an app and skips the prompt after always allow', async () => {
     const prepare = vi.spyOn(desktopOnboardingClient, 'prepare').mockResolvedValue({ app: 'com.example.Memmy', pid: 42 });
     const guide = vi.spyOn(desktopOnboardingClient, 'guide').mockResolvedValue(false);
     const doctor = vi.spyOn(permissionChecks, 'nativePermissionDoctor');
     const pause = vi.spyOn(nativeLifecycle, 'stopOwnedNativeAgent').mockResolvedValue(undefined);
-    const binary = resolveOpenComputerUseCommand('open-computer-use');
-    const session = { ...fakeSession([...OCU_TOOLS]), ping: async () => {}, callTool: vi.fn().mockResolvedValue({ isError: true, content: [{ type: 'text', text: 'Accessibility permission is required.' }] }) };
+    const allowed = vi.spyOn(nativeAppApprovalStore, 'isAllowed').mockReturnValue(false);
+    const binary = bundledComputerUseBinary();
+    const session = { ...fakeSession([...OCU_TOOLS]), ping: async () => {}, callTool: vi.fn().mockImplementation(async (name: string) =>
+      name === 'list_apps'
+        ? { content: [{ type: 'text', text: 'Notes — com.apple.Notes [running]' }] }
+        : { isError: true, content: [{ type: 'text', text: 'Accessibility permission is required.' }] }) };
     setMcpRuntimeForTest(runtimeFor({ [binary]: session }) as any);
     const registry = new ToolRegistry();
     let stacks: Awaited<ReturnType<typeof connectMcpServers>> = {};
     try {
-      stacks = await connectMcpServers({ open_computer_use: { command: 'open-computer-use', args: ['mcp'] } }, registry);
-      const tool = registry.get('mcp_open_computer_use_get_app_state')!;
-      (tool as any).setContext(new RequestContext({ messageId: 'desktop-first', sessionKey: 'test' }));
+      stacks = await connectMcpServers({ memmy_computer_use: { command: 'open-computer-use', args: ['mcp'] } }, registry);
+      const tool = registry.get('mcp_memmy_computer_use_get_app_state')!;
+      (tool as any).setContext(new RequestContext({ messageId: 'desktop-unapproved', sessionKey: 'approval-test', channel: 'webui', chatId: 'chat' }));
       const stop = vi.fn();
+      const denied = await tool.execute({ app: 'Notes' }, { stopTurn: stop });
+      expect(denied).toContain('was not allowed to use this app');
+      expect(stop).toHaveBeenCalledOnce();
+      expect(session.callTool).toHaveBeenCalledWith('list_apps', {}, 30);
+      expect(session.callTool).not.toHaveBeenCalledWith('get_app_state', expect.anything(), 30);
+      allowed.mockReturnValue(true);
+      session.callTool.mockClear();
+      stop.mockClear();
+      (tool as any).setContext(new RequestContext({ messageId: 'desktop-allowed', sessionKey: 'approval-test', channel: 'webui', chatId: 'chat' }));
       const result = await tool.execute({ app: 'Notes' }, { stopTurn: stop });
-      expect(result).toContain('授权面板'); expect(stop).toHaveBeenCalledOnce();
-      expect(session.callTool).toHaveBeenCalledExactlyOnceWith('get_app_state', { app: 'com.example.Memmy', max_tree_nodes: 1, max_tree_depth: 1 }, 12);
-      expect(guide).toHaveBeenCalledExactlyOnceWith('accessibility', path.dirname(path.dirname(path.dirname(binary))), expect.any(AbortSignal), expect.any(Function), true);
-      expect(doctor).not.toHaveBeenCalled();
-      expect(pause).toHaveBeenCalledOnce();
-      expect(pause.mock.invocationCallOrder[0]).toBeLessThan(guide.mock.invocationCallOrder[0]);
+      expect(result).toContain('Accessibility permission is required.');
+      expect(session.callTool).toHaveBeenCalledWith('get_app_state', { app: 'com.apple.Notes' }, 30);
     } finally {
-      await stacks.open_computer_use?.aclose(); prepare.mockRestore(); guide.mockRestore(); doctor.mockRestore(); pause.mockRestore(); vi.unstubAllEnvs();
+      await stacks.memmy_computer_use?.aclose(); prepare.mockRestore(); guide.mockRestore(); doctor.mockRestore(); pause.mockRestore(); allowed.mockRestore(); vi.unstubAllEnvs();
     }
   });
   it.runIf(process.platform === "darwin")("preserves explicit custom OCU launchers without inventing a doctor contract", async () => {
@@ -173,31 +192,35 @@ describe("MCP connection helpers", () => {
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
     setMcpRuntimeForTest(runtimeFor({ [process.execPath]: session }) as any);
     const registry = new ToolRegistry();
-    const stacks = await connectMcpServers({open_computer_use: {
+    const stacks = await connectMcpServers({memmy_computer_use: {
       command: process.execPath, args: [launcher, "mcp"],
     }}, registry);
     try {
-      expect(await registry.execute("mcp_open_computer_use_get_app_state", {app: "WeChat"})).toBe("ok");
+      expect(await registry.execute("mcp_memmy_computer_use_get_app_state", {app: "WeChat"})).toBe("ok");
       expect(call).toHaveBeenCalledOnce();
       expect(show).not.toHaveBeenCalled();
     } finally {
-      await stacks.open_computer_use.aclose();
+      await stacks.memmy_computer_use.aclose();
       call.mockRestore(); show.mockRestore();
     }
   });
 
   it("registers bundled OCU tools without looking up the launcher on PATH", async () => {
-    const binary = resolveOpenComputerUseCommand("open-computer-use");
+    const binary = bundledComputerUseBinary();
     expect(path.isAbsolute(binary)).toBe(true);
     const onStdio = vi.fn();
     setMcpRuntimeForTest(runtimeFor({ [binary]: fakeSession(["list_apps", "get_app_state", "click", "drag", "perform_secondary_action", "type_text", "set_value", "press_key", "scroll"]) }, { onStdio }) as any);
     const registry = new ToolRegistry();
     const stacks = await connectMcpServers({
-      open_computer_use: { command: "open-computer-use", args: ["mcp"] },
+      memmy_computer_use: { command: "open-computer-use", args: ["mcp"] },
     }, registry);
-    expect(onStdio).toHaveBeenCalledWith(binary);
-    expect(registry.has("mcp_open_computer_use_list_apps")).toBe(true);
-    await stacks.open_computer_use.aclose();
+    try {
+      expect(onStdio).toHaveBeenCalledWith(binary);
+      expect(registry.has("mcp_memmy_computer_use_list_apps")).toBe(true);
+    } finally {
+      await stacks.memmy_computer_use.aclose();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("reports spawn failures instead of silently dropping the server", async () => {
@@ -207,6 +230,39 @@ describe("MCP connection helpers", () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining("cannot connect missing-command"));
     error.mockRestore();
   });
+
+  it("continues after a failed MCP transport never finishes closing", async () => {
+    const closeStarted = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const healthy = fakeSession(["healthy_tool"]);
+    setMcpRuntimeForTest({
+      ...runtimeFor({ healthy }),
+      stdioClient(params: any) {
+        if (params.command === "healthy") return runtimeFor({ healthy }).stdioClient(params);
+        return {
+          async enter() {
+            return [{
+              async initialize() { throw new Error("broken startup"); },
+            }, {}];
+          },
+          close() {
+            closeStarted();
+            return new Promise<void>(() => {});
+          },
+        };
+      },
+    } as any);
+    const registry = new ToolRegistry();
+    const stacks = await connectMcpServers({
+      broken: { command: "broken" },
+      healthy: { command: "healthy" },
+    }, registry);
+    expect(closeStarted).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("cleanup timed out"));
+    expect(registry.has("mcp_healthy_healthy_tool")).toBe(true);
+    await stacks.healthy.aclose();
+    warning.mockRestore();
+  }, 10_000);
 
   it("sanitizes tool names and safely noops when MCP runtime is unavailable", async () => {
     expect(sanitizeName("mcp/fs.read-file")).toBe("mcp_fs_read-file");

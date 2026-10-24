@@ -8,6 +8,7 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
+import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
@@ -16,6 +17,20 @@ import { createMockMemoryClient } from "./support/mock-memory-client.js";
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
+
+function createMockMemmyAgentAdminClient(reloadMcpConfig: MemmyAgentAdminClient["reloadMcpConfig"]): MemmyAgentAdminClient {
+  return {
+    getChannelDefinitions: async () => ({ channels: [] }),
+    getChannelConnections: async () => ({ connections: [] }),
+    configureChannel: async () => ({ status: "connected", running: true }),
+    stopChannel: async () => ({ status: "disabled", running: false }),
+    startWeixinLogin: async () => ({ status: "pendingQr" }),
+    pollWeixinLogin: async () => ({ status: "connected" }),
+    startFeishuLogin: async () => ({ status: "pendingQr" }),
+    pollFeishuLogin: async () => ({ status: "connected" }),
+    reloadMcpConfig
+  };
+}
 
 afterEach(async () => {
   await backend?.close();
@@ -132,11 +147,68 @@ describe("local api", () => {
     expect(YAML.parse(readFileSync(memmyConfigPath, "utf8")).memmyMemory.language).toBe("en-US");
   });
 
-  it("reloads Agent MCP only after writing the current Composio bridge config", async () => {
+  it("starts the local API while Agent MCP reload is pending, after writing the current Composio bridge config", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
     const memmyConfigPath = join(tempDir, "config.yaml");
     const snapshots: unknown[] = [];
+    let finishReload!: (result: Awaited<ReturnType<MemmyAgentAdminClient["reloadMcpConfig"]>>) => void;
+    const reloadComplete = new Promise<Awaited<ReturnType<MemmyAgentAdminClient["reloadMcpConfig"]>>>((resolve) => {
+      finishReload = resolve;
+    });
 
+    try {
+      backend = await createLocalBackend({
+        databasePath: join(tempDir, "app.sqlite"),
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        memoryClient: createMockMemoryClient(),
+        cloudClient: createMockCloudClient(),
+        memmyConfigPath,
+        memmyAgentAdminClient: createMockMemmyAgentAdminClient(async () => {
+          snapshots.push(YAML.parse(readFileSync(memmyConfigPath, "utf8")));
+          return reloadComplete;
+        })
+      });
+
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]).toMatchObject({
+        tools: {
+          mcpServers: {
+            composio: {
+              type: "streamableHttp",
+              url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
+              headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
+            }
+          }
+        }
+      });
+      const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+        headers: { "x-memmy-local-token": "test-token" }
+      });
+      expect(response.status).toBe(200);
+      expect(AppBootstrapResponseSchema.safeParse(await response.json()).success).toBe(true);
+    } finally {
+      finishReload({ ok: true, message: "reloaded", requires_restart: false });
+    }
+  });
+
+  it("can prepare the current bridge before Agent startup without requesting a premature MCP reload", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-prepare-"));
+    const memmyConfigPath = join(tempDir, "config.yaml");
+    const legacyCustom = { type: "stdio", command: "legacy-tool", args: ["--existing"] };
+    writeFileSync(memmyConfigPath, YAML.stringify({
+      tools: {
+        mcpServers: {
+          legacyCustom,
+          composio: {
+            type: "streamableHttp",
+            url: "http://127.0.0.1:1/old-bridge",
+            headers: { "x-memmy-mcp-token": "old-token" }
+          }
+        }
+      }
+    }), "utf8");
+    const reload = vi.fn(async () => ({ ok: true, message: "reloaded", requires_restart: false }));
     backend = await createLocalBackend({
       databasePath: join(tempDir, "app.sqlite"),
       runtimeConfigPath: join(tempDir, "runtime.json"),
@@ -144,34 +216,85 @@ describe("local api", () => {
       memoryClient: createMockMemoryClient(),
       cloudClient: createMockCloudClient(),
       memmyConfigPath,
-      memmyAgentAdminClient: {
-        getChannelDefinitions: async () => ({ channels: [] }),
-        getChannelConnections: async () => ({ connections: [] }),
-        configureChannel: async () => ({ status: "connected", running: true }),
-        stopChannel: async () => ({ status: "disabled", running: false }),
-        startWeixinLogin: async () => ({ status: "pendingQr" }),
-        pollWeixinLogin: async () => ({ status: "connected" }),
-        startFeishuLogin: async () => ({ status: "pendingQr" }),
-        pollFeishuLogin: async () => ({ status: "connected" }),
-        async reloadMcpConfig() {
-          snapshots.push(YAML.parse(readFileSync(memmyConfigPath, "utf8")));
-          return { ok: true, message: "reloaded", requires_restart: false };
-        }
-      }
+      memmyAgentAdminClient: createMockMemmyAgentAdminClient(reload),
+      skipAgentMcpReload: true
     });
 
-    expect(snapshots).toHaveLength(1);
-    expect(snapshots[0]).toMatchObject({
-      tools: {
-        mcpServers: {
-          composio: {
-            type: "streamableHttp",
-            url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
-            headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
-          }
-        }
-      }
+    const config = YAML.parse(readFileSync(memmyConfigPath, "utf8"));
+    const bridge = config.tools.mcpServers.composio;
+    expect(config.tools.mcpServers.legacyCustom).toEqual(legacyCustom);
+    expect(bridge).toMatchObject({
+      type: "streamableHttp",
+      url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
+      headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) },
+      toolTimeout: 60
     });
+    expect(bridge.headers["x-memmy-mcp-token"]).not.toBe("old-token");
+    const bootstrap = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(bootstrap.status).toBe(200);
+    expect(AppBootstrapResponseSchema.safeParse(await bootstrap.json()).success).toBe(true);
+    const initialize = await fetch(bridge.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...bridge.headers
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "startup-prepare-test", version: "1.0" }
+        }
+      })
+    });
+    expect(initialize.status).toBe(200);
+    await initialize.body?.cancel();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it.each(["not-ok", "rejected", "thrown"] as const)("logs %s Agent MCP reload failures without rejecting startup or leaving an unhandled rejection", async (failure) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-failure-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (error: unknown) => unhandledRejections.push(error);
+    let rejectReload: ((error: Error) => void) | undefined;
+    process.on("unhandledRejection", onUnhandledRejection);
+
+    try {
+      backend = await createLocalBackend({
+        databasePath: join(tempDir, "app.sqlite"),
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        memoryClient: createMockMemoryClient(),
+        cloudClient: createMockCloudClient(),
+        memmyConfigPath: join(tempDir, "config.yaml"),
+        memmyAgentAdminClient: createMockMemmyAgentAdminClient(() => {
+          if (failure === "not-ok") {
+            return Promise.resolve({ ok: false, message: "reload failed", requires_restart: true });
+          }
+          if (failure === "thrown") throw new Error("reload failed");
+          return new Promise((_resolve, reject) => { rejectReload = reject; });
+        })
+      });
+
+      rejectReload?.(new Error("reload failed"));
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+        failure === "not-ok"
+          ? "Agent MCP reload did not complete: reload failed"
+          : "Agent MCP reload unavailable during backend startup: reload failed"
+      ));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      warn.mockRestore();
+    }
   });
 
   it("does not block local API startup while managed Memory is still initializing", async () => {

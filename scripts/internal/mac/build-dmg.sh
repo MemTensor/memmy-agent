@@ -12,6 +12,7 @@ MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 DMG_HELPER_DIR="$DESKTOP_DIR/dist/dmg"
 EMBEDDING_MODELS_DIR="$DESKTOP_DIR/dist/embedding-models"
+SQLCIPHER_STAGING_DIR="$DESKTOP_DIR/dist/native/sqlcipher"
 EMBEDDING_MODEL_ID="${MEMMY_EMBEDDING_MODEL:-Xenova/all-MiniLM-L6-v2}"
 source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 package_log_init "mac-build-dmg" "$DESKTOP_DIR/release/logs"
@@ -88,15 +89,29 @@ write_desktop_edition_manifest() {
       ;;
   esac
 
-  node "$ROOT_DIR/scripts/internal/shared/write-desktop-edition-manifest.mjs" \
-    --output "$DESKTOP_DIR/dist/main/desktop-edition.json" \
-    --edition "$edition" \
-    --account-channel "$account_channel" \
+  local manifest_args=(
+    --output "$DESKTOP_DIR/dist/main/desktop-edition.json"
+    --edition "$edition"
+    --account-channel "$account_channel"
     --signing "$package_signing"
+  )
+  if [ -n "${MEMMY_SIGNED_LOCAL_TEST_BUILD:-}" ] && [ "${MEMMY_SIGNED_LOCAL_TEST_BUILD:-}" != "1" ]; then
+    echo "MEMMY_SIGNED_LOCAL_TEST_BUILD must be 1 when set" >&2
+    exit 1
+  fi
+  if [ "${MEMMY_SIGNED_LOCAL_TEST_BUILD:-}" = "1" ]; then
+    if [ "$package_signing" != "signed" ] || [ "${MEMMY_SKIP_CODESIGN:-}" = "1" ]; then
+      echo "MEMMY_SIGNED_LOCAL_TEST_BUILD requires real macOS code signing" >&2
+      exit 1
+    fi
+    manifest_args+=(--local-test-profile signed-local)
+  fi
+  node "$ROOT_DIR/scripts/internal/shared/write-desktop-edition-manifest.mjs" "${manifest_args[@]}"
 }
 
-# Resolves NSMicrophoneUsageDescription from the package edition (cn/intl).
-resolve_microphone_usage_description() {
+# Resolves camera/microphone usage descriptions from the package edition (cn/intl).
+resolve_media_usage_description() {
+  local media="${1:-}"
   local edition="${MEMMY_APP_EDITION:-}"
 
   if [ -z "$edition" ]; then
@@ -110,18 +125,32 @@ resolve_microphone_usage_description() {
     esac
   fi
 
-  case "$edition" in
-    intl)
-      printf '%s' "Memmy uses the microphone only when you start voice input."
+  case "$edition:$media" in
+    intl:microphone)
+      printf '%s' "Memmy uses the microphone for voice input and for website tasks you request."
       ;;
-    cn)
-      printf '%s' "Memmy 仅在你开始语音输入时使用麦克风"
+    cn:microphone)
+      printf '%s' "Memmy 会在语音输入和你要求的网页任务中使用麦克风。"
+      ;;
+    intl:camera)
+      printf '%s' "Memmy uses the camera for website tasks you request."
+      ;;
+    cn:camera)
+      printf '%s' "Memmy 会在你要求的网页任务中使用摄像头。"
       ;;
     *)
-      echo "Unsupported package edition for microphone usage description: $edition" >&2
+      echo "Unsupported package edition or media type for usage description: $edition:$media" >&2
       exit 1
       ;;
   esac
+}
+
+resolve_microphone_usage_description() {
+  resolve_media_usage_description microphone
+}
+
+resolve_camera_usage_description() {
+  resolve_media_usage_description camera
 }
 
 create_cli_launcher() {
@@ -427,7 +456,7 @@ function addPackage(packageKey) {
   if (!packageInfo) {
     throw new Error(`Missing package-lock entry for ${packageKey}`);
   }
-  if (packageInfo.link) {
+  if (packageInfo.link || !packageMatchesTarget(packageInfo, targetCpu)) {
     return;
   }
 
@@ -449,6 +478,32 @@ function addDependency(fromPackageKey, dependencyName, optional) {
     throw new Error(`Cannot resolve ${dependencyName} from ${fromPackageKey || "runtime root"}`);
   }
   addPackage(packageKey);
+}
+
+function packageMatchesTarget(packageInfo, cpu) {
+  return matchesConstraint(packageInfo.os, "darwin") && matchesConstraint(packageInfo.cpu, cpu);
+}
+
+function matchesConstraint(list, actual) {
+  if (!Array.isArray(list) || list.length === 0) {
+    return true;
+  }
+  let matched = false;
+  let hasPositive = false;
+  for (const raw of list) {
+    const negated = raw.startsWith("!");
+    const name = negated ? raw.slice(1) : raw;
+    if (!negated) {
+      hasPositive = true;
+    }
+    if (name === actual) {
+      if (negated) {
+        return false;
+      }
+      matched = true;
+    }
+  }
+  return hasPositive ? matched : true;
 }
 
 function resolvePackageKey(fromPackageKey, dependencyName) {
@@ -614,6 +669,30 @@ require_packaged_runtime_glob() {
   fi
 }
 
+verify_desktop_surface_artifacts() {
+  local desktop_dist="$1"
+  local cpu="$2"
+  if [ "$cpu" = "x64" ]; then cpu=x86_64; fi
+  require_packaged_runtime_file "$desktop_dist/main/computer-use-surface.html"
+  require_packaged_runtime_file "$desktop_dist/main/computer-use-surface-window.js"
+  require_packaged_runtime_file "$desktop_dist/preload/computer-use-surface-preload.cjs"
+  for addon in memmy-pip menu-bar-appearance; do
+    require_packaged_runtime_file "$desktop_dist/native/$addon.node"
+    lipo "$desktop_dist/native/$addon.node" -verify_arch "$cpu"
+    verify_desktop_native_deployment_target "$desktop_dist/native/$addon.node"
+  done
+}
+
+verify_desktop_native_deployment_target() {
+  local native_addon="$1"
+  local minos
+  minos="$(xcrun vtool -show-build "$native_addon" | awk '$1 == "minos" { print $2; exit }')"
+  if [ -z "$minos" ] || ! awk -v version="$minos" 'BEGIN { split(version, v, "."); exit (v[1] > 14 || (v[1] == 14 && v[2] > 0)) }'; then
+    echo "Desktop native addon requires unsupported macOS version $minos: $native_addon" >&2
+    exit 1
+  fi
+}
+
 verify_mac_memory_native_artifacts() {
   local target_cpu="$1"
 
@@ -630,11 +709,16 @@ verify_mac_agent_native_artifacts() {
   local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu"
 
   verify_computer_history_helpers "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/mac" "$target_cpu"
+  verify_computer_use_helpers "$RUNTIME_DIR/memmy-agent/dist/tools/computer-use/mac" "$target_cpu"
+  if [ "$target_cpu" = arm64 ]; then
+    require_packaged_runtime_file "$SQLCIPHER_STAGING_DIR/libsqlcipher.dylib"
+    require_packaged_runtime_file "$SQLCIPHER_STAGING_DIR/libcrypto.4.dylib"
+  fi
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
-  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse"
   node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+    "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
     exit 1
@@ -649,13 +733,42 @@ verify_computer_history_helpers() {
   local swift_cpu="$2"
   local helper
   if [ "$swift_cpu" = "x64" ]; then swift_cpu=x86_64; fi
-  for helper in human-recorder app-icon; do
+  if [ -e "$helper_dir/human-recorder" ]; then
+    echo "Standalone Computer History recorder must not be packaged: $helper_dir/human-recorder" >&2
+    exit 1
+  fi
+  for helper in app-icon; do
     require_packaged_runtime_file "$helper_dir/$helper"
     if [ ! -x "$helper_dir/$helper" ]; then
       echo "Computer History helper is not executable: $helper_dir/$helper" >&2
       exit 1
     fi
     lipo "$helper_dir/$helper" -verify_arch "$swift_cpu"
+  done
+  if [ "$2" = arm64 ]; then
+    require_packaged_runtime_file "$1/../wechat_identity.py"
+    for helper in MemmyWeChatPermissionProbe.dylib MemmyWeChatPrivateStorage.dylib MemmyWeChatKeyCapture.dylib; do
+      require_packaged_runtime_file "$1/wechat/native/arm64/$helper"
+      lipo "$1/wechat/native/arm64/$helper" -verify_arch arm64
+    done
+    require_packaged_runtime_file "$1/wechat/python/runtime.json"
+    require_packaged_runtime_file "$1/wechat/python/bin/python3.13"
+    lipo "$1/wechat/python/bin/python3.13" -verify_arch arm64
+  fi
+}
+
+verify_computer_use_helpers() {
+  local helper
+  local cpu="$2"
+  if [ "$cpu" = "x64" ]; then cpu=x86_64; fi
+  for name in list-windows focus-guard; do
+    helper="$1/native/$2/$name"
+    require_packaged_runtime_file "$helper"
+    if [ ! -x "$helper" ]; then
+      echo "Computer Use helper is not executable: $helper" >&2
+      exit 1
+    fi
+    lipo "$helper" -verify_arch "$cpu"
   done
 }
 
@@ -680,7 +793,50 @@ verify_packaged_mac_unpacked_artifacts() {
   local packaged_embedding_model="$app_path/Contents/Resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
+  node "$ROOT_DIR/scripts/internal/shared/verify-browser-extension.mjs" \
+    "$DESKTOP_DIR/extensions/memmy-browser" "$app_path/Contents/Resources/browser-extension"
+  local cpu="$target_cpu"
+  if [ "$cpu" = "x64" ]; then cpu=x86_64; fi
+  for addon in memmy-pip menu-bar-appearance; do
+    local native_addon="$app_path/Contents/Resources/app.asar.unpacked/dist/native/$addon.node"
+    require_packaged_runtime_file "$native_addon"
+    lipo "$native_addon" -verify_arch "$cpu"
+    verify_desktop_native_deployment_target "$native_addon"
+    if [ "${MEMMY_SKIP_CODESIGN:-}" != 1 ]; then codesign --verify --strict "$native_addon"; fi
+  done
   verify_computer_history_helpers "$unpacked_runtime/memmy-agent/dist/tools/computer-history/mac" "$target_cpu"
+  verify_computer_use_helpers "$unpacked_runtime/memmy-agent/dist/tools/computer-use/mac" "$target_cpu"
+  if [ "$target_cpu" = arm64 ]; then
+    local packaged_sqlcipher="$app_path/Contents/Resources/native/sqlcipher"
+    require_packaged_runtime_file "$packaged_sqlcipher/libsqlcipher.dylib"
+    require_packaged_runtime_file "$packaged_sqlcipher/libcrypto.4.dylib"
+    codesign --verify --strict "$packaged_sqlcipher/libsqlcipher.dylib"
+    codesign --verify --strict "$packaged_sqlcipher/libcrypto.4.dylib"
+    if [ "${MEMMY_SKIP_CODESIGN:-}" != 1 ]; then
+      local app_team library_team
+      app_team="$(codesign -dv --verbose=4 "$app_path" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')"
+      if [ -z "$app_team" ] || [ "$app_team" = "not set" ]; then
+        echo "Signed Memmy app has no Developer ID team identifier" >&2
+        exit 1
+      fi
+      for library in "$packaged_sqlcipher/libsqlcipher.dylib" "$packaged_sqlcipher/libcrypto.4.dylib"; do
+        library_team="$(codesign -dv --verbose=4 "$library" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')"
+        if [ "$library_team" != "$app_team" ]; then
+          echo "Bundled SQLCipher library does not share the Memmy signing team: $library" >&2
+          exit 1
+        fi
+      done
+    fi
+    /usr/bin/python3 - "$packaged_sqlcipher/libsqlcipher.dylib" <<'PY'
+import ctypes
+import sys
+
+library = ctypes.CDLL(sys.argv[1])
+library.sqlite3_libversion.restype = ctypes.c_char_p
+if not library.sqlite3_libversion() or not hasattr(library, "sqlite3_key"):
+    raise SystemExit("Packaged SQLCipher cannot be loaded")
+PY
+  fi
   verify_packaged_runtime_config_boundary "$app_path/Contents/Resources"
   require_packaged_runtime_file "$packaged_memory_runtime/package.json"
   require_packaged_runtime_file "$packaged_memory_runtime/package-lock.json"
@@ -703,10 +859,10 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
   verify_packaged_memory_runtime_manifest "$packaged_memory_runtime" "$target_cpu"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/native-computer-use/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse"
   node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
-    "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" \
-    --expected-app "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/Open Computer Use.app"
+    "$unpacked_runtime/memmy-agent/dist/native-computer-use/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse" \
+    --expected-app "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/Memmy Computer Use.app"
   require_packaged_runtime_file "$packaged_embedding_model/config.json"
   require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
   require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"
@@ -756,12 +912,16 @@ verify_packaged_runtime_config_boundary() {
     --expected "$DESKTOP_VERSION" \
     --platform darwin \
     --arch "$target_cpu"
+  node "$ROOT_DIR/scripts/internal/shared/verify-renderer-bootstrap.mjs" \
+    --asar "$asar_file" --platform darwin
 }
 
 prune_mac_runtime_artifacts() {
   local target_cpu="$1"
 
   echo "Pruning macOS runtime artifacts for darwin-$target_cpu."
+  node "$ROOT_DIR/scripts/internal/shared/prune-native-platforms.mjs" \
+    --platform darwin --arch "$target_cpu" --runtime-root "$RUNTIME_DIR"
   find "$RUNTIME_DIR" -type f -name "*.map" -delete
   node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
   prune_node_modules_non_runtime_files "$RUNTIME_DIR"
@@ -843,7 +1003,11 @@ npm run build -w @memmy/memory
 package_step_start "Build memmy-agent runtime"
 npm --prefix "$AGENT_DIR" run build
 package_step_start "Build Electron desktop shell"
-npm run build -w @memmy/desktop
+MEMMY_DESKTOP_NATIVE_ARCH="$TARGET_CPU" npm run build -w @memmy/desktop
+verify_desktop_surface_artifacts "$DESKTOP_DIR/dist" "$TARGET_CPU"
+package_step_start "Verify production renderer initialization without GUI"
+node "$ROOT_DIR/scripts/internal/shared/verify-renderer-bootstrap.mjs" \
+  --renderer-dir "$DESKTOP_DIR/dist/renderer" --platform darwin
 package_step_start "Write desktop edition manifest"
 write_desktop_edition_manifest
 
@@ -852,7 +1016,10 @@ rm -rf "$RUNTIME_DIR"
 rm -rf "$DMG_HELPER_DIR"
 rm -rf "$MIGRATIONS_STAGING_DIR"
 rm -rf "$EMBEDDING_MODELS_DIR"
+rm -rf "$SQLCIPHER_STAGING_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR" "$DMG_HELPER_DIR"
+package_step_start "Stage self-contained WeChat SQLCipher library"
+bash "$ROOT_DIR/scripts/internal/mac/stage-wechat-sqlcipher.sh" "$SQLCIPHER_STAGING_DIR" "$TARGET_CPU"
 mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
@@ -870,6 +1037,12 @@ node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_
 package_step_start "Build Computer History native helpers"
 bash "$ROOT_DIR/scripts/internal/mac/build-computer-history-helpers.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/mac" "$TARGET_CPU"
+package_step_start "Stage self-contained WeChat Python runtime"
+bash "$ROOT_DIR/scripts/internal/mac/stage-wechat-python.sh" \
+  "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/mac/wechat/python" "$TARGET_CPU"
+package_step_start "Build Computer Use native helpers"
+bash "$ROOT_DIR/scripts/internal/mac/build-computer-use-helpers.sh" \
+  "$RUNTIME_DIR/memmy-agent/dist/tools/computer-use/mac" "$TARGET_CPU"
 package_step_start "Create Memory runtime manifest"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
 package_step_start "Resolve Memory runtime lockfile"
@@ -888,6 +1061,21 @@ package_step_start "Install memmy-agent runtime production dependencies"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+package_step_start "Build Memmy Computer Use from source"
+OCU_APP="$RUNTIME_DIR/memmy-agent/dist/native-computer-use/Memmy Computer Use.app"
+if [ "${MEMMY_SKIP_CODESIGN:-}" = "1" ]; then
+  OCU_SIGNING_IDENTITY="-"
+else
+  OCU_SIGNING_IDENTITY="${CODESIGN_IDENTITY:-${CSC_NAME:-}}"
+  if [ -z "$OCU_SIGNING_IDENTITY" ]; then
+    echo "Memmy Computer Use requires CODESIGN_IDENTITY or CSC_NAME for a signed package." >&2
+    exit 1
+  fi
+  if [[ "$OCU_SIGNING_IDENTITY" != 'Developer ID Application:'* ]]; then
+    OCU_SIGNING_IDENTITY="Developer ID Application: $OCU_SIGNING_IDENTITY"
+  fi
+fi
+bash "$ROOT_DIR/scripts/internal/mac/build-memmy-computer-use.sh" "$OCU_APP" "$TARGET_CPU" "$OCU_SIGNING_IDENTITY" cn.memtensor.memmy
 package_step_start "Stage memmy-agent workspace runtime packages"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -993,13 +1181,16 @@ cd "$DESKTOP_DIR"
 # DMG background images are committed static assets and are no longer generated during packaging.
 # For style changes, see the historical generator in git history.
 MEMMY_MICROPHONE_USAGE_DESCRIPTION="$(resolve_microphone_usage_description)"
+MEMMY_CAMERA_USAGE_DESCRIPTION="$(resolve_camera_usage_description)"
 echo "Using edition microphone usage description: $MEMMY_MICROPHONE_USAGE_DESCRIPTION"
+echo "Using edition camera usage description: $MEMMY_CAMERA_USAGE_DESCRIPTION"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
 if [ -n "${MEMMY_ELECTRON_DIST:-}" ]; then
   BUILDER_ARGS+=(--config.electronDist="$MEMMY_ELECTRON_DIST")
 fi
 BUILDER_ARGS+=(--config.mac.extendInfo.NSMicrophoneUsageDescription="$MEMMY_MICROPHONE_USAGE_DESCRIPTION")
+BUILDER_ARGS+=(--config.mac.extendInfo.NSCameraUsageDescription="$MEMMY_CAMERA_USAGE_DESCRIPTION")
 
 package_step_start "Run electron-builder macOS DMG packaging"
 npx electron-builder "${BUILDER_ARGS[@]}" --mac dmg "$@"

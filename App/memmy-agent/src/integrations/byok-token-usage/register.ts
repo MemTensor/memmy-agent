@@ -34,13 +34,21 @@ export function createByokTokenUsageRecorder(
   _config: unknown,
   options: ByokTokenUsageInstallOptions = {},
 ): ByokTokenUsageRecorder {
+  return new ByokTokenUsageRecorder({ client: createByokTokenUsageClient(options) });
+}
+
+/** Resolve the current Desktop runtime lazily, including profile relocations. */
+export function createByokTokenUsageClient(options: ByokTokenUsageInstallOptions = {}): HttpByokTokenUsageClient {
   const runtimeConfigPath = resolveRuntimeConfigPath(options);
-  const client = new HttpByokTokenUsageClient({
+  return new HttpByokTokenUsageClient({
     runtimeConfigProvider: () => readRuntimeConfig(runtimeConfigPath),
     timeoutMs: options.timeoutMs,
     fetchImpl: options.fetchImpl,
   });
-  return new ByokTokenUsageRecorder({ client });
+}
+
+export function resolveHistorySummaryUsagePath(options: ByokTokenUsageInstallOptions = {}): string {
+  return path.join(path.dirname(resolveRuntimeConfigPath(options)), "history-summary-usage", "outbox.json");
 }
 
 function isTestRuntime(env: Record<string, string | undefined>): boolean {

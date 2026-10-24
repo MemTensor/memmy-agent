@@ -1,5 +1,4 @@
-// Explicitly record one human-operated macOS workflow as a small, local JSONL
-// event stream. This is a demo recorder, not a background activity monitor.
+// Record authorized foreground activity as a local JSONL event stream.
 
 import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
@@ -10,15 +9,30 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { redactSensitive } from "./redaction.js";
-import { ensureNativeHistoryHelper } from "./native-helper.js";
+import { captureGapRecord, nativeRecorderDiagnostic, recorderHealthReporter } from "./recorder-health.js";
+import { historyNativeCommand } from "./native-helper.js";
+import { WeChatHistoryConsentStore, defaultWeChatConsentFile } from "./wechat-consent.js";
+import { isWindows11, windowsObserverCommand } from "../win/win11.js";
+import { readBrowserAuthority } from "../browser-privacy.js";
+import { applyWindowsBrowserPrivacy, normalizeWindowsKeyboardAction, previousControlsAtPoint } from "../win/native-event-adapter.js";
+
 import {
   BROWSER_BUNDLE_IDS,
   DEFAULT_OBSERVATION_SETTINGS,
+  SENSITIVE_MESSAGE_APP_BUNDLE_IDS,
   evaluateObservation,
   parseObservationSettings,
   type ObservationSettings,
   type ObservationSubject,
 } from "./observation-settings.js";
+
+export const WINDOWS_HISTORY_STREAM_DISCONNECT = "Memmy Windows History stream disconnected unexpectedly.";
+
+/** Keep the native disconnect protocol on its own line for the parent service. */
+export function recorderFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === WINDOWS_HISTORY_STREAM_DISCONNECT ? message : `human history recording failed: ${message}`;
+}
 
 /** A line from the Swift helper. Its fields depend on `kind`. */
 type HelperEvent = Record<string, any>;
@@ -39,6 +53,8 @@ export interface RecorderArgs {
   recordingsDir?: string;
   contextUrl?: string;
   observationSettings?: string;
+  /** Windows only: authoritative browser tab state from the extension bridge. */
+  browserAuthority?: string;
   help?: boolean;
 }
 
@@ -82,8 +98,8 @@ Options:
   --recordings-dir <dir>  generated recording root
   --context-url <url>     approved starting page recorded without query or fragment
   --capture-search-text   retain text typed into recognized search/address fields
-  --capture-text          retain text only in explicitly allowed applications
-  --allow-app <bundle-id> application allowed to retain text; repeatable
+  --capture-text          retain text in observed applications and non-password controls
+  --allow-app <bundle-id> restrict retained text to this application; repeatable
   --only-app <bundle-id>  record events only from this approved app; repeatable
   --no-screenshots        record events without key screenshots
   --help                  show this help
@@ -122,12 +138,10 @@ export function parseArgs(argv: string[]): RecorderArgs {
     else if (key === "--allow-app") args.allowApps.push(value());
     else if (key === "--only-app") args.onlyApps.push(value());
     else if (key === "--observation-settings") args.observationSettings = value();
+    else if (key === "--browser-authority") args.browserAuthority = value();
     else if (key === "--no-screenshots") args.screenshots = false;
     else if (key === "--help" || key === "-h") args.help = true;
     else throw new Error(`unknown argument: ${key}`);
-  }
-  if (args.captureText && args.allowApps.length === 0) {
-    throw new Error("--capture-text requires at least one --allow-app bundle id");
   }
   return args;
 }
@@ -167,7 +181,26 @@ export function appFrom(event: HelperEvent | undefined): Application {
 }
 
 export function isSecureInput(event: HelperEvent | undefined): boolean {
-  return event?.app?.secureInput === true;
+  return event?.app?.secureInput === true
+    || isPasswordTarget(event?.keyboard?.target ?? event?.selection?.target);
+}
+
+function focusedTarget(accessibility: unknown): Record<string, unknown> | null {
+  if (!accessibility || typeof accessibility !== "object") return null;
+  const value = accessibility as Record<string, unknown>;
+  const focused = value.focused;
+  return focused && typeof focused === "object" && !Array.isArray(focused)
+    ? focused as Record<string, unknown> : value;
+}
+
+function isPasswordTarget(accessibility: unknown): boolean {
+  if (!accessibility || typeof accessibility !== "object") return false;
+  const outer = accessibility as Record<string, unknown>;
+  const focused = focusedTarget(accessibility);
+  const isPasswordNode = (node: Record<string, unknown> | null): boolean =>
+    node?.role === "AXSecureTextField" || node?.subrole === "AXSecureTextField"
+      || node?.isPassword === true || node?.IsPassword === true;
+  return isPasswordNode(outer) || isPasswordNode(focused);
 }
 
 const SEARCH_INPUT_ROLES = new Set(["AXSearchField"]);
@@ -178,11 +211,11 @@ export function searchInputContextFromAccessibility(accessibility: any): SearchI
   if (!accessibility || typeof accessibility !== "object") return null;
   // Only the current target (or its explicitly focused element) grants text
   // retention. A search field elsewhere in a window is not evidence of focus.
-  const node = accessibility.focused ?? accessibility;
+  const node = focusedTarget(accessibility);
   if (!node || typeof node !== "object") return null;
   const role = typeof node.role === "string" ? node.role : "";
   const subrole = typeof node.subrole === "string" ? node.subrole : "";
-  if (role === "AXSecureTextField" || subrole === "AXSecureTextField") return null;
+  if (isPasswordTarget(node)) return null;
   const label = [node.title, node.description, node.identifier]
     .filter((value) => typeof value === "string")
     .join(" ")
@@ -204,26 +237,38 @@ const REDACTED = "[REDACTED]";
 // summaries: a text area is as often a terminal, a transcript or a document as
 // a draft. What is withheld is what is never content — a password field — and
 // credential patterns wherever they appear.
-function keepsFieldValue(subrole: string): boolean {
-  return subrole !== "AXSecureTextField";
+function keepsFieldValue(role: string, subrole: string, isPassword = false): boolean {
+  return role !== "AXSecureTextField" && subrole !== "AXSecureTextField" && !isPassword;
+}
+
+function isDockTarget(role: string, subrole: string): boolean {
+  return role === "AXDockItem" || subrole.endsWith("WindowDockItem")
+    || subrole === "AXApplicationDockItem";
 }
 
 /**
- * Scrubs an accessibility payload before it is written: a password field's
- * value is withheld, and every string has credential patterns masked.
+ * Scrubs an accessibility payload before it is written: all content fields
+ * of a password control are withheld, and credentials are masked elsewhere.
  */
 export function scrubAccessibility(value: unknown): unknown {
   if (typeof value === "string") return redactSensitive(value);
   if (Array.isArray(value)) return value.map((item) => scrubAccessibility(item));
   if (!value || typeof value !== "object") return value;
   const node = value as Record<string, unknown>;
+  const role = typeof node.role === "string" ? node.role : "";
   const subrole = typeof node.subrole === "string" ? node.subrole : "";
-  const keep = keepsFieldValue(subrole);
+  // Dock labels can identify an excluded application or a private browser's
+  // minimized window, even when the click belongs to an allowed foreground
+  // app. Older helpers do not carry the target's own observation policy.
+  if (isDockTarget(role, subrole)) return { role: "AXUnknown" };
+  if (!keepsFieldValue(role, subrole, node.isPassword === true || node.IsPassword === true)) {
+    // Providers can expose a password in Name/Description or a generic child,
+    // not just Value. Discard the entire node payload before persistence.
+    return { role: role || "AXSecureTextField", subrole: "AXSecureTextField", value: REDACTED };
+  }
   const scrubbed: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(node)) {
-    scrubbed[key] = key === "value" && !keep && typeof field === "string" && field
-      ? REDACTED
-      : scrubAccessibility(field);
+    scrubbed[key] = scrubAccessibility(field);
   }
   return scrubbed;
 }
@@ -234,14 +279,11 @@ function scrubTreeLine(line: string): string {
   const prefix = /^[+-] /u.test(line) ? line.slice(0, 2) : "";
   const parts = line.slice(prefix.length).split("|");
   const [role = "", subrole = ""] = parts;
-  if (keepsFieldValue(subrole)) {
-    return prefix + redactSensitive(parts.join("|"));
+  if (isDockTarget(role, subrole)) return `${prefix}AXUnknown|||||`;
+  if (!keepsFieldValue(role, subrole)) {
+    return `${prefix}${role || "AXSecureTextField"}|AXSecureTextField||||${REDACTED}`;
   }
-  if (parts.length === 6 && !parts[5]) return prefix + redactSensitive(parts.join("|"));
-  // A `|` inside any field shifts the value to the right, so when the line does
-  // not split cleanly keep only the role and drop the rest rather than guess.
-  const labels = parts.length === 6 ? parts.slice(0, 5) : [role, subrole, "", "", ""];
-  return prefix + [...labels.map(redactSensitive), REDACTED].join("|");
+  return prefix + redactSensitive(parts.join("|"));
 }
 
 /** Scrubs a window snapshot, full or diff, line by line. */
@@ -250,7 +292,9 @@ export function scrubAxSnapshot(ax: unknown): unknown {
   const snapshot = ax as Record<string, unknown>;
   if (typeof snapshot.text !== "string") return scrubAccessibility(ax);
   return {
-    ...snapshot,
+    // A full native snapshot can also carry a focused control with its own
+    // raw value. Scrub that envelope as well as the serialized tree lines.
+    ...scrubAccessibility(snapshot) as Record<string, unknown>,
     text: snapshot.text.split("\n").map((line) => scrubTreeLine(line)).join("\n"),
   };
 }
@@ -258,6 +302,9 @@ export function scrubAxSnapshot(ax: unknown): unknown {
 interface AxBaseline {
   windowKey: string;
   lines: string[];
+  observedAt?: string;
+  truncated?: boolean;
+  readFailures?: number;
 }
 
 function prepareAuthorizedAxSnapshot(ax: unknown, previous: AxBaseline | null): {
@@ -265,6 +312,9 @@ function prepareAuthorizedAxSnapshot(ax: unknown, previous: AxBaseline | null): 
   baseline: AxBaseline | null;
 } {
   const current = scrubAxSnapshot(ax) as Record<string, unknown> | null;
+  // Action envelopes may carry only focus/window identity. They contain no
+  // replacement tree and must not erase an already-authorized baseline.
+  if (current && !("mode" in current) && !("text" in current)) return { snapshot: null, baseline: previous };
   // Only complete native observations can establish permission to store text.
   // Legacy/unknown diffs may contain removed text from an excluded interval.
   if (current?.mode !== "fullTree" || typeof current.text !== "string") {
@@ -272,8 +322,17 @@ function prepareAuthorizedAxSnapshot(ax: unknown, previous: AxBaseline | null): 
   }
   const lines = current.text.split("\n");
   const baseline = typeof current.windowKey === "string"
-    ? { windowKey: current.windowKey, lines } : null;
+    ? { windowKey: current.windowKey, lines,
+      ...(typeof current.observedAt === "string" && Number.isFinite(Date.parse(current.observedAt))
+        ? { observedAt: new Date(current.observedAt).toISOString() } : {}),
+      ...(typeof current.truncated === "boolean" ? { truncated: current.truncated } : {}),
+      ...(typeof current.readFailures === "number" ? { readFailures: current.readFailures } : {}) } : null;
   if (!baseline || previous?.windowKey !== baseline.windowKey) return { snapshot: current, baseline };
+  // A complete read can have the same text as an earlier partial one. Keep
+  // that change in coverage instead of deduplicating its recovery evidence.
+  if (previous.truncated !== baseline.truncated || previous.readFailures !== baseline.readFailures) {
+    return { snapshot: current, baseline };
+  }
   if (previous.lines.length === lines.length && previous.lines.every((line, index) => line === lines[index])) {
     return { snapshot: null, baseline };
   }
@@ -304,7 +363,7 @@ function loadObservationSettings(file: string | undefined): ObservationSettings 
   } catch {
     // An explicit policy that is temporarily unreadable must not revert to
     // recording everything. The next event retries the current file.
-    return { observation: {
+    return { memory: { syncEnabled: false }, observation: {
       defaultApplicationBehavior: "do_not_observe",
       defaultURLBehavior: "do_not_observe",
       rules: [],
@@ -317,7 +376,6 @@ function observationSubject(event: HelperEvent): ObservationSubject {
     bundleId: appFrom(event).bundleId,
     browser: event.window?.browser === true,
     url: typeof event.window?.url === "string" ? event.window.url : null,
-    privateBrowsing: event.window?.privateBrowsing === true,
   };
 }
 
@@ -331,6 +389,10 @@ function printableKey(event: HelperEvent): boolean {
     && event.keyboard.text.length > 0;
 }
 
+function textAllowedInApplication(application: Application, allowedApps: string[]): boolean {
+  return allowedApps.length === 0 || appAllowed(application, allowedApps);
+}
+
 export function normalizeKeyBurst(
   events: HelperEvent[],
   // Search-field retention is opt-in, and absent means off.
@@ -342,8 +404,9 @@ export function normalizeKeyBurst(
     && events.every((event) => event.inputContext?.purpose === "search_query")
     ? events.at(-1)!.inputContext
     : null;
-  const retainText = (options.captureText && appAllowed(application, options.allowApps))
-    || (options.captureSearchText && searchInput);
+  const retainText = events.every((event) => !isSecureInput(event))
+    && textAllowedInApplication(application, options.allowApps)
+    && (options.captureText || (options.captureSearchText && searchInput));
   if (rawText && events.every(printableKey)) {
     return {
       eventType: "text_input",
@@ -392,14 +455,15 @@ export function isStopHotkey(event: HelperEvent | undefined): boolean {
  * gone or full, so it ends the recording where the service will report it;
  * anything else costs only the event that caused it.
  */
-export function recordingStep(onWriteFailure: () => void) {
+export function recordingStep(onWriteFailure: () => void, onProcessingFailure: () => void = () => {}) {
   return (task: () => Promise<void>) => async (): Promise<void> => {
     try {
       await task();
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (!code) {
-        console.error(`[recorder] skipped an event: ${(error as Error).message}`);
+        onProcessingFailure();
+        console.error("[recorder] skipped an event after a processing failure");
         return;
       }
       console.error(`[recorder] cannot write the recording (${code}): ${(error as Error).message}`);
@@ -408,12 +472,9 @@ export function recordingStep(onWriteFailure: () => void) {
   };
 }
 
-async function ensureHelper(): Promise<string> {
-  return ensureNativeHistoryHelper(HELPER_SOURCE, "human-history-recorder");
-}
-
-async function helperJson(binary: string, mode: string, extraArgs: string[] = []): Promise<RecorderPermissions> {
-  const { stdout } = await execFileAsync(binary, [mode, ...extraArgs], { timeout: 60_000 });
+async function helperJson(binary: string, mode: string, extraArgs: string[] = [], env?: NodeJS.ProcessEnv): Promise<RecorderPermissions> {
+  const { stdout } = await execFileAsync(binary, [...extraArgs, mode],
+    { timeout: 60_000, ...(env ? { env } : {}) });
   return JSON.parse(stdout.trim());
 }
 
@@ -430,10 +491,12 @@ export async function checkPermissions(
   );
   if (missingRequiredPermission()) {
     const requests: string[] = [];
-    if (!permissions.inputMonitoring) requests.push("--request-input-monitoring");
+    // Accessibility also grants event listening. Request it once rather than
+    // asking for a redundant Input Monitoring grant alongside it.
+    if (!accessibility && !permissions.inputMonitoring) requests.push("--request-input-monitoring");
     if (screenshots && !permissions.screenRecording) requests.push("--request-screen-recording");
     if (accessibility && !permissions.accessibility) requests.push("--request-accessibility");
-    permissions = await readPermissions(binary, "--permissions", requests);
+    if (requests.length) permissions = await readPermissions(binary, "--permissions", requests);
   }
   if (missingRequiredPermission()) {
     const missing: string[] = [];
@@ -459,7 +522,7 @@ async function captureScreenshot(file: string, width: number): Promise<string> {
 }
 
 function appendJsonLine(file: string, payload: unknown): void {
-  fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
+  fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 export async function run(
@@ -470,47 +533,99 @@ export async function run(
     usage();
     return null;
   }
-  if (process.platform !== "darwin") throw new Error("the human history recorder currently supports macOS only");
+  const windows = process.platform === "win32";
+  if (windows && !isWindows11()) throw new Error("Computer History requires Windows 11 build 22000 or later");
+  if (!windows && process.platform !== "darwin") throw new Error("Computer History requires macOS or Windows 11");
+  if (windows && args.screenshots) throw new Error("Windows 11 Computer History does not capture screenshots; pass --no-screenshots");
 
-  const binary = await ensureHelper();
-  const permissions = await checkPermissions(binary, { screenshots: args.screenshots });
+  const command = windows
+    ? { ...windowsObserverCommand({ parentPid: process.pid }), managed: false, env: undefined as NodeJS.ProcessEnv | undefined }
+    : await historyNativeCommand(HELPER_SOURCE);
+  if (!windows && command.managed && args.screenshots) {
+    throw new Error("Packaged Computer History records without screenshots; pass --no-screenshots");
+  }
+  const permissions = windows
+    ? { inputMonitoring: true, screenRecording: false, accessibility: true, mainDisplayWidth: 0, mainDisplayHeight: 0 }
+    : await checkPermissions(command.binary, { screenshots: args.screenshots },
+      (binary, mode, extra = []) => helperJson(binary, mode, [...command.args, ...extra], command.env));
   const recordingId = `human:${crypto.randomUUID()}`;
   const contextUrl = normalizedContextUrl(args.contextUrl);
   const output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
   const recordingDir = path.dirname(output);
   const screenshotDir = path.join(recordingDir, "screenshots");
-  fs.mkdirSync(recordingDir, { recursive: true });
+  fs.mkdirSync(recordingDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(recordingDir, 0o700);
+  if (fs.existsSync(output)) fs.chmodSync(output, 0o600);
 
   const startedAt = new Date().toISOString();
   appendJsonLine(output, {
     recordType: "human_history_metadata",
     schemaVersion: 1,
     recordingId,
-    title: args.title ?? "Human-operated macOS workflow",
+    title: args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`,
     createdAt: startedAt,
-    platform: "macOS",
+    platform: windows ? "Windows 11" : "macOS",
     display: { width: permissions.mainDisplayWidth, height: permissions.mainDisplayHeight },
     captureText: args.captureText,
     captureSearchText: args.captureSearchText,
     allowedApplications: args.allowApps,
     captureScopeApplications: args.onlyApps,
-    ...(contextUrl ? { contextUrl } : {}),
-    privacy: "Search/address-field text is retained only when explicitly enabled; other text is retained only for allowed bundle ids. Common credential patterns are redacted.",
+    ...(contextUrl && shouldObserve(loadObservationSettings(args.observationSettings), { browser: true, url: contextUrl })
+      ? { contextUrl } : {}),
+    privacy: "Text is retained from observed applications when enabled, except in password fields. An explicit allow-app narrows text capture. Excluded applications and sites are skipped; credential patterns are redacted.",
   });
 
   let sequence = 0;
+  const failWrite = () => {
+    if (!helper.killed) helper.kill("SIGTERM");
+    process.exit(1);
+  };
+  const health = recorderHealthReporter((line) => {
+    const signal = JSON.parse(line.slice("[recorder-health] ".length));
+    if (signal.code !== "heartbeat" && signal.code !== "event_recorded") {
+      // Retain content-free capture quality beside its events. Current health
+      // cannot tell a later reader which historical intervals were incomplete.
+      try { appendJsonLine(output, { recordType: "capture_health", ...signal }); }
+      catch {
+        // Do not try to report a failed write through the same failing sink.
+        console.error("[recorder] cannot persist capture health; stopping recording");
+        failWrite();
+        return;
+      }
+    }
+    console.log(line);
+  });
+  let snapshotHealthy: boolean | undefined;
+  const reportSnapshotHealth = (healthy: boolean) => {
+    if (snapshotHealthy === healthy) return;
+    snapshotHealthy = healthy;
+    health.report(healthy ? "ax_snapshot_ready" : "ax_snapshot_failed");
+  };
   let lastPageContextUrl: string | null = null;
   let axBaseline: AxBaseline | null = null;
+  let observationEpoch = 0;
+  const invalidateObservation = () => { axBaseline = null; observationEpoch += 1; };
+  const weChatConsent = new WeChatHistoryConsentStore();
   let observationPolicyVersion: string | null = null;
   const canObserve = (subject: ObservationSubject) => {
+    // Exclusions and the separate WeChat consent are keyed by app identity.
+    // The native Mac helper uses "unknown" when it cannot resolve that key.
+    if (!subject.bundleId || subject.bundleId.trim().toLowerCase() === "unknown") {
+      invalidateObservation();
+      return false;
+    }
     const settings = loadObservationSettings(args.observationSettings);
     const version = JSON.stringify(settings);
     if (version !== observationPolicyVersion) {
-      axBaseline = null;
+      invalidateObservation();
       observationPolicyVersion = version;
     }
-    const allowed = shouldObserve(settings, subject);
-    if (!allowed) axBaseline = null;
+    const allowed = shouldObserve(settings, {
+      ...subject,
+      ...(subject.bundleId && SENSITIVE_MESSAGE_APP_BUNDLE_IDS.has(subject.bundleId.toLowerCase())
+        ? { weChatChatAccess: weChatConsent.read().enabled } : {}),
+    });
+    if (!allowed) invalidateObservation();
     return allowed;
   };
   let pendingKeys: HelperEvent[] = [];
@@ -533,6 +648,7 @@ export async function run(
       details = {},
       ax = null,
       subjects,
+      previousControlsEpoch,
     }: {
       eventType: string;
       timestamp?: string;
@@ -540,6 +656,7 @@ export async function run(
       details?: Record<string, unknown>;
       ax?: unknown;
       subjects?: ObservationSubject[];
+      previousControlsEpoch?: number;
     },
     screenshot = false,
   ) => {
@@ -563,11 +680,22 @@ export async function run(
       if (screenshotPath) fs.rmSync(screenshotPath, { force: true });
       return;
     }
+    if (details.previousControlsAtPoint && previousControlsEpoch !== observationEpoch) {
+      details = { ...details };
+      delete details.previousControlsAtPoint;
+    }
     // There are no awaits between computing this delta and committing its
     // baseline. Thus it can only refer to permitted snapshots already on disk.
     const preparedAx = ax ? prepareAuthorizedAxSnapshot(ax, axBaseline) : null;
+    const tree = ax && typeof ax === "object" ? ax as Record<string, unknown> : null;
+    const attemptedTree = windows && tree && ("mode" in tree || "text" in tree);
+    const completeTree = attemptedTree && tree.mode === "fullTree"
+      && typeof tree.text === "string" && tree.text.trim().length > 0
+      && tree.truncated === false && tree.readFailures === 0;
+    if (attemptedTree && !completeTree) reportSnapshotHealth(false);
     if (ax && !preparedAx?.snapshot && eventType === "accessibility_snapshot") {
       axBaseline = preparedAx?.baseline ?? null;
+      if (completeTree && axBaseline) reportSnapshotHealth(true);
       return;
     }
     // Every event is written through here, so this is where accessibility
@@ -582,7 +710,9 @@ export async function run(
       ...(preparedAx?.snapshot ? { ax: preparedAx.snapshot } : {}),
       ...(screenshotPath ? { screenshot: screenshotPath } : {}),
     });
+    if (eventType !== "recording_stopped") health.report("event_recorded");
     if (preparedAx) axBaseline = preparedAx.baseline;
+    if (completeTree && preparedAx?.snapshot) reportSnapshotHealth(true);
   };
 
   const flushKeys = async () => {
@@ -597,10 +727,7 @@ export async function run(
       subjects: events.map(observationSubject) });
   };
 
-  const safely = recordingStep(() => {
-    if (!helper.killed) helper.kill("SIGTERM");
-    process.exit(1);
-  });
+  const safely = recordingStep(failWrite, () => health.report("event_processing_error"));
 
   const scheduleKeyFlush = () => {
     if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
@@ -613,14 +740,24 @@ export async function run(
     const application = appFrom(event);
     if (event.kind === "session.ended") return;
     if (args.onlyApps.length && !appAllowed(application, args.onlyApps)) {
-      axBaseline = null;
+      invalidateObservation();
       return;
     }
+    if (windows) applyWindowsBrowserPrivacy(event,
+      args.browserAuthority ? readBrowserAuthority(args.browserAuthority) : null);
     const subjects = [observationSubject(event)];
     if (!canObserve(subjects[0])) {
       pendingKeys = pendingKeys.filter((pending) => canObserve(observationSubject(pending)));
       return;
     }
+
+    // Native caches are not aware of application/site exclusion settings.
+    // Admit earlier labels only when their exact observation was already
+    // authorized here. Compute before this event's full tree replaces it.
+    const candidate = windows ? previousControlsAtPoint(event.mouse?.previousControlsAtPoint, event.timestamp) : null;
+    const authorizedPreviousControls = candidate && axBaseline?.observedAt === candidate.observedAt
+      && event.ax?.windowKey === axBaseline.windowKey ? candidate : null;
+    const previousControlsEpoch = observationEpoch;
 
     if (event.kind === "session.started") {
       await appendEvent({
@@ -628,7 +765,7 @@ export async function run(
         timestamp: event.timestamp,
         application,
         subjects,
-        details: { goal: args.title ?? "Human-operated macOS workflow" },
+        details: { goal: args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow` },
         ax: event.ax,
       }, true);
       return;
@@ -666,7 +803,10 @@ export async function run(
     }
 
     if (event.kind === "keyboard.text_input") {
-      if (isSecureInput(event)) return;
+      if (isSecureInput(event)) {
+        await flushKeys();
+        return;
+      }
       const inputContext = searchInputContextFromAccessibility(event.keyboard?.target);
       event = { ...event, inputContext };
       const previous = pendingKeys.at(-1);
@@ -680,12 +820,22 @@ export async function run(
       return;
     }
 
+    if (windows && event.kind === "keyboard.keydown") {
+      await flushKeys();
+      const inputContext = searchInputContextFromAccessibility(event.keyboard?.target);
+      const textAllowed = textAllowedInApplication(application, args.allowApps);
+      const action = normalizeWindowsKeyboardAction(event, inputContext,
+        args.captureSearchText && textAllowed, args.captureText && textAllowed);
+      if (action) await appendEvent({ ...action, timestamp: event.timestamp, application, subjects });
+      return;
+    }
+
     if (event.kind === "keyboard.shortcut" || event.kind === "keyboard.submit") {
       await flushKeys();
       // Submitting in a browser starts a navigation; give it a moment so the
       // next captured state is the destination rather than the old page.
       const captureAfterNavigation = event.kind === "keyboard.submit"
-        && BROWSER_BUNDLE_IDS.has(application.bundleId ?? "");
+        && BROWSER_BUNDLE_IDS.has((application.bundleId ?? "").toLowerCase());
       if (captureAfterNavigation) {
         await new Promise<void>((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
       }
@@ -712,11 +862,13 @@ export async function run(
         timestamp: event.timestamp,
         application,
         subjects,
+        previousControlsEpoch,
         details: {
           button: event.mouse?.button ?? "left",
           clickCount: event.mouse?.clickCount ?? 1,
           ...(event.kind === "mouse.context_menu" ? { contextMenu: true } : {}),
           ...(target ? { accessibility: target } : {}),
+          ...(authorizedPreviousControls ? { previousControlsAtPoint: authorizedPreviousControls } : {}),
         },
       }, true);
       return;
@@ -736,12 +888,21 @@ export async function run(
       return;
     }
 
+    if (event.kind === "mouse.scroll") {
+      await appendEvent({ eventType: "scroll", timestamp: event.timestamp, application, subjects,
+        details: { direction: ["up", "down", "left", "right"].includes(event.mouse?.direction)
+          ? event.mouse.direction : Number.isFinite(event.mouse?.deltaY) && event.mouse.deltaY !== 0
+            ? event.mouse.deltaY > 0 ? "up" : "down" : "none" } });
+      return;
+    }
+
     // Selected text is evidence about what the user is reading, so it obeys the
     // same retention rule as typed text rather than being kept unconditionally.
     if (event.kind === "selection.changed") {
       const selectedText = event.selection?.selectedText;
       if (typeof selectedText !== "string" || !selectedText) return;
-      const retain = args.captureText && appAllowed(application, args.allowApps);
+      if (isSecureInput(event)) return;
+      const retain = args.captureText && textAllowedInApplication(application, args.allowApps);
       await appendEvent({
         eventType: "selection_changed",
         timestamp: event.timestamp,
@@ -764,12 +925,16 @@ export async function run(
       stopping = true;
       terminalLines?.close();
       if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
-      // Only ever called from handlers registered after the helper starts.
-      if (!helper.killed) helper.kill("SIGTERM");
+      // Let the Windows supervisor remove its temporary worker and close its
+      // child job before falling back to termination if it cannot respond.
+      if (windows && helper.stdin && !helper.stdin.destroyed) {
+        helper.stdin.end('{"kind":"stop"}\n');
+      } else if (!helper.killed) helper.kill("SIGTERM");
       await Promise.race([
         childClosed,
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
       ]);
+      if (!helper.killed && !helperClosed) helper.kill("SIGTERM");
       await processing;
       await flushKeys();
       // Shutdown has no fresh native app/window envelope to authorize a
@@ -784,44 +949,89 @@ export async function run(
     return finishPromise;
   };
 
-  const helper = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
-  helper.once("close", childClosedResolve);
+  if (windows) command.args.push("--wechat-consent", defaultWeChatConsentFile());
+  const helper = spawn(command.binary, command.args, { stdio: [windows ? "pipe" : "ignore", "pipe", "pipe"], windowsHide: true,
+    ...(command.env ? { env: command.env } : {}) });
+  helper.stdin?.on("error", () => { /* A closed stop pipe is covered by the child-exit handler. */ });
+  if (!helper.stdout || !helper.stderr) throw new Error("history observer pipes are unavailable");
+  let helperClosed = false;
+  helper.once("close", () => { helperClosed = true; childClosedResolve(); });
   const lines = readline.createInterface({ input: helper.stdout });
+  let queuedWindowsEvents = 0;
   lines.on("line", (line: string) => {
+    if (windows && line.length > 512 * 1024) { health.report("helper_parse_error"); return; }
     try {
       const event = JSON.parse(line);
+      if (!event || typeof event !== "object" || Array.isArray(event)) {
+        health.report("helper_parse_error");
+        return;
+      }
+      if (event.type === "recorder.diagnostic") {
+        const signal = nativeRecorderDiagnostic(event);
+        if (signal) processing = processing.then(safely(async () => {
+          if (signal.code === "ax_snapshot_failed") snapshotHealthy = false;
+          health.report(signal.code, signal);
+        }));
+        else health.report("helper_parse_error");
+        return;
+      }
+      if (event.type === "recorder.capture_gap") {
+        const gap = captureGapRecord(event);
+        if (gap) processing = processing.then(safely(async () => {
+          appendJsonLine(output, gap);
+        }));
+        else health.report("helper_parse_error");
+        return;
+      }
       if (isStopHotkey(event)) {
         stopFromHotkey?.();
         return;
       }
-      processing = processing.then(safely(() => ingest(event)));
-    } catch (error) {
-      console.error(`[recorder] ignored malformed helper event: ${(error as Error).message}`);
+      if (stopping) return;
+      if (windows && queuedWindowsEvents >= 64) { health.report("enrichment_backlog"); return; }
+      if (windows) queuedWindowsEvents++;
+      processing = processing.then(safely(() => ingest(event))).finally(() => {
+        if (windows) queuedWindowsEvents--;
+      });
+    } catch {
+      health.report("helper_parse_error");
+      console.error("[recorder] ignored malformed helper event");
     }
   });
   helper.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 
-  console.log(`[recorder] goal: ${args.title ?? "Human-operated macOS workflow"}`);
+  console.log(`[recorder] goal: ${args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`}`);
   console.log(`[recorder] output: ${output}`);
-  console.log("[recorder] recording now; keep the final result visible and press control+option+cmd+r to stop.");
+  console.log(windows
+    ? "[recorder] recording now; use Memmy to pause or stop recording."
+    : "[recorder] recording now; keep the final result visible and press control+option+cmd+r to stop.");
   console.log("[recorder] fallback: return here and press Enter or Ctrl+C.");
 
-  await new Promise<void>((resolve, reject) => {
-    const onSignal = () => finish("user_interrupt").then(resolve, reject);
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
-    stopFromHotkey = () => finish("stop_hotkey").then(resolve, reject);
-    if (process.stdin.isTTY) {
-      terminalLines = readline.createInterface({ input: process.stdin, output: process.stdout });
-      terminalLines.once("line", () => finish("user_stop").then(resolve, reject));
-    }
-    helper.once("error", reject);
-    helper.once("exit", (code, signal) => {
-      if (stopping) return;
-      finish(`helper_exit:${code ?? signal ?? "unknown"}`).then(resolve, reject);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onSignal = () => finish("user_interrupt").then(resolve, reject);
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+      stopFromHotkey = () => finish("stop_hotkey").then(resolve, reject);
+      if (process.stdin.isTTY) {
+        terminalLines = readline.createInterface({ input: process.stdin, output: process.stdout });
+        terminalLines.once("line", () => finish("user_stop").then(resolve, reject));
+      }
+      helper.once("error", reject);
+      helper.once("exit", (code, signal) => {
+        if (stopping) return;
+        finish(`helper_exit:${code ?? signal ?? "unknown"}`).then(() => {
+          if (windows) reject(new Error(WINDOWS_HISTORY_STREAM_DISCONNECT));
+          else if (code !== 0) reject(new Error(`history observer exited with ${code ?? signal ?? "unknown"}`));
+          else resolve();
+        }, reject);
+      });
     });
-  });
-  return { output, recordingId, events: sequence };
+    return { output, recordingId, events: sequence };
+  } finally {
+    // A short session or Stop must still publish the last successful write.
+    health.close();
+  }
 }
 
 const invokedDirectly = process.argv[1]
@@ -830,7 +1040,7 @@ if (invokedDirectly) {
   try {
     await run();
   } catch (error) {
-    console.error(`human history recording failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(recorderFailureMessage(error));
     process.exitCode = 1;
   }
 }

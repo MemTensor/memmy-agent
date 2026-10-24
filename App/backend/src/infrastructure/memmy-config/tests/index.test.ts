@@ -165,6 +165,16 @@ describe("memmy runtime config current contract", () => {
     expect(YAML.parse(await import("node:fs/promises").then(({ readFile }) => readFile(explicitTarget, "utf8"))).memmyMemory.language).toBe("zh-CN");
   });
 
+  it.each(["ja-jp", "fr-fr"])("publishes the explicit future output language %s without changing unrelated runtime configuration", async (language) => {
+    const target = file({ memmyMemory: { domain: "keep", futureOption: true }, app: { futureAppField: "keep" } });
+    await createMemmyConfigWriter({ configPath: target, accountChannel: "email" }).writeMemoryLanguage?.(language);
+    const saved = YAML.parse(await import("node:fs/promises").then(({ readFile }) => readFile(target, "utf8")));
+    expect(saved).toMatchObject({
+      memmyMemory: { domain: "keep", futureOption: true, language: Intl.getCanonicalLocales(language)[0] },
+      app: { futureAppField: "keep" }
+    });
+  });
+
   it("exposes the same shared writers through createMemmyConfigWriter", async () => {
     const target = file({
       futureSection: { keepMe: true },

@@ -14,6 +14,7 @@ const INSTALL_LOCK_TIMEOUT_MS = 15_000;
 const INSTALL_LOCK_WRITE_GRACE_MS = 2_000;
 const SERVICE_STOP_TIMEOUT_MS = 5_000;
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 120_000;
+const SEMANTIC_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 export interface RuntimeBuildIdentity { buildId?: string; schemaVersion?: number; }
 export interface RuntimeAssetDescriptor extends RuntimeBuildIdentity { name: string; sha256: string; size?: number; url?: string; }
@@ -109,7 +110,9 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
       && (versionComparison < 0 || (versionComparison === 0
         && (!identity.buildId || identity.buildId === previous.buildId)
         && existsSync(previous.entrypoint)))) {
-      return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
+      // Reuse still rewrites launchers and awaits activation. Keep the install
+      // lock until it settles so another installer cannot switch its pointer.
+      return await reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
     }
     if (previous && versionComparison < 0) {
       throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
@@ -1002,19 +1005,36 @@ export function runtimeTarget(platform: NodeJS.Platform, arch: string): string {
 
 export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => {
-    const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+    const match = value.match(SEMANTIC_VERSION_PATTERN);
     if (!match) throw new Error(`invalid semantic version: ${value}`);
-    return { numbers: [Number(match[1]), Number(match[2]), Number(match[3])], prerelease: match[4] };
+    return { numbers: [match[1]!, match[2]!, match[3]!], prerelease: match[4]?.split(".") };
   };
+  const compareNumericIdentifiers = (a: string, b: string) => Math.sign(a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0);
   const a = parse(left); const b = parse(right);
-  for (let index = 0; index < 3; index += 1) { const delta = a.numbers[index]! - b.numbers[index]!; if (delta !== 0) return Math.sign(delta); }
-  if (a.prerelease === b.prerelease) return 0;
+  for (let index = 0; index < 3; index += 1) {
+    const delta = compareNumericIdentifiers(a.numbers[index]!, b.numbers[index]!);
+    if (delta !== 0) return delta;
+  }
+  if (!a.prerelease && !b.prerelease) return 0;
   if (!a.prerelease) return 1;
   if (!b.prerelease) return -1;
-  return a.prerelease.localeCompare(b.prerelease);
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftIdentifier = a.prerelease[index];
+    const rightIdentifier = b.prerelease[index];
+    if (leftIdentifier === undefined) return -1;
+    if (rightIdentifier === undefined) return 1;
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumeric = /^\d+$/.test(leftIdentifier);
+    const rightNumeric = /^\d+$/.test(rightIdentifier);
+    if (leftNumeric && rightNumeric) return compareNumericIdentifiers(leftIdentifier, rightIdentifier);
+    if (leftNumeric) return -1;
+    if (rightNumeric) return 1;
+    return leftIdentifier < rightIdentifier ? -1 : 1;
+  }
+  return 0;
 }
 
-function validVersion(value: unknown): value is string { return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value); }
+function validVersion(value: unknown): value is string { return typeof value === "string" && SEMANTIC_VERSION_PATTERN.test(value); }
 function resolveHome(value: string): string { return resolve(value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isNodeError(error: unknown): error is NodeJS.ErrnoException { return error instanceof Error && "code" in error; }

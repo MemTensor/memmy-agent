@@ -216,16 +216,64 @@ describe("resolveAssignedModel", () => {
     })).toEqual({ ok: false, code: "model_selection_unavailable" });
   });
 
-  it("rejects Responses presets for Memory capabilities until a Responses adapter exists", () => {
+  it("resolves Responses presets for memory capabilities", () => {
     const current = catalog() as any;
     current.providers.dashscope.endpoints.asr.protocol = "openai-responses";
     current.modelPresets["byok-asr"].capabilities = ["memory_summary"];
     current.modelAssignments.byok = { memorySummary: "byok-asr" };
 
-    expect(resolveAssignedModel({
+    const resolved = resolveAssignedModel({
       catalog: current,
       mode: "byok",
       capability: "memory_summary"
-    })).toEqual({ ok: false, code: "model_selection_unavailable" });
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.context.protocol).toBe("openai-responses");
+    expect(resolved.context.capability).toBe("memory_summary");
+  });
+
+  it("resolves bedrock-converse and declared input modalities", () => {
+    const current: RuntimeModelCatalog = {
+      providers: {
+        bedrock: {
+          endpoints: {
+            chat: {
+              apiBase: "https://bedrock-runtime.us-west-2.amazonaws.com",
+              protocol: "bedrock-converse",
+              region: "us-west-2"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        custom: {
+          provider: "bedrock",
+          endpoint: "chat",
+          model: "anthropic.claude-sonnet-5",
+          source: "byok",
+          capabilities: ["agent"],
+          inputModalities: ["text", "image"]
+        }
+      },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: ["custom"], default: "custom" }
+        }
+      }
+    };
+    const resolved = resolveAssignedModel({
+      catalog: current,
+      mode: "byok",
+      capability: "agent"
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.context.protocol).toBe("bedrock-converse");
+    expect(resolved.context.provider).toBe("bedrock");
+    expect(resolved.context.inputModalities).toEqual(["text", "image"]);
+    expect(resolved.provider.apiBase).toBe("https://bedrock-runtime.us-west-2.amazonaws.com");
   });
 });

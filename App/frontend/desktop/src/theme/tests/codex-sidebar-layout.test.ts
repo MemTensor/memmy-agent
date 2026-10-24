@@ -11,7 +11,7 @@ const tokenCss = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "
 describe("codex sidebar layout tokens", () => {
   it("reads default, min, and max widths from tokens.css", () => {
     expect(parseCodexSidebarLayout(tokenCss)).toEqual({
-      defaultWidth: 250,
+      defaultWidth: 264,
       minWidth: 240,
       maxWidth: 520
     });

@@ -25,6 +25,7 @@ import {
   languageSteeringLine,
   packL2InductionTraces,
   pinnedPromptLanguage,
+  skillOutputLanguageFor,
   steeredPromptLanguage,
   renderRepositoryRepairProtocol,
   retrievePluginMemories,
@@ -324,6 +325,51 @@ describe("plugin algorithm parity helpers", () => {
       kind: "unknown",
       retrieval: { tier1: true, tier2: true, tier3: true }
     });
+  });
+
+  it.each([
+    "介绍下你自己",
+    "介绍一下你自己。",
+    "介绍你自己",
+    "请介绍一下你自己！",
+    "你好，请介绍下你自己",
+    "你是谁？",
+    "你能做什么",
+    "您可以帮我做什么？",
+    "你有什么能力呢？",
+    "Introduce yourself.",
+    "Please introduce yourself!",
+    "Tell me about yourself",
+    "Who are you?",
+    "What can you do?",
+    "What can you help me with?"
+  ])("skips recall for a complete assistant introduction: %s", (query) => {
+    expect(classifyIntent(query)).toMatchObject({
+      kind: "meta",
+      retrieval: { tier1: false, tier2: false, tier3: false },
+      signals: ["meta.assistant_introduction"]
+    });
+  });
+
+  it.each([
+    "介绍下你自己，再帮我回忆上次的计划",
+    "介绍下你自己，然后写一个Python脚本",
+    "你是谁，帮我打开WPS",
+    "你能做什么来继续我们之前的项目？",
+    "你之前是怎么介绍你自己的？",
+    "你还记得我之前给你起的名字吗？",
+    "我以前给你取过什么名字？",
+    "介绍一下我自己",
+    "我是谁？",
+    "我能做什么",
+    "帮我写一份自我介绍",
+    "我喜欢吃什么",
+    "Please introduce yourself and recall our previous plan.",
+    "What can you do for the project we discussed last time?",
+    "What name did I give you?",
+    "Who am I?"
+  ])("retains recall for a mixed, historical, or user introduction: %s", (query) => {
+    expect(classifyIntent(query).retrieval).toEqual({ tier1: true, tier2: true, tier3: expect.any(Boolean) });
   });
 
   it("classifies feedback text with the plugin classifier rules", () => {
@@ -1290,6 +1336,32 @@ describe("plugin algorithm parity helpers", () => {
     expect(languageSteeringLine(steeredPromptLanguage("en-US", ["请修复这个失败流程"]))).not.toContain("Simplified Chinese");
     expect(steeredPromptLanguage(undefined, ["请修复这个失败流程 process.arch arm64"])).toBe("zh");
     expect(steeredPromptLanguage(undefined, ["please fix the failing pipeline"])).toBe("en");
+  });
+
+  it.each(["ja-JP", "fr-FR", "zh-Hant-TW", "en-GB", "sr-Latn-RS"])("keeps the concrete %s output locale instead of detecting Chinese or falling back to English", (locale) => {
+    expect(pinnedPromptLanguage(locale)).toBe(locale);
+    expect(steeredPromptLanguage(locale, ["请修复这个失败流程"])).toBe(locale);
+    const steering = languageSteeringLine(steeredPromptLanguage(locale, ["please fix this workflow"]));
+    expect(steering).toContain(`BCP 47 locale ${locale}`);
+    expect(steering).toContain("Preserve JSON keys and machine identifiers");
+    expect(steering).not.toContain("same natural language the user used");
+    expect(steering).not.toContain("Simplified Chinese");
+  });
+
+  it.each([
+    ["follow_policy", "zh", "zh"],
+    ["follow_policy", "en", "en"],
+    ["follow_policy", "auto", "en"],
+    ["follow_policy", "ja-JP", "ja-JP"],
+    ["follow_policy", "fr-FR", "fr-FR"],
+    ["follow_policy", "zh-Hant-TW", "zh-Hant-TW"],
+    ["zh", "en", "zh"],
+    ["en", "zh", "en"],
+    ["zh", "ja-JP", "zh"],
+    ["en", "fr-FR", "en"],
+    ["zh", "auto", "zh"]
+  ] as const)("resolves shared Skill output mode %s and steered language %s as %s", (mode, steered, expected) => {
+    expect(skillOutputLanguageFor(mode, steered)).toBe(expected);
   });
 
   it("keeps plugin L3 loose admission dampening and domain tags", () => {

@@ -1,0 +1,32 @@
+.memmy-browser-use-policies { min-width: 0; color: inherit; font-size: 13px; line-height: 1.5; }
+.memmy-browser-use-policies h2 { margin: 0 0 12px; font-size: 16px; }
+.memmy-browser-use-policies h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.memmy-browser-use-policies p { margin: 0; color: var(--color-text-secondary, #73777f); }
+.memmy-browser-use-policies-all { padding: 12px 0 16px; margin-bottom: 16px; border-bottom: 1px solid var(--color-border-stone, #ddd); }
+.memmy-browser-use-policies-all .memmy-browser-use-policies-permission { align-items: flex-start; }
+.memmy-browser-use-policies-all strong { font-weight: 600; }
+.memmy-browser-use-policies-all p { margin-top: 6px; }
+.memmy-browser-use-policies-all p.memmy-browser-use-policies-inherited { color: #c62828; }
+.memmy-browser-use-policies-all input { flex: none; width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--color-brand, #3f8178); }
+.memmy-browser-use-policies-group { margin-top: 20px; }
+.memmy-browser-use-policies-add { display: flex; gap: 8px; margin: 12px 0; }
+.memmy-browser-use-policies-add input { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid var(--color-border-stone, #ddd); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+.memmy-browser-use-policies button { flex: none; padding: 6px 10px; border: 1px solid var(--color-border-stone, #ddd); border-radius: 7px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.memmy-browser-use-policies button:hover:not(:disabled) { background: var(--color-canvas-oat, #f2f2f2); }
+.memmy-browser-use-policies-card { padding: 14px 0; border-bottom: 1px solid var(--color-border-stone, #ddd); }
+.memmy-browser-use-policies-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.memmy-browser-use-policies-card__head strong { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.memmy-browser-use-policies-permission { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+.memmy-browser-use-policies-permission select { flex: none; width: 132px; height: 32px; padding: 0 8px; border: 1px solid var(--color-border-stone, #ddd); border-radius: 7px; background: var(--color-canvas-white, transparent); color: inherit; font: inherit; }
+.memmy-browser-use-policies-advanced { margin-top: 8px; }
+.memmy-browser-use-policies-advanced summary { color: var(--color-text-secondary, #73777f); cursor: pointer; }
+.memmy-browser-use-policies-advanced p { margin-top: 6px; font-size: 12px; }
+.memmy-browser-use-policies button:disabled,
+.memmy-browser-use-policies input:disabled,
+.memmy-browser-use-policies select:disabled { opacity: .5; cursor: default; }
+.memmy-browser-use-policies p.memmy-browser-use-policies-error { margin-top: 8px; color: #c62828; }
+.memmy-browser-permissions-dialog .modal-header { margin-bottom: 0; }
+@media (max-width: 420px) {
+  .memmy-browser-use-policies-card__head { align-items: flex-start; }
+  .memmy-browser-use-policies-permission select { width: 116px; }
+}

@@ -131,7 +131,7 @@ describe("Memmy Account image-to-text fallback", () => {
     const messages = [
       { role: "user", content: "What is on my screen?" },
       { role: "assistant", content: "", tool_calls: [{ id: "screen-1", type: "function", function: {
-        name: "mcp_open_computer_use_get_app_state", arguments: "{}",
+        name: "mcp_memmy_computer_use_get_app_state", arguments: "{}",
       } }] },
       { role: "tool", tool_call_id: "screen-1", content: [{ type: "text", text: "Screen captured" }, image] },
     ];

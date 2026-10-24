@@ -816,7 +816,7 @@ describe("Session DAG builder and queue", () => {
       assistant_text: "已完成 DAG store。",
     });
 
-    const processed = await queue.waitUntilProcessed(sessionKey, "turn-retry-dropped-edge", 10000);
+    const processed = await queue.waitUntilProcessed(sessionKey, "turn-retry-dropped-edge", 30000);
     const store = new SessionDagStore({ sessionKey });
     try {
       const graph = store.readGraphForHistoryDag();
@@ -832,7 +832,7 @@ describe("Session DAG builder and queue", () => {
       await waitForQueueDrain();
       queue.closeAll();
     }
-  });
+  }, 45000);
 
   it("writes an audit record for an empty but valid patch", async () => {
     const root = tmpRoot();

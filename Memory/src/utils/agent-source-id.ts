@@ -42,6 +42,8 @@ export function agentSourceFamilyRoots(value: string): string[] {
   if (!family) return [];
   return [
     family,
+    // Computer History is Memmy data; keep its exact source id for provenance.
+    ...(family === "memmy" ? ["computer_history"] : []),
     ...Object.entries(AGENT_SOURCE_FAMILY_ALIASES)
       .filter(([, target]) => target === family)
       .map(([alias]) => alias)

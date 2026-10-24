@@ -90,7 +90,85 @@ describe("persistent Codex scan", () => {
     }));
     expect(repository.getConversationCheckpoint("codex", "complete-session")).not.toBeNull();
     expect(repository.getConversationCheckpoint("codex", "incomplete-session")).toBeNull();
-    expect(repository.getScanWatermark("codex")).toBeNull();
+    expect(repository.getScanWatermark("codex")).toMatchObject({ latestSeenCreatedAt: at });
+  });
+
+  it("starts the first watermark at a recent unfinished turn and captures it after it completes in place", async () => {
+    const root = mkdtempSync(join(tmpdir(), "native-backend-scan-")); roots.push(root);
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") }); stores.push(store);
+    const repository = store.repositories.agentSources;
+    const heldAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const doneAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const event = (timestamp: string, type: string, payload: Record<string, unknown>) => ({ type, timestamp, payload });
+    const write = (file: string, events: unknown[]) => writeFileSync(join(root, file), events.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const heldTurn = (complete: boolean) => [
+      event(heldAt, "session_meta", { id: "held-session" }),
+      event(heldAt, "event_msg", { type: "task_started", turn_id: "held-turn" }),
+      event(heldAt, "response_item", { type: "message", role: "user", content: [{ text: "Keep working on the release check." }] }),
+      ...(complete ? [
+        event(heldAt, "response_item", { type: "message", role: "assistant", content: [{ text: "The release check passed." }] }),
+        event(heldAt, "event_msg", { type: "task_complete", turn_id: "held-turn" })
+      ] : [])
+    ];
+    write("rollout-done.jsonl", [
+      event(doneAt, "session_meta", { id: "done-session" }),
+      event(doneAt, "event_msg", { type: "task_started", turn_id: "done-turn" }),
+      event(doneAt, "response_item", { type: "message", role: "user", content: [{ text: "Summarize the finished task." }] }),
+      event(doneAt, "response_item", { type: "message", role: "assistant", content: [{ text: "Done." }] }),
+      event(doneAt, "event_msg", { type: "task_complete", turn_id: "done-turn" })
+    ]);
+    write("rollout-held.jsonl", heldTurn(false));
+    const client = createMockMemoryClient();
+    const completeSourceTurn = vi.spyOn(client, "completeSourceTurn");
+    const service = createAgentSourceService({
+      sourceRegistry: createSourceRegistry([createCodexSourceAdapter({ sessionsRoot: root })]),
+      memoryClient: client,
+      agentSourceRepository: repository,
+      ingestionService: createIngestionService({ memoryClient: client, agentSourceRepository: repository }),
+      skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
+      scanStoreDirectory: join(root, "scans")
+    });
+    expect((await service.scanOne("codex", { scanJobId: "first-job" })).errors).toEqual([]);
+    expect(repository.getScanWatermark("codex")).toMatchObject({ baselineAt: heldAt, latestSeenCreatedAt: heldAt });
+    write("rollout-held.jsonl", heldTurn(true));
+    expect((await service.scanOne("codex", { scanJobId: "second-job" })).errors).toEqual([]);
+    expect(completeSourceTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+      sourceTurn: expect.objectContaining({ conversationId: "held-session", turnId: "held-turn" })
+    }));
+    expect(repository.getConversationCheckpoint("codex", "held-session")).not.toBeNull();
+  });
+
+  it("advances the watermark past an unfinished turn abandoned long ago", async () => {
+    const root = mkdtempSync(join(tmpdir(), "native-backend-scan-")); roots.push(root);
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") }); stores.push(store);
+    const repository = store.repositories.agentSources;
+    const at = "2099-09-09T10:00:00.000Z";
+    const abandonedAt = "2020-01-01T00:00:00.000Z";
+    const event = (timestamp: string, type: string, payload: Record<string, unknown>) => ({ type, timestamp, payload });
+    writeFileSync(join(root, "rollout-complete.jsonl"), [
+      event(at, "session_meta", { id: "complete-session" }),
+      event(at, "event_msg", { type: "task_started", turn_id: "complete-turn" }),
+      event(at, "response_item", { type: "message", role: "user", content: [{ text: "Finish the complete turn." }] }),
+      event(at, "response_item", { type: "message", role: "assistant", content: [{ text: "Done." }] }),
+      event(at, "event_msg", { type: "task_complete", turn_id: "complete-turn" })
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    writeFileSync(join(root, "rollout-abandoned.jsonl"), [
+      event(abandonedAt, "session_meta", { id: "abandoned-session" }),
+      event(abandonedAt, "event_msg", { type: "task_started", turn_id: "abandoned-turn" }),
+      event(abandonedAt, "response_item", { type: "message", role: "user", content: [{ text: "This turn never finished." }] })
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const client = createMockMemoryClient();
+    const service = createAgentSourceService({
+      sourceRegistry: createSourceRegistry([createCodexSourceAdapter({ sessionsRoot: root })]),
+      memoryClient: client,
+      agentSourceRepository: repository,
+      ingestionService: createIngestionService({ memoryClient: client, agentSourceRepository: repository }),
+      skillDistributionService: { install: async () => undefined, uninstall: async () => undefined, installPlugin: async () => undefined, uninstallPlugin: async () => undefined },
+      scanStoreDirectory: join(root, "scans")
+    });
+    expect((await service.scanOne("codex", { scanJobId: "abandoned-job", mode: "full" })).errors).toEqual([]);
+    expect(repository.getScanWatermark("codex")).toMatchObject({ latestSeenCreatedAt: at });
+    expect(repository.getConversationCheckpoint("codex", "abandoned-session")).toBeNull();
   });
 
   it("counts skipped cancelled messages in add progress and still writes the watermark", async () => {

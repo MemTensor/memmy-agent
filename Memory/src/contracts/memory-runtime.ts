@@ -22,7 +22,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill", "work_memory"]);
+export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill", "work_memory", "observed_activity"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -46,6 +46,7 @@ export const JobTypeSchema = z.enum([
   "trace_summary",
   "user_memory_embedding",
   "import_summary",
+  "observation_extract",
   "reflection",
   "embedding",
   "reward",

@@ -70,7 +70,8 @@ export function createByokTokenUsageService(
       lifetimeUsed: snapshot.lifetimeUsed,
       paused: snapshot.paused,
       trigger: snapshot.trigger,
-      nextLocalMidnightAt: snapshot.nextLocalMidnightAt || new Date(nextLocalMidnightMs(current)).toISOString()
+      nextLocalMidnightAt: snapshot.nextLocalMidnightAt || new Date(nextLocalMidnightMs(current)).toISOString(),
+      ...(snapshot.stale === undefined ? {} : { stale: snapshot.stale })
     });
   }
 
@@ -80,7 +81,7 @@ export function createByokTokenUsageService(
     }
     const today = localCalendarDate(current);
     if (lastMemoryBudget.dailyDate === today) {
-      return budgetFromMemorySnapshot(current, lastMemoryBudget.snapshot);
+      return { ...budgetFromMemorySnapshot(current, lastMemoryBudget.snapshot), stale: true };
     }
     const events = eventsUsage(current);
     const rolled = evaluateMemoryTokenBudget({
@@ -138,7 +139,27 @@ export function createByokTokenUsageService(
 
     async getMemoryBudget() {
       const current = now();
-      return await readMemoryBudget(current) ?? budgetFromUsage(current, eventsUsage(current));
+      const memoryBudget = await readMemoryBudget(current);
+      const usage = eventsUsage(current);
+      if (!memoryBudget) {
+        const fallback = budgetFromUsage(current, usage);
+        return options.memoryClient ? { ...fallback, stale: true } : fallback;
+      }
+      // History reports summary usage directly to App. Memory's in-process ledger
+      // may not have reconciled those events yet; keep either side's larger total
+      // without counting the same persisted Memory events twice.
+      const merged = evaluateMemoryTokenBudget({
+        dailyLimitM: memoryBudget.dailyLimitM,
+        totalLimitM: memoryBudget.totalLimitM,
+        dailyUsed: Math.max(memoryBudget.dailyUsed, usage.dailyUsed),
+        lifetimeUsed: Math.max(memoryBudget.lifetimeUsed, usage.lifetimeUsed)
+      });
+      return MemoryTokenBudgetDtoSchema.parse({
+        ...memoryBudget,
+        ...merged,
+        paused: memoryBudget.paused || merged.paused,
+        trigger: merged.trigger ?? (memoryBudget.paused ? memoryBudget.trigger : null)
+      });
     }
   };
 }

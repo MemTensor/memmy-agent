@@ -1,5 +1,6 @@
 import { Tool } from "./base.js";
 import { RequestContextStore } from "./context.js";
+import { delegateSubagentComputerUse } from "../subagent-computer-use-context.js";
 
 export class SpawnTool extends Tool {
   static scopes = new Set(["core"]);
@@ -38,7 +39,7 @@ export class SpawnTool extends Tool {
   }
 
   get description(): string {
-    return "Spawn a subagent task.";
+    return "Spawn an independent subagent task. For parallel work in different native application windows, assign one task per window. Each task has its own Computer Use state and Stop control; stopping or failing one task leaves sibling tasks running.";
   }
 
   get parameters() {
@@ -94,6 +95,7 @@ export class SpawnTool extends Tool {
         temperature: params.temperature,
         workspace,
         readonlySkillRoots: this.readonlySkillRoots,
+        computerUseAuthorization: delegateSubagentComputerUse(requestContext),
       }),
     );
   }

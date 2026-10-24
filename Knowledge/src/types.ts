@@ -21,12 +21,16 @@ export interface KnowledgeFile {
   status: string;
   message: string;
   folderId?: string;
+  /** ISO 时间；上游未返回时为空字符串。 */
+  createdAt?: string;
 }
 export interface KnowledgeFolder {
   id: string;
   /** 父目录 id，空字符串表示位于知识库根目录。 */
   parentId: string;
   name: string;
+  /** ISO 时间；上游未返回时为空字符串。 */
+  createdAt?: string;
 }
 export interface KnowledgeFiles {
   files: KnowledgeFile[];
@@ -62,6 +66,23 @@ export function record(value: unknown): Record<string, unknown> {
 }
 export function text(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+/** 从上游对象里取出创建时间，统一成 ISO 字符串；缺失或无法解析时返回空字符串。 */
+export function createdAtText(value: Record<string, unknown>): string {
+  const raw =
+    value.createdAt ??
+    value.created_at ??
+    value.createTime ??
+    value.createdTime ??
+    value.gmtCreate;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+  }
+  if (typeof raw !== "string" || !raw.trim()) return "";
+  const parsed = Date.parse(raw.trim());
+  return Number.isNaN(parsed) ? "" : new Date(parsed).toISOString();
 }
 export function requiredText(value: unknown, label: string, max = 500): string {
   const result = text(value).trim();

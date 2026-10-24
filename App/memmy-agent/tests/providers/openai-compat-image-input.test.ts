@@ -55,6 +55,7 @@ describe("OpenAI-compatible image input", () => {
   it.each([
     "deepseek-flash",
     "deepseek-v4.1-flash",
+    "deepseek-v4.1-flash-1017",
     "deepseek-v4-flash-vision-exp",
   ])("sends image blocks to DeepSeek vision model %s", async (model) => {
     const create = vi.fn(async () => ({

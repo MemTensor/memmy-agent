@@ -105,6 +105,46 @@ describe("app reducer", () => {
     expect(visibleState.agent.completedUnseenByChatId["chat-1"]).toBeUndefined();
   });
 
+  it("keeps a completion unread while the main window is hidden, including route changes", () => {
+    let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/main"));
+    state = appReducer(state, agentActions.newChatCreated("chat-1"));
+    state = appReducer(state, { type: "window/visibilityChanged", visible: false });
+    state = appReducer(state, agentActions.wsEventReceived({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1781240000000 }));
+    state = appReducer(state, agentActions.wsEventReceived({ event: "turn_end", chat_id: "chat-1" }));
+
+    expect(state.agent.chatViewVisible).toBe(false);
+    expect(state.agent.completedUnseenByChatId["chat-1"]).toBeTypeOf("number");
+
+    state = appReducer(state, appActions.navigate("/tools"));
+    state = appReducer(state, appActions.navigate("/main"));
+    expect(state.agent.chatViewVisible).toBe(false);
+    expect(state.agent.completedUnseenByChatId["chat-1"]).toBeTypeOf("number");
+
+    state = appReducer(state, { type: "window/visibilityChanged", visible: true });
+    expect(state.agent.chatViewVisible).toBe(true);
+    expect(state.agent.completedUnseenByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("does not acknowledge a hidden completion when the window returns on another page", () => {
+    let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/main"));
+    state = appReducer(state, agentActions.newChatCreated("chat-1"));
+    state = appReducer(state, { type: "window/visibilityChanged", visible: false });
+    state = appReducer(state, agentActions.wsEventReceived({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1781240000000 }));
+    state = appReducer(state, agentActions.wsEventReceived({ event: "turn_end", chat_id: "chat-1" }));
+    state = appReducer(state, appActions.navigate("/tools"));
+    state = appReducer(state, { type: "window/visibilityChanged", visible: true });
+
+    expect(state.agent.chatViewVisible).toBe(false);
+    expect(state.agent.completedUnseenByChatId["chat-1"]).toBeTypeOf("number");
+  });
+
+  it("does not let bootstrap mark a hidden main window as a visible chat", () => {
+    let state = appReducer(createInitialAppState(), { type: "window/visibilityChanged", visible: false });
+    state = appReducer(state, appActions.bootstrapLoaded(bootstrap, "/main"));
+
+    expect(state.agent.chatViewVisible).toBe(false);
+  });
+
   it("merges settings and onboarding updates conservatively", () => {
     const readyState = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/welcome"));
     const withSettings = appReducer(readyState, appActions.settingsUpdated({ language: "zh-CN", theme: "dark" }));
@@ -201,6 +241,61 @@ describe("app reducer", () => {
       total: 0
     }));
     expect(staleProgressState).toBe(failedButFinishedState);
+  });
+
+  it("keeps the scan card frozen while cancel is in flight and drops late progress after it finishes", () => {
+    const progressState = appReducer(
+      createInitialAppState(),
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 2,
+        total: 5,
+        message: "Adding memories"
+      })
+    );
+    const cancellingState = appReducer(progressState, appActions.agentSourceScanCancelRequested("job-1"));
+    const ignoredProgressState = appReducer(
+      cancellingState,
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 4,
+        total: 5,
+        message: "Adding memories"
+      })
+    );
+
+    expect(cancellingState.agentSources.cancellingScanJobId).toBe("job-1");
+    expect(ignoredProgressState.agentSources.isScanning).toBe(true);
+    expect(ignoredProgressState.agentSources.scanProgress).toEqual(progressState.agentSources.scanProgress);
+
+    const cancelledState = appReducer(ignoredProgressState, appActions.agentSourceScanCompleted());
+    expect(cancelledState.agentSources.isScanning).toBe(false);
+    expect(cancelledState.agentSources.scanProgress).toBeNull();
+    expect(cancelledState.agentSources.cancellingScanJobId).toBeNull();
+    expect(cancelledState.agentSources.finishedScanJobIds).toEqual(["job-1"]);
+    expect(cancelledState.agentSources.recentScanCompletions).toEqual([]);
+
+    const restoredState = appReducer(
+      cancelledState,
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 5,
+        total: 5
+      })
+    );
+    expect(restoredState).toBe(cancelledState);
+
+    const failedState = appReducer(cancellingState, appActions.agentSourceScanCancelFailed("cancel failed"));
+    expect(failedState.agentSources.cancellingScanJobId).toBeNull();
+    expect(failedState.agentSources.error).toBe("cancel failed");
+    expect(failedState.agentSources.scanProgress).toEqual(progressState.agentSources.scanProgress);
+    expect(failedState.agentSources.isScanning).toBe(true);
   });
 
   it("ignores stale scan progress for a stopped job", () => {

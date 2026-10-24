@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { redactSensitive } from "./redaction.js";
+import { captureGapRecord, RECORDER_HEALTH_CODES } from "./recorder-health.js";
 export { redactSensitive } from "./redaction.js";
 
 /** A parsed JSONL line. Its shape is only known through the checks made on it. */
@@ -374,8 +375,21 @@ function renderEvent(record: JsonRecord): string[] {
   return [];
 }
 
+const captureFailureCodes = new Set<string>(RECORDER_HEALTH_CODES.filter((code) =>
+  !["heartbeat", "observer_ready", "event_recorded", "input_monitoring_ready", "ax_snapshot_ready"].includes(code)));
+
+/** Failures and unbound input are evidence of capture limits, not human activity. */
+export function isCaptureInterruptionRecord(record: JsonRecord): boolean {
+  if (record.recordType === "capture_gap") return captureGapRecord(record) !== null;
+  return record.recordType === "capture_health" && captureFailureCodes.has(record.code)
+    && typeof record.timestamp === "string" && /^\d{4}-\d{2}-\d{2}T/u.test(record.timestamp)
+    && Number.isFinite(Date.parse(record.timestamp))
+    && (record.count === undefined || (Number.isSafeInteger(record.count) && record.count > 0));
+}
+
 function isHumanHistory(records: JsonRecord[]): boolean {
-  return records.some((record) => record.recordType === "human_history_metadata");
+  return records.some((record) => record.recordType === "human_history_metadata"
+    || record.recordType === "human_event" || isCaptureInterruptionRecord(record));
 }
 
 function humanApplications(records: JsonRecord[], explicitApplications: string[]): string[] {
@@ -472,6 +486,20 @@ function reusableHumanAction(record: JsonRecord, { navigationHint = "" }: { navi
   const application = record.application?.name ?? record.application?.bundleId ?? "unknown application";
   const bundleId = record.application?.bundleId ?? "unknown";
   const details = record.details ?? {};
+  if (record.eventType === "browser_action") {
+    if (details.actor === "agent" || details.phase === "context") return null;
+    const target = [details.target?.role, details.target?.name].filter((value) => typeof value === "string" && value).join(" ");
+    const key = typeof details.key === "string" && details.key && details.key !== "[REDACTED]" ? ` ${cleanInline(details.key, 40)}` : "";
+    const action = cleanInline(details.action, 80) + key;
+    const after = details.after?.target;
+    const expected = after && typeof after === "object"
+      ? ["checked", "selected", "expanded", "value"].filter((key) => after[key] !== undefined)
+        .map((key) => `${key}=${cleanInline(JSON.stringify(after[key]), 240)}`).join(", ") : "";
+    return `Recorded browser operation (${details.actor === "human" ? "human" : "unknown"} actor${details.phase === "attempt" ? "; attempt, outcome unconfirmed" : ""}) in ${application}: ${action}`
+      + (target ? ` on ${cleanInline(target, 300)}` : "; target label unavailable")
+      + (expected ? `; observed subsequent state: ${expected}` : "; subsequent outcome is not established")
+      + ". Locate the matching live control with browser tools and verify its current state; never replay recorded coordinates or assume a business submission succeeded.";
+  }
   if (record.eventType === "application_changed") {
     return `Activate ${application} (\`${bundleId}\`) and verify its main content window is visible.`;
   }
@@ -495,6 +523,8 @@ function reusableHumanAction(record: JsonRecord, { navigationHint = "" }: { navi
   if (record.eventType === "text_input") {
     return details.redacted
       ? `Text was entered in ${application} (\`${bundleId}\`) but was intentionally redacted; require a current task variable or stop instead of guessing it.`
+      : details.textSource === "focused_field_value"
+        ? `Set the matching semantic field in ${application} (\`${bundleId}\`) to the recorded current value ${cleanInline(JSON.stringify(details.text ?? ""), 240)}, then verify it. Do not append the entire value as new keystrokes.`
       : `Enter ${cleanInline(JSON.stringify(details.text ?? ""), 240)} in the matching semantic field in ${application} (\`${bundleId}\`), then verify the visible value.`;
   }
   if (record.eventType === "key_press") {
@@ -512,8 +542,34 @@ function compressedScrollHint(scrolls: JsonRecord[]): string {
   return `after moving ${direction} only as needed to reveal the next semantic target`;
 }
 
+const NATIVE_STEP_EVENTS = new Set(["mouse_click", "text_input", "key_press", "scroll"]);
+const eventTime = (record: JsonRecord): number | null => {
+  const value = Date.parse(recordTimestamp(record) ?? "");
+  return Number.isFinite(value) ? value : null;
+};
+
 export function reusableHumanActions(events: JsonRecord[]): string[] {
   const actions: string[] = [];
+  const observedInteractions = new Set(events.filter(event => event.eventType === "browser_action" && event.details?.phase !== "attempt"
+    && event.details?.phase !== "context" && typeof event.details?.interactionId === "string")
+    .map(event => `${event.application?.bundleId}:${event.details.documentId}:${event.details.interactionId}`));
+  // A page step the browser sensor recorded is the same physical action as the
+  // native click, typing or key beside it; replaying both would repeat it.
+  const browserMoments = new Map<string, number[]>();
+  for (const event of events) {
+    const at = eventTime(event);
+    if (event.eventType !== "browser_action" || at === null || event.details?.actor === "agent"
+      || event.details?.phase === "context") continue;
+    const application = String(event.application?.bundleId ?? "");
+    browserMoments.set(application, [...(browserMoments.get(application) ?? []), at]);
+  }
+  const recordedByBrowser = (event: JsonRecord) => {
+    const at = eventTime(event);
+    return NATIVE_STEP_EVENTS.has(event.eventType) && at !== null
+      && !!browserMoments.get(String(event.application?.bundleId ?? ""))?.some(moment => Math.abs(moment - at) <= 2_000);
+  };
+  const includedInteractions = new Set<string>();
+  let lastBrowserStep: { document: string; at: number } | null = null;
   let pendingScrolls: JsonRecord[] = [];
   const flushPendingScrolls = () => {
     if (!pendingScrolls.length) return;
@@ -522,6 +578,21 @@ export function reusableHumanActions(events: JsonRecord[]): string[] {
     pendingScrolls = [];
   };
   for (const event of events) {
+    if (recordedByBrowser(event)) continue;
+    if (event.eventType === "browser_action") {
+      const browserAction = event.details?.action, at = eventTime(event);
+      const document = `${event.application?.bundleId}:${event.details?.documentId}`;
+      // Scrolling and the resulting page are context; the page context event records the latter.
+      if (browserAction === "scroll" || browserAction === "navigation") continue;
+      // A change after typing, or a submit after a click or Enter, is that step's outcome.
+      if ((browserAction === "change" || browserAction === "submit") && at !== null
+        && lastBrowserStep?.document === document && at - lastBrowserStep.at <= 2_000) continue;
+    }
+    if (event.eventType === "browser_action" && typeof event.details?.interactionId === "string") {
+      const key = `${event.application?.bundleId}:${event.details.documentId}:${event.details.interactionId}`;
+      if ((event.details.phase === "attempt" && observedInteractions.has(key)) || includedInteractions.has(key)) continue;
+      if (event.details.actor !== "agent" && event.details.phase !== "context") includedInteractions.add(key);
+    }
     if (event.eventType === "scroll") {
       pendingScrolls.push(event);
       continue;
@@ -541,6 +612,10 @@ export function reusableHumanActions(events: JsonRecord[]): string[] {
     }
     const action = reusableHumanAction(event);
     if (action) actions.push(action);
+    const at = eventTime(event);
+    if (action && event.eventType === "browser_action" && at !== null) {
+      lastBrowserStep = { document: `${event.application?.bundleId}:${event.details?.documentId}`, at };
+    }
   }
   flushPendingScrolls();
   return actions;
@@ -569,6 +644,7 @@ function derivedHumanTitle(events: JsonRecord[], fallback: string): string {
   }
   const textInput = events.find((event) => (
     event.eventType === "text_input"
+    && event.details?.textPurpose === "search_query"
     && event.details?.redacted === false
     && typeof event.details?.text === "string"
     && event.details.text.trim()
@@ -598,19 +674,24 @@ export function renderHumanSummary({
 }: Omit<RenderOptions, "last">): string {
   const metadata: JsonRecord = records.find((record) => record.recordType === "human_history_metadata") ?? {};
   const events = records.filter((record) => record.recordType === "human_event");
-  if (!events.length) throw new Error("no human operation events found in the selected recording");
+  const hasInterruption = records.some(isCaptureInterruptionRecord);
+  if (!events.length && !hasInterruption) throw new Error("no human operation events found in the selected recording");
+  const interruptionOnly = hasInterruption && !events.some((event) =>
+    typeof event.eventType === "string" && !["recording_started", "recording_stopped"].includes(event.eventType));
   const stopped = events.some((record) => record.eventType === "recording_stopped");
   const status = stopped ? "completed" : "incomplete";
   const applications = humanApplications(events, explicitApplications);
   const artifacts = humanArtifacts(events);
   const initialTitle = title || metadata.title || "Human-operated macOS workflow";
-  const resolvedTitle = isGenericHumanTitle(initialTitle)
+  const resolvedTitle = interruptionOnly ? "采集记录存在缺口" : isGenericHumanTitle(initialTitle)
     ? derivedHumanTitle(events, initialTitle)
     : initialTitle;
-  const resolvedDescription = description || (
+  const resolvedDescription = description || (interruptionOnly
+    ? "这段记录仅包含采集失败或未能关联到可靠上下文的输入证据，无法据此还原具体活动。"
+    : (
     `用户在「${cleanInline(resolvedTitle, SUMMARY_TEXT_LIMIT)}」中完成了一组电脑操作，`
     + "已整理为可读的行为记忆。"
-  );
+  ));
   const recordingId = metadata.recordingId ?? path.basename(path.dirname(file));
 
   const output = [

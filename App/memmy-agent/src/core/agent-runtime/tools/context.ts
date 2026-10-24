@@ -36,6 +36,21 @@ export function isContextAware(value: any): value is ContextAware {
   );
 }
 
+// The host binds each actual tool batch, after asynchronous progress hooks.
+// enterWith in a nested hook cannot update its awaiting caller's ALS scope.
+// A WeakMap keeps this host context out of model-visible hook metadata.
+const toolExecutionContexts = new WeakMap<object, RequestContext>();
+const toolExecutionScope = new AsyncLocalStorage<RequestContext>();
+
+export function bindToolExecutionRequestContext(owner: object, context: RequestContext): void {
+  toolExecutionContexts.set(owner, context);
+}
+
+export function withToolExecutionRequestContext<T>(owner: object, work: () => T): T {
+  const context = toolExecutionContexts.get(owner);
+  return context ? toolExecutionScope.run(context, work) : work();
+}
+
 export class ToolContext extends RequestContext {
   config?: any;
   registry?: any;
@@ -80,7 +95,7 @@ export class RequestContextStore {
   }
 
   get(): RequestContext | null {
-    return this.storage.getStore() ?? this.fallback;
+    return toolExecutionScope.getStore() ?? this.storage.getStore() ?? this.fallback;
   }
 
   clear(): void {

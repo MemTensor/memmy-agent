@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Config } from "../../src/config/schema.js";
 import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
+import { makeProvider } from "../../src/providers/factory.js";
 import { extractReasoning } from "../../src/utils/helpers.js";
 
 afterEach(() => {
@@ -112,8 +114,23 @@ describe("Anthropic thinking", () => {
     expect(kwargs.messages[1].content.at(-1).cache_control).toEqual({ type: "ephemeral" });
     expect(kwargs.tools[0]).toMatchObject({ name: "read_file", description: "read", input_schema: { type: "object" } });
     expect(kwargs.tool_choice).toEqual({ type: "auto" });
-    expect(kwargs.extra_headers).toEqual({ "x-test": "1" });
+    expect(kwargs).not.toHaveProperty("extra_headers");
     expect(kwargs.metadata).toEqual({ user_id: "u1" });
+    expect(provider.client._options.defaultHeaders).toEqual({ "x-test": "1" });
+  });
+
+  it("omits extra_headers from the messages body when no custom headers are configured", () => {
+    const provider = makeProvider(new Config({
+      agents: { defaults: { provider: "anthropic", model: "claude-haiku-5.5" } },
+      providers: { anthropic: { apiKey: "sk-test" } },
+    })) as AnthropicProvider;
+
+    const kwargs = provider.buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      model: "claude-haiku-5.5",
+    });
+
+    expect(kwargs).not.toHaveProperty("extra_headers");
   });
 
   it("parses Anthropic response text, tool calls, thinking blocks, stop reason, and usage", () => {

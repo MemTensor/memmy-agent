@@ -10,7 +10,12 @@ vi.mock("node:child_process", async () => {
   Object.defineProperty(execFile, promisify.custom, { value: compiler.run });
   return { execFile };
 });
-import { ensureNativeHistoryHelper } from "../../../../src/tools/computer-history/mac/native-helper.js";
+import { ensureNativeHistoryHelper, historyNativeCommand, physicalRuntimeAsset } from "../../../../src/tools/computer-history/mac/native-helper.js";
+
+test("uses the physical unpacked asset path for Python child processes", () => {
+  expect(physicalRuntimeAsset("/Memmy.app/Contents/Resources/app.asar/dist/wechat/connect.py"))
+    .toBe("/Memmy.app/Contents/Resources/app.asar.unpacked/dist/wechat/connect.py");
+});
 
 let root: string;
 beforeEach(() => {
@@ -23,8 +28,22 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test.runIf(process.platform === "darwin")("History uses the same app-agent socket and binary as Computer Use", async () => {
+  const app = path.join(root, "Memmy Computer Use.app");
+  const binary = path.join(app, "Contents", "MacOS", "MemmyComputerUse");
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, "fixture", { mode: 0o755 });
+  vi.stubEnv("MEMMY_DEV_COMPUTER_USE_BINARY", binary);
+  const command = await historyNativeCommand(path.join(root, "human-recorder.swift"));
+  expect(command.binary).toBe(binary);
+  expect(command.args).toEqual(["__memmy-history"]);
+  expect(command.env?.OPEN_COMPUTER_USE_AGENT_SOCKET_NAMESPACE).toBe(`memmy:${fs.realpathSync(app)}`);
+  expect(compiler.run).not.toHaveBeenCalled();
 });
 
 test.each(["human-recorder", "app-icon"])("%s resolves the unpacked binary without reading source or invoking Swift", async (name) => {

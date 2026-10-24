@@ -9,17 +9,19 @@ export function nativePrivacyFixture(directory: string): Record<string, any> {
   const source = fs.readFileSync(fileURLToPath(new URL(
     "../../../../src/tools/computer-history/mac/human-recorder.swift", import.meta.url,
   )), "utf8");
+  const sourcePolicy = source.slice(source.indexOf("let separatelyAuthorizedSourceBundleIds:"), source.indexOf("func emit("));
   const classifier = source.slice(source.indexOf("let keyNames:"), source.indexOf("func characters("));
+  const weChatConsent = source.slice(source.indexOf("func excludesUnconsentedWeChat("), source.indexOf("func timestamp()"));
   const focus = source.slice(source.indexOf("struct FocusSnapshot"), source.indexOf("func applicationEnvelope("));
   const resolver = source.slice(source.indexOf("func resolveTarget("), source.indexOf("func modifierList("));
   const callback = source.slice(source.indexOf("let callback:"), source.indexOf("// MARK: - Entry point"));
   const snapshot = source.slice(source.indexOf("func axSnapshot("), source.indexOf("let axObserverCallback:"));
-  const observer = source.slice(source.indexOf("let axObserverCallback:"), source.indexOf("func observeApplication("));
+  const observer = source.slice(source.indexOf("let axObserverCallback:"), source.indexOf("let observedNotifications ="));
   const script = path.join(directory, "native-privacy.swift");
   fs.writeFileSync(script, `import Foundation
 import Dispatch
 struct CGPoint { var x: Double; var y: Double }
-enum EventType { case leftMouseDown, rightMouseDown, leftMouseUp, keyDown, tapDisabledByTimeout, tapDisabledByUserInput, other }
+enum EventType { case leftMouseDown, rightMouseDown, leftMouseUp, keyDown, scrollWheel, tapDisabledByTimeout, tapDisabledByUserInput, other }
 enum EventField { case mouseEventClickState, keyboardEventKeycode }
 final class CGEvent {
   let location = CGPoint(x: 0, y: 0)
@@ -38,6 +40,7 @@ typealias AXObserverCallback = (Int, AXUIElement, String, Any?) -> Void
 let kAXFocusedUIElementChangedNotification = "focus", kAXSelectedTextChangedNotification = "selection"
 let kAXValueChangedNotification = "value", kAXFocusedWindowChangedNotification = "window"
 let kAXWindowMovedNotification = "move"
+let kAXRoleAttribute = "role", kAXSubroleAttribute = "subrole"
 enum AXResult { case success }
 func AXUIElementGetPid(_ element: AXUIElement, _ pid: inout pid_t) -> AXResult { pid = 1; return .success }
 func emitSelectionChanged(_ element: AXUIElement) {}
@@ -46,7 +49,14 @@ let axStateLock = NSLock()
 var observedPid: pid_t? = 1
 var focusedElementCache: AXUIElement? = AXUIElement("Customer ID")
 var focusedElementGeneration: UInt64 = 0
+var focusedNotificationsAvailable = true
 var frontPid: pid_t = 1
+final class RunningApplication { var processIdentifier: pid_t { frontPid } }
+final class NSWorkspace {
+  static let shared = NSWorkspace()
+  var frontmostApplication: RunningApplication? { RunningApplication() }
+}
+func accessibilityString(_ element: AXUIElement, _ attribute: CFString) -> String? { nil }
 var mutateDuringRead = false
 var nodeReads = 0
 func changeFocus(_ element: AXUIElement?, pid: pid_t? = 1) {
@@ -62,25 +72,36 @@ func nodePayload(_ element: AXUIElement) -> [String: Any] {
   }
   return ["role": element.role, "title": element.label]
 }
-func accessibilityHit(at point: CGPoint) -> (payload: [String: Any], pid: pid_t?)? { nil }
+func accessibilityHit(at point: CGPoint, expectedPid: pid_t, expectedWindow: AXUIElement) -> (payload: [String: Any], pid: pid_t?)? { nil }
 func hitHasSemantics(_ payload: [String: Any]) -> Bool { false }
 func modifierList(_ event: CGEvent) -> [String] { [] }
 func applicationPayload() -> [String: Any] { ["pid": frontPid] }
 func secureInputActive() -> Bool { false }
 func characters(from event: CGEvent) -> String { event.text }
 let enrichmentQueue = DispatchQueue(label: "native-privacy-fixture.enrichment")
+func enqueueEnrichment(key: String? = nil, _ work: @escaping () -> Void) { enrichmentQueue.async(execute: work) }
+func requestScrollSample(application: [String: Any]) {}
 var eventTap: Int? = nil
-var dragOrigin: (point: CGPoint, target: [String: Any])?
+var dragOrigin: (point: CGPoint, target: [String: Any], pid: pid_t, window: AXUIElement, url: String?)?
 var emitted: [[String: Any]] = []
-func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
+func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: AXUIElement? = nil, expectedUrl: String? = nil, extra: [String: Any]) {
   var value = extra; value["kind"] = kind; emitted.append(value)
 }
+let currentFixtureWindow = AXUIElement("Current window", "AXWindow")
+func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], element: AXUIElement?) {
+  ([:], currentFixtureWindow)
+}
+func elementBelongsToWindow(_ element: AXUIElement, window: AXUIElement, pid: pid_t) -> Bool { true }
 let AX_TREE_MIN_INTERVAL: TimeInterval = 0.4
 var lastTreeKey: String?
 var lastTreeAt: Date?
+var lastTreeFingerprint: Int?
+var lastTreeDeliveredAt: Date?
 var fixtureLines: [String] = []
 func axTreeLines(window: AXUIElement) -> [String] { fixtureLines }
+${sourcePolicy}
 ${classifier}
+${weChatConsent}
 ${focus}
 ${resolver}
 ${callback}

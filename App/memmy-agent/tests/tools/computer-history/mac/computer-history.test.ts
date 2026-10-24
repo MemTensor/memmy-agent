@@ -212,9 +212,9 @@ describe("ComputerHistoryTool", () => {
     }
   });
 
-  it("tells the caller the summary is not where the detail lives", () => {
+  it("directs exact-detail questions to the raw event stream", () => {
     const tool = new ComputerHistoryTool({ searchHistories: vi.fn() } as any);
-    expect(tool.description).toContain("summaries only");
+    expect(tool.description).toContain("summaries, which may include observed text");
     expect(tool.description).toContain("event_stream_path");
   });
 

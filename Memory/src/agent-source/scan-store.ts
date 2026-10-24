@@ -39,6 +39,13 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
   const refreshStaged = db.prepare(`UPDATE staged_messages
     SET role=?,content=?,created_at=?,workspace_path=?,git_root=?,raw_meta_json=?
     WHERE job_id=? AND source_id=? AND conversation_id=? AND message_id=?`);
+  // One scan owns staged writes. Initialize from durable rows on reopen, then
+  // count successful inserts instead of repeatedly walking the staged index.
+  let messageCounts: Map<string, number> | undefined;
+  const counts = () => messageCounts ??= new Map(
+    (db.prepare("SELECT source_id AS sourceId, COUNT(*) AS count FROM staged_messages WHERE job_id=? GROUP BY source_id").all(job.jobId) as Array<{ sourceId: string; count: number }>)
+      .map((row) => [row.sourceId, Number(row.count)])
+  );
   const store: MemoryAgentSourceScanStore = {
     path,
     stage(message) {
@@ -51,16 +58,24 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
         // to an existing message. Preserve its ordinal and the insertion count.
         refreshStaged.run(message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.conversationId, message.messageId);
       }
+      if (inserted && messageCounts) messageCounts.set(message.sourceId, (messageCounts.get(message.sourceId) ?? 0) + 1);
       return inserted;
     },
-    stageBatch(messages) { const tx = db.transaction(() => { let count = 0; for (const message of messages) if (store.stage(message)) count += 1; return count; }); return tx(); },
+    stageBatch(messages) {
+      const tx = db.transaction(() => { let count = 0; for (const message of messages) if (store.stage(message)) count += 1; return count; });
+      try { return tx(); }
+      catch (error) { messageCounts = undefined; throw error; }
+    },
     messages(sourceId, cursor, limit=500) { limit=Math.min(500,Math.max(1,limit)); const params: unknown[]=[job.jobId,sourceId]; let where="job_id=? AND source_id=?"; if(cursor){where += " AND ((conversation_id > ?) OR (conversation_id = ? AND (created_at > ? OR (created_at = ? AND (message_id > ? OR (message_id = ? AND ordinal > ?))))))"; params.push(cursor.conversationId,cursor.conversationId,cursor.createdAt,cursor.createdAt,cursor.messageId,cursor.messageId,cursor.ordinal);} const rows = db.prepare(`SELECT source_id AS sourceId,conversation_id AS conversationId,message_id AS messageId,role,content,created_at AS createdAt,workspace_path AS workspacePath,git_root AS gitRoot,raw_meta_json AS rawMetaJson,ordinal FROM staged_messages WHERE ${where} ORDER BY conversation_id,created_at,message_id,ordinal LIMIT ?`).iterate(...params,limit) as Iterable<Record<string,unknown>>; return (function*(){let bytes=0; let count=0; for(const row of rows){const message=rowToMessage(row); yield message; count+=1; bytes+=Buffer.byteLength(JSON.stringify(message)); if(count>=500||bytes>=MAX_PAGE_BYTES) break;}})(); },
     saveScanCursor(s,c){db.prepare("INSERT INTO scan_cursors(source_id,conversation_id,created_at,message_id,ordinal) VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET conversation_id=excluded.conversation_id,created_at=excluded.created_at,message_id=excluded.message_id,ordinal=excluded.ordinal").run(s,c.conversationId,c.createdAt,c.messageId,c.ordinal);},
     getScanCursor(s){return (db.prepare("SELECT conversation_id AS conversationId,created_at AS createdAt,message_id AS messageId,ordinal FROM scan_cursors WHERE source_id=?").get(s) as MessageCursor|undefined)??null;},
     saveSourceState(s){db.prepare("INSERT INTO scan_source_state(source_id,mode,phase,message_count,result_count,error_count,scan_started_at,watermarked_since,updated_at,error) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET mode=excluded.mode,phase=excluded.phase,message_count=excluded.message_count,result_count=excluded.result_count,error_count=excluded.error_count,scan_started_at=excluded.scan_started_at,watermarked_since=excluded.watermarked_since,updated_at=excluded.updated_at,error=excluded.error").run(s.sourceId,s.mode,s.phase,s.messageCount,s.resultCount,s.errorCount,s.scanStartedAt??null,s.watermarkedSince??null,s.updatedAt,s.error??null);},
     getSourceState(s){return(db.prepare("SELECT source_id AS sourceId,mode,phase,message_count AS messageCount,result_count AS resultCount,error_count AS errorCount,scan_started_at AS scanStartedAt,watermarked_since AS watermarkedSince,updated_at AS updatedAt,error FROM scan_source_state WHERE source_id=?").get(s) as ScanSourceState|undefined)??null;},
     sourceCount(){return Number((db.prepare("SELECT COUNT(*) AS count FROM scan_source_state").get() as {count:number}).count);},
-    count(sourceId){const row=db.prepare(`SELECT COUNT(*) AS count FROM staged_messages WHERE job_id=?${sourceId?" AND source_id=?":""}`).get(job.jobId,...(sourceId?[sourceId]:[])) as {count:number}; return Number(row.count);},
+    count(sourceId) {
+      const stagedCounts = counts();
+      return sourceId ? stagedCounts.get(sourceId) ?? 0 : [...stagedCounts.values()].reduce((total, count) => total + count, 0);
+    },
     saveCheckpoint(c){db.prepare("INSERT INTO checkpoints(source_id,conversation_id,last_message_id,last_created_at,content_hash,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,conversation_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_created_at=excluded.last_created_at,content_hash=excluded.content_hash,updated_at=excluded.updated_at").run(c.sourceId,c.conversationId,c.lastMessageId,c.lastCreatedAt,c.contentHash,c.updatedAt);},
     getCheckpoint(s,c){return (db.prepare("SELECT source_id AS sourceId,conversation_id AS conversationId,last_message_id AS lastMessageId,last_created_at AS lastCreatedAt,content_hash AS contentHash,updated_at AS updatedAt FROM checkpoints WHERE source_id=? AND conversation_id=?").get(s,c) as ConversationCheckpoint|undefined)??null;},
     saveConversationMeta(m){db.prepare("INSERT INTO conversation_meta(source_id,conversation_id,last_message_id,last_created_at,content_hash,selected) VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,conversation_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_created_at=excluded.last_created_at,content_hash=excluded.content_hash,selected=excluded.selected").run(m.sourceId,m.conversationId,m.lastMessageId,m.lastCreatedAt,m.contentHash,m.selected?1:0);},

@@ -5,9 +5,11 @@ import type {
   ByokTokenUsageRuntimeConfig,
   FetchLike,
 } from "./types.js";
+import { MemoryTokenBudgetDtoSchema, type MemoryTokenBudgetDto } from "@memmy/local-api-contracts";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const EVENT_PATH = "/api/app/byok-token-usage/events";
+const MEMORY_BUDGET_PATH = "/api/app/byok-token-usage/memory-budget";
 
 export class HttpByokTokenUsageClient implements ByokTokenUsageClient {
   private readonly baseUrl: string | null;
@@ -24,9 +26,12 @@ export class HttpByokTokenUsageClient implements ByokTokenUsageClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async recordEvent(event: ByokTokenUsageEvent): Promise<void> {
+  async recordEvent(event: ByokTokenUsageEvent, options: { requireRuntime?: boolean } = {}): Promise<void> {
     const runtime = this.resolveRuntimeConfig();
-    if (!runtime) return;
+    if (!runtime) {
+      if (options.requireRuntime) throw new Error("BYOK token usage runtime is unavailable");
+      return;
+    }
 
     const response = await this.fetchImpl(new URL(EVENT_PATH, runtime.baseUrl), {
       method: "POST",
@@ -41,6 +46,17 @@ export class HttpByokTokenUsageClient implements ByokTokenUsageClient {
     if (!response.ok) {
       throw new Error(`BYOK token usage upload failed: ${response.status} ${response.statusText}`);
     }
+  }
+
+  async getMemoryBudget(): Promise<MemoryTokenBudgetDto> {
+    const runtime = this.resolveRuntimeConfig();
+    if (!runtime) throw new Error("BYOK memory budget runtime is unavailable");
+    const response = await this.fetchImpl(new URL(MEMORY_BUDGET_PATH, runtime.baseUrl), {
+      headers: { "x-memmy-local-token": runtime.localToken },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`BYOK memory budget read failed: ${response.status}`);
+    return MemoryTokenBudgetDtoSchema.parse(await response.json());
   }
 
   private resolveRuntimeConfig(): ByokTokenUsageRuntimeConfig | null {
@@ -66,7 +82,12 @@ export class HttpByokTokenUsageClient implements ByokTokenUsageClient {
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
+  const url = new URL(baseUrl);
+  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+    || url.username || url.password || url.search || url.hash || !["", "/"].includes(url.pathname)) {
+    throw new Error("BYOK token usage endpoint must be a local backend");
+  }
+  return url.origin;
 }
 
 function stringOrNull(value: unknown): string | null {

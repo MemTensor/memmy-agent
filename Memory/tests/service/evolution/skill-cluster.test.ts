@@ -147,6 +147,9 @@ describe("MemoryService / evolution / skill cluster", () => {
   it.each([
     { language: "zh-CN", outputLanguageMode: "follow_policy", expected: "zh" },
     { language: "en-US", outputLanguageMode: "follow_policy", expected: "en" },
+    { language: "ja-JP", outputLanguageMode: "follow_policy", expected: "ja-JP" },
+    { language: "fr-FR", outputLanguageMode: "follow_policy", expected: "fr-FR" },
+    { language: "zh-Hant-TW", outputLanguageMode: "follow_policy", expected: "zh-Hant-TW" },
     { language: "zh-CN", outputLanguageMode: "en", expected: "en" },
     { language: "en-US", outputLanguageMode: "zh", expected: "zh" }
   ] as const)("uses $expected for interface $language and skill mode $outputLanguageMode", async ({
@@ -171,7 +174,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(generation!.messages.filter((message) => message.role === "system").map((message) => message.content))
       .toContain(expected === "zh"
         ? "All natural-language answers MUST be in Simplified Chinese (zh-CN)."
-        : "All natural-language answers MUST be in English.");
+        : expected === "en" ? "All natural-language answers MUST be in English."
+          : `All natural-language answers MUST use the language, script, and regional conventions of BCP 47 locale ${expected}. Preserve JSON keys and machine identifiers.`);
   });
 
   it("crystallizes a Skill from RawTurns when the cluster has a success anchor", async () => {

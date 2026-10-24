@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import { memmyPermissionSnapshot } from "../src/main/memmy-screen-permission.js";
+import type { GuideControls } from "../src/main/computer-use-onboarding.js";
 
 const sessionChannel = "memmy:get-computer-history-permission-session";
 const restartChannel = "memmy:restart-for-computer-history-permissions";
@@ -48,7 +50,10 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
   const handlers = new Map<string, () => unknown>();
   const deferred: Array<() => void> = [];
   const app = { quit: vi.fn(), relaunch: vi.fn() };
+  const stopComputerUseAgentForPermissionRestart = vi.fn().mockResolvedValue(undefined);
+  const warn = vi.fn();
   const createSessionId = vi.fn(randomUUID);
+  let systemSessionEnding = false;
   const ipcMain = {
     handle: (channel: string, callback: () => unknown) => handlers.set(channel, callback),
     removeHandler: (channel: string) => handlers.delete(channel),
@@ -56,6 +61,8 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
   const program = [
     mainVariable("computerHistoryPermissionSessionId"),
     mainVariable("shouldRelaunchAfterQuitCleanup"),
+    mainVariable("hasCapturedMacPermissionRestart"),
+    mainVariable("MACOS_PERMISSION_RELAUNCH_ARG"),
     permissionIpcStatements("registerIpcHandlers", "handle"),
     mainFunction("relaunchAfterQuitCleanupIfRequested").getText(mainAst),
     `return {
@@ -68,8 +75,9 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
   // Execute the real handler bodies without importing Electron's app entrypoint.
-  const lifecycle = Function("ipcMain", "app", "process", "setImmediate", "randomUUID", "writePackagedStartupLog", compiled)(
-    ipcMain, app, { platform }, (callback: () => void) => deferred.push(callback), createSessionId, vi.fn(),
+  const lifecycle = Function("ipcMain", "app", "process", "setImmediate", "randomUUID", "writePackagedStartupLog", "stopComputerUseAgentForPermissionRestart", "isMacSystemSessionEnding", "console", compiled)(
+    ipcMain, app, { platform, env: {}, argv: ["Memmy"] }, (callback: () => void) => deferred.push(callback), createSessionId, vi.fn(), stopComputerUseAgentForPermissionRestart,
+    () => systemSessionEnding, { warn },
   ) as { relaunchRequested(): boolean; finishCleanup(): void; removeHandlers(): void };
 
   let api: PermissionApi | undefined;
@@ -98,10 +106,42 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
     module, module.exports, { platform },
   );
   if (!api) throw new Error("Preload did not expose the Memmy API");
-  return { api, app, deferred, handlers, createSessionId, ipcRenderer, ...lifecycle };
+  return { api, app, deferred, handlers, createSessionId, ipcRenderer, stopComputerUseAgentForPermissionRestart, warn,
+    setSystemSessionEnding: (next: boolean) => { systemSessionEnding = next; }, ...lifecycle };
 }
 
 describe("Computer History permission IPC", () => {
+  it("observes the native permission flags while the settings guide is open", async () => {
+    const binary = "/Applications/Memmy.app/Contents/Resources/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse";
+    const helper = "/Applications/Memmy.app/Contents/Resources/Memmy Computer Use.app";
+    const guide = vi.fn(async (_reason: unknown, _helper: unknown, controls: GuideControls) => {
+      expect(controls.canContinue).toBe(false);
+      expect(controls.observe).toBeTypeOf("function");
+      expect(await controls.observe!()).toMatchObject({ inputMonitoring: "required" });
+      expect(await controls.observe!()).toMatchObject({ inputMonitoring: "granted" });
+      expect(await controls.check()).toMatchObject({ inputMonitoring: "granted" });
+      return true;
+    });
+    const runHelperCommand = vi.fn()
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ accessibility: true, inputMonitoring: false, screenRecording: false }) })
+      .mockResolvedValue({ stdout: JSON.stringify({ accessibility: true, inputMonitoring: true, screenRecording: false }) });
+    const compiled = ts.transpileModule(`${mainFunction("guideMemmySystemPermission").getText(mainAst)}\nreturn guideMemmySystemPermission;`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const guidePermission = Function("memmyPermissionOnboarding", "resolveComputerUseBinary", "computerUseApp", "app", "process", "runHelperCommand", "memmyPermissionSnapshot", compiled)(
+      { guide }, vi.fn().mockResolvedValue(binary), vi.fn().mockReturnValue(helper),
+      { isPackaged: true }, { resourcesPath: "/Applications/Memmy.app/Contents/Resources", env: {} },
+      runHelperCommand, memmyPermissionSnapshot,
+    ) as (permission: "inputMonitoring") => Promise<boolean>;
+    await expect(guidePermission("inputMonitoring")).resolves.toBe(true);
+    expect(guide).toHaveBeenCalledWith("inputMonitoring", helper, expect.any(Object));
+    expect(runHelperCommand.mock.calls).toEqual([
+      [binary, ["__memmy-history", "--permissions"]],
+      [binary, ["__memmy-history", "--permissions"]],
+      [binary, ["__memmy-history", "--permissions"]],
+    ]);
+  });
+
   it("keeps the session stable within a launch and renews it for the next launch", async () => {
     const first = loadPermissionIpc("darwin");
     const second = loadPermissionIpc("darwin");
@@ -118,6 +158,7 @@ describe("Computer History permission IPC", () => {
     await expect(shell.api.restartForComputerHistoryPermissions()).resolves.toBeUndefined();
     expect(shell.ipcRenderer.invoke).toHaveBeenCalledWith(restartChannel);
     expect(shell.relaunchRequested()).toBe(true);
+    expect(shell.stopComputerUseAgentForPermissionRestart).toHaveBeenCalledOnce();
     expect(shell.app.quit).not.toHaveBeenCalled();
     expect(shell.app.relaunch).not.toHaveBeenCalled();
     expect(shell.deferred).toHaveLength(1);
@@ -126,6 +167,7 @@ describe("Computer History permission IPC", () => {
     expect(shell.app.relaunch).not.toHaveBeenCalled();
     shell.finishCleanup();
     expect(shell.app.relaunch).toHaveBeenCalledTimes(1);
+    expect(shell.app.relaunch).toHaveBeenCalledWith({ args: [] });
     expect(shell.relaunchRequested()).toBe(false);
     shell.finishCleanup();
     expect(shell.app.relaunch).toHaveBeenCalledTimes(1);
@@ -140,6 +182,32 @@ describe("Computer History permission IPC", () => {
     expect(shell.deferred).toHaveLength(0);
     expect(shell.app.quit).not.toHaveBeenCalled();
     expect(shell.app.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("continues permission restart through normal quit cleanup if native shutdown fails", async () => {
+    const shell = loadPermissionIpc("darwin");
+    const error = new Error("native agent shutdown timed out");
+    shell.stopComputerUseAgentForPermissionRestart.mockRejectedValueOnce(error);
+    await expect(shell.api.restartForComputerHistoryPermissions()).resolves.toBeUndefined();
+    expect(shell.warn).toHaveBeenCalledWith(
+      "Failed to stop the native Computer Use agent before permission restart:", error);
+    expect(shell.relaunchRequested()).toBe(true);
+    expect(shell.app.quit).not.toHaveBeenCalled();
+    expect(shell.deferred).toHaveLength(1);
+    shell.deferred[0]();
+    expect(shell.app.quit).toHaveBeenCalledOnce();
+    shell.finishCleanup();
+    expect(shell.app.relaunch).toHaveBeenCalledExactlyOnceWith({ args: [] });
+    expect(shell.relaunchRequested()).toBe(false);
+  });
+
+  it("a system-session quit overrides a pending explicit History permission restart", async () => {
+    const shell = loadPermissionIpc("darwin");
+    await shell.api.restartForComputerHistoryPermissions();
+    expect(shell.relaunchRequested()).toBe(true);
+    shell.setSystemSessionEnding(true); shell.finishCleanup();
+    expect(shell.app.relaunch).not.toHaveBeenCalled();
+    expect(shell.relaunchRequested()).toBe(false);
   });
 
   it("removes both permission handlers during quit cleanup", async () => {

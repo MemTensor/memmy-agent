@@ -62,6 +62,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $lockAcquiredHere = $false
+$ownershipDenied = $false
 $effectiveSourceDataPath = $SourceDataPath
 $effectiveSourceAuthority = $SourceAuthority
 $effectiveSourceInstallDir = $SourceInstallDir
@@ -77,6 +78,19 @@ $effectiveTargetInstallDir = if ($TargetInstallDir) {
   Split-Path -Parent $SourceDataPath
 }
 $verifiedExternalRuntimeHomePath = ""
+
+function Invoke-MemmyRuntimeOwnershipGuard([string]$Path) {
+  # Profiles and temporary test layouts are private; only the canonical shared drive root is guarded.
+  if ($Path -notmatch '^[A-BD-Za-bd-z]:[\\/]MemmyData[\\/]\.memmy(?:[\\/]|\.migration-backup-|$)') { return }
+  try {
+    $ownershipScript = Join-Path $PSScriptRoot 'MemmyWindowsRuntimeOwnership.ps1'
+    if (-not (Test-Path -LiteralPath $ownershipScript -PathType Leaf)) { throw 'Packaged Windows ownership helper is missing' }
+    . $ownershipScript -LibraryOnly
+    Assert-MemmySharedRuntimeOwnership $Path | Out-Null
+  } catch {
+    throw ('MEMMY_WINDOWS_DATA_OWNERSHIP: Choose C: for a per-user installation, or use a separate drive. Another folder on this same drive cannot isolate Memmy data. ' + $_.Exception.Message)
+  }
+}
 
 function Ensure-ParentDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -156,6 +170,8 @@ function Assert-NoReparsePath {
     [Parameter(Mandatory = $true)][string]$Description
   )
 
+  Invoke-MemmyRuntimeOwnershipGuard $Path
+
   $currentPath = Get-NormalizedPath -Path $Path
   while (-not (Test-Path -LiteralPath $currentPath)) {
     $parentPath = [System.IO.Path]::GetDirectoryName($currentPath)
@@ -213,12 +229,14 @@ function Read-DataRootPointer {
             (Test-SamePath -Left $normalizedValue -Right $AllowedRememberedRuntimeHomePath)) -or
           ($verifiedExternalRuntimeHomePath -and
             (Test-SamePath -Left $normalizedValue -Right $verifiedExternalRuntimeHomePath))) {
+        Invoke-MemmyRuntimeOwnershipGuard $normalizedValue
         return $normalizedValue
       }
       Write-MigrationLog -Message "Ignoring data-root pointer outside a supported Memmy runtime root: $normalizedValue"
     }
   }
   catch {
+    if ($_.Exception.Message -like 'MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw }
     Write-MigrationLog -Message ("Ignoring unreadable data-root pointer: {0}" -f $_.Exception.Message)
   }
   return $null
@@ -349,6 +367,7 @@ function Test-CompleteInstallUserData {
 function Test-CompleteInstallRuntimeData {
   param([Parameter(Mandatory = $true)][string]$Path)
 
+  Invoke-MemmyRuntimeOwnershipGuard $Path
   $configPath = Join-Path $Path "config.yaml"
   if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     return $false
@@ -414,8 +433,8 @@ function Test-CompatibleRecordedVersion {
     [Parameter(Mandatory = $true)][string]$InstalledVersion
   )
 
-  $recordedMatch = [Regex]::Match($RecordedVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)$')
-  $installedMatch = [Regex]::Match($InstalledVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:\s.*)?$')
+  $recordedMatch = [Regex]::Match($RecordedVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.-]+)?$')
+  $installedMatch = [Regex]::Match($InstalledVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+][0-9A-Za-z.-]+)?(?:\s.*)?$')
   if (-not $recordedMatch.Success -or -not $installedMatch.Success) { return $false }
   try {
     return ([Version]$recordedMatch.Groups['version'].Value) -eq
@@ -481,10 +500,12 @@ function Resolve-EffectiveInstallSource {
           throw "The external-v1 record does not identify the trusted current data layout."
         }
         Assert-NoReparsePath -Path $recordedExternalRuntimeHomePath -Description 'recorded external runtimeHomePath'
+        Invoke-MemmyRuntimeOwnershipGuard $recordedExternalRuntimeHomePath
         $script:verifiedExternalRuntimeHomePath = $recordedExternalRuntimeHomePath
         Write-MigrationLog -Message "Using the verified external-v1 runtime source for relocation: $verifiedExternalRuntimeHomePath"
       }
       catch {
+        if ($_.Exception.Message -like 'MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw }
         Write-MigrationLog -Message "Ignoring an invalid external-v1 runtime source: $($_.Exception.Message)"
         $script:verifiedExternalRuntimeHomePath = ""
       }
@@ -803,6 +824,67 @@ function Update-StagedStandaloneSessionBindings {
   return $updatedCount
 }
 
+function Update-StagedMemoryRuntimePointer {
+  param(
+    [Parameter(Mandatory = $true)][string]$StagingPath,
+    [Parameter(Mandatory = $true)][string]$SourceRuntimeHomePath,
+    [Parameter(Mandatory = $true)][string]$TargetRuntimeHomePath,
+    [string]$SourceInstallDir = "",
+    [string]$TargetInstallDir = ""
+  )
+
+  $pointerPath = Join-Path $StagingPath "memory-service\current.json"
+  if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf)) { return $false }
+  Assert-NoReparsePath -Path $pointerPath -Description 'staged Memory runtime pointer'
+  $pointer = [System.IO.File]::ReadAllText($pointerPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+  $runtimeProperty = $pointer.PSObject.Properties["runtimeDir"]
+  $entryProperty = $pointer.PSObject.Properties["entrypoint"]
+  if ($null -eq $runtimeProperty -or $null -eq $entryProperty -or
+      -not ($runtimeProperty.Value -is [string]) -or -not ($entryProperty.Value -is [string]) -or
+      -not [System.IO.Path]::IsPathRooted($runtimeProperty.Value) -or
+      -not [System.IO.Path]::IsPathRooted($entryProperty.Value)) { return $false }
+
+  $sourceHome = Get-NormalizedPath -Path $SourceRuntimeHomePath
+  $sourceRuntimeRoot = Join-Path $sourceHome "memory-service\runtime"
+  $runtimeDirectory = Get-NormalizedPath -Path $runtimeProperty.Value
+  # An independently installed runtime outside the copied home belongs to its
+  # own installer. Rebase only immutable builds that this transaction copied.
+  if (-not $runtimeDirectory.StartsWith("$sourceRuntimeRoot\", [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+  $expectedEntry = Join-Path $runtimeDirectory "dist\src\server\index.js"
+  if (-not (Test-SamePath -Left $entryProperty.Value -Right $expectedEntry)) {
+    throw "Installed Memory runtime entrypoint does not match its migrated runtime directory"
+  }
+  $relativeRuntimeDirectory = $runtimeDirectory.Substring($sourceHome.Length + 1)
+  $stagedRuntimeDirectory = Join-Path $StagingPath $relativeRuntimeDirectory
+  $stagedEntry = Join-Path $stagedRuntimeDirectory "dist\src\server\index.js"
+  Assert-NoReparsePath -Path $stagedEntry -Description 'staged Memory runtime entrypoint'
+  if (-not (Test-Path -LiteralPath $stagedEntry -PathType Leaf)) {
+    throw "Migrated Memory runtime entrypoint is missing from the staged copy"
+  }
+  $targetRuntimeDirectory = Join-Path (Get-NormalizedPath -Path $TargetRuntimeHomePath) $relativeRuntimeDirectory
+  $runtimeProperty.Value = $targetRuntimeDirectory
+  $entryProperty.Value = Join-Path $targetRuntimeDirectory "dist\src\server\index.js"
+  $executableProperty = $pointer.PSObject.Properties["runtimeExecutable"]
+  if ($null -ne $executableProperty -and $executableProperty.Value -is [string] -and
+      [System.IO.Path]::IsPathRooted($executableProperty.Value) -and
+      $SourceInstallDir -and $TargetInstallDir -and
+      [System.IO.Path]::IsPathRooted($SourceInstallDir) -and [System.IO.Path]::IsPathRooted($TargetInstallDir) -and
+      (Test-SamePath -Left $executableProperty.Value -Right (Join-Path $SourceInstallDir "Memmy.exe"))) {
+    # The trusted installer context identifies a relocated Desktop executable;
+    # standalone Node executables retain their original ownership and path.
+    $executableProperty.Value = Join-Path (Get-NormalizedPath -Path $TargetInstallDir) "Memmy.exe"
+  }
+  $temporaryPath = "$pointerPath.rebase-$([Guid]::NewGuid().ToString('N')).tmp"
+  try {
+    [System.IO.File]::WriteAllText($temporaryPath, ($pointer | ConvertTo-Json -Compress -Depth 100), (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $temporaryPath -Destination $pointerPath -Force -ErrorAction Stop
+  }
+  finally {
+    if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+  }
+  return $true
+}
+
 function Update-StagedRuntimePaths {
   param(
     [Parameter(Mandatory = $true)][string]$StagingPath,
@@ -811,6 +893,7 @@ function Update-StagedRuntimePaths {
   )
 
   $configUpdated = $false
+  $memoryPointerUpdated = $false
   $sessionCount = 0
   $processedSourcePaths = @()
   foreach ($sourceRuntimeHomePath in @($SourceRuntimeHomePaths | Where-Object { $_ })) {
@@ -829,8 +912,16 @@ function Update-StagedRuntimePaths {
       -StagingPath $StagingPath `
       -SourceRuntimeHomePath $sourceRuntimeHomePath `
       -TargetRuntimeHomePath $TargetRuntimeHomePath
+    if (Update-StagedMemoryRuntimePointer `
+        -StagingPath $StagingPath `
+        -SourceRuntimeHomePath $sourceRuntimeHomePath `
+        -TargetRuntimeHomePath $TargetRuntimeHomePath `
+        -SourceInstallDir $effectiveSourceInstallDir `
+        -TargetInstallDir $effectiveTargetInstallDir) {
+      $memoryPointerUpdated = $true
+    }
   }
-  Write-MigrationLog -Message "Rebased staged runtime defaults config=$configUpdated standaloneSessions=$sessionCount sources=$($processedSourcePaths -join ';') target=$TargetRuntimeHomePath"
+  Write-MigrationLog -Message "Rebased staged runtime defaults config=$configUpdated standaloneSessions=$sessionCount memoryPointer=$memoryPointerUpdated sources=$($processedSourcePaths -join ';') target=$TargetRuntimeHomePath"
 }
 
 function Invoke-TransactionalDirectoryCopy {
@@ -1307,6 +1398,7 @@ function Read-VerifiedPreviousMigrationForCarryForward {
 }
 
 try {
+  Invoke-MemmyRuntimeOwnershipGuard $TargetRuntimeHomePath
   if ($AcquireLock) {
     Ensure-ParentDirectory -Path $LockPath
     New-Item -ItemType Directory -Path $LockPath -ErrorAction Stop | Out-Null
@@ -1523,6 +1615,7 @@ try {
       }
       catch {
         $prepareFailure = $_
+        if ($prepareFailure.Exception.Message -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw $prepareFailure }
         if ($preparedCopies.Count -gt 0 -and -not $preparedStateWritten) {
           try {
             Write-PreparedRollbackJournal `
@@ -1606,6 +1699,13 @@ try {
   exit 0
 }
 catch {
+  $migrationError = $_
+  $ownershipDenied = $migrationError.Exception.Message -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*'
+  if ($ownershipDenied) {
+    # Refuse before generic source preservation, rollback, or lock cleanup.
+    [Console]::Error.WriteLine($migrationError.Exception.Message)
+    exit 5
+  }
   try {
     Preserve-FailedDirectMigrationSource
   }

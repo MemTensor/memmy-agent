@@ -15,6 +15,7 @@ import {
 } from "../../algorithm/plugin-algorithms.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
+import { isObservationMemory, isObservationMemoryProcessed } from "../observation-memory-state.js";
 
 const EMBEDDING_RETRY_BASE_BACKOFF_MS = 60_000;
 const EMBEDDING_RETRY_MAX_BACKOFF_MS = 60 * 60_000;
@@ -31,6 +32,10 @@ export interface EmbeddingRetryRunItem {
 }
 
 export function embeddingTextForMemory(memory: MemoryRow): string {
+  if (isObservationMemory(memory)) {
+    return isObservationMemoryProcessed(memory)
+      ? [memory.info.title, memory.info.summary, memory.memoryValue].filter(Boolean).join("\n\n") : "";
+  }
   const trace = traceMetaFromMemory(memory);
   if (trace) {
     return [trace.summary, trace.reflection ?? ""]

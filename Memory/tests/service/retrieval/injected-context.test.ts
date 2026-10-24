@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertActivePolicyMemory,
   insertActiveSkillMemoryForTest,
@@ -7,6 +7,7 @@ import {
 } from "../../fixtures/evolution-fixture.js";
 import {
   createBatchReflectionLlm,
+  createCapturingEmbedder,
   configWithMemoryGates,
   createMemoryServiceFixture,
   runWorkerRounds
@@ -862,6 +863,58 @@ describe("MemoryService / retrieval / injected context", () => {
 
     db.close();
   });
+
+  it.each(["介绍下你自己", "What can you do?", "谢谢"])(
+    "avoids remote work for a no-recall turn in an existing session: %s",
+    async (query) => {
+      const llm = createBatchReflectionLlm([]);
+      const embedder = createCapturingEmbedder([]);
+      const complete = vi.spyOn(llm, "complete");
+      const completeJson = vi.spyOn(llm, "completeJson");
+      const embed = vi.spyOn(embedder, "embed");
+      const embedOne = vi.spyOn(embedder, "embedOne");
+      const { db, service } = createTestService({ llm, embedder });
+      const namespace = { source: "memmy-agent", profileId: "default", userId: "self-introduction-user" };
+      const session = service.openSession({ namespace });
+      const previous = service.completeTurn("turn-before-introduction", {
+        sessionId: session.sessionId,
+        query: "Fix the pytest failure and run the tests again.",
+        answer: "The pytest failure is fixed and the tests pass."
+      });
+      insertActivePolicyMemory(db, {
+        id: "policy-introduction-test",
+        userId: namespace.userId,
+        sessionId: session.sessionId,
+        agentId: namespace.source,
+        appId: "memmy",
+        profileId: namespace.profileId,
+        sourceTraceId: previous.l1MemoryId,
+        sourceEpisodeId: previous.episodeId
+      });
+      expect(db.db.prepare("SELECT status FROM memories WHERE id = ?").get("policy-introduction-test"))
+        .toEqual({ status: "activated" });
+      for (const spy of [complete, completeJson, embed, embedOne]) spy.mockClear();
+
+      const prepared = await service.startTurn({
+        turnId: "turn-self-introduction",
+        sessionId: session.sessionId,
+        query
+      });
+      expect(prepared.sourceMemoryIds).toEqual([]);
+      expect(prepared.status).toContain(
+        query === "谢谢" ? "intent:chitchat:retrieval_skipped" : "intent:meta:retrieval_skipped"
+      );
+      const completed = service.completeTurn("turn-self-introduction", {
+        sessionId: session.sessionId,
+        query,
+        answer: "我是 Memmy，可以帮你处理任务。"
+      });
+      expect(db.db.prepare("SELECT user_text, assistant_text FROM raw_turns WHERE id = ?").get(completed.rawTurnId))
+        .toEqual({ user_text: query, assistant_text: "我是 Memmy，可以帮你处理任务。" });
+      for (const spy of [complete, completeJson, embed, embedOne]) expect(spy).not.toHaveBeenCalled();
+      db.close();
+    }
+  );
 
   it("applies turn-start intent gates while creating routed episodes", async () => {
     const { db, service } = createTestService();

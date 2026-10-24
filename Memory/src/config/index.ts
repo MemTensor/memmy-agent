@@ -17,6 +17,7 @@ export type LlmProviderName =
   | ""
   | "local_only"
   | "openai_compatible"
+  | "openai_responses"
   | "sglang"
   | "vllm"
   | "gemini"
@@ -94,6 +95,7 @@ export interface EmbeddingConfig {
   actualModelContext?: ActualModelContext;
   selectionError?: "model_selection_unavailable";
   maxInputTokens?: number;
+  maxInputBytes?: number;
   batchSize: number;
   timeoutMs: number;
   maxRetries: number;
@@ -275,8 +277,8 @@ export interface AlgorithmConfig {
   };
 }
 
-/** Concrete languages the host app can pin memory output to. */
-export type MemoryLanguage = "zh-CN" | "en-US";
+/** A canonical, concrete BCP 47 locale validated when host configuration is loaded. */
+export type MemoryLanguage = string;
 
 export interface MemmyConfig {
   version: 1;
@@ -628,6 +630,7 @@ function configFromEnv(): Record<string, unknown> {
       model: process.env.MEMMY_EMBEDDING_MODEL,
       apiKey: process.env.MEMMY_EMBEDDING_API_KEY,
       maxInputTokens: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS"),
+      maxInputBytes: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_BYTES"),
       batchSize: numberEnv("MEMMY_EMBEDDING_BATCH_SIZE"),
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
@@ -652,8 +655,21 @@ function configFromEnv(): Record<string, unknown> {
  * Anything the host cannot resolve to a concrete language is left unset, so
  * callers fall back to reading the language from the content itself.
  */
-function memoryLanguage(value: unknown): MemoryLanguage | undefined {
-  return value === "zh-CN" || value === "en-US" ? value : undefined;
+export function normalizeMemoryLanguage(value: unknown): MemoryLanguage | undefined {
+  if (typeof value !== "string" || !value.trim() || value.trim().toLowerCase() === "system") return undefined;
+  try {
+    const canonical = Intl.getCanonicalLocales(value.trim())[0];
+    if (!canonical) return undefined;
+    const locale = new Intl.Locale(canonical);
+    // Match the host's concrete output-language contract without importing App.
+    if (!/^[a-z]{2,3}$/u.test(locale.language)
+      || /^(?:und|mul|mis|zxx|qps)$/u.test(locale.language)
+      || /^q[a-t][a-z]$/u.test(locale.language)
+      || locale.region === "XA" || locale.region === "XB") return undefined;
+    return canonical;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
@@ -673,12 +689,13 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
   const embedding = normalizeEmbedding(asRecord(input.embedding));
   const agentAccess = normalizeAgentAccess(asRecord(input.agentAccess));
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
+  const language = normalizeMemoryLanguage(input.language);
   return {
     version: 1,
     domain: memoryDomainName(input.domain, DEFAULT_MEMMY_CONFIG.domain),
     roleRouting: normalizeRoleRouting(asRecord(input.roleRouting)),
     userId: optionalString(input.userId),
-    ...(memoryLanguage(input.language) ? { language: memoryLanguage(input.language)! } : {}),
+    ...(language ? { language } : {}),
     storage,
     summary,
     evolution,
@@ -799,6 +816,7 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
       ? input.selectionError
       : undefined,
     maxInputTokens: positiveInteger(input.maxInputTokens),
+    maxInputBytes: positiveInteger(input.maxInputBytes),
     batchSize: numberValue(input.batchSize, DEFAULT_MEMMY_CONFIG.embedding.batchSize),
     timeoutMs: numberValue(input.timeoutMs, DEFAULT_MEMMY_CONFIG.embedding.timeoutMs),
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),
@@ -843,7 +861,7 @@ function resolveAssignedLlm(
   if (!resolved.ok || !llmProtocolSupported(resolved.context.protocol)) {
     return unavailableLlm(defaults);
   }
-  const runtimeProvider = memoryLlmProvider(resolved.context.provider);
+  const runtimeProvider = memoryRuntimeProvider(resolved.context.provider, resolved.context.protocol);
   return {
     ...defaults,
     provider: runtimeProvider,
@@ -887,6 +905,17 @@ function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
     model: "",
     selectionError: "model_selection_unavailable"
   };
+}
+
+function memoryRuntimeProvider(
+  provider: string,
+  protocol: ActualModelContext["protocol"]
+): LlmProviderName {
+  if (protocol === "bedrock-converse") return "bedrock";
+  if (protocol === "openai-responses") return "openai_responses";
+  if (protocol === "anthropic-messages") return "anthropic";
+  if (protocol === "gemini-generate-content") return "gemini";
+  return memoryLlmProvider(provider);
 }
 
 function memoryLlmProvider(provider: string): LlmProviderName {
@@ -1104,8 +1133,10 @@ function runtimeAssignmentMode(rootConfig: Record<string, unknown>): "account" |
 
 function llmProtocolSupported(protocol: ActualModelContext["protocol"]): boolean {
   return protocol === "openai-chat-completions"
+    || protocol === "openai-responses"
     || protocol === "anthropic-messages"
     || protocol === "gemini-generate-content"
+    || protocol === "bedrock-converse"
     || protocol === "memmy-account";
 }
 
@@ -1364,6 +1395,7 @@ function llmProvider(value: unknown, fallback: LlmProviderName): LlmProviderName
     provider === "" ||
     provider === "local_only" ||
     provider === "openai_compatible" ||
+    provider === "openai_responses" ||
     provider === "sglang" ||
     provider === "vllm" ||
     provider === "gemini" ||

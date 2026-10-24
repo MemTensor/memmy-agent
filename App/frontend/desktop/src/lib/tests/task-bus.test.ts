@@ -8,6 +8,7 @@ import {
   createEmptyTaskBusSnapshot,
   createTaskRecord,
   dismissTaskInSnapshot,
+  errorTaskInSnapshot,
   focusTaskInSnapshot,
   loadTaskBusSnapshot,
   markTaskReadInSnapshot,
@@ -212,6 +213,242 @@ describe("TaskBus snapshot helpers", () => {
     expect(snapshot.tasks[0]?.status).toBe("done");
     expect(snapshot.tasks[0]?.lastAgentMessage).toBe("端午节是6月9日");
     expect(snapshot.tasks[0]?.finishedAt).toBe(1500);
+    expect(snapshot.tasks[0]?.unseen).toBe(true);
+  });
+
+  it("侧边栏未读点按 session 同步，已读会话里的多条任务都不再计为未读", () => {
+    const older = createTaskRecord({ input: "旧问题", source: "main", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const latest = createTaskRecord({ input: "新问题", source: "main", sessionId: "websocket:chat-1" }, { now: 2000, makeId: nextId(["task-new"]) });
+    const other = createTaskRecord({ input: "另一个会话", source: "main", sessionId: "chat-2" }, { now: 3000, makeId: nextId(["task-other"]) });
+    let snapshot = addTaskToSnapshot(addTaskToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), other), latest), older);
+    snapshot = completeTaskInSnapshot(snapshot, older.id, "旧答案", 1100);
+    snapshot = completeTaskInSnapshot(snapshot, latest.id, "新答案", 2100);
+    snapshot = completeTaskInSnapshot(snapshot, other.id, "其他答案", 3100);
+
+    snapshot = syncAgentTaskStatusesToSnapshot(snapshot, {
+      now: 4000,
+      tasks: [
+        { sessionIds: ["chat-1", "websocket:chat-1"], isRunning: false, completedUnseen: false },
+        { sessionIds: ["chat-2"], isRunning: false, completedUnseen: true }
+      ]
+    });
+
+    expect(snapshot.tasks.find((item) => item.id === older.id)).toMatchObject({ unseen: false, readAt: 4000 });
+    expect(snapshot.tasks.find((item) => item.id === latest.id)).toMatchObject({ unseen: false, readAt: 4000 });
+    expect(snapshot.tasks.find((item) => item.id === other.id)?.unseen).toBe(true);
+    expect(snapshot.tasks.find((item) => item.id === other.id)?.readAt).toBeUndefined();
+
+    const acknowledged = markTaskReadInSnapshot(snapshot, other.id, 5000);
+    const resurfaced = syncAgentTaskStatusesToSnapshot(acknowledged, {
+      now: 6000,
+      tasks: [{ sessionIds: ["chat-2"], isRunning: false, completedUnseen: true }]
+    });
+    expect(resurfaced.tasks.find((item) => item.id === other.id)).toMatchObject({ unseen: false, readAt: 5000 });
+  });
+
+  it("已读会话的历史消息首次同步时原子应用侧边栏未读状态", () => {
+    const snapshot = syncAgentConversationToSnapshot(createEmptyTaskBusSnapshot(), {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      completedUnseen: false,
+      now: 2000,
+      makeId: nextId(["task-history"]),
+      messages: [
+        { role: "user", content: "历史问题", createdAt: 1000 },
+        { role: "assistant", content: "已看过的答案", createdAt: 1500 }
+      ]
+    });
+
+    expect(snapshot.tasks[0]).toMatchObject({ status: "done", unseen: false, readAt: 2000 });
+  });
+
+  it("新完成回合保持未读，但重复同步不会重新标记同回合的桌宠已读通知", () => {
+    const input = {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      completedUnseen: true,
+      now: 2000,
+      makeId: nextId(["task-unread"]),
+      messages: [
+        { role: "user", content: "后台问题", createdAt: 1000 },
+        { role: "assistant", content: "后台答案", createdAt: 1500 }
+      ]
+    };
+    const unread = syncAgentConversationToSnapshot(createEmptyTaskBusSnapshot(), input);
+    expect(unread.tasks[0]).toMatchObject({ unseen: true });
+    const read = markTaskReadInSnapshot(unread, "task-unread", 2500);
+    const repeated = syncAgentConversationToSnapshot(read, { ...input, now: 3000 });
+
+    expect(repeated.tasks[0]).toMatchObject({ unseen: false, readAt: 2500 });
+  });
+
+  it("一分钟内相同输入的新回合不会复用已读桌宠回合", () => {
+    const oldTask = createTaskRecord({ input: "重复问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const read = markTaskReadInSnapshot(completeTaskInSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), oldTask), oldTask.id, "第一次答案", 2000), oldTask.id, 2500);
+    const snapshot = syncAgentConversationToSnapshot(read, {
+      sessionIds: ["websocket:chat-1"],
+      isRunning: false,
+      completedUnseen: true,
+      now: 12000,
+      makeId: nextId(["task-new"]),
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 10000 },
+        { role: "assistant", content: "第二次答案", createdAt: 11000 }
+      ]
+    });
+
+    expect(snapshot.tasks).toHaveLength(2);
+    expect(snapshot.tasks.find((item) => item.id === "task-old")).toMatchObject({ lastAgentMessage: "第一次答案", unseen: false, readAt: 2500 });
+    expect(snapshot.tasks.find((item) => item.id === "task-new")).toMatchObject({ lastAgentMessage: "第二次答案", unseen: true });
+  });
+
+  it("历史回合同步不推进完成时间，随后相同输入的新回合保持独立未读", () => {
+    const oldTask = createTaskRecord({ input: "重复问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    let snapshot = markTaskReadInSnapshot(completeTaskInSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), oldTask), oldTask.id, "第一次答案", 2000), oldTask.id, 2500);
+    snapshot = syncAgentConversationToSnapshot(snapshot, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      now: 10000,
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 1100 },
+        { role: "assistant", content: "第一次答案", createdAt: 1500 }
+      ]
+    });
+    expect(snapshot.tasks[0]?.finishedAt).toBe(2000);
+    snapshot = syncAgentConversationToSnapshot(snapshot, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      completedUnseen: true,
+      now: 11000,
+      makeId: nextId(["task-new"]),
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 9000 },
+        { role: "assistant", content: "第二次答案", createdAt: 10500 }
+      ]
+    });
+
+    expect(snapshot.tasks).toHaveLength(2);
+    expect(snapshot.tasks.find((item) => item.id === "task-old")).toMatchObject({ lastAgentMessage: "第一次答案", unseen: false, readAt: 2500 });
+    expect(snapshot.tasks.find((item) => item.id === "task-new")).toMatchObject({ lastAgentMessage: "第二次答案", unseen: true });
+  });
+
+  it("已关联的桌宠回合在重启后也不会复用完成前排队的同文新回合", () => {
+    const oldTask = createTaskRecord({ input: "重复问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    let snapshot = markTaskReadInSnapshot(completeTaskInSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), oldTask), oldTask.id, "第一次答案", 10000), oldTask.id, 10500);
+    snapshot = syncAgentConversationToSnapshot(snapshot, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      now: 11000,
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 1100 },
+        { role: "assistant", content: "第一次答案", createdAt: 5000 }
+      ]
+    });
+    const storage = new MemoryStorage();
+    saveTaskBusSnapshot(storage, snapshot);
+    snapshot = loadTaskBusSnapshot(storage);
+    snapshot = syncAgentConversationToSnapshot(snapshot, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      completedUnseen: true,
+      now: 12500,
+      makeId: nextId(["task-new"]),
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 9000 },
+        { role: "assistant", content: "第二次答案", createdAt: 12000 }
+      ]
+    });
+
+    expect(snapshot.tasks).toHaveLength(2);
+    expect(snapshot.tasks.find((item) => item.id === "task-old")).toMatchObject({ lastAgentMessage: "第一次答案", unseen: false, finishedAt: 10000 });
+    expect(snapshot.tasks.find((item) => item.id === "task-new")).toMatchObject({ lastAgentMessage: "第二次答案", unseen: true });
+  });
+
+  it("已关联的运行中桌宠回合只获取对应 user 时间戳的答案", () => {
+    const task = createTaskRecord({ input: "重复问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    let snapshot = syncAgentConversationToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), task), {
+      sessionIds: ["chat-1"],
+      isRunning: true,
+      now: 2000,
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 1100 },
+        { role: "assistant", content: "第一次答案", createdAt: 1500 }
+      ]
+    });
+    snapshot = syncAgentConversationToSnapshot(snapshot, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      now: 3000,
+      makeId: nextId(["task-new"]),
+      messages: [
+        { role: "user", content: "重复问题", createdAt: 1100 },
+        { role: "assistant", content: "第一次答案", createdAt: 1500 },
+        { role: "user", content: "重复问题", createdAt: 1900 },
+        { role: "assistant", content: "第二次答案", createdAt: 2500 }
+      ]
+    });
+
+    expect(snapshot.tasks.find((item) => item.id === "task-old")?.lastAgentMessage).toBe("第一次答案");
+    expect(snapshot.tasks.find((item) => item.id === "task-new")?.lastAgentMessage).toBe("第二次答案");
+  });
+
+  it("重复同步已收起的完成回合不会重新展开气泡或恢复未读", () => {
+    const task = createTaskRecord({ input: "完成问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-1"]) });
+    const dismissed = dismissTaskInSnapshot(completeTaskInSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), task), task.id, "完成答案", 2000), task.id, 2500);
+    const snapshot = syncAgentConversationToSnapshot(dismissed, {
+      sessionIds: ["chat-1"],
+      isRunning: false,
+      completedUnseen: true,
+      now: 3000,
+      messages: [
+        { role: "user", content: "完成问题", createdAt: 1100 },
+        { role: "assistant", content: "完成答案", createdAt: 1500 }
+      ]
+    });
+
+    expect(snapshot.tasks[0]).toMatchObject({ dismissed: true, unseen: false, readAt: 2500 });
+  });
+
+  it.each(["done", "error"] as const)("%s 重复完成回调不会恢复同一结果的已读通知，更新结果仍可通知", (status) => {
+    const finish = status === "done" ? completeTaskInSnapshot : errorTaskInSnapshot;
+    const task = createTaskRecord({ input: "任务问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-1"]) });
+    const done = finish(addTaskToSnapshot(createEmptyTaskBusSnapshot(), task), task.id, "结果一", 2000);
+    const read = markTaskReadInSnapshot(done, task.id, 2500);
+    const repeated = finish(read, task.id, "结果一", 3000);
+
+    expect(repeated).toBe(read);
+    expect(repeated.tasks[0]).toMatchObject({ status, unseen: false, readAt: 2500, finishedAt: 2000 });
+    expect(finish(repeated, task.id, "结果二", 3500).tasks[0]).toMatchObject({ status, unseen: true, readAt: undefined, lastAgentMessage: "结果二", finishedAt: 3500 });
+  });
+
+  it.each(["read", "dismiss"] as const)("%s 完成回合时按会话确认所有完成通知，并保留其他会话和运行中回合", (action) => {
+    const older = createTaskRecord({ input: "旧问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const latest = createTaskRecord({ input: "新问题", source: "pet", sessionId: "websocket:chat-1" }, { now: 2000, makeId: nextId(["task-new"]) });
+    const other = createTaskRecord({ input: "另一个会话", source: "pet", sessionId: "chat-2" }, { now: 3000, makeId: nextId(["task-other"]) });
+    const running = createTaskRecord({ input: "运行中问题", source: "pet", sessionId: "chat-1" }, { now: 4000, makeId: nextId(["task-running"]) });
+    let snapshot = addTaskToSnapshot(addTaskToSnapshot(addTaskToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), older), latest), other), running);
+    snapshot = completeTaskInSnapshot(snapshot, older.id, "旧答案", 1500);
+    snapshot = completeTaskInSnapshot(snapshot, latest.id, "新答案", 2500);
+    snapshot = completeTaskInSnapshot(snapshot, other.id, "其他答案", 3500);
+    snapshot = action === "read" ? markTaskReadInSnapshot(snapshot, latest.id, 5000) : dismissTaskInSnapshot(snapshot, latest.id, 5000);
+
+    expect(snapshot.tasks.find((item) => item.id === older.id)).toMatchObject({ unseen: false, readAt: 5000 });
+    expect(snapshot.tasks.find((item) => item.id === latest.id)).toMatchObject({ unseen: false, readAt: 5000 });
+    expect(snapshot.tasks.find((item) => item.id === other.id)).toMatchObject({ unseen: true });
+    expect(snapshot.tasks.find((item) => item.id === running.id)).toEqual(running);
+  });
+
+  it.each(["read", "dismiss"] as const)("%s 旧完成回合不会确认同会话后来完成的新通知", (action) => {
+    const older = createTaskRecord({ input: "旧问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const latest = createTaskRecord({ input: "新问题", source: "pet", sessionId: "websocket:chat-1" }, { now: 2000, makeId: nextId(["task-new"]) });
+    let snapshot = addTaskToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), older), latest);
+    snapshot = completeTaskInSnapshot(snapshot, older.id, "旧答案", 1500);
+    snapshot = completeTaskInSnapshot(snapshot, latest.id, "新答案", 2500);
+    const newerCompleted = snapshot.tasks.find((item) => item.id === latest.id);
+    snapshot = action === "read" ? markTaskReadInSnapshot(snapshot, older.id, 3000) : dismissTaskInSnapshot(snapshot, older.id, 3000);
+
+    expect(snapshot.tasks.find((item) => item.id === older.id)).toMatchObject({ unseen: false, readAt: 3000 });
+    expect(snapshot.tasks.find((item) => item.id === latest.id)).toEqual(newerCompleted);
   });
 
   it("完整模式任务列表只把同 session 最新代表任务推进为 running", () => {
@@ -229,6 +466,24 @@ describe("TaskBus snapshot helpers", () => {
     expect(snapshot.tasks.find((item) => item.id === older.id)?.status).toBe("done");
     expect(snapshot.tasks.find((item) => item.id === latest.id)?.status).toBe("processing");
     expect(snapshot.tasks.find((item) => item.id === latest.id)?.finishedAt).toBeUndefined();
+  });
+
+  it("旧回合迟到的完成时间不会抢走同 session 新回合的 running 状态", () => {
+    const older = createTaskRecord({ input: "旧问题", source: "pet", sessionId: "chat-1" }, { now: 1000, makeId: nextId(["task-old"]) });
+    const latest = createTaskRecord({ input: "新问题", source: "pet", sessionId: "websocket:chat-1" }, { now: 2000, makeId: nextId(["task-new"]) });
+    let snapshot = addTaskToSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), older), latest);
+    snapshot = completeTaskInSnapshot(snapshot, latest.id, "新答案", 2500);
+    snapshot = completeTaskInSnapshot(snapshot, older.id, "迟到的旧答案", 8000);
+    snapshot = syncAgentTaskStatusesToSnapshot(snapshot, {
+      now: 9000,
+      tasks: [{ sessionIds: ["chat-1"], isRunning: true }]
+    });
+
+    expect(snapshot.tasks.find((item) => item.id === older.id)).toMatchObject({ status: "done", finishedAt: 8000 });
+    const running = snapshot.tasks.find((item) => item.id === latest.id);
+    expect(running?.status).toBe("processing");
+    expect(running?.finishedAt).toBeUndefined();
+    expect(running?.unseen).toBeUndefined();
   });
 
   it("startNewSession 清焦点并置位，下一次创建任务后由调用方清掉 pendingNewSession", () => {
@@ -258,6 +513,7 @@ describe("TaskBus snapshot helpers", () => {
     expect(snapshot.focusedTaskId).toBe(task.id);
     expect(snapshot.tasks[0]?.dismissed).toBeUndefined();
     expect(snapshot.tasks[0]?.readAt).toBe(1200);
+    expect(snapshot.tasks[0]?.unseen).toBe(false);
   });
 
   it("dismissTask 只关闭桌宠 answering 气泡，不删除任务历史", () => {
@@ -269,6 +525,7 @@ describe("TaskBus snapshot helpers", () => {
     const dismissedTask = snapshot.tasks[0];
     expect(dismissedTask).toBeDefined();
     expect(dismissedTask?.dismissed).toBe(true);
+    expect(dismissedTask?.unseen).toBe(false);
     expect(snapshot.focusedTaskId).toBeNull();
   });
 

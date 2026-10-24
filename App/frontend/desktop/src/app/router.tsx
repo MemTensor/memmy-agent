@@ -1,5 +1,5 @@
 /** Router module. */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   PetGuideModal,
   readCloseMainWindowAction,
@@ -16,6 +16,8 @@ import {
   ProductTourGuide,
   productTourIncludesLogs,
   productTourMemorySubPage,
+  productTourStartMemorySubPage,
+  productTourStartRoute,
   productTourTabRoute,
   type ProductTourDismissResult,
   type ProductTourStepInfo,
@@ -26,7 +28,6 @@ import {
   clearDeferredGuidanceStep,
   clearProductTourStep,
   readCurrentRoute,
-  readDeferredGuidanceStep,
   readLaunchModeOverride,
   writeCurrentRoute,
   writeDeferredGuidanceStep,
@@ -35,6 +36,8 @@ import {
   type DeferredGuidanceStep
 } from "./routes.js";
 import { persistNickname } from "./nickname.js";
+import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "./campaign-prompt-state.js";
+import { useGuidanceProgress } from "./use-guidance-progress.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
@@ -48,23 +51,31 @@ import { appActions } from "../state/app-actions.js";
 import { NicknameModal } from "../components/nickname-modal.js";
 import { randomNickname } from "../lib/nickname.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import {
+  resolveWindowDragExclusionSelector,
+  WindowDragRegion
+} from "./window-drag-region.js";
 import { ApiKeyPage } from "../pages/api-key-page.js";
 import { ApiKeyOptionalPage } from "../pages/api-key-optional-page.js";
 import { ModelPage } from "../pages/model-page.js";
 import { HomePage } from "../pages/home-page.js";
+import { hasMountedBrowserPanel, MEMMY_BROWSER_MOUNTED_EVENT, requestBrowserNewTab } from "../pages/browser-panel.js";
 import { LoginPage } from "../pages/login-page.js";
-import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
-import { KnowledgePage } from "../pages/knowledge-page.js";
+import { writeMemorySubPage } from "../pages/memory-sub-page-storage.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
-import { SettingsPage } from "../pages/settings-page.js";
+import { PetStartupScreen } from "../pages/pet-startup-screen.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
-import { ToolsPage } from "../pages/tools-page.js";
 import { WelcomePage } from "../pages/welcome-page.js";
 
-function readWorkspaceGuidanceOverlay(storage: Storage | undefined): Extract<DeferredGuidanceStep, "product_tour" | "nickname"> | null {
-  const step = readDeferredGuidanceStep(storage);
+// These pages are not needed to show the startup, sign-in, or chat screens.
+const MemoryPage = lazy(() => import("../pages/memory-page.js").then(({ MemoryPage }) => ({ default: MemoryPage })));
+const KnowledgePage = lazy(() => import("../pages/knowledge-page.js").then(({ KnowledgePage }) => ({ default: KnowledgePage })));
+const SettingsPage = lazy(() => import("../pages/settings-page.js").then(({ SettingsPage }) => ({ default: SettingsPage })));
+const ToolsPage = lazy(() => import("../pages/tools-page.js").then(({ ToolsPage }) => ({ default: ToolsPage })));
+
+function readWorkspaceGuidanceOverlay(step: DeferredGuidanceStep | null): Extract<DeferredGuidanceStep, "product_tour" | "nickname"> | null {
   return step === "product_tour" || step === "nickname" ? step : null;
 }
 
@@ -75,13 +86,26 @@ export function AppRouter(props: { onRetry: () => void }) {
   const { track, ready: analyticsReady } = useAnalytics();
   const { language } = useTranslation();
   const prevPathRef = useRef<AppRoutePath | null>(null);
-  const [workspaceGuidanceStep, setWorkspaceGuidanceStep] = useState(() =>
-    readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage)
-  );
+  const { deferredGuidanceStep } = useGuidanceProgress();
+  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isCampaignPromptSurfaceReady({
+    startupStatus: state.startup.status,
+    currentPath: state.navigation.currentPath,
+  }) && isCampaignPromptSessionReady({
+    userMode: state.bootstrap?.app.userMode,
+    accountUserId: state.account.userId,
+    byokConfigured: Boolean(state.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length),
+    guidanceDone: true,
+  });
+  const workspaceGuidanceStep = guidanceWorkspaceReady ? readWorkspaceGuidanceOverlay(deferredGuidanceStep) : null;
   const [deferredNickname, setDeferredNickname] = useState("");
   const [petGuideRequest, setPetGuideRequest] = useState<MainWindowActionRequest | null>(null);
+  const [preserveHomeBrowser, setPreserveHomeBrowser] = useState(false);
   const isPetWindowContext = isPetWindow(state.navigation.currentPath);
-  const windowDragRegion = !isPetWindowContext ? <WindowDragRegion /> : null;
+  const windowDragRegion = !isPetWindowContext ? (
+    <WindowDragRegion
+      dynamicExclusionSelector={resolveWindowDragExclusionSelector(state.navigation.currentPath)}
+    />
+  ) : null;
 
   const completeMainWindowAction = useCallback(
     (request: MainWindowActionRequest, resolution: MainWindowActionResolution) => {
@@ -146,13 +170,40 @@ export function AppRouter(props: { onRetry: () => void }) {
 
   const currentPath = state.navigation.currentPath;
   useEffect(() => {
-    // Memory/Tools pages are not always wrapped by AppFrame; keep the product tour mounted at router level.
-    const step = readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage);
-    setWorkspaceGuidanceStep(step);
-    if (step === "nickname") {
+    const preserve = () => setPreserveHomeBrowser(true);
+    window.addEventListener(MEMMY_BROWSER_MOUNTED_EVENT, preserve);
+    if (hasMountedBrowserPanel()) preserve();
+    return () => window.removeEventListener(MEMMY_BROWSER_MOUNTED_EVENT, preserve);
+  }, []);
+  useEffect(() => window.memmy?.onEmbeddedBrowserOpen?.((url, owner) => {
+    requestBrowserNewTab(url, owner);
+    setPreserveHomeBrowser(true);
+  }), []);
+  useEffect(() => {
+    if (resolveMainWindowActionRoute(currentPath) === "auth") setPreserveHomeBrowser(false);
+  }, [currentPath]);
+  useEffect(() => {
+    if (workspaceGuidanceStep === "nickname") {
       setDeferredNickname((current) => current || randomNickname(language));
     }
-  }, [currentPath, language, state.startup.status]);
+  }, [workspaceGuidanceStep, language]);
+
+  useEffect(() => {
+    if (!guidanceWorkspaceReady || deferredGuidanceStep !== "improvement") return;
+    if (state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset") {
+      // Memory has its own frame; the consent choice lives in the main workspace frame.
+      if (currentPath !== "/main") dispatch(appActions.navigate("/main"));
+      return;
+    }
+    // A resumed guide may belong to a previous mode or already have a consent decision.
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const includeLogs = productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission);
+    clearProductTourStep(storage);
+    writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
+    writeDeferredGuidanceStep(storage, "product_tour");
+    dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
+  }, [currentPath, deferredGuidanceStep, dispatch, guidanceWorkspaceReady, state.bootstrap?.app.userMode,
+    state.bootstrap?.onboarding.improvementProgram, state.bootstrap?.onboarding.scanPermission]);
 
   useEffect(() => {
     if (!analyticsReady) return;
@@ -186,7 +237,6 @@ export function AppRouter(props: { onRetry: () => void }) {
     // re-read stale `product_tour` and remount the tour on /tools.
     writeDeferredGuidanceStep(storage, "nickname");
     setDeferredNickname(randomNickname(language));
-    setWorkspaceGuidanceStep("nickname");
     dispatch(appActions.navigate("/main"));
   }
 
@@ -208,10 +258,10 @@ export function AppRouter(props: { onRetry: () => void }) {
     track(buildOnboardingCompletedEvent(scanPermission));
     writeGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
     clearDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage);
-    setWorkspaceGuidanceStep(null);
   }
 
   if (state.startup.status === "loading" || state.startup.status === "idle") {
+    if (isPetWindowContext) return <PetStartupScreen />;
     return (
       <>
         <StartupScreen quiet={hasReloadRestoreRoute()} />
@@ -221,6 +271,7 @@ export function AppRouter(props: { onRetry: () => void }) {
   }
 
   if (state.startup.status === "error") {
+    if (isPetWindowContext) return <PetStartupScreen message={state.startup.message} onRetry={props.onRetry} />;
     return (
       <>
         <StartupScreen message={state.startup.message} onRetry={props.onRetry} />
@@ -231,7 +282,21 @@ export function AppRouter(props: { onRetry: () => void }) {
 
   return (
     <>
-      {renderRoute(state.navigation.currentPath)}
+      {(currentPath === "/main" || (preserveHomeBrowser
+        && resolveMainWindowActionRoute(currentPath) === "workspace")) && (
+        <div style={currentPath === "/main" ? { display: "contents" } : {
+          position: "fixed", left: -10_000, top: 0, width: 800, height: 600,
+          opacity: 0, pointerEvents: "none",
+        }}
+          aria-hidden={currentPath !== "/main"}>
+          <HomePage />
+        </div>
+      )}
+      {currentPath === "/main" ? null : (
+        <Suspense fallback={<StartupScreen />}>
+          {renderRoute(currentPath)}
+        </Suspense>
+      )}
       {windowDragRegion}
       {workspaceGuidanceStep === "product_tour" && (
         <ProductTourGuide
@@ -274,16 +339,6 @@ export function AppRouter(props: { onRetry: () => void }) {
           || workspaceGuidanceStep === "nickname"
         }
       />
-    </>
-  );
-}
-
-function WindowDragRegion() {
-  return (
-    <>
-      <div aria-hidden="true" className="window-drag-region" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--sidebar-toggle" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--lang-toggle" />
     </>
   );
 }

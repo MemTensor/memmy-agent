@@ -118,7 +118,8 @@ const CAPABILITIES = new Set<ModelCapability>([
 const PROTOCOLS = new Set<ModelEndpointProtocol>([
     "openai-chat-completions", "openai-responses", "anthropic-messages",
     "gemini-generate-content", "openai-embeddings", "dashscope-input-audio-chat",
-    "openai-images", "dashscope-multimodal-generation", "memmy-account"
+    "openai-images", "dashscope-multimodal-generation", "memmy-account",
+    "bedrock-converse"
 ]);
 
 /** Resolves one immutable current-catalog model assignment without guessing another preset or endpoint. */
@@ -332,12 +333,15 @@ function protocolSupportsCapability(
         return protocol === "openai-chat-completions"
             || protocol === "openai-responses"
             || protocol === "anthropic-messages"
-            || protocol === "gemini-generate-content";
+            || protocol === "gemini-generate-content"
+            || protocol === "bedrock-converse";
     }
     if (capability === "memory_summary" || capability === "memory_evolution") {
         return protocol === "openai-chat-completions"
+            || protocol === "openai-responses"
             || protocol === "anthropic-messages"
-            || protocol === "gemini-generate-content";
+            || protocol === "gemini-generate-content"
+            || protocol === "bedrock-converse";
     }
     if (capability === "embedding") return protocol === "openai-embeddings";
     if (capability === "asr") return protocol === "dashscope-input-audio-chat";

@@ -78,6 +78,27 @@ export function sourceTurnSkipBlocksWatermark(reason: string): boolean {
   return reason !== "turn_cancelled";
 }
 
+/** How long a skipped native turn may still finish and keep the source watermark behind it. */
+export const SOURCE_TURN_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const CAPTURE_UNAVAILABLE_REASONS = new Set(["memory_add_disabled", "source_capture_activation_unresolved"]);
+
+/**
+ * `rescan`: Memory could not accept captures, so the whole source must be retried.
+ * `retry`: a recent turn may still finish; hold the watermark at its latest activity.
+ * `none`: a cancelled or long-abandoned turn must not force every later scan to start over.
+ */
+export function sourceTurnSkipWatermarkEffect(
+  reason: string,
+  latestActivityAt: string | null,
+  now = Date.now()
+): "rescan" | "retry" | "none" {
+  if (!sourceTurnSkipBlocksWatermark(reason)) return "none";
+  if (CAPTURE_UNAVAILABLE_REASONS.has(reason)) return "rescan";
+  const activityAt = latestActivityAt ? Date.parse(latestActivityAt) : Number.NaN;
+  return Number.isFinite(activityAt) && now - activityAt <= SOURCE_TURN_RETRY_WINDOW_MS ? "retry" : "none";
+}
+
 /**
  * A reader that stages native turns marks every message with its turn state, so the
  * scan can tell an unfinished native turn apart from a source that has no native

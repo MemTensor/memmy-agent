@@ -8,6 +8,7 @@ vi.mock("electron", () => ({ app: { getPath: () => "/unused" } }));
 vi.mock("electron-log/main", () => ({
   default: {
     initialize: vi.fn(),
+    error: vi.fn(),
     transports: { file: { level: "info" }, console: { level: "info" } }
   }
 }));
@@ -31,6 +32,14 @@ async function setup() {
 }
 
 describe("desktop console pipe failures", () => {
+  it("writes process diagnostics through electron-log after the console pipe closes", async () => {
+    const context = await setup();
+    context.stdout.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+    context.writeProcessDiagnostic('shell-process:{"event":"renderer-gone","reason":"killed"}');
+    expect(context.log.error).toHaveBeenCalledWith('shell-process:{"event":"renderer-gone","reason":"killed"}');
+    expect(context.log.transports.file.level).toBe("info");
+  });
+
   it.each(["stdout", "stderr"] as const)("survives %s EPIPE while retaining file logging", async (streamName) => {
     const context = await setup();
     const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });

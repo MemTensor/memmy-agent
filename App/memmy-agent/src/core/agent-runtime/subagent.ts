@@ -3,7 +3,11 @@ import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 import { AgentHook, AgentHookContext } from "./hook.js";
 import { AgentRunner, AgentRunSpec } from "./runner.js";
-import { ToolContext } from "./tools/context.js";
+import { bindToolExecutionRequestContext, RequestContext, ToolContext } from "./tools/context.js";
+import type { Tool } from "./tools/base.js";
+import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from "../../tools/computer-use/surface-preview.js";
+import { createTurnCancellationBoundary } from "./turn-cancellation-boundary.js";
+import { resolveSubagentComputerUseAuthorization, type SubagentComputerUseAuthorization } from "./subagent-computer-use-context.js";
 import { ToolLoader } from "./tools/loader.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { InboundMessage, MessageBus } from "../runtime-messages/index.js";
@@ -71,16 +75,17 @@ export class SubagentStatus {
 export class SubagentHook extends AgentHook {
   taskId: string;
   status: SubagentStatus | null;
+  private requestContext: RequestContext | null;
 
-  constructor(taskId: string, status: SubagentStatus | null = null) {
+  constructor(taskId: string, status: SubagentStatus | null = null, requestContext: RequestContext | null = null) {
     super();
     this.taskId = taskId;
     this.status = status;
+    this.requestContext = requestContext;
   }
 
   override async beforeExecuteTools(context: AgentHookContext): Promise<void> {
-    // Hook point retained for parity with memmy logging and tests.
-    void context;
+    if (this.requestContext) bindToolExecutionRequestContext(context, this.requestContext);
   }
 
   override async afterIteration(context: AgentHookContext): Promise<void> {
@@ -115,6 +120,7 @@ type SubagentManagerInit = {
   maxToolResultChars?: number;
   llmWallTimeoutForSession?: (sessionKey?: string | null) => number | null;
   lifecycleHook?: (() => AgentHook | null) | null;
+  computerUseTools?: (() => readonly Tool[]) | null;
 };
 
 type CancelableSubagentTask = Promise<void> & {
@@ -145,6 +151,10 @@ export class SubagentManager {
   sessionTasks: Map<string, Set<string>> = new Map();
   private llmWallTimeoutForSession?: (sessionKey?: string | null) => number | null;
   private lifecycleHook: (() => AgentHook | null) | null;
+  private computerUseTools: (() => readonly Tool[]) | null;
+  private taskOrigins = new Map<string, Record<string, any>>();
+  private taskComputerUseContexts = new Map<string, RequestContext>();
+  private stoppedStatuses = new WeakSet<SubagentStatus>();
 
   constructor(init: SubagentManagerInit = {}) {
     const defaults = new AgentDefaults();
@@ -163,6 +173,7 @@ export class SubagentManager {
     this.runner = new AgentRunner(this.provider);
     this.llmWallTimeoutForSession = init.llmWallTimeoutForSession;
     this.lifecycleHook = init.lifecycleHook ?? null;
+    this.computerUseTools = init.computerUseTools ?? null;
   }
 
   private getLifecycleHook(): AgentHook | null {
@@ -206,6 +217,8 @@ export class SubagentManager {
     status: SubagentStatus,
     extra: Record<string, any> = {},
   ): Promise<void> {
+    if (this.stoppedStatuses.has(status)) return;
+    this.stoppedStatuses.add(status);
     await this.getLifecycleHook()?.subagentStop(this.subagentContext(taskId, task, label, origin, status, extra));
   }
 
@@ -253,10 +266,12 @@ export class SubagentManager {
     modelPreset?: string | null;
     modelProvider?: string | null;
     actualModelContext?: ActualModelContext | null;
+    computerUseAuthorization?: SubagentComputerUseAuthorization | null;
   }, label: string | null = null, originChannel = "cli", originChatId = "direct", sessionKey: string | null = null, originMessageId: string | null = null, temperature: number | null = null): Promise<string> {
     const args = typeof input === "string" ? { task: input, label, originChannel, originChatId, sessionKey, originMessageId, temperature } : input;
     const task = String(args.task ?? "");
     const taskId = randomUUID().slice(0, 8);
+    const turnId = `subagent:${randomUUID()}`;
     const displayLabel = args.label ?? (task.length > 30 ? `${task.slice(0, 30)}...` : task);
     const origin = {
       channel: args.originChannel ?? originChannel,
@@ -275,6 +290,7 @@ export class SubagentManager {
             ...args.actualModelContext,
             capabilities: Object.freeze([...args.actualModelContext.capabilities]),
           }),
+      turnId,
     };
     const status = new SubagentStatus({
       taskId,
@@ -284,11 +300,16 @@ export class SubagentManager {
     });
     this.taskStatuses.set(taskId, status);
     this.tasks.set(taskId, status);
+    this.taskOrigins.set(taskId, origin);
+    const computerUseContext = resolveSubagentComputerUseAuthorization(args.computerUseAuthorization);
+    if (computerUseContext) this.taskComputerUseContexts.set(taskId, computerUseContext);
     try {
       await this.emitSubagentStart(taskId, task, displayLabel, origin, status);
     } catch (error) {
       this.taskStatuses.delete(taskId);
       this.tasks.delete(taskId);
+      this.taskOrigins.delete(taskId);
+      this.taskComputerUseContexts.delete(taskId);
       throw error;
     }
 
@@ -310,6 +331,8 @@ export class SubagentManager {
         this.runningTasks.delete(taskId);
         this.taskStatuses.delete(taskId);
         this.tasks.delete(taskId);
+        this.taskOrigins.delete(taskId);
+        this.taskComputerUseContexts.delete(taskId);
         const key = origin.sessionKey;
         if (key) {
           const ids = this.sessionTasks.get(key);
@@ -351,6 +374,27 @@ export class SubagentManager {
     let resultText: string | null = null;
     let stopError: string | null = null;
     const isCancelled = (): boolean => Boolean(signal?.aborted);
+    const turnId = origin.turnId ?? `subagent:${randomUUID()}`;
+    const sessKey = origin.sessionKey ?? `${origin.channel}:${origin.chatId}`;
+    const surfaceScope = { sessionKey: sessKey, channel: origin.channel, chatId: origin.chatId, turnId };
+    const inherited = this.taskComputerUseContexts.get(taskId);
+    const authorized = inherited instanceof RequestContext && inherited.sessionKey === sessKey
+      && inherited.channel === origin.channel && inherited.chatId === origin.chatId
+      && inherited.metadata.computerUseInteractive === true
+      && inherited.metadata.computerUseInteractiveReason === 'interactive-user-message';
+    const requestContext = new RequestContext({
+      channel: origin.channel, chatId: origin.chatId, sessionKey: sessKey,
+      workspace: path.resolve(origin.workspace ?? this.workspace),
+      messageId: authorized ? inherited.messageId : null,
+      metadata: {
+        ...(authorized ? structuredClone(inherited.metadata) : {}), turnId, turn_id: turnId,
+        computerUseInteractive: authorized,
+        computerUseInteractiveReason: authorized ? 'interactive-user-message' : 'subagent-user-authorization-missing',
+      },
+    });
+    const boundary = createTurnCancellationBoundary({ turnId, signal });
+    const releaseInterrupt = authorized ? registerComputerUseTurnInterrupt(surfaceScope,
+      async () => await this.cancelTask(taskId, sessKey) ? 'stopped' : 'already_finished') : null;
     try {
       status.phase = "running";
       const workspace = path.resolve(origin.workspace ?? this.workspace);
@@ -358,11 +402,11 @@ export class SubagentManager {
         ? origin.readonlySkillRoots
         : [];
       const tools = this.buildTools(workspace, null, readonlySkillRoots);
+      for (const tool of this.computerUseTools?.() ?? []) tools.register(tool);
       const messages = [
         { role: "system", content: this.buildSubagentPrompt(workspace) },
         { role: "user", content: task },
       ];
-      const sessKey = origin.sessionKey ?? null;
       const provider = origin.provider ?? this.provider;
       const model = origin.model ?? this.model;
       const contextWindowTokens = origin.contextWindowTokens ?? this.contextWindowTokens;
@@ -384,11 +428,13 @@ export class SubagentManager {
           status.phase = String(payload.phase ?? status.phase);
           status.iteration = Number(payload.iteration ?? status.iteration);
         },
-        sessionKey: sessKey,
+        sessionKey: origin.sessionKey ?? null,
         workspace,
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
-        hook: new SubagentHook(taskId, status),
+        turnId,
+        boundary,
+        hook: new SubagentHook(taskId, status, requestContext),
         actualModelContext: origin.actualModelContext ?? null,
       }));
       if (isCancelled()) {
@@ -427,14 +473,15 @@ export class SubagentManager {
       resultText = `Error: ${(error as Error).message}`;
       await this.announceResult(taskId, label, task, resultText, origin, "error", originMessageId);
     } finally {
-      if (!isCancelled()) {
-        await this.emitSubagentStop(taskId, task, label, origin, status, {
-          reason: "completed",
-          result: resultText,
-          finalStatus,
-          error: stopError,
-        });
-      }
+      releaseInterrupt?.();
+      boundary.close(isCancelled() ? 'aborted' : 'ended');
+      await closeNativeSurfacesForTurn(surfaceScope);
+      await this.emitSubagentStop(taskId, task, label, origin, status, {
+        reason: isCancelled() ? "cancelled" : "completed",
+        result: resultText,
+        finalStatus,
+        error: stopError,
+      });
     }
   }
 
@@ -517,38 +564,40 @@ export class SubagentManager {
     });
   }
 
+  async cancelTask(taskId: string, sessionKey?: string): Promise<boolean> {
+    if (sessionKey && !this.sessionTasks.get(sessionKey)?.has(taskId)) return false;
+    const task = this.runningTasks.get(taskId);
+    const done = typeof task?.done === 'function' ? task.done() : Boolean((task as any)?.settled);
+    if (!task || done) return false;
+    const didCancel = typeof task.cancel === 'function' ? task.cancel() !== false
+      : typeof task.abort === 'function' ? task.abort() !== false : false;
+    if (!didCancel) return false;
+    const status = this.taskStatuses.get(taskId);
+    if (status) {
+      status.phase = SubagentStatus.CANCELLED;
+      await this.emitSubagentStop(taskId, status.taskDescription, status.label,
+        this.taskOrigins.get(taskId) ?? { sessionKey }, status,
+        { reason: 'cancelled', finalStatus: 'cancelled', result: null, error: null });
+    }
+    await Promise.resolve(task).catch(() => undefined);
+    this.runningTasks.delete(taskId);
+    this.taskStatuses.delete(taskId);
+    this.tasks.delete(taskId);
+    this.taskOrigins.delete(taskId);
+    this.taskComputerUseContexts.delete(taskId);
+    if (sessionKey) {
+      const ids = this.sessionTasks.get(sessionKey);
+      ids?.delete(taskId);
+      if (ids?.size === 0) this.sessionTasks.delete(sessionKey);
+    }
+    return true;
+  }
+
   async cancelBySession(sessionKey: string): Promise<number> {
     const ids = [...(this.sessionTasks.get(sessionKey) ?? [])].filter((id) => this.runningTasks.has(id));
-    const waits: Promise<unknown>[] = [];
-    let cancelled = 0;
-    for (const id of ids) {
-      const task: any = this.runningTasks.get(id);
-      const done = typeof task?.done === "function" ? task.done() : Boolean(task?.settled);
-      let didCancel = false;
-      if (!done && task && typeof task.cancel === "function") {
-        didCancel = task.cancel() !== false;
-      } else if (!done && task && typeof task.abort === "function") {
-        didCancel = task.abort() !== false;
-      }
-      if (didCancel) {
-        cancelled += 1;
-        if (typeof task.then === "function") waits.push(Promise.resolve(task).catch(() => undefined));
-      }
-      this.runningTasks.delete(id);
-      const status = this.taskStatuses.get(id);
-      if (status) status.phase = SubagentStatus.CANCELLED;
-      if (status) await this.emitSubagentStop(id, status.taskDescription, status.label, { sessionKey }, status, {
-        reason: "cancelled",
-        finalStatus: "cancelled",
-        result: null,
-        error: null,
-      });
-      this.taskStatuses.delete(id);
-      this.tasks.delete(id);
-    }
+    const outcomes = await Promise.all(ids.map(id => this.cancelTask(id, sessionKey)));
     this.sessionTasks.delete(sessionKey);
-    if (waits.length) await Promise.allSettled(waits);
-    return cancelled;
+    return outcomes.filter(Boolean).length;
   }
 
   getRunningCount(): number {

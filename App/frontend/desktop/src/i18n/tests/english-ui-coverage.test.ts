@@ -13,6 +13,8 @@ const allowedSourceFiles = new Set([
   "pages/memory/skill-demo-data.ts",
   // Provider aliases are identifiers used for logo matching, not visible UI copy.
   "components/model-provider-logo.tsx",
+  // App names people type to find an app in search, not visible UI copy.
+  "pages/memory/app-search-aliases.ts",
   // English ui coverage tests.
   "dev-agent-preview.tsx"
 ]);

@@ -9,7 +9,7 @@ import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
-import { AuthCodeForm } from "../components/auth-code-form.js";
+import { AuthCodeForm, type AuthCodeFormValues } from "../components/auth-code-form.js";
 import { SocialLoginButtons } from "../components/social-login-buttons.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -37,7 +37,6 @@ export function LoginPage() {
   const [pendingAccountOnboarding, setPendingAccountOnboarding] = useState<Partial<OnboardingStateDto> | null>(null);
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
-  const canContinue = Boolean(identifier.trim() && code.trim());
 
   useEffect(() => {
     setIdentifier("");
@@ -58,7 +57,7 @@ export function LoginPage() {
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
   }
 
-  async function submitLogin() {
+  async function submitLogin(values: AuthCodeFormValues) {
     if (verificationCodeAuth.loginPending || socialLogin.pendingProvider || modePersistencePending) {
       return;
     }
@@ -67,15 +66,13 @@ export function LoginPage() {
       await continueAfterRegistration(pendingAccountOnboarding);
       return;
     }
-    if (!canContinue) return;
-
     const loginResult = await verificationCodeAuth.login(
       channel,
-      identifier,
-      code,
-      invitationEnabled ? inviteCode : undefined
+      values.identifier,
+      values.code,
+      invitationEnabled ? values.inviteCode : undefined
     );
-    await finishAccountLogin(loginResult, channel);
+    await finishAccountLogin(loginResult, channel, values.inviteCode);
   }
 
   async function startSocialLogin(provider: SocialLoginProvider) {
@@ -88,7 +85,8 @@ export function LoginPage() {
 
   async function finishAccountLogin(
     loginResult: AccountLoginResultView | null,
-    method: "email" | "phone" | SocialLoginProvider
+    method: "email" | "phone" | SocialLoginProvider,
+    submittedInviteCode = inviteCode
   ) {
     if (!loginResult || !loginResult.session.authenticated) {
       return;
@@ -104,7 +102,7 @@ export function LoginPage() {
     track(buildInvitationSignupEvent({
       channel: method,
       isNewUser: session.isNewUser,
-      invitationCode: invitationEnabled ? inviteCode : undefined
+      invitationCode: invitationEnabled ? submittedInviteCode : undefined
     }));
 
     dispatch(appActions.accountUpdated({
@@ -171,13 +169,14 @@ export function LoginPage() {
           <p className="text-sm font-semibold text-text-ink/60">{t("nav.login")}</p>
           <h1 className="text-2xl font-extrabold text-text-ink mt-1">{t("login.title")}</h1>
         </div>
-        <div className="px-6 pb-6 space-y-3.5">
+        <div className="login-page__body px-6 pb-6 space-y-3.5">
           <AuthCodeForm
             identifier={identifier}
             identifierType={channel}
             code={code}
             inviteCode={inviteCode}
-            disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}
+            disabled={verificationCodeAuth.loginPending || Boolean(socialLogin.pendingProvider) || modePersistencePending}
+            pending={verificationCodeAuth.loginPending || modePersistencePending}
             sendCodeDisabled={verificationCodeAuth.sendCodeDisabled || Boolean(socialLogin.pendingProvider) || modePersistencePending}
             sendCodeLabel={verificationCodeAuth.sendCodeLabel}
             feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
@@ -185,7 +184,7 @@ export function LoginPage() {
             onCodeChange={setCode}
             onInviteCodeChange={invitationEnabled ? setInviteCode : undefined}
             onSendCode={() => void verificationCodeAuth.sendCode(channel, identifier)}
-            onSubmit={() => void submitLogin()}
+            onSubmit={(values) => void submitLogin(values)}
             onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
             onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
           />
@@ -193,6 +192,7 @@ export function LoginPage() {
             <SocialLoginButtons
               pendingProvider={socialLogin.pendingProvider}
               disabled={verificationCodeAuth.loginPending || modePersistencePending}
+              showDivider
               feedback={socialLogin.feedback}
               onLogin={(provider) => void startSocialLogin(provider)}
             />

@@ -20,6 +20,7 @@ function serviceAt() {
   const service = new ComputerHistoryDemoService({
     historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"),
     workflowDirectory: path.join(root, "workflows"), observationSettingsFile: path.join(root, "settings.json"),
+    weChatConsentFile: path.join(root, "wechat", "consent.json"),
   });
   services.push(service);
   return service;
@@ -51,6 +52,20 @@ afterEach(async () => {
 });
 
 describe("repairing historical six-hour aggregation", () => {
+  it("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+    const id = `${instantId(new Date())}-10min-summary`;
+    fs.writeFileSync(historyFile(id),
+      '---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["com.tencent.xinWeChat"]\n---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n');
+    const model = vi.fn(async () => response());
+    const service = serviceAt();
+    service.setLlmRuntime(runtime(model));
+    expect(await service.backfillUnwrittenSummaries()).toBe(0);
+    expect(model).not.toHaveBeenCalled();
+    service.setWeChatChatAccess(true);
+    expect(await service.backfillUnwrittenSummaries()).toBe(1);
+    expect(model).toHaveBeenCalledOnce();
+  });
+
   it("waits for the six-hour window to close before preparing or narrating its final rollup", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(start.getTime() + 6 * 60 * 60_000 - 1));

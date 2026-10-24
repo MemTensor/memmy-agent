@@ -4,6 +4,7 @@ import { buildMemorySubPageViewEvent } from "../analytics/page-view.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { useApiClients } from "../app/providers.js";
 import { isComputerHistorySupported } from "../app/computer-history-platform.js";
+import { onComputerHistoryLaunchEnable } from "../app/computer-history-launch-intent.js";
 import {
   PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR,
   PRODUCT_TOUR_MEMORY_NAV_ANCHOR,
@@ -14,13 +15,18 @@ import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { WindowsTitlebar } from "../components/windows-titlebar.js";
+import { isWindowsDesktopPlatform } from "../utils/window-fullscreen.js";
 import { AppContentTopbar } from "./app-content-topbar.js";
 import { writeSettingsMemoryBudgetFocus, writeSettingsTabHash } from "./settings-nav.js";
+import { MEMORY_SUB_PAGE_STORAGE_KEY, writeMemorySubPage, type MemorySubPageId } from "./memory-sub-page-storage.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
 import { readHistoryPermissionSetup } from "./memory/computer-history-permission-state.js";
+import { readWeChatPermissionReturn } from "./memory/computer-history-wechat-permission-state.js";
 import { isComputerHistoryQuotaExhausted, useComputerHistoryQuotaRefresh } from "./memory/computer-history-quota.js";
 import { ComputerHistorySubPage } from "./memory/computer-history-sub-page.js";
+import { openObservationHistorySource } from "./memory/observed-memory-detail.js";
 import { LogsSubPage } from "./memory/logs-sub-page.js";
 import {
   resolveMemoryReferencePage,
@@ -52,18 +58,8 @@ import {
   Wand2
 } from "./memory/memory-prototype-icons.js";
 
-export type MemorySubPageId =
-  | "overview"
-  | "computer-history"
-  | "memories"
-  | "user-memories"
-  | "tasks"
-  | "policies"
-  | "world-model"
-  | "skills"
-  | "analytics"
-  | "logs"
-  | "sources";
+export { writeMemorySubPage } from "./memory-sub-page-storage.js";
+export type { MemorySubPageId } from "./memory-sub-page-storage.js";
 
 interface MemoryNavSection {
   titleKey: MessageKey;
@@ -86,8 +82,7 @@ const memoryNavSections: MemoryNavSection[] = [
       { id: "policies", labelKey: "memory.nav.policies", icon: <Sparkles size={16} /> },
       { id: "world-model", labelKey: "memory.nav.worldModel", icon: <Globe2 size={16} /> },
       { id: "skills", labelKey: "memory.nav.skills", icon: <Wand2 size={16} /> },
-      { id: "user-memories", labelKey: "memory.nav.userMemories", icon: <UserRound size={16} /> },
-      { id: "computer-history", labelKey: "memory.nav.computerHistory", icon: <ScrollText size={16} /> }
+      { id: "user-memories", labelKey: "memory.nav.userMemories", icon: <UserRound size={16} /> }
     ]
   },
   {
@@ -100,23 +95,24 @@ const memoryNavSections: MemoryNavSection[] = [
   {
     titleKey: "memory.nav.system",
     items: [
+      { id: "computer-history", labelKey: "memory.nav.computerHistory", icon: <ScrollText size={16} /> },
       { id: "sources", labelKey: "memory.sourcesNav", icon: <Link2 size={16} /> }
     ]
   }
 ];
-const MEMORY_SUB_PAGE_STORAGE_KEY = "memmy.memorySubPage";
 
 export interface MemoryPageProps {
   initialSubPage?: MemorySubPageId;
 }
 
 export function MemoryPage(props: MemoryPageProps) {
+  const { t } = useTranslation();
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
   const { track, ready: analyticsReady } = useAnalytics();
   const prevSubPageRef = useRef<MemorySubPageId | null>(null);
   const referenceRequestIdRef = useRef(0);
-  const [selectedPage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? (isComputerHistorySupported() && readHistoryPermissionSetup() ? "computer-history" : readInitialMemorySubPage()));
+  const [selectedPage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? (isComputerHistorySupported() && (readHistoryPermissionSetup() || readWeChatPermissionReturn()) ? "computer-history" : readInitialMemorySubPage()));
   // Stored selections, URL parameters and explicit navigation must all obey the
   // same platform gate before mounting a page with polling/permission effects.
   const activePage = supportedMemorySubPage(selectedPage);
@@ -136,6 +132,11 @@ export function MemoryPage(props: MemoryPageProps) {
     setReferenceRequest(null);
     setActivePage(page);
   }, []);
+
+  useEffect(() => onComputerHistoryLaunchEnable(() => {
+    setReferenceRequest(null);
+    setActivePage("computer-history");
+  }), []);
 
   const handleOpenMemoryReference = useCallback<OpenMemoryReference>((id, fallbackPage) => {
     const page = resolveMemoryReferencePage(id, fallbackPage);
@@ -160,11 +161,20 @@ export function MemoryPage(props: MemoryPageProps) {
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
       overview: <OverviewSubPage client={client} onNavigate={handleSubPageChange} />,
-      "computer-history": <ComputerHistorySubPage client={clients?.memmyAgent ?? null} quotaExhausted={historyQuotaExhausted} />,
+      "computer-history": (
+        <ComputerHistorySubPage
+          client={clients?.memmyAgent ?? null}
+          memoryClient={client}
+          quotaExhausted={historyQuotaExhausted}
+          onOpenSkill={(skillId) => handleOpenMemoryReference(skillId, "skills")}
+          onOpenMemory={(memoryId) => handleOpenMemoryReference(memoryId, "memories")}
+        />
+      ),
       memories: (
         <MemoriesSubPage
           client={client}
           openRequest={referenceRequest?.page === "memories" ? referenceRequest : undefined}
+          onOpenHistorySource={clients?.memmyAgent ? (historyId) => openObservationHistorySource(clients.memmyAgent, historyId, t("memory.memories.historySourceUnavailable")) : undefined}
           onOpenSettings={() => {
             writeSettingsTabHash("model");
             dispatch(appActions.navigate("/settings"));
@@ -198,7 +208,7 @@ export function MemoryPage(props: MemoryPageProps) {
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client, clients?.memmyAgent, dispatch, handleOpenMemoryReference, handleSubPageChange, referenceRequest, historyQuotaExhausted]
+    [client, clients?.memmyAgent, dispatch, handleOpenMemoryReference, handleSubPageChange, referenceRequest, historyQuotaExhausted, t]
   );
 
   useEffect(() => {
@@ -250,10 +260,6 @@ export function readMemorySubPage(storage: Storage | undefined): MemorySubPageId
   return isMemorySubPageId(value) ? value : null;
 }
 
-export function writeMemorySubPage(storage: Storage | undefined, page: MemorySubPageId): void {
-  storage?.setItem(MEMORY_SUB_PAGE_STORAGE_KEY, page);
-}
-
 function resolveMemoryNavTourAnchor(page: MemorySubPageId): string | undefined {
   switch (page) {
     case "logs":
@@ -280,14 +286,22 @@ export function MemoryPageView(props: MemoryPageViewProps) {
   const activePage = supportedMemorySubPage(props.activePage);
   const childByPage = props.childByPage ?? createPreviewChildByPage(t);
   const [sidebarHidden, setSidebarHidden] = useState(false);
-  const sidebarResize = useCodexResizableSidebar("memmy.memory.sidebarWidth.codex.v2");
+  const windowsChrome = isWindowsDesktopPlatform();
+  const sidebarResize = useCodexResizableSidebar("memmy.memory.sidebarWidth.codex.v3");
 
   const sidebarStyle = sidebarHidden
     ? { ...sidebarResize.sidebarStyle, width: 0, minWidth: 0, maxWidth: 0, flexBasis: 0 }
     : sidebarResize.sidebarStyle;
 
   return (
-    <div className={`sidebar-shell flex h-screen bg-canvas-oat/40${sidebarHidden ? " sidebar-shell--hidden" : ""}`}>
+    <div className={`sidebar-shell flex h-screen bg-canvas-oat/40${sidebarHidden ? " sidebar-shell--hidden" : ""}${windowsChrome ? " sidebar-shell--windows-titlebar" : ""}`}>
+      {windowsChrome ? (
+        <WindowsTitlebar
+          sidebarHidden={sidebarHidden}
+          onToggleSidebar={() => setSidebarHidden((hidden) => !hidden)}
+        />
+      ) : null}
+      <div className={windowsChrome ? "sidebar-shell__body" : "sidebar-shell__passthrough"}>
       <aside
         aria-hidden={sidebarHidden ? true : undefined}
         inert={sidebarHidden ? true : undefined}
@@ -295,6 +309,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
         style={sidebarStyle}
         data-tour-anchor={PRODUCT_TOUR_MEMORY_NAV_ANCHOR}
       >
+        {!windowsChrome && (
         <div className="sidebar-window-toolbar memory-page-toolbar">
           <button
             type="button"
@@ -306,6 +321,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
             <PanelLeft size={20} />
           </button>
         </div>
+        )}
         <div className="memory-page-return-row">
           <button
             type="button"
@@ -348,7 +364,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
           </div>
         ))}
       </aside>
-      {sidebarHidden && (
+      {sidebarHidden && !windowsChrome && (
         <button
           type="button"
           className="sidebar-restore-button"
@@ -370,7 +386,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
         onResizeBy={sidebarResize.resizeBy}
       />
       <div
-        className={`min-w-0 flex-1 flex flex-col overflow-hidden bg-content-bg${
+        className={`memory-page-main min-w-0 flex-1 flex flex-col overflow-hidden bg-content-bg${
           sidebarHidden ? " memory-page-main--sidebar-hidden" : ""
         }`}
       >
@@ -381,6 +397,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
           }}
         />
         <div className="app-frame-page-content min-h-0 flex-1 overflow-y-auto py-6">{childByPage[activePage]}</div>
+      </div>
       </div>
     </div>
   );

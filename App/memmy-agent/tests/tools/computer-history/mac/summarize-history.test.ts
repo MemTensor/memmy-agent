@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vitest";
-import { run } from "../../../../src/tools/computer-history/mac/summarize-history.js";
+import { renderHumanSummary, run, reusableHumanActions } from "../../../../src/tools/computer-history/mac/summarize-history.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +28,31 @@ function writeFixture(dir: string, name: string, records: Array<Record<string, u
   fs.writeFileSync(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   return file;
 }
+
+test("replay sets a captured field value instead of appending it as new keystrokes", () => {
+  const actions = reusableHumanActions([{ eventType: "text_input",
+    application: { name: "DingTalk", bundleId: "win32.dingtalk" },
+    details: { text: "请明天发文档", textSource: "focused_field_value", redacted: false },
+  }]);
+  assert.equal(actions.length, 1);
+  assert.match(actions[0], /Set the matching semantic field.*请明天发文档/u);
+  assert.match(actions[0], /Do not append the entire value/u);
+});
+
+test("ordinary captured text on a shopping page is not mislabeled as a search query", () => {
+  const base = [
+    { recordType: "human_event", eventType: "page_context", application: { name: "Chrome", bundleId: "com.google.Chrome" },
+      details: { url: "https://www.amazon.com/reviews" } },
+    { recordType: "human_event", eventType: "text_input", application: { name: "Chrome", bundleId: "com.google.Chrome" },
+      details: { text: "给卖家的消息", redacted: false } },
+  ];
+  const options = { file: "/tmp/history/events.jsonl", title: "Computer History demonstration", records: base };
+  assert.doesNotMatch(renderHumanSummary(options), /amazon\.com 搜索/u);
+  const searched = renderHumanSummary({ ...options, records: [base[0], {
+    ...base[1], details: { text: "录音卡", textPurpose: "search_query", redacted: false },
+  }] });
+  assert.match(searched, /amazon\.com 搜索 录音卡/u);
+});
 
 test("writes a Computer History-style summary from a computer-use session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-history-test-"));

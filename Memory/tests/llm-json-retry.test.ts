@@ -3,6 +3,7 @@ import { get_encoding } from "tiktoken";
 import type { LlmConfig } from "../src/config/index.js";
 import { createLlmClient } from "../src/model/llm.js";
 import type { LlmMessage } from "../src/model/types.js";
+import { prepareObservationExtractionInput } from "../src/service/evidence/observation-memory-pipeline.js";
 
 const originalLogLevel = process.env.MEMMY_LOG_LEVEL;
 const encoding = get_encoding("cl100k_base");
@@ -154,6 +155,35 @@ describe("memory summary input budget", () => {
       expect(inputTokenCount(body) + Number(body.max_tokens) + 512).toBeLessThanOrEqual(8_192);
     }
     expect((bodies[1]!.messages as LlmMessage[])[0]?.content).toContain("previous output was truncated");
+  });
+
+  it("retries long observation JSON within its fixed output reservation without cutting input sources", async () => {
+    const fetchMock = sequenceFetch([
+      openAiResponse('{"keep":', "length"),
+      openAiResponse('{"keep":false,"reason":"Only incidental activity was observed."}', "stop")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const sources = Array.from({ length: 37 }, (_value, index) => ({ id: `observation_${index}_0123456789abcdef`,
+      title: `采购审批观察第${index + 1}条`, summary: "观察时采购审批状态未确认，需核实采购单进度。".repeat(30),
+      content: "录音硬件采购和报销任务的审批状态尚未确认，应核对采购凭据。".repeat(420),
+      revision: "2026-10-09T10:00:00.000Z", contentHash: `hash-${index}` }));
+    const prepared = prepareObservationExtractionInput({ language: "zh-CN", observedAt: "2026-10-09T10:00:00.000Z",
+      aggregate: true, sources });
+    expect(prepared.messages.reduce((total, message) => total + encoding.encode(message.content, [], []).length, 0)).toBeGreaterThan(3_584);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+    await expect(client.completeJson(prepared.messages, { operation: "capture.observation_extract",
+      maxTokens: 2_400, retryTokenCeiling: 2_400 })).resolves.toMatchObject({ keep: false });
+    const bodies = requestBodies(fetchMock);
+    expect(bodies.map((body) => body.max_tokens)).toEqual([2_400, 2_400]);
+    for (const body of bodies) {
+      const messages = body.messages as LlmMessage[];
+      const user = messages.find((message) => message.role === "user")!;
+      expect(user.content).toBe(prepared.messages[1]!.content);
+      expect(JSON.parse(user.content).sources.map((source: { id: string }) => source.id)).toEqual(sources.map((source) => source.id));
+      expect(inputTokenCount(body)).toBeLessThanOrEqual(5_280);
+      expect(user.content).not.toContain("[... input truncated ...]");
+    }
+    expect((bodies[1]!.messages as LlmMessage[])[0]?.content).toContain("Shorten the JSON");
   });
 
   it("does not expand a summary JSON retry to an impossible 8192-token output", async () => {

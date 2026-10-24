@@ -55,6 +55,8 @@ fs.writeFileSync(output + "." + process.pid + ".ready", "ready");
       if (!child) throw new Error("Synthetic recorder child was not created");
       ownedChildren.add(child);
       expect(child.spawnargs[1]).toBe(recorderScript);
+      expect(child.spawnargs).toContain("--capture-text");
+      expect(child.spawnargs).not.toContain("--allow-app");
       expect(child.pid).toBeGreaterThan(0);
       await waitUntil(() => fs.existsSync(`${eventsFile}.${child.pid}.ready`));
       const before = fs.statSync(eventsFile).size;

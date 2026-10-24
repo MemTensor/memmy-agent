@@ -14,6 +14,9 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import type {
   MemoryAddRequest,
+  ExternalEvidenceSyncRequest,
+  ExternalEvidenceStatusRequest,
+  ExternalEvidenceSkillSuggestionRequest,
   MemoryGovernanceRequest,
   MemoryLayer,
   MemoryReloadConfigRequest,
@@ -77,6 +80,11 @@ export const API_ROUTES = [
   "POST /api/v1/memory/search",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
+  "POST /api/v1/evidence/sync",
+  "POST /api/v1/evidence/status",
+  "POST /api/v1/evidence/skills/suggest",
+  "POST /api/v1/evidence/skills/:id/approve",
+  "PATCH /api/v1/evidence/skills/:id",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -128,6 +136,7 @@ interface AuthPrincipal {
   kind: "anonymous" | "local" | "cloud" | "scoped" | "viewer";
   tokenId?: string;
   namespace?: RuntimeNamespace;
+  authenticatedNamespace?: RuntimeNamespace;
   scopes: string[];
   timeZone?: string;
 }
@@ -853,6 +862,52 @@ async function routeRequest(
     return result;
   }
 
+  if (method === "POST" && path === "/api/v1/evidence/sync") {
+    requireMemoryWrite(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.sync"), principal) as unknown as ExternalEvidenceSyncRequest;
+    const result = service.syncExternalEvidence(request);
+    if (request.action === "upsert") autoWorker.schedule();
+    return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/status") {
+    requireMemoryRead(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.status"), principal) as unknown as ExternalEvidenceStatusRequest;
+    return service.externalEvidenceStatus(request);
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/skills/suggest") {
+    requireMemoryWrite(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.skills.suggest"), principal) as unknown as ExternalEvidenceSkillSuggestionRequest;
+    const result = await service.suggestExternalEvidenceSkill(request);
+    if (result.status === "active") autoWorker.schedule();
+    return result;
+  }
+  const evidenceSkillEdit = path.match(/^\/api\/v1\/evidence\/skills\/([^/]+)$/u);
+  if (method === "PATCH" && evidenceSkillEdit) {
+    requireMemoryWrite(principal);
+    const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+    const input = asObject(body, "evidence.skills.edit");
+    const request = scopedPrincipal.namespace ? strictEnvelopeWithPrincipal(input, scopedPrincipal)
+      : envelopeWithPrincipal(input, scopedPrincipal);
+    const result = service.updateExternalEvidenceSkill(decodeURIComponent(evidenceSkillEdit[1]!),
+      { body: input.body as string, expectedVersion: input.expectedVersion as number }, request);
+    autoWorker.schedule();
+    return result;
+  }
+  const evidenceSkillApprove = path.match(/^\/api\/v1\/evidence\/skills\/([^/]+)\/approve$/u);
+  if (method === "POST" && evidenceSkillApprove) {
+    requireMemoryWrite(principal);
+    const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+    const input = asObject(body, "evidence.skills.approve");
+    const request = scopedPrincipal.namespace
+      ? strictEnvelopeWithPrincipal(input, scopedPrincipal)
+      : envelopeWithPrincipal(input, scopedPrincipal);
+    const result = service.approveExternalEvidenceSkill(decodeURIComponent(evidenceSkillApprove[1]!), request);
+    autoWorker.schedule();
+    return result;
+  }
+
   if (method === "POST" && path === "/api/v1/worker/import-summaries/enqueue") {
     requireMemoryWrite(principal);
     const request = asObject(body, "worker.import-summaries.enqueue") as { memoryIds?: unknown };
@@ -1326,6 +1381,7 @@ function authenticate(
       kind: "cloud",
       tokenId: stableTokenId(candidate!),
       namespace: mergeNamespaces(cloudNamespace, namespaceFromRequest(request, url)),
+      authenticatedNamespace: cloudNamespace,
       scopes: ["*"]
     };
   }
@@ -1335,6 +1391,7 @@ function authenticate(
       kind: "scoped",
       tokenId: stableTokenId(candidate!),
       namespace: mergeNamespaces(scoped.namespace, namespaceFromRequest(request, url)),
+      authenticatedNamespace: scoped.namespace,
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
   }
@@ -1507,6 +1564,16 @@ function strictEnvelopeWithPrincipal(
     namespace,
     timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   };
+}
+
+/** A producer's source is evidence identity, independent of its authenticated namespace. */
+function evidenceEnvelopeWithPrincipal(
+  body: Record<string, unknown>,
+  principal: AuthPrincipal
+): Record<string, unknown> {
+  const { source, ...envelope } = body;
+  const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+  return { ...strictEnvelopeWithPrincipal(envelope, scopedPrincipal), source };
 }
 
 function parseV2OpenSessionRequest(value: Record<string, unknown>): SessionOpenRequest {

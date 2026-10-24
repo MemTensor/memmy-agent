@@ -70,6 +70,26 @@ describe("OpenAI-compatible API response helpers", () => {
 });
 
 describe("OpenAI-compatible API request validation", () => {
+  it("overrides a persisted model binding only when the request explicitly selects the configured model", async () => {
+    const calls: any[] = [];
+    const app = createApp({
+      modelPreset: "glm-preset",
+      processMessageInternal() {},
+      processDirect: async (_content: string, options: any) => {
+        calls.push(options);
+        return "ok";
+      },
+    }, "glm-5.2");
+    for (const stream of [false, true]) {
+      const response = await app.fetch(request({ model: "glm-5.2", session_id: "existing",
+        messages: [{ role: "user", content: "hello" }], stream }));
+      await response.text();
+      expect(calls.at(-1)).toMatchObject({ sessionKey: "api:existing", metadata: { model_preset: "glm-preset" } });
+    }
+    await app.fetch(request({ session_id: "existing", messages: [{ role: "user", content: "hello" }] }));
+    expect(calls.at(-1).metadata).toBeUndefined();
+  });
+
   it("returns 400 when messages are missing", async () => {
     const app = createApp({ processDirect: async () => "unused" }, "test-model");
 
@@ -102,8 +122,8 @@ describe("OpenAI-compatible API request validation", () => {
       {
         agentLoop: { processDirect: async () => "unused" },
         modelName: "test-model",
-        requestTimeout: 10,
         sessionLocks: new Map(),
+        activeRequests: new Map(),
       },
     );
     const body = (await response.json()) as any;

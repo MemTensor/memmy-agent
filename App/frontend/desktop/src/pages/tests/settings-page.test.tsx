@@ -25,9 +25,10 @@ import {
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
 } from "../settings-page.js";
-import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
+import { enUSMessages, formatMessage, zhCNMessages } from "../../i18n/messages.js";
 import {
   availableConnectionProtocols,
+  catalogProviderForEditor,
   editorProtocolForCapabilities,
   modelCapabilitiesForKind,
   normalizeEditorCapabilities,
@@ -75,6 +76,7 @@ describe("多 BYOK endpoint 入口", () => {
         endpointId: "openai-chat",
         endpoint: "https://api.openai.com/v1",
         protocol: "openai-chat-completions",
+        region: "",
         apiKeyMasked: "••••1234",
         models: ["gpt-4o"],
         modelEntries: [{ presetId: "preset-openai", model: "gpt-4o", capability: "chat", capabilities: ["agent"] }],
@@ -89,6 +91,7 @@ describe("多 BYOK endpoint 入口", () => {
         endpointId: "anthropic-chat",
         endpoint: "https://api.anthropic.com",
         protocol: "anthropic-messages",
+        region: "",
         apiKeyMasked: "••••5678",
         models: ["claude-sonnet-4"],
         modelEntries: [{ presetId: "preset-anthropic", model: "claude-sonnet-4", capability: "chat", capabilities: ["agent"] }],
@@ -100,8 +103,21 @@ describe("多 BYOK endpoint 入口", () => {
     ]);
 
     expect(available).toContain("openai");
+    expect(available).toContain("openai_responses");
+    expect(available).toContain("custom");
     expect(available).toContain("anthropic");
     expect(available[0]).toBe("openai");
+  });
+});
+
+describe("Custom 与 OpenAI Responses 的 catalog provider 推导", () => {
+  it("Custom 按供应商 custom 保存，协议留在端点上", () => {
+    expect(catalogProviderForEditor("custom", "openai-chat-completions")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "openai-responses")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "anthropic-messages")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "bedrock-converse")).toBe("custom");
+    expect(catalogProviderForEditor("openai_responses", null)).toBe("openai");
+    expect(catalogProviderForEditor("moonshot", null)).toBe("moonshot");
   });
 });
 
@@ -188,6 +204,7 @@ describe("自定义模型能力选择", () => {
 
   it("模型能力沿用标准 Select 四选一，不再拆分文本用途", () => {
     const source = readFileSync(modelWorkspaceSourcePath, "utf8");
+    const styles = readFileSync(fileURLToPath(new URL("../../styles.css", import.meta.url)), "utf8");
 
     expect(source).toContain('const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;');
     expect(source).toContain("value={kind}");
@@ -196,9 +213,23 @@ describe("自定义模型能力选择", () => {
     expect(source).toContain('className="select-control--subtle model-capability-select"');
     expect(source.match(/t\("settings\.modelWorkspace\.modelCapability"\)/g)).toHaveLength(1);
     expect(source).toContain("normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))");
-    expect(source).not.toContain('type="checkbox"');
+    expect(source).toContain("checked={thinkingConfigured}");
+    expect(source).toContain('t("settings.modelWorkspace.allowThinkingOff")');
+    expect(source).toContain('t("settings.modelWorkspace.customThinkingDefaultEnabledHint")');
+    expect(source).toContain('t("settings.modelWorkspace.customImageInputHint")');
+    expect(source).toContain('className="custom-thinking-config__checkbox check-sky"');
+    expect(source).toContain('className="check-sky"');
+    expect(styles).toContain(".custom-thinking-config__checkbox");
+    expect(styles).toContain('.custom-thinking-config input[type="checkbox"].check-sky:checked');
     expect(source).not.toContain('t("settings.modelWorkspace.textRoles")');
     expect(source).not.toContain('t("settings.modelWorkspace.capability.agent")');
+  });
+
+  it("思考模式说明区分接口默认行为与允许关闭", () => {
+    expect(zhCNMessages["settings.modelWorkspace.thinkingModeToggleHint"]).toContain("模型接口按默认行为处理");
+    expect(zhCNMessages["settings.modelWorkspace.allowThinkingOffHint"]).toContain("不勾选则思考始终开启");
+    expect(enUSMessages["settings.modelWorkspace.thinkingModeToggleHint"]).toContain("endpoint's default behavior");
+    expect(enUSMessages["settings.modelWorkspace.allowThinkingOffHint"]).toContain("thinking stays on");
   });
 });
 
@@ -253,6 +284,8 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#computer-use-browser-extension")).toBe("computer-use");
+    expect(resolveSettingsTabFromHash("#computer-use-excel")).toBe("computer-use");
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
   });
 });
@@ -904,12 +937,10 @@ describe("SettingsPageView", () => {
   });
 
   it("模型工作区连接编辑展示已保存脱敏 key，且保存不回传脱敏值", () => {
-    const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const fieldsSource = readFileSync(fileURLToPath(new URL("../api-key-form-fields.tsx", import.meta.url)), "utf8");
 
-    expect(workspaceSource).toContain("maskedValue={editor.connectionId && !editorProviderChanged");
-    expect(workspaceSource).toContain("apiKey: editor.apiKey || undefined");
-    expect(workspaceSource).toContain("apiKeyMasked:");
+    // Credential display/test/save behavior is covered with the real catalog
+    // writer in byok-credential-consistency.interaction.test.tsx.
     expect(fieldsSource).toContain("const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;");
     expect(fieldsSource).toContain("placeholder={placeholder}");
     expect(fieldsSource).not.toContain("const showSavedSecret = !props.value.trim() && Boolean(props.maskedValue)");

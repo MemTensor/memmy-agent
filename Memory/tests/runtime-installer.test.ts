@@ -52,6 +52,27 @@ describe("standalone Memory runtime installer", () => {
     expect(compareVersions("2.1.0-beta.1", "2.1.0")).toBe(-1);
   });
 
+  it.each([
+    ["2.1.0-rc.2", "2.1.0-rc.10"],
+    ["2.1.0-alpha", "2.1.0-alpha.1"],
+    ["2.1.0-alpha.1", "2.1.0-alpha.beta"],
+    ["2.1.0-beta.11", "2.1.0-rc.1"],
+    ["2.1.0-rc.10", "2.1.0"],
+    ["2.1.0-rc.9007199254740992", "2.1.0-rc.9007199254740993"],
+  ])("orders prerelease %s before %s", (older, newer) => {
+    expect(compareVersions(older, newer)).toBe(-1);
+    expect(compareVersions(newer, older)).toBe(1);
+  });
+
+  it("ignores build metadata when comparing semantic versions", () => {
+    expect(compareVersions("2.1.0-rc.1+first", "2.1.0-rc.1+second")).toBe(0);
+  });
+
+  it.each(["2.1.0-rc..1", "2.1.0-rc.01", "02.1.0", "2.1.0-"])(
+    "rejects malformed semantic version %s",
+    (version) => expect(() => compareVersions(version, "2.1.0")).toThrow("invalid semantic version")
+  );
+
   it("plans a service-only install without downloading or mutating disk", async () => {
     const home = tempRoot();
     const result = await installMemoryRuntime({ home, dryRun: true });
@@ -127,6 +148,33 @@ describe("standalone Memory runtime installer", () => {
     expect(launcher).toContain("/original/node");
     expect(launcher).not.toContain("/desktop/electron");
   }, 15_000);
+
+  it("holds the installer lock until a reused runtime finishes activation", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    await installMemoryRuntime({ home, runtimeDirectory, skipServiceRegistration: true, skipHealthCheck: true });
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    let releaseHealth!: () => void;
+    const healthReady = new Promise<void>((resolve) => { releaseHealth = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      await healthReady;
+      return { ok: true, json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" }) } as Response;
+    });
+    const install = installMemoryRuntime({ home, runtimeDirectory, preferInstalledCompatible: true,
+      skipServiceRegistration: true, endpoint: "http://127.0.0.1:18960" });
+    try {
+      await started;
+      expect(existsSync(join(home, "memory-service", "install.lock"))).toBe(true);
+    } finally {
+      releaseHealth();
+      try { await expect(install).resolves.toMatchObject({ reused: true, version: "2.1.0" }); }
+      finally { fetchSpy.mockRestore(); }
+    }
+    expect(existsSync(join(home, "memory-service", "install.lock"))).toBe(false);
+  });
 
   it.each([true, false])("replaces changed same-version builds (preferInstalledCompatible=%s) without touching data", async (preferInstalledCompatible) => {
     const root = tempRoot();
@@ -531,6 +579,63 @@ describe("standalone Memory runtime installer", () => {
 });
 
 describe("installer lock recovery", () => {
+  it.each([false, true])("rechecks a newer activation after waiting for install.lock (reuse=%s)", async (preferInstalledCompatible) => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: createRuntimeDirectory(root, "2.1.0"),
+      skipServiceRegistration: true,
+      skipHealthCheck: true,
+    });
+    const previous = (await currentInstalledRuntime(home))!;
+    const newerDirectory = createRuntimeDirectory(root, "2.3.0");
+    const newerPointer = {
+      ...previous, version: "2.3.0", runtimeDir: newerDirectory,
+      entrypoint: join(newerDirectory, "dist", "src", "server", "index.js"),
+      runtimeExecutable: "/original/node",
+    };
+    const lockPath = join(home, "memory-service", "install.lock");
+    writeFileSync(lockPath, `${process.pid}\n`);
+    let resolveWaiting!: () => void;
+    const waiting = new Promise<void>((resolveWait) => { resolveWaiting = resolveWait; });
+    const originalSetTimeout = globalThis.setTimeout;
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, milliseconds, ...args) => {
+      const timer = originalSetTimeout(handler, milliseconds, ...args);
+      if (milliseconds === 50) resolveWaiting();
+      return timer;
+    });
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory: createRuntimeDirectory(root, "2.2.0"),
+        nodeExecutable: "/desktop/electron",
+        preferInstalledCompatible,
+        skipServiceRegistration: true,
+        skipHealthCheck: true,
+      }).then((value) => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+      await waiting;
+      // The lock holder activates a newer runtime before releasing its lock.
+      writeFileSync(join(home, "memory-service", "current.json"), JSON.stringify(newerPointer));
+      writeFileSync(join(home, "memory-service", "installation.json"), JSON.stringify({ serviceVersion: "2.3.0" }));
+      rmSync(lockPath);
+      const result = await install;
+      if (preferInstalledCompatible) {
+        expect(result.error).toBeUndefined();
+        expect(result.value).toMatchObject({ reused: true, version: "2.3.0", runtimeExecutable: "/original/node" });
+      } else {
+        expect(result.error).toBeInstanceOf(Error);
+        expect((result.error as Error).message).toContain("refusing to downgrade Memory from 2.3.0 to 2.2.0");
+      }
+      expect((await currentInstalledRuntime(home))?.version).toBe("2.3.0");
+      expect(JSON.parse(readFileSync(join(home, "memory-service", "installation.json"), "utf8"))).toMatchObject({ serviceVersion: "2.3.0" });
+      expect(existsSync(join(home, "memory-service", "runtime", "2.2.0"))).toBe(false);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      timerSpy.mockRestore();
+    }
+  });
+
   it("reclaims a lock abandoned by a crashed installer", async () => {
     const root = tempRoot();
     const home = join(root, "home");

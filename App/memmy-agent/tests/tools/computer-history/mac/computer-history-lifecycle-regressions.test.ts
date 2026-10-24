@@ -79,6 +79,24 @@ afterEach(async () => {
 });
 
 describe("summary retries and atomic replacement", () => {
+  it("keeps a clear unavailable-model error and rejects an old in-flight result", async () => {
+    const { root, service } = serviceAt();
+    const segment = seed(root, segmentId, false);
+    const pending = deferred();
+    const chat = vi.fn(() => pending.promise);
+    service.setLlmRuntime(runtime(chat), "account");
+    await vi.waitFor(() => expect(chat).toHaveBeenCalledOnce());
+    const reason = "Computer History summary model is unavailable. Configure a Memory summary model in Memmy settings.";
+    service.setLlmRuntime(null, null, reason);
+    expect(await internal(service).writeSummaryWith(segment.historyFile, "10min", segment.eventsFile)).toBe(false);
+    expect(service.snapshot().observation).toMatchObject({ modelSource: null, narrationError: reason });
+    pending.resolve(response("Old account summary"));
+    await pending.promise;
+    await Promise.resolve();
+    expect(service.snapshot().histories.some((entry) => entry.title === "Old account summary")).toBe(false);
+    expect(chat).toHaveBeenCalledOnce();
+  });
+
   it("immediately retries the active segment with BYOK while the old account request is pending", async () => {
     const { root, service } = serviceAt();
     const segment = seed(root, segmentId, false);
@@ -147,7 +165,7 @@ describe("summary retries and atomic replacement", () => {
     seed(root, segmentId, false);
     service.setLlmRuntime(runtime(async () => { throw new Error("temporary outage"); }));
     expect(await service.backfillUnwrittenSummaries()).toBe(0);
-    expect(service.snapshot().histories).toHaveLength(0);
+    expect(service.snapshot().histories).toMatchObject([{ id: historyId, summaryStatus: "pending" }]);
     const recovered = vi.fn(async () => response("Recovered"));
     service.setLlmRuntime(runtime(recovered));
     await service.backfillUnwrittenSummaries();
@@ -279,7 +297,8 @@ describe("deletion and complete collection clearing", () => {
     await pending;
     expect(service.snapshot().histories).toHaveLength(0);
     expect(fs.existsSync(segment.directory)).toBe(false);
-    expect(fs.readdirSync(path.join(root, "histories"))).toEqual([]);
+    // Memory sync may retain deletion receipts in the history directory.
+    expect(fs.readdirSync(path.join(root, "histories")).filter(name => /\.md(?:\.staging)?$/u.test(name))).toEqual([]);
   });
 
   it("deletes pending summaries and removes rollups containing deleted evidence", () => {
@@ -314,7 +333,7 @@ describe("deletion and complete collection clearing", () => {
     }
     model.resolve(response("Must not return"));
     await pending;
-    expect(fs.readdirSync(path.join(root, "histories"))).toEqual([]);
+    expect(fs.readdirSync(path.join(root, "histories")).filter(name => /\.md(?:\.staging)?$/u.test(name))).toEqual([]);
   });
 
   it("clear today retains previous days while deleting pending records for today", async () => {

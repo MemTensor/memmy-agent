@@ -459,7 +459,12 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(snapshot).toContain("COMPARE_METADATA.json");
     expect(snapshot).toContain("api_merge_base");
     expect(snapshot).toContain("api_total");
-    expect(snapshot).toContain("gh api --paginate");
+    expect(snapshot).not.toContain("gh api --paginate");
+    expect(snapshot).toContain("pulls?per_page=100");
+    expect(snapshot).toContain("curl --silent --show-error --location");
+    expect(snapshot).toContain("--retry-all-errors");
+    expect(snapshot).toContain("Authorization: Bearer");
+    expect(snapshot).toContain("http_status");
     expect(snapshot).toContain("?per_page=100");
     expect(snapshot).toContain("remoteMetadataValidated");
     const evidence = draftScript("Build auditable release evidence");
@@ -500,6 +505,15 @@ describe("GitHub Draft Release v2 workflow", () => {
     );
   });
 
+  it("retries and validates per-commit GitHub PR metadata before building the snapshot", () => {
+    const snapshot = draftScript("Build complete release change snapshot");
+    expect(snapshot).toContain("PR_" + "$" + "{commit_sha}.json");
+    expect(snapshot).toContain("for attempt in 1 2 3");
+    expect(snapshot).toContain("pulls?per_page=100");
+    expect(snapshot).toContain("jq -e 'type == \"array\"'");
+    expect(snapshot).toContain("Could not fetch valid associated PRs for commit");
+    expect(snapshot).toContain("sleep \"$((attempt * 2))\"");
+  });
   it("cleans up a half-created Draft Release if asset upload fails", () => {
     const create = draftScript("Create draft release and upload every asset");
     expect(create).toContain("cleanup_draft_release()");

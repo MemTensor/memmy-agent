@@ -1,16 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { OutboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { issueToken, issueTokenOk, WsMessage, WsTestClient } from "./ws-test-client.js";
 
 const running: WebSocketChannel[] = [];
+const dataRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(running.splice(0).map((channel) => channel.stop()));
+  vi.unstubAllEnvs();
+  for (const root of dataRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 async function startChannel(config: Record<string, any> = {}): Promise<{ bus: MessageBus; channel: WebSocketChannel; port: number }> {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-cron-websocket-integration-"));
+  dataRoots.push(dataRoot);
+  vi.stubEnv("MEMMY_AGENT_DATA_DIR", dataRoot);
   const bus = new MessageBus();
   const channel = new WebSocketChannel(
     { enabled: true, allowFrom: ["*"], host: "127.0.0.1", port: 0, path: "/", websocketRequiresToken: false, ...config },
@@ -79,6 +88,24 @@ describe("WebSocket integration", () => {
     });
   });
 
+  it("replays an undelivered startup reminder after GUI ready and retains it until the GUI ACK", async () => {
+    const { channel, port } = await startChannel();
+    const deliveryId = "cron:startup-job:1000:1";
+    await channel.send(new OutboundMessage({ channel: "websocket", chatId: "startup-chat", content: "startup reminder",
+      metadata: { proactiveDelivery: "cron", deliveryId } }));
+    const file = path.join(process.env.MEMMY_AGENT_DATA_DIR!, "webui", "pending-cron-notifications.json");
+    await withClient(port, "gui-after-startup", async (client) => {
+      await client.recvReady();
+      const reminder = await client.recv();
+      expect(reminder.event).toBe("message");
+      expect(reminder.text).toBe("startup reminder");
+      expect(reminder.chatId).toBe("startup-chat");
+      expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toHaveLength(1);
+      await client.sendJson({ type: "cron_delivery_ack", delivery_id: deliveryId });
+      await vi.waitFor(() => expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toEqual([]));
+    });
+  });
+
   it("generates an anonymous client id when none is supplied", async () => {
     const { port } = await startChannel();
     const client = new WsTestClient(`ws://127.0.0.1:${port}/`, { clientId: "" });
@@ -88,6 +115,21 @@ describe("WebSocket integration", () => {
     } finally {
       await client.close();
     }
+  });
+
+  it("preserves a corrupt notification queue while keeping the GUI connection usable", async () => {
+    const { bus, port } = await startChannel();
+    const file = path.join(process.env.MEMMY_AGENT_DATA_DIR!, "webui", "pending-cron-notifications.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "synthetic corrupt queue");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await withClient(port, "gui-with-corrupt-queue", async (client) => {
+      await client.recvReady();
+      await client.sendContent("still connected");
+      expect((await nextInbound(bus)).content).toBe("still connected");
+    });
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("queue preserved"));
+    expect(fs.readFileSync(file, "utf8")).toBe("synthetic corrupt queue");
   });
 
   it("assigns a unique chat id to each connection", async () => {

@@ -2,13 +2,47 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openMemoryAgentSourceScanStore } from "../src/agent-source/scan-store.js";
 
 let directory: string | undefined;
-afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); directory = undefined; });
+afterEach(() => { vi.restoreAllMocks(); if (directory) rmSync(directory, { recursive: true, force: true }); directory = undefined; });
 
 describe("standalone durable scan store retry", () => {
+  it("counts inserts once across sources, duplicates, rollback and reopen", async () => {
+    directory = mkdtempSync(join(tmpdir(), "memmy-scan-counts-"));
+    const path = join(directory, "job.sqlite");
+    const job = { jobId: "job", sourceId: "all", mode: "full", phase: "stage", createdAt: "2099-01-01", updatedAt: "2099-01-01" };
+    let store = await openMemoryAgentSourceScanStore(path, job);
+    const message = { messageId: "m1", sourceId: "codex", conversationId: "c1", role: "user" as const, content: "Synthetic", createdAt: "2099-01-01T00:00:00Z", workspacePath: null, gitRoot: null, rawMeta: {} };
+    const prepare = vi.spyOn(Database.prototype, "prepare");
+    expect(store.count()).toBe(0);
+    expect(store.stageBatch([message, { ...message, sourceId: "cursor" }])).toBe(2);
+    expect(store.stage(message)).toBe(false);
+    for (let index = 0; index < 100; index += 1) {
+      expect(store.count("codex")).toBe(1);
+      expect(store.count("cursor")).toBe(1);
+      expect(store.count()).toBe(2);
+    }
+    expect(prepare.mock.calls.filter(([sql]) => /COUNT\(\*\).*staged_messages/.test(sql))).toHaveLength(1);
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => store.stageBatch([{ ...message, messageId: "rolled-back" }, { ...message, messageId: "invalid", rawMeta: circular }])).toThrow();
+    expect(store.count("codex")).toBe(1);
+    expect(store.count()).toBe(2);
+    store.close();
+    const raw = new Database(path);
+    raw.prepare("INSERT INTO staged_messages(job_id,source_id,conversation_id,message_id,role,content,created_at,raw_meta_json,ordinal) VALUES(?,?,?,?,?,?,?,?,?)").run("other-job", "codex", "c2", "foreign", "user", "Synthetic other job", message.createdAt, "{}", 100);
+    raw.close();
+    store = await openMemoryAgentSourceScanStore(path, job);
+    expect(store.count("codex")).toBe(1);
+    expect(store.count()).toBe(2);
+    expect(store.stage({ ...message, messageId: "new" })).toBe(true);
+    expect(store.count("codex")).toBe(2);
+    expect(store.count()).toBe(3);
+    store.close();
+  });
+
   it("refreshes unresolved Codex rows in the same job without counting them as new messages", async () => {
     directory = mkdtempSync(join(tmpdir(), "memmy-codex-scan-retry-"));
     const path = join(directory, "job.sqlite");

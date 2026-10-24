@@ -95,9 +95,15 @@ function userQuery(payload) {
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.source?.kind === "user" || message?.role === "user") return messageText(message);
+    // Recalled context also uses role:user, so an explicit source takes precedence.
+    if (message?.source?.kind === "user" || (!message?.source && message?.role === "user")) {
+      const text = messageText(message);
+      if (text) return text;
+    }
   }
-  return messageText(payload?.message);
+  const message = payload?.message;
+  if (message?.source && message.source.kind !== "user") return "";
+  return messageText(message);
 }
 
 function agentSessionKey(agent) {

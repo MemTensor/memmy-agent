@@ -28,6 +28,7 @@ describe("memory token budget rules", () => {
 
   it("pauses budgeted jobs and leaves idle close runnable", () => {
     expect(jobTypeConsumesMemoryBudget("trace_summary")).toBe(true);
+    expect(jobTypeConsumesMemoryBudget("observation_extract")).toBe(true);
     expect(jobTypeConsumesMemoryBudget("episode_title")).toBe(true);
     expect(jobTypeConsumesMemoryBudget("embedding")).toBe(true);
     expect(jobTypeConsumesMemoryBudget("new_future_job")).toBe(true);
@@ -57,11 +58,13 @@ describe("memory token budget rules", () => {
 
     expect(jobTypeConsumesMemoryBudget("reflection", account)).toBe(false);
     expect(jobTypeConsumesMemoryBudget("trace_summary", account)).toBe(false);
+    expect(jobTypeConsumesMemoryBudget("observation_extract", account)).toBe(false);
     expect(jobTypeConsumesMemoryBudget("embedding", account)).toBe(false);
 
     expect(jobTypeConsumesMemoryBudget("episode_title", mixed)).toBe(true);
     expect(jobTypeConsumesMemoryBudget("span_big_turn", mixed)).toBe(true);
     expect(jobTypeConsumesMemoryBudget("work_memory_extract", mixed)).toBe(true);
+    expect(jobTypeConsumesMemoryBudget("observation_extract", mixed)).toBe(true);
     expect(jobTypeConsumesMemoryBudget("reflection", mixed)).toBe(true);
     expect(jobTypeConsumesMemoryBudget("reward", mixed)).toBe(true);
     expect(jobTypeConsumesMemoryBudget("embedding", mixed)).toBe(false);
@@ -69,6 +72,7 @@ describe("memory token budget rules", () => {
     expect(jobTypeConsumesMemoryBudget("l2_association", mixed)).toBe(false);
     expect(jobTypeBudgetRoles("span_big_turn")).toEqual(["memory_summary"]);
     expect(jobTypeBudgetRoles("work_memory_extract")).toEqual(["memory_summary"]);
+    expect(jobTypeBudgetRoles("observation_extract")).toEqual(["memory_summary"]);
     expect(jobTypeBudgetRoles("reflection")).toEqual(["memory_summary", "memory_evolution"]);
     expect(jobTypeBudgetRoles("reward")).toEqual(["memory_summary", "memory_evolution"]);
   });

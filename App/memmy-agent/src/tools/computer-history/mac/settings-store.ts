@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -9,7 +10,8 @@ import {
 } from "./observation-settings.js";
 
 export function defaultSettingsFile(): string {
-  return path.join(os.homedir(), ".memmy", "computer-history", "observation-settings.json");
+  const home = process.env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy");
+  return path.join(home, "computer-history", "observation-settings.json");
 }
 
 /**
@@ -47,7 +49,17 @@ export class ObservationSettingsStore {
   write(input: unknown): ObservationSettings {
     const settings = parseObservationSettings(input);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    // The recorder reads this file for each event. Publish a complete policy
+    // in one rename so a concurrent read never sees half a JSON document.
+    const temporaryFile = `${this.file}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporaryFile, `${JSON.stringify(settings, null, 2)}\n`, {
+        encoding: "utf8", mode: 0o600, flag: "wx",
+      });
+      fs.renameSync(temporaryFile, this.file);
+    } finally {
+      try { fs.rmSync(temporaryFile, { force: true }); } catch { /* Preserve the write error. */ }
+    }
     return settings;
   }
 }

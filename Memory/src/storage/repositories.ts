@@ -54,6 +54,7 @@ import {
   VECTOR_SEARCH_WINDOW,
   type VectorSearchCandidate
 } from "./sqlite-vec-store.js";
+import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
 
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
@@ -694,6 +695,22 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
+    // Parent traces may already be soft-deleted, and their span_ids only describe
+    // the latest split. Use the spans' own ownership links for task deletion.
+    const rows = this.db.prepare(
+      `SELECT id FROM memories
+       WHERE user_id = ? AND memory_layer = 'L1'
+         AND deleted_at IS NULL AND status != 'deleted'
+         AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
+         AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
+         AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
+           IN (SELECT value FROM json_each(?))
+       ORDER BY id`
+    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
     const row = this.db
       .prepare(
@@ -835,7 +852,7 @@ export class MemoryRepository {
                 memory_layer,
                 created_at,
                 updated_at,
-                json_extract(info_json, '$.source') AS info_source,
+                ${memoryDisplayedSourceSql("json_extract(info_json, '$.source')")} AS info_source,
                 json_extract(properties_json, '$.internal_info.source') AS internal_source
          FROM memories
          WHERE deleted_at IS NULL`
@@ -960,6 +977,17 @@ export class MemoryRepository {
          LIMIT ?`
       )
       .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  /** Bounded, idempotent upgrade pass; deleted observations never re-enter processing. */
+  listUnprocessedObservations(limit = 100): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE deleted_at IS NULL AND status = 'activated' AND memory_layer = 'L1'
+        AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+        AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
+        AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1
+      ORDER BY created_at DESC, id DESC LIMIT ?`).all(Math.min(Math.max(limit, 0), 1000)) as MemorySqlRow[];
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
@@ -1668,18 +1696,23 @@ export class UserMemoryRepository {
   }
 }
 
+// A first attempt waiting in the queue has not failed; only a job that already
+// recorded an error and still has attempts left is an automatic retry.
+const AUTO_RETRY_SCHEDULED_SQL = `EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.last_error IS NOT NULL
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled`;
+
 export class MemoryProcessingRepository {
   constructor(private readonly db: Database.Database) {}
 
   get(memoryId: string): MemoryProcessingRecord | undefined {
     const row = this.db.prepare(
       `SELECT memory_processing_state.*,
-              EXISTS(
-                SELECT 1 FROM evolution_jobs
-                WHERE evolution_jobs.id = memory_processing_state.active_job_id
-                  AND evolution_jobs.status IN ('failed', 'queued')
-                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
-              ) AS auto_retry_scheduled
+              ${AUTO_RETRY_SCHEDULED_SQL}
        FROM memory_processing_state
        WHERE memory_id = ?`
     ).get(memoryId) as SqlMemoryProcessingRow | undefined;
@@ -1691,12 +1724,7 @@ export class MemoryProcessingRepository {
     const placeholders = memoryIds.map(() => "?").join(", ");
     const rows = this.db.prepare(
       `SELECT memory_processing_state.*,
-              EXISTS(
-                SELECT 1 FROM evolution_jobs
-                WHERE evolution_jobs.id = memory_processing_state.active_job_id
-                  AND evolution_jobs.status IN ('failed', 'queued')
-                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
-              ) AS auto_retry_scheduled
+              ${AUTO_RETRY_SCHEDULED_SQL}
        FROM memory_processing_state
        WHERE memory_id IN (${placeholders})`
     ).all(...memoryIds) as SqlMemoryProcessingRow[];
@@ -1711,12 +1739,7 @@ export class MemoryProcessingRepository {
     const placeholders = states.map(() => "?").join(", ");
     return (this.db.prepare(
       `SELECT memory_processing_state.*,
-              EXISTS(
-                SELECT 1 FROM evolution_jobs
-                WHERE evolution_jobs.id = memory_processing_state.active_job_id
-                  AND evolution_jobs.status IN ('failed', 'queued')
-                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
-              ) AS auto_retry_scheduled
+              ${AUTO_RETRY_SCHEDULED_SQL}
        FROM memory_processing_state
        WHERE state IN (${placeholders})
        ORDER BY updated_at ASC, memory_id ASC
@@ -1808,8 +1831,41 @@ function sourceTurnCaptureFromSql(row: Record<string, unknown>): SourceTurnCaptu
 
 export class RuntimeRepository {
   private readonly scheduledLogPrunes = new Set<LogTableName>();
+  private historyLogCompactionScheduled = false;
+  private historyLogCompactionCursor = 0;
 
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Database.Database) {
+    this.scheduleHistoryLogCompaction();
+  }
+
+  /** Update payloads in bounded batches; IDs, versions and sync cursors never move. */
+  private scheduleHistoryLogCompaction(reset = false): void {
+    if (reset) this.historyLogCompactionCursor = 0;
+    if (this.historyLogCompactionScheduled || !this.db.open || this.db.readonly) return;
+    this.historyLogCompactionScheduled = true;
+    setImmediate(() => {
+      this.historyLogCompactionScheduled = false;
+      if (!this.db.open || this.db.readonly) return;
+      try {
+        const rows = this.db.prepare(
+          `SELECT seq, before_json, after_json FROM memory_change_log WHERE seq > ? ORDER BY seq LIMIT 200`
+        ).all(this.historyLogCompactionCursor) as Array<Record<string, unknown> & { seq: number }>;
+        const update = this.db.prepare(`UPDATE memory_change_log SET before_json = ?, after_json = ?
+          WHERE seq = ? AND before_json IS ? AND after_json IS ?`);
+        this.db.transaction(() => {
+          for (const row of rows) {
+            const compact = compactHistoryChangeRow(row);
+            if (compact !== row) update.run(compact.before_json, compact.after_json, row.seq, row.before_json, row.after_json);
+          }
+        })();
+        if (rows.length) this.historyLogCompactionCursor = rows[rows.length - 1]!.seq;
+        if (rows.length === 200) this.scheduleHistoryLogCompaction();
+      } catch {
+        // Best-effort maintenance must not interfere with capture or worker writes.
+        // An interrupted pass is retried on the next service start.
+      }
+    });
+  }
 
   getKv(key: string): { value: unknown; updatedAt: string } | undefined {
     const row = this.db
@@ -1847,17 +1903,20 @@ export class RuntimeRepository {
     }));
   }
 
+  // userId is capture provenance. It must not partition the same local native turn
+  // when an installed Hook and the desktop scanner submit under different accounts.
   getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
-        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+      WHERE source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId
+      ORDER BY created_at ASC, user_id ASC LIMIT 1`
     ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
   latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
       ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
     ).get(scope) as Record<string, unknown> | undefined;
@@ -1869,7 +1928,7 @@ export class RuntimeRepository {
     after?: SourceTurnCaptureRecord;
   } {
     const prefix = `SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
     const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
       .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
@@ -1906,8 +1965,8 @@ export class RuntimeRepository {
       .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
   }
 
-  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
-    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+  sourceConversationSessions(input: { userId?: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
         OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
@@ -3100,8 +3159,8 @@ export class RuntimeRepository {
         change.userId,
         change.changeType,
         change.version ?? versionFromChangePayload(change.after),
-        change.before === undefined ? null : toJson(change.before),
-        change.after === undefined ? null : toJson(change.after),
+        change.before === undefined ? null : toJson(compactHistoryChangePayload(change.before)),
+        change.after === undefined ? null : toJson(compactHistoryChangePayload(change.after)),
         change.source,
         change.createdAt
     );
@@ -3502,11 +3561,15 @@ export class RuntimeRepository {
   getPendingJob(
     targetMemoryId: string,
     jobType: JobType,
-    contentHash?: string
+    contentHash?: string,
+    observationGeneration?: string,
+    externalSkillGeneration?: string
   ): EvolutionJobRecord | undefined {
     const contentClause = contentHash
       ? "AND json_extract(payload_json, '$.contentHash') = ?"
       : "";
+    const generationClause = observationGeneration ? "AND json_extract(payload_json, '$.observationGeneration') = ?" : "";
+    const skillGenerationClause = externalSkillGeneration ? "AND json_extract(payload_json, '$.externalSkillGeneration') = ?" : "";
     const row = this.db
       .prepare(
         `SELECT *
@@ -3515,10 +3578,13 @@ export class RuntimeRepository {
            AND job_type = ?
            AND status IN ('queued', 'leased')
            ${contentClause}
+           ${generationClause}
+           ${skillGenerationClause}
          ORDER BY ${evolutionJobOrderSql()}
          LIMIT 1`
       )
-      .get(targetMemoryId, jobType, ...(contentHash ? [contentHash] : [])) as SqlJobRow | undefined;
+      .get(targetMemoryId, jobType, ...(contentHash ? [contentHash] : []), ...(observationGeneration ? [observationGeneration] : []),
+        ...(externalSkillGeneration ? [externalSkillGeneration] : [])) as SqlJobRow | undefined;
     return row ? jobFromSql(row) : undefined;
   }
 
@@ -3667,6 +3733,15 @@ export class RuntimeRepository {
          WHERE id = ?`
       )
       .run(at, id);
+    return this.getJob(id);
+  }
+
+  /** Waiting for a dependency is not a model failure and does not consume an attempt. */
+  deferProcessingJob(id: string, runAfter: string, at = nowIso()): EvolutionJobRecord | undefined {
+    this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+      attempts = MAX(0, attempts - 1), updated_at = ?,
+      payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE id = ? AND status = 'leased'`).run(at, runAfter, id);
     return this.getJob(id);
   }
 
@@ -4741,10 +4816,10 @@ export class RuntimeRepository {
     const tables: Record<string, Array<Record<string, unknown>>> = {};
     for (const table of BUNDLE_TABLES) {
       const rows = this.db.prepare(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>;
-      tables[table] = rows.map((row) => serializeBundleRow(
-        table,
-        includeRawText ? row : redactBundleRow(table, row)
-      ));
+      tables[table] = rows.map((row) => {
+        const projected = table === "memory_change_log" ? compactHistoryChangeRow(row) : row;
+        return serializeBundleRow(table, includeRawText ? projected : redactBundleRow(table, projected));
+      });
     }
     return includeRawText ? tables : normalizeRedactedL3WorldModelBundle(tables);
   }
@@ -4789,7 +4864,8 @@ export class RuntimeRepository {
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
-          const normalized = applyBundleDefaults(table, deserializeBundleRow(row));
+          const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
+          const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -4849,6 +4925,7 @@ export class RuntimeRepository {
       }
     })();
     this.scheduleLogTablesPrune();
+    this.scheduleHistoryLogCompaction(true);
     return result;
   }
 
@@ -6743,9 +6820,17 @@ function likeColumnsForTerm(term: string, includeTags: boolean): string[] {
   // memories above real hits. Longer terms and CJK bigrams cannot collide with
   // JSON structure and keep their reach into metadata values.
   if (!isShortAsciiTerm(term)) {
+    // Raw History is retained for provenance, not as another retrieval corpus
+    // after the worker has distilled the useful memory from it.
     columns.push(
-      "lower(memories.properties_json) LIKE ? ESCAPE '\\'",
-      "lower(memories.info_json) LIKE ? ESCAPE '\\'"
+      `lower(CASE WHEN json_extract(memories.properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+        THEN json_object('title', json_extract(memories.properties_json, '$.internal_info.title'),
+          'summary', json_extract(memories.properties_json, '$.internal_info.summary'))
+        ELSE memories.properties_json END) LIKE ? ESCAPE '\\'`,
+      `lower(CASE WHEN json_extract(memories.properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+        THEN json_object('title', json_extract(memories.info_json, '$.title'),
+          'summary', json_extract(memories.info_json, '$.summary'))
+        ELSE memories.info_json END) LIKE ? ESCAPE '\\'`
     );
   }
   if (includeTags) columns.push("lower(memories.tags_json) LIKE ? ESCAPE '\\'");
@@ -6758,6 +6843,29 @@ function isShortAsciiTerm(term: string): boolean {
 
 function normalizedAgentIdSql(column: string): string {
   return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
+}
+
+/** Keep the narrow stats projection and panel filters aligned with panelSourceForMemory. */
+function memoryDisplayedSourceSql(fallback: string): string {
+  const candidate = "$.internal_info.external_evidence_candidate";
+  // SQLite GLOB is case-sensitive and anchored unless a wildcard is present,
+  // matching the canonical History ID shape used by the legacy source helper.
+  const historyPrefix = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]";
+  const historyId = ["10min", "6h"].flatMap((window) => ["", "Z"].map((zone) =>
+    `history_source.value GLOB '${historyPrefix}${zone}-${window}-summary'`)).join(" OR ");
+  return `CASE
+    WHEN (json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND (json_extract(properties_json, '$.internal_info.external_evidence.source') = 'computer_history'
+        OR json_type(properties_json, '$.internal_info.external_evidence.provenance.historyId') = 'text'))
+      OR (memory_layer = 'Skill' AND (
+        json_extract(properties_json, '${candidate}.source') = 'computer_history'
+        OR (agent_id = 'memmy' AND json_extract(properties_json, '${candidate}.source') = 'memmy'
+          AND json_type(properties_json, '${candidate}.sourceRecordIds') = 'array'
+          AND (SELECT COUNT(DISTINCT value) FROM json_each(properties_json, '${candidate}.sourceRecordIds')) >= 2
+          AND NOT EXISTS (SELECT 1 FROM json_each(properties_json, '${candidate}.sourceRecordIds') AS history_source
+            WHERE history_source.type <> 'text' OR NOT (${historyId})))
+      ))
+    THEN 'computer_history' ELSE ${fallback} END`;
 }
 
 /**
@@ -6845,13 +6953,16 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   }
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
+    // The namespace owner remains Memmy; the panel filters by the producer it
+    // displays, including History records written by the old HTTP envelope.
+    const displayedSource = memoryDisplayedSourceSql("agent_id");
     if (value?.trim()) {
-      const match = agentIdMatchClause("agent_id", value);
+      const match = agentIdMatchClause(displayedSource, value);
       clauses.push(match.sql);
       params.push(...match.params);
       return;
     }
-    const exclusion = agentIdExclusionClause("agent_id", excludedValues ?? []);
+    const exclusion = agentIdExclusionClause(displayedSource, excludedValues ?? []);
     if (exclusion) {
       clauses.push(exclusion.sql);
       params.push(...exclusion.params);
@@ -8023,7 +8134,7 @@ function isSerializedBuffer(value: unknown): value is { __memmy_type: "buffer"; 
 }
 
 function evolutionJobOrderSql(): string {
-  const memoryProcessingJob = `job_type IN ('trace_summary', 'import_summary', 'embedding')
+  const memoryProcessingJob = `job_type IN ('trace_summary', 'import_summary', 'observation_extract', 'embedding')
     AND target_memory_id IS NOT NULL`;
   return `${evolutionJobPrioritySql()} ASC,
            CASE WHEN ${memoryProcessingJob}
@@ -8034,7 +8145,7 @@ function evolutionJobOrderSql(): string {
              ELSE ''
            END DESC,
            CASE
-             WHEN job_type IN ('trace_summary', 'import_summary') THEN 0
+             WHEN job_type IN ('trace_summary', 'import_summary', 'observation_extract') THEN 0
              WHEN job_type = 'embedding' THEN 1
              ELSE 2
            END ASC,
@@ -8049,8 +8160,11 @@ function evolutionJobPrioritySql(): string {
   const interactiveL1Target = targetMemoryMatchesSql(
     `memories.memory_layer = 'L1' AND NOT (${agentSourceMemorySql("memories")})`
   );
+  // The background drain leases only the highest tier present. Computer History
+  // shares the trace tier so recency, not a backfill of old Agent turns, decides
+  // when a fresh History window becomes memory.
   return `CASE
-             WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
+             WHEN job_type IN ('trace_summary', 'import_summary', 'observation_extract', 'embedding')
                AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
              WHEN job_type IN ('trace_summary', 'import_summary')
@@ -8058,7 +8172,7 @@ function evolutionJobPrioritySql(): string {
                  'startup.processing_repair',
                  'startup.placeholder_summary_repair'
                ) THEN 90
-             WHEN job_type = 'trace_summary'
+             WHEN job_type IN ('trace_summary', 'observation_extract')
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
              WHEN job_type = 'import_summary'
                OR (job_type = 'embedding' AND ${importedTarget}) THEN 2

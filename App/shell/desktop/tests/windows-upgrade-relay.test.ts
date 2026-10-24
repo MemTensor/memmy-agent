@@ -151,6 +151,10 @@ const createRelayFixture = async (
   await writeFile(join(dataDir, "prepared-required-update.json.attempt"), "1.0.9", "utf8");
   const windowsDirectory = process.env.SystemRoot ?? "C:\\Windows";
   const appStubPath = join(windowsDirectory, "System32", "where.exe");
+  const { stdout: productVersion } = await execFile(join(windowsDirectory, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+    "-NoProfile", "-NonInteractive", "-Command",
+    `[System.Diagnostics.FileVersionInfo]::GetVersionInfo('${appStubPath.replaceAll("'", "''")}').FileVersion`,
+  ], { timeout: 30_000, windowsHide: true });
   await writeFile(join(installDir, "Memmy.exe"), await readFile(appStubPath));
   const escapedTargetInstallDir = targetInstallDir.replaceAll("%", "%%");
   const escapedAppStubPath = appStubPath.replaceAll("%", "%%");
@@ -190,6 +194,7 @@ const createRelayFixture = async (
     backupPath,
     logPath,
     installerPath,
+    expectedVersion: productVersion.trim(),
     descendantPidPath,
     targetUserDataPath,
     targetRuntimeHomePath,
@@ -303,7 +308,7 @@ const buildRelayArguments = (
     "-LegacyHelperPid",
     String(options.legacyHelperPid ?? 2147483647),
     "-ExpectedVersion",
-    "10.",
+    fixture.expectedVersion,
     "-InstalledVersion",
     options.installedVersion ?? "1.0.9",
     "-InstallerMode",
@@ -369,6 +374,21 @@ const waitForPathPresent = async (path: string) => {
 };
 
 describeOnWindows("Windows upgrade relay", () => {
+  it.each([
+    ["1.2.10", "1.2.1", false],
+    ["1.2.1-rc.2", "1.2.1", false],
+    ["1.2.1.0", "1.2.1", true],
+    ["1.2.2-rc.10", "1.2.2-rc.2", false],
+    ["1.2.2-rc.10", "1.2.2-rc.10", true],
+    ["10.0.26100.1", "10.0.26100.1", true],
+  ])("checks exact relay version %s against expected %s", async (actual, expected, accepted) => {
+    const source = await readFile(relayScriptPath, "utf8");
+    const functions = source.slice(source.indexOf("function Normalize-MemmyRelayInstalledVersion"), source.indexOf("function Test-MemmySamePath"));
+    const script = `${functions}\nif (Test-MemmyRelayInstalledVersion '${actual}' '${expected}') { 'true' } else { 'false' }`;
+    const { stdout } = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { timeout: 30_000, windowsHide: true });
+    expect(stdout.trim()).toBe(String(accepted));
+  });
+
   it("revalidates relocation safety immediately before starting the child installer", async () => {
     const source = await readFile(relayScriptPath, "utf8");
     const safetyCalls = [...source.matchAll(/^\s+Assert-MemmyRelocationTargetIsSafe(?:\s|$)/gmu)];
@@ -773,25 +793,22 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(log).not.toContain("upgrade verified");
   });
 
-  it("continues a silent relay upgrade when migration fails and retains the original data for manual recovery", async () => {
+  it("aborts a silent relay upgrade when migration fails and restores the original data", async () => {
     const fixture = await createRelayFixture(0, { failMigrationPrepare: true });
     const lockPath = join(fixture.root, "active.lock");
     await mkdir(fixture.targetUserDataPath, { recursive: true });
     await writeFile(join(fixture.targetUserDataPath, "historical.txt"), "keep-existing-target", "utf8");
 
-    await runRelay(fixture);
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
 
     expect(existsSync(join(fixture.installDir, "Memmy.exe"))).toBe(true);
-    expect(existsSync(join(fixture.installDir, "data"))).toBe(false);
+    expect(await readFile(join(fixture.dataDir, "sentinel.txt"), "utf8")).toBe("keep-me");
     expect(await readFile(join(fixture.targetUserDataPath, "historical.txt"), "utf8")).toBe("keep-existing-target");
-    expect(await readFile(join(fixture.backupPath, "Memmy", "sentinel.txt"), "utf8")).toBe("keep-me");
     expect(existsSync(fixture.migrationStatePath)).toBe(false);
     expect(existsSync(lockPath)).toBe(false);
     const log = await readFile(fixture.logPath, "utf8");
-    expect(log).toContain("data migration Prepare failed safely; continuing installation without migration");
-    expect(log).toContain(`original data retained for manual recovery at ${fixture.backupPath}`);
-    expect(log).not.toContain("upgrade not verified");
-    await waitForPathAbsent(fixture.workDir);
+    expect(log).toContain("data migration Prepare failed; aborting before installation");
+    expect(log).toContain("upgrade not verified");
   });
 
   it("keeps the installed app when migration completion fails and rolls the targets back", async () => {

@@ -50,6 +50,15 @@ export interface CreateHttpMemoryClientOptions {
 
 type PathKey = keyof typeof MEMORY_LAYER_PATHS;
 
+const ObservedSkillApprovalOutputSchema = z.object({
+  id: z.string().min(1),
+  status: z.literal("activated"),
+  serverTime: z.string().datetime()
+});
+const ObservedSkillUpdateOutputSchema = ObservedSkillApprovalOutputSchema.extend({
+  version: z.number().int().positive()
+});
+
 /** Creates create http memory client. */
 export function createHttpMemoryClient(
   config: MemoryLayerConfig,
@@ -58,7 +67,7 @@ export function createHttpMemoryClient(
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   async function request<Output>(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     pathKey: PathKey,
     responseSchema: ZodType<Output>,
     requestOptions: {
@@ -197,6 +206,18 @@ export function createHttpMemoryClient(
         params: { id: memoryId },
         body,
         context
+      });
+    },
+
+    async approveObservedSkill(memoryId, context) {
+      return request("POST", "approveObservedSkill", ObservedSkillApprovalOutputSchema, {
+        params: { id: memoryId }, body: {}, context, maxRetries: 0
+      });
+    },
+
+    async updateObservedSkill(memoryId, input, context) {
+      return request("PATCH", "updateObservedSkill", ObservedSkillUpdateOutputSchema, {
+        params: { id: memoryId }, body: input, context, maxRetries: 0
       });
     },
 

@@ -3,9 +3,10 @@ import { promisify } from "node:util";
 import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { RequestContext } from "../../core/agent-runtime/tools/context.js";
 import type { MacPermission } from "./mac-permission-settings.js";
+import type { NativeDiagnostic } from './native-diagnostics.js';
 
 const execFileAsync = promisify(execFile);
-export type PermissionPreflight = { state: "granted" } | { state: "missing"; permission: MacPermission; missingPermissions?: MacPermission[] } | { state: "unknown"; reason?: 'desktopUnavailable' | 'probeFailed' | 'screenCaptureUnavailable' | 'helperPauseFailed' };
+export type PermissionPreflight = { state: "granted" } | { state: "missing"; permission: MacPermission; missingPermissions?: MacPermission[] } | { state: "unknown"; reason?: 'desktopUnavailable' | 'probeFailed' | 'screenCaptureUnavailable' | 'helperPauseFailed' | 'requestUnavailable' | 'connectionFailed'; diagnostic?: NativeDiagnostic };
 
 export function parsePermissionDoctor(stdout: string): PermissionPreflight {
   const match = stdout.match(/^Permissions: accessibility=(granted|missing), screenRecording=(granted|missing)\s*$/m);
@@ -18,13 +19,12 @@ export function parsePermissionDoctor(stdout: string): PermissionPreflight {
 }
 
 /** Uses the same launcher, arguments, environment and native app identity as MCP.
- * doctor never receives the target app. The pinned native runtime presents its
- * own onboarding when permissions are missing, without opening the target.
+ * doctor never receives the target app and only reads permission status.
  */
 export function nativePermissionDoctor(options: {
   command: string; args: string[]; env: Record<string, string> | null; cwd: string | null;
-}): () => Promise<PermissionPreflight> {
-  return async () => {
+}): (signal?: AbortSignal) => Promise<PermissionPreflight> {
+  return async signal => {
     if (options.args.at(-1) !== "mcp") return { state: "unknown" };
     try {
       const { stdout } = await execFileAsync(options.command, [...options.args.slice(0, -1), "doctor"], {
@@ -32,6 +32,7 @@ export function nativePermissionDoctor(options: {
         ...(options.cwd ? { cwd: options.cwd } : {}),
         timeout: 15_000,
         maxBuffer: 64 * 1024,
+        signal,
       });
       return parsePermissionDoctor(stdout);
     } catch {
@@ -59,7 +60,7 @@ export class MacPermissionPreflight {
   }
   blocked(context: RequestContext | null): Promise<PermissionPreflight> | undefined {
     const key = this.key(context);
-    return key ? this.denied.get(key) : Promise.resolve({ state: 'unknown' });
+    return key ? this.denied.get(key) : Promise.resolve({ state: 'unknown', reason: 'requestUnavailable' });
   }
   check(context: RequestContext | null, generation = 0, signal?: AbortSignal | null): Promise<PermissionPreflight> {
     const key = this.key(context);

@@ -1,0 +1,131 @@
+{
+  "date": "2026-10-16",
+  "timezone": "Asia/Shanghai",
+  "branch": "codex/windows-history-evidence-repair-20261015",
+  "baseCommit": "6e3d38f17",
+  "sourceSha256": {
+    "README.md": "90467c227542b7705261dd65f3b9db52d5b0b60d361192f51e137921d788b6da",
+    "go.mod": "4a846540b02ccdb36cc0985967b19d64abf3cc5cecdafdf91e329f624a976ec3",
+    "logic.go": "40c763318f8c78bb26e2b2caac3c690856bb559cd75fb2f913a786e77b767c45",
+    "logic_test.go": "8dfd54b5998d7dcc73b620b4241e4cc0fd318e90f49f41bd4bc1d5a5cd1af866",
+    "main.go": "754085321e18b57e2de726c45e7c14c71d0ffe2b7c0254fbac29e2f67e02c6b8",
+    "platform_other.go": "d4fff0f000726ed742fe4905adf6f17fcaec0a4df4e8e3af4bec2a56e402e38e",
+    "platform_windows.go": "fb2edd9cbefee051e257bedd80e494ce84d50b3401edfbd5f176a1e6a19614f4",
+    "supervisor_test.go": "5b511d17e4344e72a6fba008f6aeb9abf53acd8da6c56b5c4b2ce9144fcc5273",
+    "worker.ps1": "c24dbc4f2bc124c39980439fd8e091df40c1dc7b7abe84ab9792e58d41b4c9d9"
+  },
+  "pureTestFilesSha256": {
+    "worker.ps1": "908ac913ffa01f63e2578a33c444730c47028b2e95e0a2ec094e85db1df0dd2f",
+    "worker-legacy-binder.ps1": "173c47f8fab00b9296baeadd14300facfa68fd8c08c4845f140179a29545a9fe",
+    "memmy-computer-history-amd64.exe": "5c7c529f01e228d8bc1aa3b83795b1158d5670ec575ba1fb142bffb432f47abb",
+    "memmy-computer-history-arm64.exe": "f149ef572e52c9ce73763002a1476691d32fc2710d85adeda1c3676d4d0f7ca2",
+    "native-tests-amd64.exe": "d6f3918d180042a1bb267fc14f3fe7c335faa80c4a2372da92f71a093ee14ded",
+    "native-tests-arm64.exe": "ca40c953e8d6549316ca0cc92841bd6ffb6d0980f3e89cdad9d2fec76389eae1"
+  },
+  "workerTestEncoding": "UTF-8 BOM added exactly as production supervisor does",
+  "vm": {
+    "system": "Windows 11 ARM",
+    "powershell": "5.1.26100.9711",
+    "desktopAccess": false,
+    "results": [
+      {
+        "step": "worker-legacy-binder.ps1 -SelfTest",
+        "exitCode": 1,
+        "expectedFailure": true,
+        "error": "System.ArgumentException: Argument types do not match at Snapshot return"
+      },
+      {
+        "step": "worker.ps1 -SelfTest",
+        "exitCode": 0,
+        "expectedFailure": false,
+        "output": {
+          "runtimeId": "MemmyWindowsHistoryRuntimeV1",
+          "pureSelfTest": true,
+          "desktopAccess": false,
+          "workerApiCompiled": true,
+          "snapshotTraversalChecked": true
+        }
+      },
+      {
+        "step": "memmy-computer-history-amd64.exe --self-test",
+        "exitCode": 0,
+        "expectedFailure": false,
+        "output": {
+          "desktopAccess": false,
+          "pureSelfTest": true,
+          "runtimeId": "MemmyWindowsHistoryRuntimeV1",
+          "version": "dev"
+        }
+      },
+      {
+        "step": "native-tests-amd64.exe -test.v",
+        "exitCode": 0,
+        "expectedFailure": false,
+        "topLevelTestsPassed": 24,
+        "subTestsPassed": 7
+      },
+      {
+        "step": "memmy-computer-history-arm64.exe --self-test",
+        "exitCode": 0,
+        "expectedFailure": false,
+        "output": {
+          "desktopAccess": false,
+          "pureSelfTest": true,
+          "runtimeId": "MemmyWindowsHistoryRuntimeV1",
+          "version": "dev"
+        }
+      },
+      {
+        "step": "native-tests-arm64.exe -test.v",
+        "exitCode": 0,
+        "expectedFailure": false,
+        "topLevelTestsPassed": 24,
+        "subTestsPassed": 7
+      }
+    ],
+    "genericListControl": [
+      {
+        "legacyArgumentException": true,
+        "fixedCount": 0,
+        "nonempty": false
+      },
+      {
+        "legacyArgumentException": true,
+        "fixedCount": 1,
+        "nonempty": true
+      }
+    ],
+    "dedicatedGuestTestDirectoryRemoved": true
+  },
+  "automated": {
+    "historyAndSkills": {
+      "files": 59,
+      "passed": 726,
+      "skipped": 4
+    },
+    "contractAndPackaging": {
+      "files": 2,
+      "passed": 24,
+      "skipped": 1
+    },
+    "typeScript": "passed",
+    "goRace": "passed",
+    "goVet": "passed",
+    "windowsBuilds": [
+      "amd64",
+      "arm64"
+    ],
+    "diffCheck": "passed"
+  },
+  "acceptance": {
+    "installerBuilt": false,
+    "installedRuntimeReplaced": false,
+    "guiTested": false,
+    "liveObserverStarted": false,
+    "remaining": [
+      "integrated package provenance",
+      "installed Windows and macOS acceptance",
+      "capture coverage, latency and resource usage"
+    ]
+  }
+}

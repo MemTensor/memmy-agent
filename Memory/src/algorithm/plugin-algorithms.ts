@@ -7,11 +7,12 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
-import { MEMORY_SUMMARY_MAX_TOKENS, type MemoryLanguage } from "../config/index.js";
+import { MEMORY_SUMMARY_MAX_TOKENS, normalizeMemoryLanguage, type MemoryLanguage } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
 import { formatZonedTime } from "../utils/time.js";
+import { isObservationMemory, isObservationMemoryProcessed } from "../service/observation-memory-state.js";
 import {
   renderL3WorldModelFields,
   type L3WorldModelFields
@@ -613,6 +614,15 @@ function matchIntentHeuristic(text: string): {
       return { kind: "chitchat", confidence: 0.9, reason: "greeting", signal: "chitchat.greeting" };
     }
   }
+  // Only complete requests about the assistant itself belong here. A mixed
+  // request or a question about a past nickname must retain normal retrieval.
+  const assistantQuestion = text.replace(/[.!?。！？]+$/u, "").trim();
+  if (
+    /^(?:你好[，,\s]*)?(?:请|麻烦)?(?:介绍(?:一下|下)?(?:你|您)自己|(?:你|您)是谁|(?:你|您)(?:能|可以)(?:做什么|帮我做什么)|(?:你|您)有什么(?:功能|能力))(?:吧|吗|呢)?$/.test(assistantQuestion) ||
+    /^(?:please\s+)?(?:introduce yourself|tell me about yourself|who are you|what can you do|what can you help me with|what are your (?:capabilities|features))$/i.test(assistantQuestion)
+  ) {
+    return { kind: "meta", confidence: 0.98, reason: "assistant identity or capabilities", signal: "meta.assistant_introduction" };
+  }
   if (
     /\b(what did (i|we) (say|discuss|talk|mention)|do you remember|last time|earlier we|previously we|we talked about)\b/i.test(text) ||
     /(我们(刚刚|之前|刚才)?(聊|说|讨论)过|你还记得|上次(?:我们)?|之前(?:我|我们|咱们)?(提|说|聊|讨论))/.test(text) ||
@@ -955,7 +965,8 @@ async function relationWithTimeout<T>(promise: Promise<T>, timeoutMs: number): P
   }
 }
 
-export type PromptLanguage = "auto" | "zh" | "en";
+type DetectedPromptLanguage = "auto" | "zh" | "en";
+export type PromptLanguage = DetectedPromptLanguage | MemoryLanguage;
 
 export const L2_INDUCTION_PROMPT = {
   id: "l2.induction",
@@ -1463,7 +1474,7 @@ Input:
 - Each evidence item includes episode_outcome ("success"|"failure"|"unknown") and episode_r_task.
 - REPAIR_HINTS (optional): prefer / avoid seeds for \`decision_guidance\`.
 - NAMING_SPACE: existing skill names to avoid.
-- OUTPUT_LANGUAGE: "zh" | "en". All natural-language fields must use this language.
+- OUTPUT_LANGUAGE: a concrete BCP 47 locale (or legacy "zh" / "en"). All natural-language fields must use that language, script, and regional conventions. Preserve JSON keys and machine identifiers.
 
 Return JSON:
 {
@@ -1520,7 +1531,7 @@ Input adds:
   - L2: may rewrite steps when policy or new evidence materially changes the workflow.
 
 Also includes POLICY, EVIDENCE (full top traces), EVIDENCE_TOOLS, COUNTER_EXAMPLES, REPAIR_HINTS.
-Also includes OUTPUT_LANGUAGE ("zh" | "en") and REPAIR_RENAME_ALLOWED (boolean).
+Also includes OUTPUT_LANGUAGE (a concrete BCP 47 locale, or legacy "zh" / "en") and REPAIR_RENAME_ALLOWED (boolean). Preserve JSON keys and machine identifiers.
 
 Return the same JSON schema as crystallize, plus:
   "changed_sections": ["retrieval_blurb", "summary", ...]
@@ -3713,7 +3724,7 @@ export function buildPolicyDraft(args: {
   };
 }
 
-export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): PromptLanguage {
+export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): DetectedPromptLanguage {
   return detectPromptLanguage(samples, 0.7, "en", false);
 }
 
@@ -3721,17 +3732,18 @@ export function detectDominantLanguage(samples: ReadonlyArray<string | null | un
 const STEERED_CHINESE_LETTER_SHARE = 0.2;
 
 export function pinnedPromptLanguage(language: MemoryLanguage | undefined): PromptLanguage | undefined {
-  if (language === "zh-CN") return "zh";
-  if (language === "en-US") return "en";
-  return undefined;
+  const locale = normalizeMemoryLanguage(language);
+  if (locale === "zh-CN") return "zh";
+  if (locale === "en-US") return "en";
+  return locale;
 }
 
 export function detectPromptLanguage(
   samples: ReadonlyArray<string | null | undefined>,
   chineseShare = STEERED_CHINESE_LETTER_SHARE,
-  empty: PromptLanguage = "auto",
+  empty: DetectedPromptLanguage = "auto",
   inclusive = true
-): PromptLanguage {
+): DetectedPromptLanguage {
   let zh = 0;
   let en = 0;
   for (const sample of samples) {
@@ -3758,6 +3770,12 @@ export function steeredPromptLanguage(
   return pinnedPromptLanguage(language) ?? detectPromptLanguage(samples);
 }
 
+/** Use the same explicit override and default locale policy for every Skill producer. */
+export function skillOutputLanguageFor(mode: "follow_policy" | "zh" | "en", steered: PromptLanguage): PromptLanguage {
+  if (mode === "zh" || mode === "en") return mode;
+  return steered === "auto" ? "en" : steered;
+}
+
 export function languageSteeringLine(language: PromptLanguage): string {
   switch (language) {
     case "zh":
@@ -3765,8 +3783,13 @@ export function languageSteeringLine(language: PromptLanguage): string {
     case "en":
       return "All natural-language answers MUST be in English.";
     case "auto":
-    default:
       return "Answer in the same natural language the user used. Do not mix languages.";
+    default: {
+      const locale = normalizeMemoryLanguage(language);
+      return locale
+        ? `All natural-language answers MUST use the language, script, and regional conventions of BCP 47 locale ${locale}. Preserve JSON keys and machine identifiers.`
+        : "Answer in the same natural language the user used. Do not mix languages.";
+    }
   }
 }
 
@@ -5088,6 +5111,9 @@ interface RankedMemoryCandidate {
 
 export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (memory.status === "deleted" || memory.status === "archived") return false;
+  if (isObservationMemory(memory) && !isObservationMemoryProcessed(memory)) return false;
+  if (memory.memoryLayer === "Skill" && memory.status !== "activated"
+    && memory.properties.internal_info.external_evidence_candidate) return false;
   const evidenceStatus = memory.properties.internal_info.evidence_status;
   if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
   const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;

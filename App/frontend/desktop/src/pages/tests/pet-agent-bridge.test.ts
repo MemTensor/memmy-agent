@@ -15,6 +15,19 @@ afterEach(() => {
 });
 
 describe("createPetAgentBridge", () => {
+  it("ignores a broadcast cron result while retaining the pet task's own answer", async () => {
+    const socket = createFakeSocket();
+    const bus = createBridgeBus();
+    const bridge = createPetAgentBridge({ client: createFakeClient(socket.connection), bus });
+    await bridge.sendTask({ task: createTask(), content: "前台桌宠任务" });
+    socket.emit({ event: "message", text: "定时检查结果", metadata: { proactiveDelivery: "cron", deliveryId: "cron-1" } });
+    expect(bus.appendChunk).not.toHaveBeenCalled();
+    socket.emit({ event: "delta", text: "桌宠自己的回答" });
+    socket.emit({ event: "turn_end" });
+    expect(bus.completeTask).toHaveBeenCalledWith("task-1", "桌宠自己的回答");
+    bridge.close();
+  });
+
   it("停止当前桌宠任务时发送 Agent stop 并本地取消任务", async () => {
     const socket = createFakeSocket();
     const bus = createBridgeBus();

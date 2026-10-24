@@ -216,6 +216,12 @@ export async function probeGateway(
         : undefined,
       signal: controller.signal,
     });
+    if (response.status === 503) {
+      return {
+        status: "unavailable",
+        detail: "bootstrap HTTP 503",
+      };
+    }
     if (!response.ok) {
       return {
         status: "unexpected",

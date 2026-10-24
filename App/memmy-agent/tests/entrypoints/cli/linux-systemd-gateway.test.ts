@@ -79,6 +79,9 @@ describe("Linux systemd Gateway probing", () => {
     const unauthorizedFetch = vi.fn(
       async () => new Response("Unauthorized", { status: 401 }),
     ) as unknown as typeof fetch;
+    const startingFetch = vi.fn(
+      async () => new Response("Gateway is still starting", { status: 503 }),
+    ) as unknown as typeof fetch;
     const invalidFetch = vi.fn(async () => new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -90,6 +93,10 @@ describe("Linux systemd Gateway probing", () => {
     await expect(probeGateway(configured(), { fetchImpl: unauthorizedFetch })).resolves.toEqual({
       status: "unexpected",
       detail: "bootstrap HTTP 401",
+    });
+    await expect(probeGateway(configured(), { fetchImpl: startingFetch })).resolves.toEqual({
+      status: "unavailable",
+      detail: "bootstrap HTTP 503",
     });
     await expect(probeGateway(configured(), { fetchImpl: invalidFetch })).resolves.toEqual({
       status: "unexpected",
@@ -292,6 +299,38 @@ describe("Linux systemd Gateway root terminal flow", () => {
       "systemd:true",
       "tui",
     ]);
+  });
+
+  it("retries a transient bootstrap 503 while the managed service starts", async () => {
+    const config = configured();
+    let serviceRunning = false;
+    const probes: GatewayProbe[] = [
+      { status: "unavailable", detail: "bootstrap HTTP 503" },
+      { status: "unavailable", detail: "bootstrap HTTP 503" },
+      { status: "ready" },
+    ];
+    const enableGatewayService = vi.fn(async () => {
+      serviceRunning = true;
+    });
+    const runInteractive = vi.fn(async () => null);
+
+    await runLinuxRootTerminal({
+      platform: "linux",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      systemdGatewayEnabled: true,
+      loadConfig: () => config,
+      onboardWizard: vi.fn(),
+      prepareGatewayEnvironment: async () => false,
+      enableGatewayService,
+      probeGateway: vi.fn(async (): Promise<GatewayProbe> => probes.shift() ?? { status: "ready" }),
+      gatewayServiceMainPid: vi.fn(async () => serviceRunning ? 789 : null),
+      sleep: async () => undefined,
+      runInteractive,
+    });
+
+    expect(enableGatewayService).toHaveBeenCalledWith({ restart: false });
+    expect(runInteractive).toHaveBeenCalledWith(config);
   });
 
   it("keeps systemd ownership and restarts when the persisted environment changes", async () => {

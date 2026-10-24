@@ -29,16 +29,21 @@ import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
+import { ComputerUseSettings } from "./computer-use-settings.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
+  SETTINGS_BROWSER_EXTENSION_EVENT,
+  SETTINGS_EXCEL_CONNECTION_EVENT,
   SETTINGS_MEMORY_BUDGET_EVENT,
   readInitialSettingsTab,
   readSettingsAddModelReturnRoute,
   resolveSettingsTabFromHash,
   resetSettingsOuterScroll,
   scrollSettingsSectionIntoView,
+  shouldFocusBrowserExtensionFromHash,
+  shouldFocusExcelConnectionFromHash,
   shouldFocusMemoryBudgetFromHash,
   writeSettingsTabHash,
   type SettingsTabId
@@ -257,6 +262,7 @@ export function SettingsPage() {
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
+        computerUseClient={clients?.memmyAgent}
         update={update}
         track={track}
         activeTab={activeTab}
@@ -287,6 +293,7 @@ export interface SettingsPageViewProps {
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
+  computerUseClient?: import("../api/memmy-agent-client.js").MemmyAgentClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   activeTab?: SettingsTabId;
@@ -379,6 +386,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
   const [memoryBudgetFocusNonce, setMemoryBudgetFocusNonce] = useState(0);
+  const [browserExtensionFocusNonce, setBrowserExtensionFocusNonce] = useState(() =>
+    typeof window !== "undefined" && shouldFocusBrowserExtensionFromHash(window.location.hash) ? 1 : 0);
+  const [excelConnectionFocusNonce, setExcelConnectionFocusNonce] = useState(() =>
+    typeof window !== "undefined" && shouldFocusExcelConnectionFromHash(window.location.hash) ? 1 : 0);
   const activeTab = activeTabProp ?? activeTabState;
 
   function setActiveTab(tab: SettingsTabId) {
@@ -807,6 +818,31 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
     window.addEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
     return () => window.removeEventListener(SETTINGS_MEMORY_BUDGET_EVENT, requestMemoryBudgetFocus);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const requestBrowserExtensionFocus = () => {
+      setActiveTab("computer-use");
+      setExcelConnectionFocusNonce(0);
+      setBrowserExtensionFocusNonce((current) => current + 1);
+    };
+
+    window.addEventListener(SETTINGS_BROWSER_EXTENSION_EVENT, requestBrowserExtensionFocus);
+    return () => window.removeEventListener(SETTINGS_BROWSER_EXTENSION_EVENT, requestBrowserExtensionFocus);
+  }, []);
+
+  useEffect(() => {
+    const requestExcelConnectionFocus = () => {
+      setActiveTab("computer-use");
+      setBrowserExtensionFocusNonce(0);
+      setExcelConnectionFocusNonce((current) => current + 1);
+    };
+    window.addEventListener(SETTINGS_EXCEL_CONNECTION_EVENT, requestExcelConnectionFocus);
+    return () => window.removeEventListener(SETTINGS_EXCEL_CONNECTION_EVENT, requestExcelConnectionFocus);
   }, []);
 
   useEffect(() => {
@@ -1415,7 +1451,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     <div
       className="settings-page h-full overflow-y-auto"
     >
-      <div className="app-frame-page-content max-w-2xl mx-auto py-8">
+      <div className={`app-frame-page-content ${activeTab === "computer-use" ? "max-w-4xl" : "max-w-2xl"} mx-auto py-8`}>
         <div
           id="settings-panel-account"
           role="tabpanel"
@@ -1817,6 +1853,16 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             <ToggleRow label={t("settings.notifications.sound")} description={t("settings.notifications.soundDesc")} checked={notificationSoundEnabled} onChange={(checked) => persistSettings({ notificationSoundEnabled: checked })} />
           </div>
         </Section>
+        </div>
+
+        <div
+          id="settings-panel-computer-use"
+          role="tabpanel"
+          aria-labelledby="settings-tab-computer-use"
+          hidden={activeTab !== "computer-use"}
+        >
+          {activeTab === "computer-use" && <ComputerUseSettings client={props.computerUseClient} platform={platform}
+            browserExtensionFocusNonce={browserExtensionFocusNonce} excelConnectionFocusNonce={excelConnectionFocusNonce} />}
         </div>
 
         <div
@@ -2858,7 +2904,9 @@ function ProtocolSelect(props: ProtocolSelectProps) {
       value={props.value}
       onValueChange={(value) => props.onChange(value as Protocol)}
       className="select-control--paper"
-      options={PROTOCOL_OPTIONS.map((option) => ({
+      options={PROTOCOL_OPTIONS
+        .filter((option) => option.value !== "openai_responses" && option.value !== "custom")
+        .map((option) => ({
         value: option.value,
         label: t(option.labelKey)
       }))}

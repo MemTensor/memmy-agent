@@ -46,6 +46,53 @@ afterEach(async () => {
 });
 
 describe("recorder transition ordering", () => {
+  it("restores an explicitly running recorder after agent restart, and keeps pause across restarts", async () => {
+    service.startObservation();
+    const intentFile = path.join(root, "histories", "recording-intent.json");
+    expect(JSON.parse(fs.readFileSync(intentFile, "utf8"))).toEqual({ state: "running" });
+    const firstShutdown = service.shutdown();
+    state.children[0]!.exit();
+    await firstShutdown;
+    expect(JSON.parse(fs.readFileSync(intentFile, "utf8"))).toEqual({ state: "running" });
+
+    const recorderScript = path.join(root, "unused.js");
+    const reopen = () => new ComputerHistoryDemoService({ recorderScript,
+      historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"),
+      workflowDirectory: path.join(root, "workflows"), observationSettingsFile: path.join(root, "settings.json"),
+      permissionReader: async () => ({ supported: true, accessibility: true, inputMonitoring: true }),
+    });
+    service = reopen();
+    await service.restoreObservationOnLaunch();
+    expect(service.snapshot().observation.state).toBe("running");
+    const pause = service.pauseObservation();
+    state.children.at(-1)!.exit();
+    await pause;
+    expect(JSON.parse(fs.readFileSync(intentFile, "utf8"))).toEqual({ state: "paused" });
+    await service.shutdown();
+
+    service = reopen();
+    await service.restoreObservationOnLaunch();
+    expect(service.snapshot().observation.state).toBe("paused");
+    expect(state.children).toHaveLength(2);
+    await service.stopObservation();
+    expect(JSON.parse(fs.readFileSync(intentFile, "utf8"))).toEqual({ state: "stopped" });
+  });
+
+  it("does not restore recording when system permission was revoked", async () => {
+    await service.shutdown();
+    const histories = path.join(root, "histories");
+    fs.mkdirSync(histories, { recursive: true });
+    fs.writeFileSync(path.join(histories, "recording-intent.json"), JSON.stringify({ state: "running" }));
+    service = new ComputerHistoryDemoService({ recorderScript: path.join(root, "unused.js"),
+      historyDirectory: histories, recordingDirectory: path.join(root, "recordings"),
+      workflowDirectory: path.join(root, "workflows"), observationSettingsFile: path.join(root, "settings.json"),
+      permissionReader: async () => ({ supported: true, accessibility: false, inputMonitoring: true }),
+    });
+    await service.restoreObservationOnLaunch();
+    expect(service.snapshot().observation.state).toBe("stopped");
+    expect(state.children).toHaveLength(0);
+  });
+
   function writeStop(reason: string) {
     const id = service.snapshot().observation.segmentId!;
     const file = path.join(root, "recordings", "segments", id, "events.jsonl");

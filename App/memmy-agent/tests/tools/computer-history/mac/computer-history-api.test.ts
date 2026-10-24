@@ -1,18 +1,73 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService, clientSnapshot } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { ApplicationIconReader } from "../../../../src/tools/computer-history/mac/application-icon.js";
+import { WindowsApplicationIconReader } from "../../../../src/tools/computer-history/win/application-icon.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 describe("ComputerHistoryDemoService", () => {
+  it("uses the Windows icon reader for Windows History application IDs", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.spyOn(os, "release").mockReturnValue("10.0.26100");
+    const windowsIcon = vi.spyOn(WindowsApplicationIconReader.prototype, "iconFor")
+      .mockResolvedValue("data:image/png;base64,AAA");
+    const macIcon = vi.spyOn(ApplicationIconReader.prototype, "iconFor")
+      .mockResolvedValue(null);
+    const { service } = createService();
+
+    await expect(service.applicationIcon("win32.explorer"))
+      .resolves.toBe("data:image/png;base64,AAA");
+    expect(windowsIcon).toHaveBeenCalledWith("win32.explorer");
+    expect(macIcon).not.toHaveBeenCalled();
+    await service.shutdown();
+  });
+
+  it("keeps saved History readable on macOS 13 while rejecting recording before permissions or native launch", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    vi.spyOn(os, "release").mockReturnValue("22.6.0");
+    const permissionReader = vi.fn(async () => ({ supported: true, accessibility: true, inputMonitoring: true }));
+    const { root } = createService();
+    const service = new ComputerHistoryDemoService({ historyDirectory: path.join(root, "histories"),
+      recordingDirectory: path.join(root, "recordings"), workflowDirectory: path.join(root, "workflows"), permissionReader });
+    const imported = service.importMarkdown({ title: "Existing History", markdown: "# Saved work\n\nThis must remain readable." });
+    await expect(service.startObservationWithPermissions()).rejects.toMatchObject({ status: 400,
+      message: "Computer History recording requires macOS 14 or later. Existing History remains available." });
+    expect(() => service.startObservation()).toThrow("requires macOS 14 or later");
+    expect(permissionReader).not.toHaveBeenCalled();
+    expect(service.snapshot().histories.map(entry => entry.id)).toEqual(imported.histories.map(entry => entry.id));
+    expect(service.snapshot().observation.state).toBe("stopped");
+    await service.shutdown();
+  });
+  it("keeps explicit Skill links across snapshots and removes them with their History", () => {
+    const { service, root } = createService();
+    const history = service.importMarkdown({ title: "Skill source", markdown: "# Work\n\nSteps." }).histories[0]!;
+    const secondHistory = service.importMarkdown({ title: "Second source", markdown: "# Work\n\nMore steps." })
+      .histories.find((entry) => entry.title === "Second source")!;
+
+    const linked = service.setHistorySkillLinks(history.id, ["skill-memory-1", "skill-memory-1"]);
+    expect(linked.histories.find((entry) => entry.id === history.id)?.skillMemoryIds).toEqual(["skill-memory-1"]);
+    service.setHistorySkillLinks(secondHistory.id, ["skill-memory-1"]);
+    expect(service.snapshot().histories.filter((entry) => entry.skillMemoryIds?.includes("skill-memory-1"))).toHaveLength(2);
+    expect(fs.existsSync(path.join(root, "histories", "skill-links.json"))).toBe(true);
+
+    service.deleteHistory(history.id);
+    expect(service.snapshot().histories.find((entry) => entry.id === secondHistory.id)?.skillMemoryIds).toEqual(["skill-memory-1"]);
+    expect(JSON.parse(fs.readFileSync(path.join(root, "histories", "skill-links.json"), "utf8"))).toEqual({
+      [secondHistory.id]: ["skill-memory-1"],
+    });
+    expect(() => service.setHistorySkillLinks(history.id, ["skill-memory-1"])).toThrow("history not found");
+  });
+
   it("keeps imported context distinguishable from captured history", () => {
     const { service } = createService();
     const snapshot = service.importMarkdown({
@@ -112,8 +167,8 @@ describe("ComputerHistoryDemoService", () => {
 
     expect(workflow.sourceHistoryId).toBe(history.id);
     expect(workflow.markdown).toContain("generated_from: recorded_operation_experience");
-    expect(workflow.markdown).toContain("Use only the Open Computer Use MCP tools");
-    expect(workflow.markdown).toContain("mcp_open_computer_use_get_app_state");
+    expect(workflow.markdown).toContain("Use only the Memmy Computer Use MCP tools");
+    expect(workflow.markdown).toContain("mcp_memmy_computer_use_get_app_state");
     expect(workflow.markdown).not.toContain("mcp_cua_");
     expect(workflow.markdown).not.toContain("built-in `computer_*`");
     expect(workflow.markdown).toContain("银色");

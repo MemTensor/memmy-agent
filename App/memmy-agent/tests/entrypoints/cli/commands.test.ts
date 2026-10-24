@@ -531,7 +531,7 @@ describe("CLI command helpers", () => {
       .toThrow("unsupported config key");
   });
 
-  it("serve uses api.timeout from config when no CLI timeout override is supplied", async () => {
+  it("serve ignores legacy api.timeout while a task is still executing", async () => {
     const root = tempRoot("memmy-serve-timeout-");
     const workspace = path.join(root, "workspace");
     const configPath = writeConfig(root, {
@@ -561,8 +561,8 @@ describe("CLI command helpers", () => {
       });
       const body = await response.json() as any;
 
-      expect(response.status).toBe(504);
-      expect(body.error.message).toContain("Request timed out after 0.01s");
+      expect(response.status).toBe(200);
+      expect(body.choices[0].message.content).toBe("late");
       expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     } finally {
       await closeServer(server);
@@ -675,20 +675,28 @@ describe("CLI command helpers", () => {
     });
     let migratedSessionManager: SessionManager | null = null;
     let loopRunning = true;
+    let finishToolInitialization!: () => void;
+    const toolInitialization = new Promise<void>((resolve) => { finishToolInitialization = resolve; });
     const fakeLoop: any = {
       workspace,
+      isReady: false,
       model: "agent_chat",
       unifiedSession: false,
       fileMemoryEnabled: true,
       tools: { get: vi.fn(() => undefined) },
       provider: null,
+      initializeRuntimeTools: vi.fn(() => toolInitialization),
+      closeRuntimeTools: vi.fn(async () => undefined),
       refreshProviderSnapshot: vi.fn(() => {
         fakeLoop.model = "openai/refreshed-model";
       }),
       run: vi.fn(async () => {
+        await fakeLoop.initializeRuntimeTools();
+        fakeLoop.isReady = loopRunning;
         while (loopRunning) {
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
+        fakeLoop.isReady = false;
       }),
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
@@ -709,6 +717,7 @@ describe("CLI command helpers", () => {
       },
       stop: vi.fn(() => {
         loopRunning = false;
+        fakeLoop.isReady = false;
       }),
       closeMcp: vi.fn(async () => undefined),
       sessions: null,
@@ -735,6 +744,7 @@ describe("CLI command helpers", () => {
     const missing = await fetch(`http://127.0.0.1:${actualPort}/missing`);
 
     expect(response.status).toBe(200);
+    expect(fakeLoop.initializeRuntimeTools).toHaveBeenCalledTimes(1);
     expect(await response.json()).toEqual({ status: "ok" });
     expect(bindingAtLoopCreation).toMatchObject({
       webui: true,
@@ -764,6 +774,13 @@ describe("CLI command helpers", () => {
     expect(runtime.manager.webuiRuntimeModelName?.()).toBe("openai/refreshed-model");
     const websocketChannel = runtime.manager.getChannel("websocket");
     expect(websocketChannel).toBeInstanceOf(WebSocketChannel);
+    await vi.waitFor(() => expect((websocketChannel as WebSocketChannel).server).not.toBeNull());
+    const websocketPort = (websocketChannel as WebSocketChannel).server.address().port;
+    const bootstrap = await fetch(`http://127.0.0.1:${websocketPort}/webui/bootstrap`);
+    expect(bootstrap.status).toBe(503);
+    expect((websocketChannel as WebSocketChannel).issuedTokens.size).toBe(0);
+    expect((websocketChannel as WebSocketChannel).apiTokens.size).toBe(0);
+    expect(fakeLoop.initializeRuntimeTools).toHaveBeenCalledTimes(1);
     const snapshot = (websocketChannel as WebSocketChannel).webuiSessionSnapshot();
     expect(snapshot.sessions).toEqual(
       expect.arrayContaining([
@@ -815,14 +832,23 @@ describe("CLI command helpers", () => {
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     expect(runtime.cron.listJobs({ includeDisabled: true }).map((job) => job.id)).toContain("dream");
     expect((websocketChannel as WebSocketChannel).fileMemoryEnabled).toBe(true);
-    await runtime.stop();
+    const stopping = runtime.stop();
+    expect(fakeLoop.closeRuntimeTools).not.toHaveBeenCalled();
+    finishToolInitialization();
+    await stopping;
     expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
+    expect(fakeLoop.closeRuntimeTools).toHaveBeenCalledTimes(1);
 
     const migratedBytes = fs.readFileSync(legacySessionPath);
     const appliedBeforeRestart = JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied;
+    loopRunning = true;
     const secondRuntime = await gateway({ config: configPath });
     expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
     expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual(appliedBeforeRestart);
+    const secondChannel = secondRuntime.manager.getChannel("websocket") as WebSocketChannel;
+    await vi.waitFor(() => expect(secondChannel.server).not.toBeNull());
+    const secondPort = secondChannel.server.address().port;
+    expect((await fetch(`http://127.0.0.1:${secondPort}/webui/bootstrap`)).status).toBe(200);
     await secondRuntime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
   });
@@ -963,6 +989,11 @@ describe("CLI command helpers", () => {
       }),
       closeMcp: vi.fn(async () => undefined),
       cancelActiveTasks: vi.fn(async () => 0),
+      stopCurrentTurn: vi.fn(async () => 1),
+      terminalRunControl: {
+        read: vi.fn(() => null),
+        requestCancel: vi.fn(async () => false),
+      },
       sessions,
       isSessionBusy,
       isSessionGoalActive,
@@ -973,6 +1004,46 @@ describe("CLI command helpers", () => {
     const runtime = await gateway({ config: configPath });
     return { runtime, fakeLoop, sessionsByKey };
   }
+
+  it("gateway GUI Stop stops the current turn without cancelling queued tasks", async () => {
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({ processDirect: vi.fn() });
+    try {
+      await expect(runtime.manager.stopCurrentTurn!("websocket:chat-1", "turn-current")).resolves.toBe(1);
+      expect(fakeLoop.stopCurrentTurn).toHaveBeenCalledWith("websocket:chat-1", "turn-current");
+      expect(fakeLoop.cancelActiveTasks).not.toHaveBeenCalled();
+      expect(fakeLoop.terminalRunControl.requestCancel).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("gateway GUI Stop still cancels the matching external terminal owner", async () => {
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({ processDirect: vi.fn() });
+    fakeLoop.stopCurrentTurn.mockResolvedValue(0);
+    fakeLoop.terminalRunControl.read.mockReturnValueOnce({ turnId: "turn-terminal" });
+    fakeLoop.terminalRunControl.requestCancel.mockResolvedValue(true);
+    try {
+      await expect(runtime.manager.stopCurrentTurn!("cli:terminal-session", "turn-terminal")).resolves.toBe(1);
+      expect(fakeLoop.stopCurrentTurn).toHaveBeenCalledWith("cli:terminal-session", "turn-terminal");
+      expect(fakeLoop.terminalRunControl.requestCancel).toHaveBeenCalledWith("cli:terminal-session", "turn-terminal");
+      expect(fakeLoop.cancelActiveTasks).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("gateway GUI Stop leaves a newer external terminal turn running", async () => {
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({ processDirect: vi.fn() });
+    fakeLoop.stopCurrentTurn.mockResolvedValue(0);
+    fakeLoop.terminalRunControl.read.mockReturnValue({ turnId: "turn-next" });
+    try {
+      await expect(runtime.manager.stopCurrentTurn!("cli:terminal-session", "turn-old")).resolves.toBe(0);
+      expect(fakeLoop.terminalRunControl.requestCancel).not.toHaveBeenCalled();
+      expect(fakeLoop.cancelActiveTasks).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+    }
+  });
 
   function makeCronJob(payload: CronPayload, nextRunAtMs = 1_780_000_000_000): CronJob {
     return new CronJob({
@@ -1030,6 +1101,11 @@ describe("CLI command helpers", () => {
           wantsStream: true,
           streamId: "old-stream",
           toolEvents: [{ phase: "start" }],
+          client_request_id: "old-request",
+          clientRequestId: "old-request",
+          webui_request_digest: "old-digest",
+          turn_source: { kind: "gui", channel: "websocket" },
+          computerUseInteractive: true,
         },
       }), due));
 
@@ -1053,6 +1129,7 @@ describe("CLI command helpers", () => {
           webui_language: "zh-CN",
           proactiveDelivery: "cron",
           cronJobId: "cron-test",
+          cronJobName: "cron test",
           scheduledForMs: due,
         },
       });
@@ -1062,10 +1139,18 @@ describe("CLI command helpers", () => {
       expect(outbound?.metadata).not.toHaveProperty("streamId");
       expect(outbound?.metadata).not.toHaveProperty("toolEvents");
       expect(outbound?.metadata).not.toHaveProperty("recordChannelDelivery");
+      expect(outbound?.metadata).not.toHaveProperty("client_request_id");
+      expect(outbound?.metadata).not.toHaveProperty("clientRequestId");
+      expect(outbound?.metadata).not.toHaveProperty("webui_request_digest");
+      expect(outbound?.metadata).not.toHaveProperty("computerUseInteractive");
+      expect(outbound?.metadata.deliveryId).toBe(`cron:cron-test:${due}:1`);
+      expect(outbound?.metadata.deliveredAtMs).toEqual(expect.any(Number));
       expect(outbound?.metadata.delayedByMs).toEqual(expect.any(Number));
       const session = sessionsByKey.get("websocket:chat-1");
       expect(session.messages).toEqual([
-        { role: "assistant", content: "cron final", channelDelivery: true },
+        { role: "assistant", content: "cron final", channelDelivery: true,
+          metadata: { proactiveDelivery: "cron", cronJobId: "cron-test", cronJobName: "cron test", scheduledForMs: due,
+            deliveryId: `cron:cron-test:${due}:1`, deliveredAtMs: expect.any(Number) } },
       ]);
     } finally {
       await runtime.stop();
@@ -1081,6 +1166,7 @@ describe("CLI command helpers", () => {
         metadata: {
           ...options.metadata,
           recordChannelDelivery: true,
+          cronJobName: "model supplied title",
         },
       }));
       return { content: "fallback should not send", metadata: {} };
@@ -1103,16 +1189,103 @@ describe("CLI command helpers", () => {
         webui_language: "zh-CN",
         proactiveDelivery: "cron",
         cronJobId: "cron-test",
+        cronJobName: "cron test",
       });
       expect(outbound?.metadata).not.toHaveProperty("turn_id");
       expect(outbound?.metadata).not.toHaveProperty("recordChannelDelivery");
       expect(runtime.bus.outbound.getNowait()).toBeUndefined();
       expect(sessionsByKey.get("websocket:chat-1").messages).toEqual([
-        { role: "assistant", content: "message tool final", channelDelivery: true },
+        expect.objectContaining({ role: "assistant", content: "message tool final", channelDelivery: true,
+          metadata: expect.objectContaining({ deliveryId: expect.any(String), cronJobName: "cron test" }) }),
       ]);
     } finally {
       await runtime.stop();
     }
+  });
+
+  it("stores the scheduled task name snapshot independently of later job changes", async () => {
+    const job = makeCronJob(new CronPayload({
+      message: "check", deliver: true,
+      channel: "websocket", to: "chat-1", sessionKey: "websocket:chat-1",
+      channelMeta: { cronJobName: "stale metadata title" },
+    }));
+    job.name = "微信新消息监测";
+    const { runtime, sessionsByKey } = await startCronGatewayWithFakeLoop({
+      processDirect: vi.fn(async () => {
+        job.name = "renamed while running";
+        return { content: "result" };
+      }),
+    });
+    try {
+      await runtime.cron.onJob?.(job);
+      const outbound = runtime.bus.outbound.getNowait();
+      const recorded = sessionsByKey.get("websocket:chat-1").messages[0];
+      expect(outbound?.metadata.cronJobName).toBe("微信新消息监测");
+      expect(recorded.metadata.cronJobName).toBe("微信新消息监测");
+      job.name = "renamed after delivery";
+      expect(recorded.metadata.cronJobName).toBe("微信新消息监测");
+      expect(recorded.metadata.deliveredAtMs).toBe(outbound?.metadata.deliveredAtMs);
+    } finally { await runtime.stop(); }
+  });
+
+  it("delivers explicitly requested no-change reports without another model veto", async () => {
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({
+      processDirect: vi.fn(async () => ({ content: "暂无微信新消息。" })),
+    });
+    fakeLoop.provider = { chatWithRetry: vi.fn(async () => ({
+      shouldExecuteTools: true, toolCalls: [{ arguments: { should_notify: false } }],
+    })) };
+    try {
+      await runtime.cron.onJob?.(makeCronJob(new CronPayload({
+        message: "每两分钟通知，无新消息也通知", deliver: true,
+        channel: "websocket", to: "chat-1", sessionKey: "websocket:chat-1",
+      })));
+      expect(runtime.bus.outbound.getNowait()?.content).toBe("暂无微信新消息。");
+      expect(fakeLoop.provider.chatWithRetry).not.toHaveBeenCalled();
+    } finally { await runtime.stop(); }
+  });
+
+  it("retains distinct identities for multiple messages from one scheduled run", async () => {
+    const { runtime } = await startCronGatewayWithFakeLoop({
+      processDirect: vi.fn(async (_prompt: string, options: any) => {
+        for (const content of ["first result", "second result"]) {
+          await options.messageSendCallback(new OutboundMessage({ channel: "websocket", chatId: "chat-1", content }));
+        }
+        return { content: "already delivered" };
+      }),
+    });
+    try {
+      const job = makeCronJob(new CronPayload({ message: "check", deliver: true,
+        channel: "websocket", to: "chat-1", sessionKey: "websocket:chat-1" }));
+      await runtime.cron.onJob?.(job);
+      expect(runtime.bus.outbound.getNowait()?.metadata.deliveryId).toBe(`cron:cron-test:${job.state.nextRunAtMs}:1`);
+      expect(runtime.bus.outbound.getNowait()?.metadata.deliveryId).toBe(`cron:cron-test:${job.state.nextRunAtMs}:2`);
+      expect(runtime.bus.outbound.getNowait()).toBeUndefined();
+    } finally { await runtime.stop(); }
+  });
+
+  it.each(["throw", "empty", "model-error"])("reports scheduled execution failure (%s) without marking it successful", async (failure) => {
+    const { runtime } = await startCronGatewayWithFakeLoop({
+      processDirect: vi.fn(async () => {
+        if (failure === "throw") throw new Error("synthetic execution failure");
+        if (failure === "model-error") return { content: "model unavailable",
+          metadata: { modelErrorCategory: "quota_exhausted", modelErrorDetail: "private diagnostic" } };
+        return { content: "" };
+      }),
+    });
+    try {
+      const job = makeCronJob(new CronPayload({ message: "check", deliver: true,
+        channel: "websocket", to: "chat-1", sessionKey: "websocket:chat-1",
+        channelMeta: { webui_language: "zh-CN" } }));
+      await runtime.cron.executeJob(job);
+      expect(job.state.lastStatus).toBe("error");
+      const outbound = runtime.bus.outbound.getNowait();
+      expect(outbound?.content).toContain("执行失败");
+      expect(outbound?.metadata.proactiveDelivery).toBe("cron");
+      expect(outbound?.metadata.cronJobName).toBe("cron test");
+      expect(outbound?.metadata.deliveryId).toEqual(expect.any(String));
+      expect(outbound?.content).not.toContain("private diagnostic");
+    } finally { await runtime.stop(); }
   });
 
   it("adds the WebUI active-goal delay notice before cron delivery", async () => {
@@ -2098,4 +2271,54 @@ describe("CLI command parity with memmy test_commands", () => {
     expect(fs.existsSync(path.join(legacyDir, "jobs.json"))).toBe(true);
     expect(fs.existsSync(path.join(customWorkspace, "cron", "jobs.json"))).toBe(false);
   });
+});
+
+it("serve admits silent tasks immediately and reserves cancellation for explicit stop", async () => {
+  const root = tempRoot("memmy-serve-stop-");
+  const configPath = writeConfig(root, {
+    agents: { defaults: { workspace: path.join(root, "workspace"), model: "openai/test-model" } },
+    api: { host: "127.0.0.1", port: 0 },
+  });
+  let signal!: AbortSignal;
+  let release!: () => void;
+  vi.spyOn(AgentLoop, "fromConfig").mockReturnValue({
+    processMessageInternal() {},
+    async processDirect(_text: string, opts: any) {
+      signal = opts.abortSignal;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { content: "finished" };
+    },
+    connectMcp: vi.fn(async () => undefined),
+    closeMcp: vi.fn(async () => undefined),
+  } as any);
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const server = await serve({ config: configPath });
+  try {
+    const port = (server.address() as any).port;
+    const base = `http://127.0.0.1:${port}`;
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "go" }], stream: true, session_id: "s", request_id: "r" }),
+      signal: AbortSignal.timeout(2000),
+    });
+    expect(response.status).toBe(200);
+    expect(signal.aborted).toBe(false);
+    await response.body!.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(signal.aborted).toBe(false);
+    const stopped = await fetch(`${base}/v1/chat/cancel`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: "s", request_id: "r" }),
+      signal: AbortSignal.timeout(2000),
+    });
+    expect(await stopped.json()).toEqual({ status: "cancelled" });
+    expect(signal.aborted).toBe(true);
+    expect((await fetch(`${base}/health`)).status).toBe(200);
+  } finally {
+    release?.();
+    await closeServer(server);
+  }
 });

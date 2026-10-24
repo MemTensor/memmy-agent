@@ -33,22 +33,26 @@ export class DesktopOnboardingClient {
     return isComputerUseProbeTarget(reply?.target) && reply.target.pid === this.ipc.ppid ? reply.target : null;
   }
   async guide(reason: ComputerUseGuideReason, helperApp: string, signal?: AbortSignal | null,
-    check?: () => Promise<ComputerUsePermissions>, canContinue = false): Promise<boolean> {
+    check?: () => Promise<ComputerUsePermissions>, canContinue = false,
+    observe?: (signal?: AbortSignal) => Promise<ComputerUsePermissions>): Promise<boolean> {
     if (!this.ipc.connected || !this.ipc.send || signal?.aborted || !check) return false;
     const requestId = randomUUID();
     return new Promise(resolve => {
       let finished = false;
       let checking: Promise<void> | null = null;
+      let observing: Promise<void> | null = null;
+      const observationAbort = new AbortController();
       const send = (data: object) => { try { this.ipc.send!(data, error => { if (error) cancel(); }); } catch { cancel(); } };
       const finish = (approved = false) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
+        observationAbort.abort();
         this.ipc.removeListener('message', receive);
         this.ipc.removeListener('disconnect', cancel);
         signal?.removeEventListener('abort', cancel);
-        // A cancelled guide must not leave a recheck racing the next tool call.
-        void Promise.resolve(checking).then(() => resolve(approved && !signal?.aborted));
+        // Do not let a late doctor relaunch the app agent after guide cleanup.
+        void Promise.allSettled([checking, observing]).then(() => resolve(approved && !signal?.aborted));
       };
       const cancel = () => {
         finish();
@@ -56,17 +60,24 @@ export class DesktopOnboardingClient {
       };
       const receive = (reply: any) => {
         if (reply?.type === `${PREFIX}guide:result` && reply.requestId === requestId) finish(reply.approved === true);
-        else if (!finished && !checking && reply?.type === `${PREFIX}check` && reply.guideId === requestId
+        else if (!finished && reply?.guideId === requestId
+          && (reply?.type === `${PREFIX}check` || reply?.type === `${PREFIX}observe`)
           && typeof reply.requestId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(reply.requestId)) {
-          checking = Promise.resolve().then(check).catch(() => ({ accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' } as const))
-            .then(status => { if (!finished) send({ type: `${PREFIX}check:result`, requestId: reply.requestId, guideId: requestId, status }); })
-            .finally(() => { checking = null; });
+          const passive = reply.type === `${PREFIX}observe`;
+          if ((passive && (observing || !observe)) || (!passive && checking)) return;
+          const pending = Promise.resolve(passive ? undefined : observing)
+            .then(() => finished ? { accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' } as const
+              : passive ? observe!(observationAbort.signal) : check())
+            .catch(() => ({ accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' } as const))
+            .then(status => { if (!finished) send({ type: `${reply.type}:result`, requestId: reply.requestId, guideId: requestId, status }); })
+            .finally(() => { if (passive) observing = null; else checking = null; });
+          if (passive) observing = pending; else checking = pending;
         }
       };
       const timer = setTimeout(cancel, 10 * 60_000);
       this.ipc.on('message', receive); this.ipc.on('disconnect', cancel);
       signal?.addEventListener('abort', cancel, { once: true });
-      send({ type: `${PREFIX}guide`, requestId, reason, helperApp, canContinue });
+      send({ type: `${PREFIX}guide`, requestId, reason, helperApp, canContinue, canObserve: Boolean(observe) });
     });
   }
 }

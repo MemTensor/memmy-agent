@@ -11,13 +11,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createPackage } from "@electron/asar";
+import { createPackageWithOptions, listPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   normalizePublicCloudService,
   writeDesktopEditionManifest,
 } from "../scripts/internal/shared/write-desktop-edition-manifest-lib.mjs";
 import { pruneRuntimeEnvFiles } from "../scripts/internal/shared/prune-runtime-env-files-lib.mjs";
+import { windowsPEFixture } from "./fixtures/windows-pe-fixture.mjs";
 
 import { memoryRuntimeBuildIdentity } from "../scripts/internal/shared/memory-runtime-build-identity.mjs";
 
@@ -387,6 +388,29 @@ describe("packaged desktop runtime configuration", () => {
     expect(staleAgent.stderr).toContain("dist/runtime/memmy-agent/package.json");
   });
 
+  it("verifies standalone Windows Memory outside the ASAR", async () => {
+    const root = fixtureRoot();
+    const memoryRoot = join(root, "memory-resource");
+    const asar = await createAsarFixture(root, "external-memory", "1.1.8", false, true, [], "win32", "complete", "2.1.3", "1.1.8", false);
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "internal", "shared", "verify-packaged-asar.mjs");
+    writeFixtureJson(join(memoryRoot, "package.json"), { version: "2.1.3" });
+    writeFixtureJson(join(memoryRoot, "node_modules/@memmy/agent-source-core/package.json"), { version: "0.0.0" });
+    const core = join(memoryRoot, "node_modules/@memmy/agent-source-core/dist/src/index.js");
+    mkdirSync(dirname(core), { recursive: true });
+    writeFileSync(core, "export {};\n");
+    const onnx = join(memoryRoot, "node_modules/onnxruntime-node/bin/napi-v3/win32/x64");
+    mkdirSync(onnx, { recursive: true });
+    writeFileSync(join(onnx, "onnxruntime_binding.node"), "win-x64-node");
+    writeFileSync(join(onnx, "onnxruntime.dll"), "win-x64-dll");
+    const args = [verifier, ...verifierArgs(asar, "1.1.8", "win32", "x64", "2.1.3"), "--memory-root", memoryRoot];
+    const valid = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(valid.status, valid.stderr).toBe(0);
+    writeFixtureJson(join(memoryRoot, "package.json"), { version: "2.1.2" });
+    const stale = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(stale.status).not.toBe(0);
+    expect(stale.stderr).toContain("Packaged Memory resource version");
+  });
+
   it("fails closed on ASAR env files and stale embedded versions", async () => {
     const root = fixtureRoot();
     const verifier = join(
@@ -494,6 +518,124 @@ describe("packaged desktop runtime configuration", () => {
     expect(verifierCall).not.toContain("TARGET_ARCH");
   });
 
+  it("rejects a package without the Computer Use page or its unpacked native panel", async () => {
+    const root = fixtureRoot();
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+    const asar = await createAsarFixture(root, "native-pip", "1.2.0", false, true, [], "darwin");
+    const run = path => spawnSync(process.execPath, [verifier, ...verifierArgs(path, "1.2.0", "darwin", "arm64")], { encoding: "utf8" });
+    expect(run(asar).status).toBe(0);
+    rmSync(join(`${asar}.unpacked`, "dist/native/memmy-pip.node"));
+    const missingNative = run(asar);
+    expect(missingNative.status).not.toBe(0);
+    expect(missingNative.stderr).toContain("Packaged native PiP addon is missing from unpacked resources");
+    const missingPage = await createAsarFixture(root, "missing-pip-page", "1.2.0", false, true,
+      [["dist/main/computer-use-surface.html", null]], "darwin");
+    const missing = run(missingPage);
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain("dist/main/computer-use-surface.html");
+  });
+
+  it("rejects missing Windows preview assets and a packed-only or foreign helper", async () => {
+    const root = fixtureRoot();
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+    const helper = "dist/runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe";
+    const run = path => spawnSync(process.execPath, [verifier, ...verifierArgs(path, "1.2.0")], { encoding: "utf8" });
+    const asar = await createAsarFixture(root, "windows-cu", "1.2.0");
+    expect(run(asar).status).toBe(0);
+    rmSync(join(`${asar}.unpacked`, helper));
+    const missingUnpacked = run(asar);
+    expect(missingUnpacked.status).not.toBe(0);
+    expect(missingUnpacked.stderr).toContain("helper is missing from unpacked resources");
+    for (const file of ["dist/main/computer-use-surface.html", "dist/preload/computer-use-surface-preload.cjs", helper]) {
+      const missing = await createAsarFixture(root, `missing-${file.split('/').pop()}`, "1.2.0", false, true, [[file, null]]);
+      expect(run(missing).status).not.toBe(0);
+      expect(run(missing).stderr).toContain(file);
+    }
+    const foreign = await createAsarFixture(root, "windows-foreign-helper", "1.2.0", false, true,
+      [[helper, windowsPEFixture(0xaa64)]]);
+    expect(run(foreign).status).not.toBe(0);
+    expect(run(foreign).stderr).toContain("x64 PE32+ executable");
+    const addon = await createAsarFixture(root, "windows-mac-addon", "1.2.0", false, true,
+      [["dist/native/memmy-pip.node", "Mach-O fixture"]]);
+    expect(run(addon).status).not.toBe(0);
+    expect(run(addon).stderr).toContain("macOS-only native Computer Use addon");
+  });
+
+  it("rejects a missing, foreign, or packed-only Windows History recorder", async () => {
+    const root = fixtureRoot();
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+    const helper = "dist/runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe";
+    const run = path => spawnSync(process.execPath, [verifier, ...verifierArgs(path, "1.2.0")], { encoding: "utf8" });
+    const asar = await createAsarFixture(root, "windows-history", "1.2.0");
+    expect(run(asar).status).toBe(0);
+    rmSync(join(`${asar}.unpacked`, helper));
+    expect(run(asar).stderr).toContain("History recorder is missing from unpacked resources");
+    for (const [name, bytes, error] of [
+      ["missing", null, "missing required runtime file"],
+      ["foreign", Buffer.concat([windowsPEFixture(0xaa64), Buffer.from("MemmyWindowsHistoryRuntimeV1")]), "x64 PE32+"],
+      ["fixture", windowsPEFixture(), "no current native runtime identity"],
+    ]) {
+      const broken = await createAsarFixture(root, `windows-history-${name}`, "1.2.0", false, true, [[helper, bytes]]);
+      expect(run(broken).status).not.toBe(0);
+      expect(run(broken).stderr).toContain(error);
+    }
+  });
+
+  it("accepts the current Windows browser modules without the removed autofill vault", async () => {
+    const root = fixtureRoot();
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+    const asar = await createAsarFixture(root, "current-browser-modules", "1.2.2-rc.1");
+    const entries = listPackage(asar).map(path => path.replaceAll("\\", "/").replace(/^\/+/, ""));
+    expect(entries).toContain("dist/main/browser-auth-form.js");
+    expect(entries).toContain("dist/main/browser-browsing-data.js");
+    expect(entries).not.toContain("dist/main/browser-autofill-vault.js");
+    const result = spawnSync(process.execPath, [verifier, ...verifierArgs(asar, "1.2.2-rc.1")], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("extracts preview, unpacked renderer and JSON entries with Windows host separators", async () => {
+    const root = fixtureRoot();
+    const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+    const asar = await createAsarFixture(root, "windows-host-separators", "1.2.2-rc.1");
+    const prelude = join(root, "windows-host-asar.mjs");
+    // Exercise the real ASAR lookup with Windows separators in an isolated child.
+    // Physical temporary files keep their host paths so this also runs on macOS.
+    writeFileSync(prelude, String.raw`
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+const nativePath = createRequire(import.meta.url)("node:path");
+const hostJoin = nativePath.join;
+const hostDirname = nativePath.dirname;
+const hostBasename = nativePath.basename;
+nativePath.sep = "\\";
+nativePath.join = (...parts) => parts.every(part => !part.includes("/") && !part.includes("\\"))
+  ? nativePath.win32.join(...parts)
+  : hostJoin(...parts.map(part => part.replaceAll("\\", "/")));
+nativePath.dirname = path => path.includes("\\") && !path.includes("/")
+  ? nativePath.win32.dirname(path) : hostDirname(path);
+nativePath.basename = path => path.includes("\\") && !path.includes("/")
+  ? nativePath.win32.basename(path) : hostBasename(path);
+syncBuiltinESMExports();
+process.argv.splice(1, 1);
+await import(pathToFileURL(process.argv[1]).href);
+`);
+    const result = spawnSync(process.execPath, [prelude, verifier, ...verifierArgs(asar, "1.2.2-rc.1")], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Verified packaged ASAR boundary and version 1.2.2-rc.1");
+  });
+
+  it.each(["dist/main/browser-auth-form.js", "dist/main/browser-browsing-data.js"])(
+    "rejects a Windows package missing current browser module %s", async file => {
+      const root = fixtureRoot();
+      const verifier = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts/internal/shared/verify-packaged-asar.mjs");
+      const asar = await createAsarFixture(root, "missing-current-browser-module", "1.2.2-rc.1", false, true,
+        [[file, null], ["dist/main/browser-autofill-vault.js", "obsolete module cannot replace current module\n"]]);
+      const result = spawnSync(process.execPath, [verifier, ...verifierArgs(asar, "1.2.2-rc.1")], { encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`Packaged ASAR is missing required runtime file: ${file}`);
+    },
+  );
+
   it("stages the private agent source workspace package without resolving it from npm", () => {
     const buildScript = readFileSync(join(
       dirname(fileURLToPath(import.meta.url)),
@@ -557,6 +699,7 @@ async function createAsarFixture(
   agentSourceCoreFixture = "complete",
   memoryVersion = version,
   agentVersion = version,
+  memoryInAsar = true,
 ) {
   const source = join(root, `${name}-source`);
   const asar = join(root, `${name}.asar`);
@@ -565,7 +708,18 @@ async function createAsarFixture(
   writeFixtureJson(join(source, "dist/main/desktop-edition.json"), {
     cloudService: "https://manifest.example.test",
   });
+  for (const file of ["dist/main/computer-use-surface-window.js", "dist/main/computer-use-surface.html",
+    "dist/preload/computer-use-surface-preload.cjs",
+    ...(platform === "darwin" ? ["dist/native/memmy-pip.node", "dist/native/menu-bar-appearance.node"] : [])]) {
+    mkdirSync(dirname(join(source, file)), { recursive: true });
+    writeFileSync(join(source, file), "preview-asset\n");
+  }
+  const renderer = join(source, "dist/renderer");
+  mkdirSync(join(renderer, "assets"), { recursive: true });
+  writeFileSync(join(renderer, "index.html"), '<script type="module" src="./assets/main.js"></script>\n');
+  writeFileSync(join(renderer, "assets/main.js"), "export {};\n");
   for (const component of ["memory", "memmy-agent"]) {
+    if (component === "memory" && !memoryInAsar) continue;
     const componentVersion = component === "memory" ? memoryVersion : agentVersion;
     const componentManifest = { version: componentVersion };
     const componentLock = { version: componentVersion, packages: { "": { version: componentVersion } } };
@@ -582,10 +736,39 @@ async function createAsarFixture(
   mkdirSync(dirname(knowledge), { recursive: true });
   writeFileSync(knowledge, "export {};\n");
   if (platform === "win32") {
+    for (const relativePath of [
+      "dist/main/computer-use-window-capture.js",
+      "dist/runtime/memmy-agent/dist/tools/computer-use/managed-ocu-session.js",
+      "dist/runtime/memmy-agent/dist/tools/computer-use/native-surface-control.js",
+      "dist/runtime/memmy-agent/dist/tools/computer-use/windows-focus-guard.js",
+      "dist/main/browser-sidebar-bridge.js",
+      "dist/main/browser-history-store.js",
+      "dist/main/browser-download-catalog.js",
+      "dist/main/browser-site-permissions.js",
+      "dist/main/browser-access-store.js",
+      "dist/main/browser-download-settings.js",
+      "dist/main/browser-auth-form.js",
+      "dist/main/browser-browsing-data.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-profile.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-downloads.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-site-permissions.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-access-approval.js",
+      "dist/runtime/memmy-agent/dist/core/agent-runtime/tools/browser-window-visibility.js",
+    ]) {
+      const target = join(source, relativePath);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, "export {};\n");
+    }
+    const helper = join(source, "dist/runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe");
+    mkdirSync(dirname(helper), { recursive: true });
+    writeFileSync(helper, windowsPEFixture());
+    const historyHelper = join(source, "dist/runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe");
+    mkdirSync(dirname(historyHelper), { recursive: true });
+    writeFileSync(historyHelper, Buffer.concat([windowsPEFixture(), Buffer.from("MemmyWindowsHistoryRuntimeV1")]));
     const ownSourceMap = join(source, "dist/runtime/memmy-agent/dist/main.js.map");
     mkdirSync(dirname(ownSourceMap), { recursive: true });
     writeFileSync(ownSourceMap, "own-production-map\n");
-    if (agentSourceCoreFixture === "complete") {
+    if (memoryInAsar && agentSourceCoreFixture === "complete") {
       const agentSourceCore = join(
         source,
         "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
@@ -593,7 +776,7 @@ async function createAsarFixture(
       mkdirSync(dirname(agentSourceCore), { recursive: true });
       writeFileSync(agentSourceCore, "export {};\n");
     }
-    if (agentSourceCoreFixture !== "missing") {
+    if (memoryInAsar && agentSourceCoreFixture !== "missing") {
       writeFixtureJson(
         join(source, "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json"),
         {
@@ -606,10 +789,12 @@ async function createAsarFixture(
     }
   }
   const targetArch = platform === "darwin" ? "arm64" : "x64";
-  const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
-  mkdirSync(onnxRuntimeRoot, { recursive: true });
-  writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
-  if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
+  if (memoryInAsar) {
+    const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
+    mkdirSync(onnxRuntimeRoot, { recursive: true });
+    writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
+    if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
+  }
   const lifecycleSidecar = join(
     source,
     "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
@@ -618,11 +803,12 @@ async function createAsarFixture(
   writeFileSync(lifecycleSidecar, "export {};\n");
   for (const [relativePath, contents] of extraFiles) {
     const targetPath = join(source, relativePath);
+    if (contents === null) { rmSync(targetPath, { force: true }); continue; }
     mkdirSync(dirname(targetPath), { recursive: true });
     writeFileSync(targetPath, contents);
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
-  await createPackage(source, asar);
+  await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
   return asar;
 }
 

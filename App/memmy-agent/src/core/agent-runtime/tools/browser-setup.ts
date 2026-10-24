@@ -287,15 +287,9 @@ export async function prepareManagedChromium(
   try {
     configurePlaywrightBrowsersPath();
     const { playwrightCli } = resolveManagedPlaywrightPaths();
-    let resolved = await resolveManagedChromium();
-    if (runtime.existsSync(resolved.executablePath)) {
-      recordBrowserPreparationState({
-        status: "ready",
-        ...(attemptId ? { attemptId } : {}),
-        executablePath: resolved.executablePath,
-      });
-      return { status: "ready", executablePath: resolved.executablePath };
-    }
+    // The pinned installer checks the full Chromium bundle and its default
+    // headless shell. A full browser alone does not make a partial cache ready;
+    // complete artifacts are reused by Playwright without downloading again.
     const startedAt = new Date().toISOString();
     let lastProgressAt = startedAt;
     let progressPercent = 0;
@@ -414,7 +408,7 @@ export async function prepareManagedChromium(
         },
       );
     }
-    resolved = await resolveManagedChromium();
+    const resolved = await resolveManagedChromium();
     if (!runtime.existsSync(resolved.executablePath)) {
       return preparationFailure(
         "Chromium executable is missing after Playwright install",

@@ -32,12 +32,14 @@ export class ApplicationIconReader {
   private readonly helperSource: string;
   private helper: Promise<string> | null = null;
   private readonly pending = new Map<string, Promise<string | null>>();
+  private catalog: { at: number; applications: Array<{ bundleId: string; name: string }> } | null = null;
 
   constructor(input: { cacheDirectory?: string } = {}) {
     // Copied beside the compiled module by the build, as the recorder's is.
     this.helperSource = fileURLToPath(new URL("./app-icon.swift", import.meta.url));
+    const home = process.env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy");
     this.cacheDirectory = input.cacheDirectory
-      ?? path.join(os.homedir(), ".memmy", "computer-history", "app-icons");
+      ?? path.join(home, "computer-history", "app-icons");
   }
 
   /** The icon as a `data:` URL, or null when macOS has none to give. */
@@ -51,6 +53,27 @@ export class ApplicationIconReader {
     const request = this.extract(bundleId).finally(() => this.pending.delete(bundleId));
     this.pending.set(bundleId, request);
     return request;
+  }
+
+  /** Installed user-facing applications for the History source picker. */
+  async listApplications(): Promise<Array<{ bundleId: string; name: string }>> {
+    if (process.platform !== "darwin") return [];
+    if (this.catalog && Date.now() - this.catalog.at < 60_000) return this.catalog.applications;
+    const binary = await this.ensureHelper();
+    const { stdout } = await execFileAsync(binary, ["--list"], {
+      timeout: 20_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const parsed: unknown = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) throw new Error("invalid application catalog");
+    const applications = parsed.filter((row): row is { bundleId: string; name: string } => {
+      if (row === null || typeof row !== "object") return false;
+      const { bundleId, name } = row as { bundleId?: unknown; name?: unknown };
+      return typeof bundleId === "string" && BUNDLE_ID.test(bundleId)
+        && typeof name === "string" && Boolean(name.trim());
+    });
+    this.catalog = { at: Date.now(), applications };
+    return applications;
   }
 
   private cacheFile(bundleId: string): string {

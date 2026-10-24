@@ -19,6 +19,7 @@ import {
 const roots: string[] = [];
 const oldPath = process.env.PATH;
 const oldDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+const oldComputerUseBinary = process.env.MEMMY_DEV_COMPUTER_USE_BINARY;
 const oldPresetEnv = {
   FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
   BRAVE_API_KEY: process.env.BRAVE_API_KEY,
@@ -41,6 +42,8 @@ afterEach(() => {
   process.env.PATH = oldPath;
   if (oldDataDir == null) delete process.env.MEMMY_AGENT_DATA_DIR;
   else process.env.MEMMY_AGENT_DATA_DIR = oldDataDir;
+  if (oldComputerUseBinary == null) delete process.env.MEMMY_DEV_COMPUTER_USE_BINARY;
+  else process.env.MEMMY_DEV_COMPUTER_USE_BINARY = oldComputerUseBinary;
   for (const [key, value] of Object.entries(oldPresetEnv)) {
     if (value == null) delete process.env[key];
     else process.env[key] = value;
@@ -50,16 +53,43 @@ afterEach(() => {
 });
 
 describe("mcp presets api", () => {
-  it("detects bundled OCU with an empty PATH and preserves the portable config", () => {
+  it("enables and removes the bundled computer-use preset without changing its portable command", () => {
     useConfig();
+    saveConfig(new Config({ tools: { mcpServers: {} } }));
+    const enabled = mcpPresetsAction("enable", { name: ["memmy_computer_use"] });
+    expect(enabled.presets.find((item: any) => item.name === "memmy_computer_use")).toMatchObject({ installed: true });
+    expect(loadConfig().tools.mcpServers.memmy_computer_use).toMatchObject({
+      command: "open-computer-use", args: ["mcp"]
+    });
+    mcpPresetsAction("remove", { name: ["memmy_computer_use"] });
+    expect(loadConfig().tools.mcpServers.memmy_computer_use).toBeUndefined();
+  });
+
+  it.skipIf(process.platform !== 'darwin')("detects Memmy Computer Use with an empty PATH and preserves the portable config", () => {
+    const root = useConfig();
+    const binary = path.join(root, 'Memmy Computer Use.app', 'Contents', 'MacOS', 'MemmyComputerUse');
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, 'fixture');
+    fs.chmodSync(binary, 0o755);
+    process.env.MEMMY_DEV_COMPUTER_USE_BINARY = binary;
     saveConfig(new Config({ tools: { mcpServers: {
-      open_computer_use: { type: "stdio", command: "open-computer-use", args: ["mcp"] },
+      memmy_computer_use: { type: "stdio", command: "open-computer-use", args: ["mcp"] },
     } } }));
     process.env.PATH = "";
     const payload = mcpPresetsPayload();
-    const server = payload.presets.find((item: any) => item.name === "open_computer_use");
+    const server = payload.presets.find((item: any) => item.name === "memmy_computer_use");
     expect(server).toMatchObject({ available: true, status: "configured" });
-    expect(loadConfig().tools.mcpServers.open_computer_use.command).toBe("open-computer-use");
+    expect(loadConfig().tools.mcpServers.memmy_computer_use.command).toBe("open-computer-use");
+  });
+
+  it.skipIf(process.platform !== 'darwin')('reports the owned helper as unavailable when its binary is missing', () => {
+    useConfig();
+    process.env.MEMMY_DEV_COMPUTER_USE_BINARY = '/missing/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse';
+    saveConfig(new Config({ tools: { mcpServers: {
+      memmy_computer_use: { type: 'stdio', command: 'open-computer-use', args: ['mcp'] },
+    } } }));
+    const server = mcpPresetsPayload().presets.find((item: any) => item.name === 'memmy_computer_use');
+    expect(server).toMatchObject({ available: false, status: 'missing_dependency' });
   });
 
   it("lists supported preset cards", () => {

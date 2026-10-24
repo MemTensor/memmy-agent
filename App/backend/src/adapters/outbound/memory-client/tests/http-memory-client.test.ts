@@ -46,6 +46,8 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
+      "/api/v1/evidence/skills/:id/approve",
+      "/api/v1/evidence/skills/:id",
       "/api/v1/memory/recalls/:queryId",
       "/api/v1/worker/run",
       "/api/v1/worker/import-summaries/enqueue",
@@ -64,6 +66,46 @@ describe("HttpMemoryClient", () => {
       })
     ).toBe("http://127.0.0.1:8765/api/v1/sessions/session%201/close");
     expect(() => buildMemoryLayerUrl("http://127.0.0.1:8765", "closeSession")).toThrow("Missing path param");
+  });
+
+  it("forwards observed Skill approval without inventing a namespace and validates the result", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ id: "skill 1", status: "activated", serverTime: now() }), {
+          status: 200, headers: { "content-type": "application/json" }
+        });
+      }) as typeof fetch
+    });
+    expect(await client.approveObservedSkill("skill 1")).toEqual({ id: "skill 1", status: "activated", serverTime: now() });
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/evidence/skills/skill%201/approve");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({});
+    expect(new Headers(calls[0]?.init?.headers).get("authorization")).toBe("Bearer fixture-token");
+    expect(new Headers(calls[0]?.init?.headers).has("x-memmy-user-id")).toBe(false);
+  });
+
+  it("saves an observed Skill with its version and does not retry an ambiguous edit", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    let failed = false;
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", timeoutMs: 500, maxRetries: 2 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        if (failed) throw new Error("connection lost after sending edit");
+        return new Response(JSON.stringify({ id: "skill 1", status: "activated", version: 4, serverTime: now() }), {
+          status: 200, headers: { "content-type": "application/json" }
+        });
+      }) as typeof fetch
+    });
+    const input = { body: "# Release review\n\nCheck the actual result.", expectedVersion: 3 };
+    expect(await client.updateObservedSkill("skill 1", input)).toMatchObject({ version: 4, status: "activated" });
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/evidence/skills/skill%201");
+    expect(calls[0]?.init?.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
+    failed = true;
+    await expect(client.updateObservedSkill("skill 1", input)).rejects.toThrow();
+    expect(calls).toHaveLength(2);
   });
 
   it("calls every final runtime path and parses schema-valid responses", async () => {

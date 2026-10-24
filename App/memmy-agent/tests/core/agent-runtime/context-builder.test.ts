@@ -185,7 +185,7 @@ describe("Bundled Tool Contract", () => {
     expect(content).toContain("## General Tool Contract");
     expect(content).toContain("{% include 'agent/verification-contract.md' %}");
     expect(content).not.toContain("After meaningful changes, verify with the smallest reliable check");
-    expect(content).toContain("Use the narrowest structured tool");
+    expect(content).toContain("Tool descriptions explain supported interfaces, parameters and results");
     expect(content).toContain("Do not treat `exec` as a universal workaround");
     expect(content).toContain("## Execution Progress");
     expect(content).toContain("A request to change external state is incomplete");
@@ -212,6 +212,13 @@ describe("Bundled Tool Contract", () => {
     expect(prompt).toContain("## Execution Progress");
     expect(prompt).toContain("Keep long-running services in the foreground");
     expect(prompt).toContain("independent static `.html`/`.htm` page");
+    expect(prompt).toContain("On Windows 11, native Computer Use works in an unlocked, signed-in desktop");
+    expect(prompt).toContain("Allow once** covers the current interactive user message");
+    expect(prompt).toContain("The user's task determines the actions to perform");
+    expect(prompt).toContain("Supplied values are transient and redacted from tool history");
+    expect(prompt).toContain("not answered in time, tell the user which permission");
+    expect(prompt).not.toContain("defaults to Block");
+    expect(prompt).toContain("**computer-use** - Choose Memmy browser, desktop Computer Use");
     expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
     expect(prompt).toContain("`failed` means the validation output must be inspected");
   });

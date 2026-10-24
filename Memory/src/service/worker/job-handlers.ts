@@ -1,3 +1,4 @@
+import { EmbeddingInputLimitError } from "../../model/openai-embedding-inputs.js";
 /**
  * Worker job routing and durable write-back helpers.
  *
@@ -23,6 +24,7 @@ import {
 } from "../embedding/embedding-pipeline.js";
 import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
   namespaceForMemory,
@@ -58,6 +60,7 @@ export interface WorkerJobProcessors {
   import: {
     summarizeCapturedTrace(job: EvolutionJobRecord): MaybePromise<void>;
     summarizeImportedTrace(job: EvolutionJobRecord): MaybePromise<void>;
+    processObservation?(job: EvolutionJobRecord): MaybePromise<void>;
   };
   evolution: {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
@@ -237,6 +240,10 @@ export async function processJob(
       return;
     case "import_summary":
       await deps.processors.import.summarizeImportedTrace(job);
+      return;
+    case "observation_extract":
+      if (!deps.processors.import.processObservation) throw new Error("observation processor is unavailable");
+      await deps.processors.import.processObservation(job);
       return;
     case "l2_induction":
       await deps.processors.evolution.induceL2(job);
@@ -552,20 +559,26 @@ export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
 export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
   return job.jobType === "trace_summary" ||
     job.jobType === "import_summary" ||
+    job.jobType === "observation_extract" ||
     job.jobType === "embedding" ||
     job.jobType === "l3_world_model_update" ||
     job.jobType === "project_environment_profile";
 }
 
 export function processingStageForJob(jobType: JobType): ProcessingStage | undefined {
-  if (jobType === "trace_summary" || jobType === "import_summary") return "summary";
+  if (jobType === "trace_summary" || jobType === "import_summary" || jobType === "observation_extract") return "summary";
   if (jobType === "embedding") return "embedding";
   return undefined;
 }
 
 export function processingJobMatchesMemory(job: EvolutionJobRecord, memory: MemoryRow): boolean {
   const contentHash = typeof job.payload.contentHash === "string" ? job.payload.contentHash : undefined;
-  return !contentHash || contentHash === memory.contentHash;
+  const generation = job.payload.observationGeneration;
+  const skillOrigin = memory.properties.internal_info.external_evidence_candidate;
+  const externalSkillGeneration = isRecord(skillOrigin) ? skillOrigin.content_generation : undefined;
+  return (!contentHash || contentHash === memory.contentHash)
+    && (generation === undefined || generation === observationMemoryState(memory)?.generation)
+    && job.payload.externalSkillGeneration === externalSkillGeneration;
 }
 
 export function sanitizeProcessingError(error: unknown): string {
@@ -583,6 +596,9 @@ export function classifyProcessingError(error: unknown): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
 } {
+  if (error instanceof EmbeddingInputLimitError) {
+    return { code: "model_input_too_long", retryAction: "none" };
+  }
   if (error instanceof ModelHttpError && error.errorCode === "40309") {
     return { code: "40309", retryAction: "open_settings" };
   }
@@ -593,6 +609,18 @@ export function classifyProcessingError(error: unknown): {
   const normalized = message.toLowerCase();
   if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
     return { code: "40309", retryAction: "open_settings" };
+  }
+  // Providers can report shared model/account failures as HTTP 400. Classify
+  // their reason before generic 4xx handling, which permits item isolation.
+  if (error instanceof ModelHttpError) {
+    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    if (providerCode === "operationnotsupported" || providerCode === "insufficientquota" ||
+      /operation.{0,80}(?:does not work|not supported)|insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
+      return { code: "model_configuration", retryAction: "open_settings" };
+    }
+    if (providerCode === "ratelimitexceeded" || /rate[\s_-]*limit/.test(normalized)) {
+      return { code: "transient_provider_error", retryAction: "retry" };
+    }
   }
   if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };
@@ -640,13 +668,15 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
         ? `episode_title:${input.episodeId}:${payloadString("stage") ?? "provisional"}`
         : undefined;
     case "embedding":
-      return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
+      return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}${payloadString("observationGeneration") ? `:${payloadString("observationGeneration")}` : ""}${payloadString("externalSkillGeneration") ? `:external-skill:${payloadString("externalSkillGeneration")}` : ""}` : undefined;
     case "user_memory_embedding":
       return target ? `user_memory_embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "trace_summary":
       return target ? `trace_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "import_summary":
       return target ? `import_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
+    case "observation_extract":
+      return target ? `observation_extract:${target}:${payloadString("observationGeneration") ?? payloadString("contentHash") ?? "current"}` : undefined;
     case "reflection":
       return input.episodeId ? `reflection:${input.episodeId}` : target ? `reflection:${target}` : undefined;
     case "reward":

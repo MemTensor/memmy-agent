@@ -158,9 +158,9 @@ function makeInstallerFixture(root) {
   writeFileSync(path.join(model, "tokenizer.json"), "{}\n");
   writeFileSync(path.join(model, "tokenizer_config.json"), "{}\n");
   writeFileSync(path.join(model, "onnx", "model_quantized.onnx"), "fixture\n");
-  const ocu = path.join(agent, "node_modules", "open-computer-use", "dist", "linux", "amd64", "open-computer-use");
+  const ocu = path.join(agent, "dist", "native-computer-use", "linux", "amd64", "memmy-computer-use");
   mkdirSync(path.dirname(ocu), { recursive: true });
-  writeFileSync(ocu, "#!/bin/sh\necho 0.3.5\n");
+  writeFileSync(ocu, `#!/bin/sh\necho ${JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version}\n`);
   chmodSync(ocu, 0o755);
   const tar = spawnSync("tar", ["-czf", archive, "-C", payload, "."], { encoding: "utf8" });
   expect(tar.status, tar.stderr).toBe(0);
@@ -310,7 +310,8 @@ describe("Linux CLI package boundary", () => {
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
     expect(listing.stdout).toContain("scripts/internal/linux/install-computer-use-deps.sh");
-    expect(listing.stdout).toMatch(/App\/memmy-agent\/vendor\/open-computer-use-[^/]+-linux\.tgz/);
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/amd64/memmy-computer-use");
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/arm64/memmy-computer-use");
     expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
@@ -442,6 +443,44 @@ describe("Linux CLI package boundary", () => {
 });
 
 describe("Linux one-line installer transaction", () => {
+  it("accepts stable and rc release versions while rejecting unsafe or malformed versions", () => {
+    const root = temporaryRoot("memmy-linux-installer-version-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    mkdirSync(release);
+    writeFileSync(path.join(release, "memmy-agent-linux-cli.tar.gz"), "fixture\n");
+    writeFileSync(
+      path.join(release, "memmy-agent-linux-cli.tar.gz.sha256"),
+      `${"0".repeat(64)}  memmy-agent-linux-cli.tar.gz\n`,
+    );
+
+    for (const version of ["1.2.3", "v1.2.3", "1.2.3-rc.7", "v1.2.3-rc.7"]) {
+      const home = path.join(root, `accepted-${version}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_VERSION: version });
+      expect(result.status, `${version}: ${result.stderr}`).not.toBe(0);
+      expect(result.stderr, version).toContain("SHA-256 verification failed");
+      expect(result.stderr, version).not.toContain("invalid release version");
+    }
+
+    for (const version of [
+      "1.2.3-rc.",
+      "1.2.3-rc.07",
+      "1.2.3-rc.7/../../tmp",
+      "1.2.3-rc.7+meta",
+      "1.2.3-rc.7-extra",
+      "1.2.3-rc.7.1",
+      "01.2.3",
+    ]) {
+      const home = path.join(root, `rejected-${version.replaceAll("/", "_")}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_VERSION: version });
+      expect(result.status, version).not.toBe(0);
+      expect(result.stderr, version).toContain(`invalid release version: ${version}`);
+      expect(result.stderr, version).not.toContain("SHA-256 verification failed");
+    }
+  });
+
   it("installs, repeats PATH setup idempotently, and preserves the prior version on checksum failure", () => {
     const root = temporaryRoot("memmy-linux-installer-");
     const home = path.join(root, "home");

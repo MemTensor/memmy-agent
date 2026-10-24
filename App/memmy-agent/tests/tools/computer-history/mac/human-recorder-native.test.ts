@@ -32,6 +32,7 @@ func AXUIElementCopyAttributeValue(_ element: AXUIElement, _ attribute: String, 
   result = element.fields[attribute]
   return result == nil ? .failure : .success
 }
+func copyAXAttribute(_ element: AXUIElement, _ attribute: String, _ result: inout Any?) -> AXResult { AXUIElementCopyAttributeValue(element, attribute, &result) }
 ${sanitizeUrl}
 ${browserPage}
 let page = AXUIElement(["role": "AXWebArea", "url": "https://example.com/"])
@@ -76,6 +77,7 @@ test.runIf(process.platform === "darwin")("native mouse targets use hit tests an
   const source = fs.readFileSync(fileURLToPath(new URL(
     "../../../../src/tools/computer-history/mac/human-recorder.swift", import.meta.url,
   )), "utf8");
+  const sourcePolicy = source.slice(source.indexOf("let separatelyAuthorizedSourceBundleIds:"), source.indexOf("func emit("));
   const classifier = source.slice(source.indexOf("let keyNames:"), source.indexOf("func characters("));
   const resolveTarget = source.slice(source.indexOf("func resolveTarget("), source.indexOf("func modifierList("));
   const callback = source.slice(source.indexOf("let callback:"), source.indexOf("// MARK: - Entry point"));
@@ -87,7 +89,7 @@ test.runIf(process.platform === "darwin")("native mouse targets use hit tests an
   fs.writeFileSync(script, `import Foundation
 import Dispatch
 struct CGPoint { var x: Double; var y: Double }
-enum EventType { case leftMouseDown, rightMouseDown, leftMouseUp, keyDown, tapDisabledByTimeout, tapDisabledByUserInput, other }
+enum EventType { case leftMouseDown, rightMouseDown, leftMouseUp, keyDown, scrollWheel, tapDisabledByTimeout, tapDisabledByUserInput, other }
 enum EventField { case mouseEventClickState, keyboardEventKeycode }
 final class CGEvent {
   let location: CGPoint
@@ -101,30 +103,53 @@ final class CGEvent {
 }
 typealias CGEventTapCallBack = (Int, EventType, CGEvent, Any?) -> Unmanaged<CGEvent>?
 let enrichmentQueue = DispatchQueue(label: "native-event-test.enrichment")
+func enqueueEnrichment(key: String? = nil, _ work: @escaping () -> Void) { enrichmentQueue.async(execute: work) }
+func requestScrollSample(application: [String: Any]) {}
 var eventTap: Int? = nil
-var dragOrigin: (point: CGPoint, target: [String: Any])?
+var dragOrigin: (point: CGPoint, target: [String: Any], pid: pid_t, window: AXUIElement, url: String?)?
 typealias AXUIElement = String
+func CFEqual(_ lhs: String, _ rhs: String) -> Bool { lhs == rhs }
+var frontPid: pid_t = 1
+var activeWindow = "Window A"
+var activeUrl: String?
+final class RunningApplication { var processIdentifier: pid_t { frontPid } }
+final class NSWorkspace {
+  static let shared = NSWorkspace()
+  var frontmostApplication: RunningApplication? { RunningApplication() }
+}
+func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], element: AXUIElement?) {
+  var payload: [String: Any] = [:]
+  if let activeUrl { payload["url"] = activeUrl }
+  return (payload, activeWindow)
+}
+func elementBelongsToWindow(_ element: AXUIElement, window: AXUIElement, pid: pid_t) -> Bool { true }
 let axStateLock = NSLock()
 var observedPid: pid_t? = 1
 var focusedElementCache: String? = "Previously focused editor"
 var focusedElementGeneration: UInt64 = 0
+var focusedNotificationsAvailable = true
 var hitAvailable = true
+var hitPid: pid_t = 1
+var hitRole = "AXButton"
+var hitSubrole = ""
 var hitTests = 0
 var emitted: [[String: Any]] = []
 func nodePayload(_ element: String) -> [String: Any] { ["role": "AXTextField", "title": element] }
 func hasSemanticLabel(_ payload: [String: Any]) -> Bool { payload["title"] != nil }
-func accessibilityHit(at point: CGPoint) -> (payload: [String: Any], pid: Int?)? {
+func accessibilityHit(at point: CGPoint, expectedPid: pid_t, expectedWindow: AXUIElement) -> (payload: [String: Any], pid: pid_t?)? {
   hitTests += 1
-  return hitAvailable ? (["role": "AXButton", "title": "Hit \\(Int(point.x)),\\(Int(point.y))"], 1) : nil
+  return hitAvailable ? (["role": hitRole, "subrole": hitSubrole, "title": "Hit \\(Int(point.x)),\\(Int(point.y))"], hitPid) : nil
 }
 func hitHasSemantics(_ payload: [String: Any]) -> Bool { hasSemanticLabel(payload) }
 func modifierList(_ event: CGEvent) -> [String] { [] }
-func applicationPayload() -> [String: Any] { ["pid": pid_t(1)] }
+func applicationPayload() -> [String: Any] { ["pid": frontPid] }
 func secureInputActive() -> Bool { false }
 func characters(from event: CGEvent) -> String { event.text }
-func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
+func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: AXUIElement? = nil, expectedUrl: String? = nil, extra: [String: Any]) {
   var payload = extra; payload["kind"] = kind; emitted.append(payload)
 }
+${sourcePolicy}
+func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool { false }
 ${classifier}
 ${focus}
 ${resolveTarget}
@@ -147,6 +172,41 @@ enrichmentQueue.sync {}
 let targeting = emitted
 emitted.removeAll()
 hitAvailable = true
+
+// Neither another app's hit nor a minimized Dock window may retain labels,
+// even if a faulty/old AX bridge returns a payload with the expected PID.
+hitPid = 2
+_ = callback(0, .leftMouseDown, CGEvent(5, 6), nil)
+_ = callback(0, .leftMouseUp, CGEvent(5, 6), nil)
+enrichmentQueue.sync {}
+hitPid = 1; hitRole = "AXDockItem"; hitSubrole = "AXMinimizedWindowDockItem"
+_ = callback(0, .leftMouseDown, CGEvent(7, 8), nil)
+_ = callback(0, .leftMouseUp, CGEvent(7, 8), nil)
+enrichmentQueue.sync {}
+let untrustedHits = emitted
+emitted.removeAll()
+hitRole = "AXButton"; hitSubrole = ""
+
+// A drag cannot reuse labels captured in another app, window, or page.
+_ = callback(0, .leftMouseDown, CGEvent(0, 0), nil)
+enrichmentQueue.sync {}
+frontPid = 2
+_ = callback(0, .leftMouseUp, CGEvent(50, 50), nil)
+enrichmentQueue.sync {}
+frontPid = 1
+_ = callback(0, .leftMouseDown, CGEvent(0, 0), nil)
+enrichmentQueue.sync {}
+activeWindow = "Window B"
+_ = callback(0, .leftMouseUp, CGEvent(50, 50), nil)
+enrichmentQueue.sync {}
+activeWindow = "Window A"; activeUrl = "https://blocked.example/"
+_ = callback(0, .leftMouseDown, CGEvent(0, 0), nil)
+enrichmentQueue.sync {}
+activeUrl = "https://allowed.example/"
+_ = callback(0, .leftMouseUp, CGEvent(50, 50), nil)
+enrichmentQueue.sync {}
+let changedDragContexts = emitted
+emitted.removeAll(); activeUrl = nil
 
 // Hold enrichment while tap events arrive. Releasing the queue later must
 // preserve both drags and clear a wobbling click's origin. The tap callback
@@ -173,6 +233,7 @@ enrichmentQueue.sync {}
 let result: [String: Any] = [
   "targeting": targeting, "keyboardHitTests": keyboardHitTests,
   "dragEvents": emitted, "dragOriginCleared": dragOrigin == nil,
+  "untrustedHits": untrustedHits, "changedDragContexts": changedDragContexts,
   "callbackReturnedWhileBlocked": returnedWhileBlocked,
 ]
 print(String(data: try JSONSerialization.data(withJSONObject: result), encoding: .utf8)!)
@@ -198,6 +259,12 @@ print(String(data: try JSONSerialization.data(withJSONObject: result), encoding:
       ["Hit 0,0", "Hit 50,50"], ["Hit 60,60", "Hit 100,100"],
     ]);
     assert.equal(parsed.dragOriginCleared, true);
+    assert.deepEqual(parsed.untrustedHits.map((event: any) => event.mouse.target), [
+      { role: "AXUnknown" }, { role: "AXUnknown" },
+    ]);
+    assert.deepEqual(parsed.changedDragContexts.map((event: any) => event.kind), [
+      "mouse.click", "mouse.click", "mouse.click",
+    ]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

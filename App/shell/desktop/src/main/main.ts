@@ -1,8 +1,45 @@
+import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
+import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
+import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
+import { desktopSaveFileName } from './save-file-name.js';
 import { createComputerUseOnboarding } from './computer-use-onboarding.js';
+import { createComputerUsePIPScreenPermissionGuide } from './computer-use-pip-screen-permission.js';
+import { stopComputerUseAgentForPermissionRestart, stopComputerUseAgentsOnExitSync } from './computer-use-agent-restart.js';
+import { createComputerUseSurfaceWindows } from './computer-use-surface-window.js';
+import { captureComputerUseWindow } from './computer-use-window-capture.js';
+import { createBrowserSidebarBridge } from './browser-sidebar-bridge.js';
+import { EmbeddedBrowserDriver } from './embedded-browser-driver.js';
+import { runApprovedEmbeddedCdpRead, runApprovedEmbeddedCdpWrite } from './browser-embedded-cdp-access.js';
+import { BrowserHistoryStore } from './browser-history-store.js';
+import { queryInAppBrowserHistory } from './browser-history-access.js';
+import { BROWSER_DATA_CATEGORIES, clearInAppBrowserData, parseBrowserDataCategories } from './browser-browsing-data.js';
+import { BrowserDownloadCatalog } from './browser-download-catalog.js';
+import { BrowserDownloadSettings } from './browser-download-settings.js';
+import { BrowserWebviewDownloads } from './browser-webview-downloads.js';
+import { attachBrowserWebviewPermissions } from './browser-webview-permissions.js';
+import { BrowserAccessStore } from './browser-access-store.js';
+import { BrowserUseSitePolicyStore } from './browser-use-site-policy-store.js';
+import { BrowserAllowAll } from './browser-allow-all.js';
+import { rememberBrowserCdpGrant } from './browser-cdp-remembered-grant.js';
+import { showBrowserAuthForm } from './browser-auth-form.js';
+import { resolveExternalBrowserExtensionDirectory } from './external-browser-extension-directory.js';
+import { createExternalBrowserExtensionDragHandler, EXTERNAL_BROWSER_EXTENSION_DRAG_CHANNEL } from './external-browser-extension-drag.js';
+import { launchExternalBrowserExtensionManager, type ExternalBrowserInstallPreparation } from './external-browser-extension-install.js';
+import { installedExternalBrowsers, probeExternalBrowserInstallation } from './installed-external-browsers.js';
+import { runningExternalBrowsers } from './running-external-browsers.js';
+import { wakeExternalBrowser } from './wake-external-browser.js';
+import { retireLockedMacConsent } from './retire-locked-mac-consent.js';
+import { hasFullDiskAccess } from './full-disk-access.js';
+import { isMacPermissionSystemQuit, isMacSystemSessionQuit, MacPermissionRestartIntent,
+  MACOS_PERMISSION_SETTINGS_DEEPLINKS, openMacPermissionSettingsFromRenderer,
+  type MacPermissionQuitContext } from './mac-permission-quit.js';
+import { NativeAppAllowAll, nativeAppAccessDecision } from './native-app-allow-all.js';
 import { isComputerUsePermissionPanelFocused, showComputerUsePermissionPanel } from './computer-use-permission-panel.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
-import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
+import { BROWSER_NATIVE_ALLOW_ALL_FILE_ENV, browserUsePatternMatches, parseBrowserTaskSitePermission, resolveCloudServiceBaseUrl,
+  type BrowserAllowAllState, type BrowserUseCapability, type BrowserUseSiteRule,
+  type AccountChannel, type ComputerUsePermissions } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
   DesktopImageActionRequest,
@@ -10,6 +47,7 @@ import type {
   DesktopMemoryServiceRestartResult,
   DesktopProjectDirectorySelection,
   DesktopRuntimeConfig,
+  DesktopWorkspaceDirectoryResult,
   DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
   DesktopUpdateDownloadOptions,
@@ -17,8 +55,9 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
-import { execFileSync, spawn } from "node:child_process";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
@@ -49,16 +88,19 @@ import {
   resolveDevelopmentRuntimeEntryPaths,
   resolveDevelopmentRuntimeExecutable,
   startManagedRuntimeServices,
+  waitForExternalAgentMcpConfig,
   type ManagedRuntimeServices
 } from "./runtime-services.js";
 import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelWidth, type RendererContextMenuCommand } from "./renderer-context-menu.js";
 import { startPackagedRendererStaticServer, type PackagedRendererStaticServer } from "./renderer-static-server.js";
 import { shouldBlockRendererReloadShortcut } from "./renderer-shortcuts.js";
 import { normalizeMailtoUrl } from "./mailto-url.js";
+import { TaskDoneNotificationDeduplicator } from "./task-done-notification-deduplicator.js";
 import {
   selectEmptyProjectDirectory,
   selectProjectDirectory,
 } from "./project-directory-picker.js";
+import { readWorkspaceDirectory, writeWorkspaceTextFile } from "./workspace-directory.js";
 import { buildAgentToolCliPromptDeepLink, buildAgentToolPromptDeepLink, normalizeAgentToolLaunchRequest } from "./agent-tool-deeplink.js";
 import {
   CLAUDE_CODE_TERMINAL_SCRIPT,
@@ -89,6 +131,7 @@ import {
 import {
   getCurrentLogLevel,
   initLogger,
+  writeProcessDiagnostic,
   setLogLevel as applyAndPersistLogLevel,
   type LogLevel
 } from "./logger.js";
@@ -110,7 +153,11 @@ import {
   type WindowsDataMigrationConsistency,
   type WindowsDataLayout
 } from "./windows-data-layout.js";
+import { assertWindowsRuntimeOwnership } from "./windows-runtime-ownership.js";
 import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import { createWindowsUpdateVerificationScript, validateWindowsUpdateInstaller, windowsUpdatePowerShellExecutable, windowsUpdatePowerShellFile, type WindowsUpdateVerification } from "./windows-update-validation.js";
+import { applyLocalTestProfileEnvironment, prepareLocalTestProfile,
+  readExecutableSigningTeamIdentifier, type LocalTestProfile } from './local-test-profile.js';
 import {
   installPackagedWindowsCliTools,
   resolveCliInstallStrategy,
@@ -122,13 +169,152 @@ import {
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
 import { resolveComputerHistoryMarkdownPath } from "./computer-history-markdown.js";
+import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js";
+import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
+import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
+import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
 
 let mainWindow: BrowserWindow | null = null;
+let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
+let pipScreenPermissionGuide: ReturnType<typeof createComputerUsePIPScreenPermissionGuide> | null = null;
 let petWindow: BrowserWindow | null = null;
 let localBackend: LocalBackend | null = null;
 let menuBarTray: Tray | null = null;
+let historyTrayIndicatorEnabled = false;
+let historyTrayRecording = false;
+let recordingMenuBarCache: { dark: boolean; image: Electron.NativeImage } | null = null;
+let menuBarAppearanceWatching = false;
 const MENU_BAR_TRAY_GUID = "8B2A0C33-45C0-4C43-8F1C-77F7D4FDF2D4";
 let runtimeServices: ManagedRuntimeServices | null = null;
+let nativeAppAllowAll: NativeAppAllowAll | null = null;
+
+function allowAllNativeApps(): NativeAppAllowAll {
+  nativeAppAllowAll ??= new NativeAppAllowAll(app.getPath('userData'));
+  return nativeAppAllowAll;
+}
+
+function browserAllowAllStore(): BrowserAllowAll | null {
+  const configPath = runtimeServices?.agentGateway.configPath;
+  return configPath ? new BrowserAllowAll(dirname(configPath), () => allowAllNativeApps().isEnabled()) : null;
+}
+
+function browserAllowAllState(): BrowserAllowAllState {
+  const inherited = allowAllNativeApps().isEnabled();
+  return browserAllowAllStore()?.read() ?? { enabled: false, inherited, effective: inherited };
+}
+
+function browserSiteDecision(url: string, capability: BrowserUseCapability) {
+  return browserAllowAllStore()?.decision(url, capability) ?? 'block';
+}
+
+const pendingBrowserApprovals = new Set<AbortController>();
+function publishBrowserAllowAll(): BrowserAllowAllState {
+  const state = browserAllowAllState();
+  if (state.effective) for (const pending of pendingBrowserApprovals) pending.abort();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('memmy:browser-allow-all:changed', state);
+  }
+  return state;
+}
+
+async function showBrowserApproval(options: Electron.MessageBoxOptions, parent: BrowserWindow | null) {
+  if (browserAllowAllState().effective) return { response: -1, checkboxChecked: false };
+  const pending = new AbortController();
+  pendingBrowserApprovals.add(pending);
+  try {
+    return parent ? await dialog.showMessageBox(parent, { ...options, signal: pending.signal })
+      : await dialog.showMessageBox({ ...options, signal: pending.signal });
+  } finally { pendingBrowserApprovals.delete(pending); }
+}
+let computerUseSurfaceWindows: ReturnType<typeof createComputerUseSurfaceWindows> | null = null;
+const computerUseTrayRecovery = createPIPTrayRecovery({
+  hasTray: () => Boolean(menuBarTray),
+  showTray: () => syncMenuBarTray(true, true),
+  removeTray: () => destroyMenuBarTray(),
+  updateMenu: () => syncMenuBarTrayContextMenu()
+});
+let browserSidebarBridge: ReturnType<typeof createBrowserSidebarBridge> | null = null;
+let embeddedBrowserHistoryStore: BrowserHistoryStore | null = null;
+const embeddedBrowserDriver = new EmbeddedBrowserDriver(() => mainWindow);
+
+/**
+ * Approval dialogs attach to the main window. In pet mode that window is hidden, so a dialog
+ * would be invisible and time out as a denial; bring Memmy forward and alert a user who is elsewhere.
+ */
+function presentApprovalWindow(prompt: string): BrowserWindow | null {
+  const userWasInMemmy = BrowserWindow.getFocusedWindow() !== null;
+  activateMainWindow();
+  const approvalWindow = mainWindow;
+  if (!approvalWindow || approvalWindow.isDestroyed()) return null;
+  if (!userWasInMemmy) {
+    if (process.platform === 'win32') {
+      approvalWindow.flashFrame(true);
+      approvalWindow.once('focus', () => { if (!approvalWindow.isDestroyed()) approvalWindow.flashFrame(false); });
+    }
+    if (process.platform === 'darwin') app.dock?.bounce('critical');
+    const chinese = app.getLocale().toLowerCase().startsWith('zh');
+    showDesktopNotification({ title: chinese ? 'Memmy 需要你确认' : 'Memmy needs your approval',
+      body: prompt, silent: false });
+  }
+  return approvalWindow;
+}
+
+async function approveBrowserCapabilityOperation(capability: 'download' | 'upload' | 'debug' | 'debug-write',
+  origin: string, names: string[]): Promise<boolean> {
+  const configPath = runtimeServices?.agentGateway.configPath;
+  if (!configPath) return false;
+  const decision = browserSiteDecision(origin,
+    capability === 'download' ? 'downloads' : capability === 'upload' ? 'uploads' : 'fullCdp');
+  if (decision === 'block') return false;
+  if (decision === 'allow') return true;
+  const chinese = app.getLocale().toLowerCase().startsWith('zh');
+  const isDebug = capability === 'debug' || capability === 'debug-write';
+  const direction = capability === 'upload'
+    ? (chinese ? '上传' : 'upload') : capability === 'download'
+      ? (chinese ? '下载' : 'download') : (chinese ? '读取 CDP 信息' : 'read CDP data');
+  const detail = capability === 'debug-write'
+    ? (chinese ? `站点：${origin}\n方法：${names.join('、')}\n此操作可修改当前网页或浏览器状态。始终允许可在浏览器设置的「网站权限」中撤销。`
+      : `Site: ${origin}\nMethods: ${names.join(', ')}\nThis operation can modify the current page or browser state. Revoke a saved grant in Browser settings → Website permissions.`)
+    : capability === 'debug'
+    ? (chinese ? `站点：${origin}\n方法：${names.join('、')}\n本次操作为只读。始终允许会保存此网站的 Debug / CDP 权限，之后包括可修改页面的操作也不再询问，可在浏览器设置中撤销。`
+      : `Site: ${origin}\nMethods: ${names.join(', ')}\nThis operation is read-only. Always allow saves this site's Debug / CDP permission, so later operations that can change the page will not ask either; revoke it in Browser settings.`)
+    : (chinese ? `站点：${origin}\n文件：${names.join('、')}\n仅本次${direction}有效。`
+      : `Site: ${origin}\nFiles: ${names.join(', ')}\nApplies only to this ${direction}.`);
+  const message = capability === 'debug-write'
+    ? (chinese ? '允许 Memmy 在此站点使用可修改页面的 CDP 调试命令吗？'
+      : 'Allow Memmy to use a CDP debug command that can change this site?')
+    : capability === 'debug'
+    ? (chinese ? '允许 Memmy 读取此站点的只读 CDP 调试信息吗？'
+      : 'Allow Memmy to read CDP debug information on this site?')
+    : chinese ? `允许 Memmy 在此站点${direction}文件吗？`
+      : `Allow Memmy to ${direction} files on this site?`;
+  const approvalWindow = presentApprovalWindow(message);
+  if (!approvalWindow) return false;
+  const choice = await showBrowserApproval({
+    type: 'question', title: capability === 'debug-write'
+      ? (chinese ? '高风险浏览器调试操作审批' : 'High-risk browser debug approval')
+      : capability === 'debug'
+        ? (chinese ? '浏览器调试读取审批' : 'Browser debug read approval')
+      : (chinese ? '浏览器文件操作审批' : 'Browser file approval'),
+    message, detail, buttons: isDebug
+      ? (chinese ? ['阻止', '仅本次允许', '始终允许此网站'] : ['Block', 'Allow this operation', 'Always allow this site'])
+      : (chinese ? ['阻止', '仅本次允许'] : ['Block', 'Allow this operation']),
+    defaultId: 0, cancelId: 0, noLink: true,
+  }, approvalWindow);
+  if (browserAllowAllState().effective) return true;
+  if (approvalWindow.isDestroyed() || (choice.response !== 1 && !(isDebug && choice.response === 2))) return false;
+  try {
+    const store = new BrowserUseSitePolicyStore(dirname(configPath));
+    if (isDebug && choice.response === 2) {
+      return rememberBrowserCdpGrant(store, origin,
+        new BrowserAccessStore(dirname(configPath)).list().find(entry => entry.origin === origin)?.decision);
+    }
+    return browserSiteDecision(origin,
+      capability === 'download' ? 'downloads' : capability === 'upload' ? 'uploads' : 'fullCdp') !== 'block';
+  } catch { return false; }
+}
+let browserWebviewDownloads: BrowserWebviewDownloads | null = null;
+let disposeBrowserWebviewPermissions: (() => void) | null = null;
 let runtimeConfig: DesktopRuntimeConfig | null = null;
 let memoryServiceControl: { baseUrl: string; token: string } | null = null;
 let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
@@ -137,6 +323,7 @@ let packagedRendererBaseUrl: string | null = null;
 let windowsDataLayout: WindowsDataLayout | null = null;
 const rendererReadyWebContentsIds = new Set<number>();
 const rendererReadyWaiters = new Map<number, (verified: boolean) => void>();
+const rendererRecoveries = new Map<number, ReturnType<typeof attachRendererRecovery>>();
 let queuedPetWindowClose: ReturnType<typeof setTimeout> | null = null;
 let petWindowCloseActivateSuppressionTimer: ReturnType<typeof setTimeout> | null = null;
 let latestPetWindowLayout: PetWindowLayout | null = null;
@@ -165,6 +352,7 @@ let requiredUpdateBackgroundFirstCheckTimer: ReturnType<typeof setTimeout> | nul
 let requiredUpdateBackgroundCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let isRequiredUpdateBackgroundCheckRunning = false;
 let preparedManagedBackgroundUpdateVersion: string | null = null;
+let localTestProfile: LocalTestProfile | null = null;
 let updateInstallForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let isManagedUpdateInstallerRunning = false;
 let shouldSuppressActivateAfterPetWindowClose = false;
@@ -356,15 +544,257 @@ async function boot(): Promise<void> {
     }
     if (isQuitting) return;
     bootStage = "runtime-services";
+    if (process.platform === 'darwin') pipScreenPermissionGuide = createComputerUsePIPScreenPermissionGuide({
+      whenIdle: () => memmyPermissionOnboarding?.whenIdle() ?? Promise.resolve(null),
+      guide: readGranted => guideMemmySystemPermission('screenRecording', readGranted),
+      isQuitting: () => isQuitting,
+      reportError: error => console.warn('[computer-use] Native PiP screen permission guide failed:', error),
+    });
+    computerUseSurfaceWindows = createComputerUseSurfaceWindows(process.platform, {
+      onVisibilityChanged: () => computerUseTrayRecovery.visibilityChanged(
+        computerUseSurfaceWindows?.hasHiddenActive() ?? false),
+      onScreenRecordingPermissionRequired: request => pipScreenPermissionGuide?.request(request),
+    });
+    embeddedBrowserHistoryStore = new BrowserHistoryStore(join(app.getPath('userData'), 'in-app-browser-history.json'));
+    embeddedBrowserDriver.setHistoryStore(embeddedBrowserHistoryStore);
+    browserSidebarBridge = createBrowserSidebarBridge(
+      () => mainWindow,
+      action => runtimeServices?.sendComputerUseSurfaceAction(action) ?? false,
+      embeddedBrowserHistoryStore,
+      false,
+    );
     const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
+    // Read the existing parent choice live, including after an upgrade or a settings change.
+    process.env[BROWSER_NATIVE_ALLOW_ALL_FILE_ENV] = allowAllNativeApps().filePath;
     runtimeServices = await startManagedRuntimeServices({
-      ...(process.platform === 'darwin' ? { captureScreen: createDesktopScreenCapture({
-        getStatus: () => systemPreferences.getMediaAccessStatus('screen'),
-        getSources: options => desktopCapturer.getSources(options),
-        getDisplays: () => screen.getAllDisplays(),
-        getPrimaryDisplay: () => screen.getPrimaryDisplay(),
-        openSettings: () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'),
-      }), computerUseOnboarding: createComputerUseOnboarding({
+      // Publish the service handles before waiting so quit can cancel gateway startup.
+      // The first window is created only after the gateway can accept tasks.
+      deferAgentGatewayStartup: true,
+      deferBrowserPreparation: process.platform === "win32",
+      onStartupStage: (stage, elapsedMs) => {
+        bootStage = `runtime-services:${stage}`;
+        void writePackagedStartupLog(`boot:runtime-stage:${JSON.stringify({ stage, elapsedMs })}`);
+      },
+      ...(process.platform === 'win32' ? { captureComputerUseWindow } : {}),
+      onComputerUseSurface: (message, sendAction) => {
+        computerUseSurfaceWindows?.update(message, sendAction);
+        browserSidebarBridge?.update(message, sendAction);
+      },
+      onComputerUseSurfaceStop: () => {
+        computerUseSurfaceWindows?.closeAll();
+        browserSidebarBridge?.clear();
+      },
+      handleEmbeddedBrowserRequest: async (request, isCurrentChild, emitEvent) => {
+        if (request.command === 'externalBrowserState') {
+          if (!isCurrentChild()) throw new Error('Browser operation belongs to a finished turn');
+          const installation = probeExternalBrowserInstallation();
+          const runningBrowsers = await runningExternalBrowsers();
+          if (!isCurrentChild()) throw new Error('Browser operation belongs to a finished turn');
+          return { installation, runningBrowsers };
+        }
+        if (request.command === 'recoverExternalBrowser') {
+          if (!isCurrentChild()) throw new Error('Browser operation belongs to a finished turn');
+          const browser = request.args.browser;
+          if (browser !== 'chrome' && browser !== 'edge') throw new Error('Invalid external browser');
+          const running = await runningExternalBrowsers();
+          if (!isCurrentChild()) throw new Error('Browser operation belongs to a finished turn');
+          const installation = probeExternalBrowserInstallation()[browser];
+          // Protected browser metadata is optional evidence. macOS can deny it
+          // after a clean install even though the extension is enabled. Only
+          // explicit negative facts block this user-requested, URL-free wake.
+          if (installation.installed === false || installation.enabled === false || !running?.includes(browser)) return 'unavailable';
+          const recovery = await wakeExternalBrowser(browser);
+          if (!isCurrentChild()) throw new Error('Browser operation belongs to a finished turn');
+          return recovery;
+        }
+        if (request.command === 'setSitePermission') {
+          const choice = parseBrowserTaskSitePermission(request.args);
+          if (!choice || !Number.isSafeInteger(request.tabId) || !isCurrentChild()
+            || embeddedBrowserDriver.uploadOrigin(request.tabId!) !== choice.origin
+            || (choice.allow && (browserSiteDecision(choice.origin, 'access') === 'block'
+              || browserAllowAllStore()?.siteRuleDecision(choice.origin, 'access') === 'block'))) {
+            throw new Error('Browser permission target is no longer current');
+          }
+          // An Agent choice must never become one of the user's saved site permissions.
+          embeddedBrowserDriver.taskSitePermissions.set(request.tabId!, choice.origin, choice.permission,
+            choice.allow, isCurrentChild);
+          return { status: choice.allow ? 'granted' : 'revoked', origin: choice.origin,
+            permission: choice.permission, allowed: choice.allow, lasts: 'task' };
+        }
+        if (request.command === 'endSitePermissions') {
+          embeddedBrowserDriver.taskSitePermissions.end(request.tabId!);
+          return { ended: true };
+        }
+        if (request.command === 'authRequest') {
+          if (!mainWindow || mainWindow.isDestroyed() || !Number.isSafeInteger(request.tabId))
+            return { status: 'unavailable' };
+          const configPath = runtimeServices?.agentGateway.configPath;
+          if (!configPath) return { status: 'unavailable' };
+          const isAllowed = () => {
+            return isCurrentChild() && browserSiteDecision(String(request.args.origin ?? ''), 'access') !== 'block';
+          };
+          return embeddedBrowserDriver.requestAuth(request.tabId!, request.args,
+            auth => showBrowserAuthForm(mainWindow!, auth, isAllowed), isAllowed);
+        }
+        if (request.command === 'upload') {
+          const workspace = runtimeServices?.agentGateway.workspace;
+          if (!workspace) throw new Error('Browser upload workspace is unavailable');
+          return runApprovedEmbeddedUpload(request, workspace, embeddedBrowserDriver,
+            (site, names) => approveBrowserCapabilityOperation('upload', site, names), isCurrentChild);
+        }
+        if (request.command === 'setDownloadDestination') {
+          if (!browserWebviewDownloads || !Number.isSafeInteger(request.tabId))
+            throw new Error('Browser download service is unavailable');
+          return embeddedBrowserDriver.setDownloadDestination(request.tabId!, request.args,
+            (tabId, filePath, destinationId, isCurrent) => browserWebviewDownloads!.setDestination(tabId, filePath, destinationId, isCurrent),
+            isCurrentChild);
+        }
+        if (request.command === 'waitDownloadDestination') {
+          if (!browserWebviewDownloads || !Number.isSafeInteger(request.tabId))
+            throw new Error('Browser download service is unavailable');
+          return browserWebviewDownloads.waitDestination(request.tabId!,
+            String(request.args.destinationId ?? ''), isCurrentChild);
+        }
+        if (['playwrightStart', 'playwrightCdp', 'playwrightEnd'].includes(request.command)) {
+          const configPath = runtimeServices?.agentGateway.configPath;
+          if (!configPath) throw new Error('Browser page policy is unavailable');
+          const approvedOrigin = String(request.args.approvedOrigin ?? '');
+          const approvedPage = { origin: approvedOrigin, isCurrentChild, isAllowed: () => {
+            return isCurrentChild() && browserSiteDecision(approvedOrigin, 'access') !== 'block';
+          } };
+          if (request.command === 'playwrightStart' && request.args.uploadPaths !== undefined) {
+            const workspace = runtimeServices?.agentGateway.workspace;
+            if (!workspace) throw new Error('Browser upload workspace is unavailable');
+            return runApprovedEmbeddedUpload({ ...request, command: 'upload',
+              args: { ...request.args, paths: request.args.uploadPaths } }, workspace, {
+              uploadOrigin: tabId => embeddedBrowserDriver.uploadOrigin(tabId),
+              handle: (_uploadRequest, approval) => embeddedBrowserDriver.handle(request, approval, approvedPage, isCurrentChild, emitEvent),
+            }, (site, names) => approveBrowserCapabilityOperation('upload', site, names), isCurrentChild);
+          }
+          return embeddedBrowserDriver.handle(request, undefined, approvedPage, isCurrentChild, emitEvent);
+        }
+        if (request.command === 'cdpCall' || request.command === 'cdpEvents'
+          || request.command === 'cdpWrite') {
+          const configPath = runtimeServices?.agentGateway.configPath;
+          if (!configPath) throw new Error('Browser CDP policy is unavailable');
+          const isAllowed = (site: string) => {
+            return browserSiteDecision(site, 'access') !== 'block'
+              && browserSiteDecision(site, 'fullCdp') !== 'block';
+          };
+          const run = request.command === 'cdpWrite'
+            ? runApprovedEmbeddedCdpWrite : runApprovedEmbeddedCdpRead;
+          return run(request, embeddedBrowserDriver,
+            (site, method) => approveBrowserCapabilityOperation(
+              request.command === 'cdpWrite' ? 'debug-write' : 'debug', site, [method]),
+            isCurrentChild, isAllowed);
+        }
+        if (request.command !== 'queryHistory') {
+          return embeddedBrowserDriver.handle(request, undefined, undefined, isCurrentChild);
+        }
+        if (!embeddedBrowserHistoryStore) throw new Error('In-app browser history is unavailable');
+        return queryInAppBrowserHistory(embeddedBrowserHistoryStore, request, async query => {
+          if (browserAllowAllState().effective) return true;
+          const chinese = app.getLocale().toLowerCase().startsWith('zh');
+          const message = chinese ? '允许 Memmy 读取内置浏览器历史吗？' : 'Allow Memmy to read in-app browser history?';
+          const approvalWindow = presentApprovalWindow(message);
+          if (!approvalWindow) return false;
+          const choice = await showBrowserApproval({
+            type: 'question', title: chinese ? '浏览历史访问审批' : 'Browser history access', message,
+            detail: chinese
+              ? `关键词：${query.keyword}\n时间：${new Date(query.from).toISOString()} 至 ${new Date(query.to).toISOString()}\n最多 ${query.limit} 条。仅本次查询有效。`
+              : `Keyword: ${query.keyword}\nTime: ${new Date(query.from).toISOString()} to ${new Date(query.to).toISOString()}\nUp to ${query.limit} entries. This approval applies only to this query.`,
+            buttons: chinese ? ['仅本次允许', '阻止'] : ['Allow this query', 'Block'],
+            defaultId: 1, cancelId: 1, noLink: true,
+          }, approvalWindow);
+          return browserAllowAllState().effective || (!approvalWindow.isDestroyed() && choice.response === 0);
+        });
+      },
+      approveBrowserAccess: async (origin, url) => {
+        const configPath = runtimeServices?.agentGateway.configPath;
+        if (!configPath) return 'deny';
+        if (browserAllowAllState().effective) return 'allow-always';
+        const store = new BrowserAccessStore(dirname(configPath));
+        let policyRules: BrowserUseSiteRule[];
+        try { policyRules = new BrowserUseSitePolicyStore(dirname(configPath)).list(); }
+        catch { return 'deny'; }
+        const policy = browserSiteDecision(url, 'access');
+        if (policy === 'block') return 'deny';
+        if (policy === 'allow') return 'allow-always';
+        const matched = policyRules.some(rule => browserUsePatternMatches(rule.pattern, url));
+        const remembered = matched ? null : store.list().find(entry => entry.origin === origin)?.decision;
+        if (remembered === 'allow') return 'allow-always';
+        if (remembered === 'deny') return 'deny';
+        const chinese = app.getLocale().toLowerCase().startsWith('zh');
+        const options = { type: 'question' as const, title: chinese ? 'Agent 网站访问权限' : 'Agent website access',
+          message: chinese ? `允许 Agent 读取和操作 ${origin} 的网页吗？` : `Allow the Agent to read and interact with pages at ${origin}?`,
+          detail: chinese
+            ? `允许本次会话：在当前聊天与标签连接有效期间使用。\n始终允许此网站：记住这个网站的网页访问授权。\n允许对所有网站操作：允许内置浏览器和外部浏览器读取和操作网页、上传下载文件及查询内置浏览器历史，可在「网站权限」中关闭。网站设备权限仍单独管理。\n\n当前页面：${url}`
+            : `Allow this session: applies while this chat and tab connection remain active.\nAlways allow this site: remembers access to this website.\nAllow operations on all websites: allows page reading and actions, file uploads and downloads, and in-app history across the in-app and external browsers. Turn it off in Website permissions. Website device permissions remain separate.\n\nCurrent page: ${url}`,
+          buttons: matched ? (chinese ? ['允许本次会话', '允许对所有网站操作', '阻止'] : ['Allow this session', 'Allow operations on all websites', 'Block'])
+            : (chinese ? ['允许本次会话', '始终允许此网站', '允许对所有网站操作', '阻止'] : ['Allow this session', 'Always allow this site', 'Allow operations on all websites', 'Block']),
+          defaultId: 0, cancelId: matched ? 2 : 3, noLink: true };
+        const approvalWindow = presentApprovalWindow(options.message);
+        const choice = await showBrowserApproval(options, approvalWindow);
+        if (browserAllowAllState().effective) return 'allow-always';
+        if (choice.response === (matched ? 1 : 2)) {
+          browserAllowAllStore()!.setEnabled(true);
+          publishBrowserAllowAll();
+          return 'allow-always';
+        }
+        let currentRules: BrowserUseSiteRule[];
+        try { currentRules = new BrowserUseSitePolicyStore(dirname(configPath)).list(); }
+        catch { return 'deny'; }
+        if (browserSiteDecision(url, 'access') === 'block') return 'deny';
+        const currentlyMatched = currentRules.some(rule => browserUsePatternMatches(rule.pattern, url));
+        if (!matched && !currentlyMatched && choice.response === 1) { store.set(origin, 'allow'); return 'allow-always'; }
+        if (!matched && currentlyMatched && choice.response === 1) return 'allow-once';
+        return choice.response === 0 ? 'allow-once' : 'deny';
+      },
+      approveBrowserCapability: async ({ capability, origin, names }) =>
+        approveBrowserCapabilityOperation(capability, origin, names),
+      approveNativeAppAccess: async ({ platform, appId, displayName }) => {
+        const decision = nativeAppAccessDecision({
+          platform, appId, displayName, hostPlatform: process.platform, allowAll: allowAllNativeApps().isEnabled(),
+        });
+        if (decision !== 'ask') return decision;
+        const chinese = app.getLocale().toLowerCase().startsWith('zh');
+        const options = { type: 'question' as const,
+          title: chinese ? '应用操控审批' : 'App control approval',
+          message: chinese ? `允许 Memmy 操作「${displayName}」吗？` : `Allow Memmy to control “${displayName}”?`,
+          detail: chinese ? `应用标识：${appId}\n允许一次只对当前这条消息有效。始终允许会把这个应用放进设置列表，之后不再询问。具体操作以你的任务要求为准。`
+            : `App ID: ${appId}\nAllow once applies only to the current message. Always allow adds this app to Settings, and Memmy will not ask again. The actions follow the task you requested.`,
+          buttons: chinese ? ['允许一次', '始终允许', '阻止'] : ['Allow once', 'Always allow', 'Block'],
+          defaultId: 2, cancelId: 2, noLink: true };
+        const approvalWindow = presentApprovalWindow(options.message);
+        const choice = approvalWindow
+          ? await dialog.showMessageBox(approvalWindow, options) : await dialog.showMessageBox(options);
+        return choice.response === 0 ? 'allow-once' : choice.response === 1 ? 'allow-always' : 'deny';
+      },
+      chooseBrowserDownload: async (name) => {
+        const configPath = runtimeServices?.agentGateway.configPath;
+        if (!configPath) return null;
+        const settings = new BrowserDownloadSettings(dirname(configPath));
+        const options = { title: app.getLocale().toLowerCase().startsWith('zh') ? '保存浏览器下载文件' : 'Save browser download',
+          defaultPath: join(settings.read().directory ?? app.getPath('downloads'), name) };
+        const selected = mainWindow && !mainWindow.isDestroyed()
+          ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options);
+        if (selected.canceled || !selected.filePath) return null;
+        settings.remember(dirname(selected.filePath));
+        return selected.filePath;
+      },
+      ...(process.platform === 'darwin' ? {
+        captureScreen: createDesktopScreenCapture({
+          getDisplays: () => screen.getAllDisplays(),
+          getPrimaryDisplay: () => screen.getPrimaryDisplay(),
+          capture: async (displayId, signal) => {
+            const binary = await resolveComputerUseBinary(app.isPackaged, process.resourcesPath, process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
+            return captureMemmyScreen(binary, displayId, signal, {
+              run: runHelperCommand,
+            });
+          },
+          guide: async () => { await guideMemmySystemPermission('screenRecording'); },
+        }),
+        computerUseOnboarding: (memmyPermissionOnboarding = createComputerUseOnboarding({
         target: () => {
           if (!isComputerUsePermissionPanelFocused() && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused())) return null;
           try {
@@ -378,9 +808,14 @@ async function boot(): Promise<void> {
           return showComputerUsePermissionPanel(mainWindow, state, act);
         },
         openSettings: url => shell.openExternal(url),
+        permissionGuideStarted: () => {
+          const token = macPermissionRestartIntent.begin();
+          return approved => macPermissionRestartIntent.finish(token, approved);
+        },
         copyPath: value => clipboard.writeText(value),
         reportError: error => console.warn('[computer-use] Permission guide failed:', error),
-      }) } : {}),
+      })),
+      } : {}),
       appPath: app.getAppPath(),
       appDatabaseFile,
       resourcesPath: process.resourcesPath,
@@ -423,16 +858,44 @@ async function boot(): Promise<void> {
       runtimeServices = null;
       return;
     }
+    const embeddedBrowserSession = session.fromPartition('persist:memmy-browser');
+    const browserDataDirectory = dirname(runtimeServices.agentGateway.configPath);
+    browserWebviewDownloads = new BrowserWebviewDownloads(embeddedBrowserSession, browserDataDirectory);
+    disposeBrowserWebviewPermissions = attachBrowserWebviewPermissions(embeddedBrowserSession, browserDataDirectory,
+      embeddedBrowserDriver.taskSitePermissions);
     bootStage = "local-api";
+    void writePackagedStartupLog(`boot:stage:${JSON.stringify({ stage: bootStage, elapsedMs: Date.now() - bootStartedAt })}`);
     runtimeConfig = await startLocalApi(runtimeServices);
     if (isQuitting) {
       await localBackend?.close();
       localBackend = null;
       return;
     }
+    // The local API writes its current MCP bridge URL/token before the Agent reads config.
+    const gatewayStartupIssue = await runtimeServices.startAgentGateway();
+    if (isQuitting) return;
+    if (gatewayStartupIssue && runtimeConfig.agentGateway) {
+      runtimeConfig.agentGateway.startupIssue = gatewayStartupIssue;
+    }
+    if (!gatewayStartupIssue && runtimeServices.isAgentGatewayExternal()) {
+      bootStage = "runtime-services:external-mcp";
+      void writePackagedStartupLog(`boot:stage:${JSON.stringify({ stage: bootStage, elapsedMs: Date.now() - bootStartedAt })}`);
+      const gatewayAdmin = createHttpMemmyAgentAdminClient({
+        baseUrl: runtimeServices.agentGateway.baseUrl,
+        bootstrapSecret: runtimeServices.agentGateway.bootstrapSecret
+      });
+      if (!await waitForExternalAgentMcpConfig({
+        reload: () => gatewayAdmin.reloadMcpConfig(),
+        isCanceled: () => isQuitting
+      }) || isQuitting) return;
+    }
     bootStage = "renderer";
+    void writePackagedStartupLog(`boot:stage:${JSON.stringify({ stage: bootStage, elapsedMs: Date.now() - bootStartedAt })}`);
     const initialWindow = createInitialWindow();
     watchStartupRenderer(initialWindow);
+    if (process.platform === "win32" && runtimeServices) {
+      startWindowsBrowserPreparationAfterFirstWindow(initialWindow, runtimeServices);
+    }
     isBootReady = true;
     triggerAgentSourceAutoInject("boot");
     if (process.platform === "darwin") {
@@ -476,6 +939,21 @@ async function boot(): Promise<void> {
  * @returns Nothing.
  */
 function configureAppIdentity(): void {
+  localTestProfile = prepareLocalTestProfile({
+    requestedRoot: process.env.MEMMY_TEST_PROFILE_ROOT,
+    manifest: readCurrentDesktopEditionManifest(),
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    env: process.env,
+    signedTeamIdentifier: process.env.MEMMY_TEST_PROFILE_ROOT && process.env.MEMMY_ENABLE_SIGNED_TEST_PROFILE === '1'
+      ? readExecutableSigningTeamIdentifier(app.getPath('exe')) : null,
+  });
+  app.setName("Memmy");
+  if (localTestProfile) {
+    applyLocalTestProfileEnvironment(localTestProfile, process.env);
+    app.setPath('home', localTestProfile.home);
+    app.setPath('appData', localTestProfile.appData);
+  }
   const edition = resolveCurrentDesktopEdition();
   windowsDataLayout = resolveWindowsDataLayout({
     platform: process.platform,
@@ -486,13 +964,31 @@ function configureAppIdentity(): void {
     localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
     homeDirectory: homedir()
   });
+  if (windowsDataLayout) {
+    try { assertWindowsRuntimeOwnership(windowsDataLayout.runtimeHomePath); }
+    catch (error) {
+      dialog.showErrorBox("Memmy 数据目录 / Data directory", error instanceof Error ? error.message : String(error));
+      app.exit(1);
+      throw error;
+    }
+  }
   const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
-  app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", userDataPath);
+  if (localTestProfile) {
+    if (resolve(userDataPath) !== localTestProfile.userData || resolve(memmyHome) !== localTestProfile.runtimeHome) {
+      throw new Error('Isolated test profile path validation failed');
+    }
+    app.setPath('sessionData', localTestProfile.sessionData);
+    app.setPath('logs', localTestProfile.logs);
+    app.setPath('temp', localTestProfile.temp);
+    app.setPath('crashDumps', localTestProfile.crashDumps);
+    app.setPath('downloads', localTestProfile.downloads);
+    app.setPath('documents', localTestProfile.documents);
+  }
   if (app.isPackaged) {
     process.env.MEMMY_HOME = memmyHome;
     process.env.MEMMY_CONFIG = join(memmyHome, "config.yaml");
@@ -554,7 +1050,7 @@ function readCurrentDesktopEditionManifest(): string | null {
  * @returns Resolves once installation completes.
  */
 async function installBundledCliIfNeeded(): Promise<void> {
-  if (!app.isPackaged || !isInstalledApplicationsApp()) {
+  if (!app.isPackaged || localTestProfile || !isInstalledApplicationsApp()) {
     return;
   }
 
@@ -863,6 +1359,7 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
+    skipAgentMcpReload: Boolean(services),
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
   const agentGateway: NonNullable<DesktopRuntimeConfig["agentGateway"]> =
@@ -921,17 +1418,55 @@ async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult
  * Registers the IPC handlers the renderer uses to read the runtime config.
  * @returns Nothing.
  */
+async function guideMemmySystemPermission(permission: "accessibility" | "inputMonitoring" | "screenRecording",
+  readHostScreenGranted?: () => boolean): Promise<boolean> {
+  const onboarding = memmyPermissionOnboarding;
+  const binary = await resolveComputerUseBinary(app.isPackaged, process.resourcesPath, process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
+  const helper = binary ? computerUseApp(binary) : null;
+  if (!onboarding || !helper || !binary) return false;
+  const reason = permission === "screenRecording" ? "screenCaptureUnavailable" : permission;
+  // Read flags while Settings retains focus so enabling a switch can finish
+  // this guide without requiring the user to close it first.
+  const readPermissions = async (): Promise<ComputerUsePermissions> => {
+    if (permission === 'screenRecording' && readHostScreenGranted) {
+      try { return { accessibility: 'unknown', screenRecording: readHostScreenGranted() ? 'granted' : 'required' }; }
+      catch { return { accessibility: 'unknown', screenRecording: 'unknown', failure: 'unavailable' }; }
+    }
+    return memmyPermissionSnapshot((await runHelperCommand(binary, ["__memmy-history", "--permissions"])).stdout);
+  };
+  return onboarding.guide(reason, helper, {
+    signal: AbortSignal.timeout(120_000),
+    canContinue: false,
+    check: readPermissions,
+    observe: readPermissions,
+  });
+}
+
 function registerIpcHandlers(): void {
   if (areIpcHandlersRegistered) {
     return;
   }
 
   areIpcHandlersRegistered = true;
+  try { retireLockedMacConsent(app.getPath('userData')); }
+  catch { console.warn('[computer-use] Could not remove retired lock-screen consent'); }
 
   ipcMain.on("memmy:renderer-ready", (event) => {
     const senderId = event.sender.id;
     rendererReadyWebContentsIds.add(senderId);
     rendererReadyWaiters.get(senderId)?.(true);
+    rendererRecoveries.get(senderId)?.markReady();
+  });
+  ipcMain.on('memmy:browser:select-tab', (event, tabId: unknown) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || (tabId !== null && (!Number.isSafeInteger(tabId) || (tabId as number) <= 0))) return;
+    try { embeddedBrowserDriver.selectTab(tabId as number | null, mainWindow); }
+    catch { /* A closing tab can race the renderer selection change. */ }
+  });
+  ipcMain.handle('memmy:browser:copy-tab-mention', (event, tabId: unknown) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+      || !Number.isSafeInteger(tabId) || (tabId as number) <= 0) throw new Error('Browser tab is unavailable');
+    clipboard.writeText(embeddedBrowserDriver.tabMention(tabId as number, mainWindow));
   });
 
   ipcMain.handle("memmy:get-runtime-config", () => {
@@ -950,14 +1485,177 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:download-update", async (event, update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions) => downloadUpdate(update, options, event.sender));
   ipcMain.handle("memmy:open-update-installer", async (_event, filePath: string) => openUpdateInstaller(filePath));
 
-  ipcMain.handle("memmy:openExternal", async (_event, url: string) => {
+  ipcMain.handle("memmy:openExternal", async (event, url: string) => {
+    if (process.platform === "darwin" && typeof url === "string"
+      && await openMacPermissionSettingsFromRenderer(url,
+        Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents),
+        value => shell.openExternal(value), macPermissionRestartIntent)) return;
     await openExternalUrl(url);
+  });
+  ipcMain.handle("memmy:browser-clear-data", async (event, requestedCategories: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error("Invalid browser data request");
+    const categories = requestedCategories === undefined
+      ? [...BROWSER_DATA_CATEGORIES] : parseBrowserDataCategories(requestedCategories);
+    if (!categories) throw new Error('Invalid browser data categories');
+    const browserSession = session.fromPartition("persist:memmy-browser");
+    const configPath = runtimeServices?.agentGateway.configPath;
+    await clearInAppBrowserData(browserSession, embeddedBrowserHistoryStore,
+      configPath ? new BrowserDownloadCatalog(dirname(configPath), 'webview') : null, categories);
+  });
+  ipcMain.handle('memmy:browser:user-navigation', (event, tabId: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow
+      || !mainWindow || !Number.isSafeInteger(tabId) || (tabId as number) <= 0) {
+      throw new Error('Invalid browser navigation source');
+    }
+    embeddedBrowserDriver.markUserNavigation(tabId as number, mainWindow);
+  });
+  ipcMain.handle('memmy:browser-extension:reveal', async event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser extension request');
+    const directory = resolveExternalBrowserExtensionDirectory(process.resourcesPath);
+    if (!directory) return false;
+    // Reveal the folder itself so it can be dragged onto the extensions page.
+    // Opening its contents makes users pick files rather than the extension folder.
+    shell.showItemInFolder(directory);
+    return true;
+  });
+  ipcMain.handle('memmy:browser-extension:directory', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser extension request');
+    return resolveExternalBrowserExtensionDirectory(process.resourcesPath);
+  });
+  ipcMain.on(EXTERNAL_BROWSER_EXTENSION_DRAG_CHANNEL, createExternalBrowserExtensionDragHandler(
+    () => mainWindow,
+    () => resolveExternalBrowserExtensionDirectory(process.resourcesPath),
+    () => {
+      const stagedIcon = join(import.meta.dirname, 'browser-extension-drag-icon.png');
+      const developmentIcon = resolve(import.meta.dirname, '../../build/icon.png');
+      return nativeImage.createFromPath(existsSync(stagedIcon) ? stagedIcon : developmentIcon)
+        .resize({ width: 64, height: 64 });
+    },
+  ));
+  ipcMain.handle('memmy:browser-extension:prepare', async (event, browser: unknown, revealFolder: unknown = true): Promise<ExternalBrowserInstallPreparation> => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || (browser !== 'chrome' && browser !== 'edge')
+      || typeof revealFolder !== 'boolean') {
+      throw new Error('Invalid browser extension request');
+    }
+    const directory = resolveExternalBrowserExtensionDirectory(process.resourcesPath);
+    if (!directory) return { status: 'extension-missing', directory: null };
+    const result = await launchExternalBrowserExtensionManager(browser);
+    if (revealFolder) shell.showItemInFolder(directory);
+    return { status: result === 'opened' ? 'browser-opened'
+      : result === 'not-found' ? 'browser-not-found' : 'browser-launch-failed', directory };
+  });
+  ipcMain.handle('memmy:browser-extension:installed', event => {
+    if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser extension request');
+    return installedExternalBrowsers();
+  });
+  ipcMain.handle('memmy:browser-extension:installation', event => {
+    if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser extension request');
+    return probeExternalBrowserInstallation();
+  });
+  ipcMain.handle('memmy:browser-extension:running', event => {
+    if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser extension request');
+    return runningExternalBrowsers();
+  });
+  ipcMain.handle('memmy:computer-use:allow-all-apps:get', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid computer use request');
+    return allowAllNativeApps().isEnabled();
+  });
+  ipcMain.handle('memmy:computer-use:allow-all-apps:set', (event, enabled: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || typeof enabled !== 'boolean') {
+      throw new Error('Invalid computer use request');
+    }
+    const result = allowAllNativeApps().setEnabled(enabled);
+    publishBrowserAllowAll();
+    return result;
+  });
+  ipcMain.handle('memmy:browser-allow-all:get', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser approval request');
+    return browserAllowAllState();
+  });
+  ipcMain.handle('memmy:browser-allow-all:set', (event, enabled: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || typeof enabled !== 'boolean')
+      throw new Error('Invalid browser approval request');
+    const store = browserAllowAllStore();
+    if (!store) throw new Error('Browser service is unavailable');
+    store.setEnabled(enabled);
+    return publishBrowserAllowAll();
+  });
+  ipcMain.handle('memmy:browser-downloads:settings', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser downloads request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath) throw new Error('Browser service is unavailable');
+    return new BrowserDownloadSettings(dirname(configPath)).read();
+  });
+  ipcMain.handle('memmy:browser-downloads:choose-directory', async event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !mainWindow) throw new Error('Invalid browser downloads request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath) throw new Error('Browser service is unavailable');
+    const settings = new BrowserDownloadSettings(dirname(configPath));
+    const selected = await dialog.showOpenDialog(mainWindow, {
+      title: app.getLocale().toLowerCase().startsWith('zh') ? '选择浏览器下载位置' : 'Choose browser download location',
+      properties: ['openDirectory', 'createDirectory'],
+      ...(settings.read().directory ? { defaultPath: settings.read().directory! } : {}),
+    });
+    return selected.canceled || !selected.filePaths[0] ? settings.read() : settings.select(selected.filePaths[0]);
+  });
+  ipcMain.handle('memmy:browser-downloads:default-directory', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser downloads request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath) throw new Error('Browser service is unavailable');
+    return new BrowserDownloadSettings(dirname(configPath)).select(null);
+  });
+  ipcMain.handle('memmy:browser-downloads:ask-before', (event, enabled: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || typeof enabled !== 'boolean')
+      throw new Error('Invalid browser downloads request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath) throw new Error('Browser service is unavailable');
+    return new BrowserDownloadSettings(dirname(configPath)).setAskBeforeDownload(enabled);
+  });
+  ipcMain.handle('memmy:browser-access:list', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser access request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    return configPath ? new BrowserAccessStore(dirname(configPath)).list() : [];
+  });
+  ipcMain.handle('memmy:browser-access:set', (event, origin: unknown, decision: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser access request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath || typeof origin !== 'string' || !['allow', 'deny', 'ask'].includes(String(decision)))
+      throw new Error('Invalid browser access request');
+    return new BrowserAccessStore(dirname(configPath)).set(origin, decision as 'allow' | 'deny' | 'ask');
+  });
+  ipcMain.handle('memmy:browser-use-site-policy:list', event => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser policy request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    return configPath ? new BrowserUseSitePolicyStore(dirname(configPath)).list() : [];
+  });
+  ipcMain.handle('memmy:browser-use-site-policy:upsert', (event, rule: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser policy request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath || !rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('Invalid browser policy request');
+    return new BrowserUseSitePolicyStore(dirname(configPath)).upsert(rule as BrowserUseSiteRule);
+  });
+  ipcMain.handle('memmy:browser-use-site-policy:remove', (event, pattern: unknown) => {
+    if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('Invalid browser policy request');
+    const configPath = runtimeServices?.agentGateway.configPath;
+    if (!configPath || typeof pattern !== 'string') throw new Error('Invalid browser policy request');
+    return new BrowserUseSitePolicyStore(dirname(configPath)).remove(pattern);
   });
 
   ipcMain.handle("memmy:get-computer-history-permission-session", () => computerHistoryPermissionSessionId);
 
-  ipcMain.handle("memmy:restart-for-computer-history-permissions", () => {
+  ipcMain.handle("memmy:guide-memmy-permission", async (event, permission: unknown) => {
+    if (!mainWindow || mainWindow.isDestroyed() || BrowserWindow.fromWebContents(event.sender) !== mainWindow) return false;
+    if (permission !== "accessibility" && permission !== "inputMonitoring" && permission !== "screenRecording") return false;
+    return guideMemmySystemPermission(permission);
+  });
+
+  ipcMain.handle("memmy:restart-for-computer-history-permissions", async () => {
     if (process.platform !== "darwin") throw new Error("Computer History permissions require macOS");
+    await stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
+      process.env.MEMMY_DEV_COMPUTER_USE_BINARY).catch(error => {
+        // The normal quit path retries native cleanup and has a synchronous exit fallback.
+        console.warn("Failed to stop the native Computer Use agent before permission restart:", error);
+      });
     shouldRelaunchAfterQuitCleanup = true;
     // Let IPC finish, then reuse the normal recording/service shutdown path.
     setImmediate(() => app.quit());
@@ -981,7 +1679,11 @@ function registerIpcHandlers(): void {
     saveDesktopImage(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
   ));
 
-  ipcMain.handle("memmy:notify-task-done", (_event, payload: { title: string; body: string; silent: boolean }) => {
+  ipcMain.handle("memmy:save-file", async (event, request: DesktopImageActionRequest) => (
+    saveDesktopFile(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
+  ));
+
+  ipcMain.handle("memmy:notify-task-done", (_event, payload: { title: string; body: string; silent: boolean; deliveryId?: string }) => {
     showTaskDoneNotification(payload);
   });
   ipcMain.handle("memmy:notify-update-available", (_event, payload: { title: string; body: string; silent: boolean }) => {
@@ -1016,6 +1718,8 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("memmy:get-microphone-access-status", () => getMicrophoneAccessStatus());
 
+  ipcMain.handle("memmy:get-full-disk-access-status", () => hasFullDiskAccess());
+
   ipcMain.handle("memmy:request-microphone-access", async () => requestMicrophoneAccess());
 
   ipcMain.handle(
@@ -1032,6 +1736,26 @@ function registerIpcHandlers(): void {
     ),
   );
 
+  ipcMain.handle(
+    "memmy:read-workspace-directory",
+    async (event, rootPath: string, relativePath = ""): Promise<DesktopWorkspaceDirectoryResult> => {
+      if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) {
+        throw new Error("workspace files are only available to the main window");
+      }
+      return readWorkspaceDirectory(rootPath, relativePath, { agentHomePath: agentWorkspaceDirectory() });
+    },
+  );
+
+  ipcMain.handle(
+    "memmy:write-workspace-file",
+    async (event, rootPath: string, filePath: string, contents: string): Promise<void> => {
+      if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) {
+        throw new Error("workspace files are only available to the main window");
+      }
+      await writeWorkspaceTextFile(rootPath, filePath, contents, { agentHomePath: agentWorkspaceDirectory() });
+    },
+  );
+
   ipcMain.handle("memmy:set-pet-window", (_event, enabled: boolean, target?: RendererRouteTarget | null) => {
     setPetWindowMode(Boolean(enabled), parseRendererRouteTarget(target));
   });
@@ -1045,6 +1769,7 @@ function registerIpcHandlers(): void {
     syncMenuBarTray(normalizedEnabled);
     return { enabled: normalizedEnabled };
   });
+  ipcMain.on("memmy:set-computer-history-tray-indicator", handleComputerHistoryTrayIndicator);
 
   ipcMain.handle("memmy:complete-main-window-action", (event, rawResponse: unknown) => {
     const response = parseMainWindowActionResponse(rawResponse);
@@ -1167,6 +1892,7 @@ function resolveDesktopPackageVersion(): string | null {
  */
 async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
   const currentVersion = resolveDesktopAppVersion();
+  if (localTestProfile) return { status: "not-configured", currentVersion };
   const manifestUrl = resolveUpdateManifestUrl();
   if (!manifestUrl) {
     return { status: "not-configured", currentVersion };
@@ -1655,7 +2381,7 @@ function hideMacDockForPreparedUpdateInstall(): void {
  * @returns True when it is a packaged app and the current platform supports background install.
  */
 function shouldManageRequiredUpdates(): boolean {
-  if (!app.isPackaged) {
+  if (!app.isPackaged || localTestProfile) {
     return false;
   }
 
@@ -2048,6 +2774,7 @@ async function downloadUpdate(
   options: DesktopUpdateDownloadOptions = {},
   progressTarget?: WebContents
 ): Promise<DesktopUpdateInstallResult> {
+  if (localTestProfile) throw new Error('Updates are disabled in the isolated test profile');
   if (update.status !== "available" || !update.downloadUrl) {
     throw new Error("no update package is available");
   }
@@ -2057,7 +2784,13 @@ async function downloadUpdate(
   await mkdir(updatesDirectory, { recursive: true });
   const filePath = join(updatesDirectory, resolveUpdatePackageFileName(downloadUrl, update.latestVersion));
   await downloadUpdatePackageWithLock(downloadUrl, filePath, progressTarget);
-  await stageMacDmgUpdatePackageOrDiscard(filePath);
+  try {
+    await validateWindowsDownloadedUpdate(filePath, update.latestVersion);
+  } catch (error) {
+    await removeFileIfExists(filePath).catch(() => undefined);
+    throw error;
+  }
+  await stageMacDmgUpdatePackageOrDiscard(filePath, update.latestVersion);
 
   if (options.openInstaller === false) {
     await writePreparedRequiredUpdate(update, filePath);
@@ -2256,7 +2989,9 @@ async function removeFileIfExists(filePath: string): Promise<void> {
  * @returns The installer package's local path and open state.
  */
 async function openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
+  if (localTestProfile) throw new Error('Updates are disabled in the isolated test profile');
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  await validateWindowsDownloadedUpdate(safeFilePath);
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
     const result = await installMacDmgUpdateInBackground(safeFilePath);
     if (!result.background) {
@@ -2335,6 +3070,39 @@ function shouldInstallWindowsUpdateInBackground(filePath: string): boolean {
   return process.platform === "win32" && filePath.toLowerCase().endsWith(".exe") && app.isPackaged;
 }
 
+/** Signed installed apps retain their publisher; only a packaged unsigned marker permits local tests. */
+async function validateWindowsDownloadedUpdate(filePath: string, expectedVersion?: string): Promise<WindowsUpdateVerification | undefined> {
+  if (process.platform !== "win32" || !app.isPackaged) return undefined;
+  if (!filePath.toLowerCase().endsWith(".exe")) throw new Error("Windows updates require a Memmy executable installer");
+  return validateWindowsUpdateInstaller({
+    installerPath: filePath,
+    currentExecutable: process.execPath,
+    currentVersion: resolveDesktopAppVersion(),
+    expectedVersion,
+    packagedManifest: readCurrentDesktopEditionManifest(),
+  });
+}
+
+/** Keep automatic updates on the installed architecture and signing identity. */
+function macUpdateValidationOptions(expectedVersion?: string): MacUpdateValidationOptions {
+  if (process.arch !== "arm64" && process.arch !== "x64") {
+    throw new Error("Unsupported macOS update architecture");
+  }
+  const details = spawnSync("/usr/bin/codesign", ["-dv", "--verbose=4", resolveCurrentAppBundlePath()], {
+    encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "pipe"]
+  });
+  let allowUnsigned = false;
+  try {
+    allowUnsigned = (JSON.parse(readCurrentDesktopEditionManifest() ?? "{}") as { signing?: unknown }).signing === "unsigned";
+  } catch { /* Missing or malformed markers must use release signing policy. */ }
+  if ((details.error || details.status !== 0) && !allowUnsigned) {
+    throw new Error("Cannot verify the current macOS app signing identity");
+  }
+  const teamIdentifier = details.stderr.match(/^TeamIdentifier=([A-Z0-9]+)$/mu)?.[1] ?? null;
+  if (!teamIdentifier && !allowUnsigned) throw new Error("Signed macOS app has no signing team identifier");
+  return { architecture: process.arch, teamIdentifier, allowUnsigned, currentVersion: resolveDesktopAppVersion(), expectedVersion };
+}
+
 /**
  * Installs a macOS DMG update in the background.
  *
@@ -2363,7 +3131,7 @@ async function installMacDmgUpdateInBackground(
   const stagedReadyPath = resolveStagedMacUpdateReadyPath(filePath);
   const stagedAppArg = existsSync(stagedAppPath) && existsSync(stagedReadyPath) ? stagedAppPath : "";
   const stagedReadyArg = stagedAppArg ? stagedReadyPath : "";
-  await writeFile(helperPath, createMacDmgUpdateInstallScript(), { mode: 0o700 });
+  await writeFile(helperPath, createMacDmgUpdateInstallScript(macUpdateValidationOptions(options.expectedVersion)), { mode: 0o700 });
   await chmod(helperPath, 0o700).catch(() => undefined);
 
   const helper = spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0", markerPath, stagedAppArg, stagedReadyArg], {
@@ -2406,152 +3174,6 @@ function resolveMacUpdateDestinationAppPath(): string | null {
   return existsSync(applicationsAppPath) ? applicationsAppPath : null;
 }
 
-/**
- * Creates the macOS DMG background install script.
- *
- * @returns The zsh script content.
- */
-function createMacDmgUpdateInstallScript(): string {
-  return `#!/bin/zsh
-set -eu
-set -o pipefail
-
-DMG_PATH="$1"
-DEST_APP_PATH="$2"
-LOG_PATH="$3"
-CURRENT_APP_PID="\${4:-}"
-OPEN_AFTER_INSTALL="\${5:-1}"
-MARKER_PATH="\${6:-}"
-STAGED_APP_PATH="\${7:-}"
-STAGED_READY_PATH="\${8:-}"
-REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"
-SCRIPT_PATH="$0"
-MOUNT_POINT=""
-LOCK_DIR=""
-TMP_APP_PATH=""
-BACKUP_APP_PATH=""
-INSTALL_SUCCEEDED=0
-
-exec >> "$LOG_PATH" 2>&1
-echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] starting Memmy background update"
-
-cleanup() {
-  if [[ "$INSTALL_SUCCEEDED" != "1" && -n "$BACKUP_APP_PATH" && -d "$BACKUP_APP_PATH" && ! -d "$DEST_APP_PATH" ]]; then
-    /bin/mv "$BACKUP_APP_PATH" "$DEST_APP_PATH" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$TMP_APP_PATH" ]]; then
-    /bin/rm -rf "$TMP_APP_PATH" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$MOUNT_POINT" && -d "$MOUNT_POINT" ]]; then
-    /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet || true
-    /bin/rmdir "$MOUNT_POINT" 2>/dev/null || true
-  fi
-  if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
-    /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
-  fi
-  /bin/rm -f "$SCRIPT_PATH" || true
-}
-trap cleanup EXIT
-
-TMP_APP_PATH="$DEST_APP_PATH.update-tmp"
-BACKUP_APP_PATH="$DEST_APP_PATH.update-backup"
-
-validate_app_bundle() {
-  local app_path="$1"
-  if [[ ! -d "$app_path" ]]; then
-    echo "Memmy app bundle missing: $app_path"
-    exit 1
-  fi
-  if [[ ! -f "$app_path/Contents/Info.plist" ]]; then
-    echo "Memmy app Info.plist missing: $app_path"
-    exit 1
-  fi
-  local bundle_executable
-  bundle_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist" 2>/dev/null || true)"
-  if [[ -z "$bundle_executable" || ! -x "$app_path/Contents/MacOS/$bundle_executable" ]]; then
-    echo "Memmy app executable missing: $app_path"
-    exit 1
-  fi
-}
-
-if [[ -n "$MARKER_PATH" ]]; then
-  LOCK_DIR="$MARKER_PATH.lock"
-  if ! /bin/mkdir "$LOCK_DIR" >/dev/null 2>&1; then
-    echo "Memmy background update already running"
-    exit 0
-  fi
-fi
-
-if [[ "$CURRENT_APP_PID" =~ '^[0-9]+$' ]]; then
-  echo "waiting for Memmy PID $CURRENT_APP_PID to exit"
-  while /bin/kill -0 "$CURRENT_APP_PID" >/dev/null 2>&1; do
-    /bin/sleep 0.2
-  done
-else
-  echo "missing Memmy PID, falling back to app path wait"
-  while /usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" >/dev/null 2>&1; do
-    /bin/sleep 0.2
-  done
-fi
-
-LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
-if [[ -n "$LEFTOVER_PIDS" ]]; then
-  echo "terminating leftover Memmy runtime processes: $LEFTOVER_PIDS"
-  if [[ "$OPEN_AFTER_INSTALL" != "1" ]]; then
-    REOPEN_AFTER_INSTALL="1"
-    echo "detected reopen while background update is installing; will reopen after replacement"
-  fi
-  /bin/kill $LEFTOVER_PIDS >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5; do
-    LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
-    if [[ -z "$LEFTOVER_PIDS" ]]; then
-      break
-    fi
-    /bin/sleep 0.2
-  done
-  LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
-  if [[ -n "$LEFTOVER_PIDS" ]]; then
-    /bin/kill -9 $LEFTOVER_PIDS >/dev/null 2>&1 || true
-  fi
-fi
-
-if [[ -n "$STAGED_APP_PATH" && -n "$STAGED_READY_PATH" && -d "$STAGED_APP_PATH" && -f "$STAGED_READY_PATH" ]]; then
-  echo "using staged Memmy app: $STAGED_APP_PATH"
-  /bin/rm -rf "$TMP_APP_PATH"
-  /bin/mv "$STAGED_APP_PATH" "$TMP_APP_PATH"
-  /bin/rm -f "$STAGED_READY_PATH" >/dev/null 2>&1 || true
-else
-  MOUNT_POINT="$(/usr/bin/mktemp -d /tmp/memmy-update.XXXXXX)"
-  /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
-  SOURCE_APP_PATH="$(/usr/bin/find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -type d -print -quit)"
-  if [[ -z "$SOURCE_APP_PATH" ]]; then
-    echo "update DMG does not contain an app bundle"
-    exit 1
-  fi
-
-  /bin/rm -rf "$TMP_APP_PATH"
-  /usr/bin/ditto "$SOURCE_APP_PATH" "$TMP_APP_PATH"
-fi
-validate_app_bundle "$TMP_APP_PATH"
-/bin/rm -rf "$BACKUP_APP_PATH"
-if [[ -d "$DEST_APP_PATH" ]]; then
-  /bin/mv "$DEST_APP_PATH" "$BACKUP_APP_PATH"
-fi
-/bin/mv "$TMP_APP_PATH" "$DEST_APP_PATH"
-validate_app_bundle "$DEST_APP_PATH"
-/usr/bin/xattr -dr com.apple.quarantine "$DEST_APP_PATH" >/dev/null 2>&1 || true
-if [[ -n "$MARKER_PATH" ]]; then
-  /bin/rm -f "$MARKER_PATH" >/dev/null 2>&1 || true
-fi
-/bin/rm -rf "$BACKUP_APP_PATH" >/dev/null 2>&1 || true
-INSTALL_SUCCEEDED=1
-if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]; then
-  /bin/sleep 0.1
-  /usr/bin/open -n "$DEST_APP_PATH" >/dev/null 2>&1 || true
-fi
-echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] Memmy background update finished"
-`;
-}
 
 /**
  * Pre-expands the app bundle inside the macOS DMG, reducing the blank window time during the actual
@@ -2560,7 +3182,7 @@ echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] Memmy background update finished"
  * @param filePath The path of the downloaded DMG.
  * @returns Resolves once pre-expansion completes.
  */
-async function stageMacDmgUpdatePackage(filePath: string): Promise<void> {
+async function stageMacDmgUpdatePackage(filePath: string, expectedVersion?: string): Promise<void> {
   if (!shouldInstallMacDmgUpdateInBackground(filePath)) {
     return;
   }
@@ -2572,7 +3194,7 @@ async function stageMacDmgUpdatePackage(filePath: string): Promise<void> {
   }
   const helperPath = join(resolveUpdatesDirectory(), `stage-mac-update-${Date.now()}.zsh`);
   const logPath = join(resolveUpdatesDirectory(), "mac-update-install.log");
-  await writeFile(helperPath, createMacDmgUpdateStageScript(), { mode: 0o700 });
+  await writeFile(helperPath, createMacDmgUpdateStageScript(macUpdateValidationOptions(expectedVersion)), { mode: 0o700 });
   await chmod(helperPath, 0o700).catch(() => undefined);
   try {
     await runHelperScript(helperPath, [filePath, stagedAppPath, stagedReadyPath, logPath]);
@@ -2581,7 +3203,7 @@ async function stageMacDmgUpdatePackage(filePath: string): Promise<void> {
   }
 }
 
-async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void> {
+async function stageMacDmgUpdatePackageWithLock(filePath: string, expectedVersion?: string): Promise<void> {
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
   const existingPreparation = updatePackagePreparationLocks.get(safeFilePath);
   if (existingPreparation) {
@@ -2589,7 +3211,7 @@ async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void>
     return;
   }
 
-  const preparation = stageMacDmgUpdatePackage(safeFilePath);
+  const preparation = stageMacDmgUpdatePackage(safeFilePath, expectedVersion);
   updatePackagePreparationLocks.set(safeFilePath, preparation);
   try {
     await preparation;
@@ -2600,13 +3222,13 @@ async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void>
   }
 }
 
-async function stageMacDmgUpdatePackageOrDiscard(filePath: string): Promise<void> {
+async function stageMacDmgUpdatePackageOrDiscard(filePath: string, expectedVersion?: string): Promise<void> {
   if (!shouldInstallMacDmgUpdateInBackground(filePath)) {
     return;
   }
 
   try {
-    await stageMacDmgUpdatePackageWithLock(filePath);
+    await stageMacDmgUpdatePackageWithLock(filePath, expectedVersion);
   } catch (error) {
     console.warn("mac update package staging failed:", error);
     await writePackagedStartupLog(`mac-update-stage failed\n${formatStartupError(error)}`).catch(() => undefined);
@@ -2644,74 +3266,6 @@ function resolveStagedMacUpdateReadyPath(filePath: string): string {
   return `${resolveStagedMacUpdateAppPath(filePath)}.ready`;
 }
 
-/**
- * Creates the macOS update package pre-expansion script.
- *
- * @returns The zsh script content.
- */
-function createMacDmgUpdateStageScript(): string {
-  return `#!/bin/zsh
-set -eu
-set -o pipefail
-
-DMG_PATH="$1"
-STAGED_APP_PATH="$2"
-STAGED_READY_PATH="$3"
-LOG_PATH="$4"
-SCRIPT_PATH="$0"
-MOUNT_POINT=""
-STAGED_TMP_PATH="$STAGED_APP_PATH.tmp"
-
-exec >> "$LOG_PATH" 2>&1
-echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] staging Memmy update package"
-
-cleanup() {
-  if [[ -n "$MOUNT_POINT" && -d "$MOUNT_POINT" ]]; then
-    /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet || true
-    /bin/rmdir "$MOUNT_POINT" 2>/dev/null || true
-  fi
-  /bin/rm -rf "$STAGED_TMP_PATH" 2>/dev/null || true
-  /bin/rm -f "$SCRIPT_PATH" || true
-}
-trap cleanup EXIT
-
-validate_app_bundle() {
-  local app_path="$1"
-  if [[ ! -d "$app_path" ]]; then
-    echo "Memmy staged app bundle missing: $app_path"
-    exit 1
-  fi
-  if [[ ! -f "$app_path/Contents/Info.plist" ]]; then
-    echo "Memmy staged app Info.plist missing: $app_path"
-    exit 1
-  fi
-  local bundle_executable
-  bundle_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist" 2>/dev/null || true)"
-  if [[ -z "$bundle_executable" || ! -x "$app_path/Contents/MacOS/$bundle_executable" ]]; then
-    echo "Memmy staged app executable missing: $app_path"
-    exit 1
-  fi
-}
-
-/bin/rm -rf "$STAGED_TMP_PATH"
-/bin/rm -f "$STAGED_READY_PATH"
-MOUNT_POINT="$(/usr/bin/mktemp -d /tmp/memmy-stage.XXXXXX)"
-/usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
-SOURCE_APP_PATH="$(/usr/bin/find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -type d -print -quit)"
-if [[ -z "$SOURCE_APP_PATH" ]]; then
-  echo "update DMG does not contain an app bundle"
-  exit 1
-fi
-
-/usr/bin/ditto "$SOURCE_APP_PATH" "$STAGED_TMP_PATH"
-validate_app_bundle "$STAGED_TMP_PATH"
-/bin/rm -rf "$STAGED_APP_PATH"
-/bin/mv "$STAGED_TMP_PATH" "$STAGED_APP_PATH"
-/usr/bin/xattr -dr com.apple.quarantine "$STAGED_APP_PATH" >/dev/null 2>&1 || true
-/usr/bin/touch "$STAGED_READY_PATH"
-echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] staged Memmy update package"
-`;
-}
 
 /**
  * Runs a temporary helper script and waits for the result.
@@ -2744,6 +3298,8 @@ async function installWindowsUpdateInBackground(
   filePath: string,
   options: BackgroundUpdateInstallOptions = { quitCurrentApp: true, openAfterInstall: true }
 ): Promise<DesktopUpdateInstallResult> {
+  const verification = await validateWindowsDownloadedUpdate(filePath, options.expectedVersion);
+  if (!verification) throw new Error("Cannot validate the Windows update installer");
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
@@ -2755,9 +3311,9 @@ async function installWindowsUpdateInBackground(
   } else {
     await clearWindowsUpdatePromptMarker().catch(() => undefined);
   }
-  await writeFile(helperPath, createWindowsUpdateInstallScript(), { mode: 0o700 });
+  await writeFile(helperPath, windowsUpdatePowerShellFile(createWindowsUpdateInstallScript(verification)), { mode: 0o700 });
   await writeFile(launcherPath, createWindowsUpdateLauncherFile([
-    "powershell.exe",
+    windowsUpdatePowerShellExecutable(),
     "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
@@ -2771,7 +3327,7 @@ async function installWindowsUpdateInBackground(
     String(process.pid),
     options.openAfterInstall ? "1" : "0",
     resolvePreparedRequiredUpdatePath(),
-    options.expectedVersion ?? ""
+    verification.version
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
@@ -2791,7 +3347,7 @@ async function installWindowsUpdateInBackground(
   return { filePath, opened: false, willQuit: options.quitCurrentApp, background: true };
 }
 
-function createWindowsUpdateInstallScript(): string {
+function createWindowsUpdateInstallScript(verification: WindowsUpdateVerification): string {
   return `param(
   [string]$Installer,
   [string]$AppExe,
@@ -2805,11 +3361,14 @@ function createWindowsUpdateInstallScript(): string {
 $ErrorActionPreference = 'Continue'
 $installExit = 0
 $lockPath = ''
+$lockAcquired = $false
 $promptMarkerPath = ''
 if ($MarkerPath) {
   $lockPath = "$MarkerPath.lock"
   $promptMarkerPath = "$MarkerPath.prompt"
 }
+
+${createWindowsUpdateVerificationScript(verification)}
 
 function Write-MemmyUpdateLog([string]$Message) {
   Add-Content -LiteralPath $LogPath -Value ("[{0}] {1}" -f (Get-Date), $Message)
@@ -2842,6 +3401,7 @@ try {
   if ($lockPath) {
     try {
       New-Item -ItemType Directory -Path $lockPath -ErrorAction Stop | Out-Null
+      $lockAcquired = $true
     } catch {
       Write-MemmyUpdateLog 'another Memmy update installer is already running'
       exit 0
@@ -2907,6 +3467,9 @@ try {
     Write-MemmyUpdateLog 'install dir missing'
     $installExit = 3
   } else {
+    # Recheck the pinned bytes and publisher while holding a read handle; do
+    # this before running the installer and never request an elevated fallback.
+    Assert-MemmyUpdateInstaller $Installer
     if (Test-Path -LiteralPath $AppExe) {
       $beforeVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($AppExe)
       Write-MemmyUpdateLog ('before fileVersion=' + $beforeVersion.FileVersion + '; productVersion=' + $beforeVersion.ProductVersion)
@@ -2921,15 +3484,15 @@ try {
       Write-MemmyUpdateLog ('after fileVersion=' + $afterVersion.FileVersion + '; productVersion=' + $afterVersion.ProductVersion)
     }
 
-    if ($installExit -eq 0 -and $ExpectedVersion) {
+    if ($installExit -eq 0) {
       if (-not (Test-Path -LiteralPath $AppExe)) {
         Write-MemmyUpdateLog 'installed exe missing after install'
         $installExit = 4
       } else {
         $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($AppExe)
-        $actual = @($version.ProductVersion, $version.FileVersion) | Where-Object { $_ } | Select-Object -First 1
+        $actual = Get-MemmyUpdateExecutableVersion $version
         Write-MemmyUpdateLog ('expected version=' + $ExpectedVersion + '; actual version=' + $actual)
-        if (-not $actual -or -not $actual.StartsWith($ExpectedVersion)) {
+        if (-not $actual -or -not (Test-MemmyExactUpdateVersion $actual $MemmyVerifiedUpdateVersion)) {
           $installExit = 4
         }
       }
@@ -2950,10 +3513,13 @@ try {
   Write-MemmyUpdateLog ('unexpected error: ' + ($_ | Out-String))
   $installExit = 1
 } finally {
-  if ($lockPath) {
+  if ($null -ne $MemmyInstallerVerificationHandle) {
+    $MemmyInstallerVerificationHandle.Dispose()
+  }
+  if ($lockAcquired -and $lockPath) {
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
   }
-  if ($promptMarkerPath) {
+  if ($lockAcquired -and $promptMarkerPath) {
     Remove-Item -LiteralPath $promptMarkerPath -Force -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -3022,11 +3588,6 @@ function resolveUpdatesDirectory(): string {
  * @param fileName The file name.
  * @returns The version number (e.g. "0.0.2"); null when it cannot be parsed.
  */
-function parseUpdatePackageVersion(fileName: string): string | null {
-  const match = fileName.match(/-(\d+(?:\.\d+)+)-/u);
-  return match?.[1] ?? null;
-}
-
 /**
  * Collects the installer package paths that the current update task still needs to keep.
  *
@@ -3238,36 +3799,6 @@ function resolveUpdatePackageExtension(): string {
  */
 function buildUpdateDownloadKeys(): string[] {
   return [resolveCurrentDesktopPlatformType()];
-}
-
-/**
- * Compares the numeric segments of two version numbers.
- *
- * @param left The left-hand version.
- * @param right The right-hand version.
- * @returns A positive number when left is greater than right, negative when less, and 0 when equal.
- */
-function compareVersionSegments(left: string, right: string): number {
-  const leftParts = extractVersionSegments(left);
-  const rightParts = extractVersionSegments(right);
-  const length = Math.max(leftParts.length, rightParts.length);
-  for (let index = 0; index < length; index += 1) {
-    const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-  return 0;
-}
-
-/**
- * Extracts the numeric segments from a version number.
- *
- * @param version The raw version string.
- * @returns The list of numeric segments.
- */
-function extractVersionSegments(version: string): number[] {
-  return (version.match(/\d+/gu) ?? []).map((part) => Number(part));
 }
 
 /**
@@ -3528,6 +4059,30 @@ function createInitialWindow(): BrowserWindow | null {
   return createMainWindow();
 }
 
+function startWindowsBrowserPreparationAfterFirstWindow(
+  targetWindow: BrowserWindow | null,
+  services: ManagedRuntimeServices
+): void {
+  let started = false;
+  const isPetWindow = targetWindow === petWindow;
+  const start = () => {
+    if (started || isQuitting || runtimeServices !== services) return;
+    started = true;
+    clearTimeout(fallback);
+    if (isPetWindow) targetWindow?.removeListener("show", start);
+    else targetWindow?.removeListener("ready-to-show", start);
+    services.startBrowserPreparation();
+  };
+  // A hidden pet window may never receive its first layout. Keep the launch bounded.
+  const fallback = setTimeout(start, 12_000);
+  fallback.unref?.();
+  if (targetWindow && !targetWindow.isDestroyed()) {
+    if (isPetWindow) targetWindow.once("show", start);
+    else targetWindow.once("ready-to-show", start);
+  }
+  else start();
+}
+
 function waitForInitialRendererVerification(targetWindow: BrowserWindow | null): Promise<boolean> {
   if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve(false);
   const webContentsId = targetWindow.webContents.id;
@@ -3628,7 +4183,9 @@ function resolveMenuBarIconEnabled(): boolean {
  *
  * @param enabled Whether to show the menu bar icon.
  */
-function syncMenuBarTray(enabled: boolean): void {
+function syncMenuBarTray(enabled: boolean, temporaryForPIP = false): void {
+  if (!temporaryForPIP) enabled = computerUseTrayRecovery.trayRequested(enabled,
+    computerUseSurfaceWindows?.hasHiddenActive() ?? false);
   if (!isNativeTraySupported() || !enabled) {
     destroyMenuBarTray();
     return;
@@ -3637,14 +4194,26 @@ function syncMenuBarTray(enabled: boolean): void {
   const trayImage = resolveMenuBarTrayImage();
   if (menuBarTray) {
     menuBarTray.setImage(trayImage);
+    syncComputerHistoryTrayIndicator();
+    syncMenuBarTrayContextMenu();
     return;
   }
 
   menuBarTray = new Tray(trayImage, MENU_BAR_TRAY_GUID);
   menuBarTray.setToolTip("Memmy");
+  syncComputerHistoryTrayIndicator();
   if (process.platform === "darwin") {
     menuBarTray.setIgnoreDoubleClickEvents(true);
   }
+  syncMenuBarTrayContextMenu();
+  // macOS opens the native context menu before an action is chosen.
+  if (process.platform !== "darwin") {
+    menuBarTray.on("click", () => activateMainWindow());
+  }
+}
+
+function syncMenuBarTrayContextMenu(): void {
+  if (!menuBarTray) return;
   menuBarTray.setContextMenu(Menu.buildFromTemplate([
     {
       label: "显示 Memmy",
@@ -3654,13 +4223,147 @@ function syncMenuBarTray(enabled: boolean): void {
       label: "桌宠模式",
       click: () => setPetWindowMode(true, { petIntent: "user" })
     },
+    // Explicit recovery for our hide controls; ordinary app activation keeps
+    // the user's hidden presentations hidden.
+    ...(computerUseSurfaceWindows?.hasHiddenActive() ? [{
+      label: "显示实时小窗",
+      click: () => computerUseSurfaceWindows?.restoreAll()
+    }] : []),
     { type: "separator" },
     {
       label: "退出 Memmy",
       click: () => app.quit()
     }
   ]));
-  menuBarTray.on("click", () => activateMainWindow());
+}
+
+function handleComputerHistoryTrayIndicator(event: IpcMainEvent, raw: unknown): void {
+  if (process.platform !== "darwin" || BrowserWindow.fromWebContents(event.sender) !== mainWindow
+    || !raw || typeof raw !== "object") return;
+  const state = raw as Record<string, unknown>;
+  if (typeof state.enabled !== "boolean" || typeof state.recording !== "boolean") return;
+  historyTrayIndicatorEnabled = state.enabled;
+  historyTrayRecording = state.recording;
+  syncComputerHistoryTrayIndicator();
+}
+
+function syncComputerHistoryTrayIndicator(): void {
+  if (!menuBarTray) return;
+  attachMenuBarAppearanceWatch();
+  const recording = process.platform === "darwin" && historyTrayIndicatorEnabled && historyTrayRecording;
+  if (!recording) {
+    menuBarTray.setImage(resolveMenuBarTrayImage());
+    if (process.platform === "darwin") menuBarTray.setTitle("");
+    menuBarTray.setToolTip("Memmy");
+    return;
+  }
+  const image = resolveRecordingMenuBarImage();
+  if (image) {
+    menuBarTray.setImage(image);
+    menuBarTray.setTitle("");
+  } else {
+    // Keep AppKit's template tint when the native appearance is unavailable,
+    // including after a previous composite. ANSI gives the fallback mark its own color.
+    menuBarTray.setImage(resolveMenuBarTrayImage());
+    menuBarTray.setTitle("\u001b[31m●\u001b[0m");
+  }
+  menuBarTray.setToolTip("Memmy · 电脑历史记录中");
+}
+
+type MenuBarAppearanceNative = {
+  menuBarAppearance: () => "dark" | "light" | "unknown";
+  watchMenuBarButton: (onChange: () => void) => boolean;
+  unwatchMenuBarButton: () => void;
+  readCurrentQuitContext?: () => MacPermissionQuitContext | null;
+  readSystemSessionEnding?: () => boolean;
+  readSystemSessionEndingState?: () => {
+    mainThread: boolean;
+    observerInstalled: boolean;
+    notificationRecent: boolean;
+    notificationSequence: number;
+    notificationAgeMs: number | null;
+  };
+  installQuitEventObserver?: () => boolean;
+};
+
+let menuBarAppearanceNative: MenuBarAppearanceNative | null | undefined;
+let menuBarAppearanceAttached = false;
+
+function loadMenuBarAppearanceNative(): MenuBarAppearanceNative | null {
+  if (menuBarAppearanceNative !== undefined) return menuBarAppearanceNative;
+  if (process.platform !== "darwin") {
+    menuBarAppearanceNative = null;
+    return null;
+  }
+  try {
+    menuBarAppearanceNative = createRequire(import.meta.url)(
+      join(import.meta.dirname, "../native/menu-bar-appearance.node")
+    ) as MenuBarAppearanceNative;
+  } catch (error) {
+    menuBarAppearanceNative = null;
+    void writePackagedStartupLog(`menu-bar-appearance-load-failed:${String(error)}`);
+  }
+  return menuBarAppearanceNative;
+}
+
+/**
+ * Whether the menu bar itself wants a light glyph.
+ *
+ * The app pins `themeSource` to light, so NativeTheme reports light even when the
+ * menu bar is dark. `AppleInterfaceStyle` only follows the system appearance and
+ * misses a light-mode menu bar sitting on a dark wallpaper. The status button's
+ * own appearance is what AppKit uses to tint the template icon.
+ */
+function menuBarIsDark(): boolean | null {
+  const appearance = loadMenuBarAppearanceNative()?.menuBarAppearance() ?? "unknown";
+  if (appearance === "dark") return true;
+  if (appearance === "light") return false;
+  // A light system theme can still have a dark menu bar over dark wallpaper.
+  // Without the button's appearance, preserve the system-tinted template instead.
+  return null;
+}
+
+function attachMenuBarAppearanceWatch(): void {
+  if (menuBarAppearanceAttached || process.platform !== "darwin") return;
+  const attached = loadMenuBarAppearanceNative()?.watchMenuBarButton(() => {
+    recordingMenuBarCache = null;
+    syncComputerHistoryTrayIndicator();
+  }) ?? false;
+  menuBarAppearanceAttached = attached;
+}
+
+function resolveRecordingMenuBarImage(): Electron.NativeImage | null {
+  const dark = menuBarIsDark();
+  if (dark === null) return null;
+  if (recordingMenuBarCache?.dark === dark) return recordingMenuBarCache.image;
+  const source = loadMenuBarTemplateImage();
+  if (source.isEmpty()) return null;
+  const image = nativeImage.createEmpty();
+  const scales = source.getScaleFactors();
+  for (const scale of (scales.length > 0 ? scales : [1])) {
+    const logical = source.getSize(scale);
+    const pixelWidth = Math.round(logical.width * scale);
+    const pixelHeight = Math.round(logical.height * scale);
+    const bitmap = source.toBitmap({ scaleFactor: scale });
+    if (bitmap.length !== pixelWidth * pixelHeight * 4) continue;
+    const composed = composeRecordingMenuBarBitmap({
+      source: bitmap,
+      width: pixelWidth,
+      height: pixelHeight,
+      scale,
+      ink: dark ? 255 : 0,
+    });
+    image.addRepresentation({
+      scaleFactor: scale,
+      width: composed.width,
+      height: composed.height,
+      buffer: composed.bitmap,
+    });
+  }
+  if (image.isEmpty()) return null;
+  image.setTemplateImage(false);
+  recordingMenuBarCache = { dark, image };
+  return image;
 }
 
 /**
@@ -3677,14 +4380,18 @@ function isNativeTraySupported(): boolean {
  *
  * @returns The Electron menu bar tray icon.
  */
+function loadMenuBarTemplateImage() {
+  const packagedIconPath = join(process.resourcesPath, "MenuBarIconTemplate.png");
+  const developmentIconPath = resolve(import.meta.dirname, "../../build/MenuBarIconTemplate.png");
+  return nativeImage.createFromPath(existsSync(packagedIconPath) ? packagedIconPath : developmentIconPath);
+}
+
 function resolveMenuBarTrayImage() {
   if (process.platform === "win32") {
     return resolveWindowsTrayImage();
   }
 
-  const packagedIconPath = join(process.resourcesPath, "MenuBarIconTemplate.png");
-  const developmentIconPath = resolve(import.meta.dirname, "../../build/MenuBarIconTemplate.png");
-  const trayIcon = nativeImage.createFromPath(existsSync(packagedIconPath) ? packagedIconPath : developmentIconPath);
+  const trayIcon = loadMenuBarTemplateImage();
   trayIcon.setTemplateImage(true);
   return trayIcon;
 }
@@ -3723,6 +4430,8 @@ function destroyMenuBarTray(): void {
     return;
   }
 
+  loadMenuBarAppearanceNative()?.unwatchMenuBarButton();
+  menuBarAppearanceAttached = false;
   menuBarTray.destroy();
   menuBarTray = null;
 }
@@ -3739,13 +4448,34 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
     ...resolveFullWindowSize(screen.getPrimaryDisplay().workArea),
     ...(windowsTaskbarIconPath ? { icon: windowsTaskbarIconPath } : {}),
     // webPreferences: the renderer's security isolation and preload configuration.
-    webPreferences: createWebPreferences()
+    webPreferences: { ...createWebPreferences(), webviewTag: true }
   });
   mainWindow = targetMainWindow;
+  attachShellRendererRecovery(targetMainWindow, "full");
 
   hideInWindowMenuBar(targetMainWindow);
   updateFullWindowButtonPosition(targetMainWindow);
   attachWindowOpenHandler(targetMainWindow);
+  targetMainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    if (params.partition !== 'persist:memmy-browser' || !isBrowserPageUrl(params.src ?? '')) {
+      event.preventDefault();
+      return;
+    }
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+  });
+  targetMainWindow.webContents.on('did-attach-webview', (_event, guest) => {
+    embeddedBrowserDriver.attach(guest, targetMainWindow);
+    guest.setWindowOpenHandler(({ url }) => {
+      if (isBrowserPageUrl(url)) targetMainWindow.webContents.send('memmy:browser:open-url', url, { sourceGuestId: guest.id });
+      return { action: 'deny' };
+    });
+    guest.on('will-navigate', (event, url) => {
+      if (!isBrowserPageUrl(url)) event.preventDefault();
+    });
+  });
   attachRendererContextMenu(targetMainWindow);
   attachRendererShortcutGuards(targetMainWindow);
   attachMainWindowFullScreenSync(targetMainWindow);
@@ -3800,7 +4530,7 @@ function resolveWindowsTaskbarIconPath(): string | undefined {
  * @param event The Electron close event.
  */
 function handleMainWindowClose(event: ElectronEvent): void {
-  if (!mainWindow || isQuitting || isReplayingMainWindowAction) {
+  if (!mainWindow || event.defaultPrevented || isQuitting || isReplayingMainWindowAction) {
     return;
   }
 
@@ -3820,6 +4550,7 @@ function handleMainWindowMinimize(event: ElectronEvent): void {
   }
 
   event.preventDefault();
+  if (rendererRecoveries.get(mainWindow.webContents.id)?.isUnavailable()) return;
   requestMainWindowAction(mainWindow, "minimize");
 }
 
@@ -3978,6 +4709,7 @@ function createPetWindow(target: RendererRouteTarget | null = null): BrowserWind
     webPreferences: createWebPreferences()
   });
   petWindow = targetPetWindow;
+  attachShellRendererRecovery(targetPetWindow, "pet");
 
   attachWindowOpenHandler(petWindow);
   attachRendererContextMenu(petWindow);
@@ -4589,6 +5321,18 @@ function forceLightWindowChrome(): void {
   }
 
   nativeTheme.themeSource = "light";
+  watchMenuBarAppearance();
+}
+
+function watchMenuBarAppearance(): void {
+  if (menuBarAppearanceWatching || process.platform !== "darwin") return;
+  menuBarAppearanceWatching = true;
+  const refreshRecordingGlyph = () => {
+    recordingMenuBarCache = null;
+    syncComputerHistoryTrayIndicator();
+  };
+  nativeTheme.on("updated", refreshRecordingGlyph);
+  systemPreferences.subscribeNotification("AppleInterfaceThemeChangedNotification", refreshRecordingGlyph);
 }
 
 /**
@@ -4707,6 +5451,14 @@ function createWebPreferences() {
     // nodeIntegration: forbids the renderer from directly accessing Node.js APIs.
     nodeIntegration: false
   } as const;
+}
+
+function isBrowserPageUrl(input: string): boolean {
+  if (input === 'about:blank') return true;
+  try {
+    const protocol = new URL(input).protocol;
+    return protocol === 'https:' || protocol === 'http:';
+  } catch { return false; }
 }
 
 /**
@@ -4894,6 +5646,13 @@ let didWaitForSingleInstanceLock = false;
 let hasIgnoredStaleReopenQuit = false;
 const computerHistoryPermissionSessionId = randomUUID();
 let shouldRelaunchAfterQuitCleanup = false;
+const macPermissionRestartIntent = new MacPermissionRestartIntent();
+let isMacSystemQuitInProgress = false;
+let hasCapturedMacPermissionRestart = false;
+let permissionQuitNotificationSequence: number | null = null;
+let permissionQuitSameDispatch = false;
+const MACOS_PERMISSION_RELAUNCH_ARG = '--memmy-permission-relaunch';
+const wasMacPermissionRelaunch = process.platform === 'darwin' && process.argv.includes(MACOS_PERMISSION_RELAUNCH_ARG);
 const appProcessStartedAt = Date.now();
 
 /**
@@ -4924,17 +5683,22 @@ async function waitForSingleInstanceLock(): Promise<boolean> {
  * The "Quit & Reopen" flow quits the old instance and reopens the app, but when the old instance
  * shuts down slowly the reopen races ahead and the quit request is delivered to the replacement
  * instance instead — the reopened window flashes briefly and the app is gone. Having waited for the
- * single-instance lock is the fingerprint of that reopen race (a normal launch acquires the lock on
- * the first try), so shortly after such a launch the first quit request is treated as stale and
- * ignored once. Every later quit request behaves normally.
+ * single-instance lock is the fingerprint of that reopen race. Ignore only a verified Settings
+ * request shortly after such a launch; rlgo also needs the marker from our permission relaunch.
+ * Ordinary user quits and system termination are never treated as a stale reopen request.
  *
  * @returns Whether the current quit request should be ignored as stale.
  */
-function shouldIgnoreStaleReopenQuit(): boolean {
-  return process.platform === "darwin"
-    && didWaitForSingleInstanceLock
-    && !hasIgnoredStaleReopenQuit
-    && Date.now() - appProcessStartedAt <= MACOS_STALE_REOPEN_QUIT_GRACE_MS;
+function shouldIgnoreStaleReopenQuit(context: MacPermissionQuitContext | null): boolean {
+  if (process.platform !== "darwin" || !didWaitForSingleInstanceLock
+    || hasIgnoredStaleReopenQuit
+    || Date.now() - appProcessStartedAt > MACOS_STALE_REOPEN_QUIT_GRACE_MS) return false;
+  if (!isMacPermissionSystemQuit(context,
+    { permissionRequested: wasMacPermissionRelaunch, systemSessionEnding: false })) return false;
+  const probe = readMacSystemSessionProbe();
+  return !probe.ending || (probe.source === "notification"
+    && context?.senderBundleId === "com.apple.settings.PrivacySecurity.extension"
+    && context.quitReason === "rlgo" && wasMacPermissionRelaunch);
 }
 
 app.on("second-instance", () => {
@@ -4978,6 +5742,50 @@ function handleRendererLoadFailure(error: unknown): void {
   console.warn("renderer load failed:", error);
 }
 
+function recordShellProcessDiagnostic(diagnostic: RendererRecoveryDiagnostic | {
+  event: "child-process-gone"; type: string; reason: string; exitCode: number;
+}): void {
+  const message = `shell-process:${JSON.stringify(diagnostic)}`;
+  try { writeProcessDiagnostic(message); } catch { /* The independent startup log remains available. */ }
+  void writePackagedStartupLog(message);
+}
+
+function attachShellRendererRecovery(targetWindow: BrowserWindow, mode: DesktopWindowMode): void {
+  const id = targetWindow.webContents.id;
+  const recovery = attachRendererRecovery({
+    window: targetWindow,
+    mode,
+    isQuitting: () => isQuitting || programmaticPetWindowCloses.has(targetWindow),
+    isStartup: () => startupRendererCleanup !== null,
+    clearRendererState: () => {
+      rendererReadyWebContentsIds.delete(id);
+      rendererReadyWaiters.get(id)?.(false);
+      if (pendingMainWindowAction?.targetWindow === targetWindow) pendingMainWindowAction = null;
+    },
+    reload: () => targetWindow.loadURL(rendererRecoveryUrl(targetWindow.webContents.getURL(), resolveRendererUrl(mode))),
+    showRecoveryDialog: async () => {
+      const chinese = app.getLocale().toLowerCase().startsWith("zh");
+      const result = await dialog.showMessageBox(targetWindow, {
+        type: "error", title: "Memmy",
+        message: chinese ? "界面暂时无法显示" : "The Memmy interface is unavailable",
+        detail: chinese ? "可以重新加载界面，或退出后重新打开 Memmy。" : "Reload the interface, or quit and reopen Memmy.",
+        buttons: chinese ? ["重新加载", "退出 Memmy"] : ["Reload", "Quit Memmy"],
+        defaultId: 0, cancelId: 1, noLink: true
+      });
+      return result.response === 0 ? "reload" : "quit";
+    },
+    quit: () => app.quit(),
+    record: recordShellProcessDiagnostic
+  });
+  rendererRecoveries.set(id, recovery);
+  targetWindow.once("closed", () => rendererRecoveries.delete(id));
+}
+
+app.on("child-process-gone", (_event, details) => {
+  recordShellProcessDiagnostic({ event: "child-process-gone", type: details.type,
+    reason: details.reason, exitCode: details.exitCode });
+});
+
 app.whenReady().then(async () => {
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
@@ -4992,11 +5800,16 @@ app.whenReady().then(async () => {
     return;
   }
 
+  installMacQuitEventObserver();
   await boot();
 }).catch(handleStartupFailure);
 
 app.on("activate", () => {
   if (isQuitting || isQuitCleanupInProgress) {
+    if (isMacSystemSessionEnding()) {
+      shouldRelaunchAfterQuitCleanup = false;
+      return;
+    }
     // macOS "Quit & Reopen" delivers the reopen as an activate event to this still-dying instance
     // when the quit cleanup is slow, so no replacement process is ever spawned. Honor the reopen
     // by relaunching once cleanup finishes instead of letting the app end up fully closed.
@@ -5025,13 +5838,147 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
+/** Electron emits before-quit after the quit AppleEvent is dispatched, so record it on delivery. */
+function installMacQuitEventObserver(): void {
+  if (process.platform !== "darwin") return;
+  try {
+    if (loadMenuBarAppearanceNative()?.installQuitEventObserver?.() !== true) {
+      void writePackagedStartupLog("quit:apple-event-observer-unavailable");
+    }
+  } catch (error) {
+    void writePackagedStartupLog(`quit:apple-event-observer-failed:${String(error)}`);
+  }
+}
+
+type MacSystemSessionProbe = {
+  ending: boolean;
+  source: "clear" | "notification" | "unavailable" | "error" | "latched";
+  mainThread: boolean | null;
+  observerInstalled: boolean | null;
+  notificationSequence: number | null;
+  notificationAgeMs: number | null;
+};
+
+/** Keep the original native evidence separate from a later TypeScript veto. */
+function readMacSystemSessionProbe(): MacSystemSessionProbe {
+  const unknown = (source: "unavailable" | "error" | "latched"): MacSystemSessionProbe => ({
+    ending: true, source, mainThread: null, observerInstalled: null,
+    notificationSequence: null, notificationAgeMs: null,
+  });
+  if (isMacSystemQuitInProgress) return unknown("latched");
+  try {
+    const state = loadMenuBarAppearanceNative()?.readSystemSessionEndingState?.();
+    if (!state || state.mainThread !== true || state.observerInstalled !== true
+      || typeof state.notificationRecent !== "boolean"
+      || !Number.isSafeInteger(state.notificationSequence) || state.notificationSequence < 0) {
+      return { ...unknown("unavailable"), mainThread: state?.mainThread ?? null,
+        observerInstalled: state?.observerInstalled ?? null };
+    }
+    return {
+      ending: state.notificationRecent === true,
+      source: state.notificationRecent === true ? "notification" : "clear",
+      mainThread: state.mainThread,
+      observerInstalled: state.observerInstalled,
+      notificationSequence: state.notificationSequence,
+      notificationAgeMs: typeof state.notificationAgeMs === "number" ? state.notificationAgeMs : null,
+    };
+  } catch {
+    return unknown("error");
+  }
+}
+
+/** A later system notification or AppleEvent still overrides a pending reopen. */
+function isMacSystemSessionEnding(): boolean {
+  if (process.platform !== "darwin") return false;
+  const probe = readMacSystemSessionProbe();
+  const notificationUnchangedSincePermissionQuit = hasCapturedMacPermissionRestart
+    && probe.source === "notification"
+    && probe.notificationSequence === permissionQuitNotificationSequence;
+  const ending = probe.ending && !notificationUnchangedSincePermissionQuit;
+  if (ending && (isQuitting || isQuitCleanupInProgress)) isMacSystemQuitInProgress = true;
+  return ending;
+}
+
+/** Read once, before guide cancellation or asynchronous quit cleanup. */
+function readMacQuitContext(): MacPermissionQuitContext | null {
+  if (process.platform !== "darwin" || !hasSingleInstanceLock || isQuitCleanupComplete) return null;
+  try {
+    return loadMenuBarAppearanceNative()?.readCurrentQuitContext?.() ?? null;
+  } catch (error) {
+    void writePackagedStartupLog(`quit:system-permission-request-check-failed:${String(error)}`);
+    return null;
+  }
+}
+
+function captureMacPermissionRestartRequest(context: MacPermissionQuitContext | null): boolean {
+  if (process.platform !== "darwin" || !hasSingleInstanceLock || isQuitCleanupComplete) return false;
+  try {
+    // AppKit may emit before-quit twice while dispatching one AppleEvent, but
+    // native quit context is intentionally single-use. A separate user action
+    // runs in a later turn and still cancels the pending permission restart.
+    if (!context && isQuitCleanupInProgress && hasCapturedMacPermissionRestart
+      && permissionQuitSameDispatch) return true;
+    const permissionRequested = macPermissionRestartIntent.consume()
+      || (isQuitCleanupInProgress && hasCapturedMacPermissionRestart);
+    const sessionProbe = readMacSystemSessionProbe();
+    const verifiedPermissionQuit = context?.senderBundleId === "com.apple.settings.PrivacySecurity.extension"
+      && context.quitReason === "rlgo"
+      && isMacPermissionSystemQuit(context, { permissionRequested, systemSessionEnding: false });
+    // Privacy & Security can issue rlgo during Quit & Reopen. A notification
+    // already present when that exact request arrives is weaker evidence than its
+    // verified sender plus a fresh, app-owned permission intent.
+    const ignoreExistingNotification = verifiedPermissionQuit && sessionProbe.source === "notification";
+    const systemSessionEnding = sessionProbe.ending && !ignoreExistingNotification;
+    if (systemSessionEnding) {
+      isMacSystemQuitInProgress = true;
+      shouldRelaunchAfterQuitCleanup = false;
+    }
+    const permissionRestart = isMacPermissionSystemQuit(context, {
+      permissionRequested, systemSessionEnding,
+    });
+    if (!permissionRestart && isMacSystemSessionQuit(context)) {
+      isMacSystemQuitInProgress = true;
+      shouldRelaunchAfterQuitCleanup = false;
+    }
+    if (!permissionRestart && isQuitCleanupInProgress) {
+      // A later ordinary Quit overrides an earlier permission reopen request.
+      shouldRelaunchAfterQuitCleanup = false;
+      hasCapturedMacPermissionRestart = false;
+      permissionQuitSameDispatch = false;
+    }
+    if (context?.eventClass === "aevt" && context.eventId === "quit") {
+      void writePackagedStartupLog(`quit:apple-event:${JSON.stringify({
+        senderBundleId: context.senderBundleId, senderExecutablePath: context.senderExecutablePath,
+        quitReason: context.quitReason, permissionRestart, permissionRequested,
+        systemSessionEnding, sessionProbe, ignoreExistingNotification,
+      })}`);
+    }
+    if (!permissionRestart) return false;
+    hasCapturedMacPermissionRestart = true;
+    permissionQuitNotificationSequence = verifiedPermissionQuit ? sessionProbe.notificationSequence : null;
+    permissionQuitSameDispatch = true;
+    queueMicrotask(() => { permissionQuitSameDispatch = false; });
+    shouldRelaunchAfterQuitCleanup = true;
+    void writePackagedStartupLog(`quit:system-permission-restart-requested:${context?.senderBundleId}`);
+    return true;
+  } catch (error) {
+    void writePackagedStartupLog(`quit:system-permission-request-check-failed:${String(error)}`);
+    return false;
+  }
+}
+
 app.on("before-quit", (event) => {
-  if (shouldIgnoreStaleReopenQuit()) {
+  const quitContext = readMacQuitContext();
+  if (shouldIgnoreStaleReopenQuit(quitContext)) {
     hasIgnoredStaleReopenQuit = true;
+    shouldRelaunchAfterQuitCleanup = false;
+    hasCapturedMacPermissionRestart = false;
     event.preventDefault();
     void writePackagedStartupLog("quit:ignored-stale-reopen-quit");
     return;
   }
+  // Capture before quit cleanup closes permission observers.
+  captureMacPermissionRestartRequest(quitContext);
   if (!hasSingleInstanceLock) {
     return;
   }
@@ -5060,6 +6007,10 @@ app.on("before-quit", (event) => {
       clearQuitCleanupForceExitTimer();
       isQuitCleanupComplete = true;
       isQuitCleanupInProgress = false;
+      if (process.platform === 'darwin') {
+        stopComputerUseAgentsOnExitSync(app.isPackaged, process.resourcesPath,
+          process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
+      }
       relaunchAfterQuitCleanupIfRequested();
       app.quit();
     });
@@ -5076,16 +6027,33 @@ function relaunchAfterQuitCleanupIfRequested(): void {
   }
 
   shouldRelaunchAfterQuitCleanup = false;
+  if (isMacSystemSessionEnding()) {
+    void writePackagedStartupLog("quit:relaunch-cancelled-system-session-ending");
+    return;
+  }
   void writePackagedStartupLog("quit:relaunching-after-cleanup");
-  app.relaunch();
+  // Do not let a later ordinary relaunch inherit this one-process permission marker.
+  const args = process.argv.slice(1).filter(arg => arg !== MACOS_PERMISSION_RELAUNCH_ARG);
+  if (process.platform === 'darwin' && hasCapturedMacPermissionRestart) args.push(MACOS_PERMISSION_RELAUNCH_ARG);
+  app.relaunch({ args });
 }
 
 function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
+  // cleanupBeforeQuit clears the global while its asynchronous service close is pending.
+  const services = runtimeServices;
   quitCleanupForceExitTimer = setTimeout(() => {
     console.warn("quit cleanup timed out; forcing app exit");
     // Apply the same service-lifecycle choice when graceful cleanup times out.
-    runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
+    try {
+      services?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
+    } catch (error) {
+      console.warn("Failed to terminate runtime services during forced quit:", error);
+    }
+    if (process.platform === 'darwin') {
+      stopComputerUseAgentsOnExitSync(app.isPackaged, process.resourcesPath,
+        process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
+    }
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
   }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
@@ -5135,13 +6103,35 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");
   ipcMain.removeHandler("memmy:openExternal");
+  ipcMain.removeHandler("memmy:browser-clear-data");
+  ipcMain.removeHandler('memmy:browser:user-navigation');
+  ipcMain.removeHandler('memmy:browser-extension:reveal');
+  ipcMain.removeHandler('memmy:browser-extension:directory');
+  ipcMain.removeAllListeners(EXTERNAL_BROWSER_EXTENSION_DRAG_CHANNEL);
+  ipcMain.removeHandler('memmy:browser-extension:prepare');
+  ipcMain.removeHandler('memmy:browser-extension:installed');
+  ipcMain.removeHandler('memmy:browser-extension:installation');
+  ipcMain.removeHandler('memmy:browser-extension:running');
+  ipcMain.removeHandler('memmy:browser-downloads:settings');
+  ipcMain.removeHandler('memmy:browser-downloads:choose-directory');
+  ipcMain.removeHandler('memmy:browser-downloads:default-directory');
+  ipcMain.removeHandler('memmy:browser-downloads:ask-before');
+  ipcMain.removeHandler('memmy:browser-access:list');
+  ipcMain.removeHandler('memmy:browser-access:set');
+  ipcMain.removeHandler('memmy:browser-use-site-policy:list');
+  ipcMain.removeHandler('memmy:browser-use-site-policy:upsert');
+  ipcMain.removeHandler('memmy:browser-use-site-policy:remove');
+  ipcMain.removeHandler('memmy:browser-allow-all:get');
+  ipcMain.removeHandler('memmy:browser-allow-all:set');
   ipcMain.removeHandler("memmy:open-computer-history-markdown");
+  ipcMain.removeHandler("memmy:guide-memmy-permission");
   ipcMain.removeHandler("memmy:restart-for-computer-history-permissions");
   ipcMain.removeHandler("memmy:get-computer-history-permission-session");
   ipcMain.removeHandler("memmy:openAgentTool");
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
   ipcMain.removeHandler("memmy:save-image");
+  ipcMain.removeHandler("memmy:save-file");
   ipcMain.removeHandler("memmy:export-memory-database");
   ipcMain.removeHandler("memmy:install-cli-tools");
   ipcMain.removeHandler("memmy:restart-memory-service");
@@ -5150,14 +6140,18 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:get-launch-at-login");
   ipcMain.removeHandler("memmy:set-launch-at-login");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
+  ipcMain.removeHandler("memmy:get-full-disk-access-status");
   ipcMain.removeHandler("memmy:request-microphone-access");
   ipcMain.removeHandler("memmy:select-project-directory");
   ipcMain.removeHandler("memmy:select-empty-project-directory");
+  ipcMain.removeHandler("memmy:read-workspace-directory");
+  ipcMain.removeHandler("memmy:write-workspace-file");
   ipcMain.removeHandler("memmy:notify-task-done");
   ipcMain.removeHandler("memmy:notify-update-available");
   ipcMain.removeHandler("memmy:set-pet-window");
   ipcMain.removeHandler("memmy:hide-pet-window");
   ipcMain.removeHandler("memmy:set-menu-bar-icon");
+  ipcMain.removeListener("memmy:set-computer-history-tray-indicator", handleComputerHistoryTrayIndicator);
   ipcMain.removeHandler("memmy:complete-main-window-action");
   ipcMain.removeListener("memmy:move-pet-window", handleMovePetWindow);
   ipcMain.removeListener("memmy:start-pet-window-drag", handleStartPetWindowDrag);
@@ -5171,7 +6165,30 @@ async function cleanupBeforeQuit(): Promise<void> {
   memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
-  await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+  browserWebviewDownloads?.dispose();
+  browserWebviewDownloads = null;
+  disposeBrowserWebviewPermissions?.();
+  disposeBrowserWebviewPermissions = null;
+  // Native app agents belong to LaunchServices, outside the gateway process tree.
+  // Start their shutdown before awaiting services, which may fail or hit the quit deadline.
+  const nativeAgentShutdown = process.platform === 'darwin'
+    ? stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
+      process.env.MEMMY_DEV_COMPUTER_USE_BINARY).catch(error => {
+        console.warn("Failed to stop the native Computer Use agent during quit cleanup:", error);
+      })
+    : Promise.resolve();
+  try {
+    await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+  } finally {
+    await nativeAgentShutdown;
+  }
+  browserSidebarBridge?.dispose();
+  browserSidebarBridge = null;
+  embeddedBrowserDriver.dispose();
+  pipScreenPermissionGuide?.dispose();
+  pipScreenPermissionGuide = null;
+  computerUseSurfaceWindows?.dispose();
+  computerUseSurfaceWindows = null;
   await backend?.close();
   await stopPackagedRendererServer();
   await sendAppExitEventBeforeQuit();
@@ -5232,6 +6249,69 @@ async function saveDesktopImage(request: DesktopImageActionRequest, senderUrl: s
     filePath: selected.filePath,
     bytes: saved.size
   };
+}
+
+async function saveDesktopFile(request: DesktopImageActionRequest, senderUrl: string, owner: BrowserWindow | null): Promise<DesktopImageSaveResult> {
+  const fileData = await fetchDesktopFile(request, senderUrl);
+  const defaultName = desktopSaveFileName(request.name ?? fileData.url);
+  const options = {
+    title: "Save As",
+    defaultPath: join(app.getPath("downloads"), defaultName),
+    filters: desktopFileSaveFilters(defaultName)
+  };
+  const selected = owner && !owner.isDestroyed()
+    ? await dialog.showSaveDialog(owner, options)
+    : await dialog.showSaveDialog(options);
+  if (selected.canceled || !selected.filePath) {
+    return { canceled: true };
+  }
+  await writeFile(selected.filePath, fileData.buffer);
+  const saved = await stat(selected.filePath);
+  return {
+    canceled: false,
+    filePath: selected.filePath,
+    bytes: saved.size
+  };
+}
+
+async function fetchDesktopFile(request: DesktopImageActionRequest, senderUrl: string): Promise<{ url: string; buffer: Buffer }> {
+  const rawUrl = typeof request?.url === "string" ? request.url.trim() : "";
+  if (request?.data && request.data.byteLength > 0) {
+    return {
+      url: rawUrl,
+      buffer: Buffer.from(request.data.buffer, request.data.byteOffset, request.data.byteLength)
+    };
+  }
+  if (!rawUrl) {
+    throw new Error("file url is required");
+  }
+
+  const localMediaFile = resolveLocalGatewayMediaFile(rawUrl);
+  if (localMediaFile) {
+    try {
+      return { url: rawUrl, buffer: await readFile(localMediaFile) };
+    } catch {
+      // Fall back to an authenticated gateway request when the local media file is unreadable.
+    }
+  }
+
+  const url = resolveDesktopImageUrl(rawUrl, senderUrl);
+  const response = await fetchDesktopImageResponse(url);
+  if (!response.ok) {
+    throw new Error(`file download failed: ${response.status}`);
+  }
+  return { url, buffer: Buffer.from(await response.arrayBuffer()) };
+}
+
+function desktopFileSaveFilters(name: string): FileFilter[] {
+  const extension = extname(name).replace(/^\./u, "");
+  if (!extension || extension === "*") {
+    return [{ name: "All Files", extensions: ["*"] }];
+  }
+  return [
+    { name: extension.toUpperCase(), extensions: [extension] },
+    { name: "All Files", extensions: ["*"] }
+  ];
 }
 
 async function fetchDesktopImage(request: DesktopImageActionRequest, senderUrl: string): Promise<{ url: string; buffer: Buffer; mime: string | null }> {
@@ -5692,6 +6772,12 @@ function resolvePathValue(path: string): string {
   return resolve(path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 }
 
+function agentWorkspaceDirectory(): string {
+  return runtimeServices?.agentGateway.workspace
+    ?? process.env.MEMMY_AGENT_WORKSPACE
+    ?? join(resolvePathValue(process.env.MEMMY_HOME ?? "~/.memmy"), "workspace");
+}
+
 function formatExportTimestamp(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   return [
@@ -5719,14 +6805,9 @@ function formatExportTimestamp(date: Date): string {
  * iMessage channel needs a "one-click jump to System Settings", so we allow exactly these two
  * controlled deep links and do not open up arbitrary schemes.
  */
-const MACOS_SETTINGS_DEEPLINKS = new Set<string>([
-  "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
-  "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
-]);
-
 async function openExternalUrl(rawUrl: string): Promise<void> {
   const trimmed = rawUrl.trim();
-  if (MACOS_SETTINGS_DEEPLINKS.has(trimmed)) {
+  if (MACOS_PERMISSION_SETTINGS_DEEPLINKS.has(trimmed)) {
     await shell.openExternal(trimmed);
     return;
   }
@@ -5959,17 +7040,21 @@ async function openMailtoUrl(rawUrl: string): Promise<void> {
   await shell.openExternal(normalizeMailtoUrl(rawUrl));
 }
 
+const taskDoneNotificationDeduplicator = new TaskDoneNotificationDeduplicator();
+
 /**
  * Shows a "task done" system notification.
  *
  * Whether to show it and whether it has sound is decided by the renderer based on the user's toggle
  * and the window focus state; this function is only responsible for showing it when the system
- * supports notifications. `silent` controls whether the default alert sound plays.
+ * supports notifications. Stable delivery IDs suppress duplicate reports from multiple windows.
+ * `silent` controls whether the default alert sound plays.
  *
  * @param payload The notification title, body, and silent flag.
  */
-function showTaskDoneNotification(payload: { title: string; body: string; silent: boolean }): void {
-  showDesktopNotification(payload);
+function showTaskDoneNotification(payload: { title: string; body: string; silent: boolean; deliveryId?: string }): void {
+  if (!Notification.isSupported() || !taskDoneNotificationDeduplicator.shouldNotify(payload.deliveryId)) return;
+  showDesktopNotification({ title: payload.title, body: payload.body, silent: payload.silent });
 }
 
 /**

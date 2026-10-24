@@ -238,7 +238,7 @@ describe("raw event retention", () => {
     const root = instance.snapshot().privacy.markdownDirectory.replace(/histories$/, "recordings");
     const directory = path.join(root, "segments", id);
     fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, "events.jsonl"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(directory, "events.jsonl"), JSON.stringify({ recordType: "human_history_metadata", schemaVersion: 1 }) + "\n", "utf8");
     const at = new Date(Date.now() - ageMs);
     fs.utimesSync(directory, at, at);
     return directory;
@@ -333,7 +333,7 @@ describe("pinning raw events", () => {
   function staleSegment(root: string, id: string): string {
     const directory = path.join(root, "recordings", "segments", id);
     fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, "events.jsonl"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(directory, "events.jsonl"), JSON.stringify({ recordType: "human_history_metadata", schemaVersion: 1 }) + "\n", "utf8");
     fs.writeFileSync(
       path.join(directory, "metadata.json"),
       JSON.stringify({ id, startedAt: new Date(Date.now() - RETENTION_MS - 60_000).toISOString() }),

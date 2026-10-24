@@ -38,11 +38,10 @@ function shortcut(keyEquivalent: string, modifiers: string[], application = note
   };
 }
 
-test("requires an explicit app allowlist before retaining text", () => {
-  assert.throws(
-    () => parseArgs(["node", "recorder", "--capture-text"]),
-    /requires at least one --allow-app/,
-  );
+test("allows observed text capture without a second app allowlist", () => {
+  const args = parseArgs(["node", "recorder", "--capture-text"]);
+  assert.equal(args.captureText, true);
+  assert.deepEqual(args.allowApps, []);
 });
 
 test("accepts an explicit starting URL as recording context", () => {
@@ -111,6 +110,44 @@ test("retains text only for an explicitly allowed application", () => {
     characterCount: 5,
     redacted: true,
   });
+});
+
+test("retains ordinary text in observed applications when no text allowlist is supplied", () => {
+  const notesText = [..."project note"].map((character) => textInput(character));
+  const chat = { name: "DingTalk", bundleId: "com.alibaba.DingTalkMac", pid: 44 };
+  const chatText = [..."明天下午讨论"].map((character) => textInput(character, chat));
+  const options = { captureText: true, allowApps: [] };
+  assert.deepEqual(normalizeKeyBurst(notesText, options).details, {
+    text: "project note", characterCount: 12, redacted: false,
+  });
+  assert.deepEqual(normalizeKeyBurst(chatText, options).details, {
+    text: "明天下午讨论", characterCount: 6, redacted: false,
+  });
+  assert.deepEqual(normalizeKeyBurst(chatText, { captureText: true, allowApps: ["com.apple.Notes"] }).details, {
+    text: "[REDACTED]", characterCount: 6, redacted: true,
+  });
+});
+
+test("withholds typed characters only when the target is a password field", () => {
+  for (const target of [
+    { role: "AXSecureTextField" },
+    { role: "AXTextField", subrole: "AXSecureTextField" },
+    { role: "AXSecureTextField", focused: { role: "AXTextField" } },
+    { role: "ControlType.Edit", isPassword: true },
+  ]) {
+    const event = textInput("hunter2", notes, { keyboard: { text: "hunter2", target } });
+    assert.equal(normalizeKeyBurst([event], { captureText: true, allowApps: [] }).details.text, "[REDACTED]");
+  }
+  // Apps such as WeChat do not report their focused input; that is not a password field.
+  for (const target of [{ role: "AXUnknown" }, undefined]) {
+    const event = textInput("你好", notes, { keyboard: { text: "你好", target } });
+    assert.deepEqual(normalizeKeyBurst([event], { captureText: true, allowApps: [] }).details, {
+      text: "你好", characterCount: 2, redacted: false,
+    });
+  }
+  assert.equal(isSecureInput(textInput("x", notes, {
+    keyboard: { text: "x", target: { role: "AXTextField", subrole: "AXSecureTextField" } },
+  })), true);
 });
 
 test("retains recognized search terms while ordinary browser text stays redacted", () => {
@@ -208,17 +245,19 @@ const policy = (
   defaultUrl: ObservationBehavior,
   rules: ObservationRule[] = [],
 ): ObservationSettings => ({
+  memory: { syncEnabled: false },
   observation: { defaultApplicationBehavior: defaultApp, defaultURLBehavior: defaultUrl, rules },
 });
 
-test("never records a window its browser reports as private", () => {
-  // The helper sets privateBrowsing for Chrome and Arc; the exclusion used to
-  // exist only in a policy function the capture path never called.
+test("records browser windows by the user's application and website rules alone", () => {
   const everything = policy("observe", "observe", [
     { scope: "app", bundleID: "com.google.Chrome", behavior: "observe" },
   ]);
-  assert.equal(shouldObserve(everything, { bundleId: "com.google.Chrome", url: "https://example.com/", privateBrowsing: true }), false);
-  assert.equal(shouldObserve(everything, { bundleId: "com.google.Chrome", url: "https://example.com/", privateBrowsing: false }), true);
+  assert.equal(shouldObserve(everything, { bundleId: "com.google.Chrome", url: "https://example.com/" }), true);
+  const withoutChrome = policy("observe", "observe", [
+    { scope: "app", bundleID: "com.google.Chrome", behavior: "do_not_observe" },
+  ]);
+  assert.equal(shouldObserve(withoutChrome, { bundleId: "com.google.Chrome", url: "https://example.com/" }), false);
 });
 
 test("never records the login window or the screen saver, whatever the rules say", () => {
@@ -297,22 +336,64 @@ test("withholds a password field and masks credentials anywhere", () => {
     ],
   }) as Record<string, any>;
   assert.equal(scrubbed.value, "[REDACTED]");
-  assert.doesNotMatch(scrubbed.descendants[0].title, /abcdefghijklmnop1234/);
-  assert.doesNotMatch(scrubbed.descendants[1].value, /demo-secret-value/);
+  assert.equal(scrubbed.descendants, undefined);
+  assert.equal((scrubAccessibility({ role: "AXSecureTextField", value: "role-only secret" }) as any).value, "[REDACTED]");
+  assert.equal((scrubAccessibility({ role: "ControlType.Edit", isPassword: true, value: "provider secret" }) as any).value, "[REDACTED]");
+  const provider = scrubAccessibility({ role: "ControlType.Edit", isPassword: true,
+    title: "password in name", description: "password in description", identifier: "password in id",
+    value: "provider secret", focused: { role: "AXTextField", value: "password in child" } });
+  assert.doesNotMatch(JSON.stringify(provider), /password in|provider secret/);
 });
 
-test("keeps window snapshots readable, full or diff, masking only credentials", () => {
+test("removes Dock window and application labels from nested accessibility payloads", () => {
+  const privateWindow = {
+    role: "AXDockItem", subrole: "AXMinimizedWindowDockItem",
+    title: "微博 – 随时随地发现新鲜事", value: "https://weibo.com/",
+    ancestors: [{ role: "AXApplication", title: "Dock" }],
+  };
+  assert.deepEqual(scrubAccessibility({
+    accessibility: privateWindow,
+    origin: { element: { ...privateWindow, role: "AXUnknown" } },
+    destination: { element: { role: "AXDockItem", subrole: "AXApplicationDockItem", title: "钉钉" } },
+    allowed: { role: "AXButton", title: "Save" },
+  }), {
+    accessibility: { role: "AXUnknown" },
+    origin: { element: { role: "AXUnknown" } },
+    destination: { element: { role: "AXUnknown" } },
+    allowed: { role: "AXButton", title: "Save" },
+  });
+});
+
+test("removes Dock titles from full and delta window snapshots", () => {
+  const snapshot = scrubAxSnapshot({ mode: "fullTree", text: [
+    "AXStaticText||Allowed document|||",
+    "AXDockItem|AXMinimizedWindowDockItem|微博 – 随时随地发现新鲜事||https://weibo.com/|",
+    "+ AXDockItem|AXApplicationDockItem|钉钉|||",
+    "- AXUnknown|AXMinimizedWindowDockItem|Private account|||",
+  ].join("\n") }) as { text: string };
+  assert.equal(snapshot.text, [
+    "AXStaticText||Allowed document|||", "AXUnknown|||||",
+    "+ AXUnknown|||||", "- AXUnknown|||||",
+  ].join("\n"));
+});
+
+test("keeps allowed window snapshots readable, full or diff, masking credentials", () => {
   const full = scrubAxSnapshot({
     mode: "fullTree",
+    focused: { role: "AXTextField", value: "api_key=focused-secret-value" },
     text: [
       "AXStaticText||Inbox|||",
       "AXTextArea||Body|||the plan for Friday",
       "AXTextField|AXSecureTextField|Password|||hunter2",
+      "AXSecureTextField||Password|||role-only secret",
+      "AXSecureTextField||password in title|password in description|password in id|hunter2",
       "AXStaticText||||| token: demo-secret-value-123",
     ].join("\n"),
-  }) as { text: string };
+  }) as { text: string; focused: { value: string } };
   assert.match(full.text, /the plan for Friday/);
-  assert.doesNotMatch(full.text, /hunter2|demo-secret-value/);
+  assert.doesNotMatch(full.text, /hunter2|role-only secret|password in|demo-secret-value/);
+  assert.equal(full.focused.value, "api_key=[REDACTED]");
+  assert.doesNotMatch(JSON.stringify(full), /focused-secret-value/);
   const diff = scrubAxSnapshot({
     mode: "diffFromPrevious",
     text: ["- AXTextField||Search|||old query", "+ AXTextField||Search|||new query"].join("\n"),

@@ -1,5 +1,5 @@
 import type { AgentHook } from "../../core/agent-runtime/hook.js";
-import type { ActualModelContext } from "@memmy/local-api-contracts";
+import type { ActualModelContext, MemoryTokenBudgetDto } from "@memmy/local-api-contracts";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -14,19 +14,23 @@ export type NormalizedByokTokenUsage = {
 
 export type ByokTokenUsageEvent = NormalizedByokTokenUsage & {
   id: string;
-  kind: "agent_chat";
-  source: "agent";
+  kind: "agent_chat" | "memory_summary";
+  source: "agent" | "memory";
   operationId: string;
   presetId: string;
   provider: string;
   model: string;
-  capability: "agent";
+  capability: "agent" | "memory_summary";
   metadata: JsonRecord;
   createdAt: string;
 };
 
 export interface ByokTokenUsageClient {
-  recordEvent(event: ByokTokenUsageEvent): Promise<void>;
+  recordEvent(event: ByokTokenUsageEvent, options?: { requireRuntime?: boolean }): Promise<void>;
+}
+
+export interface HistorySummaryUsageClient extends ByokTokenUsageClient {
+  getMemoryBudget(): Promise<MemoryTokenBudgetDto>;
 }
 
 export type ByokTokenUsageHookOptions = {

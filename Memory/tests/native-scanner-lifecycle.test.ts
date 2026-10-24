@@ -31,7 +31,7 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
     writeFileSync(path, records(true).map(record => JSON.stringify(record)).join("\n") + "\n");
     const messages: RawCodexMessage[] = []; for await (const value of readCodexRollout(path)) messages.push(value);
     const turn = sourceTurnFromMessages(messages)!;
-    const hook = () => service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "hook"), namespace: { source: "codex", profileId: "default", userId: "scan-owner" } });
+    const hook = () => service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "hook"), namespace: { source: "codex", profileId: "default", userId: "hook-owner" } });
     const add = vi.spyOn(service, "addMemory");
     const executor = createAgentSourceExecutor({ service, configPath: join(root, "config.yaml"),
       resolveAgentSkillRoot: () => null,
@@ -43,19 +43,19 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
       expect(executor.scanStatus().error).toBeNull();
       expect(hook().status).toBe("existing");
       expect(add).not.toHaveBeenCalled();
-      for (const table of ["raw_turns", "source_turn_captures"]) expect(db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
+      for (const table of ["sessions", "episodes", "raw_turns", "source_turn_captures"]) expect(db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE memory_layer = 'L1'").get()).toEqual({ n: 1 });
       const captured = hook().result!;
       const repos = new Repositories(db.db);
-      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe("scan-owner");
-      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe("scan-owner");
+      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe(first === "hook" ? "hook-owner" : "scan-owner");
+      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe(first === "hook" ? "hook-owner" : "scan-owner");
       expect(repos.runtime.getEpisode(captured.episodeId)?.l1MemoryIds).toEqual([captured.l1MemoryId]);
       expect(repos.runtime.getRawTurn(captured.rawTurnId)?.toolCalls[0]).toMatchObject({ id: "read", input: { path: "src/main.ts" }, output: expect.stringContaining("source contents") });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'import_summary'").get()).toEqual({ n: 0 });
     } finally { await executor.dispose(); }
   });
 
-  it("keeps an incomplete scan retryable, then captures after task_complete is appended", async () => {
+  it("holds the watermark at an unfinished turn, then captures after task_complete is appended", async () => {
     const { service, db, root } = fixture.createTestService();
     const path = join(root, "rollout.jsonl"); const statePath = join(root, "scan-state.json");
     const write = (complete: boolean) => writeFileSync(path, records(complete).map(record => JSON.stringify(record)).join("\n") + "\n");
@@ -67,7 +67,7 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
     try {
       await executor.startScan({ sourceId: "codex", mode: "incremental" }); await wait(executor);
       expect(executor.scanStatus().error).toBeNull();
-      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.latestSeenAt).toBeNull();
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex).toMatchObject({ lastScannedAt: expect.any(String), latestSeenAt: at });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns").get()).toEqual({ n: 0 });
       write(true);
       await executor.startScan({ sourceId: "codex", mode: "incremental" }); await wait(executor);
@@ -114,5 +114,54 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
     } finally {
       await executor.dispose();
     }
+  });
+
+  it("moves to incremental scans when the only unfinished turn was abandoned long ago", async () => {
+    const { service, db, root } = fixture.createTestService();
+    const statePath = join(root, "scan-state.json");
+    const completePath = join(root, "rollout-complete.jsonl");
+    const abandonedPath = join(root, "rollout-abandoned.jsonl");
+    const abandonedAt = "2020-01-01T00:00:00.000Z";
+    writeFileSync(completePath, records(true).map((record) => JSON.stringify(record)).join("\n") + "\n");
+    writeFileSync(abandonedPath, [
+      { type: "session_meta", timestamp: abandonedAt, payload: { id: "abandoned-session" } },
+      { type: "event_msg", timestamp: abandonedAt, payload: { type: "task_started", turn_id: "abandoned-turn" } },
+      { type: "response_item", timestamp: abandonedAt, payload: { type: "message", role: "user", content: [{ text: "This turn never finished." }] } }
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const scans: Array<{ fullHistory?: boolean; since?: string }> = [];
+    const executor = createAgentSourceExecutor({ service, configPath: join(root, "config.yaml"), statePath,
+      resolveAgentSkillRoot: () => null,
+      sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: root },
+        detect: async () => true,
+        async *scan(options) {
+          scans.push({ fullHistory: options.fullHistory, since: options.since });
+          for (const path of [abandonedPath, completePath]) {
+            for await (const message of readCodexRollout(path)) yield { ...message, sourceId: "codex", workspacePath: null, gitRoot: null };
+          }
+        } }]) });
+    try {
+      for (let run = 0; run < 2; run += 1) {
+        await executor.startScan({ sourceId: "codex" }); await wait(executor);
+        expect(executor.scanStatus().error).toBeNull();
+      }
+      expect(scans).toEqual([{ fullHistory: true, since: undefined }, { fullHistory: false, since: at }]);
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex).toMatchObject({ lastScannedAt: expect.any(String), latestSeenAt: at });
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns").get()).toEqual({ n: 1 });
+    } finally { await executor.dispose(); }
+  });
+
+  it("keeps the whole source retryable when Memory refuses captures", async () => {
+    const { service, root } = fixture.createTestService();
+    const path = join(root, "rollout.jsonl"); const statePath = join(root, "scan-state.json");
+    writeFileSync(path, records(true).map((record) => JSON.stringify(record)).join("\n") + "\n");
+    vi.spyOn(service, "completeSourceTurn").mockReturnValue({ status: "pending", reason: "memory_add_disabled" });
+    const executor = createAgentSourceExecutor({ service, configPath: join(root, "config.yaml"), statePath,
+      resolveAgentSkillRoot: () => null,
+      sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: root },
+        detect: async () => true, async *scan() { for await (const message of readCodexRollout(path)) yield { ...message, sourceId: "codex", workspacePath: null, gitRoot: null }; } }]) });
+    try {
+      await executor.startScan({ sourceId: "codex" }); await wait(executor);
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex).toMatchObject({ lastScannedAt: null, latestSeenAt: null });
+    } finally { await executor.dispose(); }
   });
 });

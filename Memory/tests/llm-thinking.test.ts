@@ -16,6 +16,23 @@ afterEach(() => {
 });
 
 describe("memory LLM thinking configuration", () => {
+  it.each(["openai_responses", "sglang", "vllm"] as const)(
+    "preserves the explicit %s provider in fixed memory configuration",
+    (provider) => {
+      const root = mkdtempSync(join(tmpdir(), "memmy-provider-"));
+      roots.push(root);
+      const file = join(root, "config.yaml");
+      writeFileSync(file, YAML.stringify({
+        memmyMemory: {
+          roleRouting: { summary: "fixed" },
+          summary: { provider, endpoint: "https://api.example.test/v1", model: "qwen3.8-27b" }
+        }
+      }));
+
+      expect(loadMemmyConfig(file).config.summary.provider).toBe(provider);
+    }
+  );
+
   it("sends every Bailian thinking switch to the Memmy account gateway", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -175,6 +192,84 @@ describe("memory LLM thinking configuration", () => {
     expect(requestBody(fetchMock)).not.toHaveProperty("response_format");
   });
 
+  it("disables thinking for the account summary alias without knowing its upstream model", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      vendor: "openai_compatible",
+      sourceProvider: "memmy_account",
+      endpoint: "https://account-gateway.example/v1",
+      model: "memory_summary"
+    }), { modelRole: "memory_summary" });
+
+    await client.completeJson([{ role: "user", content: "extract keywords" }], {
+      operation: "retrieval.query_extract",
+      thinkingMode: "disabled",
+      maxTokens: 320
+    });
+
+    expect(requestBody(fetchMock)).toMatchObject({
+      model: "memory_summary",
+      enable_thinking: false,
+      max_tokens: 320,
+      response_format: { type: "json_object" }
+    });
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
+  });
+
+  it("controls the account evolution alias per operation and keeps its thinking budget", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      vendor: "openai_compatible",
+      sourceProvider: "memmy_account",
+      endpoint: "https://account-gateway.example/v1",
+      model: "memory_evolution",
+      enableThinking: true,
+      thinkingBudget: 1_000
+    }));
+
+    await client.completeJson([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+    expect(requestBody(fetchMock)).toMatchObject({
+      enable_thinking: false,
+      response_format: { type: "json_object" }
+    });
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
+
+    fetchMock.mockClear();
+    await client.completeJson([{ role: "user", content: "evolve" }], {
+      operation: "evolution.induction",
+      thinkingMode: "enabled"
+    });
+    expect(requestBody(fetchMock)).toMatchObject({
+      enable_thinking: true,
+      thinking_budget: 1_000
+    });
+    expect(requestBody(fetchMock)).not.toHaveProperty("response_format");
+  });
+
+  it.each(["memory_summary", "memory_evolution"])("does not infer account thinking controls for a BYOK %s alias", async (model) => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      vendor: "openai_compatible",
+      sourceProvider: "openai",
+      model
+    }));
+
+    await client.completeJson([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+
+    expect(requestBody(fetchMock)).not.toHaveProperty("enable_thinking");
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking");
+  });
+
   it("does not add a thinking budget to user-configured Qwen requests", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -251,6 +346,7 @@ describe("memory LLM thinking configuration", () => {
       enable_thinking: false,
       chat_template_kwargs: { tokenizer_option: "preserved" }
     });
+    expect(requestBody(fetchMock).chat_template_kwargs).toEqual({ tokenizer_option: "preserved" });
   });
 
   it.each([

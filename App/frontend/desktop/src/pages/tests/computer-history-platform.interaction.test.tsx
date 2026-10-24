@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { MemoryPage, type MemorySubPageId } from "../memory-page.js";
 import { HISTORY_PERMISSION_SETUP_KEY } from "../memory/computer-history-permission-state.js";
+import { WECHAT_PERMISSION_RETURN_KEY } from "../memory/computer-history-wechat-permission-state.js";
 
 const mocks = vi.hoisted(() => ({ historyPage: vi.fn(), dispatch: vi.fn(), track: vi.fn() }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: null }) }));
@@ -53,11 +54,12 @@ describe("Computer History platform availability", () => {
     expect(window.sessionStorage.getItem("memmy.memorySubPage")).toBe("overview");
   });
 
-  it.each(["saved page", "direct URL", "pending permission setup"])("ignores Windows %s without mounting permission/polling effects", (entry) => {
+  it.each(["saved page", "direct URL", "pending permission setup", "pending WeChat permission return"])("ignores Windows %s without mounting permission/polling effects", (entry) => {
     platform("win32");
     if (entry === "saved page") window.sessionStorage.setItem("memmy.memorySubPage", "computer-history");
     if (entry === "direct URL") window.history.replaceState(null, "", "/memory?memoryPage=computer-history");
     if (entry === "pending permission setup") window.localStorage.setItem(HISTORY_PERMISSION_SETUP_KEY, "start");
+    if (entry === "pending WeChat permission return") window.localStorage.setItem(WECHAT_PERMISSION_RETURN_KEY, JSON.stringify({ sessionId: "old-process", createdAt: Date.now() }));
     render();
     expect(host.textContent).not.toContain("Computer History");
     expect(host.textContent).toContain("Overview content");
@@ -67,6 +69,15 @@ describe("Computer History platform availability", () => {
   it("keeps the macOS entry and mounts History when selected", () => {
     platform("darwin");
     render();
+    const sidebarText = host.querySelector(".memory-page-sidebar")?.textContent ?? "";
+    const userMemories = sidebarText.indexOf("User Memory");
+    const system = sidebarText.indexOf("System");
+    const history = sidebarText.indexOf("Computer History");
+    const sources = sidebarText.indexOf("Cross-Agent access");
+    expect(userMemories).toBeGreaterThan(-1);
+    expect(system).toBeGreaterThan(userMemories);
+    expect(history).toBeGreaterThan(system);
+    expect(sources).toBeGreaterThan(history);
     const entry = [...host.querySelectorAll("button")].find((button) => button.textContent === "Computer History");
     expect(entry).toBeDefined();
     expect(mocks.historyPage).not.toHaveBeenCalled();
@@ -78,6 +89,14 @@ describe("Computer History platform availability", () => {
   it("restores macOS pending permission onboarding", () => {
     platform("darwin");
     window.localStorage.setItem(HISTORY_PERMISSION_SETUP_KEY, "resume");
+    render();
+    expect(host.textContent).toContain("History content");
+    expect(mocks.historyPage).toHaveBeenCalled();
+  });
+
+  it("returns to the macOS Computer History page after WeChat permission setup", () => {
+    platform("darwin");
+    window.localStorage.setItem(WECHAT_PERMISSION_RETURN_KEY, JSON.stringify({ sessionId: "old-process", createdAt: Date.now() }));
     render();
     expect(host.textContent).toContain("History content");
     expect(mocks.historyPage).toHaveBeenCalled();

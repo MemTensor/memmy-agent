@@ -2,9 +2,13 @@ import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, I
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   MODEL_NAME_MAX_LENGTH,
-  type ModelEndpointProtocol
+  THINKING_LEVELS,
+  defaultThinkingLevel,
+  type ModelEndpointProtocol,
+  type ModelThinkingConfigDto,
+  type ThinkingLevel
 } from "@memmy/local-api-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -25,8 +29,10 @@ import {
   setDefaultTaskModel,
   setTaskModelCandidates,
   upsertModelConnection,
+  isCustomModelEntry,
   type ModelCapability,
   type ModelAssignmentKind,
+  type ModelCandidate,
   type ModelConnection,
   type ModelWorkspaceMode,
   type ModelWorkspaceMutationError
@@ -36,7 +42,7 @@ import {
   PasswordConfigField,
   TestButton as ApiKeyTestButton
 } from "./api-key-form-fields.js";
-import { DEFAULT_ENDPOINTS, DEFAULT_MODEL_IDS, PROTOCOL_OPTIONS, fromProtocol, type Protocol } from "./model-config.js";
+import { DEFAULT_ENDPOINTS, DEFAULT_MODEL_IDS, PROTOCOL_OPTIONS, CUSTOM_PROTOCOL_OPTIONS, fromProtocol, type CustomProtocol, type Protocol } from "./model-config.js";
 import {
   SETTINGS_ADD_MODEL_EVENT,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
@@ -51,6 +57,8 @@ import {
   type StoredConnectionTestState,
   type StoredConnectionTestStatus
 } from "./model-workspace-connection-test-state.js";
+
+import { endpointCredentialSignature, resolveModelCredentials } from "./model-credentials.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 export type ModelKind = "text" | "embedding" | "asr" | "image";
@@ -72,18 +80,84 @@ interface ConnectionTestState {
   message: string | null;
 }
 
+type CustomThinkingMode = "interface-default" | "switchable" | "always-on";
+
+interface CustomModelOptions {
+  thinkingMode: CustomThinkingMode;
+  defaultEnabled: boolean;
+  levels: ThinkingLevel[];
+  defaultLevel: ThinkingLevel;
+  imageInput: boolean;
+}
+
+interface ConnectionEditorModel {
+  presetId?: string;
+  name: string;
+  capabilities: ModelCapability[];
+  customOptions?: CustomModelOptions;
+}
+
+function defaultCustomModelOptions(): CustomModelOptions {
+  return {
+    thinkingMode: "interface-default",
+    defaultEnabled: true,
+    levels: ["medium"],
+    defaultLevel: "medium",
+    imageInput: false
+  };
+}
+
+function customOptionsFromModel(entry: ModelConnection["modelEntries"][number]): CustomModelOptions {
+  const thinking = entry.thinking;
+  const levels = thinking?.levels.length ? [...thinking.levels] : ["medium" as ThinkingLevel];
+  return {
+    thinkingMode: !thinking
+      ? "interface-default"
+      : thinking.switchable ? "switchable" : "always-on",
+    defaultEnabled: thinking?.defaultEnabled ?? true,
+    levels,
+    defaultLevel: thinking?.defaultLevel && levels.includes(thinking.defaultLevel)
+      ? thinking.defaultLevel
+      : defaultThinkingLevel(levels) ?? "medium",
+    imageInput: entry.inputModalities?.includes("image") === true
+  };
+}
+
+function thinkingConfigFromOptions(options: CustomModelOptions | undefined): ModelThinkingConfigDto | undefined {
+  if (!options || options.thinkingMode === "interface-default") return undefined;
+  return {
+    switchable: options.thinkingMode === "switchable",
+    defaultEnabled: options.thinkingMode === "switchable" ? options.defaultEnabled : true,
+    levels: [...options.levels],
+    defaultLevel: options.defaultLevel
+  };
+}
+
+function editorDeclarationKey(model: ConnectionEditorModel) {
+  return {
+    name: model.name,
+    capabilities: [...model.capabilities].sort()
+  };
+}
+
+function savedDeclarationKey(entry: ModelConnection["modelEntries"][number]) {
+  return {
+    name: entry.model,
+    capabilities: normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability)).sort()
+  };
+}
+
 interface ConnectionEditorState {
   connectionId: string | null;
   provider: Protocol;
   endpoint: string;
   apiKey: string;
-  models: Array<{
-    presetId?: string;
-    name: string;
-    capabilities: ModelCapability[];
-  }>;
+  customProtocol: CustomProtocol | null;
+  region: string;
+  models: ConnectionEditorModel[];
   modelDraft: string;
   capabilityDrafts: ModelCapability[];
+  modelDraftOptions: CustomModelOptions;
   addingModel: boolean;
   editingModelIndex: number | null;
 }
@@ -113,8 +187,17 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [workspace, setWorkspace] = useState(() => createModelWorkspace(props.seedConfig));
   const [modelsExpanded, setModelsExpanded] = useState(true);
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
-  const [editor, setEditor] = useState<ConnectionEditorState | null>(null);
+  const [editor, setEditorState] = useState<ConnectionEditorState | null>(null);
+  const editorRevision = useRef(0);
+  const editorRequest = useRef(0);
   const [editorTest, setEditorTest] = useState<ConnectionTestState>({ status: "idle", message: null });
+  // Every edit (including closing/reopening) invalidates pending responses, even
+  // when the user later restores the same field values.
+  const setEditor: Dispatch<SetStateAction<ConnectionEditorState | null>> = useCallback((update) => {
+    editorRevision.current += 1;
+    setEditorState(update);
+    setEditorTest({ status: "idle", message: null });
+  }, []);
   const [showEditorApiKey, setShowEditorApiKey] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ModelConnection | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -223,9 +306,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       provider,
       endpoint: DEFAULT_ENDPOINTS[provider],
       apiKey: "",
+      customProtocol: provider === "custom" ? "openai-chat-completions" : null,
+      region: "",
       models: [],
       modelDraft: DEFAULT_MODEL_IDS[provider],
       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      modelDraftOptions: defaultCustomModelOptions(),
       addingModel: true,
       editingModelIndex: null
     });
@@ -269,33 +355,47 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   }, [openAddConnection, props.autoOpenAddConnection]);
 
   function openEditConnection(connection: ModelConnection) {
-    const provider = protocolFromConnection(connection.provider);
+    const isCustom = connection.modelEntries[0]?.custom === true;
+    const provider: Protocol = isCustom
+      ? "custom"
+      : connection.protocol === "openai-responses"
+        ? "openai_responses"
+        : protocolFromConnection(connection.provider);
     const savedTest = connectionTestState(connection, testStates);
     setFormError(null);
-    setEditorTest(savedTest
-      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
-      : { status: "idle", message: null });
     setShowEditorApiKey(false);
     setEditor({
       connectionId: connection.id,
       provider,
       endpoint: connection.endpoint,
       apiKey: "",
+      customProtocol: isCustom ? connection.protocol as CustomProtocol : null,
+      region: connection.region ?? "",
       models: connection.modelEntries.map((entry) => ({
         presetId: entry.presetId,
         name: entry.model,
-        capabilities: normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))
+        capabilities: normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability)),
+        ...(isCustom ? { customOptions: customOptionsFromModel(entry) } : {})
       })),
       modelDraft: "",
       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      modelDraftOptions: defaultCustomModelOptions(),
       addingModel: false,
       editingModelIndex: null
     });
+    setEditorTest(savedTest
+      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
+      : { status: "idle", message: null });
+  }
+
+  function updateDraftCustomOptions(next: CustomModelOptions) {
+    setEditor((current) => current ? { ...current, modelDraftOptions: next } : null);
+    setEditorTest({ status: "idle", message: null });
   }
 
   function resolveEditorModels() {
     if (!editor) {
-      return { models: [] as Array<{ presetId?: string; name: string; capabilities: ModelCapability[] }>, error: null as string | null };
+      return { models: [] as ConnectionEditorModel[], error: null as string | null };
     }
     const draftName = editor.modelDraft.trim();
     if (!editor.addingModel || !draftName) {
@@ -316,7 +416,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     const nextModel = {
       ...(editedModel?.presetId ? { presetId: editedModel.presetId } : {}),
       name: draftName,
-      capabilities: editor.capabilityDrafts
+      capabilities: editor.capabilityDrafts,
+      ...(editor.provider === "custom" ? { customOptions: editor.modelDraftOptions } : {})
     };
     return {
       models: editor.editingModelIndex !== null
@@ -333,31 +434,31 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setFormError(resolved.error);
       return;
     }
-    const existing = editor.connectionId
-      ? space.connections.find((connection) => connection.id === editor.connectionId)
-      : undefined;
-    const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
-    );
-    const capabilities = resolved.models.flatMap((model) => model.capabilities);
+    const credentials = editorCredentials;
+    if (!canSaveConnection || !credentials) return;
     const result = upsertModelConnection(workspace, props.mode, {
       id: editor.connectionId ?? undefined,
-      provider: editor.provider,
-      endpoint: editor.endpoint,
-      protocol: editorProtocolForCapabilities(
-        editor.provider,
-        capabilities,
-        providerChanged ? undefined : existing?.protocol
-      ),
-      apiKey: editor.apiKey || undefined,
-      apiKeyMasked: providerChanged ? undefined : existing?.apiKeyMasked,
+      provider: credentials.provider,
+      endpoint: credentials.endpoint,
+      protocol: credentials.protocol,
+      region: editor.customProtocol === "bedrock-converse" ? editor.region.trim() || undefined : undefined,
+      apiKey: credentials.apiKey || undefined,
+      apiKeyMasked: credentials.apiKeyMasked || undefined,
       models: resolved.models.map((model) => model.name),
-      modelEntries: resolved.models.map((model) => ({
-        ...(model.presetId ? { presetId: model.presetId } : {}),
-        model: model.name,
-        capability: model.capabilities[0]!,
-        capabilities: model.capabilities
-      })),
+      modelEntries: resolved.models.map((model) => {
+        const thinking = thinkingConfigFromOptions(model.customOptions);
+        return {
+          ...(model.presetId ? { presetId: model.presetId } : {}),
+          model: model.name,
+          capability: model.capabilities[0]!,
+          capabilities: model.capabilities,
+          ...(editor.provider === "custom" ? {
+            custom: true,
+            ...(thinking ? { thinking } : {}),
+            inputModalities: model.customOptions?.imageInput ? ["text", "image"] : ["text"]
+          } : {})
+        };
+      }),
       modelCapabilities: Object.fromEntries(
         resolved.models.map((model) => [model.name, model.capabilities[0]!])
       )
@@ -370,8 +471,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       connection.id === editor.connectionId
       || (
         editor.connectionId === null
-        && protocolFromConnection(connection.provider) === editor.provider
-        && connection.endpoint === editor.endpoint.trim().replace(/\/+$/, "")
+        && connection.provider === credentials.provider
+        && connection.endpoint === credentials.endpoint
         && resolved.models.every((model) => connection.modelEntries.some((entry) => (
           entry.model === model.name
           && model.capabilities.every((capability) => entry.capabilities.includes(toCatalogCapabilityForEditor(capability)))
@@ -453,7 +554,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     const nextModel = {
       ...(editedModel?.presetId ? { presetId: editedModel.presetId } : {}),
       name,
-      capabilities: editor.capabilityDrafts
+      capabilities: editor.capabilityDrafts,
+      ...(editor.provider === "custom" ? { customOptions: editor.modelDraftOptions } : {})
     };
     const models = editor.editingModelIndex !== null
       ? editor.models.map((model, index) => index === editor.editingModelIndex ? nextModel : model)
@@ -463,6 +565,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       models,
       modelDraft: "",
       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      modelDraftOptions: defaultCustomModelOptions(),
       addingModel: false,
       editingModelIndex: null
     });
@@ -478,6 +581,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       ...editor,
       modelDraft: model.name,
       capabilityDrafts: model.capabilities,
+      modelDraftOptions: model.customOptions ?? defaultCustomModelOptions(),
       addingModel: true,
       editingModelIndex: modelIndex
     });
@@ -490,6 +594,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       ...editor,
       modelDraft: "",
       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+      modelDraftOptions: defaultCustomModelOptions(),
       addingModel: false,
       editingModelIndex: null
     });
@@ -508,6 +613,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         ? {
             modelDraft: "",
             capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+            modelDraftOptions: defaultCustomModelOptions(),
             addingModel: false,
             editingModelIndex: null
           }
@@ -551,39 +657,34 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testNoModel") });
       return;
     }
-    const existing = editor.connectionId
-      ? space.connections.find((connection) => connection.id === editor.connectionId)
-      : undefined;
-    const providerChanged = Boolean(
-      existing && protocolFromConnection(existing.provider) !== editor.provider
-    );
-    if (!editor.apiKey.trim() && (!existing?.apiKeyMasked || providerChanged)) {
-      setEditorTest({ status: "error", message: t("settings.modelWorkspace.testKeyRequired") });
+    const credentials = editorCredentials;
+    if (!credentials || (!credentials.apiKey && !credentials.hasExistingApiKey)) {
+      setEditorTest({ status: "error", message: t(credentials?.requiresApiKey
+        ? "apiKey.credentialsChanged" : "settings.modelWorkspace.testKeyRequired") });
       return;
     }
+    const revision = editorRevision.current;
+    const request = ++editorRequest.current;
+    const isCurrent = () => revision === editorRevision.current && request === editorRequest.current;
     setEditorTest({ status: "testing", message: t("settings.modelWorkspace.testing") });
     try {
       const result = props.configClient
         ? await props.configClient.testModelConfig({
-          provider: fromProtocol(editor.provider),
-          endpointId: existing?.endpointId ?? editor.connectionId ?? "connection-test-new",
-          protocol: editorProtocolForCapabilities(
-            editor.provider,
-            selectedModel.capabilities,
-            providerChanged ? undefined : existing?.protocol
-          ),
-          endpoint: editor.endpoint,
-            model: selectedModel.name,
-            apiKey: editor.apiKey,
-            apiKeyMasked: providerChanged ? "" : existing?.apiKeyMasked ?? "",
-            configured: true
-          }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
+          ...credentials,
+          apiKeyMasked: credentials.apiKeyMasked ?? "",
+          configured: true,
+          ...(editor.customProtocol === "bedrock-converse" && editor.region.trim()
+            ? { region: editor.region.trim() }
+            : {})
+        }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
         : await simulateConnectionTest();
+      if (!isCurrent()) return;
       setEditorTest({
         status: result.ok ? "success" : "error",
         message: result.ok ? t("settings.modelWorkspace.testSuccess") : t("settings.modelWorkspace.testFailed")
       });
     } catch {
+      if (!isCurrent()) return;
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testFailed") });
     }
   }
@@ -608,7 +709,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   const memorySummaryOptions = memorySummaryCandidates.map((candidate) => candidateOption(
     candidate.id,
-    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t),
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate)),
     candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform" ? t("settings.modelWorkspace.platformModels") : t("settings.modelWorkspace.byokConnections"),
     candidate.source,
@@ -616,7 +717,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   ));
   const memoryEvolutionOptions = memoryEvolutionCandidates.map((candidate) => candidateOption(
     candidate.id,
-    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t),
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate)),
     candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform" ? t("settings.modelWorkspace.platformModels") : t("settings.modelWorkspace.byokConnections"),
     candidate.source,
@@ -626,7 +727,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     .filter((candidate) => candidate.source === "byok")
     .map((candidate) => candidateOption(
       candidate.id,
-      connectionProtocolLabel(candidate.provider, t),
+      connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate)),
       candidate.model,
       t("settings.modelWorkspace.byokConnections"),
       candidate.source,
@@ -647,7 +748,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     candidate.id,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformName")
-      : connectionProtocolLabel(candidate.provider, t),
+      : connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate)),
     candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformModels")
@@ -659,7 +760,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     candidate.id,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformName")
-      : connectionProtocolLabel(candidate.provider, t),
+      : connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate)),
     candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformModels")
@@ -683,21 +784,55 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const editorExistingConnection = editor?.connectionId
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
+  const editorModels = resolveEditorModels().models;
+  const editorSelectedModel = editorModels.find((model) => model.capabilities.includes("chat")) ?? editorModels[0];
   const editorOriginalProvider = editorExistingConnection
-    ? protocolFromConnection(editorExistingConnection.provider)
+    ? editorIdentity(editorExistingConnection)
     : null;
   const editorProviderChanged = Boolean(
     editor && editorOriginalProvider && editor.provider !== editorOriginalProvider
   );
-  const editorHasUsableKey = Boolean(
-    editor?.apiKey.trim()
-    || (editorExistingConnection?.apiKeyMasked && !editorProviderChanged)
-  );
+  const editorCapabilities = editorModels.flatMap((model) => model.capabilities);
+  const editorProtocol = editor?.provider === "custom" && editor.customProtocol
+    ? editor.customProtocol
+    : editor
+      ? editorProtocolForCapabilities(
+          editor.provider,
+          editorCapabilities,
+          editorProviderChanged ? undefined : editorExistingConnection?.protocol
+        )
+      : undefined;
+  const editorRegion = editor?.customProtocol === "bedrock-converse" ? editor.region.trim() : "";
+  const editorCredentials = editor && editorProtocol ? resolveModelCredentials({
+    provider: catalogProviderForEditor(editor.provider, editor.customProtocol),
+    protocol: editorProtocol,
+    endpoint: editor.endpoint,
+    model: editorSelectedModel?.name ?? "",
+    apiKey: editor.apiKey,
+    apiKeyMasked: editorExistingConnection?.apiKeyMasked ?? ""
+  }, editorExistingConnection ? {
+    endpointId: editorExistingConnection.endpointId,
+    credentialSignature: endpointCredentialSignature(
+      editorExistingConnection.provider,
+      editorExistingConnection.protocol,
+      editorExistingConnection.endpoint,
+      "",
+      editorExistingConnection.apiKeyMasked
+    )
+  } : null) : null;
+  const editorHasUsableKey = Boolean(editorCredentials?.apiKey || editorCredentials?.hasExistingApiKey);
+  const editorDetailsChanged = Boolean(editorExistingConnection && editorCredentials && (
+    editorCredentials.apiKey
+    || !editorCredentials.hasExistingApiKey
+    || editorRegion !== (editorExistingConnection.region ?? "").trim()
+    || JSON.stringify(editorModels.map(editorDeclarationKey))
+      !== JSON.stringify(editorExistingConnection.modelEntries.map(savedDeclarationKey))
+  ));
   const canSaveConnection = Boolean(
-    editor
-    && editor.endpoint.trim()
-    && editorHasUsableKey
-    && (editor.models.length > 0 || (editor.addingModel && editor.modelDraft.trim()))
+    editor && editorCredentials?.endpoint && editorHasUsableKey
+    && editorModels.length && !resolveEditorModels().error
+    && editorTest.status !== "error"
+    && (!editorDetailsChanged || editorTest.status === "success")
   );
   const selectedTaskModelsText = taskCandidates.length > 0
     ? taskCandidates.map((candidate) => candidate.model).join("、")
@@ -798,7 +933,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   <div className="min-w-0">
                     <h4 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text-ink/80">
                       <ModelProviderLogo provider={connection.provider} size={16} />
-                      <span className="truncate">{connectionProtocolLabel(connection.provider, t)}</span>
+                      <span className="truncate">{connectionProtocolLabel(connection.provider, t, editorIdentity(connection))}</span>
                     </h4>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -833,7 +968,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                       />
                 ) : (
                   <p className="mt-2 text-xs text-text-ink/45">
-                    {connectionProtocolLabel(connection.provider, t)} · {t("settings.modelWorkspace.modelCount", {
+                    {connectionProtocolLabel(connection.provider, t, editorIdentity(connection))} · {t("settings.modelWorkspace.modelCount", {
                       count: connection.models.length
                     })}
                   </p>
@@ -934,7 +1069,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                           <span className="shrink-0 text-[10px] text-text-ink/40">
                             {candidate.source === "platform"
                               ? t("settings.modelWorkspace.platformName")
-                              : connectionProtocolLabel(candidate.provider, t)}
+                              : connectionProtocolLabel(candidate.provider, t, identityForCandidate(workspace, candidate))}
                           </span>
                           </button>
                           {selected && (
@@ -1063,12 +1198,15 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 provider,
                 endpoint: DEFAULT_ENDPOINTS[provider],
                 apiKey: "",
+                customProtocol: provider === "custom" ? current.customProtocol ?? "openai-chat-completions" : null,
+                region: provider === "custom" ? current.region : "",
                 ...(current.connectionId
                   ? {}
                   : {
                       models: [],
                       modelDraft: DEFAULT_MODEL_IDS[provider],
                       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+                      modelDraftOptions: defaultCustomModelOptions(),
                       addingModel: true,
                       editingModelIndex: null
                     })
@@ -1086,6 +1224,34 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             className="select-control--subtle model-connection-select"
             labelClassName="model-connection-select__label"
           />
+          {editor.provider === "custom" && (
+            <>
+              <Select
+                label={t("settings.modelWorkspace.customProtocol")}
+                value={editor.customProtocol ?? "openai-chat-completions"}
+                onValueChange={(value) => {
+                  setEditor((prev) => prev ? { ...prev, customProtocol: value as CustomProtocol } : null);
+                  setEditorTest({ status: "idle", message: null });
+                }}
+                className="select-control--subtle"
+                options={CUSTOM_PROTOCOL_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: t(option.labelKey)
+                }))}
+              />
+              {editor.customProtocol === "bedrock-converse" && (
+                <ConfigField
+                  label={t("settings.modelWorkspace.region")}
+                  value={editor.region}
+                  onChange={(region) => {
+                    setEditor((prev) => prev ? { ...prev, region } : prev);
+                    setEditorTest({ status: "idle", message: null });
+                  }}
+                  placeholder={t("settings.modelWorkspace.regionPlaceholder")}
+                />
+              )}
+            </>
+          )}
           <ConfigField
             label={t("apiKey.endpoint")}
             value={editor.endpoint}
@@ -1096,7 +1262,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             placeholder={DEFAULT_ENDPOINTS[editor.provider]}
           />
           <PasswordConfigField
-            label={editor.connectionId && !editorProviderChanged
+            label={editorCredentials?.hasExistingApiKey
               ? t("settings.modelWorkspace.replaceKey")
               : t("apiKey.key")}
             value={editor.apiKey}
@@ -1104,15 +1270,19 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               setEditor((current) => current ? { ...current, apiKey: value } : current);
               setEditorTest({ status: "idle", message: null });
             }}
-            maskedValue={editor.connectionId && !editorProviderChanged
-              ? editorExistingConnection?.apiKeyMasked
-              : undefined}
-            placeholder={editor.connectionId && !editorProviderChanged
+            maskedValue={editorCredentials?.apiKeyMasked}
+            placeholder={editorCredentials?.hasExistingApiKey
               ? t("settings.modelWorkspace.replaceKeyPlaceholder")
               : "sk-..."}
             showPassword={showEditorApiKey}
             onTogglePassword={() => setShowEditorApiKey((show) => !show)}
           />
+          {editorCredentials?.requiresApiKey && (
+            <p className="text-xs text-status-error" role="alert">{t("apiKey.credentialsChanged")}</p>
+          )}
+          {editorDetailsChanged && editorHasUsableKey && editorTest.status === "idle" && (
+            <p className="text-xs text-text-ink/65" role="status">{t("apiKey.testStale")}</p>
+          )}
           <div className="grid gap-1.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-xs text-text-ink/65">
@@ -1127,6 +1297,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                     capabilityDrafts: editorExistingConnection
                       ? editorCapabilitiesForProtocol(editorExistingConnection.protocol)
                       : [...DEFAULT_TEXT_CAPABILITIES],
+                    modelDraftOptions: defaultCustomModelOptions(),
                     addingModel: true,
                     editingModelIndex: null
                   })}
@@ -1174,9 +1345,18 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 />
                 <ModelCapabilityPicker
                   capabilities={editor.capabilityDrafts}
-                  onChange={(capabilityDrafts) => setEditor({ ...editor, capabilityDrafts })}
+                  onChange={(capabilityDrafts) => {
+                    setEditor({ ...editor, capabilityDrafts });
+                    setEditorTest({ status: "idle", message: null });
+                  }}
                 />
               </div>
+              {editor.provider === "custom" && editor.capabilityDrafts.includes("chat") && (
+                <CustomModelSettings
+                  options={editor.modelDraftOptions}
+                  onChange={updateDraftCustomOptions}
+                />
+              )}
               <div className="model-editor-actions">
                 <button
                   type="button"
@@ -1231,7 +1411,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         open={Boolean(deleteTarget)}
         title={t("settings.modelWorkspace.deleteTitle")}
         message={t("settings.modelWorkspace.deleteConfirm", {
-          provider: deleteTarget ? connectionProtocolLabel(deleteTarget.provider, t) : ""
+          provider: deleteTarget ? connectionProtocolLabel(deleteTarget.provider, t, editorIdentity(deleteTarget)) : ""
         })}
         cancelLabel={t("common.cancel")}
         closeLabel={t("common.close")}
@@ -1276,9 +1456,7 @@ function ProviderModelList(props: {
             index > 0 ? "border-t border-border-stone/30" : ""
           }`}
         >
-          <span className="min-w-0 flex-1 truncate text-sm text-text-ink/70" title={item.model}>
-            {item.model}
-          </span>
+          <span className="min-w-0 flex-1 truncate text-sm text-text-ink/70" title={item.model}>{item.model}</span>
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="rounded-tag bg-canvas-oat px-2 py-0.5 text-[10px] text-text-ink/50">
               {t(modelKindMessageKey(modelKindForCapabilities(item.capabilities)))}
@@ -1449,11 +1627,23 @@ function candidateOption(
 
 function connectionProtocolLabel(
   provider: string,
-  t: ReturnType<typeof useTranslation>["t"]
+  t: ReturnType<typeof useTranslation>["t"],
+  identity?: Protocol
 ): string {
-  const protocol = protocolFromConnection(provider);
+  const protocol = identity ?? protocolFromConnection(provider);
   const option = PROTOCOL_OPTIONS.find((item) => item.value === protocol);
   return option ? t(option.labelKey) : provider;
+}
+
+function identityForCandidate(
+  workspace: ReturnType<typeof createModelWorkspace>,
+  candidate: ModelCandidate
+): Protocol | undefined {
+  if (candidate.source !== "byok" || !candidate.connectionId) return undefined;
+  const connection = workspace.spaces.byok.connections.find((item) => item.id === candidate.connectionId)
+    ?? workspace.spaces.account.connections.find((item) => item.id === candidate.connectionId);
+  if (!connection) return isCustomModelEntry(workspace, candidate) ? "custom" : undefined;
+  return editorIdentity(connection);
 }
 
 export function protocolFromConnection(provider: string): Protocol {
@@ -1466,10 +1656,23 @@ export function protocolFromConnection(provider: string): Protocol {
   return "openai";
 }
 
+export function catalogProviderForEditor(provider: Protocol, _customProtocol: CustomProtocol | null): string {
+  if (provider === "custom") return "custom";
+  if (provider === "openai_responses") return "openai";
+  return fromProtocol(provider) === "kimi" ? "moonshot" : fromProtocol(provider);
+}
+
+function editorIdentity(connection: ModelConnection): Protocol {
+  if (connection.modelEntries[0]?.custom === true) return "custom";
+  if (connection.protocol === "openai-responses") return "openai_responses";
+  return protocolFromConnection(connection.provider);
+}
+
 function protocolForEditor(provider: Protocol, capability: ModelCapability): ModelEndpointProtocol {
   if (capability === "embedding") return "openai-embeddings";
   if (capability === "asr") return "dashscope-input-audio-chat";
   if (capability === "image") return provider === "qwen" ? "dashscope-multimodal-generation" : "openai-images";
+  if (provider === "openai_responses") return "openai-responses";
   if (provider === "anthropic") return "anthropic-messages";
   if (provider === "gemini") return "gemini-generate-content";
   return "openai-chat-completions";
@@ -1604,4 +1807,124 @@ function modelWorkspaceErrorText(
 async function simulateConnectionTest(): Promise<{ ok: boolean }> {
   await new Promise((resolve) => window.setTimeout(resolve, 450));
   return { ok: true };
+}
+
+function CustomCapabilityOption(props: {
+  checked: boolean;
+  label: string;
+  hint: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="custom-thinking-config__label">
+      <input
+        type="checkbox"
+        className="custom-thinking-config__checkbox check-sky"
+        checked={props.checked}
+        onChange={(event) => props.onChange(event.target.checked)}
+      />
+      <Tooltip content={props.hint} variant="description">
+        <span>{props.label}</span>
+      </Tooltip>
+    </label>
+  );
+}
+
+function CustomModelSettings(props: {
+  options: CustomModelOptions;
+  onChange: (next: CustomModelOptions) => void;
+}) {
+  const { t } = useTranslation();
+  const thinkingConfigured = props.options.thinkingMode !== "interface-default";
+
+  function toggleLevel(level: ThinkingLevel) {
+    const levels = props.options.levels.includes(level)
+      ? props.options.levels.filter((item) => item !== level)
+      : THINKING_LEVELS.filter((item) => item === level || props.options.levels.includes(item));
+    if (levels.length === 0) return;
+    props.onChange({
+      ...props.options,
+      levels,
+      defaultLevel: levels.includes(props.options.defaultLevel)
+        ? props.options.defaultLevel
+        : defaultThinkingLevel(levels) ?? levels[0]!
+    });
+  }
+
+  return (
+    <fieldset className="custom-thinking-config">
+      <legend className="custom-thinking-config__title">{t("settings.modelWorkspace.modelAbilities")}</legend>
+      <div className="custom-thinking-config__capabilities">
+        <CustomCapabilityOption
+          checked={props.options.imageInput}
+          label={t("settings.modelWorkspace.customImageInput")}
+          hint={t("settings.modelWorkspace.customImageInputHint")}
+          onChange={(imageInput) => props.onChange({ ...props.options, imageInput })}
+        />
+        <CustomCapabilityOption
+          checked={thinkingConfigured}
+          label={t("settings.modelWorkspace.thinkingMode")}
+          hint={t("settings.modelWorkspace.thinkingModeToggleHint")}
+          onChange={(checked) => props.onChange({
+            ...props.options,
+            thinkingMode: checked ? "always-on" : "interface-default"
+          })}
+        />
+      </div>
+      {thinkingConfigured && (
+        <>
+          <div className="custom-thinking-config__capabilities">
+            <CustomCapabilityOption
+              checked={props.options.thinkingMode === "switchable"}
+              label={t("settings.modelWorkspace.allowThinkingOff")}
+              hint={t("settings.modelWorkspace.allowThinkingOffHint")}
+              onChange={(allowed) => props.onChange({
+                ...props.options,
+                thinkingMode: allowed ? "switchable" : "always-on"
+              })}
+            />
+            {props.options.thinkingMode === "switchable" && (
+              <CustomCapabilityOption
+                checked={props.options.defaultEnabled}
+                label={t("settings.modelWorkspace.customThinkingDefaultEnabled")}
+                hint={t("settings.modelWorkspace.customThinkingDefaultEnabledHint")}
+                onChange={(defaultEnabled) => props.onChange({ ...props.options, defaultEnabled })}
+              />
+            )}
+          </div>
+          <div className="custom-thinking-config__section">
+            <div className="custom-thinking-config__section-title">{t("settings.modelWorkspace.supportedThinkingLevels")}</div>
+            <div className="custom-thinking-level-options">
+              {THINKING_LEVELS.map((level) => (
+                <label key={level} className="custom-thinking-level-option">
+                  <input
+                    type="checkbox"
+                    className="check-sky"
+                    checked={props.options.levels.includes(level)}
+                    disabled={props.options.levels.length === 1 && props.options.levels[0] === level}
+                    onChange={() => toggleLevel(level)}
+                  />
+                  <span>{t(`home.thinking.levelValue.${level}`)}</span>
+                </label>
+              ))}
+            </div>
+            <p className="custom-thinking-config__hint">{t("settings.modelWorkspace.supportedThinkingLevelsHint")}</p>
+          </div>
+          <Select
+            label={t("settings.modelWorkspace.defaultThinkingLevel")}
+            value={props.options.defaultLevel}
+            options={props.options.levels.map((level) => ({
+              value: level,
+              label: t(`home.thinking.levelValue.${level}`)
+            }))}
+            onValueChange={(value) => props.onChange({
+              ...props.options,
+              defaultLevel: value as ThinkingLevel
+            })}
+            className="select-control--subtle"
+          />
+        </>
+      )}
+    </fieldset>
+  );
 }

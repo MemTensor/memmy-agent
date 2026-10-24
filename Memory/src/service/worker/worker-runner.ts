@@ -1,3 +1,4 @@
+import { ModelHttpError } from "../../model/http.js";
 /**
  * Worker scheduling and execution domain.
  *
@@ -33,7 +34,7 @@ import {
   embeddingRetryBackoffMs,
   embeddingRetryToRunItem
 } from "../embedding/embedding-pipeline.js";
-import { memoryHasImportPipeline, memoryNeedsImportSummary } from "../import/import-job-processor.js";
+import { memoryNeedsImportSummary, summaryProcessingJobType } from "../import/import-job-processor.js";
 import {
   classifyProcessingError,
   type EnqueueJobInput,
@@ -43,9 +44,13 @@ import {
   workerJobCanRunInParallel
 } from "./job-handlers.js";
 
+import { ObservationDependenciesPendingError } from "../evidence/observation-memory-pipeline.js";
+import { isObservationMemory, observationJobPayload, observationMemoryState, OBSERVATION_SUMMARY_MODEL_UNCONFIGURED } from "../observation-memory-state.js";
+import { externalSkillGeneration, externalSkillJobPayload } from "../evidence/history-skill-policy.js";
+
 export const SUMMARY_WORKER_CONCURRENCY = 4;
 export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
-const SUMMARY_JOBS_REQUIRING_MODEL: readonly string[] = ["trace_summary", "import_summary", "episode_title"];
+const SUMMARY_JOBS_REQUIRING_MODEL: readonly string[] = ["trace_summary", "import_summary", "observation_extract", "episode_title"];
 
 const workerLogger = createMemoryLogger("worker");
 
@@ -126,6 +131,7 @@ export interface WorkerRunnerDeps {
   namespaceIdFromMemory: (memory: MemoryRow) => string;
   runWorkerNoWrite: (request: RequestEnvelope) => Promise<WorkerRunSummary>;
   restartFailedProcessing: (at: string, limit: number) => number;
+  enqueueObservationBackfill?: (limit: number, at: string) => number;
   previewPolicyEvidenceReconciliation: (limit: number) => PolicyEvidencePreflightReport;
   reconcileOrphanedPolicies: (at: string, limit: number) => number;
   enqueueJob: (input: EnqueueJobInput) => EvolutionJobRecord;
@@ -199,6 +205,7 @@ export class WorkerRunner {
     }
 
     const at = this.deps.nowIso();
+    this.deps.enqueueObservationBackfill?.(Math.min(limit, 100), at);
     const interruptedJobs = this.deps.repos.runtime.requeueLeasedJobsAfterRestart(at);
     const failedJobs = this.deps.repos.runtime.requeueFailedJobs(limit, at);
     for (const { before, after } of [...interruptedJobs, ...failedJobs]) {
@@ -226,6 +233,7 @@ export class WorkerRunner {
       const memory = this.deps.repos.memories.get(processing.memoryId);
       if (!memory) continue;
       if (
+        processing.stage !== "summary" &&
         this.deps.repos.memories.hasVector(memory.id, "vec_summary") &&
         !memoryNeedsImportSummary(memory)
       ) {
@@ -242,8 +250,8 @@ export class WorkerRunner {
       }
 
       if (processing.state === "summary_pending" || processing.state === "summarizing") {
-        const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
-        let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
+        const jobType = summaryProcessingJobType(memory);
+        let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined, String(observationMemoryState(memory)?.generation ?? "") || undefined);
         if (!job) {
           job = this.deps.enqueueJob({
             jobType,
@@ -252,7 +260,7 @@ export class WorkerRunner {
             targetMemoryId: memory.id,
             payload: {
               source: "startup.processing_repair",
-              contentHash: memory.contentHash
+              ...observationJobPayload(memory)
             },
             maxAttempts: 3,
             createdAt: at
@@ -282,7 +290,8 @@ export class WorkerRunner {
         }, ["embedding_pending", "embedding"]);
         continue;
       }
-      let job = this.deps.repos.runtime.getPendingJob(memory.id, "embedding", memory.contentHash ?? undefined);
+      let job = this.deps.repos.runtime.getPendingJob(memory.id, "embedding", memory.contentHash ?? undefined, String(observationMemoryState(memory)?.generation ?? "") || undefined,
+        externalSkillGeneration(memory));
       if (!job) {
         job = this.deps.enqueueJob({
           jobType: "embedding",
@@ -291,8 +300,9 @@ export class WorkerRunner {
           targetMemoryId: memory.id,
           payload: {
             reason: "startup.processing_repair",
-            contentHash: memory.contentHash
+            ...observationJobPayload(memory), ...externalSkillJobPayload(memory)
           },
+          ...(externalSkillGeneration(memory) ? { dedupeKey: `embedding:external-skill:${memory.id}:${externalSkillGeneration(memory)}` } : {}),
           maxAttempts: 6,
           createdAt: at
         });
@@ -309,8 +319,8 @@ export class WorkerRunner {
     for (const memory of this.deps.repos.memories.listImportMemoriesNeedingSummary(limit)) {
       const processing = this.deps.repos.processing.get(memory.id);
       if (processing?.state === "summary_pending" || processing?.state === "summarizing") continue;
-      const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
-      let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
+      const jobType = summaryProcessingJobType(memory);
+      let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined, String(observationMemoryState(memory)?.generation ?? "") || undefined);
       if (!job) {
         this.deps.repos.memories.deleteVector(memory.id, "vec_summary");
         job = this.deps.enqueueJob({
@@ -320,7 +330,7 @@ export class WorkerRunner {
           targetMemoryId: memory.id,
           payload: {
             source: "startup.placeholder_summary_repair",
-            contentHash: memory.contentHash
+            ...observationJobPayload(memory)
           },
           maxAttempts: 3,
           createdAt: at
@@ -356,10 +366,10 @@ export class WorkerRunner {
         userId: memory.userId,
         sessionId: memory.sessionId,
         targetMemoryId: memory.id,
-        dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}`,
+        dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}${externalSkillGeneration(memory) ? `:${externalSkillGeneration(memory)}` : ""}`,
         payload: {
           reason: "startup.retrieval_document_v2",
-          retrievalSourceHash: sourceHash
+          retrievalSourceHash: sourceHash, ...externalSkillJobPayload(memory)
         },
         maxAttempts: 6,
         createdAt: at
@@ -367,6 +377,7 @@ export class WorkerRunner {
       enqueuedRetrievalReindexes += 1;
     }
 
+    this.refreshObservationModelConfiguration();
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
       requeuedEmbeddingRetries: embeddingRetries.length,
@@ -391,6 +402,11 @@ export class WorkerRunner {
     }
     const normalizedLimit = Math.max(1, Math.floor(limit));
     const targetMemoryIds = request.targetMemoryIds;
+    // A large upgrade drains in bounded batches over normal worker rounds.
+    // Do not create a wake-up loop while configuration or budget blocks models.
+    if (!targetMemoryIds && this.deps.summaryModelConfigured() && !this.deps.memoryBudgetPaused()) {
+      this.deps.enqueueObservationBackfill?.(Math.min(normalizedLimit, 100), this.deps.nowIso());
+    }
     const requeuedJobs = this.deps.repos.runtime.requeueFailedJobs(
       normalizedLimit,
       this.deps.nowIso(),
@@ -399,6 +415,7 @@ export class WorkerRunner {
     for (const { before, after } of requeuedJobs) {
       this.deps.appendJobChange(after, "queued", before);
     }
+    this.refreshObservationModelConfiguration();
     const pausedAtLease = this.deps.memoryBudgetPaused();
     const allowedWhenPaused = pausedAtLease
       ? allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources())
@@ -545,8 +562,7 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
-        const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" && batch.length > 1) {
+        if (batch.length > 1 && shouldIsolateEmbeddingBatch(error)) {
           for (const item of batch) results.push(await this.runLeasedEmbeddingItem(item));
           continue;
         }
@@ -596,6 +612,17 @@ export class WorkerRunner {
   }
 
   failLeasedWorkerJob(job: EvolutionJobRecord, error: unknown): WorkerJobRunResult {
+    if (error instanceof ObservationDependenciesPendingError) {
+      const at = this.deps.nowIso();
+      const deferred = this.deps.repos.runtime.deferProcessingJob(job.id, new Date(Date.parse(at) + 30_000).toISOString(), at) ?? job;
+      const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+      if (memory && processingJobMatchesMemory(job, memory)) {
+        this.deps.repos.processing.update(memory.id, { state: "summary_pending", stage: "summary", activeJobId: job.id,
+          attemptCount: deferred.attempts, updatedAt: at }, ["summary_pending", "summarizing"]);
+      }
+      this.deps.appendJobChange(deferred, "queued", job);
+      return { succeeded: 0, failed: 0, ref: { ...jobToRef(deferred), status: "queued" } };
+    }
     const errorMessage = processingStageForJob(job.jobType)
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
@@ -640,11 +667,15 @@ export class WorkerRunner {
     const memory = this.deps.repos.memories.get(job.targetMemoryId);
     if (!memory || !processingJobMatchesMemory(job, memory)) return;
     const state = stage === "summary" ? "summarizing" : "embedding";
+    const processing = this.deps.repos.processing.get(job.targetMemoryId);
     this.deps.repos.processing.update(job.targetMemoryId, {
       state,
       stage,
       activeJobId: job.id,
       attemptCount: job.attempts,
+      ...(processing?.errorCode === OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode
+        ? { retryAction: "retry" as const, errorCode: null, errorMessage: null, failedAt: null }
+        : {}),
       updatedAt: this.deps.nowIso()
     }, stage === "summary"
       ? ["summary_pending", "summarizing"]
@@ -733,8 +764,7 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
-        const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" && batch.length > 1) {
+        if (batch.length > 1 && shouldIsolateEmbeddingBatch(error)) {
           for (const item of batch) {
             results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
           }
@@ -860,9 +890,30 @@ export class WorkerRunner {
     return this.deps.summaryModelConfigured() ? undefined : SUMMARY_JOBS_REQUIRING_MODEL;
   }
 
+  private refreshObservationModelConfiguration(): void {
+    const configured = this.deps.summaryModelConfigured();
+    const at = this.deps.nowIso();
+    // Keep queued work durable while distinguishing a missing model from a
+    // normal wait. Configuration restoration resumes the original job.
+    for (const processing of this.deps.repos.processing.listByStates(["summary_pending"])) {
+      const memory = this.deps.repos.memories.get(processing.memoryId);
+      if (!memory || !isObservationMemory(memory) || observationMemoryState(memory)?.status !== "pending") continue;
+      if (!configured && processing.errorCode !== OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode) {
+        this.deps.repos.processing.update(memory.id, {
+          ...OBSERVATION_SUMMARY_MODEL_UNCONFIGURED, failedAt: null, updatedAt: at
+        }, ["summary_pending"]);
+      } else if (configured && processing.errorCode === OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode) {
+        this.deps.repos.processing.update(memory.id, {
+          retryAction: "retry", errorCode: null, errorMessage: null, failedAt: null, updatedAt: at
+        }, ["summary_pending"]);
+      }
+    }
+  }
+
   private holdUnconfiguredSummaryJob(job: EvolutionJobRecord): WorkerJobRunResult {
     this.requeueUnstartedBudgetedJobs([job]);
     if (job.targetMemoryId) {
+      const memory = this.deps.repos.memories.get(job.targetMemoryId);
       this.deps.repos.processing.update(job.targetMemoryId, {
         state: "summary_pending",
         stage: "summary",
@@ -870,7 +921,8 @@ export class WorkerRunner {
         errorCode: null,
         errorMessage: null,
         failedAt: null,
-        updatedAt: this.deps.nowIso()
+        updatedAt: this.deps.nowIso(),
+        ...(memory && isObservationMemory(memory) ? OBSERVATION_SUMMARY_MODEL_UNCONFIGURED : {})
       }, ["summary_pending", "summarizing"]);
     }
     return {
@@ -932,4 +984,13 @@ function embeddingRetryLogFields(retry: EmbeddingRetryRecord): Record<string, un
     maxAttempts: retry.maxAttempts,
     nextAttemptAt: retry.nextAttemptAt
   };
+}
+
+// A rejected input can poison a whole provider request. Probe each original
+// item once; do not split authentication, quota, rate-limit or server failures.
+function shouldIsolateEmbeddingBatch(error: unknown): boolean {
+  const classification = classifyProcessingError(error);
+  return classification.code === "model_input_too_long" ||
+    (classification.code === "invalid_model_request" && error instanceof ModelHttpError &&
+      [400, 413, 422].includes(error.httpStatus));
 }

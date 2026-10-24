@@ -36,9 +36,9 @@ const PARAMETERS = {
 // desktop control on its own.
 const DESCRIPTION = [
   "Locate windows in the local Computer History by relevance to a question.",
-  "This searches the readable summaries only, which say what the user was doing but not the specifics.",
+  "This searches readable summaries, which may include observed text but can omit or paraphrase specifics.",
   "The returned summary is a body excerpt; read summary_file_path for the full summary when needed.",
-  "For who contacted them, what a message said, or which page they were on, read the event_stream_path entries in raw_event_streams",
+  "For the exact message text, recipient, or page, inspect the event_stream_path entries in raw_event_streams",
   "from the results with your own file tools — that is where the detail is.",
   "Returns observed evidence only; it never operates the desktop.",
 ].join(" ");

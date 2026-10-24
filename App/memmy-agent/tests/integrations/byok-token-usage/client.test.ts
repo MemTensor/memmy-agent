@@ -3,6 +3,35 @@ import { HttpByokTokenUsageClient } from "../../../src/integrations/byok-token-u
 import type { ByokTokenUsageEvent } from "../../../src/integrations/byok-token-usage/types.js";
 
 describe("HttpByokTokenUsageClient", () => {
+  it("requires a runtime for durable History uploads and budget checks", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const client = new HttpByokTokenUsageClient({ runtimeConfigProvider: () => null, fetchImpl });
+    await expect(client.recordEvent(eventFixture(), { requireRuntime: true })).rejects.toThrow("runtime is unavailable");
+    await expect(client.getMemoryBudget()).rejects.toThrow("runtime is unavailable");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reads and validates the Memory budget with the local runtime token", async () => {
+    const budget = { dailyLimitM: 10, totalLimitM: 500, dailyUsed: 120, lifetimeUsed: 240,
+      paused: false, trigger: null, nextLocalMidnightAt: "2026-10-14T00:00:00.000Z" };
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(budget), { status: 200 }));
+    const client = new HttpByokTokenUsageClient({ baseUrl: "http://localhost:62934", runtimeToken: "local-only", fetchImpl });
+    await expect(client.getMemoryBudget()).resolves.toEqual(budget);
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("http://localhost:62934/api/app/byok-token-usage/memory-budget");
+    expect(fetchImpl.mock.calls[0][1]?.headers).toEqual({ "x-memmy-local-token": "local-only" });
+    fetchImpl.mockImplementation(async () => new Response("{}", { status: 200 }));
+    await expect(client.getMemoryBudget()).rejects.toThrow();
+    fetchImpl.mockImplementation(async () => new Response("unavailable", { status: 503 }));
+    await expect(client.getMemoryBudget()).rejects.toThrow("budget read failed: 503");
+  });
+
+  it.each(["https://remote.example", "http://127.0.0.1:62934?redirect=x", "http://user:secret@127.0.0.1:62934", "http://127.0.0.1:62934/path"])(
+    "rejects a non-local or decorated backend URL without sending credentials: %s", (baseUrl) => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      expect(() => new HttpByokTokenUsageClient({ baseUrl, runtimeToken: "local-only", fetchImpl })).toThrow("local backend");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
   it("posts BYOK token usage events to the local backend with the runtime token", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     const client = new HttpByokTokenUsageClient({

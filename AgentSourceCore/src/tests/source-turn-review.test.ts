@@ -5,6 +5,7 @@ import {
   readOpenclawSourceTurn,
   readOpencodeSourceTurn,
   sourceTurnSkipBlocksWatermark,
+  sourceTurnSkipWatermarkEffect,
   type CursorVscdbSource,
   type OpenclawTranscriptSource,
   type OpencodeSource,
@@ -19,6 +20,18 @@ describe("review regressions for native source turns", () => {
     expect(sourceTurnSkipBlocksWatermark("turn_incomplete")).toBe(true);
     expect(sourceTurnSkipBlocksWatermark("turn_content_incomplete")).toBe(true);
     expect(sourceTurnSkipBlocksWatermark("source_turn_content_conflict")).toBe(true);
+  });
+
+  it("retries only recent unfinished turns and rescans only when Memory refused captures", () => {
+    const now = Date.parse("2026-10-10T12:00:00.000Z");
+    expect(sourceTurnSkipWatermarkEffect("turn_incomplete", "2026-10-10T11:00:00.000Z", now)).toBe("retry");
+    expect(sourceTurnSkipWatermarkEffect("source_turn_content_conflict", "2026-10-10T11:00:00.000Z", now)).toBe("retry");
+    expect(sourceTurnSkipWatermarkEffect("turn_incomplete", "2026-10-09T11:59:59.000Z", now)).toBe("none");
+    expect(sourceTurnSkipWatermarkEffect("identity_unresolved", "2026-08-18T03:00:00.000Z", now)).toBe("none");
+    expect(sourceTurnSkipWatermarkEffect("turn_incomplete", null, now)).toBe("none");
+    expect(sourceTurnSkipWatermarkEffect("turn_cancelled", "2026-10-10T11:00:00.000Z", now)).toBe("none");
+    expect(sourceTurnSkipWatermarkEffect("memory_add_disabled", "2026-08-18T03:00:00.000Z", now)).toBe("rescan");
+    expect(sourceTurnSkipWatermarkEffect("source_capture_activation_unresolved", null, now)).toBe("rescan");
   });
 
   it("uses the disk profile for both hook and scan requests", () => {

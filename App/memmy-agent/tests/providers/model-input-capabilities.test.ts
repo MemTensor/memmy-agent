@@ -7,6 +7,7 @@ import {
   MODEL_INPUT_CAPABILITIES,
   MODEL_INPUT_CAPABILITIES_REVIEWED_AT,
   requiredInputModalities,
+  resolveModelInputModalities,
   type ModelInputModality,
 } from "../../src/providers/model-input-capabilities.js";
 
@@ -14,8 +15,8 @@ describe("model input capabilities", () => {
   it("contains only immutable, valid modality sets with text support", () => {
     const allowed = new Set<ModelInputModality>(["text", "image", "video"]);
 
-    expect(MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe("2026-09-15");
-    expect(Object.keys(MODEL_INPUT_CAPABILITIES)).toHaveLength(244);
+    expect(MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe("2026-10-14");
+    expect(Object.keys(MODEL_INPUT_CAPABILITIES)).toHaveLength(277);
     expect(Object.isFrozen(MODEL_INPUT_CAPABILITIES)).toBe(true);
     for (const [model, modalities] of Object.entries(MODEL_INPUT_CAPABILITIES)) {
       expect(model).toBeTruthy();
@@ -38,9 +39,12 @@ describe("model input capabilities", () => {
     expect(getModelInputModalities("deepseek-v4-pro")).toEqual(["text"]);
     expect(getModelInputModalities("deepseek-flash")).toEqual(["text", "image"]);
     expect(getModelInputModalities("deepseek-v4.1-flash")).toEqual(["text", "image"]);
+    expect(getModelInputModalities("deepseek-v4.1-flash-1017")).toEqual(["text", "image"]);
     expect(getModelInputModalities("deepseek-v4-flash-vision-exp")).toEqual(["text", "image"]);
     expect(getModelInputModalities("kimi-k3")).toEqual(["text", "image", "video"]);
     expect(getModelInputModalities("glm-5v-turbo")).toEqual(["text", "image", "video"]);
+    expect(getModelInputModalities("qwen-plus")).toEqual(["text"]);
+    expect(getModelInputModalities("qwen-plus-latest")).toEqual(["text"]);
     expect(getModelInputModalities("qwen3.7-max-2026-05-20")).toEqual(["text"]);
     expect(getModelInputModalities("qwen3.7-max-2026-06-08")).toEqual(["text", "image", "video"]);
     expect(getModelInputModalities("Gpt-5.6")).toEqual(["text"]);
@@ -81,5 +85,12 @@ describe("model input capabilities", () => {
     expect(imageRequired).toEqual(["text", "image"]);
     expect(coversInputModalities(["text", "image"], imageRequired)).toBe(true);
     expect(coversInputModalities(["text"], imageRequired)).toBe(false);
+  });
+
+  it("prefers an explicit modality declaration over the static catalog", () => {
+    expect(resolveModelInputModalities("deepseek-v4-pro", ["text", "image"])).toEqual(["text", "image"]);
+    expect(resolveModelInputModalities("gpt-5.6", ["text"])).toEqual(["text"]);
+    expect(resolveModelInputModalities("Qwen3-27B", undefined)).toEqual(["text"]);
+    expect(resolveModelInputModalities("gpt-5.6", null)).toEqual(["text", "image"]);
   });
 });

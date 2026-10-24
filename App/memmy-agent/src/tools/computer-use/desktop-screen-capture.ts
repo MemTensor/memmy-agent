@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { SCREEN_CAPTURE_PREFIX as PREFIX, SCREEN_CAPTURE_PROTOCOL, SCREEN_CAPTURE_MAX_BYTES, isScreenCaptureMessage, isScreenCaptureResult, type ScreenCaptureResult } from '@memmy/local-api-contracts';
 import { Tool, type ToolExecutionContext } from '../../core/agent-runtime/tools/base.js';
+import { RequestContextStore, type RequestContext } from '../../core/agent-runtime/tools/context.js';
 import { convertMcpToolContent } from '../../core/agent-runtime/tools/mcp.js';
 import { isManagedOcuConfig } from './open-computer-use-binary.js';
+import { hasNativeSurfaceForRequest } from './surface-preview.js';
+import {
+  LEGACY_COMPUTER_USE_MCP_SERVER,
+  MEMMY_COMPUTER_USE_MCP_SERVER,
+  legacyComputerUseToolName,
+  memmyComputerUseToolName,
+} from '../../config/computer-use-server.js';
 
 type IpcProcess = Pick<NodeJS.Process, 'send' | 'connected' | 'on' | 'removeListener'>;
 export class DesktopScreenClient {
@@ -69,22 +77,36 @@ export const desktopScreenClient = new DesktopScreenClient();
 export async function initializeDesktopScreenCapture(): Promise<void> {
   if (process.platform === 'darwin' && process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === '1') await desktopScreenClient.initialize();
 }
+function computerUseServer(config: any): { name: string; cfg: any } | null {
+  const layers = [config?.mcpServers, config?.tools?.mcpServers, config?.tools?.mcp_servers];
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object') continue;
+    if (layer[MEMMY_COMPUTER_USE_MCP_SERVER]) return { name: MEMMY_COMPUTER_USE_MCP_SERVER, cfg: layer[MEMMY_COMPUTER_USE_MCP_SERVER] };
+    if (layer[LEGACY_COMPUTER_USE_MCP_SERVER]) return { name: LEGACY_COMPUTER_USE_MCP_SERVER, cfg: layer[LEGACY_COMPUTER_USE_MCP_SERVER] };
+  }
+  return null;
+}
 export function screenCaptureEnabled(config: any, platform = process.platform, available = desktopScreenClient.available): boolean {
-  const cfg = config?.mcpServers?.open_computer_use ?? config?.tools?.mcpServers?.open_computer_use ?? config?.tools?.mcp_servers?.open_computer_use;
-  if (!cfg || cfg.enabled === false || !available || !isManagedOcuConfig('open_computer_use', cfg, platform)) return false;
-  const enabled = cfg.enabledTools ?? cfg.enabled_tools ?? ['*'];
-  return enabled.some((name: string) => ['*', 'get_screen_state', 'mcp_open_computer_use_get_screen_state'].includes(name));
+  const server = computerUseServer(config);
+  if (platform !== 'darwin' || !server || server.cfg.enabled === false || !available || !isManagedOcuConfig(server.name, server.cfg, platform)) return false;
+  const enabled = server.cfg.enabledTools ?? server.cfg.enabled_tools ?? ['*'];
+  return enabled.some((name: string) => ['*', 'get_screen_state', memmyComputerUseToolName('get_screen_state'), legacyComputerUseToolName('get_screen_state')].includes(name));
 }
 export class DesktopScreenCaptureTool extends Tool {
+  private readonly requestContext = new RequestContextStore();
   static enabled(ctx: any): boolean { return screenCaptureEnabled(ctx.runtimeState ? { mcpServers: ctx.runtimeState.mcpServers } : ctx.config); }
   static create(ctx: any): DesktopScreenCaptureTool { return new DesktopScreenCaptureTool(() => screenCaptureEnabled(ctx.runtimeState ? { mcpServers: ctx.runtimeState.mcpServers } : ctx.config)); }
   constructor(private readonly enabledNow: () => boolean = () => false, private readonly client = desktopScreenClient) { super(); }
   get name(): string { return 'get_screen_state'; }
-  get description(): string { return 'Observe the currently visible main screen, or a specified display_id, without opening, focusing or restoring any application. Call this tool for requests to see the current screen, including when permission has not been granted: it checks Memmy screen-recording permission and presents authorization guidance if needed. Do not infer permission from tool availability or prior messages. Never use Finder/get_app_state as a substitute.'; }
+  get description(): string { return 'Observe the currently visible main screen, or a specified display_id, only when the user requests observation of their current screen. It does not open, focus or restore an application. Never use whole-screen capture as a fallback for a missing native-app popup, menu or app screenshot; continue with get_app_state for the exact target window and its associated menus. For a screen-observation request, call this tool even after a permission failure: it checks Memmy screen-recording permission and presents authorization guidance if needed. Do not infer permission from tool availability or prior messages. Never use Finder/get_app_state as a substitute for observing the current screen.'; }
   get parameters() { return { type: 'object', properties: { display_id: { type: 'integer', minimum: 1 } }, additionalProperties: false }; }
   get exclusive(): boolean { return true; }
+  setContext(context: RequestContext): void { this.requestContext.set(context); }
   async execute(params: { display_id?: number } = {}, context?: ToolExecutionContext): Promise<any> {
     if (context?.abortSignal?.aborted) return 'Screen request cancelled';
+    if (hasNativeSurfaceForRequest(this.requestContext.get())) {
+      return 'This request is already observing a native application window. Whole-screen capture was not sent. Continue with get_app_state for the exact bound app/window and its associated menus. Do not use get_screen_state as a fallback for a missing popup; report the capture limitation if it remains unavailable.';
+    }
     if (!this.enabledNow()) { const message = 'Memmy 桌面截图工具已禁用或不可用。'; context?.stopTurn?.(message); return message; }
     const result = await this.client.capture(params.display_id === undefined ? undefined : String(params.display_id), context?.abortSignal);
     if (context?.abortSignal?.aborted) return 'Screen request cancelled';

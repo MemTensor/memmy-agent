@@ -51,6 +51,11 @@ export function initLogger(): void {
   applyLogLevel(getCurrentLogLevel());
 }
 
+/** Persist process lifecycle metadata even when the launcher has no console transport. */
+export function writeProcessDiagnostic(message: string): void {
+  log.error(message);
+}
+
 export function applyLogLevel(level: LogLevel): void {
   const normalized = parseLogLevel(level);
   log.transports.file.level = normalized;

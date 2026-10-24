@@ -79,6 +79,15 @@ describe("snapshot contract with the desktop client", () => {
     expect(() => ComputerHistorySnapshotSchema.parse(snapshot)).toThrow();
   });
 
+  it("accepts a history linked to a synced memory observation", () => {
+    const sent = clientSnapshot(service().importMarkdown({ title: "Imported history", markdown: "Imported body." }));
+    const parsed = ComputerHistorySnapshotSchema.parse({
+      ...sent,
+      histories: [{ ...sent.histories[0], memoryId: "memory-observation-1" }],
+    });
+    expect(parsed.histories[0]?.memoryId).toBe("memory-observation-1");
+  });
+
   it("accepts the snapshot as it is sent, without summary bodies", () => {
     const instance = service();
     const { markdownDirectory } = instance.snapshot().privacy;

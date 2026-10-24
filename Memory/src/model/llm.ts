@@ -14,6 +14,15 @@ import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from ".
 
 const logger = createMemoryLogger("llm");
 
+interface OpenAiResponsesResponse {
+  status?: string;
+  output?: Array<{
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  usage?: Record<string, unknown>;
+}
+
 interface OpenAiChatResponse {
   choices?: Array<{
     message?: {
@@ -187,12 +196,16 @@ class HttpLlmClient implements LlmClient {
     let malformedRetriesRemaining = Math.max(0, this.config.malformedRetries);
     let lengthRetryUsed = false;
     let previousWasTruncated = false;
+    let previousRetryWasCapped = false;
     let maxTokens = this.outputTokenBudget(options.maxTokens);
+    const retryTokenCeiling = typeof options.retryTokenCeiling === "number"
+      && Number.isFinite(options.retryTokenCeiling) && options.retryTokenCeiling > 0
+      ? Math.floor(options.retryTokenCeiling) : undefined;
     let jsonAttempt = 0;
 
     while (true) {
       jsonAttempt += 1;
-      const withJsonHint = jsonMessages(messages, lastError, previousWasTruncated);
+      const withJsonHint = jsonMessages(messages, lastError, previousWasTruncated, previousRetryWasCapped);
       const result = await this.completeResult(withJsonHint, {
         ...options,
         maxTokens,
@@ -210,9 +223,13 @@ class HttpLlmClient implements LlmClient {
         parseError !== undefined && looksLikeTruncatedJson(result.text, parseError)
       );
       const expandedMaxTokens = truncated && !lengthRetryUsed
-        ? doubleMaxTokens(maxTokens, this.options.modelRole === "memory_summary" ? SUMMARY_OUTPUT_TOKEN_LIMIT : undefined)
+        ? doubleMaxTokens(maxTokens, Math.min(retryTokenCeiling ?? Number.MAX_SAFE_INTEGER,
+          this.options.modelRole === "memory_summary" ? SUMMARY_OUTPUT_TOKEN_LIMIT : Number.MAX_SAFE_INTEGER))
         : undefined;
-      if (expandedMaxTokens !== undefined) {
+      const cappedLengthRetry = truncated && !lengthRetryUsed && retryTokenCeiling !== undefined
+        && maxTokens !== undefined && Number.isFinite(maxTokens) && maxTokens > 0;
+      if (expandedMaxTokens !== undefined || cappedLengthRetry) {
+        const nextMaxTokens = expandedMaxTokens ?? Math.min(maxTokens!, retryTokenCeiling!);
         logger.warn("json.truncated_retry", {
           role: this.options.modelRole ?? "unspecified",
           operation: options.operation,
@@ -222,12 +239,14 @@ class HttpLlmClient implements LlmClient {
           finishReason: result.finishReason ?? "unknown",
           outputChars: result.text.length,
           previousMaxTokens: maxTokens,
-          nextMaxTokens: expandedMaxTokens,
+          nextMaxTokens,
+          ...(retryTokenCeiling !== undefined ? { retryTokenCeiling } : {}),
           ...(parseError ? memoryErrorFields(parseError) : {})
         });
         lengthRetryUsed = true;
         previousWasTruncated = true;
-        maxTokens = expandedMaxTokens;
+        previousRetryWasCapped = expandedMaxTokens === undefined;
+        maxTokens = nextMaxTokens;
         lastError = parseError ?? new Error("LLM output reached the max token limit");
         continue;
       }
@@ -304,6 +323,8 @@ class HttpLlmClient implements LlmClient {
       case "sglang":
       case "vllm":
         return this.completeOpenAiCompatible(messages, options);
+      case "openai_responses":
+        return this.completeOpenAiResponses(messages, options);
       case "gemini":
         return this.completeGemini(messages, options);
       case "anthropic":
@@ -404,6 +425,46 @@ class HttpLlmClient implements LlmClient {
     }
     this.recordTokenUsage(response, options);
     return { text, finishReason: normalizeFinishReason(choice?.finish_reason) };
+  }
+
+  private async completeOpenAiResponses(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
+    const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
+    const url = base.endsWith("/responses") ? base : `${base}/responses`;
+    const maxOutputTokens = Math.max(1, options.maxTokens ?? this.config.maxTokens ?? 1);
+    const response = await postJsonWithRetry<OpenAiResponsesResponse>({
+      actualModelContext: this.config.actualModelContext,
+      provider: "openai_responses",
+      operation: options.operation,
+      model: this.config.model,
+      url,
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
+      timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
+      maxRetries: options.maxRetries ?? this.config.maxRetries,
+      body: {
+        model: this.config.model,
+        input: messages.map((message) => ({ role: message.role, content: message.content })),
+        max_output_tokens: maxOutputTokens,
+        store: false,
+        stream: false,
+        temperature: options.temperature ?? this.config.temperature,
+        ...(options.jsonMode ? { text: { format: { type: "json_object" } } } : {}),
+        ...(this.config.extraBody ?? {})
+      }
+    });
+    const text = (response.output ?? [])
+      .filter((item) => item.type === "message")
+      .flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text" || typeof part.text === "string")
+      .map((part) => part.text ?? "")
+      .join("");
+    if (!text.trim()) {
+      throw new Error("openai_responses response missing output text");
+    }
+    this.recordTokenUsage(response, options);
+    return { text, finishReason: responsesFinishReason(response.status) };
   }
 
   private async completeGemini(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
@@ -1103,12 +1164,15 @@ function modelSlug(model: string): string {
 function jsonMessages(
   messages: LlmMessage[],
   previousError?: unknown,
-  previousWasTruncated = false
+  previousWasTruncated = false,
+  previousRetryWasCapped = false
 ): LlmMessage[] {
   const hint = [
     "Return exactly one valid JSON object. Do not include markdown fences or explanatory text.",
     previousWasTruncated
-      ? "The previous output was truncated. Return the complete object within the expanded output budget."
+      ? previousRetryWasCapped
+        ? "The previous output was truncated. Shorten the JSON wording and number of items so the complete object fits within the reserved output budget. Preserve required fields and grounded evidence."
+        : "The previous output was truncated. Return the complete object within the expanded output budget."
       : undefined,
     previousError ? `Previous JSON parse error: ${previousError instanceof Error ? previousError.message : String(previousError)}` : undefined
   ].filter(Boolean).join("\n");
@@ -1142,6 +1206,13 @@ function doubleMaxTokens(value: number | undefined, limit = Number.MAX_SAFE_INTE
   if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
   const expanded = Math.min(limit, Math.max(1, Math.floor(value)) * 2);
   return expanded > value ? expanded : undefined;
+}
+
+function responsesFinishReason(status: string | undefined): LlmCallResult["finishReason"] {
+  if (status === "completed") return "stop";
+  if (status === "incomplete") return "length";
+  if (status === "failed" || status === "cancelled") return "other";
+  return normalizeFinishReason(status);
 }
 
 function normalizeFinishReason(value: string | undefined): LlmCallResult["finishReason"] {

@@ -1,6 +1,6 @@
 /** App state module. */
-import { createContext, useContext, useMemo, useReducer, type Dispatch, type ReactNode } from "react";
-import type { AppAction } from "./app-actions.js";
+import { createContext, useContext, useEffect, useMemo, useReducer, type Dispatch, type ReactNode } from "react";
+import { appActions, type AppAction } from "./app-actions.js";
 import { appReducer, createInitialAppState, type AppState } from "./app-reducer.js";
 
 /** Contract for app state context value. */
@@ -13,8 +13,21 @@ const AppStateContext = createContext<AppStateContextValue | null>(null);
 
 /** Handles app state provider. */
 export function AppStateProvider(props: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
+  // Desktop-pet mode hides the native main window while keeping its current route.
+  const [state, dispatch] = useReducer(appReducer, undefined, () => createInitialAppState(
+    typeof document === "undefined" || document.visibilityState !== "hidden"
+  ));
   const value = useMemo(() => ({ state, dispatch }), [state]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const syncWindowVisibility = () => {
+      dispatch(appActions.windowVisibilityChanged(document.visibilityState !== "hidden"));
+    };
+    document.addEventListener("visibilitychange", syncWindowVisibility);
+    syncWindowVisibility();
+    return () => document.removeEventListener("visibilitychange", syncWindowVisibility);
+  }, []);
 
   return <AppStateContext.Provider value={value}>{props.children}</AppStateContext.Provider>;
 }

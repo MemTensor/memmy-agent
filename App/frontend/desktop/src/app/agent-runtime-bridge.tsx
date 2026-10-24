@@ -2,6 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   MemmyAgentRequestError,
+  isCronProactiveMessage,
   type MemmyAgentClient,
   type MemmyAgentProject,
   type MemmyAgentRunStatusSnapshot,
@@ -14,6 +15,9 @@ import { agentActions, appActions, createAgentOperationError, type AppAction } f
 import { updateSidebarStateForTask, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { useApiClients } from "./providers.js";
+import { useTranslation } from "../i18n/use-translation.js";
+import { decideTaskDoneNotification } from "../state/task-done-notification.js";
+import { useTaskBus } from "../lib/task-bus.js";
 import type { AppRoutePath } from "./routes.js";
 
 export interface AgentRuntimeBridgeValue {
@@ -578,10 +582,31 @@ export function requestDesyncedAgentQueueSnapshots(
 /** Checks is agent runtime bridge route. */
 export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
   return path === "/main"
+    || path === "/pet"
     || path === "/tools"
     || path === "/settings"
     || path === "/memory"
     || path === "/memory-sources";
+}
+
+/** Confirm reducer consumption, independently of whether a notification is shown. */
+export function acknowledgeProcessedCronDeliveries(
+  connection: Pick<MemmyAgentWebSocketConnection, "getReadyGeneration" | "acknowledgeCronDelivery">,
+  generation: number,
+  liveDeliveryIdsByChatId: Record<string, string[]>,
+  acknowledgedKeys: Set<string>,
+): void {
+  if (!connection.acknowledgeCronDelivery || generation <= 0 || connection.getReadyGeneration() !== generation) return;
+  const prefix = `${generation}\0`;
+  for (const key of acknowledgedKeys) {
+    if (!key.startsWith(prefix)) acknowledgedKeys.delete(key);
+  }
+  for (const deliveryId of new Set(Object.values(liveDeliveryIdsByChatId).flat())) {
+    const key = `${prefix}${deliveryId}`;
+    if (acknowledgedKeys.has(key)) continue;
+    connection.acknowledgeCronDelivery(deliveryId);
+    acknowledgedKeys.add(key);
+  }
 }
 
 /** Handles agent runtime bridge. */
@@ -591,6 +616,8 @@ export function AgentRuntimeBridge(props: {
 }) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
+  const { t } = useTranslation();
+  const { syncAgentTaskStatuses } = useTaskBus();
   const enabled = isAgentRuntimeBridgeRoute(state.navigation.currentPath);
   const connectionRef = useRef<MemmyAgentWebSocketConnection | null>(null);
   const modelCatalogRefreshInFlightRef = useRef(false);
@@ -606,7 +633,71 @@ export function AgentRuntimeBridge(props: {
   const operationErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueSnapshotRequestKeysRef = useRef(new Set<string>());
   const agentStateRef = useRef(state.agent);
+  const notifiedProactiveDeliveryIds = useRef(new Set<string>());
+  const acknowledgedCronDeliveryKeys = useRef(new Set<string>());
+  const acknowledgingConnection = useRef<MemmyAgentWebSocketConnection | null>(null);
+  useEffect(() => {
+    if (!connection) return;
+    if (acknowledgingConnection.current !== connection) {
+      acknowledgingConnection.current = connection;
+      acknowledgedCronDeliveryKeys.current.clear();
+    }
+    acknowledgeProcessedCronDeliveries(connection, state.agent.connectionGeneration,
+      state.agent.proactiveLiveDeliveryIdsByChatId, acknowledgedCronDeliveryKeys.current);
+  }, [connection, state.agent.connectionGeneration, state.agent.proactiveLiveDeliveryIdsByChatId]);
+  useEffect(() => {
+    syncAgentTaskStatuses({ tasks: state.agent.tasks.map((task) => ({
+      sessionIds: [task.chatId, task.sessionKey],
+      isRunning: task.runStartedAt != null || state.agent.goalStatesByChatId[task.chatId]?.status === "active",
+      completedUnseen: task.completedUnseen,
+      proactiveUnseenAt: state.agent.proactiveDeliveredAtByChatId[task.chatId],
+    })) });
+  }, [state.agent.goalStatesByChatId, state.agent.tasks, state.agent.proactiveDeliveredAtByChatId, syncAgentTaskStatuses]);
   agentStateRef.current = state.agent;
+  useEffect(() => {
+    const updateFocus = () => dispatch({
+      type: "agent/chatWindowFocusChanged",
+      focused: document.hasFocus() && document.visibilityState !== "hidden",
+    });
+    updateFocus();
+    window.addEventListener("focus", updateFocus);
+    window.addEventListener("blur", updateFocus);
+    document.addEventListener("visibilitychange", updateFocus);
+    return () => {
+      window.removeEventListener("focus", updateFocus);
+      window.removeEventListener("blur", updateFocus);
+      document.removeEventListener("visibilitychange", updateFocus);
+    };
+  }, [dispatch]);
+  useEffect(() => {
+    const pending = state.agent.proactiveNotifications;
+    if (!pending.length) return;
+    for (const delivery of pending) {
+      if (notifiedProactiveDeliveryIds.current.has(delivery.deliveryId)) continue;
+      notifiedProactiveDeliveryIds.current.add(delivery.deliveryId);
+      const chatVisible = document.hasFocus() && document.visibilityState !== "hidden"
+        && state.agent.chatViewVisible && state.agent.currentChatId === delivery.chatId
+        && !state.agent.blankDraftActive;
+      const plan = decideTaskDoneNotification({
+        enabled: state.bootstrap?.app?.taskDoneNotificationEnabled ?? true,
+        soundEnabled: state.bootstrap?.app?.notificationSoundEnabled ?? true,
+        windowFocused: chatVisible,
+      });
+      if (plan && window.memmy?.notifyTaskDone) {
+        void window.memmy.notifyTaskDone({
+          title: t("notification.scheduled.title"),
+          body: delivery.content.replace(/\s+/gu, " ").trim().slice(0, 240) || t("notification.scheduled.body"),
+          silent: plan.silent,
+          deliveryId: delivery.deliveryId,
+        }).catch(() => undefined);
+      }
+    }
+    // Remember only recent IDs here; the reducer and native host also dedupe.
+    if (notifiedProactiveDeliveryIds.current.size > 1024) {
+      notifiedProactiveDeliveryIds.current = new Set([...notifiedProactiveDeliveryIds.current].slice(-1024));
+    }
+    dispatch({ type: "agent/proactiveNotificationsAcknowledged", deliveryIds: pending.map((item) => item.deliveryId) });
+  }, [dispatch, state.agent.proactiveNotifications, state.agent.chatViewVisible, state.agent.currentChatId, state.agent.blankDraftActive, state.bootstrap, t]);
   const ownedTaskStateCoordinatorRef = useRef<{
     client: MemmyAgentClient;
     coordinator: AgentTaskStateCoordinator;
@@ -795,6 +886,11 @@ export function AgentRuntimeBridge(props: {
             }
           }
           if (isAgentConnectionEvent(event)) {
+            dispatch(agentActions.wsEventReceived(event));
+          }
+          if (isCronProactiveMessage(event)) {
+            // Background chats have no onChat reducer subscription. Deliver
+            // reminders globally; deliveryId makes current-chat copies idempotent.
             dispatch(agentActions.wsEventReceived(event));
           }
           if (

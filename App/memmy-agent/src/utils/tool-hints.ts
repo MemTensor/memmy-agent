@@ -1,6 +1,7 @@
 import { abbreviatePath } from "./path.js";
 
 const TOOL_FORMATS: Record<string, [string[], string, boolean, boolean]> = {
+  browser_auth_request: [[], "secure browser form", false, false],
   read_file: [["path", "file_path"], "read {}", true, false],
   write_file: [["path", "file_path"], "write {}", true, false],
   edit_file: [["file_path", "path"], "edit {}", true, false],

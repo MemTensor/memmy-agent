@@ -1,5 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { writeBrowserHistorySensor } from "./generate-browser-history-sensor.mjs";
+
+// Both desktop packages ship the same passive sensor as the Agent's History source.
+await writeBrowserHistorySensor();
 
 // Keep Office source available for future work, but do not ship or advertise
 // its built-in skills in the v1.1.6 Computer Use candidate.
@@ -54,4 +60,15 @@ for (const renderer of ["office-rendering", "docx-rendering"]) {
     recursive: true,
     force: true,
   });
+}
+
+// Windows npm build produces the same recorder that NSIS builds from source.
+// Other hosts may explicitly cross-build; a normal Mac build never requires Go.
+if ((process.env.MEMMY_BUILD_TARGET_PLATFORM ?? process.platform) === "win32") {
+  const arch = process.env.MEMMY_BUILD_TARGET_ARCH || process.arch;
+  const directory = arch === "x64" ? "amd64" : arch;
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL("../../../scripts/internal/win/build-memmy-computer-history.mjs", import.meta.url)),
+    path.resolve("dist/native-computer-history/windows", directory, "memmy-computer-history.exe"), arch,
+  ], { stdio: "inherit" });
 }

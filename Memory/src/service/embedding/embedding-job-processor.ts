@@ -48,6 +48,7 @@ import {
   updateMemoryVectorField
 } from "./embedding-pipeline.js";
 import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js";
+import { isObservationMemory, isObservationMemoryProcessed, observationJobPayload } from "../observation-memory-state.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type TurnCaptureDecision = {
@@ -208,6 +209,11 @@ export class EmbeddingJobProcessor {
       throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
+
+    if (isObservationMemory(memory)) {
+      if (!isObservationMemoryProcessed(memory)) return null;
+      return { job, memory, text: embeddingTextForMemory(memory), role: "document", vectorField: "vec_summary" };
+    }
 
     if (memory.memoryLayer === "L1" && kindFromMemory(memory) === "work_memory") {
       const internal = memory.properties.internal_info;
@@ -625,7 +631,7 @@ export class EmbeddingJobProcessor {
     return this.deps.enqueueJob({
       jobType: "embedding", userId: memory.userId, sessionId: memory.sessionId, episodeId: source.episodeId,
       targetMemoryId: memory.id,
-      payload: { reason, sourceJobId: source.id, contentHash: memory.contentHash },
+      payload: { reason, sourceJobId: source.id, ...observationJobPayload(memory) },
       maxAttempts: 6, createdAt: at
     });
   }

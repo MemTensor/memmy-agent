@@ -66,6 +66,9 @@ export default defineConfig(({ mode }) => {
     define: publicMemmyEnv,
     plugins: [react(), memmyRuntimeConfigPlugin()],
     resolve: {
+      // Linked workspace packages can otherwise bundle a second React instance,
+      // whose hook dispatcher is never initialized by the desktop ReactDOM root.
+      dedupe: ["react", "react-dom"],
       alias: [
         {
           // Find.

@@ -47,6 +47,11 @@ export class ComputerHistoryStatusTool extends Tool {
       "Returns two paths: summary_directory holds the readable per-window summaries, and event_stream_root_path holds the raw per-segment event streams.",
       "Read both with your own file tools; the summaries locate a window, the raw stream answers what specifically happened in it.",
       "Call this before relying on Computer History data.",
+      "A running state reports the recorder lifecycle; it does not establish complete browser or application coverage.",
+      "Check capture_health for connection signals, the most recent successful event write, partial-capture issues, and known limitations. No recent event alone does not establish failure: the user may be idle.",
+      "For actions just performed, inspect the active raw stream at <event_stream_root_path>/<segment_id>/events.jsonl and adjacent UTC segments, even if the current summary is absent or incomplete.",
+      "A negative search means only 'not found in the captured records searched'; report those sources and their time window, and never infer that the user did not act or the action never happened.",
+      "If the user confirms a browser action but the relevant raw streams contain no browser events or page URLs, acknowledge a capture coverage gap; missing capture evidence cannot establish what happened in the browser.",
       "If it is stopped and the user expects fresh data, offer to start it; if paused, offer to resume it.",
     ].join(" ");
   }
@@ -61,6 +66,8 @@ export class ComputerHistoryStatusTool extends Tool {
       started_at: snapshot.observation.startedAt,
       segment_id: snapshot.observation.segmentId,
       error: snapshot.observation.error,
+      capture_health: snapshot.observation.captureHealth ?? null,
+      wechat: snapshot.wechat ?? null,
       // Two different things: the summaries answer "what was I doing", the raw
       // streams answer "who said what". Report both so the agent can pick.
       summary_directory: snapshot.privacy.markdownDirectory,
@@ -70,10 +77,9 @@ export class ComputerHistoryStatusTool extends Tool {
         screenshots: snapshot.privacy.screenshots,
         audio: snapshot.privacy.audio,
         raw_retention_hours: snapshot.privacy.rawRetentionHours,
-        // Stated exactly, because "private browsing is never recorded" is
-        // only true where a browser says which windows are private.
-        private_browsing: "Private windows in Google Chrome and Arc are never recorded. Safari offers no way to tell a private window apart, so its private windows are recorded like any other; a do_not_observe rule for com.apple.Safari keeps them out.",
+        separate_sources: "Personal WeChat requires its own explicit source permission and connection. It has an independent reader status; a running screen recorder does not establish WeChat coverage.",
         system_surfaces: "The login window and screen saver are never recorded.",
+        capture_scope: "Foreground applications and the controls/text they expose to accessibility only. Images, audio, unreadable controls, and content beyond the sampled window are not complete activity evidence.",
       },
     });
   }
@@ -98,6 +104,7 @@ export class ComputerHistoryGetSettingsTool extends Tool {
     return [
       "Read the complete Computer History observation settings document.",
       "Always call this immediately before computer_history_update_settings.",
+      "Application and website rules control permission to observe, not whether an application exposes readable content or the recorder supports it. Check computer_history_status.capture_health before claiming coverage.",
     ].join(" ");
   }
 

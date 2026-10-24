@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(19);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(21);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -22,6 +22,8 @@ describe("memory runtime client", () => {
       "POST /api/v1/turns/:turnId/complete",
       "POST /api/v1/memory/search",
       "POST /api/v1/memory/add",
+      "POST /api/v1/evidence/skills/:id/approve",
+      "PATCH /api/v1/evidence/skills/:id",
       "POST /api/v1/memory/processing/status",
       "POST /api/v1/memory/:id/processing/retry",
       "GET /api/v1/memory/:id",
@@ -34,6 +36,17 @@ describe("memory runtime client", () => {
       "GET /api/v1/panel/tasks",
       "DELETE /api/v1/panel/tasks/:id"
     ]);
+  });
+
+  it("saves observed Skill content with the original version through PATCH", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: "skill/1", status: "activated",
+      version: 2, serverTime: "2026-10-09T00:00:00Z" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    const input = { body: "# Revised skill\n\n1. Check current state.", expectedVersion: 1 };
+    await expect(client.updateObservedSkill!("skill/1", input)).resolves.toMatchObject({ version: 2, status: "activated" });
+    expect(fetchMock).toHaveBeenCalledWith(new URL("/api/v1/evidence/skills/skill%2F1", runtimeConfig.baseUrl),
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify(input) }));
   });
 
   it("calls memory health with runtime token through requestJson", async () => {
@@ -76,6 +89,23 @@ describe("memory runtime client", () => {
           "x-memmy-local-token": "local-token"
         })
       })
+    );
+  });
+
+  it("cancels the actual health fetch through the supplied AbortSignal", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    const failure = new Error("Health probe cancelled");
+    const cancelled = expect(client.health(controller.signal)).rejects.toBe(failure);
+    controller.abort(failure);
+    await cancelled;
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/v1/health", runtimeConfig.baseUrl),
+      expect.objectContaining({ signal: controller.signal })
     );
   });
 

@@ -44,8 +44,10 @@ function setupFakePackages(
 ): {
   root: string;
   executablePath: string;
+  headlessShellPath: string;
   playwrightCli: string;
   spawnProcess: ReturnType<typeof vi.fn>;
+  downloadArtifact: ReturnType<typeof vi.fn>;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-browser-setup-"));
   roots.push(root);
@@ -65,11 +67,17 @@ function setupFakePackages(
   const playwrightCli = path.join(playwrightRoot, "cli.js");
   fs.writeFileSync(playwrightCli, "// fake cli\n", "utf8");
   const executablePath = path.join(dataDir, "mcp", "playwright", "browsers", "chromium");
+  const headlessShellPath = path.join(path.dirname(executablePath), "chromium-headless-shell");
   process.env.MEMMY_AGENT_DATA_DIR = dataDir;
   setConfigPath(path.join(root, "config.yaml"));
+  const downloadArtifact = vi.fn((artifactPath: string) => {
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    fs.writeFileSync(artifactPath, "browser", "utf8");
+  });
   const spawnProcess = vi.fn(() => {
-    fs.mkdirSync(path.dirname(executablePath), { recursive: true });
-    fs.writeFileSync(executablePath, "browser", "utf8");
+    for (const artifactPath of [executablePath, headlessShellPath]) {
+      if (!fs.existsSync(artifactPath)) downloadArtifact(artifactPath);
+    }
     return {
       completion: Promise.resolve({ code: 0, signal: null }),
       stop: vi.fn(async () => undefined),
@@ -91,7 +99,7 @@ function setupFakePackages(
     }) as any,
     spawnProcess,
   });
-  return { root, executablePath, playwrightCli, spawnProcess };
+  return { root, executablePath, headlessShellPath, playwrightCli, spawnProcess, downloadArtifact };
 }
 
 afterEach(() => {
@@ -129,16 +137,44 @@ describe("managed Chromium setup", () => {
     });
   });
 
-  it("does not spawn an installer when the executable already exists", async () => {
-    const { executablePath, spawnProcess } = setupFakePackages();
+  it("lets the pinned installer reuse a complete cache without downloading", async () => {
+    const { executablePath, headlessShellPath, spawnProcess, downloadArtifact } = setupFakePackages();
     fs.mkdirSync(path.dirname(executablePath), { recursive: true });
     fs.writeFileSync(executablePath, "browser", "utf8");
+    fs.writeFileSync(headlessShellPath, "shell", "utf8");
 
     await expect(prepareManagedChromium(true)).resolves.toEqual({
       status: "ready",
       executablePath,
     });
-    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    expect(downloadArtifact).not.toHaveBeenCalled();
+    expect(fs.readFileSync(headlessShellPath, "utf8")).toBe("shell");
+  });
+
+  it("repairs a partial cache with the full browser present and the headless shell missing", async () => {
+    const { executablePath, headlessShellPath, spawnProcess, downloadArtifact } = setupFakePackages();
+    fs.mkdirSync(path.dirname(executablePath), { recursive: true });
+    fs.writeFileSync(executablePath, "browser", "utf8");
+    expect(fs.existsSync(headlessShellPath)).toBe(false);
+
+    await expect(prepareManagedChromium(true)).resolves.toEqual({ status: "ready", executablePath });
+
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    expect(downloadArtifact).toHaveBeenCalledExactlyOnceWith(headlessShellPath);
+    expect(fs.existsSync(headlessShellPath)).toBe(true);
+  });
+
+  it("does not report a partial cache ready when the pinned installer fails", async () => {
+    const { executablePath, headlessShellPath, spawnProcess } = setupFakePackages();
+    fs.mkdirSync(path.dirname(executablePath), { recursive: true });
+    fs.writeFileSync(executablePath, "browser", "utf8");
+    spawnProcess.mockReturnValueOnce({ completion: Promise.resolve({ code: 7, signal: null }), stop: vi.fn(async () => undefined) });
+
+    await expect(prepareManagedChromium(true)).resolves.toEqual({ status: "unavailable", error: "Playwright install exited with code 7" });
+
+    expect(fs.existsSync(headlessShellPath)).toBe(false);
+    expect(readBrowserPreparationState()?.status).toBe("unavailable");
   });
 
   it("runs only the pinned CLI install command when Chromium is missing", async () => {

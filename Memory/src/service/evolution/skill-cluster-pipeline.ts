@@ -33,6 +33,7 @@ import {
 } from "../../algorithm/trace-direct-skill.js";
 import {
   languageSteeringLine,
+  skillOutputLanguageFor,
   steeredPromptLanguage,
   skillMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
@@ -470,10 +471,7 @@ export class SkillClusterPipeline {
   }): Promise<{ name: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
     const languageSamples = input.batch.flatMap((item) => item.turns.flatMap((turn) => [turn.user, turn.assistant]));
     const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
-    const outputLanguage = this.deps.config.algorithm.skill.outputLanguageMode === "zh" ||
-      this.deps.config.algorithm.skill.outputLanguageMode === "en"
-      ? this.deps.config.algorithm.skill.outputLanguageMode
-      : steeredLanguage === "zh" ? "zh" : "en";
+    const outputLanguage = skillOutputLanguageFor(this.deps.config.algorithm.skill.outputLanguageMode, steeredLanguage);
     const success = input.batch.filter((item) => item.outcome === "success");
     const failure = input.batch.filter((item) => item.outcome === "failure");
     const result = await this.deps.skillLlm.completeJson<Record<string, unknown>>([

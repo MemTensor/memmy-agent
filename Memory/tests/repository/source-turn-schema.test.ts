@@ -33,6 +33,25 @@ describe("source turn schema upgrade", () => {
     finally { reopened.close(); }
   });
 
+  it("adds account-independent lookup indexes on an existing database without rewriting captures", () => {
+    const { db, root } = createTestService();
+    const runtime = new Repositories(db.db).runtime;
+    runtime.insertSourceTurnCapture({ userId: "installed-owner", source: "codex", profileId: "default", namespaceKey: "scope",
+      conversationId: "conversation", turnId: "turn", contentHash: "hash", startedAt: "2099-01-01T10:00:00Z",
+      completedAt: "2099-01-01T10:01:00Z", createdAt: "2099-01-01T10:01:00Z", response: { status: "rejected", reason: "capture_policy" } });
+    const before = db.db.prepare("SELECT * FROM source_turn_captures").all();
+    db.db.exec("DROP INDEX idx_source_turn_captures_native_turn; DROP INDEX idx_source_turn_captures_native_conversation");
+    db.close();
+    const reopened = new MemoryDb({ path: join(root, "memory.sqlite") });
+    try {
+      expect(reopened.db.prepare("SELECT * FROM source_turn_captures").all()).toEqual(before);
+      const plan = reopened.db.prepare(`EXPLAIN QUERY PLAN SELECT * FROM source_turn_captures
+        WHERE source = ? AND profile_id = ? AND namespace_key = ? AND conversation_id = ? AND turn_id = ?`)
+        .all("codex", "default", "scope", "conversation", "turn") as Array<{ detail: string }>;
+      expect(plan.some(row => row.detail.includes("idx_source_turn_captures_native_turn"))).toBe(true);
+    } finally { reopened.close(); }
+  });
+
   it("enforces source uniqueness across separate database connections", () => {
     const { db, root } = createTestService();
     const second = new MemoryDb({ path: join(root, "memory.sqlite") });
@@ -45,7 +64,7 @@ describe("source turn schema upgrade", () => {
     try {
       new Repositories(db.db).runtime.insertSourceTurnCapture(capture);
       expect(() => new Repositories(second.db).runtime.insertSourceTurnCapture(capture)).toThrow(/UNIQUE constraint/);
-      expect(new Repositories(second.db).runtime.getSourceTurnCapture(capture, capture.turnId)?.response).toEqual(capture.response);
+      expect(new Repositories(second.db).runtime.getSourceTurnCapture({ ...capture, userId: "switched-user" }, capture.turnId)?.response).toEqual(capture.response);
     } finally { second.close(); }
   });
 });

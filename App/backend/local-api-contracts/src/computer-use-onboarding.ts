@@ -20,6 +20,7 @@ export type ComputerUseOnboardingRequest = {
   reason?: ComputerUseGuideReason;
   helperApp?: string;
   canContinue?: boolean;
+  canObserve?: boolean;
 };
 export function isComputerUseGuideReason(value: unknown): value is ComputerUseGuideReason {
   return value === 'accessibility' || value === 'screenCaptureUnavailable';
@@ -27,11 +28,12 @@ export function isComputerUseGuideReason(value: unknown): value is ComputerUseGu
 export function isComputerUseOnboardingRequest(value: any): value is ComputerUseOnboardingRequest {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     && typeof value.requestId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(value.requestId)
-    && Object.keys(value).every(key => ['type', 'requestId', 'reason', 'helperApp', 'canContinue'].includes(key))
-    && ((value.type === `${COMPUTER_USE_ONBOARDING_PREFIX}prepare` && value.reason === undefined && value.helperApp === undefined && value.canContinue === undefined)
+    && Object.keys(value).every(key => ['type', 'requestId', 'reason', 'helperApp', 'canContinue', 'canObserve'].includes(key))
+    && ((value.type === `${COMPUTER_USE_ONBOARDING_PREFIX}prepare` && value.reason === undefined && value.helperApp === undefined && value.canContinue === undefined && value.canObserve === undefined)
       || (value.type === `${COMPUTER_USE_ONBOARDING_PREFIX}guide` && isComputerUseGuideReason(value.reason)
         && (value.canContinue === undefined || typeof value.canContinue === 'boolean')
-        && typeof value.helperApp === 'string' && value.helperApp.startsWith('/') && value.helperApp.endsWith('/Open Computer Use.app')
+        && (value.canObserve === undefined || typeof value.canObserve === 'boolean')
+        && typeof value.helperApp === 'string' && value.helperApp.startsWith('/') && value.helperApp.endsWith('/Memmy Computer Use.app')
         && value.helperApp.length <= 4096 && !/[\r\n\0]/.test(value.helperApp)));
 }
 export function isComputerUseProbeTarget(value: any): value is ComputerUseProbeTarget {

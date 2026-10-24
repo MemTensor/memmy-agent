@@ -79,8 +79,12 @@ jobs:
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             args=(--mode "${{ inputs.mode }}" --state "${{ inputs.state }}")
-            if [ "${{ inputs.mode }}" = "backfill" ] && [ "${{ inputs.apply }}" != "true" ]; then
-              args+=(--dry-run)
+            if [ "${{ inputs.mode }}" = "backfill" ]; then
+              if [ "${{ inputs.apply }}" = "true" ]; then
+                args+=(--apply)
+              else
+                args+=(--dry-run)
+              fi
             fi
           elif [ "${{ github.event_name }}" = "issues" ] || [ "${{ github.event_name }}" = "pull_request_target" ]; then
             args=(--mode event --apply)

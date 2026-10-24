@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
 import type { MemmyMemoryConnection } from "./types.js";
 
 export const DEFAULT_MEMOS_MEMORY_URL = "http://127.0.0.1:18960";
@@ -12,6 +13,9 @@ export type MemmyMemoryDiscoveryOptions = {
   env?: DiscoveryEnv;
   homeDir?: string;
 };
+
+/** A concrete, canonical language tag from the App's resolved display language. */
+export type MemmyOutputLanguage = string;
 
 function expandHome(value: string, homeDir: string): string {
   return value === "~" || value.startsWith("~/") ? path.join(homeDir, value.slice(2)) : value;
@@ -98,4 +102,26 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
         ? runtimePath(env, homeDir)
         : configPath ?? "default",
   };
+}
+
+/** Keep passive History evidence in the same Memory user scope as the agent hook. */
+export function discoverMemmyMemoryUserId(options: MemmyMemoryDiscoveryOptions = {}): string {
+  const env = options.env ?? process.env;
+  const homeDir = options.homeDir ?? os.homedir();
+  const configPath = memmyMemoryConfigPaths({ env, homeDir }).find((candidate) => fs.existsSync(candidate));
+  const value = configPath ? parseConfigFile(configPath).memmyMemory?.userId : undefined;
+  return typeof value === "string" && value.trim() ? value.trim() : "local-user";
+}
+
+/** The desktop writes its resolved display language here, including the system/account default. */
+export function discoverMemmyOutputLanguage(options: MemmyMemoryDiscoveryOptions = {}): MemmyOutputLanguage | undefined {
+  const configPath = memmyMemoryConfigPaths(options).find((candidate) => fs.existsSync(candidate));
+  if (!configPath) return undefined;
+  try {
+    const value = parseConfigFile(configPath).memmyMemory?.language;
+    return normalizeOutputLanguage(value);
+  } catch {
+    // A transient config read must not lose an otherwise usable recording.
+    return undefined;
+  }
 }

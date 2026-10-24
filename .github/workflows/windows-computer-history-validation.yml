@@ -1,0 +1,164 @@
+name: Windows 11 Computer History validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-computer-history-validation.yml"
+      - "App/native-computer-history/**"
+      - "App/memmy-agent/src/tools/computer-history/**"
+      - "App/memmy-agent/tests/tools/computer-history/**"
+      - "App/memmy-agent/scripts/copy-build-assets.mjs"
+      - "App/shell/desktop/electron-builder.win*.yml"
+      - "scripts/internal/win/build-nsis.sh"
+      - "scripts/internal/win/*computer-history*"
+      - "App/shell/desktop/tests/packaged-runtime-boundary.test.ts"
+      - "tests/computer-history-packaging.test.mjs"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.12"
+          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+      - name: Require Windows 11
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = [Environment]::OSVersion.Version.Build
+          if ($build -lt 22000) { throw "Windows 11 build 22000 or later required; found $build" }
+          Write-Host "Windows build=$build; session=$((Get-Process -Id $PID).SessionId)"
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Install standalone agent dependencies
+        run: npm ci --prefix App/memmy-agent
+      - name: Validate native protocol and lifecycle without desktop access
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location App/native-computer-history/apps/OpenComputerHistoryWindows
+          try {
+            go test ./...
+            if ($LASTEXITCODE -ne 0) { throw 'Native recorder pure tests failed' }
+            # Win32 hook LPARAM is a native record pointer carried as uintptr;
+            # unsafeptr cannot infer that callback ABI contract. Keep every other analyzer.
+            go vet -unsafeptr=false ./...
+            if ($LASTEXITCODE -ne 0) { throw 'Native recorder vet failed' }
+          } finally { Pop-Location }
+      - name: Build agent and native History recorder from source
+        run: npm --prefix App/memmy-agent run build
+      - name: Validate packaged app icons with Windows PowerShell 5.1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'App/memmy-agent/src/tools/computer-history/win/app-icon.ps1'
+          $staged = 'App/memmy-agent/dist/tools/computer-history/win/app-icon.ps1'
+          if (-not (Test-Path -LiteralPath $staged)) { throw 'App icon helper was not copied into the distributable agent' }
+          if ((Get-FileHash $source).Hash -ne (Get-FileHash $staged).Hash) { throw 'Packaged app icon helper differs from source' }
+          $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          foreach ($count in @(1, 2, 48)) {
+            $ids = [System.Collections.Generic.List[string]]::new()
+            $ids.Add('win32.powershell')
+            for ($index = 1; $index -lt $count; $index++) { $ids.Add("win32.iconprobe$index") }
+            $idArray = $ids.ToArray()
+            $json = ConvertTo-Json -InputObject $idArray -Compress
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+            $raw = & $powershell -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File $staged -IdsBase64 $encoded
+            if ($LASTEXITCODE -ne 0) { throw "App icon helper failed for $count IDs with exit code $LASTEXITCODE" }
+            $icons = $raw | ConvertFrom-Json -AsHashtable
+            if ($icons.Count -ne $count) { throw "App icon helper returned $($icons.Count) entries for $count IDs" }
+            foreach ($id in $ids) { if ($icons.Keys -notcontains $id) { throw "App icon helper omitted $id" } }
+            $png = [Convert]::FromBase64String($icons['win32.powershell'])
+            if ($png.Length -lt 24) { throw 'App icon helper returned a truncated image' }
+            $signature = -join ($png[0..7] | ForEach-Object { $_.ToString('x2') })
+            $dimensions = -join ($png[16..23] | ForEach-Object { $_.ToString('x2') })
+            if ($signature -ne '89504e470d0a1a0a' -or $dimensions -ne '0000004000000040') {
+              throw "App icon helper did not return a 64x64 PNG for its own PowerShell process ($count IDs)"
+            }
+          }
+      - name: Validate native recorder identity, pure self-test and installed app catalog
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'App/memmy-agent/src/tools/computer-history/win/win11-observer.ps1'
+          $staged = 'App/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1'
+          if (-not (Test-Path -LiteralPath $staged)) { throw 'Observer was not copied into the distributable agent' }
+          if ((Get-FileHash $source).Hash -ne (Get-FileHash $staged).Hash) { throw 'Packaged observer differs from source' }
+          $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $native = 'App/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe'
+          node scripts/internal/win/verify-computer-history-runtime.mjs $native x64 App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Native recorder PE, identity or embedded source verification failed' }
+          $probe = & $native --self-test | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $probe.runtimeId -ne 'MemmyWindowsHistoryRuntimeV1' -or -not $probe.pureSelfTest -or $probe.desktopAccess -ne $false) { throw 'Pure native recorder self-test failed' }
+          # The native recorder writes its embedded UTF-8 worker with a BOM before
+          # launching Windows PowerShell 5.1. Exercise those exact on-disk bytes.
+          $workerBytes = [IO.File]::ReadAllBytes('App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1')
+          $workerForTest = Join-Path $env:RUNNER_TEMP 'memmy-history-worker-self-test.ps1'
+          $materializedWorker = [byte[]]::new($workerBytes.Length + 3)
+          $materializedWorker[0] = 0xef; $materializedWorker[1] = 0xbb; $materializedWorker[2] = 0xbf
+          [Array]::Copy($workerBytes, 0, $materializedWorker, 3, $workerBytes.Length)
+          [IO.File]::WriteAllBytes($workerForTest, $materializedWorker)
+          $workerProbe = & $powershell -NoProfile -NonInteractive -MTA -ExecutionPolicy Bypass -File $workerForTest -SelfTest | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $workerProbe.workerApiCompiled -or -not $workerProbe.pureSelfTest -or $workerProbe.desktopAccess -ne $false) { throw 'Pure worker API compile and self-test failed' }
+          $apps = & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $staged -List | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($apps).Count -lt 1) { throw 'Windows app catalog is unavailable' }
+          foreach ($app in @($apps)) {
+            if ($app.bundleId -notmatch '^win32\.[a-z0-9._-]+$' -or [string]::IsNullOrWhiteSpace($app.name)) {
+              throw "Invalid app catalog row: $($app | ConvertTo-Json -Compress)"
+            }
+          }
+          Write-Host "Validated $(@($apps).Count) installed or running app entries"
+      - name: Verify agent History platform contracts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tests = @(
+            'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/win/win11.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/platform.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/mac/summary-writer.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/browser-privacy.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/browser-semantic-history.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/browser-history-bridge.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/win/native-event-adapter.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/win/native-recording-privacy.test.ts'
+            'App/memmy-agent/tests/tools/computer-history/win/browser-authority-publisher.test.ts'
+          )
+          foreach ($test in $tests) {
+            if (-not (Test-Path -LiteralPath $test -PathType Leaf)) { throw "Missing History test: $test" }
+          }
+          node node_modules/vitest/vitest.mjs run @tests
+          if ($LASTEXITCODE -ne 0) { throw 'History platform contracts failed' }
+      # On Windows, Vitest's Vite runner raises a collection-time SyntaxError for
+      # this valid ESM test; the Node ESM runner executes the same assertions.
+      - name: Verify packaged History assets
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/computer-history-packaging.test.mjs
+          --experimental.viteModuleRunner=false
+      - name: Verify installer enforces the unpacked History observer
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          App/shell/desktop/tests/packaged-runtime-boundary.test.ts
+          -t "requires the native Windows 11 History recorder"
+      - name: Record validation scope
+        if: ${{ always() }}
+        run: |
+          @'
+          Validates source-built Windows History recorder identity, PE architecture, exact embedded worker source, pure recorder state/lifecycle self-tests, UTF-8 app catalog output, runtime asset copy, and packaging rules. This does not start live recording or prove real UI Automation/hook behavior.
+          A signed NSIS installer and a representative real-app capture matrix still require installation testing on a Windows 11 machine.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

@@ -239,6 +239,16 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async approveObservedSkill(memoryId) {
+      failIfNeeded();
+      return { id: memoryId, status: "activated", serverTime: now() };
+    },
+
+    async updateObservedSkill(memoryId, input) {
+      failIfNeeded();
+      return { id: memoryId, status: "activated", version: input.expectedVersion + 1, serverTime: now() };
+    },
+
     async enqueueImportSummaries() {
       failIfNeeded();
       return {

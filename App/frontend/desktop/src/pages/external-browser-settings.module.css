@@ -1,0 +1,109 @@
+.section { border-top: 1px solid var(--color-border, #e5e5e8); overflow: hidden; }
+.browser + .browser { border-top: 1px solid var(--color-border, #e5e5e8); }
+.browserIcon { width: 32px; height: 32px; flex: none; object-fit: contain; }
+.row { display: flex; align-items: center; gap: 16px; padding: 16px 18px 16px 24px; }
+.browserCopy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.browserCopy strong { font-size: 14px; }
+.browserCopy small { overflow: hidden; color: #73777f; text-overflow: ellipsis; white-space: nowrap; }
+.statusDot { display: inline-block; width: 7px; height: 7px; margin: 0 6px 1px 0; border-radius: 50%; background: #e63946; }
+.badge { color: #73777f; font-size: 12px; white-space: nowrap; }
+.guide button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: 1px solid #d7d9df; border-radius: 8px; padding: 0 12px; background: transparent; color: inherit; font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.rowActions { display: flex; align-items: center; flex: none; gap: 8px; margin-left: auto; }
+.primaryButton, .secondaryButton { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; flex: none; border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.primaryButton { border: 1px solid #3478f6; background: #3478f6; color: #fff; }
+.secondaryButton { border: 1px solid #d0d5dd; background: #fff; color: #1a1a1a; }
+.secondaryButton:hover:not(:disabled) { background: #f4f5f7; }
+.primaryButton:disabled, .secondaryButton:disabled { opacity: .55; cursor: default; }
+.preparationStatus { margin: 0; padding: 0 24px 12px 62px; color: #475569; font-size: 12px; line-height: 1.5; }
+.guide { padding: 6px 24px 28px 62px; font-size: 13px; line-height: 1.6; }
+.guide > strong { font-size: 13px; }
+.guide > p { margin: 8px 0 12px; color: #73777f; }
+.guide ol { display: grid; gap: 14px; margin: 0; padding-left: 22px; }
+.guide li { padding-left: 4px; }
+.guideActions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.guideActions code, .pairing code { border-radius: 8px; padding: 8px 12px; background: rgba(90, 110, 130, .08); font-size: 12px; line-height: 1.5; user-select: all; }
+.pathActions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.path { display: block; max-width: none; padding: 10px 12px; line-height: 1.55; overflow-wrap: normal; word-break: normal; }
+.pathSegment { white-space: nowrap; }
+.hint { margin: 12px 0 0; max-width: 68ch; color: #73777f; }
+.installActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; margin-top: 2px; }
+.openPage, .revealFolder { margin: 0; }
+.revealFolder { margin-top: 16px; }
+.fallback { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--color-border, #e7e8ec); }
+.fallback summary { min-height: 28px; padding: 2px 0 0; cursor: pointer; width: fit-content; }
+.fallback ol { gap: 22px; margin-top: 16px; }
+.pairing { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 24px 16px 62px; font-size: 12px; }
+.pairing > p { flex-basis: 100%; margin: 0; color: #73777f; }
+.pairing > span { color: #73777f; }
+.pairing > small, .missing { display: block; color: #b04b37; }
+.guide button:disabled { opacity: .55; cursor: default; }
+.error { padding: 0 24px 10px; color: #c33; }
+@media (max-width: 700px) {
+  .row { flex-wrap: wrap; gap: 9px; padding: 14px 18px; }
+  .browserCopy { flex-basis: calc(100% - 35px); }
+  .badge { margin-left: 31px; }
+  .guide { padding: 8px 18px 22px 18px; }
+  .pathActions { grid-template-columns: minmax(0, 1fr); }
+  .pathActions button { justify-self: start; }
+  .pairing { padding: 0 18px 16px 27px; }
+  .preparationStatus { padding: 0 18px 12px 27px; }
+}
+
+.dragDiagram { position: relative; display: flex; align-items: stretch; gap: 20px; flex-wrap: wrap; margin: 22px 0 16px; }
+.guide .dragCard { display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 8px; width: 196px; min-height: 156px; padding: 20px 16px 16px; border: 1px solid #f0c5aa; border-radius: 16px; background: #fff7f0; cursor: grab; user-select: none; transition: transform .16s ease, box-shadow .16s ease; }
+.dragCard:hover, .dragCard:focus-visible { transform: translateY(-3px); box-shadow: 0 7px 18px #d876231a; outline: 2px solid #eea879; outline-offset: 3px; }
+.dragCard:active { cursor: grabbing; }
+.dragCard img { width: 48px; height: 48px; pointer-events: none; }
+.dragCard strong { line-height: 1.35; text-align: center; }
+.dragCard small { color: #73777f; text-align: center; pointer-events: none; }
+.dragArrow { align-self: center; color: #9299a3; flex: none; }
+.dropTarget { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; width: 196px; min-height: 156px; padding: 20px 16px; border: 1px dashed #b9c2cb; border-radius: 16px; color: #73777f; text-align: center; }
+.dropTarget img { width: 32px; height: 32px; }
+.dropTarget span { max-width: 12em; line-height: 1.45; }
+.guide .demoButton { border: 0; padding: 0 2px; color: #6e747d; }
+.demoGhost { position: absolute; left: 74px; top: 20px; pointer-events: none; display: flex; align-items: flex-end; animation: extension-drag-demo 2s ease-in-out both; }
+.demoGhost img { width: 48px; height: 48px; }
+.demoGhost svg { margin: 0 0 -5px -7px; fill: #fff; }
+.demonstrating .dropTarget { animation: extension-drop-demo 2s ease-in-out both; }
+@keyframes extension-drag-demo { 0%, 10% { transform: translate(0, 0) scale(1); opacity: 0; } 25% { transform: translate(0, -6px) scale(1.1); opacity: 1; } 75%, 90% { transform: translate(258px, 0) scale(1.05); opacity: 1; } 100% { transform: translate(258px, 0); opacity: 0; } }
+@keyframes extension-drop-demo { 0%, 55% { background: transparent; } 75%, 100% { background: #e9f6ef; border-color: #75bda0; } }
+@media (prefers-reduced-motion: reduce) { .dragCard { transition: none; } .demoGhost, .demonstrating .dropTarget { animation-duration: .01ms; } }
+@media (max-width: 700px) {
+  .dragDiagram { gap: 12px; }
+  .guide .dragCard, .dropTarget { width: 148px; min-height: 140px; }
+  .demoGhost { left: 50px; animation-name: extension-drag-demo-narrow; }
+}
+@keyframes extension-drag-demo-narrow { 0%, 10% { transform: translate(0, 0) scale(1); opacity: 0; } 25% { transform: translate(0, -6px) scale(1.1); opacity: 1; } 75%, 90% { transform: translate(194px, 0) scale(1.05); opacity: 1; } 100% { transform: translate(194px, 0); opacity: 0; } }
+
+.dragSourceRow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 18px 0 12px; }
+.installDemo { min-width: 0; }
+.installDemoToolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #73777f; font-size: 12px; }
+.installDemoTitle { margin: 15px 0 10px; font-size: 14px; }
+.installDemoDesktop { position: relative; display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 16px; padding: 18px 12px; border-radius: 10px; background: light-dark(#edf2ef, #15211b); pointer-events: none; user-select: none; }
+.installDemoWindow { min-width: 0; border: 1px solid var(--color-border, #dfe5e1); border-radius: 7px; overflow: hidden; background: light-dark(#fff, #202924); box-shadow: 0 4px 10px light-dark(#25302c12, #00000035); }
+.installDemoWindowTitle { display: flex; align-items: center; gap: 5px; min-height: 27px; padding: 0 8px; background: light-dark(#f5f8f6, #28362e); font-size: 11px; }
+.installDemoWindowTitle img { width: 14px; height: 14px; flex: none; }
+.installDemoMemmyBody { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 133px; padding: 8px; text-align: center; font-size: 11px; }
+.installDemoSourceIcon, .installDemoMovingIcon { display: block; position: relative; width: 42px; height: 42px; flex: none; }
+.installDemoSourceIcon > img, .installDemoMovingIcon > img { display: block; width: 100%; height: 100%; }
+.installDemoPlaying .installDemoSourceIcon { opacity: .25; }
+.installDemoMovingIcon { position: absolute; z-index: 2; pointer-events: none; filter: drop-shadow(0 5px 5px light-dark(#25302c35, #00000080)); }
+.installDemoPointer { position: absolute; bottom: -6px; right: -5px; fill: light-dark(#fff, #202924); }
+.installDemoAddress { margin: 5px 7px; padding: 3px 5px; border-radius: 4px; font-size: 11px; background: light-dark(#f5f8f6, #28362e); overflow-wrap: anywhere; }
+.installDemoBrowserHeading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px; padding: 5px 8px; font-size: 11px; }
+.installDemoBrowserHeading small { display: inline-flex; align-items: center; gap: 3px; color: #73777f; font-size: 11px; }
+.installDemoBrowserHeading i { width: 15px; height: 8px; border-radius: 6px; background: #3478f6; }
+.installDemoBrowserSpace { display: flex; align-items: center; justify-content: center; min-height: 79px; padding: 8px; color: #73777f; background: light-dark(#eff5ff, #23344c); font-size: 11px; text-align: center; }
+.installDemoFooter { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; color: #73777f; font-size: 12px; }
+@media (max-width: 560px) {
+  .installDemoDesktop { grid-template-columns: minmax(0, 1fr); }
+  .installDemoMemmyBody { min-height: 100px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dragCard:hover, .dragCard:focus-visible { transform: none; }
+}
+
+.guide .dragSourceRow .dragCard { width: 100%; min-height: 110px; box-sizing: border-box; flex-direction: row; justify-content: flex-start; gap: 18px; padding: 20px; background: light-dark(#fff7f0, #2c221c); }
+.dragSourceRow .dragCard img { width: 62px; height: 62px; flex: none; }
+.dragCardCopy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.dragCardCopy strong, .dragCardCopy small { text-align: left; }

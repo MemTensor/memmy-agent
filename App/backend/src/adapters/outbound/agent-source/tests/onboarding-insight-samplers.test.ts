@@ -135,6 +135,7 @@ describe("onboarding insight samplers", () => {
       ...message,
       createdAt: new Date(baseTime + index * 1000).toISOString()
     }));
+    const scanStarted = vi.fn();
     const sourceRegistry = createSourceRegistry([{
       descriptor: {
         sourceId: "codex",
@@ -145,7 +146,8 @@ describe("onboarding insight samplers", () => {
       async detect() {
         return true;
       },
-      async *scan() {
+      async *scan(options) {
+        scanStarted(options);
         yield* messages;
       }
     }]);
@@ -163,12 +165,87 @@ describe("onboarding insight samplers", () => {
     });
 
     const userIds = window?.messages.filter((message) => message.role === "user").map((message) => message.messageId);
+    expect(scanStarted).toHaveBeenCalledWith(expect.objectContaining({
+      fullHistory: true,
+      order: "recent_first",
+      maxScanTargets: 6
+    }));
     expect(userIds).toEqual(["user-0", "user-1", ...Array.from({ length: 12 }, (_, index) => `user-${index + 3}`)]);
     expect(window?.messages.filter((message) => message.role === "assistant")).toHaveLength(14);
     expect(window?.messages.filter((message) => message.role === "tool")).toHaveLength(14);
     expect(window?.messages.find((message) => message.role === "tool")?.text.length).toBeLessThanOrEqual(405);
     expect(window?.messages.find((message) => message.role === "tool")?.text).toContain("Status: success");
   });
+
+  it("does not start a conversation scan after its signal has expired", async () => {
+    const scanStarted = vi.fn();
+    const sourceRegistry = createSourceRegistry([{
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: "/tmp/codex" },
+      async detect() {
+        return true;
+      },
+      async *scan() {
+        scanStarted();
+        yield conversationMessage(0, "user-0", "user", "latest question", "latest-conversation");
+      }
+    }]);
+    const controller = new AbortController();
+    controller.abort();
+    const reader = createSourceRegistryOnboardingConversationWindowReader(sourceRegistry);
+
+    await expect(reader.readConversation({
+      sourceId: "codex",
+      displayName: "Codex",
+      conversationId: "latest-conversation",
+      latestActivityAt: "2026-07-20T10:00:00.000Z",
+      workspacePath: "/tmp/project"
+    }, { maxQueryChars: 600, deadlineMs: 5_000, signal: controller.signal })).resolves.toBeNull();
+    expect(scanStarted).not.toHaveBeenCalled();
+  });
+
+  it.each(["latest-conversation", "unrelated-conversation"])(
+    "closes a microtask-only scan at the wall-clock deadline while reading %s",
+    async (conversationId) => {
+      let wallClock = 1_000;
+      vi.spyOn(Date, "now").mockImplementation(() => wallClock);
+      let yieldedMessages = 0;
+      let iteratorClosed = false;
+      let scanSignal: AbortSignal | undefined;
+      const sourceRegistry = createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: "/tmp/codex" },
+        async detect() {
+          return true;
+        },
+        async *scan(options) {
+          scanSignal = options.signal;
+          try {
+            for (let index = 0; index < 10_000; index += 1) {
+              wallClock += 1_250;
+              yieldedMessages += 1;
+              yield conversationMessage(index, `user-${index}`, "user", `question ${index}`, conversationId);
+            }
+          } finally {
+            iteratorClosed = true;
+          }
+        }
+      }]);
+      const reader = createSourceRegistryOnboardingConversationWindowReader(sourceRegistry);
+
+      const window = await reader.readConversation({
+        sourceId: "codex",
+        displayName: "Codex",
+        conversationId: "latest-conversation",
+        latestActivityAt: "2026-07-20T10:00:00.000Z",
+        workspacePath: "/tmp/project"
+      }, { maxQueryChars: 600, deadlineMs: 5_000 });
+
+      expect(yieldedMessages).toBe(4);
+      expect(iteratorClosed).toBe(true);
+      expect(scanSignal?.aborted).toBe(false);
+      // An incomplete prefix must not replace the shallow sample's latest turns.
+      expect(window).toBeNull();
+    }
+  );
 });
 
 function conversationMessage(

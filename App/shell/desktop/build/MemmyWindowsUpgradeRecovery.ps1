@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ownershipDenied = $false
 $normalizedInstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $dataPath = Join-Path $normalizedInstallDir 'data'
 $expectedBackupParent = "$normalizedInstallDir.memmy-upgrade-backup"
@@ -57,6 +58,19 @@ $resolvedDirectMigrationLogPath = if ($DirectMigrationLogPath) {
   $DirectMigrationLogPath
 } else {
   Join-Path $env:LOCALAPPDATA 'Memmy\upgrade-logs\data-migration.log'
+}
+
+function Invoke-MemmyRuntimeOwnershipGuard([string]$Path) {
+  # Profiles and temporary test layouts are private; only the canonical shared drive root is guarded.
+  if ($Path -notmatch '^[A-BD-Za-bd-z]:[\\/]MemmyData[\\/]\.memmy(?:[\\/]|$)') { return }
+  try {
+    $ownershipScript = Join-Path $PSScriptRoot 'MemmyWindowsRuntimeOwnership.ps1'
+    if (-not (Test-Path -LiteralPath $ownershipScript -PathType Leaf)) { throw 'Packaged Windows ownership helper is missing' }
+    . $ownershipScript -LibraryOnly
+    Assert-MemmySharedRuntimeOwnership $Path | Out-Null
+  } catch {
+    throw ('MEMMY_WINDOWS_DATA_OWNERSHIP: Choose C: for a per-user installation, or use a separate drive. Another folder on this same drive cannot isolate Memmy data. ' + $_.Exception.Message)
+  }
 }
 
 function Write-MemmyUpgradeRecoveryLog([string]$Message) {
@@ -233,7 +247,7 @@ function Invoke-MemmyMigrationRecovery(
   }
 
   $powershellPath = Join-Path $PSHOME 'powershell.exe'
-  & $powershellPath @(
+  $migrationOutput = @(& $powershellPath @(
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy', 'Bypass',
@@ -251,8 +265,10 @@ function Invoke-MemmyMigrationRecovery(
     '-LockPath', $LockPath,
     '-LogPath', $MigrationLogPath,
     '-Owner', $ExpectedOwner
-  )
+  ) 2>&1)
   if ($LASTEXITCODE -ne 0) {
+    $migrationDetail = @($migrationOutput | ForEach-Object { [string]$_ }) -join ' | '
+    if ($migrationDetail -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw $migrationDetail }
     throw "migration $Mode recovery failed with exit code $LASTEXITCODE"
   }
   Write-MemmyUpgradeRecoveryLog "migration $Mode recovery completed for $ExpectedOwner"
@@ -290,6 +306,7 @@ if (-not (Test-Path -LiteralPath $LockPath -PathType Container)) {
 }
 
 try {
+  Invoke-MemmyRuntimeOwnershipGuard $expectedTargetRuntimeHomePath
   if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     $lockAge = (Get-Date) - (Get-Item -LiteralPath $LockPath).LastWriteTime
     if ($lockAge.TotalMinutes -lt 2) {
@@ -338,6 +355,7 @@ try {
     }
     Assert-MemmySamePath -Actual ([string]$state.targetUserDataPath) -Expected $expectedTargetUserDataPath -Description 'direct-lock user-data target'
     Assert-MemmySamePath -Actual ([string]$state.targetRuntimeHomePath) -Expected $directExpectedRuntimeHomePath -Description 'direct-lock runtime target'
+    Invoke-MemmyRuntimeOwnershipGuard $directExpectedRuntimeHomePath
     $expectedTargetRuntimeHomePath = $directExpectedRuntimeHomePath
     $dataPath = Join-Path $directInstallDir 'data'
 
@@ -380,6 +398,7 @@ try {
       }
     }
   }
+  Invoke-MemmyRuntimeOwnershipGuard $expectedTargetRuntimeHomePath
   $stateWorkDir = Resolve-MemmyNormalizedPath ([string]$state.workDir)
   $stateInstallerPath = Resolve-MemmyNormalizedPath ([string]$state.installerPath)
   $backupRoot = Resolve-MemmyNormalizedPath ([string]$state.backupRoot)
@@ -486,6 +505,11 @@ try {
   }
   exit 0
 } catch {
+  $ownershipDenied = $_.Exception.Message -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*'
+  if ($ownershipDenied) {
+    Write-MemmyUpgradeRecoveryLog 'data ownership denied; retaining lock and refusing launch'
+    exit 5
+  }
   Write-MemmyUpgradeRecoveryLog ('automatic recovery failed: ' + ($_ | Out-String))
   $lockAge = if (Test-Path -LiteralPath $LockPath -PathType Container) {
     (Get-Date) - (Get-Item -LiteralPath $LockPath).LastWriteTime

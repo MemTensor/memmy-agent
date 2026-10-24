@@ -12,11 +12,13 @@ let root: Root;
 let container: HTMLDivElement;
 const denied = { supported: true, accessibility: false, inputMonitoring: false };
 const granted = { supported: true, accessibility: true, inputMonitoring: true };
+const accessibilityGranted = { ...granted, inputMonitoring: false };
 beforeEach(() => {
   window.localStorage.clear();
   saveHistoryPermissionSetup("start", "current-app");
   window.memmy = {
     getComputerHistoryPermissionSessionId: vi.fn().mockResolvedValue("current-app"),
+    guideMemmyPermission: vi.fn().mockResolvedValue(true),
     restartForComputerHistoryPermissions: vi.fn().mockResolvedValue(undefined),
   } as unknown as NonNullable<Window["memmy"]>;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -39,37 +41,58 @@ async function click(label: string) {
   expect(button).toBeDefined(); await act(async () => button!.click());
 }
 describe("Computer History permission dialog", () => {
-  it("renders a modal with only the two permissions, and opens the requested settings", async () => {
+  it("requests only Accessibility, without a separate Input Monitoring grant", async () => {
     const { client, onStart } = await render();
     expect(dialog().getAttribute("aria-modal")).toBe("true");
     expect(container.querySelector('[role="dialog"]')).toBeNull(); // portal
-    expect(dialog().querySelectorAll('.ch__permission-row')).toHaveLength(2);
-    expect(dialog().textContent).toContain("辅助功能"); expect(dialog().textContent).toContain("输入监控");
+    expect(dialog().querySelectorAll('.ch__permission-row')).toHaveLength(1);
+    expect(dialog().textContent).toContain("辅助功能"); expect(dialog().textContent).not.toContain("输入监控");
     expect(dialog().textContent).not.toMatch(/检查并开始|重新检测|重启 Memmy|屏幕录制/);
     expect(client.openComputerHistoryPermission).not.toHaveBeenCalled();
-    await click("去开启"); expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "settings");
-    const half = { ...denied, accessibility: true };
-    client.checkComputerHistoryPermissions.mockResolvedValue(half); client.openComputerHistoryPermission.mockResolvedValue(half);
+    expect(window.memmy!.guideMemmyPermission).not.toHaveBeenCalled();
+    await click("去开启"); expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledExactlyOnceWith("accessibility");
+    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "request");
+    client.checkComputerHistoryPermissions.mockResolvedValue(accessibilityGranted);
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(1);
-    expect(dialog().textContent).not.toContain("退出并重启");
-    await click("去开启"); expect(client.openComputerHistoryPermission).toHaveBeenLastCalledWith("inputMonitoring", "settings");
+    expect(dialog().textContent).toContain("退出并重启");
+    expect(dialog().querySelectorAll('.ch__permission-open')).toHaveLength(0);
+    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "request");
+    expect(onStart).not.toHaveBeenCalled();
+  });
+  it("shows ordinary restart guidance when Accessibility has just been granted but listening is not ready", async () => {
+    const { client, onStart } = await render();
+    client.openComputerHistoryPermission.mockResolvedValue(accessibilityGranted);
+    client.checkComputerHistoryPermissions.mockResolvedValue(accessibilityGranted);
+    await click("去开启");
+    expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(1);
+    expect(dialog().querySelectorAll('.ch__permission-open')).toHaveLength(0);
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    expect(dialog().textContent).toContain("退出并重启");
+    expect(dialog().textContent).toContain("让权限生效，重启后会自动开始记录");
+    expect(dialog().textContent).not.toContain("重试");
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledTimes(2);
+    expect(onStart).not.toHaveBeenCalled();
+    await click("退出并重启");
+    expect(window.memmy!.restartForComputerHistoryPermissions).toHaveBeenCalledOnce();
     expect(onStart).not.toHaveBeenCalled();
   });
   it("opens settings directly on every click and never navigates again on focus", async () => {
     const { client } = await render();
     await click("去开启");
-    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "settings");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledExactlyOnceWith("accessibility");
+    expect(client.openComputerHistoryPermission).toHaveBeenCalledExactlyOnceWith("accessibility", "request");
     await act(async () => window.dispatchEvent(new Event("focus")));
-    expect(client.openComputerHistoryPermission).toHaveBeenCalledTimes(1);
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledTimes(1);
     await click("去开启");
-    expect(client.openComputerHistoryPermission).toHaveBeenLastCalledWith("accessibility", "settings");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenLastCalledWith("accessibility");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledTimes(2);
     expect(client.openComputerHistoryPermission).toHaveBeenCalledTimes(2);
   });
   it("preserves the close button while opening settings and prevents dismissal until complete", async () => {
     const { client, onCancel } = await render();
     let finish!: (value: typeof denied) => void;
-    client.openComputerHistoryPermission.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const closeButton = dialog().querySelector<HTMLButtonElement>(".modal-header button")!;
     expect(closeButton.disabled).toBe(false);
     await click("去开启");
@@ -87,10 +110,41 @@ describe("Computer History permission dialog", () => {
     await act(async () => closeButton.click());
     expect(onCancel).toHaveBeenCalledOnce();
   });
+  it("refreshes grants on focus while the native settings guide is still open", async () => {
+    const { client, onStart } = await render();
+    let closeGuide!: (value: boolean) => void;
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise<boolean>((resolve) => { closeGuide = resolve; }));
+    await click("去开启");
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledOnce();
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledOnce();
+    client.checkComputerHistoryPermissions.mockResolvedValue(accessibilityGranted);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(1);
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledTimes(2);
+    const restart = Array.from(dialog().querySelectorAll("button")).find(button => button.textContent === "退出并重启")!;
+    expect(restart.disabled).toBe(true);
+    expect(onStart).not.toHaveBeenCalled();
+    expect(window.memmy!.guideMemmyPermission).toHaveBeenCalledOnce();
+    await act(async () => closeGuide(false));
+    expect(restart.disabled).toBe(false);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+  it("ignores a settings guide completion after the dialog unmounts", async () => {
+    const { client, onStart, onCancel } = await render();
+    let closeGuide!: (value: boolean) => void;
+    window.memmy!.guideMemmyPermission = vi.fn().mockReturnValueOnce(new Promise<boolean>((resolve) => { closeGuide = resolve; }));
+    await click("去开启");
+    await act(async () => root.render(null));
+    client.checkComputerHistoryPermissions.mockResolvedValue(granted);
+    await act(async () => closeGuide(true));
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledOnce();
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
   it("shows Quit & Reopen when both grants are ready, without starting before restart", async () => {
     const { client, onStart } = await render(granted);
-    expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(2);
-    expect(dialog().textContent).not.toContain("去开启");
+    expect(dialog().querySelectorAll('.ch__permission-granted')).toHaveLength(1);
+    expect(dialog().querySelectorAll('.ch__permission-open')).toHaveLength(0);
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).not.toHaveBeenCalled();
     await click("退出并重启");
@@ -98,13 +152,54 @@ describe("Computer History permission dialog", () => {
     expect(readHistoryPermissionIntent()).toEqual({ action: "start", sessionId: "current-app" });
     expect(client.checkComputerHistoryPermissions).toHaveBeenCalledTimes(3);
   });
-  it("does not restart if a permission was revoked after the last check", async () => {
+  it("offers Quit & Reopen with Accessibility alone without treating pending listening as an error", async () => {
+    const { client, onStart } = await render(accessibilityGranted);
+    expect(dialog().querySelectorAll('.ch__permission-row')).toHaveLength(1);
+    expect(dialog().textContent).not.toContain("输入监控");
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    expect(dialog().textContent).toContain("退出并重启");
+    expect(dialog().textContent).toContain("让权限生效，重启后会自动开始记录");
+    expect(dialog().textContent).not.toContain("重试");
+    expect(onStart).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    await click("退出并重启");
+    expect(window.memmy!.restartForComputerHistoryPermissions).toHaveBeenCalledOnce();
+    expect(readHistoryPermissionIntent()).toEqual({ action: "start", sessionId: "current-app" });
+    expect(onStart).not.toHaveBeenCalled();
+    expect(client.openComputerHistoryPermission).not.toHaveBeenCalled();
+    expect(window.memmy!.guideMemmyPermission).not.toHaveBeenCalled();
+  });
+  it("still restarts when a fresh check reports pending listening but Accessibility remains granted", async () => {
     const { client, onStart } = await render(granted);
+    client.checkComputerHistoryPermissions.mockResolvedValue(accessibilityGranted);
+    await click("退出并重启");
+    expect(client.checkComputerHistoryPermissions).toHaveBeenCalledTimes(2);
+    expect(window.memmy!.restartForComputerHistoryPermissions).toHaveBeenCalledOnce();
+    expect(onStart).not.toHaveBeenCalled();
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+  });
+  it("does not restart if Accessibility was revoked after the last check", async () => {
+    const { client, onStart } = await render(accessibilityGranted);
     client.checkComputerHistoryPermissions.mockResolvedValue(denied);
     await click("退出并重启");
     expect(window.memmy!.restartForComputerHistoryPermissions).not.toHaveBeenCalled();
     expect(onStart).not.toHaveBeenCalled();
     expect(dialog().textContent).not.toContain("退出并重启");
+  });
+  it("keeps the enable intent and allows another restart attempt if restarting fails", async () => {
+    const { onStart } = await render(accessibilityGranted);
+    window.memmy!.restartForComputerHistoryPermissions = vi.fn()
+      .mockRejectedValueOnce(new Error("restart failed"))
+      .mockResolvedValue(undefined);
+    await click("退出并重启");
+    expect(dialog().querySelector('[role="alert"]')?.textContent).toContain("restart failed");
+    expect(readHistoryPermissionIntent()).toEqual({ action: "start", sessionId: "current-app" });
+    expect(onStart).not.toHaveBeenCalled();
+    await click("退出并重启");
+    expect(window.memmy!.restartForComputerHistoryPermissions).toHaveBeenCalledTimes(2);
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    expect(onStart).not.toHaveBeenCalled();
   });
   it.each([false, true])("automatically resumes the pending enable action once after an app restart (StrictMode=%s)", async (strict) => {
     saveHistoryPermissionSetup("start", "previous-app");
@@ -113,14 +208,29 @@ describe("Computer History permission dialog", () => {
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).toHaveBeenCalledOnce();
   });
-  it("does not start after a restart if one permission is still missing", async () => {
+  it.each([false, true])("waits for listening after restart without losing the pending enable action (StrictMode=%s)", async (strict) => {
     saveHistoryPermissionSetup("start", "previous-app");
-    const { client, onStart } = await render({ ...granted, inputMonitoring: false });
+    const { client, onStart } = await render(accessibilityGranted, strict);
+    expect(onStart).not.toHaveBeenCalled();
+    expect(readHistoryPermissionIntent()?.sessionId).toBe("previous-app");
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    expect(dialog().textContent).toContain("退出并重启");
+    expect(dialog().textContent).not.toContain("重试");
+    client.checkComputerHistoryPermissions.mockResolvedValue(granted);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(onStart).toHaveBeenCalledOnce();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(onStart).toHaveBeenCalledOnce();
+  });
+  it("requires another restart if Accessibility is still missing after the previous restart", async () => {
+    saveHistoryPermissionSetup("start", "previous-app");
+    const { client, onStart } = await render(denied);
     expect(onStart).not.toHaveBeenCalled();
     expect(readHistoryPermissionIntent()?.sessionId).toBe("current-app");
     client.checkComputerHistoryPermissions.mockResolvedValue(granted);
     await act(async () => window.dispatchEvent(new Event("focus")));
-    expect(dialog().textContent).toContain("退出并重启"); expect(onStart).not.toHaveBeenCalled();
+    expect(dialog().textContent).toContain("退出并重启");
+    expect(onStart).not.toHaveBeenCalled();
   });
   it("does not infer restart from a legacy intent or a page reload in the same app", async () => {
     window.localStorage.setItem("memmy.computerHistory.permissionSetup", "start");

@@ -16,8 +16,8 @@ describe("permission preflight before opening the target app", () => {
     const gate = new MacPermissionPreflight(read);
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
     const callTool = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "WeChat opened" }] });
-    const snapshot = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "get_app_state" }, 30, gate);
-    const click = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" }, 30, gate);
+    const snapshot = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "get_app_state" }, 30, gate);
+    const click = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "click" }, 30, gate);
     snapshot.setContext(turn("first")); click.setContext(turn("first"));
     expect(await snapshot.execute({ app: "WeChat" })).toContain("operation was not executed");
     expect(show).not.toHaveBeenCalled(); // Native doctor already owns onboarding.
@@ -35,7 +35,7 @@ describe("permission preflight before opening the target app", () => {
     const read = vi.fn(() => new Promise<any>((resolve) => { finish = resolve; }));
     const gate = new MacPermissionPreflight(read);
     const callTool = vi.fn().mockResolvedValue({ content: [] });
-    const tools = ["click", "type_text"].map((name) => new MCPToolWrapper({ callTool }, "open_computer_use", { name }, 30, gate));
+    const tools = ["click", "type_text"].map((name) => new MCPToolWrapper({ callTool }, "memmy_computer_use", { name }, 30, gate));
     for (const tool of tools) tool.setContext(turn("same"));
     const pending = tools.map((tool) => tool.execute({ app: "WeChat" }));
     await Promise.resolve(); expect(callTool).not.toHaveBeenCalled();
@@ -46,7 +46,7 @@ describe("permission preflight before opening the target app", () => {
     const gate = new MacPermissionPreflight(async () => ({ state: "unknown" }));
     const callTool = vi.fn();
     const show = vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
-    const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "get_app_state" }, 30, gate);
+    const tool = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "get_app_state" }, 30, gate);
     expect(await tool.execute({ app: "WeChat" })).toContain("could not verify");
     expect(callTool).not.toHaveBeenCalled(); expect(show).not.toHaveBeenCalled();
   });
@@ -54,7 +54,7 @@ describe("permission preflight before opening the target app", () => {
     const gate = new MacPermissionPreflight(async () => ({ state: "granted" }));
     vi.spyOn(macPermissionSettingsGuide, "show").mockResolvedValue(true);
     const callTool = vi.fn().mockResolvedValue({ isError: true, content: [{ type: "text", text: "Accessibility permission is required." }] });
-    const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" }, 30, gate);
+    const tool = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "click" }, 30, gate);
     tool.setContext(turn("first"));
     await tool.execute({ app: "WeChat" }); await tool.execute({ app: "WeChat" });
     expect(callTool).toHaveBeenCalledTimes(1);
@@ -77,7 +77,7 @@ describe("permission preflight before opening the target app", () => {
     const callTool = vi.fn()
       .mockRejectedValueOnce(Object.assign(new Error("MCP error -32000: Computer Use connection changed."), { code: -32000 }))
       .mockResolvedValue({ content: [] });
-    const tool = new MCPToolWrapper({ callTool }, "open_computer_use", { name: "click" }, 30, gate);
+    const tool = new MCPToolWrapper({ callTool }, "memmy_computer_use", { name: "click" }, 30, gate);
     tool.setContext(turn("before-restart"));
     expect(await tool.execute({ app: "WeChat" })).toContain("result is unknown");
     expect(await tool.execute({ app: "WeChat" })).toContain("operation was not executed");
@@ -113,7 +113,7 @@ it("does not execute the target if the user cancels during the permission check"
   const controller = new AbortController();
   const gate = new MacPermissionPreflight(async () => { controller.abort(); return {state: "granted"}; });
   const callTool = vi.fn();
-  const tool = new MCPToolWrapper({callTool}, "open_computer_use", {name: "get_app_state"}, 30, gate);
+  const tool = new MCPToolWrapper({callTool}, "memmy_computer_use", {name: "get_app_state"}, 30, gate);
   tool.setContext(turn("cancelled"));
   expect(await tool.execute({app: "WeChat"}, {abortSignal: controller.signal})).toContain("cancelled");
   expect(callTool).not.toHaveBeenCalled();

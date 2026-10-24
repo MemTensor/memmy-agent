@@ -35,6 +35,10 @@ describe("createMockMemoryClient", () => {
     expect(AddMemoryOutputSchema.parse(await client.addMemory(addMemoryInput())).id).toBeTruthy();
     expect(GetMemoryOutputSchema.parse(await client.getMemory({ memoryId: "memory-1" })).item.id).toBe("memory-1");
     expect(DeleteMemoryOutputSchema.parse(await client.deleteMemory({ memoryId: "memory-1" })).status).toBe("deleted");
+    expect(await client.approveObservedSkill("skill-1")).toEqual({ id: "skill-1", status: "activated", serverTime: NOW });
+    expect(await client.updateObservedSkill("skill-1", { body: "Updated guide", expectedVersion: 1 })).toEqual({
+      id: "skill-1", status: "activated", version: 2, serverTime: NOW
+    });
     expect(MemoryApiLogsOutputSchema.parse(await client.memoryApiLogs({ limit: 20, offset: 0 })).logs).toEqual([]);
     expect(PanelOverviewOutputSchema.parse(await client.panelOverview()).counts.memories).toBe(0);
     expect(PanelAnalysisOutputSchema.parse(await client.panelAnalysis()).metrics.avgRecallScore).toBe(0);
@@ -54,6 +58,8 @@ describe("createMockMemoryClient", () => {
       () => client.addMemory(addMemoryInput()),
       () => client.getMemory({ memoryId: "memory-1" }),
       () => client.deleteMemory({ memoryId: "memory-1" }),
+      () => client.approveObservedSkill("skill-1"),
+      () => client.updateObservedSkill("skill-1", { body: "Updated guide", expectedVersion: 1 }),
       () => client.memoryApiLogs({ limit: 20, offset: 0 }),
       () => client.panelOverview(),
       () => client.panelAnalysis(),
@@ -74,6 +80,7 @@ describe("createMockMemoryClient", () => {
 
     expect(Object.keys(client).sort()).toEqual([
       "addMemory",
+      "approveObservedSkill",
       "closeSession",
       "completeTurn",
       "completeSourceTurn",
@@ -92,7 +99,8 @@ describe("createMockMemoryClient", () => {
       "retryMemoryProcessing",
       "runWorker",
       "search",
-      "startTurn"
+      "startTurn",
+      "updateObservedSkill"
     ].sort());
   });
 });

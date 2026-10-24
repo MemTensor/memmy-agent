@@ -69,6 +69,143 @@ function openAiInput(revision: string, presetId?: string): ModelConfigInput {
 }
 
 describe("model config catalog", () => {
+  it("stores Custom beside OpenAI and moves an existing custom preset onto provider custom", async () => {
+    const file = fixture({
+      providers: {
+        openai: {
+          apiKey: "sk-shared",
+          endpoints: {
+            chat: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-chat-completions"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        "legacy-custom": {
+          provider: "openai",
+          endpoint: "chat",
+          model: "legacy-model",
+          source: "byok",
+          capabilities: ["agent", "memory_summary", "memory_evolution"],
+          custom: true
+        }
+      },
+      modelAssignments: emptyAssignments()
+    });
+
+    const read = await readModelConfigCatalog(file);
+    const migrated = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(migrated.modelPresets["legacy-custom"]).toMatchObject({
+      provider: "custom",
+      endpoint: "chat",
+      custom: true
+    });
+    expect(migrated.providers.custom.endpoints.chat).toMatchObject({
+      apiBase: "https://api.openai.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-shared"
+    });
+    expect(migrated.providers.openai).toBeUndefined();
+    expect(read.providers.map((provider) => provider.provider)).toEqual(["custom"]);
+
+    const legacy = read.providers[0]!.models[0]!;
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: read.configRevision,
+      providers: [
+        {
+          provider: "custom",
+          endpoints: [{
+            endpointId: legacy.endpointId,
+            apiBase: "https://api.openai.com/v1",
+            protocol: "openai-chat-completions",
+            apiKey: "sk-shared"
+          }, {
+            endpointId: "anthropic",
+            apiBase: "https://api.anthropic.com/v1",
+            protocol: "anthropic-messages",
+            apiKey: "sk-anthropic"
+          }],
+          models: [
+            {
+              presetId: legacy.presetId,
+              endpointId: legacy.endpointId,
+              model: "legacy-model",
+              source: "byok",
+              capabilities: ["agent", "memory_summary", "memory_evolution"],
+              custom: true
+            },
+            {
+              endpointId: "anthropic",
+              model: "claude-sonnet",
+              source: "byok",
+              capabilities: ["memory_summary", "memory_evolution"],
+              custom: true
+            }
+          ]
+        },
+        {
+          provider: "openai",
+          endpoints: [{
+            endpointId: "chat",
+            apiBase: "https://api.openai.com/v1",
+            protocol: "openai-chat-completions",
+            apiKey: "sk-shared"
+          }],
+          models: [{
+            endpointId: "chat",
+            model: "gpt-official",
+            source: "byok",
+            capabilities: ["agent"]
+          }]
+        }
+      ],
+      modelAssignments: emptyAssignments()
+    });
+    expect(saved.providers.map((provider) => provider.provider).sort()).toEqual(["custom", "openai"]);
+
+    const anthropicId = saved.providers
+      .find((provider) => provider.provider === "custom")!
+      .models.find((model) => model.model === "claude-sonnet")!
+      .presetId;
+    const officialId = saved.providers
+      .find((provider) => provider.provider === "openai")!
+      .models[0]!.presetId;
+    const assigned = await writeModelConfigCatalog(file, {
+      configRevision: saved.configRevision,
+      providers: saved.providers.map((provider) => ({
+        provider: provider.provider,
+        endpoints: provider.endpoints.map((endpoint) => ({
+          endpointId: endpoint.endpointId,
+          apiBase: endpoint.apiBase,
+          protocol: endpoint.protocol,
+          ...(provider.provider === "custom" && endpoint.protocol === "openai-chat-completions" ? { apiKey: "sk-shared" } : {}),
+          ...(endpoint.protocol === "anthropic-messages" ? { apiKey: "sk-anthropic" } : {}),
+          ...(provider.provider === "openai" ? { apiKey: "sk-shared" } : {})
+        })),
+        models: provider.models.map((model) => ({
+          presetId: model.presetId,
+          endpointId: model.endpointId,
+          model: model.model,
+          source: model.source,
+          capabilities: [...model.capabilities],
+          ...(model.custom ? { custom: true } : {})
+        }))
+      })),
+      modelAssignments: {
+        ...emptyAssignments(),
+        byok: {
+          ...emptyAssignment(),
+          agent: { candidates: [officialId], default: officialId },
+          memoryEvolution: anthropicId
+        }
+      }
+    });
+    expect(assigned.providers.find((provider) => provider.provider === "custom")?.models).toHaveLength(2);
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.evolution.provider).toBe("anthropic");
+  });
+
   it("round-trips StepFun and Xiaomi MiMo connections back into the view", async () => {
     const file = fixture({ modelAssignments: emptyAssignments() });
     const current = await readModelConfigCatalog(file);
@@ -491,8 +628,15 @@ describe("model config catalog", () => {
       embeddingMode: "custom"
     });
 
+    const evolutionOnlyInput = structuredClone(assigned);
+    evolutionOnlyInput.configRevision = saved.configRevision;
+    evolutionOnlyInput.modelAssignments.byok.memoryEvolution = agentId;
+    const evolutionOnly = await writeModelConfigCatalog(file, evolutionOnlyInput);
+    expect(evolutionOnly.modelAssignments.byok.memorySummary).toBe(agentId);
+    expect(evolutionOnly.memorySettings?.roleRouting).toEqual({ summary: "follow", evolution: "follow" });
+
     const followInput = structuredClone(assigned);
-    followInput.configRevision = saved.configRevision;
+    followInput.configRevision = evolutionOnly.configRevision;
     followInput.modelAssignments.byok.memorySummary = agentId;
     followInput.modelAssignments.byok.memoryEvolution = agentId;
     const followed = await writeModelConfigCatalog(file, followInput);
@@ -501,28 +645,156 @@ describe("model config catalog", () => {
     expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.roleRouting.summary).toBe("follow");
   });
 
-  it("rejects duplicate endpoint definitions, invalid protocol capabilities, and duplicate models", async () => {
+  it("coalesces identical endpoint definitions and redirects their model references", async () => {
     const file = fixture();
-    const revision = (await readModelConfigCatalog(file)).configRevision;
-    const duplicateEndpoint = openAiInput(revision);
-    duplicateEndpoint.providers[0]!.endpoints.push({
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints.push({
       endpointId: "chat-copy",
       apiBase: "https://api.example.test/v1",
       protocol: "openai-chat-completions"
     });
-    await expect(writeModelConfigCatalog(file, duplicateEndpoint)).rejects.toThrow(/Duplicate endpoint definition/);
+    input.providers[0]!.models.push({
+      endpointId: "chat-copy",
+      model: "gpt-5-alias",
+      source: "byok",
+      capabilities: ["agent"]
+    });
 
+    const saved = await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["chat"]);
+    expect(Object.values(raw.modelPresets).map((preset: any) => preset.endpoint)).toEqual(["chat", "chat"]);
+    expect(saved.providers[0]?.endpoints).toHaveLength(1);
+  });
+
+  it("coalesces duplicate embedding endpoints created while adding models", async () => {
+    const file = fixture();
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints = [
+      {
+        endpointId: "embedding",
+        apiBase: "https://api.example.test/v1/",
+        protocol: "openai-embeddings"
+      },
+      {
+        endpointId: "embedding-copy",
+        apiBase: "https://api.example.test/v1",
+        protocol: "openai-embeddings"
+      }
+    ];
+    input.providers[0]!.models = [
+      {
+        endpointId: "embedding",
+        model: "embedding-a",
+        source: "byok",
+        capabilities: ["embedding"]
+      },
+      {
+        endpointId: "embedding-copy",
+        model: "embedding-b",
+        source: "byok",
+        capabilities: ["embedding"]
+      }
+    ];
+
+    const saved = await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["embedding"]);
+    expect(Object.values(raw.modelPresets).map((preset: any) => preset.endpoint)).toEqual(["embedding", "embedding"]);
+    expect(saved.providers[0]?.models.map((model) => model.model)).toEqual(["embedding-a", "embedding-b"]);
+  });
+
+  it.each([false, true])("coalesces a reentered key and identical model while retaining the saved preset (new endpoint first: %s)", async (newFirst) => {
+    const file = fixture();
+    const first = await writeModelConfigCatalog(file, openAiInput((await readModelConfigCatalog(file)).configRevision));
+    const originalId = first.providers[0]!.models[0]!.presetId;
+    const input = openAiInput(first.configRevision);
+    input.providers[0]!.models[0]!.presetId = originalId;
+    input.providers[0]!.models[0]!.capabilities = ["agent"];
+    input.providers[0]!.endpoints.push({ ...input.providers[0]!.endpoints[0]!, endpointId: "chat-copy" });
+    input.providers[0]!.models.push({
+      ...input.providers[0]!.models[0]!, presetId: undefined, endpointId: "chat-copy", capabilities: ["memory_evolution"]
+    });
+    if (newFirst) {
+      input.providers[0]!.endpoints.reverse();
+      input.providers[0]!.models.reverse();
+    }
+    const saved = await writeModelConfigCatalog(file, input);
+    expect(saved.endpointAliases).toEqual({ openai: { "chat-copy": "chat" } });
+    expect(saved.providers[0]!.models).toHaveLength(1);
+    expect(saved.providers[0]!.models[0]).toMatchObject({
+      presetId: originalId, endpointId: "chat", capabilities: ["agent", "memory_evolution"]
+    });
+    // Aliases describe this write only; neither transient metadata nor plaintext is added to GET views.
+    expect((await readModelConfigCatalog(file)).endpointAliases).toBeUndefined();
+  });
+
+  it("keeps endpoints with different credentials even when their route is the same", async () => {
+    const file = fixture();
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers[0]!.endpoints.push({
+      endpointId: "chat-other-key",
+      apiBase: "https://api.example.test/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-another-secret"
+    });
+    input.providers[0]!.models.push({
+      endpointId: "chat-other-key",
+      model: "gpt-5-alias",
+      source: "byok",
+      capabilities: ["agent"]
+    });
+
+    await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(Object.keys(raw.providers.openai.endpoints)).toEqual(["chat", "chat-other-key"]);
+    expect(raw.providers.openai.endpoints["chat-other-key"].apiKey).toBe("sk-another-secret");
+  });
+
+  it("rejects invalid protocol capabilities and duplicate models", async () => {
+    const file = fixture();
+    const revision = (await readModelConfigCatalog(file)).configRevision;
     const wrongProtocol = openAiInput(revision);
     wrongProtocol.providers[0]!.models[0]!.capabilities = ["embedding"];
     await expect(writeModelConfigCatalog(file, wrongProtocol)).rejects.toThrow(/does not support capability embedding/);
 
-    const unsupportedMemoryResponses = openAiInput(revision);
-    unsupportedMemoryResponses.providers[0]!.endpoints[0]!.protocol = "openai-responses";
-    unsupportedMemoryResponses.providers[0]!.models[0]!.capabilities = ["memory_summary"];
-    await expect(writeModelConfigCatalog(file, unsupportedMemoryResponses))
-      .rejects.toThrow(/does not support capability memory_summary/);
+    const responsesMemory = openAiInput(revision);
+    responsesMemory.providers[0]!.endpoints[0]!.protocol = "openai-responses";
+    responsesMemory.providers[0]!.models[0]!.capabilities = ["agent", "memory_summary", "memory_evolution"];
+    const savedResponses = await writeModelConfigCatalog(file, responsesMemory);
+    const responsesPresetId = savedResponses.providers[0]!.models[0]!.presetId!;
+    const assignedResponses = openAiInput(savedResponses.configRevision, responsesPresetId);
+    assignedResponses.providers[0]!.endpoints[0]!.protocol = "openai-responses";
+    assignedResponses.providers[0]!.models[0]!.capabilities = ["agent", "memory_summary", "memory_evolution"];
+    assignedResponses.modelAssignments.byok.memoryEvolution = responsesPresetId;
+    await writeModelConfigCatalog(file, assignedResponses);
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.evolution.provider).toBe("openai_responses");
 
-    const duplicateModel = openAiInput(revision);
+    const bedrockMemory = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    bedrockMemory.providers = [{
+      provider: "bedrock",
+      endpoints: [{
+        endpointId: "chat",
+        apiBase: "https://bedrock-runtime.us-west-2.amazonaws.com",
+        protocol: "bedrock-converse",
+        region: "us-west-2"
+      }],
+      models: [{
+        endpointId: "chat",
+        model: "anthropic.claude-sonnet-5",
+        source: "byok",
+        capabilities: ["agent", "memory_summary", "memory_evolution"]
+      }]
+    }];
+    const savedBedrock = await writeModelConfigCatalog(file, bedrockMemory);
+    const bedrockPresetId = savedBedrock.providers[0]!.models[0]!.presetId!;
+    bedrockMemory.configRevision = savedBedrock.configRevision;
+    bedrockMemory.providers[0]!.models[0]!.presetId = bedrockPresetId;
+    bedrockMemory.modelAssignments.byok.memorySummary = bedrockPresetId;
+    await writeModelConfigCatalog(file, bedrockMemory);
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.summary.provider).toBe("bedrock");
+
+    const duplicateModel = openAiInput((await readModelConfigCatalog(file)).configRevision);
     duplicateModel.providers[0]!.models.push({
       endpointId: "chat",
       model: "gpt-5",

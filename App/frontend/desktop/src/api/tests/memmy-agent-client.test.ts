@@ -81,6 +81,74 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it("preserves application-wide Excel status on the compatible Excel routes", async () => {
+    let enabled = false;
+    const writes: unknown[] = [];
+    const status = () => ({ scope: "application", connectionMode: "native", available: true, enabled,
+      configured: enabled, connected: enabled, connectionCount: enabled ? 1 : 0, setupCompleted: enabled,
+      manifestUrl: null, manualInstallPath: null,
+      workbooks: enabled ? [{ id: "book1", name: "Budget.xlsx" }] : [], activeWorkbookId: enabled ? "book1" : null,
+      permissionRequired: false, error: null, lockedUse: { supported: false, reason: "nativeLockGuardianUnavailable" } });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      expect(url.pathname).toBe("/api/settings/computer-use/excel");
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer agent-token");
+      if (init?.method === "POST") {
+        const body = init.body ? JSON.parse(String(init.body)) : null;
+        writes.push(body);
+        if (body?.enabled !== undefined) enabled = body.enabled;
+        else if (!body?.reveal) enabled = true;
+      }
+      return json(status());
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.getExcelAddinStatus()).resolves.toEqual(status());
+    await expect(client.setExcelAddinEnabled(true)).resolves.toMatchObject({ scope: "application", connectionMode: "native",
+      enabled: true, workbooks: [{ id: "book1", name: "Budget.xlsx" }], activeWorkbookId: "book1", permissionRequired: false });
+    const disabled = await client.setExcelAddinEnabled(false);
+    expect(disabled).toEqual(status());
+    await expect(client.enableExcelAddin()).resolves.toMatchObject({ scope: "application", enabled: true });
+    await expect(client.revealExcelAddin()).resolves.toMatchObject({ scope: "application", enabled: true });
+    expect(writes).toEqual([{ enabled: true }, { enabled: false }, null, { reveal: true }]);
+  });
+
+  it("still accepts the older Excel add-in status without application fields", async () => {
+    const legacy = { configured: true, connected: false, connectionCount: 0, setupCompleted: true,
+      manifestUrl: "https://localhost:32177/manifest.xml", manualInstallPath: "/tmp/Memmy-Excel.xml",
+      lockedUse: { supported: false, reason: "nativeLockGuardianUnavailable" } };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      json(new URL(String(input)).pathname === "/webui/bootstrap" ? bootstrap : legacy));
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.getExcelAddinStatus()).resolves.toEqual(legacy);
+  });
+
+  it("reads and changes the computer-use MCP setting through authenticated gateway routes", async () => {
+    let enabled = false;
+    const paths: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      paths.push(url.pathname + url.search);
+      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer agent-token");
+      if (url.pathname.endsWith("/enable")) {
+        expect(init?.method).toBe("POST");
+        enabled = true;
+      }
+      if (url.pathname.endsWith("/remove")) {
+        expect(init?.method).toBe("POST");
+        enabled = false;
+      }
+      return json({ presets: [{ name: "memmy_computer_use", installed: enabled, available: enabled, binary_available: true }] });
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
+    await expect(client.getComputerUseSetting()).resolves.toMatchObject({ enabled: false, binaryAvailable: true });
+    await expect(client.setComputerUseEnabled(true)).resolves.toMatchObject({ enabled: true });
+    await expect(client.setComputerUseEnabled(false)).resolves.toMatchObject({ enabled: false });
+    expect(paths).toContain("/api/settings/mcp-presets/enable?name=memmy_computer_use");
+    expect(paths).toContain("/api/settings/mcp-presets/remove?name=memmy_computer_use");
+  });
+
   it("syncs the history model and retains its actual model source in the response", async () => {
     const snapshot = {
       observation: { state: "running", startedAt: null, segmentId: null, segmentStartedAt: null, error: null, narrationError: null, modelSource: "byok" },
@@ -92,11 +160,11 @@ describe("memmy-agent client", () => {
       if (url.pathname === "/webui/bootstrap") return json(bootstrap);
       expect(url.pathname).toBe("/api/computer-history/model");
       expect(init?.method).toBe("POST");
-      expect(JSON.parse(String(init?.body))).toEqual({ model_preset: "my-api-model" });
+      expect(JSON.parse(String(init?.body))).toEqual({});
       return json(snapshot);
     });
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", fetchFn: fetchMock as typeof fetch });
-    await expect(client.setComputerHistoryModel("my-api-model")).resolves.toEqual(snapshot);
+    await expect(client.refreshComputerHistoryModel()).resolves.toEqual(snapshot);
   });
 
   it.each(["today", "all"] as const)("clears %s Computer History with the server-side clear endpoint", async (scope) => {
@@ -397,7 +465,7 @@ describe("memmy-agent client", () => {
     expect(paths).toEqual(["/webui/bootstrap"]);
   });
 
-  it("lists slash commands with bearer token, camelCase mapping, goal exposure, and control-command filtering", async () => {
+  it("lists all server-supported slash commands with bearer token and camelCase mapping", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/webui/bootstrap") {
@@ -427,9 +495,18 @@ describe("memmy-agent client", () => {
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
     await expect(client.listSlashCommands()).resolves.toEqual([
+      { command: "/stop", title: "Stop", description: "Stop turn", icon: "square", argHint: "" },
+      { command: "/restart", title: "Restart", description: "Restart agent", icon: "rotate-cw", argHint: "" },
+      { command: "/dream", title: "Dream", description: "Run Dream", icon: "sparkles", argHint: "" },
+      { command: "/dream-log", title: "Dream log", description: "Show Dream log", icon: "book-open", argHint: "" },
+      { command: "/dream-restore", title: "Dream restore", description: "Restore Dream", icon: "undo-2", argHint: "" },
+      { command: "/history", title: "History", description: "Show history", icon: "history", argHint: "[n]" },
       { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "<goal>" },
+      { command: "/pairing", title: "Pairing", description: "Manage pairing", icon: "shield", argHint: "" },
+      { command: "/help", title: "Help", description: "Show help", icon: "circle-help", argHint: "" },
       { command: "/status", title: "Status", description: "Show status", icon: "activity", argHint: "" },
-      { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" }
+      { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" },
+      { command: "/model", title: "Model", description: "Switch model", icon: "brain", argHint: "[preset]" }
     ]);
   });
 
@@ -1012,7 +1089,82 @@ describe("memmy-agent client", () => {
     });
   });
 
-  it("newChat rejects on timeout and clears pending state", async () => {
+  it("newChat invalidates a timed-out socket and recovers on a fresh ready generation", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const events: MemmyAgentWsEvent[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets, (event) => events.push(event));
+    const pending = connection.newChat(1, 100);
+    const rejection = expect(pending).rejects.toThrow("request_timeout");
+    await vi.advanceTimersByTimeAsync(100);
+
+    await rejection;
+    expect(sockets[0]?.closeCalls).toEqual([{ code: 4000, reason: "new chat timeout" }]);
+    expect(connection.getReadyGeneration()).toBeNull();
+    expect(events.at(-1)).toMatchObject({ event: "connection_closed", connection_generation: 1 });
+    await expect(connection.newChat(1)).rejects.toThrow("Agent gateway is not ready");
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1]?.sent).toEqual([]);
+    expect(connection.getReadyGeneration()).toBeNull();
+
+    sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
+    expect(connection.getReadyGeneration()).toBe(2);
+    let secondSettled = false;
+    const second = connection.newChat(2).then((result) => {
+      secondSettled = true;
+      return result;
+    });
+    const request = JSON.parse(sockets[1]!.sent.at(-1)!);
+    const eventCount = events.length;
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "stale-server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
+    });
+    sockets[0]?.emitClose();
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+    expect(events).toHaveLength(eventCount);
+    expect(connection.getReadyGeneration()).toBe(2);
+
+    sockets[1]?.emit({
+      event: "attached",
+      chat_id: "server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
+    });
+    await expect(second).resolves.toEqual({
+      chatId: "server-chat",
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
+    });
+    expect(sockets[0]?.sent.map((item) => JSON.parse(item).type)).toEqual(["new_chat"]);
+    expect(sockets[1]?.sent.map((item) => JSON.parse(item))).toEqual([
+      { type: "attach", chat_id: "ready-chat" },
+      request
+    ]);
+    connection.close();
+  });
+
+  it("explicit close cancels newChat and its timeout without reconnecting", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];
     const client = createMemmyAgentClient({
@@ -1028,24 +1180,15 @@ describe("memmy-agent client", () => {
 
     const connection = await connectReady(client, sockets);
     const pending = connection.newChat(1, 100);
-    const rejection = expect(pending).rejects.toThrow("newChat timed out");
-    await vi.advanceTimersByTimeAsync(100);
+    const rejection = expect(pending).rejects.toThrow("newChat cancelled");
+    connection.close();
 
     await rejection;
-    const second = connection.newChat(1);
-    const request = JSON.parse(sockets[0]!.sent.at(-1)!);
-    sockets[0]?.emit({
-      event: "attached",
-      chat_id: "server-chat",
-      client_request_id: request.client_request_id,
-      model_preset: "desktop-openai-gpt-5",
-      model_selection: modelSelectionWire
-    });
-    await expect(second).resolves.toEqual({
-      chatId: "server-chat",
-      modelPreset: "desktop-openai-gpt-5",
-      modelSelection
-    });
+    sockets[0]?.emitClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(connection.getReadyGeneration()).toBeNull();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.closeCalls).toEqual([{ code: undefined, reason: undefined }]);
   });
 
   it("newChat rejects on socket close and clears pending state", async () => {
@@ -1211,6 +1354,26 @@ describe("memmy-agent client", () => {
     expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toContainEqual({ type: "attach", chat_id: "chat-2" });
 
     unsubscribe();
+  });
+
+  it("delivers a never-opened chat's cron result globally without retaining a pending copy", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980", clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => { const socket = new FakeSocket(url); sockets.push(socket); return socket; },
+    });
+    const globalEvents: MemmyAgentWsEvent[] = [];
+    const connection = await connectReady(client, sockets, (event) => globalEvents.push(event));
+    globalEvents.length = 0;
+    sockets[0]?.emit({ event: "message", chat_id: "never-opened", text: "暂无微信新消息",
+      metadata: { proactiveDelivery: "cron", deliveryId: "delivery-1" } });
+    expect(globalEvents).toHaveLength(1);
+    const chatEvents: MemmyAgentWsEvent[] = [];
+    const unsubscribe = connection.onChat("never-opened", (event) => chatEvents.push(event));
+    expect(chatEvents).toEqual([]);
+    unsubscribe();
+    connection.close();
   });
 
   it("routes status_result events only through the status result handler", async () => {
@@ -2120,6 +2283,29 @@ describe("memmy-agent client", () => {
       { type: "stop", chat_id: "chat-control" },
       { type: "status", chat_id: "chat-control" }
     ]);
+  });
+
+  it("sends cron consumption acknowledgements through the ready control queue", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({ baseUrl: "https://agent.local:18980", clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => { const socket = new FakeSocket(url); sockets.push(socket); return socket; },
+    });
+    const connection = await connectReady(client, sockets);
+    connection.acknowledgeCronDelivery?.(" live-1 ");
+    connection.acknowledgeCronDelivery?.("  ");
+    expect(sockets[0]?.sent.map((raw) => JSON.parse(raw))).toEqual([{ type: "cron_delivery_ack", delivery_id: "live-1" }]);
+    sockets[0]?.emitClose();
+    connection.acknowledgeCronDelivery?.("after-disconnect");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sockets[1]?.sent).toEqual([]);
+    sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
+    expect(sockets[1]?.sent.map((raw) => JSON.parse(raw))).toEqual([
+      { type: "attach", chat_id: "ready-chat" },
+      { type: "cron_delivery_ack", delivery_id: "after-disconnect" },
+    ]);
+    connection.close();
   });
 
   it("ignores all callbacks from an old socket after a newer generation starts", async () => {

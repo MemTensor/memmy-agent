@@ -1,3 +1,4 @@
+import { redactBrowserAuthArguments, redactBrowserAuthMetadata } from "../utils/browser-auth-privacy.js";
 import {
   classifyImageInputUnsupported,
   type ProviderErrorCategory,
@@ -27,9 +28,18 @@ export class ToolCallRequest {
     this.id = init.id;
     this.name = init.name;
     this.arguments = init.arguments ?? {};
-    this.extraContent = init.extraContent ?? null;
-    this.providerSpecificFields = init.providerSpecificFields ?? null;
-    this.functionProviderSpecificFields = init.functionProviderSpecificFields ?? null;
+    this.extraContent = redactBrowserAuthMetadata(this.name, init.extraContent ?? null);
+    this.providerSpecificFields = redactBrowserAuthMetadata(this.name, init.providerSpecificFields ?? null);
+    this.functionProviderSpecificFields = redactBrowserAuthMetadata(this.name, init.functionProviderSpecificFields ?? null);
+  }
+
+  /** General JSON/RPC/log serialization must follow the same credential boundary as history. */
+  toJSON(): Record<string, any> {
+    return { ...this, arguments: redactBrowserAuthArguments(this.name, this.arguments),
+      extraContent: redactBrowserAuthMetadata(this.name, this.extraContent),
+      providerSpecificFields: redactBrowserAuthMetadata(this.name, this.providerSpecificFields),
+      functionProviderSpecificFields: redactBrowserAuthMetadata(this.name, this.functionProviderSpecificFields),
+    };
   }
 
   toOpenAIToolCall(): Record<string, any> {
@@ -38,13 +48,13 @@ export class ToolCallRequest {
       type: "function",
       function: {
         name: this.name,
-        arguments: JSON.stringify(this.arguments),
+        arguments: JSON.stringify(redactBrowserAuthArguments(this.name, this.arguments)),
       },
     };
-    if (this.extraContent) toolCall.extra_content = this.extraContent;
-    if (this.providerSpecificFields) toolCall.provider_specific_fields = this.providerSpecificFields;
+    if (this.extraContent) toolCall.extra_content = redactBrowserAuthMetadata(this.name, this.extraContent);
+    if (this.providerSpecificFields) toolCall.provider_specific_fields = redactBrowserAuthMetadata(this.name, this.providerSpecificFields);
     if (this.functionProviderSpecificFields) {
-      toolCall.function.provider_specific_fields = this.functionProviderSpecificFields;
+      toolCall.function.provider_specific_fields = redactBrowserAuthMetadata(this.name, this.functionProviderSpecificFields);
     }
     return toolCall;
   }

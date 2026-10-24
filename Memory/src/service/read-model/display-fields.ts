@@ -29,8 +29,23 @@ export function storedGeneratedTitle(memory: MemoryRow): string | undefined {
   }
   if (memory.memoryLayer !== "L1") return undefined;
   if (internal.memory_kind === "span" || internal.memory_kind === "work_memory") return undefined;
+  if (internal.memory_kind === "observed_activity") return infoTitle || internalTitle;
   const trace = isRecord(internal.trace) ? internal.trace : {};
   return text(trace.title);
+}
+
+/** Older History syncs stored the Markdown title as the entire summary. */
+export function observedActivitySummary(memory: MemoryRow): string | undefined {
+  if (memory.properties.internal_info.memory_kind !== "observed_activity") return undefined;
+  const title = text(memory.info.title) || text(memory.properties.internal_info.title);
+  const clean = (value: string) => value.replace(/^\s*#{1,6}\s+/, "").trim();
+  for (const value of [text(memory.info.summary), text(memory.properties.internal_info.summary)]) {
+    if (value && clean(value) !== title && !/^\s*#{1,6}\s/u.test(value)) return value;
+  }
+  // Keep this a read compatibility fallback; the normal writer supplies a
+  // separate summary and never needs a second model call to display old rows.
+  const section = memory.memoryValue.match(/^##\s+Memory summary\s*\n([\s\S]*?)(?=^#{1,3}\s|$(?![\s\S]))/imu)?.[1]?.trim();
+  return section || undefined;
 }
 
 /**

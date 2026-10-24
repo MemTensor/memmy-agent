@@ -5,16 +5,33 @@ import CoreGraphics
 import Foundation
 
 let emitLock = NSLock()
+// The product runs this recorder inside Memmy Computer Use.app. The CLI keeps
+// stdout output for source builds and standalone diagnostics.
+var historyEventSink: ((String) -> Void)?
+var historySessionId: UInt64 = 0
 
-func emit(_ payload: [String: Any]) {
+let separatelyAuthorizedSourceBundleIds: Set<String> = ["com.tencent.xinwechat", "com.tencent.wechat"]
+
+func isSeparatelyAuthorizedSource(_ application: [String: Any]) -> Bool {
+  excludesUnconsentedWeChat(application)
+}
+
+func emit(_ payload: [String: Any], expectedSession: UInt64? = nil) {
   guard JSONSerialization.isValidJSONObject(payload),
         let data = try? JSONSerialization.data(withJSONObject: payload),
         let line = String(data: data, encoding: .utf8)
   else { return }
   emitLock.lock()
-  print(line)
-  fflush(stdout)
-  emitLock.unlock()
+  defer { emitLock.unlock() }
+  if let expectedSession, expectedSession != historySessionId { return }
+  if let historyEventSink {
+    historyEventSink(line)
+  } else {
+    #if !MEMMY_COMPUTER_USE_APP
+    print(line)
+    fflush(stdout)
+    #endif
+  }
 }
 
 func applicationPayload(_ application: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) -> [String: Any] {
@@ -26,8 +43,134 @@ func applicationPayload(_ application: NSRunningApplication? = NSWorkspace.share
   ]
 }
 
+// Both the window observer and the database reader use this one consent file.
+// When it is absent or invalid, stop before querying AX or keyboard focus.
+func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool {
+  guard let bundleId = application["bundleId"] as? String,
+        separatelyAuthorizedSourceBundleIds.contains(bundleId.lowercased())
+  else { return false }
+  let file = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".memmy/computer-history/wechat/consent.json")
+  guard (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+        let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+        let permissions = attributes[.posixPermissions] as? NSNumber,
+        permissions.intValue & 0o77 == 0,
+        let data = try? Data(contentsOf: file),
+        let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        state["version"] as? Int == 1,
+        state["enabled"] as? Bool == true,
+        state["consentId"] as? String != nil,
+        state["consentedAt"] as? String != nil
+  else { return true }
+  return false
+}
+
 func timestamp() -> String {
   ISO8601DateFormatter().string(from: Date())
+}
+
+// Diagnostics never carry an app, title, URL, text, or a window identity.
+// Count repeated failures rather than flooding a private/unsupported window.
+let diagnosticLock = NSLock()
+var diagnosticLastAt: [String: Date] = [:]
+var diagnosticCounts: [String: Int] = [:]
+let diagnosticQueue = DispatchQueue(label: "human-recorder.diagnostics")
+var pendingDiagnostics: [String: (payload: [String: Any], session: UInt64)] = [:]
+var pendingDiagnosticOrder: [String] = []
+var diagnosticDraining = false
+let historyWorkSessionKey = "MemmyHistoryWorkSession"
+let historyAXDeadlineKey = "MemmyHistoryAXDeadline"
+let historyAXExceededKey = "MemmyHistoryAXExceeded"
+
+func recorderSession() -> UInt64 {
+  emitLock.lock(); defer { emitLock.unlock() }
+  return historySessionId
+}
+
+func queueRecorderDiagnostic(_ payload: [String: Any], session: UInt64) {
+  guard let code = payload["code"] as? String else { return }
+  diagnosticLock.lock()
+  var newest = payload
+  if let previous = pendingDiagnostics[code], previous.session == session {
+    if let count = previous.payload["count"] as? Int {
+      newest["count"] = count + (newest["count"] as? Int ?? 0)
+    }
+  }
+  if pendingDiagnostics[code] == nil { pendingDiagnosticOrder.append(code) }
+  pendingDiagnostics[code] = (newest, session)
+  let start = !diagnosticDraining
+  diagnosticDraining = true
+  diagnosticLock.unlock()
+  if start {
+    diagnosticQueue.async {
+      while true {
+        diagnosticLock.lock()
+        guard !pendingDiagnosticOrder.isEmpty else {
+          diagnosticDraining = false; diagnosticLock.unlock(); return
+        }
+        let key = pendingDiagnosticOrder.removeFirst()
+        let item = pendingDiagnostics.removeValue(forKey: key)
+        diagnosticLock.unlock()
+        if let item { emit(item.payload, expectedSession: item.session) }
+      }
+    }
+  }
+}
+
+func emitRecorderDiagnostic(code: String, count: Int? = nil, minimumInterval: TimeInterval = 10) {
+  let expected = (Thread.current.threadDictionary[historyWorkSessionKey] as? NSNumber)?.uint64Value
+  if let expected, expected != recorderSession() { return }
+  let now = Date()
+  diagnosticLock.lock()
+  if let count { diagnosticCounts[code, default: 0] += count }
+  if let last = diagnosticLastAt[code], now.timeIntervalSince(last) < minimumInterval {
+    diagnosticLock.unlock(); return
+  }
+  let accumulated = diagnosticCounts.removeValue(forKey: code)
+  diagnosticLastAt[code] = now
+  diagnosticLock.unlock()
+  var payload: [String: Any] = ["type": "recorder.diagnostic", "timestamp": timestamp(), "code": code]
+  if let accumulated { payload["count"] = accumulated }
+  let session = expected ?? recorderSession()
+  // A stalled output sink must not stall the input tap's overflow path. Only
+  // one pending content-free payload per diagnostic code is retained.
+  queueRecorderDiagnostic(payload, session: session)
+}
+
+// AX calls have an individual timeout, but a tree of individually slow calls
+// also needs a total budget. This thread-local deadline nests without widening
+// the event's budget and applies only to recorder enrichment, never the desktop.
+func withAXReadBudget<T>(_ seconds: TimeInterval, _ work: () -> T) -> T {
+  let state = Thread.current.threadDictionary
+  let previous = state[historyAXDeadlineKey] as? Date
+  let deadline = Date().addingTimeInterval(seconds)
+  state[historyAXDeadlineKey] = previous.map { min($0, deadline) } ?? deadline
+  let result = work()
+  if let previous { state[historyAXDeadlineKey] = previous }
+  else {
+    state.removeObject(forKey: historyAXDeadlineKey)
+    if state[historyAXExceededKey] as? Bool == true {
+      emitRecorderDiagnostic(code: "ax_snapshot_budget_exceeded", count: 1)
+    }
+    state.removeObject(forKey: historyAXExceededKey)
+  }
+  return result
+}
+
+func prepareAXQuery(_ element: AXUIElement, timeout: TimeInterval = 0.05) -> Bool {
+  guard let deadline = Thread.current.threadDictionary[historyAXDeadlineKey] as? Date else { return true }
+  let remaining = deadline.timeIntervalSinceNow
+  guard remaining > 0 else {
+    Thread.current.threadDictionary[historyAXExceededKey] = true
+    return false
+  }
+  AXUIElementSetMessagingTimeout(element, Float(min(timeout, remaining)))
+  return true
+}
+
+func copyAXAttribute(_ element: AXUIElement, _ attribute: CFString, _ value: inout CFTypeRef?) -> AXError {
+  guard prepareAXQuery(element) else { return .cannotComplete }
+  return AXUIElementCopyAttributeValue(element, attribute, &value)
 }
 
 func modifierNames(_ flags: CGEventFlags) -> [String] {
@@ -79,7 +222,7 @@ func characters(from event: CGEvent) -> String {
   return String(utf16CodeUnits: characters, count: length)
 }
 
-func permissionsPayload(request: Bool, requestInputMonitoring: Bool = false, requestScreenRecording: Bool = false, requestAccessibility: Bool = false) -> [String: Any] {
+public func permissionsPayload(request: Bool, requestInputMonitoring: Bool = false, requestScreenRecording: Bool = false, requestAccessibility: Bool = false) -> [String: Any] {
   let inputMonitoring = (request || requestInputMonitoring) ? CGRequestListenEventAccess() : CGPreflightListenEventAccess()
   let screenRecording = (request || requestScreenRecording) ? CGRequestScreenCaptureAccess() : CGPreflightScreenCaptureAccess()
   let accessibilityOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: (request || requestAccessibility)] as CFDictionary
@@ -99,24 +242,26 @@ func axElement(_ value: CFTypeRef?) -> AXUIElement? {
   return (value as! AXUIElement)
 }
 
-func accessibilityString(_ element: AXUIElement, _ attribute: CFString) -> String? {
+func accessibilityString(_ element: AXUIElement, _ attribute: CFString, maxCharacters: Int = 240) -> String? {
   var value: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+  guard copyAXAttribute(element, attribute, &value) == .success else { return nil }
   guard let string = value as? String else { return nil }
   let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !trimmed.isEmpty else { return nil }
-  return String(trimmed.prefix(240))
+  return String(trimmed.prefix(maxCharacters))
 }
 
 func accessibilityValueString(_ element: AXUIElement) -> String? {
   var value: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+  guard copyAXAttribute(element, kAXValueAttribute as CFString, &value) == .success,
         let value
   else { return nil }
   if let string = value as? String {
     let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
-    return String(trimmed.prefix(240))
+    // Match the bounded Windows UIA field capture rather than discarding a
+    // normal paragraph at 240 characters before it reaches raw History.
+    return String(trimmed.prefix(1000))
   }
   if let number = value as? NSNumber { return number.stringValue }
   return nil
@@ -127,10 +272,15 @@ func nodePayload(_ element: AXUIElement) -> [String: Any] {
   var payload: [String: Any] = [:]
   if let role = accessibilityString(element, kAXRoleAttribute as CFString) { payload["role"] = role }
   if let subrole = accessibilityString(element, kAXSubroleAttribute as CFString) { payload["subrole"] = subrole }
-  if let title = accessibilityString(element, kAXTitleAttribute as CFString) { payload["title"] = title }
-  if let description = accessibilityString(element, kAXDescriptionAttribute as CFString) { payload["description"] = description }
-  if let identifier = accessibilityString(element, kAXIdentifierAttribute as CFString) { payload["identifier"] = identifier }
-  if let value = accessibilityValueString(element) { payload["value"] = value }
+  // Do not query any user-visible field of a password control. A provider may
+  // place its contents in Title or Description rather than Value.
+  if payload["role"] as? String != "AXSecureTextField",
+     payload["subrole"] as? String != "AXSecureTextField" {
+    if let title = accessibilityString(element, kAXTitleAttribute as CFString) { payload["title"] = title }
+    if let description = accessibilityString(element, kAXDescriptionAttribute as CFString) { payload["description"] = description }
+    if let identifier = accessibilityString(element, kAXIdentifierAttribute as CFString) { payload["identifier"] = identifier }
+    if let value = accessibilityValueString(element) { payload["value"] = value }
+  }
   return payload
 }
 
@@ -145,7 +295,7 @@ func labeledAncestors(of element: AXUIElement, limit: Int, maxDepth: Int) -> [[S
   var current = element
   for _ in 0..<maxDepth {
     var parentRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parentRef) == .success,
+    guard copyAXAttribute(current, kAXParentAttribute as CFString, &parentRef) == .success,
           let parent = axElement(parentRef)
     else { break }
     let payload = nodePayload(parent)
@@ -166,7 +316,7 @@ func labeledDescendants(of element: AXUIElement, limit: Int, maxNodes: Int) -> [
     let current = queue.removeFirst()
     visited += 1
     var childrenRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+    guard copyAXAttribute(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
           let children = childrenRef as? [AXUIElement]
     else { continue }
     for child in children.prefix(8) {
@@ -181,23 +331,54 @@ func labeledDescendants(of element: AXUIElement, limit: Int, maxNodes: Int) -> [
   return results
 }
 
-func accessibilityHit(at point: CGPoint) -> (payload: [String: Any], pid: pid_t?)? {
+func elementBelongsToWindow(_ element: AXUIElement, window: AXUIElement, pid: pid_t) -> Bool {
+  var ownerPid: pid_t = 0
+  guard AXUIElementGetPid(element, &ownerPid) == .success, ownerPid == pid else { return false }
+  if CFEqual(element, window) { return true }
+  var windowRef: CFTypeRef?
+  if copyAXAttribute(element, kAXWindowAttribute as CFString, &windowRef) == .success,
+     let ownerWindow = axElement(windowRef) { return CFEqual(ownerWindow, window) }
+  // Some native controls omit AXWindow. Walk only ownership, without reading
+  // labels from a different window or application's hierarchy.
+  var current = element
+  for _ in 0..<12 {
+    var parentRef: CFTypeRef?
+    guard copyAXAttribute(current, kAXParentAttribute as CFString, &parentRef) == .success,
+          let parent = axElement(parentRef) else { return false }
+    if CFEqual(parent, window) { return true }
+    if accessibilityString(parent, kAXRoleAttribute as CFString) == "AXWindow" { return false }
+    current = parent
+  }
+  return false
+}
+
+func accessibilityHit(at point: CGPoint, expectedPid: pid_t, expectedWindow: AXUIElement) -> (payload: [String: Any], pid: pid_t?)? {
   let system = AXUIElementCreateSystemWide()
   AXUIElementSetMessagingTimeout(system, 0.25)
   var elementRef: AXUIElement?
-  guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &elementRef) == .success,
+  guard prepareAXQuery(system, timeout: 0.25),
+        AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &elementRef) == .success,
         let element = elementRef
   else { return nil }
-  var payload = nodePayload(element)
   var pid: pid_t = 0
-  let resolvedPid: pid_t? = AXUIElementGetPid(element, &pid) == .success ? pid : nil
+  // A click that activates another app (or a minimized window in the Dock)
+  // must not attach that target's labels to the old foreground app.
+  guard AXUIElementGetPid(element, &pid) == .success, pid == expectedPid,
+        accessibilityString(element, kAXRoleAttribute as CFString) != "AXDockItem",
+        accessibilityString(element, kAXSubroleAttribute as CFString) != "AXMinimizedWindowDockItem",
+        elementBelongsToWindow(element, window: expectedWindow, pid: expectedPid)
+  else { return nil }
+  var payload = nodePayload(element)
+  if payload["role"] as? String == "AXSecureTextField" || payload["subrole"] as? String == "AXSecureTextField" {
+    return (payload, pid)
+  }
   if !hasSemanticLabel(payload) {
     let descendants = labeledDescendants(of: element, limit: 2, maxNodes: 24)
     if !descendants.isEmpty { payload["descendants"] = descendants }
   }
   let ancestors = labeledAncestors(of: element, limit: 2, maxDepth: 8)
   if !ancestors.isEmpty { payload["ancestors"] = ancestors }
-  return (payload, resolvedPid)
+  return (payload, pid)
 }
 
 func hitHasSemantics(_ payload: [String: Any]) -> Bool {
@@ -216,7 +397,7 @@ func focusedInteractiveNode(pid: pid_t) -> [String: Any]? {
   let app = AXUIElementCreateApplication(pid)
   AXUIElementSetMessagingTimeout(app, 0.2)
   var ref: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
+  guard copyAXAttribute(app, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
         let element = axElement(ref)
   else { return nil }
   let payload = nodePayload(element)
@@ -234,6 +415,7 @@ let browserBundleIds: Set<String> = [
   "com.apple.SafariTechnologyPreview", "company.thebrowser.Browser",
   "com.microsoft.edgemac", "com.brave.Browser", "org.mozilla.firefox",
   "org.chromium.Chromium", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+  "com.quark.desktop",
 ]
 
 func sanitizedPageUrl(_ raw: String) -> String? {
@@ -249,7 +431,7 @@ func sanitizedPageUrl(_ raw: String) -> String? {
 
 func webAreaUrl(_ element: AXUIElement) -> String? {
   var urlRef: CFTypeRef?
-  if AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &urlRef) == .success {
+  if copyAXAttribute(element, kAXURLAttribute as CFString, &urlRef) == .success {
     if let url = urlRef as? NSURL, let absolute = url.absoluteString {
       return sanitizedPageUrl(absolute)
     }
@@ -279,12 +461,32 @@ func browserPage(window: AXUIElement) -> (url: String?, title: String?) {
       return (webAreaUrl(current), title)
     }
     var childrenRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+    if copyAXAttribute(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
        let children = childrenRef as? [AXUIElement] {
       queue.append(contentsOf: children.prefix(16))
     }
   }
   return (nil, title)
+}
+
+// One attribute, then the window's immediate children. Enough to notice a page
+// in a browser that is not on the known list, without walking every Notes window.
+func quickPageUrl(_ window: AXUIElement) -> String? {
+  AXUIElementSetMessagingTimeout(window, 0.05)
+  if let document = accessibilityString(window, "AXDocument" as CFString),
+     let sanitized = sanitizedPageUrl(document) {
+    return sanitized
+  }
+  var childrenRef: CFTypeRef?
+  guard copyAXAttribute(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+        let children = childrenRef as? [AXUIElement] else { return nil }
+  for child in children.prefix(12) {
+    AXUIElementSetMessagingTimeout(child, 0.05)
+    if accessibilityString(child, kAXRoleAttribute as CFString) == "AXWebArea" {
+      return webAreaUrl(child)
+    }
+  }
+  return nil
 }
 
 // MARK: - Secure input
@@ -320,41 +522,82 @@ var observedPid: pid_t?
 var observedObserver: AXObserver?
 var focusedElementCache: AXUIElement?
 var focusedElementGeneration: UInt64 = 0
+var focusedNotificationsAvailable = false
 let enrichmentQueue = DispatchQueue(label: "human-recorder.enrichment")
 let enrichmentQueueKey = DispatchSpecificKey<Bool>()
-enrichmentQueue.setSpecific(key: enrichmentQueueKey, value: true)
-// These caches and the AX sampling clock are owned by enrichmentQueue.
-var privacyWindow: AXUIElement?
-var privacyWindowPid: pid_t?
-var privacyWindowValue = false
 
-// Private windows are excluded from Computer History whatever the rules say,
-// but the recorder can only honor what a browser will tell it. Chrome reports a
-// window's `mode` and Arc an `incognito` flag, both over Apple Events, which
-// macOS puts behind a one-time Automation prompt. Safari exposes nothing, so a
-// private Safari window cannot be told apart and is recorded like any other.
-let privateWindowQueries: [String: String] = [
-  "com.google.Chrome": "mode of front window is \"incognito\"",
-  "company.thebrowser.Browser": "incognito of front window",
-]
+// MARK: - Bounded enrichment scheduling
 
-// Asked once when focus moves, not per event. This runs on the main run loop
-// the event tap shares, so the timeout bounds a browser that is slow to answer
-// or an Automation prompt still waiting for the user. An unanswered question —
-// refused permission included — is treated as not private: recording Chrome
-// as though it were always private would stop recording it without a word.
-func frontWindowIsPrivate(bundleId: String) -> Bool {
-  guard let condition = privateWindowQueries[bundleId] else { return false }
-  let source = """
-  with timeout of 1 second
-    tell application id "\(bundleId)" to return (\(condition))
-  end timeout
-  """
-  var error: NSDictionary?
-  guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error), error == nil else {
-    return false
+final class HistoryEnrichmentScheduler {
+  private struct Work { let key: String?; let run: () -> Void }
+  private let lock = NSLock()
+  private let queue: DispatchQueue
+  private let limit: Int
+  private let overflow: () -> Void
+  private var pending: [Work] = []
+  private var draining = false
+
+  init(queue: DispatchQueue, limit: Int = 64, overflow: @escaping () -> Void) {
+    self.queue = queue; self.limit = limit; self.overflow = overflow
   }
-  return result.booleanValue
+
+  func enqueue(key: String? = nil, _ run: @escaping () -> Void) {
+    lock.lock()
+    // Replace a queued sampling job with its newest state. Input jobs have no
+    // key and preserve their order, including mouse-down/up drag endpoints.
+    if let key, let index = pending.firstIndex(where: { $0.key == key }) {
+      pending[index] = Work(key: key, run: run)
+      lock.unlock(); return
+    }
+    var dropped = false
+    if pending.count >= limit {
+      if key == nil, let sampled = pending.firstIndex(where: { $0.key != nil }) {
+        pending.remove(at: sampled); dropped = true
+      } else {
+        lock.unlock(); overflow(); return
+      }
+    }
+    pending.append(Work(key: key, run: run))
+    let start = !draining
+    draining = true
+    lock.unlock()
+    if dropped { overflow() }
+    if start { queue.async { self.drain() } }
+  }
+
+  func cancelPending() {
+    lock.lock(); pending.removeAll(); lock.unlock()
+  }
+
+  private func drain() {
+    while true {
+      lock.lock()
+      guard !pending.isEmpty else { draining = false; lock.unlock(); return }
+      let work = pending.removeFirst()
+      lock.unlock()
+      work.run()
+    }
+  }
+}
+
+let enrichmentScheduler = HistoryEnrichmentScheduler(queue: enrichmentQueue) {
+  emitRecorderDiagnostic(code: "enrichment_backlog", count: 1)
+}
+var enrichmentStateSession: UInt64?
+
+func enqueueEnrichment(key: String? = nil, _ capture: @escaping () -> Void) {
+  let session = recorderSession()
+  enrichmentScheduler.enqueue(key: key) {
+    guard recorderSession() == session else { return }
+    if enrichmentStateSession != session {
+      dragOrigin = nil; resetAXSamplingCache()
+      enrichmentStateSession = session
+    }
+    let state = Thread.current.threadDictionary
+    state[historyWorkSessionKey] = NSNumber(value: session)
+    defer { state.removeObject(forKey: historyWorkSessionKey) }
+    withAXReadBudget(1) { capture() }
+  }
 }
 
 struct FocusSnapshot {
@@ -365,25 +608,28 @@ struct FocusSnapshot {
 
 func captureFocusSnapshot() -> FocusSnapshot {
   axStateLock.lock(); defer { axStateLock.unlock() }
-  return FocusSnapshot(element: focusedElementCache, pid: observedPid, generation: focusedElementGeneration)
+  return FocusSnapshot(element: focusedNotificationsAvailable ? focusedElementCache : nil,
+    pid: observedPid, generation: focusedElementGeneration)
 }
 
 func focusSnapshotIsCurrent(_ snapshot: FocusSnapshot, pid: pid_t?) -> Bool {
   axStateLock.lock(); defer { axStateLock.unlock() }
-  return pid != nil && snapshot.pid == pid && observedPid == pid
+  return focusedNotificationsAvailable && pid != nil && snapshot.pid == pid && observedPid == pid
     && snapshot.generation == focusedElementGeneration && snapshot.element != nil
 }
 
-func keyboardTarget(snapshot: FocusSnapshot, pid: pid_t?) -> [String: Any] {
+func keyboardTarget(snapshot: FocusSnapshot, pid: pid_t?, window: AXUIElement? = nil) -> [String: Any] {
   guard focusSnapshotIsCurrent(snapshot, pid: pid), let element = snapshot.element else {
     return ["role": "AXUnknown"]
   }
+  if let window, let pid, !elementBelongsToWindow(element, window: window, pid: pid) { return ["role": "AXUnknown"] }
   let target = nodePayload(element)
   // AX calls may yield while focus changes. Never attach the old field's
   // labels/value after that happens, even if they look like a search field.
   guard focusSnapshotIsCurrent(snapshot, pid: pid), !target.isEmpty else {
     return ["role": "AXUnknown"]
   }
+  if let window, let pid, !elementBelongsToWindow(element, window: window, pid: pid) { return ["role": "AXUnknown"] }
   return target
 }
 
@@ -395,66 +641,83 @@ func applicationEnvelope(_ application: [String: Any]? = nil) -> [String: Any] {
   return payload
 }
 
-func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
+func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: AXUIElement? = nil, expectedUrl: String? = nil, extra: [String: Any]) {
+  emitLock.lock()
+  let session = (Thread.current.threadDictionary[historyWorkSessionKey] as? NSNumber)?.uint64Value ?? historySessionId
+  emitLock.unlock()
   let source = application ?? applicationPayload()
+  guard !excludesUnconsentedWeChat(source) else { return }
   let at = timestamp()
   let capture = {
+    guard !excludesUnconsentedWeChat(source) else { return }
     guard let pid = source["pid"] as? pid_t,
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     else { return }
     let bundleId = source["bundleId"] as? String ?? ""
     let context = currentWindow(pid: pid, bundleId: bundleId)
     let window = context.payload
+    if let expectedWindow {
+      guard let actualWindow = context.element, CFEqual(expectedWindow, actualWindow),
+            window["url"] as? String == expectedUrl else { return }
+    }
     var payload: [String: Any] = [
       "kind": kind, "id": nextEventId(), "timestamp": at,
       "app": applicationEnvelope(source), "window": window,
     ]
     // Read the URL from this event's actual window, including same-tab
     // navigation. Never reuse an earlier URL when the lookup fails.
-    if let element = context.element, window["privateBrowsing"] as? Bool != true {
+    if let element = context.element {
       let windowKey = "\(pid):\(CFHash(element)):\(window["url"] as? String ?? "")"
-      if let ax = axSnapshot(window: element, windowKey: windowKey) {
+      if let ax = axSnapshot(window: element, windowKey: windowKey, deduplicate: kind == "sampling.changed") {
         // Navigation during tree traversal must not attach the new page's
         // contents to a previously allowed URL.
         if browserBundleIds.contains(bundleId),
            browserPage(window: element).url != window["url"] as? String {
-          lastTreeKey = nil
-          lastTreeAt = nil
+          resetAXSamplingCache()
           return
         }
         payload["ax"] = ax
       }
     }
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
     for (key, value) in extra { payload[key] = value }
-    emit(payload)
+    // AX reads can yield while another window of the same browser becomes
+    // active. PID/URL alone are insufficient.
+    let latest = currentWindow(pid: pid, bundleId: bundleId)
+    let sameWindow: Bool
+    if let originalWindow = context.element, let latestWindow = latest.element {
+      sameWindow = CFEqual(originalWindow, latestWindow)
+    } else { sameWindow = context.element == nil && latest.element == nil }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          sameWindow, latest.payload["url"] as? String == window["url"] as? String else {
+      resetAXSamplingCache()
+      return
+    }
+    emit(payload, expectedSession: session)
   }
   if DispatchQueue.getSpecific(key: enrichmentQueueKey) == true { capture() }
-  else { enrichmentQueue.async(execute: capture) }
+  else {
+    let sampling = ["accessibility.changed", "window.changed", "sampling.changed"].contains(kind)
+    enqueueEnrichment(key: sampling ? "window-snapshot" : nil, capture)
+  }
 }
 
 func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], element: AXUIElement?) {
   let app = AXUIElementCreateApplication(pid)
   AXUIElementSetMessagingTimeout(app, 0.2)
   var windowRef: CFTypeRef?
-  if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
-    _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &windowRef)
+  let knownBrowser = browserBundleIds.contains(bundleId)
+  if copyAXAttribute(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
+    _ = copyAXAttribute(app, kAXMainWindowAttribute as CFString, &windowRef)
   }
   var payload: [String: Any] = [:]
-  if browserBundleIds.contains(bundleId) { payload["browser"] = true }
+  if knownBrowser { payload["browser"] = true }
   guard let window = axElement(windowRef) else { return (payload, nil) }
   if let title = accessibilityString(window, kAXTitleAttribute as CFString) { payload["title"] = title }
-  if browserBundleIds.contains(bundleId), let url = browserPage(window: window).url {
-    payload["url"] = url
+  let pageUrl = knownBrowser ? browserPage(window: window).url : quickPageUrl(window)
+  if let pageUrl {
+    payload["browser"] = true
+    payload["url"] = pageUrl
   }
-  if privacyWindowPid != pid || privacyWindow == nil || !CFEqual(privacyWindow, window) {
-    privacyWindowPid = pid
-    privacyWindow = window
-    privacyWindowValue = privateWindowQueries[bundleId] == nil ? false : DispatchQueue.main.sync {
-      frontWindowIsPrivate(bundleId: bundleId)
-    }
-  }
-  if privacyWindowValue { payload["privateBrowsing"] = true }
   return (payload, window)
 }
 
@@ -462,37 +725,63 @@ func refreshFocusedElement(pid: pid_t) {
   let app = AXUIElementCreateApplication(pid)
   AXUIElementSetMessagingTimeout(app, 0.2)
   var ref: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
-        let element = axElement(ref)
-  else { return }
+  let result = copyAXAttribute(app, kAXFocusedUIElementAttribute as CFString, &ref)
+  let element = result == .success ? axElement(ref) : nil
   axStateLock.lock()
   guard observedPid == pid else { axStateLock.unlock(); return }
-  focusedElementCache = element
-  focusedElementGeneration &+= 1
+  let allowedElement = focusedNotificationsAvailable ? element : nil
+  let same: Bool
+  if let before = focusedElementCache, let after = allowedElement { same = CFEqual(before, after) }
+  else { same = focusedElementCache == nil && allowedElement == nil }
+  if !same {
+    focusedElementCache = allowedElement
+    focusedElementGeneration &+= 1
+  }
   axStateLock.unlock()
 }
 
 // Selected text is the single highest-volume semantic signal: it reports what
 // the user is actually reading or editing without any coordinate involved.
 func emitSelectionChanged(_ element: AXUIElement) {
-  guard !secureInputActive() else { return }
-  var target = nodePayload(element)
-  var selection: [String: Any] = [:]
-  if let text = accessibilityString(element, kAXSelectedTextAttribute as CFString) {
-    selection["selectedText"] = text
-  }
-  var rangeRef: CFTypeRef?
-  if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-     let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID() {
-    var range = CFRange(location: 0, length: 0)
-    if AXValueGetValue(value as! AXValue, .cfRange, &range) {
-      selection["selectedRange"] = ["location": range.location, "length": range.length]
+  let application = applicationPayload()
+  enqueueEnrichment {
+    guard !secureInputActive(), !excludesUnconsentedWeChat(application),
+          let pid = application["pid"] as? pid_t,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    else { return }
+    let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+    guard let window = context.element,
+          elementBelongsToWindow(element, window: window, pid: pid),
+          accessibilityString(element, kAXRoleAttribute as CFString) != "AXSecureTextField",
+          accessibilityString(element, kAXSubroleAttribute as CFString) != "AXSecureTextField"
+    else { return }
+    var target = nodePayload(element)
+    var selection: [String: Any] = [:]
+    if let text = accessibilityString(element, kAXSelectedTextAttribute as CFString, maxCharacters: 2000) {
+      selection["selectedText"] = text
     }
+    var rangeRef: CFTypeRef?
+    if copyAXAttribute(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+       let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID() {
+      var range = CFRange(location: 0, length: 0)
+      if AXValueGetValue(value as! AXValue, .cfRange, &range) {
+        selection["selectedRange"] = ["location": range.location, "length": range.length]
+      }
+    }
+    // Ownership can change during AX reads. Do not emit a stale background
+    // window's selection under the newly focused app/window's permission.
+    let latest = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+    guard !selection.isEmpty, !secureInputActive(),
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          let latestWindow = latest.element, CFEqual(window, latestWindow),
+          elementBelongsToWindow(element, window: latestWindow, pid: pid)
+    else { return }
+    if target.isEmpty { target = ["role": "AXUnknown"] }
+    selection["target"] = target
+    guard latest.payload["url"] as? String == context.payload["url"] as? String else { return }
+    emitEvent(kind: "selection.changed", application: application, expectedWindow: window,
+      expectedUrl: context.payload["url"] as? String, extra: ["selection": selection])
   }
-  guard !selection.isEmpty else { return }
-  if target.isEmpty { target = ["role": "AXUnknown"] }
-  selection["target"] = target
-  emitEvent(kind: "selection.changed", extra: ["selection": selection])
 }
 
 // MARK: - Accessibility tree snapshots
@@ -507,9 +796,16 @@ let AX_TREE_MIN_INTERVAL: TimeInterval = 0.4
 
 var lastTreeKey: String?
 var lastTreeAt: Date?
+var lastTreeFingerprint: Int?
+var lastTreeDeliveredAt: Date?
+
+func resetAXSamplingCache() {
+  lastTreeKey = nil; lastTreeAt = nil; lastTreeFingerprint = nil; lastTreeDeliveredAt = nil
+}
 
 func treeLine(_ payload: [String: Any]) -> String? {
   let role = payload["role"] as? String ?? ""
+  guard role != "AXDockItem", payload["subrole"] as? String != "AXMinimizedWindowDockItem" else { return nil }
   let fields = ["subrole", "title", "description", "identifier", "value"]
     .map { payload[$0] as? String ?? "" }
   guard !role.isEmpty, fields.contains(where: { !$0.isEmpty }) else { return nil }
@@ -517,86 +813,183 @@ func treeLine(_ payload: [String: Any]) -> String? {
 }
 
 func axTreeLines(window: AXUIElement) -> [String] {
-  var lines: [String] = []
-  var queue: [AXUIElement] = [window]
-  var visited = 0
-  while !queue.isEmpty && visited < AX_TREE_MAX_NODES {
-    let current = queue.removeFirst()
-    visited += 1
-    if let line = treeLine(nodePayload(current)) { lines.append(line) }
-    var childrenRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-       let children = childrenRef as? [AXUIElement] {
-      queue.append(contentsOf: children.prefix(24))
+  withAXReadBudget(0.25) {
+    var lines: [String] = []
+    var queue: [AXUIElement] = [window]
+    var visited = 0
+    var truncated = false
+    while !queue.isEmpty && visited < AX_TREE_MAX_NODES {
+      let current = queue.removeFirst()
+      guard prepareAXQuery(current) else { truncated = true; break }
+      visited += 1
+      let payload = nodePayload(current)
+      if let line = treeLine(payload) { lines.append(line) }
+      if payload["role"] as? String == "AXSecureTextField" || payload["subrole"] as? String == "AXSecureTextField" {
+        continue
+      }
+      var childrenRef: CFTypeRef?
+      if copyAXAttribute(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+         let children = childrenRef as? [AXUIElement] {
+        if children.count > 24 { truncated = true }
+        queue.append(contentsOf: children.prefix(24))
+      }
     }
+    if !queue.isEmpty { truncated = true }
+    if truncated { emitRecorderDiagnostic(code: "ax_snapshot_budget_exceeded", count: 1) }
+    return lines
   }
-  return lines
 }
 
 // Returns nil when the snapshot was taken recently enough that recomputing it
 // would cost more than the freshness is worth.
-func axSnapshot(window: AXUIElement, windowKey: String) -> [String: Any]? {
+func axSnapshot(window: AXUIElement, windowKey: String, deduplicate: Bool = false) -> [String: Any]? {
   let now = Date()
   if windowKey == lastTreeKey, let lastTreeAt,
      now.timeIntervalSince(lastTreeAt) < AX_TREE_MIN_INTERVAL { return nil }
 
   let lines = axTreeLines(window: window)
   guard !lines.isEmpty else { return nil }
+  var fingerprint = Hasher()
+  for line in lines { fingerprint.combine(line) }
+  let currentFingerprint = fingerprint.finalize()
+  // The native helper cannot see dynamic App/URL policy changes. Refresh a
+  // full sample occasionally so the policy owner can rebuild an authorized
+  // baseline after exclusion; it already suppresses unchanged disk records.
+  if deduplicate, windowKey == lastTreeKey, currentFingerprint == lastTreeFingerprint,
+     let delivered = lastTreeDeliveredAt, now.timeIntervalSince(delivered) < 30 {
+    lastTreeAt = now
+    return nil
+  }
   lastTreeKey = windowKey
   lastTreeAt = now
+  lastTreeFingerprint = currentFingerprint
+  lastTreeDeliveredAt = now
   return ["mode": "fullTree", "windowKey": windowKey, "text": lines.joined(separator: "\n")]
 }
 
 let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
+  guard !excludesUnconsentedWeChat(applicationPayload()) else { return }
   let name = notification as String
   switch name {
   case kAXFocusedUIElementChangedNotification:
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { break }
     axStateLock.lock()
+    guard observedPid == pid, focusedNotificationsAvailable else { axStateLock.unlock(); break }
     focusedElementCache = element
     focusedElementGeneration &+= 1
     axStateLock.unlock()
   case kAXSelectedTextChangedNotification:
     emitSelectionChanged(element)
   case kAXValueChangedNotification:
-    // A background control changing value is not evidence that it owns focus.
-    // Keep unknown focus unknown until a focus notification or focused AX query.
-    break
+    // Only the foreground focused control may trigger a fresh window snapshot.
+    // Background controls and password fields cannot cause their contents to
+    // be captured merely by changing value.
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          !secureInputActive() else { break }
+    let focus = captureFocusSnapshot()
+    guard focus.pid == pid, let focused = focus.element, CFEqual(focused, element)
+    else { break }
+    enqueueEnrichment(key: "focused-value") {
+      guard !secureInputActive(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+            focusSnapshotIsCurrent(focus, pid: pid),
+            accessibilityString(element, kAXRoleAttribute as CFString) != "AXSecureTextField",
+            accessibilityString(element, kAXSubroleAttribute as CFString) != "AXSecureTextField" else { return }
+      emitEvent(kind: "accessibility.changed", extra: [:])
+    }
   case kAXFocusedWindowChangedNotification, kAXWindowMovedNotification:
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { break }
     axStateLock.lock()
     if name == kAXFocusedWindowChangedNotification { focusedElementCache = nil }
     focusedElementGeneration &+= 1
     axStateLock.unlock()
-    var pid: pid_t = 0
-    if AXUIElementGetPid(element, &pid) == .success {
-      if name == kAXFocusedWindowChangedNotification {
-        enrichmentQueue.async { refreshFocusedElement(pid: pid) }
-      }
-      emitEvent(kind: "window.changed", extra: [:])
+    if name == kAXFocusedWindowChangedNotification {
+      enqueueEnrichment(key: "focus-refresh") { refreshFocusedElement(pid: pid) }
     }
+    emitEvent(kind: "window.changed", extra: [:])
   default:
     break
   }
 }
 
-func observeApplication(pid: pid_t) {
+let observedNotifications = [
+  kAXFocusedUIElementChangedNotification, kAXSelectedTextChangedNotification,
+  kAXValueChangedNotification, kAXFocusedWindowChangedNotification, kAXWindowMovedNotification,
+]
+var registeredObserverNotifications: Set<String> = []
+var observerNotificationAttemptAt: [String: Date] = [:]
+var observerNotificationFailures: [String: AXError] = [:]
+var observerWasReady: Bool?
+
+func registerObserverNotifications(_ observer: AXObserver, app: AXUIElement) {
+  AXUIElementSetMessagingTimeout(app, 0.03)
+  let now = Date()
+  for notification in observedNotifications where !registeredObserverNotifications.contains(notification) {
+    let retryInterval: TimeInterval = observerNotificationFailures[notification] == .notificationUnsupported ? 60 : 10
+    if let last = observerNotificationAttemptAt[notification], now.timeIntervalSince(last) < retryInterval { continue }
+    observerNotificationAttemptAt[notification] = now
+    let result = AXObserverAddNotification(observer, app, notification as CFString, nil)
+    if result == .success || result == .notificationAlreadyRegistered {
+      registeredObserverNotifications.insert(notification)
+      observerNotificationFailures.removeValue(forKey: notification)
+    } else {
+      observerNotificationFailures[notification] = result
+    }
+  }
+  let ready = registeredObserverNotifications.count == observedNotifications.count
+  axStateLock.lock()
+  focusedNotificationsAvailable = registeredObserverNotifications.contains(kAXFocusedUIElementChangedNotification)
+  if !focusedNotificationsAvailable, focusedElementCache != nil {
+    focusedElementCache = nil; focusedElementGeneration &+= 1
+  }
+  axStateLock.unlock()
+  if ready {
+    if observerWasReady != true { emitRecorderDiagnostic(code: "observer_ready", minimumInterval: 0) }
+  } else {
+    emitRecorderDiagnostic(code: "observer_notifications_unavailable",
+      count: observedNotifications.count - registeredObserverNotifications.count)
+  }
+  observerWasReady = ready
+}
+
+func observeApplication(pid: pid_t, refreshFocus: Bool = true) {
+  let application = applicationPayload()
+  guard !excludesUnconsentedWeChat(application),
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
   axStateLock.lock()
   let alreadyObserved = observedPid == pid
   axStateLock.unlock()
-  guard !alreadyObserved else { return }
-
-  if let previous = observedObserver {
-    CFRunLoopRemoveSource(
-      CFRunLoopGetMain(),
-      AXObserverGetRunLoopSource(previous),
-      .defaultMode
-    )
+  if alreadyObserved, let observer = observedObserver {
+    registerObserverNotifications(observer, app: AXUIElementCreateApplication(pid))
+    if refreshFocus {
+      axStateLock.lock()
+      focusedElementCache = nil; focusedElementGeneration &+= 1
+      axStateLock.unlock()
+    }
+    enqueueEnrichment(key: "focus-refresh") { refreshFocusedElement(pid: pid) }
+    return
   }
 
   var observer: AXObserver?
   guard AXObserverCreate(pid, axObserverCallback, &observer) == .success,
         let observer
-  else { return }
+  else {
+    // Keep the old observer attached. Returning to its app must not skip an
+    // observer whose source was removed by a failed switch to this app.
+    axStateLock.lock()
+    focusedElementCache = nil; focusedElementGeneration &+= 1
+    axStateLock.unlock()
+    observerWasReady = false
+    emitRecorderDiagnostic(code: "observer_unavailable", count: 1)
+    return
+  }
   let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.03)
   // Electron and other Chromium shells build the accessibility tree of their
   // web content only once an assistive technology asks for it; until then a
   // window is a frame and three buttons. Claude's was recorded as five nodes
@@ -604,19 +997,16 @@ func observeApplication(pid: pid_t) {
   // readers do: the tree follows within a second or two, and an application
   // that is not Electron ignores the attribute.
   AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-  for notification in [
-    kAXFocusedUIElementChangedNotification,
-    kAXSelectedTextChangedNotification,
-    kAXValueChangedNotification,
-    kAXFocusedWindowChangedNotification,
-    kAXWindowMovedNotification,
-  ] {
-    AXObserverAddNotification(observer, app, notification as CFString, nil)
+  if let previous = observedObserver {
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(previous), .commonModes)
   }
+  registeredObserverNotifications.removeAll()
+  observerNotificationAttemptAt.removeAll(); observerNotificationFailures.removeAll()
+  registerObserverNotifications(observer, app: app)
   CFRunLoopAddSource(
     CFRunLoopGetMain(),
     AXObserverGetRunLoopSource(observer),
-    .defaultMode
+    .commonModes
   )
 
   axStateLock.lock()
@@ -626,7 +1016,7 @@ func observeApplication(pid: pid_t) {
   focusedElementGeneration &+= 1
   axStateLock.unlock()
 
-  refreshFocusedElement(pid: pid)
+  enqueueEnrichment(key: "focus-refresh") { refreshFocusedElement(pid: pid) }
 }
 
 // MARK: - Event tap
@@ -639,15 +1029,19 @@ let eventMask = (1 << CGEventType.leftMouseDown.rawValue)
   | (1 << CGEventType.leftMouseUp.rawValue)
   | (1 << CGEventType.rightMouseDown.rawValue)
   | (1 << CGEventType.keyDown.rawValue)
+  | (1 << CGEventType.scrollWheel.rawValue)
 
 var eventTap: CFMachPort?
 // Read and written only on enrichmentQueue, in the order tap events arrive.
-var dragOrigin: (point: CGPoint, target: [String: Any])?
+var dragOrigin: (point: CGPoint, target: [String: Any], pid: pid_t, window: AXUIElement, url: String?)?
 
 // Mouse targets come from the event position. A previously focused editor can
 // remain focused while a button or another non-focusable control is clicked.
-func resolveTarget(at point: CGPoint) -> [String: Any] {
-  if let hit = accessibilityHit(at: point), hitHasSemantics(hit.payload) {
+func resolveTarget(at point: CGPoint, pid: pid_t, window: AXUIElement) -> [String: Any] {
+  if let hit = accessibilityHit(at: point, expectedPid: pid, expectedWindow: window),
+     hit.pid == pid, hit.payload["role"] as? String != "AXDockItem",
+     hit.payload["subrole"] as? String != "AXMinimizedWindowDockItem",
+     hitHasSemantics(hit.payload) {
     return hit.payload
   }
   return [:]
@@ -657,62 +1051,105 @@ func modifierList(_ event: CGEvent) -> [String] {
   modifierNames(event.flags)
 }
 
+let samplingLock = NSLock()
+var lastScrollSampleAt: Date?
+
+func requestScrollSample(application: [String: Any]) {
+  let now = Date()
+  samplingLock.lock()
+  if let last = lastScrollSampleAt, now.timeIntervalSince(last) < 0.5 {
+    samplingLock.unlock(); return
+  }
+  lastScrollSampleAt = now
+  samplingLock.unlock()
+  emitEvent(kind: "sampling.changed", application: application, extra: [:])
+}
+
 let callback: CGEventTapCallBack = { _, type, event, _ in
+  // WeChat has a separate message-source consent flow. Do not enrich its
+  // keyboard or pointer events through the general screen recorder.
+  if isSeparatelyAuthorizedSource(applicationPayload()) { return Unmanaged.passUnretained(event) }
   switch type {
   case .leftMouseDown, .rightMouseDown:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let point = event.location
     let clickCount = event.getIntegerValueField(.mouseEventClickState)
     let button = type == .rightMouseDown ? "right" : "left"
     let modifiers = modifierList(event)
     let application = applicationPayload()
-    enrichmentQueue.async {
-      var target = resolveTarget(at: point)
+    enqueueEnrichment {
+      guard !excludesUnconsentedWeChat(application),
+            let pid = application["pid"] as? pid_t,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+      let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+      var target: [String: Any] = [:]
+      if let window = context.element {
+        target = resolveTarget(at: point, pid: pid, window: window)
+        if type == .leftMouseDown { dragOrigin = (point, target, pid, window, context.payload["url"] as? String) }
+      } else if type == .leftMouseDown { dragOrigin = nil }
       if target.isEmpty { target = ["role": "AXUnknown"] }
-      if type == .leftMouseDown { dragOrigin = (point, target) }
       var mouse: [String: Any] = ["button": button, "clickCount": clickCount, "target": target]
       if !modifiers.isEmpty { mouse["modifiers"] = modifiers }
       emitEvent(
         kind: type == .rightMouseDown ? "mouse.context_menu" : "mouse.click",
         application: application,
+        expectedWindow: context.element,
+        expectedUrl: context.payload["url"] as? String,
         extra: ["mouse": mouse]
       )
     }
   case .leftMouseUp:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let point = event.location
     let application = applicationPayload()
-    enrichmentQueue.async {
+    enqueueEnrichment {
+      guard !excludesUnconsentedWeChat(application) else { return }
       guard let origin = dragOrigin else { return }
       dragOrigin = nil
+      guard let pid = application["pid"] as? pid_t, origin.pid == pid,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+      let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+      guard let window = context.element, CFEqual(window, origin.window),
+            context.payload["url"] as? String == origin.url else { return }
       let dx = point.x - origin.point.x
       let dy = point.y - origin.point.y
       // Anything under a few points is a click that wobbled, not a drag.
       guard (dx * dx + dy * dy) > 25 else { return }
-      var destination = resolveTarget(at: point)
+      var destination = resolveTarget(at: point, pid: pid, window: window)
       if destination.isEmpty { destination = ["role": "AXUnknown"] }
       emitEvent(
         kind: "mouse.drag",
         application: application,
+        expectedWindow: context.element,
+        expectedUrl: context.payload["url"] as? String,
         extra: ["mouse": ["origin": ["element": origin.target], "destination": ["element": destination]]]
       )
     }
   case .keyDown:
+    guard !excludesUnconsentedWeChat(applicationPayload()) else { break }
     let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
     let text = characters(from: event)
     let modifiers = modifierList(event)
     let application = applicationPayload()
     let secure = secureInputActive()
     let focus = captureFocusSnapshot()
-    enrichmentQueue.async {
-      let target = keyboardTarget(snapshot: focus, pid: application["pid"] as? pid_t)
+    enqueueEnrichment {
+      guard !excludesUnconsentedWeChat(application), let pid = application["pid"] as? pid_t,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+      let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+      let target = keyboardTarget(snapshot: focus, pid: pid, window: context.element)
       guard let classified = classifiedKeyboard(keyCode: keyCode, text: text, modifiers: modifiers, secure: secure),
             let kind = classified["kind"] as? String,
             var keyboard = classified["keyboard"] as? [String: Any]
       else { return }
       keyboard["target"] = target
-      emitEvent(kind: kind, application: application, extra: ["keyboard": keyboard])
+      emitEvent(kind: kind, application: application, expectedWindow: context.element,
+        expectedUrl: context.payload["url"] as? String, extra: ["keyboard": keyboard])
     }
   case .tapDisabledByTimeout, .tapDisabledByUserInput:
     if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+  case .scrollWheel:
+    requestScrollSample(application: applicationPayload())
   default:
     break
   }
@@ -720,60 +1157,128 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
 }
 
 // MARK: - Entry point
+// The standalone entry point is main.swift; the installed app uses the
+// lifecycle functions below from its own process.
 
-let arguments = Set(CommandLine.arguments.dropFirst())
-if arguments.contains("--permissions") || arguments.contains("--request-permissions") {
-  emit(permissionsPayload(
-    request: arguments.contains("--request-permissions"),
-    requestInputMonitoring: arguments.contains("--request-input-monitoring"),
-    requestScreenRecording: arguments.contains("--request-screen-recording"),
-    requestAccessibility: arguments.contains("--request-accessibility")
-  ))
-  exit(0)
+var historyRunLoopSource: CFRunLoopSource?
+var historyWorkspaceObserver: NSObjectProtocol?
+var historySamplingTimer: Timer?
+var inputMonitoringWasReady: Bool?
+
+func historySamplingTick(expectedSession: UInt64? = nil) {
+  if let expectedSession {
+    guard eventTap != nil, recorderSession() == expectedSession else { return }
+  }
+  emitRecorderDiagnostic(code: "heartbeat")
+  let inputMonitoring = CGPreflightListenEventAccess()
+  if inputMonitoring {
+    if inputMonitoringWasReady != true { emitRecorderDiagnostic(code: "input_monitoring_ready", minimumInterval: 0) }
+  } else {
+    emitRecorderDiagnostic(code: "input_monitoring_unavailable", count: 1)
+  }
+  inputMonitoringWasReady = inputMonitoring
+  guard AXIsProcessTrusted() else {
+    observerWasReady = false
+    emitRecorderDiagnostic(code: "observer_unavailable", count: 1)
+    return
+  }
+  let application = applicationPayload()
+  guard !isSeparatelyAuthorizedSource(application), let pid = application["pid"] as? pid_t else { return }
+  observeApplication(pid: pid, refreshFocus: false)
+  emitEvent(kind: "sampling.changed", application: application, extra: [:])
 }
 
-guard let tap = CGEvent.tapCreate(
-  tap: .cgSessionEventTap,
-  place: .headInsertEventTap,
-  options: .listenOnly,
-  eventsOfInterest: CGEventMask(eventMask),
-  callback: callback,
-  userInfo: nil
-) else {
-  FileHandle.standardError.write(
-    "Unable to create the event tap. Grant Input Monitoring permission and restart the recorder.\n"
-      .data(using: .utf8)!
-  )
-  exit(2)
+public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
+  guard eventTap == nil else { throw NSError(domain: "MemmyComputerHistory", code: 1,
+    userInfo: [NSLocalizedDescriptionKey: "Computer History is already recording."]) }
+  guard CGPreflightListenEventAccess() else {
+    throw NSError(domain: "MemmyComputerHistory", code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "Input Monitoring permission is required for Memmy Computer Use."])
+  }
+  enrichmentQueue.setSpecific(key: enrichmentQueueKey, value: true)
+  guard let tap = CGEvent.tapCreate(
+    tap: .cgSessionEventTap,
+    place: .headInsertEventTap,
+    options: .listenOnly,
+    eventsOfInterest: CGEventMask(eventMask),
+    callback: callback,
+    userInfo: nil
+  ) else {
+    throw NSError(domain: "MemmyComputerHistory", code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "Unable to create the event tap. Grant Input Monitoring to Memmy Computer Use and restart it."])
+  }
+  emitLock.lock()
+  historySessionId &+= 1
+  historyEventSink = output
+  emitLock.unlock()
+  enrichmentScheduler.cancelPending()
+  inputMonitoringWasReady = nil
+  diagnosticLock.lock()
+  diagnosticLastAt.removeAll(); diagnosticCounts.removeAll()
+  pendingDiagnostics.removeAll(); pendingDiagnosticOrder.removeAll()
+  diagnosticLock.unlock()
+  samplingLock.lock(); lastScrollSampleAt = nil; samplingLock.unlock()
+  eventTap = tap
+  historyWorkspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+    forName: NSWorkspace.didActivateApplicationNotification,
+    object: nil,
+    queue: .main
+  ) { notification in
+    let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+    let payload = applicationPayload(application)
+    if !isSeparatelyAuthorizedSource(payload), let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
+    emitEvent(kind: "window.changed", application: payload, extra: [:])
+  }
+  let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+  historyRunLoopSource = source
+  CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+  CGEvent.tapEnable(tap: tap, enable: true)
+  if !isSeparatelyAuthorizedSource(applicationPayload()), let pid = applicationPayload()["pid"] as? pid_t {
+    observeApplication(pid: pid)
+  }
+  let samplingSession = recorderSession()
+  let timer = Timer(timeInterval: 5, repeats: true) { _ in historySamplingTick(expectedSession: samplingSession) }
+  historySamplingTimer = timer
+  RunLoop.main.add(timer, forMode: .common)
+  emitRecorderDiagnostic(code: "heartbeat")
+  emitEvent(kind: "session.started", extra: [:])
 }
-eventTap = tap
 
-let workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-  forName: NSWorkspace.didActivateApplicationNotification,
-  object: nil,
-  queue: .main
-) { notification in
-  let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-  let payload = applicationPayload(application)
-  if let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
-  emitEvent(kind: "window.changed", application: payload, extra: [:])
+public func stopHistoryRecorder() {
+  guard let tap = eventTap else { return }
+  historySamplingTimer?.invalidate(); historySamplingTimer = nil
+  inputMonitoringWasReady = nil
+  enrichmentScheduler.cancelPending()
+  CGEvent.tapEnable(tap: tap, enable: false)
+  if let source = historyRunLoopSource {
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+    historyRunLoopSource = nil
+  }
+  if let observer = historyWorkspaceObserver {
+    NSWorkspace.shared.notificationCenter.removeObserver(observer)
+    historyWorkspaceObserver = nil
+  }
+  if let observer = observedObserver {
+    CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+  }
+  emitLock.lock()
+  historyEventSink = nil
+  historySessionId &+= 1
+  emitLock.unlock()
+  eventTap = nil
+  let stoppedSession = recorderSession()
+  enrichmentQueue.async {
+    guard recorderSession() == stoppedSession else { return }
+    dragOrigin = nil; resetAXSamplingCache()
+    enrichmentStateSession = nil
+  }
+  registeredObserverNotifications.removeAll()
+  observerNotificationAttemptAt.removeAll(); observerNotificationFailures.removeAll()
+  observerWasReady = nil
+  axStateLock.lock()
+    focusedElementCache = nil
+    focusedNotificationsAvailable = false
+  observedPid = nil
+  observedObserver = nil
+  axStateLock.unlock()
 }
-
-let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-CGEvent.tapEnable(tap: tap, enable: true)
-
-if let pid = applicationPayload()["pid"] as? pid_t { observeApplication(pid: pid) }
-emitEvent(kind: "session.started", extra: [:])
-
-signal(SIGTERM) { _ in
-  emitEvent(kind: "session.ended", extra: [:])
-  exit(0)
-}
-signal(SIGINT) { _ in
-  emitEvent(kind: "session.ended", extra: [:])
-  exit(0)
-}
-
-CFRunLoopRun()
-NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)

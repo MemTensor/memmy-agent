@@ -10,6 +10,7 @@ import type { SourceAdapter } from "../src/agent-source/adapters/types.js";
 import { createSourceRegistry } from "../src/agent-source/adapters/source-registry.js";
 import { createCursorSkillTarget } from "../src/agent-source/integration/cursor/index.js";
 import { createSkillTargetRegistry } from "../src/agent-source/integration/target-registry.js";
+import type { SkillTarget } from "../src/agent-source/integration/types.js";
 import type { MemoryService } from "../src/service/memory-service.js";
 
 const roots: string[] = [];
@@ -21,6 +22,39 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
+  it.each([[false, true], [true, true], [false, false]])("refreshes installed OpenCode with auto injection disabled, removal=%s, storedState=%s", async (removed, storedState) => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { agentAccess: {
+      autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false
+    } } }));
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: storedState ? { opencode: {
+      status: "plugin_installed", autoInjectSuppressed: removed, messageCount: 0, lastScannedAt: null, latestSeenAt: null
+    } } : {} }));
+    const installPlugin = vi.fn(async () => {});
+    const isInstalledHookCurrent = vi.fn(async () => installPlugin.mock.calls.length > 0);
+    const target: SkillTarget = {
+      targetId: "opencode", displayName: "OpenCode", async resolveRootDirectory() { return root; },
+      async install() {}, async uninstall() {}, async isInstalled() { return true; },
+      installPlugin, isInstalledHookCurrent
+    };
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService, configPath, statePath, initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "opencode", displayName: "OpenCode", builtin: true, dataPath: root },
+        detect: async () => true, async *scan() {}
+      }]),
+      integrationRegistry: createSkillTargetRegistry([target])
+    });
+    try {
+      executor.startAutomation();
+      if (!removed) await vi.waitFor(() => expect(isInstalledHookCurrent.mock.calls.length).toBeGreaterThan(1));
+      else await new Promise(resolve => setTimeout(resolve, 60));
+      expect(installPlugin).toHaveBeenCalledTimes(removed ? 0 : 1);
+    } finally { await executor.dispose(); }
+  });
+
   it("also waits for a canceled scan when a replacement scan starts before disposal", async () => {
     const root = tempRoot();
     let finishFirst!: () => void;
@@ -671,6 +705,7 @@ describe("standalone Agent source executor", () => {
     const cursorRoot = join(root, ".cursor");
     mkdirSync(cursorRoot, { recursive: true });
     const configPath = join(root, "config.yaml");
+    const statePath = join(root, "agent-sources.json");
     writeFileSync(configPath, "memmyMemory:\n  storage:\n    endpoint: http://127.0.0.1:18960\n");
     const adapter: SourceAdapter = {
       descriptor: { sourceId: "cursor", displayName: "Cursor", builtin: true, dataPath: cursorRoot },
@@ -684,7 +719,7 @@ describe("standalone Agent source executor", () => {
     const executor = createAgentSourceExecutor({
       service,
       configPath,
-      statePath: join(root, "agent-sources.json"),
+      statePath,
       sourceRegistry: createSourceRegistry([adapter]),
       integrationRegistry: createSkillTargetRegistry([
         createCursorSkillTarget({ rootDirectory: cursorRoot, memmyConfigPath: configPath })
@@ -699,11 +734,69 @@ describe("standalone Agent source executor", () => {
     await executor.mutateConnection("cursor", "plugin", "DELETE");
     expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).not.toContain("memmy-resume-hook.mjs");
     expect((await executor.list()).sources[0]?.status).toBe("not_connected");
+    expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
+
+    await executor.mutateConnection("cursor", "plugin", "POST", "auto_inject");
+    expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
+    await executor.mutateConnection("cursor", "plugin", "DELETE");
+    await executor.mutateConnection("cursor", "plugin", "POST", "manual");
+    expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBeUndefined();
+  });
+
+  it("removes a hook when manual uninstall races with standalone auto injection", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    mkdirSync(codexRoot, { recursive: true });
+    const configPath = join(root, "config.yaml");
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: {
+      agentAccess: { autoScanKnownAgents: true, watchFileChanges: false, autoInjectSkill: true },
+    } }));
+    let executor!: ReturnType<typeof createAgentSourceExecutor>;
+    let autoInstallFinished = false;
+    let hookPresent = false;
+    const target: SkillTarget = {
+      targetId: "codex",
+      displayName: "Codex",
+      async resolveRootDirectory() { return codexRoot; },
+      async install() {},
+      async uninstall() {},
+      async isInstalled() { return hookPresent; },
+      async installPlugin() {
+        await executor.mutateConnection("codex", "plugin", "DELETE");
+        hookPresent = true;
+        autoInstallFinished = true;
+      },
+      async uninstallPlugin() { hookPresent = false; },
+    };
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+      detect: async () => true,
+      async *scan() {},
+    };
+    executor = createAgentSourceExecutor({
+      service: {} as MemoryService,
+      configPath,
+      statePath,
+      initialScanDelayMs: 0,
+      sourceRegistry: createSourceRegistry([adapter]),
+      integrationRegistry: createSkillTargetRegistry([target]),
+    });
+
+    try {
+      executor.startAutomation();
+      await vi.waitFor(() => expect(autoInstallFinished).toBe(true));
+      await vi.waitFor(() => expect(hookPresent).toBe(false));
+      expect((await executor.list()).sources[0]?.status).toBe("not_connected");
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.codex.autoInjectSuppressed).toBe(true);
+    } finally {
+      await executor.dispose();
+    }
   });
 });
 
 async function waitForScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 10_000; attempt += 1) {
     if (!executor.scanStatus().running) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }

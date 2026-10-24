@@ -21,7 +21,7 @@ describe("computer-use local API exports", () => {
       type: `${COMPUTER_USE_ONBOARDING_PREFIX}guide`,
       requestId: "guide-1",
       reason: "accessibility",
-      helperApp: "/Applications/Open Computer Use.app",
+      helperApp: "/Applications/Memmy Computer Use.app",
       canContinue: false,
     })).toBe(true);
     expect(isComputerUseOnboardingRequest({

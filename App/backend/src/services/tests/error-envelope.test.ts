@@ -1,7 +1,7 @@
 /** Error envelope tests. */
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryLayerError } from "../../adapters/outbound/memory-client/index.js";
+import { MemoryLayerError, MemoryLayerNetworkError } from "../../adapters/outbound/memory-client/index.js";
 import { API_ERROR_CODES, HTTP_STATUS_BY_CODE, withErrorEnvelope } from "../error-envelope.js";
 import type { FastifyInstance } from "fastify";
 
@@ -13,6 +13,17 @@ afterEach(async () => {
 });
 
 describe("withErrorEnvelope", () => {
+  it("reports a failed Memory connection as recoverable service unavailability", async () => {
+    app = Fastify({ logger: false });
+    app.get("/health", withErrorEnvelope(async () => {
+      throw new MemoryLayerNetworkError(new Error("connection reset"));
+    }));
+    const response = await app.inject({ method: "GET", url: "/health" });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: {
+      code: "memory_layer_unavailable", message: "memory layer network error"
+    } });
+  });
   it("maps every ApiErrorCode to the configured HTTP status", async () => {
     for (const code of API_ERROR_CODES) {
       app = Fastify({ logger: false });

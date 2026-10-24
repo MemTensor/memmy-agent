@@ -11,7 +11,6 @@ import {
   type ModelConfigInput,
   type ModelConfigView,
   type AccountChannel,
-  type Language,
   resolveMemoryLanguage,
   type ModelProvider,
   type ModelSelectionResolution,
@@ -124,7 +123,7 @@ export interface MemmyConfigWriter {
   writeUserMode?(mode: UserMode): Promise<void>;
 
   /** Publish the interface language so Memory can write memories in it. */
-  writeMemoryLanguage?(language: Language): Promise<void>;
+  writeMemoryLanguage?(language: string): Promise<void>;
 
   /** Publish custom-key memory pipeline token caps so the Memory worker can pause. */
   writeMemoryTokenBudget?(budget: { dailyLimitM: number; totalLimitM: number }): Promise<void>;
@@ -332,6 +331,20 @@ export async function readRuntimeMemmyConfigState(
   }
 
   return deriveRuntimeMemmyConfigState(parsed, configPath, mode);
+}
+
+/** Reads the persisted runtime user mode without deriving a model selection. */
+export async function readRuntimeMemmyConfigUserMode(
+  configPath = resolveDefaultMemmyConfigPath()
+): Promise<UserMode | undefined> {
+  const content = await readMemmyConfigContent(configPath);
+  if (!content?.trim()) return undefined;
+  const parsed = YAML.parse(content) as unknown;
+  if (!isRecord(parsed)) return undefined;
+  const userMode = existingString(asRecord(parsed.app)?.userMode);
+  return userMode === "account" || userMode === "byok" || userMode === "unset"
+    ? userMode
+    : undefined;
 }
 
 /** Reads agents.defaults.timezone without inventing a configured value. */
@@ -571,6 +584,11 @@ export async function writeAccountModelProjectionToMemmyConfig(
       appConfig,
       LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE
     );
+    // Projection repair also runs during migration; preserve an explicit BYOK choice.
+    const userMode = existingString(appConfig.userMode);
+    if (!userMode || userMode === "unset") {
+      appConfig.userMode = "account";
+    }
     if (normalizedCloudUuid) appConfig.cloudUuid = normalizedCloudUuid;
     if (normalizedUserId) appConfig.userId = normalizedUserId;
     delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];

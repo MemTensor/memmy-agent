@@ -113,10 +113,15 @@ describe("runtime refresh", () => {
       workspace: "/tmp/memmy-runtime-refresh-process",
       model: "old-model",
       contextWindowTokens: 1000,
+      config: new Config({
+        agents: { defaults: { contextWindowTokens: 200_000, contextBlockLimit: 200_000 } },
+        tools: { mcpServers: {} },
+        memmyMemory: { enabled: false },
+      }),
       providerSnapshotLoader: () => ({
         provider: newProvider,
         model: "new-model",
-        contextWindowTokens: 2000,
+        contextWindowTokens: 200_000,
         signature: ["new-model"],
       }),
     });
@@ -126,7 +131,7 @@ describe("runtime refresh", () => {
     expect(response?.content).toBe("new provider answer");
     expect(loop.provider).toBe(newProvider);
     expect(loop.model).toBe("new-model");
-    expect(loop.contextWindowTokens).toBe(2000);
+    expect(loop.contextWindowTokens).toBe(200_000);
   });
 
   it("updates runtime model fields when switching presets", () => {

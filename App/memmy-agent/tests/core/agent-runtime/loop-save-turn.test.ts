@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { ToolCallRequest } from "../../../src/providers/base.js";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -399,6 +400,22 @@ describe("AgentLoop turn persistence", () => {
     });
     expect(session.metadata.runtimeCheckpoint).toBeUndefined();
     expect(session.metadata.pendingUserTurn).toBeUndefined();
+  });
+
+  it('restores an interrupted credential tool as an error without replaying provided values', () => {
+    const loop = makeLoop();
+    const session = new Session({ key: 'auth-checkpoint' });
+    const call = new ToolCallRequest({ id: 'auth-pending', name: 'browser_auth_request', arguments: {
+      origin: 'https://example.test', provided_values: { code: 'task-code-246810' },
+    } });
+    const recorded = call.toOpenAIToolCall();
+    session.metadata.runtimeCheckpoint = { assistantMessage: { role: 'assistant', content: '', tool_calls: [recorded] },
+      completedToolResults: [], pendingToolCalls: [recorded] };
+    expect(loop.restoreRuntimeCheckpoint(session)).toBe(true);
+    expect(session.messages.at(-1)).toMatchObject({ role: 'tool', name: 'browser_auth_request',
+      content: 'Error: Task interrupted before this tool finished.' });
+    expect(JSON.stringify(session.messages)).not.toContain('task-code-246810');
+    expect(session.metadata.runtimeCheckpoint).toBeUndefined();
   });
 
   it("skips multimodal runtime-only user messages", () => {

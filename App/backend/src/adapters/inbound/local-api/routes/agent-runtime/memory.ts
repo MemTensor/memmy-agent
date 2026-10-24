@@ -19,6 +19,11 @@ const RecallParamsSchema = z.object({
   queryId: z.string().min(1)
 });
 
+const ObservedSkillUpdateSchema = z.object({
+  body: z.string().trim().min(1).max(50_000),
+  expectedVersion: z.number().int().positive()
+}).strict();
+
 export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
   app.get(
     "/api/v1/memory/recalls/:queryId",
@@ -78,6 +83,31 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
         restartFailedProcessing: false
       });
       return reply.send(await deps.services.memoryClient.retryMemoryProcessing(params.id));
+    })
+  );
+
+  app.post(
+    "/api/v1/evidence/skills/:id/approve",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      z.object({}).parse(request.body ?? {});
+      return reply.send(await deps.services.memoryClient.approveObservedSkill(
+        params.id,
+        runtimeContextFromRequest(request, deps.timeZone)
+      ));
+    })
+  );
+
+  app.patch(
+    "/api/v1/evidence/skills/:id",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      const input = ObservedSkillUpdateSchema.parse(request.body);
+      return reply.send(await deps.services.memoryClient.updateObservedSkill(
+        params.id, input, runtimeContextFromRequest(request, deps.timeZone)
+      ));
     })
   );
 

@@ -20,6 +20,8 @@ const TOOL_RESULT_PREVIEW_CHARS = 1200;
 const TOOL_RESULTS_DIR = ".memmy/tool-results";
 const TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60;
 const TOOL_RESULT_MAX_BUCKETS = 32;
+// Image input cost is bounded by visual processing, not by its base64 transport size.
+const IMAGE_INPUT_ESTIMATE_TOKENS = 4096;
 const UNSAFE_CHARS_RE = /[<>:"/\\|?*]/g;
 let tiktokenEncoder: ReturnType<typeof get_encoding> | null | undefined;
 
@@ -319,12 +321,15 @@ function countTextTokens(text: string): number {
 
 export function estimateMessageTokens(message: Record<string, any>): number {
   const parts: string[] = [];
+  let imageTokens = 0;
   const content = message.content;
   if (typeof content === "string") parts.push(content);
   else if (Array.isArray(content)) {
     for (const part of content) {
       if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
         parts.push(part.text);
+      else if (part && typeof part === "object" && part.type === "image_url")
+        imageTokens += IMAGE_INPUT_ESTIMATE_TOKENS;
       else parts.push(JSON.stringify(part));
     }
   } else if (content != null) {
@@ -337,7 +342,7 @@ export function estimateMessageTokens(message: Record<string, any>): number {
   if (typeof message.reasoning_content === "string" && message.reasoning_content)
     parts.push(message.reasoning_content);
   const payload = parts.join("\n");
-  return payload ? Math.max(4, countTextTokens(payload) + 4) : 4;
+  return Math.max(4, countTextTokens(payload) + imageTokens + 4);
 }
 
 export function estimatePromptTokens(

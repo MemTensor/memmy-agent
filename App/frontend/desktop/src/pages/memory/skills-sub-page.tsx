@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
@@ -16,6 +16,7 @@ import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, cleanMemoryText, drawerEyebrow } from "./memory-display.js";
 import { displayMemoryId } from "./memory-id.js";
+import { MemoryMarkdown } from "./memory-markdown.js";
 import {
   MemoryReferenceTags,
   type MemoryReferenceOpenRequest,
@@ -34,6 +35,7 @@ import { MemoryRefreshButton } from "./memory-refresh-button.js";
 import { MemoryStateBox } from "./memory-state-box.js";
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
 import { demoSkillDetail, demoSkillPanelItems, demoSkillTimeline, isSkillsDemoEnabled } from "./skill-demo-data.js";
+import "./skill-editor.css";
 
 type SkillDetailState = RemoteData<SkillDetailData> | null;
 const SKILLS_CACHE_SECTION = "skills";
@@ -128,6 +130,8 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<SkillDetailState>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const selectedSkillIdRef = useRef(selectedSkillId);
+  selectedSkillIdRef.current = selectedSkillId;
 
   function openSkill(skillId: string) {
     setSelectedSkillId(skillId);
@@ -262,16 +266,38 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
+  async function approveObservedSkill(id: string) {
+    if (!props.client?.approveObservedSkill) throw new Error(t("memory.clientNotReady"));
+    await props.client.approveObservedSkill(id);
+    clearMemoryPanelCache();
+    const skillDetail = await loadSkillDetail(props.client, id);
+    const timeline = await loadSkillTimeline(props.client, id).catch(() => []);
+    setDetail({ status: "ready", data: { detail: skillDetail, timeline } });
+    void refresh(page, { useCache: false }).catch(() => undefined);
+  }
+
+  async function updateObservedSkill(id: string, body: string, expectedVersion: number) {
+    if (!props.client?.updateObservedSkill) throw new Error(t("memory.clientNotReady"));
+    await props.client.updateObservedSkill(id, { body, expectedVersion });
+    clearMemoryPanelCache();
+    const skillDetail = await loadSkillDetail(props.client, id);
+    if (selectedSkillIdRef.current === id) {
+      setDetail((current) => ({ status: "ready", data: { detail: skillDetail,
+        timeline: current?.status === "ready" ? current.data.timeline : [] } }));
+    }
+    void refresh(page, { useCache: false }).catch(() => undefined);
+  }
+
   useEffect(() => {
     void refresh().catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [props.client, t, demoEnabled]);
 
   useEffect(() => {
     if (props.openRequest) {
       openSkill(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [props.openRequest?.requestId]);
 
   return (
@@ -295,6 +321,8 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       }}
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
+      onApproveObservedSkill={approveObservedSkill}
+      onUpdateObservedSkill={updateObservedSkill}
       onCloseSkill={closeSkill}
       onOpenMemoryReference={props.onOpenMemoryReference}
     />
@@ -312,6 +340,8 @@ export interface SkillsSubPageViewProps {
   onRefresh: () => void | Promise<void>;
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
+  onApproveObservedSkill?: (id: string) => Promise<void>;
+  onUpdateObservedSkill?: (id: string, body: string, expectedVersion: number) => Promise<void>;
   onCloseSkill: () => void;
   onOpenMemoryReference: OpenMemoryReference;
 }
@@ -384,6 +414,8 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
         detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
         onClose={props.onCloseSkill}
         onDelete={props.onDeleteSkill}
+        onApprove={props.onApproveObservedSkill}
+        onUpdate={props.onUpdateObservedSkill}
         onOpenMemoryReference={props.onOpenMemoryReference}
       />
     </section>
@@ -401,9 +433,32 @@ function SkillDrawer(props: {
   detail: SkillDetailState;
   onClose: () => void;
   onDelete: (id: string) => Promise<void>;
+  onApprove?: (id: string) => Promise<void>;
+  onUpdate?: (id: string, body: string, expectedVersion: number) => Promise<void>;
   onOpenMemoryReference: OpenMemoryReference;
 }) {
   const { t } = useTranslation();
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editedBody, setEditedBody] = useState("");
+  const [editedVersion, setEditedVersion] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const detailId = props.detail?.status === "ready" ? props.detail.data.detail.item.id : undefined;
+  const currentDetailId = useRef(detailId);
+  currentDetailId.current = detailId;
+  const saveRequestEpoch = useRef(0);
+  useEffect(() => {
+    saveRequestEpoch.current += 1;
+    setEditing(false);
+    setEditedBody("");
+    setEditedVersion(0);
+    setSaving(false);
+    setSaveError(null);
+    setApproveError(null);
+    return () => { saveRequestEpoch.current += 1; };
+  }, [detailId]);
 
   if (!props.detail) {
     return null;
@@ -412,6 +467,16 @@ function SkillDrawer(props: {
   const readyDetail = props.detail.status === "ready" ? props.detail.data : null;
   const title = readyDetail ? skillFromDetail(readyDetail.detail).title : t("memory.skills.detailTitle");
   const eyebrow = readyDetail ? drawerEyebrow(readyDetail.detail.item) : t("memory.skills.detailTitle");
+  const internal = recordValue(recordValue(recordValue(readyDetail?.detail.item.metadata).properties).internal_info);
+  const origin = recordValue(internal.external_evidence_candidate);
+  const historySkill = isHistoryDerivedSkill(origin);
+  const sourceChangedHumanDraft = historySkill && readyDetail?.detail.item.status === "archived"
+    && origin.human_modified === true && origin.source_status === "changed";
+  const awaitingObservedReview = readyDetail?.detail.item.status === "resolving"
+    && Boolean(internal.external_evidence_candidate) && !historySkill;
+  const editableHistorySkill = historySkill && internal.read_only !== true
+    && (readyDetail?.detail.item.status === "activated" || readyDetail?.detail.item.status === "resolving"
+      || sourceChangedHumanDraft);
 
   return (
     <div className="memory-drawer-backdrop" onClick={props.onClose}>
@@ -432,6 +497,62 @@ function SkillDrawer(props: {
           </button>
         </header>
         <div className="memory-drawer__body">
+          {editableHistorySkill && readyDetail ? (
+            <section className="memory-detail-card">
+              <p>{t(sourceChangedHumanDraft ? "memory.skills.sourceChangedNotice" : readyDetail.detail.item.status === "activated"
+                ? origin.human_modified === true
+                  ? "memory.skills.humanEditedNotice" : "memory.skills.autoGeneratedNotice"
+                : "memory.skills.historyCandidateNotice")}</p>
+              {editableHistorySkill && props.onUpdate && !editing ? <button className="memory-skill-editor__button" type="button" onClick={() => {
+                setEditedBody(readyDetail.detail.item.body);
+                setEditedVersion(readyDetail.detail.item.version);
+                setSaveError(null);
+                setEditing(true);
+              }}>{t("common.edit")}</button> : null}
+            </section>
+          ) : null}
+          {editing && readyDetail ? (
+            <form className="memory-detail-card" onSubmit={(event) => {
+              event.preventDefault();
+              if (!props.onUpdate || !editedBody.trim() || saving) return;
+              const skillId = readyDetail.detail.item.id;
+              const requestEpoch = ++saveRequestEpoch.current;
+              const isCurrentRequest = () => currentDetailId.current === skillId
+                && saveRequestEpoch.current === requestEpoch;
+              setSaving(true);
+              setSaveError(null);
+              void props.onUpdate(skillId, editedBody, editedVersion)
+                .then(() => { if (isCurrentRequest()) setEditing(false); })
+                .catch((error) => {
+                  if (isCurrentRequest()) setSaveError(error instanceof Error ? error.message : String(error));
+                })
+                .finally(() => { if (isCurrentRequest()) setSaving(false); });
+            }}>
+              <label className="memory-detail-card__label" htmlFor="memory-skill-editor">{t("memory.skills.editBody")}</label>
+              <textarea id="memory-skill-editor" className="memory-skill-editor__body" value={editedBody}
+                disabled={saving} maxLength={50_000} onChange={(event) => setEditedBody(event.target.value)} />
+              <p className="memory-policy-empty">{t("memory.skills.editHint")}</p>
+              <div className="memory-skill-editor__actions">
+                <button className="memory-skill-editor__button" type="submit" disabled={saving || !editedBody.trim()}>{t(saving ? "memory.skills.saving" : "common.save")}</button>
+                <button className="memory-skill-editor__button" type="button" disabled={saving} onClick={() => setEditing(false)}>{t("common.cancel")}</button>
+              </div>
+              {saveError ? <p role="alert">{saveError}</p> : null}
+            </form>
+          ) : null}
+          {awaitingObservedReview ? (
+            <section className="memory-detail-card">
+              <p>{t("memory.skills.observedCandidateReview")}</p>
+              {props.onApprove ? <button className="memory-skill-editor__button" type="button" disabled={approving} onClick={() => {
+                if (!readyDetail) return;
+                setApproving(true);
+                setApproveError(null);
+                void props.onApprove!(readyDetail.detail.item.id).catch((error) => {
+                  setApproveError(error instanceof Error ? error.message : String(error));
+                }).finally(() => setApproving(false));
+              }}>{t("memory.skills.approveObservedCandidate")}</button> : null}
+              {approveError ? <p role="alert">{approveError}</p> : null}
+            </section>
+          ) : null}
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.skills.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
           {props.detail.status === "ready" && (
@@ -448,6 +569,35 @@ function SkillDrawer(props: {
   );
 }
 
+/** Recognize explicit History provenance without treating other passive sources as automatic Skills. */
+export function isHistoryDerivedSkill(value: unknown): boolean {
+  const origin = recordValue(value);
+  if (origin.source === "computer_history" || origin.activation_mode === "automatic_history") return true;
+  return origin.source === "memmy" && Array.isArray(origin.sourceRecordIds)
+    && new Set(origin.sourceRecordIds).size >= 2
+    && origin.sourceRecordIds.every((id) => typeof id === "string"
+      && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z?-(?:10min|6h)-summary$/u.test(id));
+}
+
+function generatedHistoryStepSources(detail: GetMemoryOutput): Array<{ stepIndex: number; sourceMemoryId: string }> {
+  const internal = recordValue(recordValue(recordValue(detail.item.metadata).properties).internal_info);
+  const origin = recordValue(internal.external_evidence_candidate);
+  const raw = origin.generatedStepSources;
+  if (!isHistoryDerivedSkill(origin) || origin.activation_mode !== "automatic_history"
+    || origin.human_modified === true || detail.item.status !== "activated"
+    || !Array.isArray(raw) || raw.length === 0 || raw.length > 12
+    || !Array.isArray(detail.item.sourceMemoryIds)) return [];
+  const available = new Set(detail.item.sourceMemoryIds);
+  const sources = raw.map((value, stepIndex) => {
+    const entry = recordValue(value);
+    return Number.isSafeInteger(entry.stepIndex) && entry.stepIndex === stepIndex
+      && typeof entry.sourceMemoryId === "string" && entry.sourceMemoryId.trim().length > 0
+      && available.has(entry.sourceMemoryId)
+      ? { stepIndex, sourceMemoryId: entry.sourceMemoryId } : null;
+  });
+  return sources.every((source) => source !== null) ? sources as Array<{ stepIndex: number; sourceMemoryId: string }> : [];
+}
+
 function SkillDetail(props: {
   detail: GetMemoryOutput;
   timeline: SkillTimelineEntry[];
@@ -456,6 +606,9 @@ function SkillDetail(props: {
   const { t } = useTranslation();
   const skill = skillFromDetail(props.detail);
   const hasDecisionGuidance = skill.decisionGuidance.preference.length > 0 || skill.decisionGuidance.antiPattern.length > 0;
+  const stepSources = generatedHistoryStepSources(props.detail);
+  const internal = recordValue(recordValue(recordValue(props.detail.item.metadata).properties).internal_info);
+  const verificationState = recordValue(recordValue(internal.skill).verification);
 
   return (
     <>
@@ -475,14 +628,17 @@ function SkillDetail(props: {
         {skill.source && (
           <div className="memory-policy-source">
             <span>{t("memory.tasks.source")}</span>
-            {skill.source}
+            {skill.source === "computer_history" ? t("memory.memories.historySource") : skill.source}
           </div>
         )}
       </section>
 
       <SkillTimelineSection entries={props.timeline} />
       {skill.usageGuide && <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.usageGuide} />}
-      <DetailTextSection title={t("memory.skills.body")} body={skill.body} />
+      <section className="memory-detail-card">
+        <h5 className="memory-detail-card__label">{t("memory.skills.body")}</h5>
+        <MemoryMarkdown text={skill.body || "-"} />
+      </section>
 
       {hasDecisionGuidance && (
         <section className="memory-detail-card">
@@ -496,11 +652,27 @@ function SkillDetail(props: {
         </section>
       )}
 
+      {stepSources.length > 0 && (
+        <section className="memory-detail-card memory-skill-step-sources">
+          <h5 className="memory-detail-card__label">{t("memory.skills.stepSources")}</h5>
+          <p className="memory-policy-section-body">{t(verificationState.summaryFactCheck === "not_independently_verified"
+            ? "memory.skills.summaryFactCheckUnverified" : "memory.skills.summaryFactCheckUnknown")}</p>
+          <p className="memory-policy-section-body">{t(verificationState.execution_verified === false
+            ? "memory.skills.executionOutcomeUnverified" : "memory.skills.executionOutcomeUnknown")}</p>
+          {stepSources.map((source) => (
+            <div className="memory-policy-source" key={source.stepIndex}>
+              <span>{t("memory.skills.stepNumber", { count: source.stepIndex + 1 })}</span>
+              <MemoryReferenceTags ids={[source.sourceMemoryId]} fallbackPage="memories" onOpen={props.onOpenMemoryReference} />
+            </div>
+          ))}
+        </section>
+      )}
+
       <LinkedIdsSection
         title={t("memory.skills.sourceExperience")}
         ids={skill.sourcePolicyIds.length > 0 ? skill.sourcePolicyIds : props.detail.item.sourceMemoryIds}
         empty={t("memory.skills.noSourceExperience")}
-        fallbackPage="policies"
+        fallbackPage={skill.sourcePolicyIds.length > 0 ? "policies" : "memories"}
         onOpen={props.onOpenMemoryReference}
       />
       <LinkedIdsSection
@@ -755,7 +927,8 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
   return {
     title: displaySkillTitle(detail.item, firstString(skill.title, internalInfo.title)),
     status: firstString(skill.status, internalInfo.status, info.status, detail.item.status) ?? detail.item.status,
-    source: firstString(metadata.source, internalInfo.source),
+    source: isHistoryDerivedSkill(internalInfo.external_evidence_candidate) ? "computer_history"
+      : firstString(metadata.source, internalInfo.source),
     createdAt: detail.item.createdAt,
     updatedAt: detail.item.updatedAt,
     body,
@@ -903,7 +1076,7 @@ function parseJsonString(value: unknown): unknown {
   }
 
   const trimmed = value.trim();
-  if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+  if (!trimmed || !(trimmed.startsWith("[") || trimmed.startsWith("{") || trimmed.startsWith('"'))) {
     return value;
   }
 

@@ -133,7 +133,7 @@ export function ToolsPageView(props: ToolsPageViewProps) {
 
   return (
     <AppFrame title={t("tools.title")}>
-      <div className="app-frame-page-content h-full overflow-y-auto py-6">
+      <div className="app-frame-page-content h-full overflow-y-auto py-6 tools-page-content">
         <div className="mb-6 flex items-center gap-3 border-b border-border-stone/30 pb-4">
           <Memmy pose="connect" size={56} />
           <div>

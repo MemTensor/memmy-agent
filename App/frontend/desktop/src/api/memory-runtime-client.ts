@@ -61,6 +61,10 @@ import {
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { ApiRequestError, requestJson } from "./http.js";
+import { z } from "zod";
+
+const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
+const UpdateObservedSkillOutputSchema = ApproveObservedSkillOutputSchema.extend({ version: z.number().int().positive() });
 
 export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/health",
@@ -71,6 +75,8 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
+  "POST /api/v1/evidence/skills/:id/approve",
+  "PATCH /api/v1/evidence/skills/:id",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -85,7 +91,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
 ] as const;
 
 export interface MemoryRuntimeClient {
-  health(): Promise<MemoryHealthSnapshot>;
+  health(signal?: AbortSignal): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   openSession(input: OpenSessionInput): Promise<OpenSessionOutput>;
   closeSession(sessionId: string, input: CloseSessionInput): Promise<CloseSessionOutput>;
@@ -95,6 +101,8 @@ export interface MemoryRuntimeClient {
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(id: string): Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
+  approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
+  updateObservedSkill?(id: string, input: { body: string; expectedVersion: number }): Promise<{ id: string; status: "activated"; version: number; serverTime: string }>;
   recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
@@ -108,8 +116,8 @@ export interface MemoryRuntimeClient {
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
   return {
-    async health() {
-      return requestJson({ config, path: "/api/v1/health", schema: MemoryHealthSnapshotSchema });
+    async health(signal) {
+      return requestJson({ config, path: "/api/v1/health", schema: MemoryHealthSnapshotSchema, init: { signal } });
     },
 
     async reloadConfig(input = {}) {
@@ -171,6 +179,16 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
       });
+    },
+
+    async approveObservedSkill(id) {
+      return requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}/approve`,
+        schema: ApproveObservedSkillOutputSchema, body: {} });
+    },
+
+    async updateObservedSkill(id, input) {
+      return requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}`,
+        schema: UpdateObservedSkillOutputSchema, body: input, init: { method: "PATCH" } });
     },
 
     async recallEvidence(queryId) {

@@ -1,6 +1,6 @@
 /** Error envelope module. */
 import { ZodError } from "zod";
-import { MemoryLayerError } from "../adapters/outbound/memory-client/index.js";
+import { MemoryLayerError, MemoryLayerNetworkError } from "../adapters/outbound/memory-client/index.js";
 import type { FastifyReply, FastifyRequest, RouteHandlerMethod } from "fastify";
 
 export const API_ERROR_CODES = [
@@ -95,6 +95,14 @@ function toErrorEnvelope(error: unknown): ErrorEnvelope {
     return {
       code,
       status: error.status,
+      message: error.message
+    };
+  }
+
+  if (error instanceof MemoryLayerNetworkError) {
+    return {
+      code: "memory_layer_unavailable",
+      status: HTTP_STATUS_BY_CODE.memory_layer_unavailable,
       message: error.message
     };
   }

@@ -224,10 +224,11 @@ export class TerminalRunControl {
     });
   }
 
-  async requestCancel(sessionKey: string): Promise<boolean> {
+  async requestCancel(sessionKey: string, expectedTurnId?: string | null): Promise<boolean> {
     let found = false;
     await this.update(sessionKey, (current) => {
       if (!current || isStale(current)) return null;
+      if (expectedTurnId != null && current.turnId !== expectedTurnId) return current;
       found = true;
       return { ...current, cancelRequested: true };
     });

@@ -29,6 +29,11 @@ export function cleanMemoryText(value?: string | null): string {
 }
 
 export function memoryDisplaySource(item?: MemorySourceItem | null): string {
+  const internal = recordValue(recordValue(item?.metadata?.properties).internal_info);
+  const evidence = recordValue(internal.external_evidence);
+  if (internal.memory_kind === "observed_activity" && (
+    evidence.source === "computer_history" || typeof recordValue(evidence.provenance).historyId === "string"
+  )) return "computer_history";
   const explicitSource = stringValue(item?.metadata?.source)?.trim();
   return normalizedAgentSource(explicitSource)
     ?? explicitSource

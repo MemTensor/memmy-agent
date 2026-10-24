@@ -34,13 +34,11 @@ export function ComputerHistoryRecordingConfirmation(props: {
         closeLabel={t("common.close")}
         confirmLabel={t("computerHistory.enableConfirm")}
         message={(
-          <ul className="ch-recording-confirmation__details">
-            <li>
-              {noticeBefore}
-              <strong className="font-semibold text-text-ink">{t("computerHistory.enableAllOperations")}</strong>
-              {noticeAfter}{t("computerHistory.enableLocalNotice")}
-            </li>
-          </ul>
+          <p className="ch-recording-confirmation__details">
+            {noticeBefore}
+            <strong className="font-semibold text-text-ink">{t("computerHistory.enableAllOperations")}</strong>
+            {noticeAfter}{t("computerHistory.enableLocalNotice")}
+          </p>
         )}
         onCancel={props.onCancel}
         onConfirm={props.onConfirm}

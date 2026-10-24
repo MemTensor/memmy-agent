@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { Config } from "../../src/config/schema.js";
+import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
+import { BedrockProvider } from "../../src/providers/bedrock-provider.js";
 import { makeProvider } from "../../src/providers/factory.js";
+import {
+  chatCompletionsModelForcesNoneReasoning,
+  customModelUsesMaxCompletionTokens,
+} from "../../src/providers/custom-provider.js";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { findByName } from "../../src/providers/registry.js";
 
@@ -45,6 +51,78 @@ describe("custom provider", () => {
     expect(() => new Config({ providers: { custom: { endpoints: {
       chat: { apiBase: "https://example.test/v1", protocol: "response" },
     } } } })).toThrow();
+  });
+
+  it("uses max_completion_tokens for newer OpenAI model names", () => {
+    expect(customModelUsesMaxCompletionTokens("gpt-6-sol")).toBe(true);
+    expect(customModelUsesMaxCompletionTokens("gpt-5.4")).toBe(true);
+    expect(customModelUsesMaxCompletionTokens("deepseek-v4")).toBe(false);
+    expect(customModelUsesMaxCompletionTokens("qwen-max")).toBe(false);
+    expect(customModelUsesMaxCompletionTokens("gpt-4o")).toBe(false);
+  });
+
+  it("treats gpt- names and o-series names as chat completions reasoning models", () => {
+    expect(chatCompletionsModelForcesNoneReasoning("gpt-4o")).toBe(true);
+    expect(chatCompletionsModelForcesNoneReasoning("gpt-6-sol")).toBe(true);
+    expect(chatCompletionsModelForcesNoneReasoning("o3-mini")).toBe(true);
+    expect(chatCompletionsModelForcesNoneReasoning("qwen-max")).toBe(false);
+  });
+
+  it("sends max_completion_tokens only for matching custom chat models", () => {
+    const gpt = chatKwargs("gpt-6-sol");
+    const qwen = chatKwargs("qwen-max");
+
+    expect(gpt.max_completion_tokens).toBe(1024);
+    expect(gpt).not.toHaveProperty("max_tokens");
+    expect(qwen.max_tokens).toBe(1024);
+    expect(qwen).not.toHaveProperty("max_completion_tokens");
+  });
+
+  it("keeps reasoning_effort when custom thinking is on", () => {
+    const kwargs = chatKwargs("gpt-6-sol", {
+      reasoningEffort: "medium",
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    });
+
+    expect(kwargs.reasoning_effort).toBe("medium");
+  });
+
+  it("sends reasoning_effort none for custom chat completions gpt models when thinking is off", () => {
+    const tools = [{ type: "function", function: { name: "read_file" } }];
+
+    expect(chatKwargs("gpt-6-sol", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-6-sol", { reasoningEffort: "none", tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-4o", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-4o", { tools }).max_tokens).toBe(1024);
+    expect(chatKwargs("gpt-4o", { tools })).not.toHaveProperty("max_completion_tokens");
+    expect(chatKwargs("qwen-max", { tools })).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("does not force reasoning_effort none for custom responses", () => {
+    const provider = new OpenAICompatProvider("test-key", "https://example.com/v1", "gpt-6-sol", findByName("custom"));
+    provider.apiType = "responses";
+    const kwargs = provider.buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+      model: "gpt-6-sol",
+      maxTokens: 1024,
+      temperature: 0.7,
+      reasoningEffort: null,
+      toolChoice: null,
+    });
+
+    expect(kwargs).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("selects the client from the custom endpoint protocol", () => {
+    const responses = makeProvider(customPresetConfig("openai-responses", "gpt-4o-mini")) as OpenAICompatProvider;
+    const anthropic = makeProvider(customPresetConfig("anthropic-messages", "claude-sonnet"));
+    const bedrock = makeProvider(customPresetConfig("bedrock-converse", "anthropic.claude-sonnet"));
+
+    expect(responses).toBeInstanceOf(OpenAICompatProvider);
+    expect(responses.apiType).toBe("responses");
+    expect(anthropic).toBeInstanceOf(AnthropicProvider);
+    expect(bedrock).toBeInstanceOf(BedrockProvider);
   });
 
   it("parses empty choices as an error response", () => {
@@ -140,3 +218,49 @@ describe("custom provider", () => {
     expect(result.content).toContain("proxy/tunnel");
   });
 });
+
+function chatKwargs(
+  model: string,
+  overrides: { reasoningEffort?: string | null; tools?: Record<string, unknown>[] | null } = {},
+): Record<string, unknown> {
+  const provider = new OpenAICompatProvider("test-key", "https://example.com/v1", model, findByName("custom"));
+  provider.apiType = "chatCompletions";
+  return provider.buildKwargs({
+    messages: [{ role: "user", content: "hi" }],
+    tools: overrides.tools ?? null,
+    model,
+    maxTokens: 1024,
+    temperature: 0.7,
+    reasoningEffort: overrides.reasoningEffort ?? null,
+    toolChoice: null,
+  });
+}
+
+function customPresetConfig(protocol: string, model: string): Config {
+  return new Config({
+    agents: { defaults: { provider: "custom", model, modelPreset: "chosen" } },
+    providers: {
+      custom: {
+        apiKey: "test-key",
+        endpoints: {
+          chat: {
+            apiBase: protocol === "bedrock-converse"
+              ? "https://bedrock-runtime.us-west-2.amazonaws.com"
+              : "https://example.com/v1",
+            protocol,
+            ...(protocol === "bedrock-converse" ? { region: "us-west-2" } : {})
+          }
+        }
+      }
+    },
+    modelPresets: {
+      chosen: {
+        provider: "custom",
+        endpoint: "chat",
+        model,
+        source: "byok",
+        capabilities: ["agent"]
+      }
+    }
+  });
+}

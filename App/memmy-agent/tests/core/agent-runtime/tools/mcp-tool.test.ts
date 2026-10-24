@@ -333,6 +333,19 @@ describe("MCP structured content conversion", () => {
     ]);
     expect(JSON.stringify(result)).not.toContain("private-invalid-payload");
   });
+
+  it("preserves an already normalized inline image_url block", () => {
+    const url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+    const result = convertMcpToolContent(
+      { content: [{ type: "text", text: "captured" }, { type: "image_url", image_url: { url, detail: "high" } }] },
+      "auto",
+    ) as Array<Record<string, any>>;
+
+    expect(result).toEqual([
+      { type: "text", text: "captured" },
+      { type: "image_url", image_url: { url, detail: "high" } },
+    ]);
+  });
 });
 
 describe("connectMcpServers enabled tools", () => {

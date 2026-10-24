@@ -26,6 +26,18 @@ import {
 } from "../memory-agent-filter.js";
 
 describe("MemoriesSubPage", () => {
+  it("在所有记忆列表明确标注没有提炼为记忆的观察和原因", () => {
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([{
+      ...memoryListItemFixture,
+      kind: "observed_activity",
+      status: "archived",
+      summary: "重复的窗口切换没有提供新上下文。",
+      metadata: { source: "computer_history", observationStatus: "skipped", observationSkipReason: "重复的窗口切换没有提供新上下文。" }
+    }]), detail: null });
+    expect(html).toContain("未提炼为记忆");
+    expect(html).toContain("重复的窗口切换没有提供新上下文。");
+    expect(html).not.toContain("memory-card__score");
+  });
   it("把搜索转换为只读取原始记忆的 PanelItemsInput", () => {
     expect(buildPanelItemsInput({ query: "偏好" })).toEqual({
       q: "偏好",
@@ -60,6 +72,8 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("lucide-bot");
     expect(html).toContain("全部 Agent");
     expect(html).toContain("按来源 Agent 筛选");
+    expect(MEMORY_AGENT_SOURCE_VALUES).not.toContain("computer_history");
+    expect(MEMORY_SOURCE_AGENT_EXCLUSIONS).toContain("computer_history");
   });
 
   it("筛选器和详情共用统一的 Agent 名称格式", () => {
@@ -77,6 +91,7 @@ describe("MemoriesSubPage", () => {
       "QwenWork"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
+    expect(agentSourceDisplayName("computer_history")).toBe("Memmy");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");
     expect(agentSourceDisplayName("OPENCLAW")).toBe("OpenClaw");
   });
@@ -114,6 +129,18 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain(">Codex</span>");
     expect(html).not.toContain("来源: codex");
     expect(html).not.toContain("memory-pill--source");
+  });
+
+  it("电脑历史记忆显示为 Memmy，同时保留真实来源供详情溯源", () => {
+    const item = {
+      ...memoryListItemFixture,
+      metadata: { source: "computer_history" }
+    };
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([item]), detail: null });
+
+    expect(memoryDisplaySource(item)).toBe("computer_history");
+    expect(html).toContain('aria-label="来源: Memmy"');
+    expect(html).not.toContain('aria-label="来源: 电脑历史"');
   });
 
   it("摘要完成前展示用户原句，生成后把独立标题和摘要分成两行", () => {

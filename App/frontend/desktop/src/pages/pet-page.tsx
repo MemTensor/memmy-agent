@@ -4,15 +4,16 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, readGuidanceCompleted, resolveInitialView, type AppRoutePath, type ByokAgentModelAvailability } from "../app/routes.js";
 import type { MemmyAgentClient, MemmyAgentSessionSummary, MemmyAgentUnsubscribe, MemmyAgentWebSocketConnection, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
+import { isCronProactiveMessage } from "../api/memmy-agent-client.js";
 import type { AsrClient } from "../api/asr-client.js";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
+import { PetIdleAnimation } from "../components/mascot/pet-idle/pet-idle-animation.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { useTaskBus, type Task, type TaskBusAgentMessage, type TaskBusValue } from "../lib/task-bus.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
-import memoIdleUrl from "../assets/mascot/memo-idle-alpha.webm";
 import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Maximize, Maximize2, Mic, Pause, Send, StopSquare, X } from "./memory/memory-prototype-icons.js";
 import { MicrophonePermissionError, microphonePermissionDeniedMessageKey, useAsrRecorder } from "./asr-recorder.js";
 import { createPetAgentBridge, PetReconnectRecoveryTracker } from "./pet-agent-bridge.js";
@@ -400,18 +401,26 @@ export function hasPetThreadLatestAnswer(messages: TaskBusAgentMessage[]): boole
   return false;
 }
 
+/**
+ * Counts sessions that have an explicit unread completion.
+ *
+ * Running tasks and historical tasks that were never marked unseen do not count.
+ * Several tasks inside one session count once. chatId and websocket:chatId are the same session.
+ */
+export function countUnreadPetSessions(tasks: Task[]): number {
+  let count = 0;
+  for (const task of resolveMiniSessionRepresentatives(tasks).values()) {
+    if (isUnreadPetSessionTask(task)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** Handles group mini task list sessions. */
 function groupMiniTaskListSessions(tasks: Task[]): MiniTaskListItem[] {
-  const sessions = new Map<string, Task[]>();
-  for (const task of tasks) {
-    const sessionTasks = sessions.get(task.sessionId) ?? [];
-    sessionTasks.push(task);
-    sessions.set(task.sessionId, sessionTasks);
-  }
-
-  return Array.from(sessions.entries()).flatMap(([sessionId, sessionTasks]) => {
-    const representative = resolveMiniSessionRepresentative(sessionTasks);
-    if (!representative || !shouldShowMiniTaskListRepresentative(representative)) {
+  return Array.from(resolveMiniSessionRepresentatives(tasks).entries()).flatMap(([sessionId, representative]) => {
+    if (!shouldShowMiniTaskListRepresentative(representative)) {
       return [];
     }
 
@@ -426,10 +435,23 @@ function groupMiniTaskListSessions(tasks: Task[]): MiniTaskListItem[] {
   });
 }
 
-/** Handles resolve mini session representative. */
-function resolveMiniSessionRepresentative(tasks: Task[]): Task | null {
-  const activityDesc = (a: Task, b: Task) => Math.max(b.startedAt, b.updatedAt, b.finishedAt ?? 0) - Math.max(a.startedAt, a.updatedAt, a.finishedAt ?? 0);
-  return tasks.filter((task) => task.status !== "cancelled").sort(activityDesc)[0] ?? null;
+/** Picks the latest turn in each session; delayed updates to an older turn cannot replace it. */
+function resolveMiniSessionRepresentatives(tasks: Task[]): Map<string, Task> {
+  const representatives = new Map<string, Task>();
+  for (const task of tasks) {
+    const sessionId = canonicalPetSessionId(task.sessionId);
+    if (task.status === "cancelled" || !sessionId) {
+      continue;
+    }
+
+    const current = representatives.get(sessionId);
+    if (!current || task.startedAt > current.startedAt || (
+      task.startedAt === current.startedAt && miniTaskActivityAt(task) > miniTaskActivityAt(current)
+    )) {
+      representatives.set(sessionId, task);
+    }
+  }
+  return representatives;
 }
 
 function shouldShowMiniTaskListRepresentative(task: Task): boolean {
@@ -437,7 +459,20 @@ function shouldShowMiniTaskListRepresentative(task: Task): boolean {
     return true;
   }
 
-  return task.readAt == null && task.dismissed !== true;
+  return isUnreadPetSessionTask(task);
+}
+
+function isUnreadPetSessionTask(task: Task): boolean {
+  return (task.status === "done" || task.status === "error") && task.unseen === true && task.readAt == null && task.dismissed !== true;
+}
+
+function canonicalPetSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith("websocket:") ? trimmed.slice("websocket:".length) : trimmed;
+}
+
+function miniTaskActivityAt(task: Task): number {
+  return Math.max(task.startedAt, task.updatedAt, task.finishedAt ?? 0);
 }
 
 /** Normalizes normalize pet task chat id. */
@@ -527,6 +562,7 @@ export function resolvePetAgentEventAction(
   fallbackError: string,
   context: { goalId?: string | null; turnRunning?: boolean } = {},
 ): PetAgentEventAction {
+  if (isCronProactiveMessage(event)) return { type: "ignore" };
   if (event.event === "delta") {
     const text = stringEventText(event);
     return text ? { type: "append", text } : { type: "ignore" };
@@ -1070,6 +1106,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     [focusedTask, hasUndismissedAnswer, isActive, isActiveSuppressed, isInHotzone]
   );
   const miniTaskListItems = useMemo(() => selectMiniTaskListItems(tasks), [tasks]);
+  const unreadSessionCount = useMemo(() => countUnreadPetSessions(tasks), [tasks]);
   const runningSessionItems = useMemo(() => miniTaskListItems.filter((item) => item.status === "processing" || item.status === "answering"), [miniTaskListItems]);
   const runningSessionCount = runningSessionItems.length;
   const runningSessionReconcileKey = useMemo(
@@ -1082,7 +1119,6 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
   const hasLiveInputActivity = derivePetInputActivity({ isTextInputFocused, textInput, isRecording, hasInteracted });
   const hasHoverBlockingActivity = hasLiveInputActivity || displayState === "processing" || displayState === "answering";
   const focusedAgentText = focusedTask?.lastAgentMessage ?? focusedTask?.streamingChunks?.join("") ?? "";
-  const hasTaskHistorySwitcher = miniTaskListItems.length > 0;
   const showIdle = displayState === "idle" && runningSessionCount === 0 && !isDragging;
   const memmyPose = resolveMemmyPose(displayState, focusedTask, isSleeping);
 
@@ -1248,7 +1284,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     setHasInteracted(false);
   }, [cancelAsrRecording]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     layoutOffsetRef.current = layoutOffset;
   }, [layoutOffset]);
 
@@ -1486,7 +1522,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     onPetWindowChange?.(true);
   }, [onPetWindowChange]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
     const body = document.body;
     root.classList.add(PET_TRANSPARENT_ROOT_CLASS);
@@ -1497,35 +1533,33 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     };
   }, []);
 
-  useEffect(() => {
-    const frameId = window.requestAnimationFrame(() => {
-      const mascotElement = hotzoneRegistryRef.current.get("mascot");
-      if (!mascotElement) {
-        return;
-      }
+  // The native pet window waits for its layout before appearing. Report committed
+  // bounds directly so showing the window never depends on an animation frame.
+  useLayoutEffect(() => {
+    const mascotElement = hotzoneRegistryRef.current.get("mascot");
+    if (!mascotElement) {
+      return;
+    }
 
-      const nextMeasurement = resolvePetMeasuredLayout({
-        currentOffset: layoutOffsetRef.current,
-        mascotRect: readElementRect(mascotElement),
-        contentRects: Array.from(hotzoneRegistryRef.current.values()).map(readElementRect),
-        padding: PET_CANVAS.edgePadding
-      });
-      if (!nextMeasurement) {
-        return;
-      }
-
-      if (!areOffsetsEqual(layoutOffsetRef.current, nextMeasurement.offset)) {
-        layoutOffsetRef.current = nextMeasurement.offset;
-        setLayoutOffset(nextMeasurement.offset);
-      }
-
-      if (!areWindowLayoutsEqual(lastWindowLayoutRef.current, nextMeasurement.windowLayout)) {
-        lastWindowLayoutRef.current = nextMeasurement.windowLayout;
-        window.memmy?.syncPetWindowLayout?.(nextMeasurement.windowLayout);
-      }
+    const nextMeasurement = resolvePetMeasuredLayout({
+      currentOffset: layoutOffsetRef.current,
+      mascotRect: readElementRect(mascotElement),
+      contentRects: Array.from(hotzoneRegistryRef.current.values()).map(readElementRect),
+      padding: PET_CANVAS.edgePadding
     });
+    if (!nextMeasurement) {
+      return;
+    }
 
-    return () => window.cancelAnimationFrame(frameId);
+    if (!areOffsetsEqual(layoutOffsetRef.current, nextMeasurement.offset)) {
+      layoutOffsetRef.current = nextMeasurement.offset;
+      setLayoutOffset(nextMeasurement.offset);
+    }
+
+    if (!areWindowLayoutsEqual(lastWindowLayoutRef.current, nextMeasurement.windowLayout)) {
+      lastWindowLayoutRef.current = nextMeasurement.windowLayout;
+      window.memmy?.syncPetWindowLayout?.(nextMeasurement.windowLayout);
+    }
   }, [contextMenu, displayState, focusedAgentText, isPaused, isRecording, layoutOffset, recordSeconds, runningSessionCount, showActiveBubble, showTopBubble, taskListOpen, tasks.length, textInput]);
 
   useEffect(() => {
@@ -1916,20 +1950,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
               filter: "drop-shadow(0 8px 16px rgba(17, 29, 28, 0.18))"
             }}
           >
-            <video
-              src={memoIdleUrl}
-              autoPlay
-              loop
-              muted
-              playsInline
-              className="drop-shadow-[0_8px_16px_rgba(17,29,28,0.18)]"
-              style={{
-                width: PET_TIMING.mascotSize,
-                height: PET_TIMING.mascotSize,
-                objectFit: "cover",
-                display: "block"
-              }}
-            />
+            <PetIdleAnimation size={PET_TIMING.mascotSize} playing={showIdle} />
           </div>
           <div className="absolute inset-0 transition-opacity duration-200" style={{ opacity: showIdle ? 0 : 1, pointerEvents: "none" }}>
             <Memmy pose={memmyPose} size={PET_TIMING.mascotSize} className={`drop-shadow-[0_8px_16px_rgba(17,29,28,0.18)] ${displayState === "processing" ? "memmy-bob" : ""}`} />
@@ -1938,11 +1959,11 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
 
         {displayState !== "idle" && <ChatWavesProp />}
 
-        {hasTaskHistorySwitcher && (
+        {unreadSessionCount > 0 && (
           <MultiTaskBadge
             registerRef={registerHotzone("badge")}
-            count={miniTaskListItems.length}
-            title={runningSessionCount > 0 ? t("pet.runningTasks", { count: runningSessionCount }) : t("pet.list.switch")}
+            count={unreadSessionCount}
+            title={t("pet.unreadSessions", { count: unreadSessionCount })}
             onClick={(event) => {
               event.stopPropagation();
               setTaskListOpen((open) => !open);
@@ -2422,7 +2443,7 @@ interface MultiTaskBadgeProps {
  */
 function MultiTaskBadge({ registerRef, count, title, onClick }: MultiTaskBadgeProps) {
   return (
-    <button ref={registerRef} type="button" onClick={onClick} className="absolute min-w-[20px] h-5 px-1.5 rounded-full bg-icon-ember text-white text-[10px] font-bold flex items-center justify-center shadow-md ring-2 ring-canvas-oat hover:scale-110 transition-transform cursor-pointer animate-in zoom-in-50 duration-200" style={{ top: -4, right: -12 }} title={title} data-task-count={count}>
+    <button ref={registerRef} type="button" onClick={onClick} className="absolute min-w-[20px] h-5 px-1.5 rounded-full bg-icon-ember text-white text-[10px] font-bold flex items-center justify-center shadow-md ring-2 ring-canvas-oat hover:scale-110 transition-transform cursor-pointer animate-in zoom-in-50 duration-200" style={{ top: -4, right: -12 }} title={title} data-unread-session-count={count}>
       {count}
     </button>
   );

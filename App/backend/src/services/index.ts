@@ -216,6 +216,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
       permissionManager: options.permissionManager,
+      isAutoInjectSuppressed: (sourceId) => options.appStateStore.repositories.agentSources.isAutoInjectSuppressed(sourceId),
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
         ?? options.appStateStore.repositories.bootstrap.getScanPreferences()
     }),

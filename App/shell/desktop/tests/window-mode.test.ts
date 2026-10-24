@@ -203,9 +203,9 @@ describe("desktop pet window mode", () => {
     // macOS can deliver the "Quit & Reopen" quit request to the freshly reopened instance when the
     // old instance exits slowly; that stale quit is ignored once so the reopened window survives.
     expect(source).toContain("const MACOS_STALE_REOPEN_QUIT_GRACE_MS = 20000;");
-    expect(source).toContain("function shouldIgnoreStaleReopenQuit(): boolean");
+    expect(source).toContain("function shouldIgnoreStaleReopenQuit(context: MacPermissionQuitContext | null): boolean");
     expect(source).toContain("didWaitForSingleInstanceLock = true;");
-    expect(beforeQuitBlock).toContain("if (shouldIgnoreStaleReopenQuit())");
+    expect(beforeQuitBlock).toContain("if (shouldIgnoreStaleReopenQuit(quitContext))");
     expect(beforeQuitBlock).toContain("hasIgnoredStaleReopenQuit = true;");
     expect(beforeQuitBlock).toContain("event.preventDefault();");
 
@@ -219,8 +219,24 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n      app.quit();");
     expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n    app.exit(0);");
 
-    // The reopen intent comes only from concrete signals (activate during quit): no marker files.
+    // The reopen intent comes from a verified system quit or activation during quit: no marker files.
     expect(source).not.toContain("macos-microphone-relaunch");
+  });
+
+  it("records the quit AppleEvent on delivery because Electron emits before-quit after dispatch", () => {
+    const source = readFileSync(mainSourcePath, "utf8");
+    const whenReadyIndex = source.indexOf("app.whenReady()", source.indexOf('app.on("second-instance"'));
+    const whenReadyBlock = source.slice(whenReadyIndex, source.indexOf('app.on("activate"', whenReadyIndex));
+    expect(whenReadyBlock.indexOf("installMacQuitEventObserver();"))
+      .toBeGreaterThan(whenReadyBlock.indexOf("if (!(await waitForSingleInstanceLock()))"));
+    expect(whenReadyBlock.indexOf("installMacQuitEventObserver();"))
+      .toBeLessThan(whenReadyBlock.indexOf("await boot();"));
+
+    const native = readFileSync(new URL("../native/menu-bar-appearance.mm", import.meta.url), "utf8");
+    expect(native).toContain("AEGetEventHandler(kCoreEventClass, kAEQuitApplication, &handler, &refcon, false)");
+    expect(native).toContain("InvokeAEEventHandlerUPP(event, reply, previousQuitRefcon, previousQuitHandler)");
+    expect(native).toContain("recordedQuitContext = nil;");
+    expect(native).toContain("kRecordedQuitEventMaxAge = 2.0");
   });
 
   it("restores an existing full window without reloading the renderer", () => {

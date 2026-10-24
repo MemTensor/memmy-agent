@@ -8,6 +8,8 @@ import { Session } from "../../../src/core/session/manager.js";
 import {
   captureGoalWorkspaceBaseline,
   createOrCheckoutWorkspaceBranch,
+  gitRelativePathsMatch,
+  normalizeGitRelativePath,
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
   switchWorkspaceBranch,
@@ -68,6 +70,13 @@ function activateGoal(session: Session, goalId: string): void {
 }
 
 describe("workspace environment", () => {
+  it("matches Windows git paths that differ by slash, case, or a carriage return", () => {
+    expect(normalizeGitRelativePath("src\\Todo.py\r")).toBe("src/Todo.py");
+    expect(gitRelativePathsMatch("src\\Todo.py\r", "src/todo.py", "win32")).toBe(true);
+    expect(gitRelativePathsMatch("src/Todo.py", "src/todo.py", "linux")).toBe(false);
+    expect(gitRelativePathsMatch("../outside.txt", "outside.txt", "win32")).toBe(false);
+  });
+
   it("attributes Goal changes without claiming pre-existing dirty files", async () => {
     const root = repository();
     const session = sessionFor(root);

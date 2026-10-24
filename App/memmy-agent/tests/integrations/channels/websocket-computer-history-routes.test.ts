@@ -6,7 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
-const history = vi.hoisted(() => ({ snapshot: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), startObservationWithPermissions: vi.fn(), applicationIcon: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
+const history = vi.hoisted(() => ({ snapshot: vi.fn(), observationStatus: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), setWeChatChatAccess: vi.fn(), connectWeChat: vi.fn(), prepareWeChatReader: vi.fn(), startObservationWithPermissions: vi.fn(), restoreObservationOnLaunch: vi.fn(), applicationIcon: vi.fn(), listApplications: vi.fn(), getObservationSettings: vi.fn(), updateObservationSettings: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -19,7 +19,9 @@ vi.mock("../../../src/tools/computer-history/mac/computer-history-api.js", async
 beforeEach(() => { vi.spyOn(process, "platform", "get").mockReturnValue("darwin"); });
 afterEach(() => {
   for (const method of Object.values(history)) method.mockReset();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 describe("Computer History pin HTTP boundary", () => {
@@ -46,6 +48,52 @@ describe("Computer History pin HTTP boundary", () => {
       await service.shutdown();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Computer History source policy HTTP boundary", () => {
+  it("persists an application exclusion through the authenticated route", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-source-http-"));
+    const service = new ComputerHistoryDemoService({ historyDirectory: path.join(root, "histories"),
+      recordingDirectory: path.join(root, "recordings"), workflowDirectory: path.join(root, "workflows"),
+      observationSettingsFile: path.join(root, "settings.json"),
+    });
+    history.getObservationSettings.mockImplementation(service.getObservationSettings.bind(service));
+    history.updateObservationSettings.mockImplementation(service.updateObservationSettings.bind(service));
+    const settings = { memory: { syncEnabled: false }, observation: { defaultApplicationBehavior: "observe", defaultURLBehavior: "observe",
+      rules: [{ scope: "app", bundleID: "com.example.Notes", behavior: "do_not_observe" }] } };
+    try {
+      expect((await channel().dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/settings", headers: {} })))?.status).toBe(401);
+      const updated = await channel().dispatchHttp({}, request({ path: "/api/computer-history/settings", body: JSON.stringify({ settings }) }));
+      expect(updated?.status).toBe(200);
+      expect(JSON.parse(String(updated?.body))).toEqual(settings);
+      const read = await channel().dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/settings" }));
+      expect(JSON.parse(String(read?.body))).toEqual(settings);
+      expect(JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8"))).toEqual(settings);
+      const invalid = await channel().dispatchHttp({}, request({ path: "/api/computer-history/settings",
+        body: JSON.stringify({ settings: { observation: { ...settings.observation, defaultURLBehavior: "anything" } } }),
+      }));
+      expect(invalid?.status).toBe(422);
+      expect(service.getObservationSettings()).toEqual(settings);
+    } finally {
+      await service.shutdown();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Computer History observation status HTTP boundary", () => {
+  it("returns only the live recorder state without reading the full History snapshot", async () => {
+    history.observationStatus.mockReturnValue({ state: "running" });
+    const response = await channel().dispatchHttp({}, request({
+      method: "GET", path: "/api/computer-history/observation/status",
+    }));
+    expect(response?.status).toBe(200);
+    expect(JSON.parse(String(response?.body))).toEqual({ state: "running" });
+    expect(history.snapshot).not.toHaveBeenCalled();
+    expect((await channel().dispatchHttp({}, request({
+      method: "POST", path: "/api/computer-history/observation/status",
+    })))?.status).toBe(405);
   });
 });
 
@@ -91,16 +139,64 @@ function snapshot(): ComputerHistorySnapshot {
   };
 }
 
+describe("personal WeChat History HTTP boundary", () => {
+  it("checks reader prerequisites through authenticated POST before any consent or connection", async () => {
+    const preparation = { ready: false, appPath: null, error: "python_unavailable" };
+    history.prepareWeChatReader.mockResolvedValue(preparation);
+    const route = "/api/computer-history/wechat/prepare";
+    expect((await channel().dispatchHttp({}, request({ path: route, headers: {}, body: "{}" })))?.status).toBe(401);
+    expect((await channel().dispatchHttp({}, request({ path: route, method: "GET", body: "{}" })))?.status).toBe(405);
+    expect((await channel().dispatchHttp({}, request({ path: route, body: "invalid" })))?.status).toBe(400);
+    expect(history.prepareWeChatReader).not.toHaveBeenCalled();
+    const response = await channel().dispatchHttp({}, request({ path: route, body: "{}" }));
+    expect(response?.status).toBe(200);
+    expect(JSON.parse(String(response?.body))).toEqual(preparation);
+    expect(history.prepareWeChatReader).toHaveBeenCalledOnce();
+    expect(history.setWeChatChatAccess).not.toHaveBeenCalled();
+    expect(history.connectWeChat).not.toHaveBeenCalled();
+  });
+
+  it("requires authenticated, explicit boolean consent before delegating", async () => {
+    const enabled = { ...snapshot(), wechat: { enabled: true as const,
+      connection: "needs_setup" as const, phase: null, error: null } };
+    history.setWeChatChatAccess.mockReturnValue(enabled);
+    const route = "/api/computer-history/wechat/consent";
+    const unauthorized = await channel().dispatchHttp({}, request({ path: route,
+      headers: {}, body: JSON.stringify({ enabled: true }) }));
+    expect(unauthorized?.status).toBe(401);
+    const invalid = await channel().dispatchHttp({}, request({ path: route,
+      body: JSON.stringify({ enabled: "true" }) }));
+    expect(invalid?.status).toBe(422);
+    expect(history.setWeChatChatAccess).not.toHaveBeenCalled();
+    const allowed = await channel().dispatchHttp({}, request({ path: route,
+      body: JSON.stringify({ enabled: true }) }));
+    expect(allowed?.status).toBe(200);
+    expect(history.setWeChatChatAccess).toHaveBeenCalledWith(true);
+  });
+
+  it("starts connection only from its separate user action", async () => {
+    history.connectWeChat.mockReturnValue(snapshot());
+    const response = await channel().dispatchHttp({}, request({ path: "/api/computer-history/wechat/connect",
+      body: "{}" }));
+    expect(response?.status).toBe(200);
+    expect(history.connectWeChat).toHaveBeenCalledOnce();
+  });
+});
+
 describe.each(["win32", "linux"] as const)("Computer History unsupported platform %s", (platform) => {
   it.each([undefined, "1"])("blocks all HTTP entry points even with MEMMY_COMPUTER_HISTORY=%s", async (enabled) => {
     vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    if (platform === "win32") vi.spyOn(os, "release").mockReturnValue("10.0.19045");
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", enabled);
     const instance = channel();
     instance.modelSelectionResolver = vi.fn();
     const routes = [
       ["GET", "/api/computer-history"],
+      ["GET", "/api/computer-history/settings"],
+      ["POST", "/api/computer-history/settings"],
+      ["GET", "/api/computer-history/apps"],
       ["GET", "/api/computer-history/app-icon?bundle_id=com.example.app"],
-      ...["permissions/check", "permissions/open", "model", "delete", "clear", "pin", "import",
+      ...["permissions/check", "permissions/open", "wechat/consent", "wechat/connect", "wechat/prepare", "model", "delete", "clear", "pin", "import",
         "observation/start", "observation/pause", "observation/resume", "observation/stop", "workflows/create"]
         .map((suffix) => ["POST", `/api/computer-history/${suffix}`]),
     ];
@@ -108,7 +204,7 @@ describe.each(["win32", "linux"] as const)("Computer History unsupported platfor
     for (const [method, route] of routes) {
       const response = await instance.dispatchHttp({}, request({ method, path: route, body: "{}" }));
       expect(response?.status, route).toBe(400);
-      expect(String(response?.body), route).toContain("available only on macOS");
+      expect(String(response?.body), route).toContain("requires macOS or Windows 11");
     }
     for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
@@ -199,30 +295,35 @@ describe("Computer History permissions HTTP boundary", () => {
 });
 
 
-describe("Computer History model selection", () => {
-  it("resolves the explicitly selected BYOK model and only refreshes when its config changes", async () => {
+describe("Computer History summary assignment", () => {
+  it("resolves the configured BYOK summary and ignores legacy Agent selections", async () => {
     const instance = channel();
     const provider = { chatWithRetry: vi.fn() };
     let revision = "key-1";
     instance.modelSelectionResolver = vi.fn(() => ({
-      presetId: "custom-model", source: "byok", ownerAccountId: null,
-      snapshot: { provider, model: "custom-model", signature: [revision] },
+      presetId: "summary-model", source: "byok", ownerAccountId: null,
+      provider: "openai", capability: "memory_summary", providerConfig: { apiBase: "https://summary.example/v1" },
+      snapshot: { provider, model: "summary-model", signature: [revision] },
     }) as any);
     history.snapshot.mockReturnValue(snapshot());
     const input = request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset: "custom-model" }) });
     expect((await instance.dispatchHttp({}, input))?.status).toBe(200);
-    expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ requestedPreset: "custom-model" });
+    expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ capability: "memory_summary" });
     expect(history.setLlmRuntime).toHaveBeenCalledOnce();
     expect(history.setLlmRuntime.mock.calls[0][1]).toBe("byok");
-    expect(history.setLlmRuntime.mock.calls[0][0]()).toMatchObject({ provider, model: "custom-model" });
-    await instance.dispatchHttp({}, input);
+    const runtime = history.setLlmRuntime.mock.calls[0][0]();
+    expect(runtime.model).toBe("summary-model");
+    // BYOK summaries are wrapped so usage and the Memory budget are enforced.
+    expect(runtime.provider).not.toBe(provider);
+    expect(runtime.provider.getDefaultModel()).toBe("summary-model");
+    await instance.dispatchHttp({}, request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset: "another-task" }) }));
     expect(history.setLlmRuntime).toHaveBeenCalledOnce();
     revision = "key-2";
     await instance.dispatchHttp({}, input);
     expect(history.setLlmRuntime).toHaveBeenCalledTimes(2);
   });
 
-  it.each([undefined, "", 42, {}])("rejects an invalid preset %j", async (model_preset) => {
+  it.each(["", 42, {}])("rejects a malformed legacy preset %j", async (model_preset) => {
     const result = await channel().dispatchHttp({}, request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset }) }));
     expect(result?.status).toBe(422);
     expect(history.setLlmRuntime).not.toHaveBeenCalled();
@@ -235,6 +336,63 @@ describe("Computer History model selection", () => {
     expect((await instance.dispatchHttp({}, { ...input, headers: {} }))?.status).toBe(401);
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
     expect((await instance.dispatchHttp({}, input))?.status).toBe(422);
-    expect(history.setLlmRuntime).not.toHaveBeenCalled();
+    expect(history.setLlmRuntime).toHaveBeenCalledWith(null, null, expect.stringContaining("Memory summary model"));
+  });
+
+  it.each([{}, { model_preset: null }])("accepts refresh-only and legacy default bodies %j", async (body) => {
+    const instance = channel();
+    const provider = { chatWithRetry: vi.fn() };
+    instance.modelSelectionResolver = vi.fn(() => ({
+      presetId: "configured-summary", source: "byok", capability: "memory_summary", provider: "openai",
+      ownerAccountId: null, providerConfig: { apiBase: "https://summary.example/v1" },
+      snapshot: { provider, model: "small-summary", signature: ["config-1"] },
+    }) as any);
+    history.snapshot.mockReturnValue(snapshot());
+    expect((await instance.dispatchHttp({}, request({ path: "/api/computer-history/model", body: JSON.stringify(body) })))?.status).toBe(200);
+    expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ capability: "memory_summary" });
+  });
+
+  it("clears an old runtime when the summary assignment disappears and restores it after repair", () => {
+    const instance = channel();
+    const provider = { chatWithRetry: vi.fn() };
+    const selection = { presetId: "summary", source: "byok", capability: "memory_summary", provider: "openai",
+      ownerAccountId: null, providerConfig: { apiBase: "https://summary.example/v1" },
+      snapshot: { provider, model: "summary", signature: ["stable"] } };
+    instance.modelSelectionResolver = vi.fn().mockReturnValueOnce(selection).mockReturnValueOnce(null)
+      .mockReturnValueOnce(null).mockReturnValueOnce(selection);
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(false);
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(false);
+    expect(history.setLlmRuntime).toHaveBeenCalledTimes(2);
+    expect(history.setLlmRuntime.mock.calls[1]).toEqual([null, null, expect.stringContaining("Memory summary model")]);
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
+    expect(history.setLlmRuntime).toHaveBeenCalledTimes(3);
+  });
+
+  it("routes Windows 11 summaries through the same configured summary capability", () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.spyOn(os, "release").mockReturnValue("10.0.22631");
+    const instance = channel();
+    const provider = { chatWithRetry: vi.fn() };
+    instance.modelSelectionResolver = vi.fn(() => ({ presetId: "win-summary", source: "byok",
+      capability: "memory_summary", provider: "openai", ownerAccountId: null,
+      providerConfig: { apiBase: "https://summary.example/v1" },
+      snapshot: { provider, model: "win-summary", signature: ["win-summary"] } }) as any);
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
+    expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ capability: "memory_summary" });
+    expect(history.setLlmRuntime.mock.calls[0][0]().model).toBe("win-summary");
+  });
+
+  it("polls the summary configuration in the background and stops its timer", async () => {
+    vi.useFakeTimers();
+    const instance = channel();
+    instance.modelSelectionResolver = vi.fn(() => null);
+    (instance as any).startComputerHistoryModelSync();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(instance.modelSelectionResolver).toHaveBeenCalledTimes(2);
+    expect(history.setLlmRuntime).toHaveBeenCalledOnce();
+    await instance.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(instance.modelSelectionResolver).toHaveBeenCalledTimes(2);
   });
 });

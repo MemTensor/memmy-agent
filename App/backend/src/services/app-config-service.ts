@@ -115,6 +115,14 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
         });
         await options.memoryClient?.reloadConfig({ reason: "memory_token_budget_saved" });
       }
+      if (input.userMode) {
+        try {
+          await options.memoryClient?.reloadConfig({ reason: "user_mode_saved" });
+        } catch {
+          // Settings are saved; saving the mode again or restarting Memory can retry the reload.
+          console.warn("Memory config reload failed after user mode was saved");
+        }
+      }
       preserveCompletedGuideWhenSwitchingToByok(previousOnboarding, options);
       return settings;
     },
