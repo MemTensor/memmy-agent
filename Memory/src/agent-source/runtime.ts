@@ -196,6 +196,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let resumePausedScan: (() => void) | undefined;
   let disposed = false;
   let canceling = false;
+  let cancellationCompletion: Promise<ScanControlResult> | undefined;
   let clearing = false;
   let automationStarted = false;
   const activeScans = new Set<Promise<void>>();
@@ -263,7 +264,11 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     // Invalidate even if permission is granted again while discovery is awaiting I/O.
     automationGeneration += 1;
     const automation = activeAutomation;
-    if (scan.running || scanPaused || scan.progress?.phase === "stopped") {
+    if (cancellationCompletion) {
+      // A checkpoint may already be draining the scan. Join that cancellation
+      // before acknowledging the saved refusal instead of rejecting reload.
+      await cancellationCompletion;
+    } else if (scan.running || scanPaused || scan.progress?.phase === "stopped") {
       const result = await cancelScan();
       if (result.outcome === "conflict") {
         throw new MemoryServiceError("conflict", "Agent source cancellation is already in progress; retry saving permission");
@@ -620,19 +625,27 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (jobId) canceledScanJobs.add(jobId);
     resumePausedScan?.();
     resumePausedScan = undefined;
-    try {
-      await Promise.all([...activeScans]);
-      if (jobId) {
-        const path = join(scanStoreDirectory, `${jobId}.sqlite`);
-        await Promise.all([rm(path, { force: true }), rm(`${path}-wal`, { force: true }), rm(`${path}-shm`, { force: true })]);
+    const completion = (async () => {
+      try {
+        await Promise.all([...activeScans]);
+        if (jobId) {
+          const path = join(scanStoreDirectory, `${jobId}.sqlite`);
+          await Promise.all([rm(path, { force: true }), rm(`${path}-wal`, { force: true }), rm(`${path}-shm`, { force: true })]);
+        }
+        setScan({ ...emptyScanState(), jobId: scan.jobId, attemptId: scan.attemptId, startedAt: scan.startedAt, sourceId: scan.sourceId, status: "cancelled" });
+        activeScanRequest = undefined;
+        progressBeforePause = null;
+        logger.info("scan.canceled", { jobId, sourceId });
+        return controlResult("applied");
+      } finally {
+        canceling = false;
       }
-      setScan({ ...emptyScanState(), jobId: scan.jobId, attemptId: scan.attemptId, startedAt: scan.startedAt, sourceId: scan.sourceId, status: "cancelled" });
-      activeScanRequest = undefined;
-      progressBeforePause = null;
-      logger.info("scan.canceled", { jobId, sourceId });
-      return controlResult("applied");
+    })();
+    cancellationCompletion = completion;
+    try {
+      return await completion;
     } finally {
-      canceling = false;
+      if (cancellationCompletion === completion) cancellationCompletion = undefined;
     }
   }
 

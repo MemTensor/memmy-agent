@@ -14,7 +14,7 @@ function deferred() {
 }
 
 describe("revoking permission during automatic integration", () => {
-  it("publishes cancelled when the permission checkpoint wins before reload", async () => {
+  it.each(["checkpoint", "existing cancellation"])("publishes cancelled and completes reload after %s", async mode => {
     const root = mkdtempSync(join(tmpdir(), "memmy-checkpoint-revoke-"));
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, 'memmyMemory:\n  agentAccess:\n    scanPermission: scan_only\n');
@@ -32,6 +32,20 @@ describe("revoking permission during automatic integration", () => {
       await executor.startScan({ sourceId: "all" });
       await vi.waitFor(() => expect(entered).toBe(true));
       writeFileSync(configPath, 'memmyMemory:\n  agentAccess:\n    scanPermission: none\n');
+      if (mode === "existing cancellation") {
+        const cancellation = executor.cancelScan();
+        const reloaded = vi.fn();
+        const failed = vi.fn();
+        const reload = executor.reconcileScanPermission!().then(reloaded, failed);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(reloaded).not.toHaveBeenCalled();
+        expect(failed).not.toHaveBeenCalled();
+        release.resolve();
+        await cancellation;
+        await reload;
+        expect(reloaded).toHaveBeenCalledOnce();
+        expect(failed).not.toHaveBeenCalled();
+      }
       release.resolve();
       await vi.waitFor(() => expect(executor.scanStatus()).toMatchObject({ status: "cancelled", running: false }));
       await executor.reconcileScanPermission!();
