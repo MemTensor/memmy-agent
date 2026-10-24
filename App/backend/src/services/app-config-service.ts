@@ -96,6 +96,12 @@ type ResolvedModelConfigTestInput = ModelConfigTestInput & { apiKey: string };
 /** Creates create app config service. */
 export function createAppConfigService(options: CreateAppConfigServiceOptions): AppConfigService {
   const modelConfigTester = options.modelConfigTester ?? createHttpModelConfigTester();
+  let scanSettingsWrite = Promise.resolve();
+  function serializeScanSettings<T>(operation: () => Promise<T>): Promise<T> {
+    const result = scanSettingsWrite.then(operation);
+    scanSettingsWrite = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   return {
     async updateSettings(input) {
@@ -137,13 +143,21 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
     },
 
     async updateScanPreferences(input) {
-      return options.scanPreferencesStore
+      return serializeScanSettings(async () => options.scanPreferencesStore
         ? options.scanPreferencesStore.updateScanPreferences(input)
-        : options.bootstrapRepository.updateScanPreferences(input);
+        : options.bootstrapRepository.updateScanPreferences(input));
     },
 
     async updateOnboarding(input) {
-      return options.bootstrapRepository.updateOnboarding(input);
+      return serializeScanSettings(async () => {
+        // Publish the authorization and automation switches together before advancing
+        // the guide. A later failure leaves the durable refusal in place for restart.
+        if (input.scanPermission !== undefined) {
+          await options.scanPreferencesStore?.setScanPermission(input.scanPermission, input.currentStep === "scan_permission_required");
+          await options.memoryClient?.reloadConfig({ reason: "scan_permission_saved" });
+        }
+        return options.bootstrapRepository.updateOnboarding(input);
+      });
     },
 
     async setImprovementProgram(input) {
