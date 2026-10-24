@@ -18,6 +18,8 @@ export type LlmProviderName =
   | "local_only"
   | "openai_compatible"
   | "openai_responses"
+  | "sglang"
+  | "vllm"
   | "gemini"
   | "anthropic"
   | "bedrock"
@@ -918,6 +920,10 @@ function memoryRuntimeProvider(
 
 function memoryLlmProvider(provider: string): LlmProviderName {
   switch (provider) {
+    case "sglang":
+      return "sglang";
+    case "vllm":
+      return "vllm";
     case "anthropic":
       return "anthropic";
     case "google":
@@ -1390,6 +1396,8 @@ function llmProvider(value: unknown, fallback: LlmProviderName): LlmProviderName
     provider === "local_only" ||
     provider === "openai_compatible" ||
     provider === "openai_responses" ||
+    provider === "sglang" ||
+    provider === "vllm" ||
     provider === "gemini" ||
     provider === "anthropic" ||
     provider === "bedrock" ||
