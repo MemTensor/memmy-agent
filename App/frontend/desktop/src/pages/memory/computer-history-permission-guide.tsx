@@ -8,7 +8,7 @@ import { Button } from "../../components/button.js";
 import { Modal } from "../../components/modal.js";
 import { readHistoryPermissionIntent, saveHistoryPermissionSetup } from "./computer-history-permission-state.js";
 
-const permissions: ComputerHistoryPermission[] = ["accessibility"];
+const permissions: ComputerHistoryPermission[] = ["accessibility", "inputMonitoring"];
 
 export function ComputerHistoryPermissionGuide(props: {
   client: MemmyAgentClient;
@@ -17,6 +17,7 @@ export function ComputerHistoryPermissionGuide(props: {
 }) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ComputerHistoryPermissions | null>(null);
+  const [listeningGuided, setListeningGuided] = useState(false);
   const [busy, setBusy] = useState(false);
   const [guiding, setGuiding] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -28,6 +29,13 @@ export function ComputerHistoryPermissionGuide(props: {
   const autoStartAttempted = useRef(false);
   const onStart = useRef(props.onStart);
   onStart.current = props.onStart;
+
+  // Accessibility comes first. Input Monitoring is guided only once Accessibility
+  // is on and listening is still off, and its row then stays to confirm the grant.
+  const applyStatus = useCallback((next: ComputerHistoryPermissions) => {
+    setStatus(next);
+    if (next.accessibility && !next.inputMonitoring) setListeningGuided(true);
+  }, []);
 
   const check = useCallback(async (retry = false) => {
     if (active.current) return;
@@ -41,7 +49,7 @@ export function ComputerHistoryPermissionGuide(props: {
         window.memmy?.getComputerHistoryPermissionSessionId?.() ?? Promise.resolve(null),
       ]);
       if (!mounted.current || version !== requestVersion.current) return;
-      setStatus(next);
+      applyStatus(next);
       const intent = readHistoryPermissionIntent();
       const restarted = sessionId && intent?.sessionId && intent.sessionId !== sessionId;
       const ready = next.supported && next.accessibility && next.inputMonitoring;
@@ -63,7 +71,7 @@ export function ComputerHistoryPermissionGuide(props: {
         if (mounted.current) { setBusy(false); setStarting(false); }
       }
     }
-  }, [props.client]);
+  }, [applyStatus, props.client]);
 
   const openPermission = async (permission: ComputerHistoryPermission) => {
     if (active.current || guideActive.current) return;
@@ -121,10 +129,9 @@ export function ComputerHistoryPermissionGuide(props: {
       // Check again: a permission may have been revoked since the dialog refreshed.
       const next = await props.client.checkComputerHistoryPermissions();
       if (!mounted.current) return;
-      setStatus(next);
-      // Accessibility is the only grant in this flow. The existing native
-      // process may not report input listening until the app is restarted.
-      if (next.supported && next.accessibility) {
+      applyStatus(next);
+      // Restart only once both grants are in place, so a single restart finishes setup.
+      if (next.supported && next.accessibility && next.inputMonitoring) {
         await window.memmy?.restartForComputerHistoryPermissions?.();
       }
     } catch (cause) {
@@ -132,7 +139,8 @@ export function ComputerHistoryPermissionGuide(props: {
     } finally { active.current = false; if (mounted.current) setBusy(false); }
   };
 
-  const authorized = status?.supported && status.accessibility;
+  const authorized = status?.supported && status.accessibility && status.inputMonitoring;
+  const rows = listeningGuided ? permissions : permissions.slice(0, 1);
   const blocked = busy || guiding;
   return createPortal(<div className="ch-recording-confirmation"><Modal
     open
@@ -154,7 +162,7 @@ export function ComputerHistoryPermissionGuide(props: {
   >
     <div className="confirm-dialog__message confirm-dialog__message--no-icon">
     <p className="ch__permission-description">{t("computerHistory.permissions.description")}</p>
-    {status?.supported === false ? <p role="status">{t("computerHistory.permissions.macOnly")}</p> : <div className="ch__permission-list">{permissions.map((permission) =>
+    {status?.supported === false ? <p role="status">{t("computerHistory.permissions.macOnly")}</p> : <div className="ch__permission-list">{rows.map((permission) =>
       <div className="ch__permission-row" key={permission}>
         <span>{t(permission === "accessibility" ? "computerHistory.permissions.accessibility" : "computerHistory.permissions.inputMonitoring")}</span>
         {!status ? <span role="status">{t("computerHistory.permissions.checking")}</span>
