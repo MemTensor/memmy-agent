@@ -9,6 +9,8 @@ import {
   sha256Hex,
   type L3FailedBatchesRetryRequest,
   type L3FailedBatchesRetryResponse,
+  type L3ScanSessionsFreezeRequest,
+  type L3ScanSessionsFreezeResponse,
   type L3UserProjectsReplaceRequest,
   type L3UserProjectsReplaceResponse
 } from "../contracts/index.js";
@@ -411,7 +413,8 @@ export class MemoryService {
       get llm() { return serviceOwner.llm; },
       get embedder() { return serviceOwner.embedder; },
       get embedAfterCapture() { return serviceOwner.config.algorithm.capture.embedAfterCapture; },
-      nowIso
+      nowIso,
+      l3FieldActive: () => serviceOwner.l3FieldActive()
     });
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
@@ -665,6 +668,7 @@ export class MemoryService {
       enqueueObservationBackfill: (limit, at) => this.observationMemory.backfill(limit, at),
       l3FieldActive: () => this.l3FieldActive(),
       requeueL3DeadLettersOnce: (at) => this.requeueL3DeadLettersOnce(at),
+      armPendingL3Flushes: () => this.armPendingL3Flushes(),
       evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
       purgeL3InactiveItems: (at) => this.repos.l3Field.purgeInactive(
         new Date(Date.parse(at) - this.config.algorithm.l3FieldCognition.inactiveRetentionDays * 86_400_000).toISOString()
@@ -811,6 +815,7 @@ export class MemoryService {
       maybeCreateDecisionRepair: this.feedbackExperience.maybeCreateDecisionRepair.bind(this.feedbackExperience),
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
       memorySearchEnabled: this.memorySearchEnabled.bind(this),
+      l3FieldActive: () => this.l3FieldActive(),
       observeToolNoWrite: this.observeToolNoWrite.bind(this),
       openSessionNoWrite: this.openSessionNoWrite.bind(this),
       pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
@@ -1337,6 +1342,7 @@ export class MemoryService {
     const changed = stableStringify(previousConfig) !== stableStringify(nextConfig);
     const requiresRestart = stableStringify(previousConfig.storage) !== stableStringify(nextConfig.storage);
     const reloadedAt = nowIso();
+    const l3FieldWasActive = this.l3FieldActive();
 
     this.config = nextConfig;
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
@@ -1349,6 +1355,8 @@ export class MemoryService {
       for (const { before, after } of this.repos.runtime.requeueFailedEpisodeAssignments(reloadedAt)) this.workerHandlers.appendJobChange(after, "queued", before);
       this.capturePendingListener?.();
     }
+    // Turned on without a restart: flushes that ran while it was off did not freeze, so hand those turns over now.
+    if (!l3FieldWasActive) this.armPendingL3Flushes();
     this.workerRunner.notifyWorkAvailable();
     serviceLogger.info("config.reloaded", {
       changed,
@@ -1578,6 +1586,39 @@ export class MemoryService {
     return { count: request.projects.length, serverTime: at };
   }
 
+  /**
+   * End of an agent-source scan pass: freeze what the pass added to each touched Session into new-L3
+   * batches, through the same entry Hook Session boundaries use. Only database rows are written (no
+   * model call), so the scan never waits on L3; a pass with nothing new freezes nothing. With the new
+   * L3 off, scans stay out of L3 as before.
+   */
+  freezeScannedL3Sessions(sessionIds: readonly string[]): number {
+    if (!this.memoryAddEnabled() || !this.l3FieldActive()) return 0;
+    let batches = 0;
+    for (const sessionId of new Set(sessionIds)) {
+      const session = this.repos.runtime.getSession(sessionId);
+      if (!session || session.meta.l3_world_model_protocol_version !== 2) continue;
+      batches += this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "scan_pass" }).batchIds.length;
+    }
+    return batches;
+  }
+
+  /**
+   * A scan or hosted import finished: freeze the scanned Sessions it touched. Capturing a scanned turn
+   * keeps the conversation's earlier owner even after an account switch, so the same rule applies
+   * here: the caller's own Sessions, and scanned Sessions of the caller's source.
+   */
+  freezeScanSessions(request: L3ScanSessionsFreezeRequest): L3ScanSessionsFreezeResponse {
+    const namespace = normalizeNamespace(request.namespace);
+    const owned = request.sessionIds.filter((id) => {
+      const session = this.repos.runtime.getSession(id);
+      if (!session) return false;
+      return session.userId === namespace.userId ||
+        (session.meta.work_memory_disabled === true && session.source === namespace.source);
+    });
+    return { batches: this.freezeScannedL3Sessions(owned), serverTime: nowIso() };
+  }
+
   /** Rerun entry for the new L3 only; dead letters of the old pipeline are not rerun. */
   retryFailedL3Batches(request: L3FailedBatchesRetryRequest): L3FailedBatchesRetryResponse {
     this.assertMemoryAddEnabled();
@@ -1590,6 +1631,24 @@ export class MemoryService {
       if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
     }
     return { requeued: requeued.length, serverTime: at };
+  }
+
+  /**
+   * Worker startup (and after an import): turns not yet handed to the new L3 get someone responsible
+   * for them, also when the process stopped before a scan's hand-off or the data came from a backup.
+   * An open Session gets its idle flush armed; a closed one, which will not close again, is frozen
+   * now. Nothing while the new L3 is off.
+   */
+  armPendingL3Flushes(): number {
+    if (!this.l3FieldActive() || !this.memoryAddEnabled()) return 0;
+    const pending = this.repos.l3WorldModels.sessionsWithUnfrozenTurns();
+    this.repos.transaction(() => {
+      for (const { sessionId, open, lastActivityAt } of pending) {
+        if (open) this.workMemory.armIdleFlush(sessionId, lastActivityAt);
+        else this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_close" });
+      }
+    });
+    return pending.length;
   }
 
   /** Worker startup: one automatic rerun for each dead-lettered new-L3 batch; nothing while the new L3 is off. */
@@ -1712,7 +1771,8 @@ export class MemoryService {
     return result;
   }
 
-  async completeSourceTurn(request: SourceTurnCompleteRequest): Promise<SourceTurnCompleteResponse> {
+  async completeSourceTurn(request: SourceTurnCompleteRequest, onEvolutionScheduled?: () => void): Promise<SourceTurnCompleteResponse> {
+    let recoveredEvolutionScheduled = false;
     // Native scans have no Hook envelope. Use the configured owner only when
     // the request (including authenticated scope) did not provide one.
     const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
@@ -1726,7 +1786,7 @@ export class MemoryService {
           ...request.namespace,
           userId: request.namespace?.userId ?? this.config.userId
         }
-      }))
+      }), () => { recoveredEvolutionScheduled = true; })
     )));
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
@@ -1741,6 +1801,8 @@ export class MemoryService {
       rawTurnId: response.result?.rawTurnId,
       l1MemoryIds: response.result?.l1MemoryIds
     });
+    // Publish only after capture acceptance and its outer transaction have completed.
+    if (recoveredEvolutionScheduled) onEvolutionScheduled?.();
     return response;
   }
 
@@ -2729,6 +2791,9 @@ export class MemoryService {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
     this.sessionTurns.migrateLegacyCaptures();
+    // Imported Sessions with turns not yet handed to the new L3 (including work the import had to
+    // drop for a unit kept here) get their idle flush armed.
+    this.armPendingL3Flushes();
     const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
     this.repos.vectors.importRows(importedVectors);
     result.inserted.memory_vectors = importedVectors.length;

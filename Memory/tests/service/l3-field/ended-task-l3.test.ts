@@ -97,6 +97,22 @@ describe("a task that ends without a session close still reaches the new L3", ()
     expect(env.batches(session)).toEqual(["new_task"]);
   });
 
+  it("hands a conversation that just stops, with no close and no later turn, to L3 once it has been quiet", async () => {
+    const env = setup();
+    const session = env.open("stopped");
+    await env.service.completeTurn("stopped-turn", { sessionId: session, query: "以后改完都跑 npm test", answer: "好" });
+    await settleCaptureAssignments(env.service);
+    expect(env.flush(session)).toMatchObject({ status: "queued" });
+    expect(env.batches(session)).toEqual([]);
+    // Two hours later with nothing else happening anywhere, the session's own flush comes due.
+    const quietSince = new Date(Date.now() - 2 * 60 * 60 * 1000 - 5_000).toISOString();
+    env.db.db.prepare(`UPDATE l3_world_model_input_traces SET created_at = ? WHERE session_id = ?`).run(quietSince, session);
+    env.db.db.prepare(`UPDATE evolution_jobs SET payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE job_type = 'work_memory_idle_flush'`).run(quietSince);
+    await env.service.runWorkerOnce(50);
+    expect(env.batches(session)).toEqual(["session_idle"]);
+  });
+
   it("keeps the flush queued when it comes due before the session has been quiet long enough", async () => {
     const env = setup();
     const session = env.open("early");
@@ -110,6 +126,25 @@ describe("a task that ends without a session close still reaches the new L3", ()
     expect(flush.status).toBe("queued");
     expect(Date.parse(flush.run_after)).toBeGreaterThan(Date.now());
     expect(env.batches(session)).toEqual([]);
+  });
+
+  it("hands over turns whose flush ran while the switch was off once it is turned on without a restart", async () => {
+    const env = setup();
+    const session = env.open("toggled");
+    await env.service.completeTurn("toggled-turn", { sessionId: session, query: "以后改完都跑 npm test", answer: "好" });
+    await settleCaptureAssignments(env.service);
+    const quietSince = new Date(Date.now() - 2 * 60 * 60 * 1000 - 5_000).toISOString();
+    env.db.db.prepare(`UPDATE l3_world_model_input_traces SET created_at = ? WHERE session_id = ?`).run(quietSince, session);
+    env.db.db.prepare(`UPDATE evolution_jobs SET payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE job_type = 'work_memory_idle_flush'`).run(quietSince);
+    env.switchTo(false);
+    await env.service.runWorkerOnce(50);
+    expect(env.flush(session)!.status).toBe("succeeded");
+    expect(env.batches(session)).toEqual([]);
+    env.switchTo(true);
+    expect(env.flush(session)!.status).toBe("queued");
+    await env.service.runWorkerOnce(50);
+    expect(env.batches(session)).toEqual(["session_idle"]);
   });
 
   it("re-freezes imported turns whose unfinished batch an import had to drop for a machine kept here", async () => {

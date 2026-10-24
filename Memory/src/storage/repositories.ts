@@ -365,7 +365,11 @@ export type L3WorldModelBatchTrigger =
   | "token_compaction"
   | "token_compaction_attempt"
   | "session_close"
-  | "episode_idle_close";
+  | "episode_idle_close"
+  /** A finished agent-source scan pass; new L3 only (scans stay out of the old pipeline). */
+  | "scan_pass"
+  /** A Session that went quiet without a close (its idle flush); new L3 only. */
+  | "session_idle";
 
 export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
 
@@ -5705,6 +5709,20 @@ export class L3WorldModelRepository {
     this.fieldCognitionMachineId = machineId;
   }
 
+  /** v2 Sessions holding captured turns that were never frozen into a batch, with their last activity. */
+  sessionsWithUnfrozenTurns(): Array<{ sessionId: string; open: boolean; lastActivityAt: string }> {
+    return (this.db.prepare(
+      `SELECT s.id AS sessionId, s.status = 'open' AS open, t.last_at AS lastActivityAt FROM sessions AS s
+       JOIN (SELECT session_id, MAX(trace_seq) AS last_seq, MAX(created_at) AS last_at
+             FROM l3_world_model_input_traces GROUP BY session_id) AS t
+         ON t.session_id = s.id
+       LEFT JOIN l3_world_model_session_cursors AS c ON c.session_id = s.id
+       WHERE json_extract(s.meta_json, '$.l3_world_model_protocol_version') = 2
+         AND t.last_seq > COALESCE(c.last_scheduled_seq, 0)`
+    ).all() as Array<{ sessionId: string; open: number; lastActivityAt: string }>)
+      .map((row) => ({ ...row, open: row.open === 1 }));
+  }
+
   /**
    * New L3 only: hand a closed task's turns to L3. Called wherever a task closes, so a conversation that
    * simply stops (idle, or the user ended the topic) still reaches L3; what is already frozen is skipped.
@@ -5804,6 +5822,34 @@ export class L3WorldModelRepository {
       episodeId: input.episodeId ?? undefined,
       createdAt
     };
+  }
+
+  /** Register retained native-scan history on its existing IDs when its Session first adopts v2. */
+  backfillSourceInputTraces(sessionId: string): number {
+    const session = this.requireV2Session(sessionId);
+    // Keep L1 outermost: resolve each retained raw-turn reference by ID, not every L1 per raw turn.
+    // A migrated capture ledger may retain the submitting account; the Session, raw turn and L1
+    // keep the original owner. Match native identity plus raw/session IDs without rewriting provenance.
+    const rows = this.db.prepare(
+      `SELECT DISTINCT r.id AS rawTurnId, r.episode_id AS episodeId, r.created_at AS createdAt, m.id AS l1MemoryId
+       FROM memories m
+       CROSS JOIN raw_turns r ON r.id IN (json_extract(m.info_json, '$.raw_turn_id'), json_extract(m.properties_json, '$.internal_info.trace.raw_turn_id'))
+         AND r.session_id = m.session_id AND r.user_id = m.user_id
+       CROSS JOIN source_turn_captures c ON c.source = ? AND c.profile_id = ?
+         AND c.namespace_key = ? AND c.conversation_id = ? AND c.turn_id = r.turn_id
+         AND c.raw_turn_id = r.id AND c.session_id = r.session_id
+       WHERE m.session_id = ? AND m.user_id = ? AND m.memory_layer = 'L1'
+         AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+         AND m.deleted_at IS NULL AND m.status != 'deleted'
+         AND json_extract(m.properties_json, '$.internal_info.capture_decision.status') IS NOT 'rejected'
+         AND NOT EXISTS (SELECT 1 FROM l3_world_model_input_traces t WHERE t.session_id = r.session_id AND t.l1_memory_id = m.id)
+       ORDER BY r.created_at, r.id, m.created_at, m.id`
+    ).all(session.source, session.profileId, session.meta.source_namespace_key ?? null,
+      session.conversationId ?? session.hostSessionKey ?? null, session.id, session.userId) as Array<{
+      rawTurnId: string; episodeId: string | null; createdAt: string; l1MemoryId: string;
+    }>;
+    for (const row of rows) this.registerInputTrace({ sessionId, ...row });
+    return rows.length;
   }
 
   traceHead(sessionId: string): L3WorldModelTraceHeadResponse {
@@ -6192,6 +6238,11 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     const session = this.requireV2Session(input.sessionId);
+    // Scanned history only ever goes to the new L3. While it is off (switched off after the scan), the
+    // turns wait without moving the cursor, so they reach the new L3 once it is on again.
+    if (session.meta.work_memory_disabled === true && !(this.l3Field && this.fieldCognitionMachineId?.())) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
     const at = input.at ?? nowIso();
     this.db.prepare(
       `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)

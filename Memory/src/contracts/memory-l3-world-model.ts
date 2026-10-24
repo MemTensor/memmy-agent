@@ -115,6 +115,19 @@ export const L3FailedBatchesRetryResponseSchema = z.object({
 }).strict();
 export type L3FailedBatchesRetryResponse = z.infer<typeof L3FailedBatchesRetryResponseSchema>;
 
+/** End of a hosted import: freeze what it added to these scanned Sessions into L3 batches. */
+export const L3ScanSessionsFreezeRequestSchema = z.object({
+  ...L3WorldModelRequestEnvelopeShape,
+  sessionIds: z.array(NonEmptyStringSchema).max(10_000)
+}).strict().superRefine(assertEnvelopeSourceConsistency);
+export type L3ScanSessionsFreezeRequest = z.input<typeof L3ScanSessionsFreezeRequestSchema>;
+
+export const L3ScanSessionsFreezeResponseSchema = z.object({
+  batches: z.number().int().nonnegative(),
+  serverTime: z.string().datetime()
+}).strict();
+export type L3ScanSessionsFreezeResponse = z.infer<typeof L3ScanSessionsFreezeResponseSchema>;
+
 export const SessionL3WorldModelContextResponseSchema = z.object({
   schemaVersion: z.literal(2),
   projectId: NonEmptyStringSchema.nullable(),

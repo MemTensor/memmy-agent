@@ -182,6 +182,8 @@ export interface WorkerRunnerDeps {
   enqueueObservationBackfill?: (limit: number, at: string) => number;
   /** Drops new-L3 items that have been inactive longer than the retention window. */
   purgeL3InactiveItems?: (at: string) => number;
+  /** Arms the idle flush of every Session holding turns not yet handed to the new L3. */
+  armPendingL3Flushes?: () => number;
   /** Gives each dead-lettered new-L3 batch one automatic rerun. */
   requeueL3DeadLettersOnce?: (at: string) => number;
   /** Whether the new L3 is on; while off its jobs stay queued and are not leased. */
@@ -469,6 +471,7 @@ export class WorkerRunner {
 
     this.deps.purgeL3InactiveItems?.(at);
     this.deps.requeueL3DeadLettersOnce?.(at);
+    this.deps.armPendingL3Flushes?.();
     this.refreshObservationModelConfiguration();
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,

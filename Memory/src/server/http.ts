@@ -10,6 +10,7 @@ import {
   EmbeddingInferenceInputSchema,
   L3UserProjectsReplaceRequestSchema,
   L3FailedBatchesRetryRequestSchema,
+  L3ScanSessionsFreezeRequestSchema,
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -81,6 +82,7 @@ export const API_ROUTES = [
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
   "POST /api/v1/l3/user-projects",
   "POST /api/v1/l3/failed-batches/retry",
+  "POST /api/v1/l3/scan-sessions/freeze",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/source-turns/complete",
@@ -720,6 +722,22 @@ async function routeRequest(
     const retried = service.retryFailedL3Batches(parsed.data);
     if (retried.requeued > 0) autoWorker.schedule();
     return retried;
+  }
+
+  if (method === "POST" && path === "/api/v1/l3/scan-sessions/freeze") {
+    requireMemoryWrite(principal);
+    const parsed = L3ScanSessionsFreezeRequestSchema.safeParse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3.scan-sessions.freeze"), principal)
+    );
+    if (!parsed.success) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")
+      );
+    }
+    const frozen = service.freezeScanSessions(parsed.data);
+    if (frozen.batches > 0) autoWorker.schedule();
+    return frozen;
   }
 
   const l3Context = match(path, /^\/api\/v1\/l3-world-model\/sessions\/([^/]+)\/context$/);

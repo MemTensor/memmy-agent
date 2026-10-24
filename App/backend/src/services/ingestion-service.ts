@@ -56,6 +56,8 @@ export interface IngestionStats {
   dedupedMemories: number;
   failedMemories: number;
   memoryIds: string[];
+  /** Memory Sessions this import added turns to; frozen into L3 when the import ends. */
+  sessionIds?: string[];
   /**
    * Subset of `memoryIds` written through the legacy add-memory path, which still needs a
    * summary job. A native turn is summarized inside the Memory capture transaction, so its
@@ -77,7 +79,7 @@ export interface IngestionItemSkip {
 
 /** Contract for create ingestion service options. */
 export interface CreateIngestionServiceOptions {
-  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn"> & Partial<Pick<MemoryClient, "freezeScanSessions">>;
   agentSourceRepository: Pick<AgentSourceRepository, "hasSeen" | "markSeen">;
   memoryAddAnalytics?: Pick<
     MemoryDesktopAddAnalytics,
@@ -117,20 +119,30 @@ export function createIngestionService(options: CreateIngestionServiceOptions): 
       };
 
       const conversations = groupByConversation(messages, stats)[Symbol.asyncIterator]();
-      while (true) {
-        if (ctx.signal?.aborted) {
-          break;
-        }
+      try {
+        while (true) {
+          if (ctx.signal?.aborted) {
+            break;
+          }
 
-        const next = await conversations.next();
-        if (next.done) {
-          break;
-        }
+          const next = await conversations.next();
+          if (next.done) {
+            break;
+          }
 
-        stats.conversations += 1;
-        await processConversation(options, next.value, ctx, stats);
+          stats.conversations += 1;
+          await processConversation(options, next.value, ctx, stats);
+        }
+      } finally {
+        // Imported history never ends its Sessions, so hand what this import added to L3 now, also
+        // when it stopped early. Freezing only writes rows in Memory; a failure must not fail the import.
+        const sessionIds = [...new Set(stats.sessionIds ?? [])];
+        if (sessionIds.length > 0 && options.memoryClient.freezeScanSessions) {
+          await options.memoryClient.freezeScanSessions(ctx.sourceId, sessionIds).catch((error: unknown) => {
+            console.warn(`[agent-source] l3.freeze_failed ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
       }
-
       return stats;
     }
   };
@@ -333,6 +345,8 @@ async function processNativeConversation(
         ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
         ...(ctx.scanMode === "initial_subset" || ctx.scanMode === "full" ? { captureLegacyHistory: true } : {})
       });
+      // Stored and already-stored turns both count: a re-import must freeze what a failed freeze left.
+      if (result.result?.sessionId) (stats.sessionIds ??= []).push(result.result.sessionId);
       if (result.status === "pending" || result.status === "conflict") {
         failed = true;
         stats.failed += turn.messages.length;

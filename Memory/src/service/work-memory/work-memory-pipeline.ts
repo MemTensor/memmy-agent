@@ -56,6 +56,8 @@ export interface WorkMemoryPipelineDependencies {
   embedder: Embedder;
   embedAfterCapture: boolean;
   nowIso: () => string;
+  /** With the new L3 on, the idle flush also hands a quiet Session's turns to L3. */
+  l3FieldActive?: () => boolean;
 }
 
 const WORK_MEMORY_SCHEMA_VERSION = 1;
@@ -112,7 +114,7 @@ export class WorkMemoryPipeline {
     at = this.deps.nowIso()
   ): WorkMemoryExtractionResult {
     const session = this.deps.repos.runtime.getSession(sessionId);
-    if (!session || session.meta.l3_world_model_protocol_version !== 2) {
+    if (!session || session.meta.l3_world_model_protocol_version !== 2 || session.meta.work_memory_disabled === true) {
       return { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
     }
     // The first Work Memory pass of a Session starts from a clean slate: the L3
@@ -197,6 +199,8 @@ export class WorkMemoryPipeline {
   ): EvolutionJobRecord | undefined {
     const session = this.deps.repos.runtime.getSession(sessionId);
     if (!session || session.meta.l3_world_model_protocol_version !== 2) return undefined;
+    // A scanned Session has no Work Memory, but with the new L3 on the same flush hands its turns to L3.
+    if (session.meta.work_memory_disabled === true && this.deps.l3FieldActive?.() !== true) return undefined;
     return this.deps.repos.runtime.armWorkMemoryIdleFlush({
       sessionId,
       userId: session.userId,
@@ -218,9 +222,10 @@ export class WorkMemoryPipeline {
     if (!sessionId) throw new Error(`work memory idle flush job has no session: ${job.id}`);
     const empty: WorkMemoryExtractionResult = { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
     const session = this.deps.repos.runtime.getSession(sessionId);
-    if (!session || session.status !== "open" || session.meta.l3_world_model_protocol_version !== 2) {
-      return empty;
-    }
+    if (!session || session.status !== "open" || session.meta.l3_world_model_protocol_version !== 2) return empty;
+    const workMemory = session.meta.work_memory_disabled !== true;
+    const l3Field = this.deps.l3FieldActive?.() === true;
+    if (!workMemory && !l3Field) return empty;
     const at = this.deps.nowIso();
     const lastActivityAt = this.deps.repos.l3WorldModels.latestInputTraceCreatedAt(sessionId)
       ?? (typeof job.payload.lastActivityAt === "string" ? job.payload.lastActivityAt : at);
@@ -231,7 +236,12 @@ export class WorkMemoryPipeline {
       return empty;
     }
     const throughTraceSeq = this.deps.repos.l3WorldModels.maxInputTraceSeq(sessionId);
-    return this.deps.repos.transaction(() => this.extractUnextracted(sessionId, throughTraceSeq, at));
+    return this.deps.repos.transaction(() => {
+      // Every captured turn ends up here once its Session goes quiet, so a conversation that just
+      // stops (no close, no later turn) still reaches the new L3; what is already frozen is skipped.
+      if (l3Field) this.deps.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_idle", at });
+      return workMemory ? this.extractUnextracted(sessionId, throughTraceSeq, at) : empty;
+    });
   }
 
   async extract(job: EvolutionJobRecord): Promise<void> {
