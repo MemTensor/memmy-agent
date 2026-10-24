@@ -4093,8 +4093,11 @@ function waitForInitialRendererVerification(targetWindow: BrowserWindow | null):
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      targetWindow.webContents.removeListener("did-fail-load", handleFailed);
-      targetWindow.removeListener("closed", handleClosed);
+      // `closed` is emitted after the native window is destroyed. webContents throws then.
+      if (!targetWindow.isDestroyed()) {
+        targetWindow.webContents.removeListener("did-fail-load", handleFailed);
+        targetWindow.removeListener("closed", handleClosed);
+      }
       if (rendererReadyWaiters.get(webContentsId) === finish) {
         rendererReadyWaiters.delete(webContentsId);
       }
