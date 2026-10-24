@@ -4,6 +4,7 @@ export * from "./cursor-source-turn.js";
 export * from "./claude-code-source-turn.js";
 export * from "./openclaw-source-turn.js";
 export * from "./opencode-source-turn.js";
+export * from "./opencode-database-source.js";
 export * from "./hermes-source-turn.js";
 export * from "./deepseek-source-turn.js";
 export * from "./deepseek-session-files.js";

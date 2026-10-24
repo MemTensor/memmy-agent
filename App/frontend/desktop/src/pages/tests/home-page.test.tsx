@@ -5,6 +5,7 @@ import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { MemmyAgentMessageRejectedError } from "../../api/memmy-agent-client.js";
+import { createModelWorkspace, type ModelCandidate } from "../../state/model-workspace.js";
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { agentReducer, initialAgentState } from "../../state/agent-chat-slice.js";
 import { AppProviders } from "../../app/providers.js";
@@ -42,6 +43,8 @@ import {
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
+  thinkingPayloadForSend,
+  toReadableAsrError,
   updateAgentComposerOverlayHeight,
   updateComposerDraftForScope,
   fileToPendingAttachment,
@@ -192,11 +195,19 @@ describe("HomePage", () => {
     expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]");
     expect(source).toContain("allowUnassignedSelected: pendingModelPreset == null && Boolean(committedModelSelection)");
     expect(source).toContain("modelPreset: resolvedConversationModel.candidateId ?? undefined");
+    expect(source).toContain("thinkingPayloadForSend(");
     expect(source).not.toContain("copyScopedModelSelection");
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
+    expect(selectorSource).toContain("AgentThinkingControl");
+    expect(selectorSource).toContain("resolveThinkingConfigForModel");
+    expect(selectorSource).toContain("optionAside={(option) => (");
+    expect(selectorSource).toContain("option.value === resolved.candidateId && thinkingConfig");
     expect(selectorSource).not.toContain("localStorage");
     expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
+    expect(styles).toContain(".agent-model-selector__menu .select-control__aside");
+    expect(styles).not.toContain(".agent-model-selector-with-thinking");
+    expect(styles).toContain(".agent-thinking-control");
     expect(styles).toContain("top: calc(100% + 6px)");
     expect(styles).toContain(".agent-model-selector__configure");
     expect(source).not.toContain("modelSwitchNotice");
@@ -208,6 +219,36 @@ describe("HomePage", () => {
     expect(source).toContain("if (resolvedConversationModel.unavailable)");
     expect(source).toContain('message: "home.modelSelector.unavailable"');
     expect(source).not.toContain("agent-conversation-model-error");
+  });
+
+  it("组帧时按模型思考表解析开关与默认档位", () => {
+    const workspace = createModelWorkspace(null);
+    const candidate: ModelCandidate = {
+      id: "gpt-54",
+      source: "byok",
+      provider: "openai",
+      model: "gpt-5.4",
+      displayName: "gpt-5.4",
+      connectionId: null,
+      endpointId: "chat",
+      capability: "chat",
+      capabilities: ["agent"],
+      available: true
+    };
+
+    expect(thinkingPayloadForSend(workspace, candidate, undefined)).toEqual({
+      thinkingEnabled: true,
+      thinkingLevel: "medium"
+    });
+    expect(thinkingPayloadForSend(workspace, candidate, { enabled: false })).toEqual({
+      thinkingEnabled: false,
+      thinkingLevel: null
+    });
+    expect(thinkingPayloadForSend(workspace, candidate, { enabled: true, level: "high" })).toEqual({
+      thinkingEnabled: true,
+      thinkingLevel: "high"
+    });
+    expect(thinkingPayloadForSend(workspace, { ...candidate, model: "unlisted-model" }, undefined)).toEqual({});
   });
 
   it("hides the agent status line after the websocket is connected", () => {
@@ -273,7 +314,7 @@ describe("HomePage", () => {
     expect(source).toContain("const slashCommandsWithLocal = [");
     expect(source).toContain("lastCompactionSlashCommand,");
     expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
-    expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
+    expect(source).toContain('buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand, slashQuery ?? "")');
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (");
@@ -1192,6 +1233,12 @@ describe("HomePage", () => {
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText("request_timeout")).toBe("请求超时，请重试");
     expect(agentErrorText(null)).toBeNull();
+  });
+
+  it("shows a dedicated message when voice input has no ASR model configured", () => {
+    expect(toReadableAsrError(new Error("Assigned ASR model is unavailable"))).toBe("home.asrNotConfigured");
+    expect(agentErrorText("home.asrNotConfigured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
+    expect(agentErrorText("语音识别失败：ASR model catalog is not configured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
   });
 
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {

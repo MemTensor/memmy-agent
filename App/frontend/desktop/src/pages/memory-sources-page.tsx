@@ -997,6 +997,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
               <AgentSourceLogo source={source} />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-normal text-text-ink/80">{source.displayName}</div>
+                {source.sourceId === "opencode" && source.status === "plugin_installed" && (
+                  <p className="mt-1 text-xs text-text-ink/60">{t("memory.opencodeReloadHint")}</p>
+                )}
                 <div className="flex items-center gap-2 mt-1">
                   <SourceStatusBadge source={source} />
                   {source.messageCount > 0 && <span className="text-xs text-text-ink/50 shrink-0 whitespace-nowrap">{formatSourceMemoryCount(source.messageCount, t)}</span>}

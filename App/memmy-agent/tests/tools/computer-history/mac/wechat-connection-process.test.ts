@@ -68,6 +68,34 @@ function connect() {
 }
 
 describe("WeChat connection process diagnostics", () => {
+  it("persists only allowed source-change metadata and keeps the original failure phase", () => {
+    const child = connect();
+    child.stdout.write(JSON.stringify({ event: "preparing_wechat_data" }) + "\n");
+    const detail = { kind: "directory", area: "cache", fields: "mtime_ns,ctime_ns",
+      pathHash: "0123456789abcdef", attempts: 3, elapsedMs: 12000,
+      path: "/private/account/chat-name", keys: "never save this" };
+    child.stdout.write(JSON.stringify({ event: "connection_error", category: "wechat_private_storage_source_changed", detail }) + "\n");
+    child.stdout.write(JSON.stringify({ event: "original_reopened", success: true }) + "\n");
+    child.stdout.write(JSON.stringify({ event: "connection_error", category: "wechat_private_storage_source_changed", detail }) + "\n");
+    child.emit("close", 2, null);
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "wechat", "last-connection-error.json"), "utf8"));
+    expect(saved).toMatchObject({ phase: "preparing_wechat_data", detail: {
+      kind: "directory", area: "cache", fields: "mtime_ns,ctime_ns", pathHash: "0123456789abcdef", attempts: 3, elapsedMs: 12000,
+    } });
+    expect(saved.detail).not.toHaveProperty("path");
+    expect(saved.detail).not.toHaveProperty("keys");
+  });
+
+  it("discards malformed source-change diagnostics", () => {
+    const child = connect();
+    child.stdout.write(JSON.stringify({ event: "connection_error", category: "wechat_private_storage_source_changed",
+      detail: { kind: "/private/path", area: "chat-name", fields: "arbitrary", pathHash: "secret", attempts: -1, elapsedMs: "secret" },
+    }) + "\n");
+    child.emit("close", 2, null);
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "wechat", "last-connection-error.json"), "utf8"));
+    expect(saved).not.toHaveProperty("detail");
+  });
+
   it("shares a running connection instead of launching another helper for repeated requests", () => {
     const child = connect();
     expect(service.connectWeChat().wechat?.connection).toBe("connecting");

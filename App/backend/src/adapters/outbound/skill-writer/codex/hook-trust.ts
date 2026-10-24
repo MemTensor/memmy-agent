@@ -1,6 +1,7 @@
 /** Codex hook trust persistence through the Codex app-server protocol. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join, normalize } from "node:path";
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
@@ -283,8 +284,17 @@ function handleResponseLine(line: string, pending: Map<number, PendingRequest>):
 
 function resolveCodexExecutable(codexHomeDirectory: string): string {
   const executableName = process.platform === "win32" ? "codex.exe" : "codex";
-  const bundledExecutable = join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName);
-  return isExecutableFile(bundledExecutable) ? bundledExecutable : executableName;
+  const candidates = [join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName)];
+  if (process.platform === "darwin") {
+    // The desktop process may not inherit the shell PATH where ChatGPT exposes Codex CLI.
+    const codexCliPath = join("Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
+    candidates.push(
+      join("/Applications", "ChatGPT.app", codexCliPath),
+      join(homedir(), "Applications", "ChatGPT.app", codexCliPath)
+    );
+  }
+
+  return candidates.find(isExecutableFile) ?? executableName;
 }
 
 function isExecutableFile(filePath: string): boolean {

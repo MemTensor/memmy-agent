@@ -354,19 +354,42 @@ jobs:
           mv release-assets/COMPARE.complete.json release-assets/COMPARE.json
 
           : > release-assets/PULL_REQUESTS.jsonl
+          api_url="${GITHUB_API_URL:-https://api.github.com}"
           while IFS= read -r commit_sha; do
-            if ! gh api --paginate \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/pulls?per_page=100" \
-              --jq '.[] | {
-                number,
-                title,
-                htmlUrl: .html_url,
-                mergedAt: .merged_at,
-                baseRef: .base.ref,
-                headRef: .head.ref
-              }' >> release-assets/PULL_REQUESTS.jsonl; then
-              echo "::error title=Pull request evidence failed::Could not fetch associated PRs for commit $commit_sha. Manual recovery: re-run after GitHub API recovers or inspect the commit manually." >&2
+            pr_response="release-assets/PR_${commit_sha}.json"
+            pr_success="false"
+            for attempt in 1 2 3; do
+              rm -f "$pr_response"
+              http_status="$(
+                curl --silent --show-error --location \
+                  --retry 4 --retry-delay 2 --retry-max-time 30 --retry-all-errors \
+                  --connect-timeout 10 --max-time 45 \
+                  --header "Accept: application/vnd.github+json" \
+                  --header "Authorization: Bearer ${GH_TOKEN}" \
+                  --header "X-GitHub-Api-Version: 2022-11-28" \
+                  --output "$pr_response" \
+                  --write-out '%{http_code}' \
+                  "$api_url/repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/pulls?per_page=100" || true
+              )"
+              if [[ "$http_status" == "200" ]] \
+                && jq -e 'type == "array"' "$pr_response" >/dev/null 2>&1; then
+                jq -c '.[] | {
+                  number,
+                  title,
+                  htmlUrl: .html_url,
+                  mergedAt: .merged_at,
+                  baseRef: .base.ref,
+                  headRef: .head.ref
+                }' "$pr_response" >> release-assets/PULL_REQUESTS.jsonl
+                pr_success="true"
+                break
+              fi
+              echo "::warning title=Retrying pull request evidence::GitHub PR metadata for commit $commit_sha was unavailable or malformed (HTTP $http_status, attempt $attempt/3)." >&2
+              sleep "$((attempt * 2))"
+            done
+            rm -f "$pr_response"
+            if [[ "$pr_success" != "true" ]]; then
+              echo "::error title=Pull request evidence failed::Could not fetch valid associated PRs for commit $commit_sha after 3 attempts. Manual recovery: re-run after GitHub API recovers or inspect the commit manually." >&2
               exit 1
             fi
           done < <(jq -r '.commits[].sha' release-assets/COMPARE.json)

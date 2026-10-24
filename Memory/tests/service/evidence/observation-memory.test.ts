@@ -85,12 +85,12 @@ describe("History meaningful-memory processing", () => {
     try {
       expect(prepared.messages.reduce((total, message) => total + encoder.encode(message.content, [], []).length, 0)).toBeLessThanOrEqual(5_000);
     } finally { encoder.free(); }
-    const payload = JSON.parse(prepared.messages[1]!.content) as { sources: Array<{ id: string; title: string; summary: string; content: string; truncated: boolean }> };
+    const payload = JSON.parse(prepared.messages[1]!.content) as { sources: Array<{ id: string; title: string; content: string; truncated: boolean }> };
     expect(payload.sources.map((source) => source.id)).toEqual(sources.map((source) => source.id));
     expect(payload.sources).toHaveLength(sourceCount);
     for (const source of payload.sources) {
       expect(source.title).not.toBe("");
-      expect(source.summary).not.toBe("");
+      expect(source).not.toHaveProperty("summary");
       expect(source.content).not.toBe("");
       expect(source.content).not.toContain("\uFFFD");
       expect(source.truncated).toBe(true);

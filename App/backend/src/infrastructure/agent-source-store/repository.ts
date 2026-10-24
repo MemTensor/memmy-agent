@@ -60,6 +60,8 @@ export interface AgentSourceRepository {
   upsertSource(input: UpsertAgentSourceInput): void;
   removeSource(sourceId: string): void;
   setStatus(sourceId: string, status: AgentSourceStatus): void;
+  setConnectionState(sourceId: string, status: AgentSourceStatus, autoInjectSuppressed: boolean): void;
+  isAutoInjectSuppressed(sourceId: string): boolean;
   setLastScannedAt(sourceId: string, scannedAt: string): void;
   getScanWatermark(sourceId: string): AgentSourceScanWatermark | null;
   upsertScanWatermark(input: UpsertAgentSourceScanWatermarkInput): void;
@@ -165,6 +167,25 @@ export function createAgentSourceRepository(
         INSTALLATION_SCAN_SCOPE_UUID,
         sourceId
       );
+    },
+
+    setConnectionState(sourceId, status, autoInjectSuppressed) {
+      db.prepare(
+        "UPDATE account_agent_sources SET status = ?, auto_inject_suppressed = ?, updated_at = ? WHERE uuid = ? AND source_id = ?"
+      ).run(
+        status,
+        autoInjectSuppressed ? 1 : 0,
+        new Date().toISOString(),
+        INSTALLATION_SCAN_SCOPE_UUID,
+        sourceId
+      );
+    },
+
+    isAutoInjectSuppressed(sourceId) {
+      const row = db.prepare(
+        "SELECT auto_inject_suppressed FROM account_agent_sources WHERE uuid = ? AND source_id = ?"
+      ).get(INSTALLATION_SCAN_SCOPE_UUID, sourceId) as { auto_inject_suppressed: 0 | 1 } | undefined;
+      return row?.auto_inject_suppressed === 1;
     },
 
     setLastScannedAt(sourceId, scannedAt) {

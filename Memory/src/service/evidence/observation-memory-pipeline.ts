@@ -11,6 +11,7 @@ import { isObservationMemory, isObservationMemoryProcessed, observationJobPayloa
 import { lookupExternalEvidence } from "../external-evidence-source.js";
 import { namespaceForMemory } from "../namespace/namespace-scope.js";
 import type { RuntimeNamespace } from "../../types.js";
+import { resolveObservationQuote } from "./observation-quote-grounding.js";
 
 export class ObservationDependenciesPendingError extends Error {
   constructor() { super("observation sources are still being processed"); }
@@ -37,8 +38,8 @@ const VALIDATION_CORRECTIONS = {
 
 /** Fixed reasons let a model correct its output without replaying or logging private text. */
 class ObservationOutputValidationError extends Error {
-  constructor(readonly reason: keyof typeof VALIDATION_CORRECTIONS, message: string) {
-    super(`${message} (${reason})`);
+  constructor(readonly reason: keyof typeof VALIDATION_CORRECTIONS, message: string, readonly itemIndex?: number) {
+    super(`${message} (${reason})${itemIndex === undefined ? "" : ` [item ${itemIndex + 1}]`}`);
   }
 }
 
@@ -60,9 +61,9 @@ Do not infer stable user preferences, identity facts, ownership of another perso
 Absence of visible completion is unknown status, not proof of noncompletion. A pending parent task does not prove every subtask is pending. Qualify time-sensitive states as "at the time observed", "no completion was shown", or "status not confirmed" as appropriate; never turn missing evidence into a permanent state assertion.
 An opened or visible document/task establishes its existence, not its creation or ownership. Adding or editing subtasks does not imply creating their parent task. Preserve the actual observed action and do not upgrade "opened" or "edited" into "created".
 When parent sources are supplied, consolidate the useful work context across them: remove duplicates, preserve specific constraints and unresolved issues, and only describe a changed decision or resolved blocker if a source explicitly supports it. Do not merely shorten the aggregate narrative.
-Sources marked truncated contain only retained excerpts; missing portions are unknown. Quote one continuous retained excerpt, never join across an omission. Title and summary provide topic context; ground each item in the displayed source content.
+Sources marked truncated contain only retained excerpts; missing portions are unknown. Quote one continuous retained excerpt, never join across an omission. The source title provides topic context only; ground each item in the displayed source content.
 For useful content return JSON {"keep":true,"title":"specific work topic, not a generic activity label","summary":"one or two sentences capturing what matters for later work","items":[{"category":"context|decision|constraint|todo|blocker|progress","text":"one grounded, self-contained fact with its scope and uncertainty","source_memory_id":"an input source ID","evidence_quote":"an exact short quotation from that source content"}]}.
-Return 1-12 nonredundant items. Every item must be supported by its exact quotation; do not add steps, dates or success claims absent from the sources. The summary and title must describe only those grounded items. Never output secrets, credentials or verification codes. Use the language, script, and regional conventions of the requested BCP 47 locale for title, summary, item text, and reason, preserving useful names. Keep JSON keys, category codes, source IDs, and exact evidence quotes unchanged.`;
+Return 1-12 nonredundant items. Copy evidence_quote directly from source.content, including its Markdown emphasis, list labels and punctuation. Prefer a short continuous original line or block; do not shorten it with ellipses or quote the source title instead. Every item must be supported by its quotation; do not add steps, dates or success claims absent from the sources. The summary and title must describe only those grounded items. Never output secrets, credentials or verification codes. Use the language, script, and regional conventions of the requested BCP 47 locale for title, summary, item text, and reason, preserving useful names. Keep JSON keys, category codes, source IDs, and exact evidence quotes unchanged.`;
 
 /** Uses the ordinary durable summary/embedding stages without fabricating a conversational turn. */
 export class ObservationMemoryPipeline {
@@ -148,7 +149,8 @@ export class ObservationMemoryPipeline {
       if (!current || !this.matches(job, current)) return;
       // One bounded correction uses exactly the same evidence snapshot. Never
       // weaken grounding or retain some items from an invalid model response.
-      const correction = `The previous response failed validation: ${error.reason}. ${VALIDATION_CORRECTIONS[error.reason]} Regenerate the complete response using the original schema and exact source quotes; title and summary must cover only the grounded items.`;
+      const itemHint = error.itemIndex === undefined ? "" : ` Item ${error.itemIndex + 1} failed.`;
+      const correction = `The previous response failed validation: ${error.reason}.${itemHint} ${VALIDATION_CORRECTIONS[error.reason]} Regenerate the complete response using the original schema and exact source quotes; title and summary must cover only the grounded items.`;
       const messages = input.messages.map((message) => message.role === "system"
         ? { ...message, content: `${message.content}\n\n${correction}` } : message);
       output = validateOutput(await complete(messages), input.sources);
@@ -217,31 +219,6 @@ function externalEvidence(memory: MemoryRow): Record<string, unknown> {
 }
 
 function string(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
-function normalizeQuote(value: string): string { return value.normalize("NFKC").replace(/\s+/gu, " ").trim(); }
-
-// Models shorten a sentence with "..." (NFKC also turns "…" into "..."). Accept that only when
-// every piece is exact and in order on one source line, so a cut cannot splice separate claims.
-const MAX_ELIDED_QUOTE_GAP = 40;
-function quoteIsGrounded(fragment: string, quote: string): boolean {
-  const text = normalizeQuote(fragment), normalized = normalizeQuote(quote);
-  if (text.includes(normalized)) return true;
-  const pieces = normalized.split(/\s*\.{3,}\s*/u).filter(Boolean);
-  if (pieces.length === 0 || pieces.some((piece) => piece.length < 4)) return false;
-  if (pieces.length === 1) return text.includes(pieces[0]!);
-  return fragment.normalize("NFKC").split("\n").some((rawLine) => {
-    const line = normalizeQuote(rawLine);
-    for (let start = line.indexOf(pieces[0]!); start >= 0; start = line.indexOf(pieces[0]!, start + 1)) {
-      let end = start + pieces[0]!.length;
-      if (pieces.slice(1).every((piece) => {
-        const at = line.indexOf(piece, end);
-        if (at < 0 || at - end > MAX_ELIDED_QUOTE_GAP) return false;
-        end = at + piece.length;
-        return true;
-      })) return true;
-    }
-    return false;
-  });
-}
 
 /** Preserve every source identity and valid JSON while sharing evidence space. */
 export function prepareObservationExtractionInput(input: {
@@ -253,24 +230,23 @@ export function prepareObservationExtractionInput(input: {
   const systemTokens = count(PROMPT);
   const sourceCount = Math.max(1, input.sources.length);
   let titleBudget = Math.min(48, Math.max(8, Math.floor(320 / sourceCount)));
-  let summaryBudget = Math.min(160, Math.max(16, Math.floor(1_000 / sourceCount)));
   const bodyTokens = input.sources.map((source) => encode(source.content));
   const serialize = (sources: Source[]): string => JSON.stringify({ language: input.language,
     observedAt: input.observedAt, aggregate: input.aggregate,
-    sources: sources.map(({ id, title, summary, content, truncated }) => ({ id, title, summary, content, truncated })) });
+    sources: sources.map(({ id, title, content, truncated }) => ({ id, title, content, truncated })) });
   const metadataSources = (): Source[] => input.sources.map((source) => {
     const title = tokenPrefix(encode(source.title), titleBudget);
-    const summary = tokenPrefix(encode(source.summary), summaryBudget);
-    return { ...source, title, summary, content: "", evidenceFragments: [],
-      truncated: Boolean(source.content) || title !== source.title || summary !== source.summary };
+    // Metadata summaries are generated prose, not quoteable source content.
+    // Keep provenance internally, but expose only the body as evidence.
+    return { ...source, title, content: "", evidenceFragments: [],
+      truncated: Boolean(source.content) || title !== source.title };
   });
   let metadata = metadataSources();
   // Even unusually long IDs retain their identity. Metadata gets shorter
   // before evidence is sacrificed; no whole parent disappears from a rollup.
   while (systemTokens + count(serialize(metadata)) + sourceCount * 12 > MODEL_INPUT_TOKEN_LIMIT
-    && (titleBudget > 0 || summaryBudget > 0)) {
+    && titleBudget > 0) {
     titleBudget = Math.floor(titleBudget * 0.75);
-    summaryBudget = Math.floor(summaryBudget * 0.75);
     metadata = metadataSources();
   }
   const fixedTokens = systemTokens + count(serialize(metadata));
@@ -285,7 +261,7 @@ export function prepareObservationExtractionInput(input: {
         ? [original.content]
         : retainedTokenFragments(tokens, shares[index]!);
       return { ...source, content: fragments.join("\n\n"), evidenceFragments: fragments,
-        truncated: fragments.length !== 1 || fragments[0] !== original.content || source.title !== original.title || source.summary !== original.summary };
+        truncated: fragments.length !== 1 || fragments[0] !== original.content || source.title !== original.title };
     });
     const content = serialize(prepared);
     const totalTokens = systemTokens + count(content);
@@ -340,20 +316,21 @@ function validateOutput(result: Record<string, unknown>, sources: Source[]):
   if (!title || title.length > 160 || !summary || summary.length > 1_200 || !result.items.length || result.items.length > 12) {
     throw new ObservationOutputValidationError("semantic_fields", "observation extraction returned invalid semantic memory fields");
   }
-  const items: Item[] = result.items.map((item) => {
-    if (!isRecord(item)) throw new ObservationOutputValidationError("item_shape", "observation extraction item is not grounded");
+  const items: Item[] = result.items.map((item, itemIndex) => {
+    if (!isRecord(item)) throw new ObservationOutputValidationError("item_shape", "observation extraction item is not grounded", itemIndex);
     const category = item.category as Category, text = string(item.text), quote = string(item.evidence_quote), id = string(item.source_memory_id);
     const source = sources.find((candidate) => candidate.id === id);
     if (!CATEGORIES.includes(category) || !text || text.length > 900 || quote.length < 4 || quote.length > 800) {
-      throw new ObservationOutputValidationError("item_fields", "observation extraction item is not grounded in its source");
+      throw new ObservationOutputValidationError("item_fields", "observation extraction item is not grounded in its source", itemIndex);
     }
     if (!source) {
-      throw new ObservationOutputValidationError("source_id", "observation extraction item is not grounded in its source");
+      throw new ObservationOutputValidationError("source_id", "observation extraction item is not grounded in its source", itemIndex);
     }
-    if (!(source.evidenceFragments ?? [source.content]).some((fragment) => quoteIsGrounded(fragment, quote))) {
-      throw new ObservationOutputValidationError("quote_grounding", "observation extraction item is not grounded in its source");
+    const originalQuote = resolveObservationQuote(source.evidenceFragments ?? [source.content], quote);
+    if (!originalQuote) {
+      throw new ObservationOutputValidationError("quote_grounding", "observation extraction item is not grounded in its source", itemIndex);
     }
-    return { category, text, evidence_quote: quote, source_memory_id: id };
+    return { category, text, evidence_quote: originalQuote, source_memory_id: id };
   });
   return { keep: true, title, summary, items };
 }

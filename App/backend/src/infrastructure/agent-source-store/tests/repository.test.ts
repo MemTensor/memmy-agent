@@ -90,6 +90,24 @@ describe("agent source repository", () => {
     expect(repository.listSources()).toEqual([]);
   });
 
+  it("persists auto-inject suppression across status-only updates", () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/Users/test/Cursor",
+      builtin: true
+    });
+
+    repository.setConnectionState("cursor", "not_connected", true);
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(true);
+    repository.setStatus("cursor", "plugin_installed");
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(true);
+
+    repository.setConnectionState("cursor", "plugin_installed", false);
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(false);
+  });
+
   it("tracks ingestion dedupe keys without double-counting repeated marks", () => {
     const repository = createRepository();
     repository.upsertSource({
@@ -184,6 +202,7 @@ function createRepository(): AgentSourceRepository {
       data_path       TEXT NOT NULL,
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
+      auto_inject_suppressed INTEGER NOT NULL DEFAULT 0 CHECK(auto_inject_suppressed IN (0,1)),
       last_scanned_at TEXT,
       sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),

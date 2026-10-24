@@ -72,6 +72,12 @@ function mergedRecord(
   return { ...(defaults ?? {}), ...(overrides ?? {}) };
 }
 
+function backendForCustomProtocol(protocol: string | undefined): ProviderSpec["backend"] {
+  if (protocol === "anthropic-messages") return "anthropic";
+  if (protocol === "bedrock-converse") return "bedrock";
+  return "openai_compat";
+}
+
 function exactEndpoint(
   config: Config,
   providerConfig: ProviderConfig | null,
@@ -98,8 +104,11 @@ function makeProviderCore(
   const model = opts.model ?? resolved.model;
   const providerName = config.getProviderName(model, { preset: resolved });
   const providerConfig = config.getProvider(model, { preset: resolved });
+  const endpoint = exactEndpoint(config, providerConfig, resolved);
   const spec = providerName ? findByName(providerName) : null;
-  const backend = spec?.backend ?? "openai_compat";
+  const backend = providerName === "custom"
+    ? backendForCustomProtocol(endpoint?.protocol)
+    : spec?.backend ?? "openai_compat";
   const init = providerInit(config, providerConfig, spec, model, resolved);
 
   if (opts.validateCredentials !== false && backend === "azure_openai") {
@@ -118,7 +127,11 @@ function makeProviderCore(
   else if (backend === "azure_openai") provider = new AzureOpenAIProvider(init);
   else if (backend === "github_copilot") provider = new GitHubCopilotProvider(init);
   else if (backend === "anthropic") provider = new AnthropicProvider(init);
-  else if (backend === "bedrock") provider = new BedrockProvider({ ...init, region: (providerConfig as any)?.region ?? null, profile: (providerConfig as any)?.profile ?? null });
+  else if (backend === "bedrock") provider = new BedrockProvider({
+    ...init,
+    region: endpoint?.region ?? (providerConfig as { region?: string | null })?.region ?? null,
+    profile: endpoint?.profile ?? (providerConfig as { profile?: string | null })?.profile ?? null,
+  });
   else provider = new OpenAICompatProvider(init);
 
   provider.generation = resolved.toGenerationSettings();
@@ -162,7 +175,6 @@ export function makeProvider(
   }
 
   const opts = typeof optsOrModel === "string" ? { model: optsOrModel } : optsOrModel;
-  const resolved = resolveModelPreset(configOrName, opts);
   let provider = makeProviderCore(configOrName, opts);
   const fallbackPresets = resolveFallbackPresets(configOrName);
   if (fallbackPresets.length) {

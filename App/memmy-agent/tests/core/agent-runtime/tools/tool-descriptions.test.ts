@@ -30,7 +30,7 @@ describe("coding tool descriptions", () => {
     const writeFile = new WriteFileTool().description.toLowerCase();
 
     expect(applyPatch).toBe(
-      "apply a patch to add, update, delete, or move one or more workspace-relative files.",
+      "apply a patch to add, update, delete, or move one or more files inside the workspace.",
     );
 
     expect(editFile).toContain("small, exact replacement");

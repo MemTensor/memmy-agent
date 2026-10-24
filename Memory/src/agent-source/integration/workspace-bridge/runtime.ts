@@ -11,7 +11,7 @@ import {
   readOpencodeSourceTurn,
   type CursorVscdbSource,
   type OpenclawTranscriptSource,
-  type OpencodeSource,
+  createOpencodeDatabaseSource,
   type SourceTurn
 } from "@memmy/agent-source-core";
 export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
@@ -28,6 +28,14 @@ import { homedir } from "node:os";
 import { isAbsolute, parse, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import YAML from "yaml";
+import { z } from "zod";
+
+/** OpenCode V1 tools are plain definitions containing real Zod schemas. Bundle them
+ * locally so installing Memmy never depends on the host's SDK package resolution. */
+export const opencodeTool = Object.assign(<T>(definition: T): T => definition, { schema: z });
+export function opencodeToolJsonSchema(args: Record<string, z.ZodType>): Record<string, unknown> {
+  return z.toJSONSchema(z.object(args));
+}
 import {
   normalizeWorkspaceUri,
   renderL3WorldModelContext,
@@ -282,7 +290,7 @@ export async function completeSourceTurn(input: {
   })));
 }
 
-type NodeSqliteDatabase = import("node:sqlite").DatabaseSync;
+type NodeSqliteDatabase = Pick<import("node:sqlite").DatabaseSync, "prepare" | "close">;
 
 let nodeSqlite: Promise<typeof import("node:sqlite")> | undefined;
 
@@ -307,8 +315,47 @@ function silenceSqliteExperimentalWarning(): void {
 }
 
 async function openReadOnlySqlite(path: string): Promise<NodeSqliteDatabase> {
+  // Official V1 embeds Bun, which does not implement node:sqlite. Choose the
+  // host driver before opening; never retry an open error with a writable DB.
+  if ("Bun" in globalThis) {
+    const moduleName = "bun:sqlite";
+    const { Database } = await import(moduleName);
+    return new Database(path, { readonly: true, create: false, strict: true });
+  }
   const { DatabaseSync } = await loadNodeSqlite();
   return new DatabaseSync(path, { readOnly: true });
+}
+
+/** Resolve only host-provided identities. V1 exposes the selected agent on
+ * output.message; V2 agent.list puts its configured effective default first. */
+export function resolveOpencodeAgent(selected: unknown, messageAgent?: unknown, agents?: unknown): string {
+  const explicit = text(selected) || text(messageAgent);
+  if (explicit) return explicit;
+  const list = Array.isArray(agents) ? agents : objectValue(agents).data;
+  if (Array.isArray(list)) {
+    const candidate = list.map(objectValue).find(agent => agent.mode !== "subagent" && !agent.hidden);
+    const id = text(candidate?.id) || text(candidate?.name);
+    if (id) return id;
+  }
+  throw new Error("OpenCode effective agent unavailable");
+}
+
+/** Durable success identity also covers a compaction event delivered before its
+ * projection, missed during restart, or repeated by the host. Failed rows are ignored. */
+export async function readOpencodeCompactionBoundary(conversationId: string): Promise<string> {
+  const db = await openReadOnlySqlite(resolveOpencodeDatabasePath());
+  try {
+    const v2 = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get();
+    const rows = db.prepare(v2
+      ? "SELECT id, data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq DESC"
+      : "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC").all(conversationId);
+    for (const value of rows) {
+      const row = objectValue(value);
+      const data = objectValue(JSON.parse(String(row.data)));
+      if (v2 ? data.status === "completed" : data.summary === true && objectValue(data.time).completed && !data.error) return text(row.id);
+    }
+    return "";
+  } finally { db.close(); }
 }
 
 /**
@@ -412,37 +459,8 @@ export async function readOpencodeHookSourceTurn(input: {
     return { turn: null, reason: "source_store_unavailable" };
   }
   try {
-    const columns = new Set((db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name));
-    const sessions = db.prepare(`SELECT id, parent_id AS parentId, directory${columns.has("agent") ? ", agent" : ""}${columns.has("revert") ? ", revert" : ""} FROM session WHERE id = ?`);
-    const messages = db.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC");
-    const parts = db.prepare("SELECT id, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC");
-    const parse = (value: unknown): unknown => {
-      if (typeof value !== "string") return undefined;
-      try {
-        return JSON.parse(value);
-      } catch {
-        return undefined;
-      }
-    };
-    const source: OpencodeSource = {
-      sessions: () => (sessions.all(input.conversationId) as unknown as Array<Record<string, unknown>>).map((row) => {
-        const revert = typeof row.revert === "string" ? parse(row.revert) : row.revert;
-        const messageId = revert && typeof revert === "object" && !Array.isArray(revert)
-          ? (revert as { messageID?: unknown }).messageID
-          : undefined;
-        return {
-          id: String(row.id),
-          parentId: row.parentId == null ? null : String(row.parentId),
-          directory: row.directory == null ? null : String(row.directory),
-          agent: typeof row.agent === "string" ? row.agent : null,
-          revertMessageId: typeof messageId === "string" && messageId ? messageId : null
-        };
-      }),
-      messages: (sessionId) => (messages.all(sessionId) as unknown as Array<{ id: string; data: string }>)
-        .map((row) => ({ id: row.id, data: parse(row.data) })),
-      parts: (messageId) => (parts.all(messageId) as unknown as Array<{ id: string; data: string }>)
-        .map((row) => ({ id: row.id, data: parse(row.data) }))
-    };
+    const source = createOpencodeDatabaseSource(db, input.conversationId);
+    if (!source) return { turn: null, reason: "source_store_unavailable" };
     return await readOpencodeSourceTurn(source, input);
   } finally {
     db.close();

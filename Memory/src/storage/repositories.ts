@@ -695,6 +695,22 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
+    // Parent traces may already be soft-deleted, and their span_ids only describe
+    // the latest split. Use the spans' own ownership links for task deletion.
+    const rows = this.db.prepare(
+      `SELECT id FROM memories
+       WHERE user_id = ? AND memory_layer = 'L1'
+         AND deleted_at IS NULL AND status != 'deleted'
+         AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
+         AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
+         AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
+           IN (SELECT value FROM json_each(?))
+       ORDER BY id`
+    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
     const row = this.db
       .prepare(
@@ -1887,17 +1903,20 @@ export class RuntimeRepository {
     }));
   }
 
+  // userId is capture provenance. It must not partition the same local native turn
+  // when an installed Hook and the desktop scanner submit under different accounts.
   getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
-        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+      WHERE source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId
+      ORDER BY created_at ASC, user_id ASC LIMIT 1`
     ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
   latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
       ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
     ).get(scope) as Record<string, unknown> | undefined;
@@ -1909,7 +1928,7 @@ export class RuntimeRepository {
     after?: SourceTurnCaptureRecord;
   } {
     const prefix = `SELECT * FROM source_turn_captures
-      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+      WHERE source = @source AND profile_id = @profileId
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
     const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
       .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
@@ -1946,8 +1965,8 @@ export class RuntimeRepository {
       .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
   }
 
-  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
-    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+  sourceConversationSessions(input: { userId?: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE source = @source
       AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
         OR host_session_key = @source || '-memory-' || @conversationId)
       ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);

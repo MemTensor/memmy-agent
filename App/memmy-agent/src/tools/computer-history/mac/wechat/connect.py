@@ -29,6 +29,8 @@ def connection_error_fields(error):
     if not re.fullmatch(r"[a-zA-Z_][a-zA-Z_:0-9-]{0,127}", category):
         category = "connection_process_failed"
     detail = getattr(error, "detail", None)
+    if category == "wechat_private_storage_source_changed" and isinstance(detail, dict):
+        return {"category": category, "detail": dict(detail)}
     if isinstance(detail, dict) and detail and all(
             isinstance(key, str) and isinstance(value, str) for key, value in detail.items()):
         return {"category": category, "detail": dict(detail)}

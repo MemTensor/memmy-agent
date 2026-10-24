@@ -222,6 +222,39 @@ describe("cloud client", () => {
     ]);
   });
 
+  it("keeps waiting for Google login after the default cloud timeout", async () => {
+    server = createServer((_request, response) => {
+      setTimeout(() => {
+        sendJson(response, {
+          code: 0,
+          message: "ok",
+          data: {
+            flowId: "social-flow-id-0001",
+            pollToken: "social-poll-token-0000000000000001",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=opaque-state",
+            expiresInSec: 600,
+            pollIntervalSec: 2
+          }
+        });
+      }, 1_500);
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind");
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 200
+    });
+
+    const start = await client.startSocialLogin({
+      provider: "google",
+      locale: "en",
+      loginSource: "Memmy"
+    });
+
+    expect(start.authorizationUrl).toContain("https://accounts.google.com/");
+  });
+
   it("rejects a social-login authorization URL outside the provider allowlist", async () => {
     server = createServer((_request, response) => {
       sendJson(response, {

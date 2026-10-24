@@ -177,6 +177,111 @@ describe("model config tester", () => {
     expect(JSON.stringify(response)).not.toContain("sk-secret");
   });
 
+  it.each([
+    ["openai-chat-completions", "https://api.example.test/v1/models", { Authorization: "Bearer sk-secret" }],
+    ["openai-responses", "https://api.example.test/v1/models", { Authorization: "Bearer sk-secret" }]
+  ] as Array<[ModelEndpointProtocol, string, Record<string, string>]>)(
+    "probes custom %s with the OpenAI model list",
+    async (protocol, url, headers) => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const tester = createHttpModelConfigTester({
+        fetch: async (request, init) => {
+          calls.push({ url: request.toString(), init: init ?? {} });
+          return json({ data: [{ id: "model-a" }] });
+        }
+      });
+
+      await tester.test(input({
+        provider: "custom",
+        protocol,
+        apiBase: "https://api.example.test/v1"
+      }));
+
+      expect(calls[0]).toMatchObject({ url, init: { method: "GET", headers } });
+    }
+  );
+
+  it("probes custom Anthropic Messages with the Anthropic model list", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const tester = createHttpModelConfigTester({
+      fetch: async (request, init) => {
+        calls.push({ url: request.toString(), init: init ?? {} });
+        return json({ data: [{ id: "model-a" }] });
+      }
+    });
+
+    await tester.test(input({
+      provider: "custom",
+      protocol: "anthropic-messages",
+      apiBase: "https://api.anthropic.com"
+    }));
+
+    expect(calls[0]).toMatchObject({
+      url: "https://api.anthropic.com/v1/models",
+      init: {
+        method: "GET",
+        headers: {
+          "x-api-key": "sk-secret",
+          "anthropic-version": "2023-06-01"
+        }
+      }
+    });
+  });
+
+  it("probes custom Gemini with the Gemini model list", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const tester = createHttpModelConfigTester({
+      fetch: async (request, init) => {
+        calls.push({ url: request.toString(), init: init ?? {} });
+        return json({ models: [{ name: "models/model-a" }] });
+      }
+    });
+
+    await tester.test(input({
+      provider: "custom",
+      protocol: "gemini-generate-content",
+      apiBase: "https://generativelanguage.googleapis.com/v1beta"
+    }));
+
+    expect(calls[0]).toMatchObject({
+      url: "https://generativelanguage.googleapis.com/v1beta/models",
+      init: { method: "GET", headers: { "x-goog-api-key": "sk-secret" } }
+    });
+  });
+
+  it("does not probe custom Bedrock Converse", async () => {
+    const fetch = vi.fn();
+    const tester = createHttpModelConfigTester({ now: () => checkedAt, fetch });
+
+    await expect(tester.test(input({
+      provider: "custom",
+      protocol: "bedrock-converse",
+      apiBase: "https://bedrock-runtime.us-west-2.amazonaws.com"
+    }))).resolves.toEqual({
+      ok: false,
+      message: "当前 endpoint 协议不支持模型列表连接测试",
+      checkedAt
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("uses the selected protocol for custom failure hints", async () => {
+    const tester = createHttpModelConfigTester({
+      now: () => checkedAt,
+      fetch: async () => json({ error: { message: "not found" } }, 404)
+    });
+
+    const openai = await tester.test(input({ provider: "custom", protocol: "openai-chat-completions" }));
+    const anthropic = await tester.test(input({
+      provider: "custom",
+      protocol: "anthropic-messages",
+      apiBase: "https://api.anthropic.com"
+    }));
+
+    expect(openai.message).toContain("OpenAI 兼容 API 地址通常以 /v1 结尾");
+    expect(anthropic.message).toContain("Anthropic API 地址通常不包含 /v1");
+  });
+
   it("keeps actionable Base URL guidance on 404", async () => {
     const tester = createHttpModelConfigTester({
       now: () => checkedAt,

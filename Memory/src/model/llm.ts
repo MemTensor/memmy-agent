@@ -14,6 +14,15 @@ import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from ".
 
 const logger = createMemoryLogger("llm");
 
+interface OpenAiResponsesResponse {
+  status?: string;
+  output?: Array<{
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  usage?: Record<string, unknown>;
+}
+
 interface OpenAiChatResponse {
   choices?: Array<{
     message?: {
@@ -312,6 +321,8 @@ class HttpLlmClient implements LlmClient {
     switch (this.config.provider) {
       case "openai_compatible":
         return this.completeOpenAiCompatible(messages, options);
+      case "openai_responses":
+        return this.completeOpenAiResponses(messages, options);
       case "gemini":
         return this.completeGemini(messages, options);
       case "anthropic":
@@ -407,6 +418,46 @@ class HttpLlmClient implements LlmClient {
     }
     this.recordTokenUsage(response, options);
     return { text, finishReason: normalizeFinishReason(choice?.finish_reason) };
+  }
+
+  private async completeOpenAiResponses(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
+    const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
+    const url = base.endsWith("/responses") ? base : `${base}/responses`;
+    const maxOutputTokens = Math.max(1, options.maxTokens ?? this.config.maxTokens ?? 1);
+    const response = await postJsonWithRetry<OpenAiResponsesResponse>({
+      actualModelContext: this.config.actualModelContext,
+      provider: "openai_responses",
+      operation: options.operation,
+      model: this.config.model,
+      url,
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
+      timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
+      maxRetries: options.maxRetries ?? this.config.maxRetries,
+      body: {
+        model: this.config.model,
+        input: messages.map((message) => ({ role: message.role, content: message.content })),
+        max_output_tokens: maxOutputTokens,
+        store: false,
+        stream: false,
+        temperature: options.temperature ?? this.config.temperature,
+        ...(options.jsonMode ? { text: { format: { type: "json_object" } } } : {}),
+        ...(this.config.extraBody ?? {})
+      }
+    });
+    const text = (response.output ?? [])
+      .filter((item) => item.type === "message")
+      .flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text" || typeof part.text === "string")
+      .map((part) => part.text ?? "")
+      .join("");
+    if (!text.trim()) {
+      throw new Error("openai_responses response missing output text");
+    }
+    this.recordTokenUsage(response, options);
+    return { text, finishReason: responsesFinishReason(response.status) };
   }
 
   private async completeGemini(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
@@ -1111,6 +1162,13 @@ function doubleMaxTokens(value: number | undefined, limit = Number.MAX_SAFE_INTE
   if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
   const expanded = Math.min(limit, Math.max(1, Math.floor(value)) * 2);
   return expanded > value ? expanded : undefined;
+}
+
+function responsesFinishReason(status: string | undefined): LlmCallResult["finishReason"] {
+  if (status === "completed") return "stop";
+  if (status === "incomplete") return "length";
+  if (status === "failed" || status === "cancelled") return "other";
+  return normalizeFinishReason(status);
 }
 
 function normalizeFinishReason(value: string | undefined): LlmCallResult["finishReason"] {

@@ -31,7 +31,7 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
     writeFileSync(path, records(true).map(record => JSON.stringify(record)).join("\n") + "\n");
     const messages: RawCodexMessage[] = []; for await (const value of readCodexRollout(path)) messages.push(value);
     const turn = sourceTurnFromMessages(messages)!;
-    const hook = () => service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "hook"), namespace: { source: "codex", profileId: "default", userId: "scan-owner" } });
+    const hook = () => service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "hook"), namespace: { source: "codex", profileId: "default", userId: "hook-owner" } });
     const add = vi.spyOn(service, "addMemory");
     const executor = createAgentSourceExecutor({ service, configPath: join(root, "config.yaml"),
       resolveAgentSkillRoot: () => null,
@@ -43,12 +43,12 @@ describe("Codex scan and Hook share the actual Memory lifecycle", () => {
       expect(executor.scanStatus().error).toBeNull();
       expect(hook().status).toBe("existing");
       expect(add).not.toHaveBeenCalled();
-      for (const table of ["raw_turns", "source_turn_captures"]) expect(db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
+      for (const table of ["sessions", "episodes", "raw_turns", "source_turn_captures"]) expect(db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE memory_layer = 'L1'").get()).toEqual({ n: 1 });
       const captured = hook().result!;
       const repos = new Repositories(db.db);
-      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe("scan-owner");
-      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe("scan-owner");
+      expect(repos.runtime.getSession(captured.sessionId)?.userId).toBe(first === "hook" ? "hook-owner" : "scan-owner");
+      expect(repos.memories.get(captured.l1MemoryId)?.userId).toBe(first === "hook" ? "hook-owner" : "scan-owner");
       expect(repos.runtime.getEpisode(captured.episodeId)?.l1MemoryIds).toEqual([captured.l1MemoryId]);
       expect(repos.runtime.getRawTurn(captured.rawTurnId)?.toolCalls[0]).toMatchObject({ id: "read", input: { path: "src/main.ts" }, output: expect.stringContaining("source contents") });
       expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'import_summary'").get()).toEqual({ n: 0 });

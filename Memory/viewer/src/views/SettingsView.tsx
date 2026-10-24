@@ -1637,6 +1637,9 @@ export function AgentAccessTab({
                         {t("settings.agents.memoryCount", { count: source.messageCount })}
                         {source.dataPath ? ` · ${source.dataPath}` : ""}
                       </p>
+                      {source.sourceId === "opencode" && source.status === "plugin_installed" && (
+                        <p class="card__subtitle">{t("settings.agents.opencodeReloadHint")}</p>
+                      )}
                     </div>
                   </div>
                   <div class="hstack" style="gap:var(--sp-2);flex-shrink:0">

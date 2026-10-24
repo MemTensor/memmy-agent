@@ -68,7 +68,7 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
   it("uses the Memmy permission guide and requires a fresh confirmation after restarting", async () => {
     const prepare = vi.fn().mockResolvedValueOnce(denied).mockResolvedValue(ready);
     await render({ onPrepareReader: prepare });
-    expect(document.body.textContent).toContain("需要完全磁盘访问");
+    expect(document.body.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(document.body.textContent).toContain("当前打开的 Memmy 无法访问微信数据");
     expect(document.body.textContent).toContain("1. 打开系统设置");
     expect(document.body.textContent).toContain("2. 开启 Memmy");
@@ -76,7 +76,7 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
     expect(document.body.textContent).not.toMatch(/Reader|Finder|助手/u);
     expect(props.onLoggedIn).not.toHaveBeenCalled();
     expect(openExternal).not.toHaveBeenCalled();
-    await click("打开完全磁盘访问");
+    await click("打开 Memmy 的完全磁盘访问");
     expect(openExternal).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
     expect(props.onLoggedIn).not.toHaveBeenCalled();
     await click("重启 Memmy");
@@ -94,9 +94,9 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
 
   it("does not prepare or connect automatically when returning from System Settings", async () => {
     await render({ onPrepareReader: vi.fn().mockResolvedValue(denied) });
-    await click("打开完全磁盘访问");
+    await click("打开 Memmy 的完全磁盘访问");
     await act(async () => { window.dispatchEvent(new Event("focus")); });
-    expect(document.body.textContent).toContain("需要完全磁盘访问");
+    expect(document.body.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(document.body.textContent).toContain("重启 Memmy");
     expect(props.onLoggedIn).not.toHaveBeenCalled();
     expect(props.onPrepareReader).toHaveBeenCalledOnce();
@@ -118,7 +118,7 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
     await click("我已登录");
     expect(getFullDiskAccessStatus).toHaveBeenCalledTimes(2);
     expect(props.onPrepareReader).toHaveBeenCalledOnce();
-    expect(document.body.textContent).toContain("需要完全磁盘访问");
+    expect(document.body.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(openExternal).not.toHaveBeenCalled();
     expect(props.onLoggedIn).not.toHaveBeenCalled();
   });
@@ -126,7 +126,7 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
   it("keeps the existing Memmy permission guide ahead of connection preparation", async () => {
     getFullDiskAccessStatus.mockResolvedValue(false);
     await render();
-    expect(document.body.textContent).toContain("需要完全磁盘访问");
+    expect(document.body.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(props.onPrepareReader).not.toHaveBeenCalled();
     expect(props.onLoggedIn).not.toHaveBeenCalled();
   });
@@ -159,7 +159,7 @@ describe("WeChat connection preparation and Memmy permission guide", () => {
     await render({ open: false });
     await render({ open: true });
     await act(async () => { old.resolve(ready); });
-    expect(document.body.textContent).toContain("需要完全磁盘访问");
+    expect(document.body.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(document.body.textContent).not.toContain("先登录微信");
     expect(props.onLoggedIn).not.toHaveBeenCalled();
   });

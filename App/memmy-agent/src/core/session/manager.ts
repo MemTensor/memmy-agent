@@ -106,6 +106,12 @@ function sessionSummary(session: Session, filePath: string, options: { repairPre
       ? session.metadata.modelPreset
       : null,
     model_selection: modelSelectionWire(session.metadata?.modelSelection),
+    thinking_enabled: typeof session.metadata?.thinking_enabled === "boolean"
+      ? session.metadata.thinking_enabled
+      : null,
+    thinking_level: typeof session.metadata?.thinking_level === "string"
+      ? session.metadata.thinking_level
+      : null,
   };
   if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
     const binding = readWebuiSessionBinding(session);

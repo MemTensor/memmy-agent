@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,12 +16,22 @@ const derivedManifests = [
   "App/memmy-agent/package.json",
   "App/shell/desktop/package.json",
 ];
+const optionalDerivedManifests = [
+  "App/memmy-agent/npm-packages/memmy-agent/package.json",
+];
 
 const staleFiles = [];
 for (const relativePath of derivedManifests) {
   await updateJson(relativePath, (json) => {
     json.version = version;
   });
+}
+for (const relativePath of optionalDerivedManifests) {
+  if (await exists(relativePath)) {
+    await updateJson(relativePath, (json) => {
+      json.version = version;
+    });
+  }
 }
 
 await updateText(
@@ -88,4 +98,13 @@ async function updateText(relativePath, nextText) {
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+async function exists(relativePath) {
+  try {
+    await access(join(root, relativePath));
+    return true;
+  } catch {
+    return false;
+  }
 }

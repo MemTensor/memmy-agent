@@ -2904,7 +2904,9 @@ function ProtocolSelect(props: ProtocolSelectProps) {
       value={props.value}
       onValueChange={(value) => props.onChange(value as Protocol)}
       className="select-control--paper"
-      options={PROTOCOL_OPTIONS.map((option) => ({
+      options={PROTOCOL_OPTIONS
+        .filter((option) => option.value !== "openai_responses" && option.value !== "custom")
+        .map((option) => ({
         value: option.value,
         label: t(option.labelKey)
       }))}

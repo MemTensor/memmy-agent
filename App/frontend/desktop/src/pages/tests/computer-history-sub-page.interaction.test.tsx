@@ -418,9 +418,9 @@ describe("ComputerHistorySubPage", () => {
     expect(setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
     expect(dialogButton("我已登录")).toBeUndefined();
     expect(openExternal).not.toHaveBeenCalled();
-    await act(async () => dialogButton("打开完全磁盘访问")!.click());
+    await act(async () => dialogButton("打开 Memmy 的完全磁盘访问")!.click());
     expect(openExternal).toHaveBeenCalledWith("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("需要完全磁盘访问");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Memmy 需要完全磁盘访问");
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("重启后重新打开");
     expect(readWeChatPermissionReturn()).not.toBeNull();
 
@@ -477,7 +477,7 @@ describe("ComputerHistorySubPage", () => {
     const client = await renderWith(disabled);
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!.click());
     await confirmWeChatRisk();
-    await act(async () => dialogButton("打开完全磁盘访问")!.click());
+    await act(async () => dialogButton("打开 Memmy 的完全磁盘访问")!.click());
     await act(async () => dialogButton("重启 Memmy")!.click());
     expect(restartForComputerHistoryPermissions).toHaveBeenCalledOnce();
     expect(client.setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
@@ -521,14 +521,14 @@ describe("ComputerHistorySubPage", () => {
     const accessSwitch = () => container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!;
     await act(async () => accessSwitch().click());
     await confirmWeChatRisk();
-    act(() => dialogButton("打开完全磁盘访问")!.click());
+    act(() => dialogButton("打开 Memmy 的完全磁盘访问")!.click());
     act(() => dialogButton("取消")!.click());
     await act(async () => accessSwitch().click());
     await confirmWeChatRisk();
     await act(async () => oldSession.resolve("current-process"));
     expect(openExternal).not.toHaveBeenCalled();
     expect(readWeChatPermissionReturn()).toBeNull();
-    await act(async () => dialogButton("打开完全磁盘访问")!.click());
+    await act(async () => dialogButton("打开 Memmy 的完全磁盘访问")!.click());
     expect(openExternal).toHaveBeenCalledOnce();
     expect(readWeChatPermissionReturn()?.sessionId).toBe("current-process");
   });
@@ -544,7 +544,7 @@ describe("ComputerHistorySubPage", () => {
     const client = await renderWith(disabled);
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-labelledby="computer-history-wechat-label"]')!.click());
     await confirmWeChatRisk();
-    await act(async () => dialogButton("打开完全磁盘访问")!.click());
+    await act(async () => dialogButton("打开 Memmy 的完全磁盘访问")!.click());
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("未能打开系统设置或重启 Memmy");
     expect(dialogButton("重启 Memmy")).toBeUndefined();
     expect(client.connectComputerHistoryWeChat).not.toHaveBeenCalled();

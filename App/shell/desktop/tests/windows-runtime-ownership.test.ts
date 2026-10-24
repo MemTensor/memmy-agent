@@ -78,6 +78,17 @@ describe("Windows shared drive runtime ownership", () => {
     const validate = nsis.slice(nsis.indexOf("Function MemmyValidateSelectedDirectories"), nsis.indexOf("Function MemmyExtractDataMigrationScript"));
     expect(validate.indexOf("MemmyWindowsRuntimeOwnership.ps1")).toBeLessThan(validate.indexOf("Call MemmyProbeWritableDirectory"));
     expect(validate).toContain("选择同一盘上的其他文件夹无法隔离数据");
+    expect(validate).toContain("我确认风险，仍要继续安装到该盘");
+    expect(validate).toContain("MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2");
+    expect(validate).toContain("-AcceptDriveRisk");
+    expect(validate.indexOf("${If} ${Silent}")).toBeLessThan(validate.indexOf("memmy_validate_ownership_confirm:"));
+    const guard = readSource("../build/MemmyWindowsRuntimeOwnership.ps1");
+    const freshInit = guard.slice(guard.indexOf("if ($fresh)"), guard.indexOf("$ownerSid = Get-MemmyOwnershipSid"));
+    expect(freshInit).toContain("New-Item -ItemType Directory -Path $staging");
+    expect(freshInit).toContain("New-MemmyPrivateAccessAcl $currentSid -Directory");
+    expect(freshInit).not.toContain("New-MemmyPrivateOwnershipAcl");
+    expect(guard).toContain("accepted-shared-drive-risk.json");
+    expect(guard).toContain("if ($_.Exception.Message -like '*reparse*') { throw }");
     expect(nsis.match(/File \/oname=MemmyWindowsRuntimeOwnership.ps1/g)).toHaveLength(4);
     const migration = readSource("../build/MemmyWindowsDataMigration.ps1");
     expect(migration).toContain("try {\n  Invoke-MemmyRuntimeOwnershipGuard $TargetRuntimeHomePath\n  if ($AcquireLock)");

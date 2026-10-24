@@ -7,6 +7,7 @@ import {
   PatchError,
   normalizePatchPath,
   parsePatchEnvelope,
+  validatePatchPathConflicts,
   type PatchFileOperation,
   type PatchHunk,
 } from "./patch-envelope.js";
@@ -284,7 +285,7 @@ export class ApplyPatchTool extends Tool {
   }
 
   get description(): string {
-    return "Apply a patch to add, update, delete, or move one or more workspace-relative files.";
+    return "Apply a patch to add, update, delete, or move one or more files inside the workspace.";
   }
 
   get parameters() {
@@ -316,7 +317,7 @@ To move or rename a file, use:
 Start each update hunk with @@. If needed, add an exact line from the file after @@ to help locate the change, for example: @@ function calculate().
 Prefix added lines with +, removed lines with -, and unchanged context lines with a space.
 Use *** End of File for an append or a hunk that must end at EOF.
-Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
+Paths may be workspace-relative or absolute paths inside the workspace. Use at most 20 file operations in one patch.`,
         },
       },
       required: ["input"],
@@ -327,15 +328,17 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
     return params;
   }
 
-  resolve(relativePath: string): string {
-    const normalized = normalizePatchPath(relativePath);
-    const target = path.resolve(this.workspace, ...normalized.split("/"));
+  private resolveNormalizedPath(normalized: string, requestedPath = normalized): string {
+    const target = path.isAbsolute(normalized)
+      ? path.resolve(normalized)
+      : path.resolve(this.workspace, ...normalized.split("/"));
     const relative = path.relative(this.workspace, target);
     if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new PatchError(`patch path escapes workspace: ${relativePath}`);
+      throw new PatchError(`patch path escapes workspace: ${requestedPath}`);
     }
+    if (!relative) throw new PatchError(`patch path must name a file inside the workspace: ${requestedPath}`);
 
-    const segments = normalized.split("/");
+    const segments = relative.split(path.sep);
     let current = this.workspace;
     for (let index = 0; index < segments.length; index += 1) {
       current = path.join(current, segments[index]);
@@ -352,6 +355,24 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
       }
     }
     return target;
+  }
+
+  resolve(requestedPath: string): string {
+    return this.resolveNormalizedPath(normalizePatchPath(requestedPath), requestedPath);
+  }
+
+  private normalizeOperations(operations: PatchFileOperation[]): PatchFileOperation[] {
+    const relativePath = (requestedPath: string): string =>
+      path.relative(this.workspace, this.resolve(requestedPath)).split(path.sep).join("/");
+    const normalized = operations.map((operation): PatchFileOperation => {
+      const operationPath = relativePath(operation.path);
+      if (operation.kind !== "update" || !operation.moveTo) {
+        return { ...operation, path: operationPath };
+      }
+      return { ...operation, path: operationPath, moveTo: relativePath(operation.moveTo) };
+    });
+    validatePatchPathConflicts(normalized);
+    return normalized;
   }
 
   private async readSnapshot(target: string, signal?: AbortSignal | null): Promise<FileSnapshot> {
@@ -377,9 +398,9 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
     const resolved = new Map<string, string>();
     for (const operation of operations) {
       throwIfAborted(signal);
-      resolved.set(operation.path, this.resolve(operation.path));
+      resolved.set(operation.path, this.resolveNormalizedPath(operation.path));
       if (operation.kind === "update" && operation.moveTo) {
-        resolved.set(operation.moveTo, this.resolve(operation.moveTo));
+        resolved.set(operation.moveTo, this.resolveNormalizedPath(operation.moveTo));
       }
     }
 
@@ -610,7 +631,7 @@ Paths must be workspace-relative. Use at most 20 file operations in one patch.`,
     let plan: PatchPlan;
     try {
       throwIfAborted(signal);
-      const operations = parsePatchEnvelope(params.input);
+      const operations = this.normalizeOperations(parsePatchEnvelope(params.input));
       plan = await this.planOperations(operations, signal);
       throwIfAborted(signal);
     } catch (error) {

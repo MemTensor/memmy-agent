@@ -1,4 +1,4 @@
-param([string]$RuntimeHomePath = '', [switch]$LibraryOnly)
+param([string]$RuntimeHomePath = '', [switch]$LibraryOnly, [switch]$AcceptDriveRisk)
 
 # Every consumer calls this before probing or reading a shared non-C runtime.
 # An installation folder on the same drive still resolves to the same MemmyData.
@@ -29,10 +29,10 @@ function Get-MemmyOwnershipSid([string]$Path) {
   return (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
 }
 
-function New-MemmyPrivateOwnershipAcl([string]$Sid, [switch]$Directory) {
+function New-MemmyPrivateAccessAcl([string]$Sid, [switch]$Directory) {
+  # A per-user installer cannot SetOwner. The creator already owns a new object.
   $acl = if ($Directory) { New-Object System.Security.AccessControl.DirectorySecurity } else { New-Object System.Security.AccessControl.FileSecurity }
   $acl.SetAccessRuleProtection($true, $false)
-  $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier($Sid)))
   foreach ($allowedSid in @($Sid, 'S-1-5-18', 'S-1-5-32-544')) {
     $identity = New-Object System.Security.Principal.SecurityIdentifier($allowedSid)
     $rule = if ($Directory) {
@@ -45,6 +45,35 @@ function New-MemmyPrivateOwnershipAcl([string]$Sid, [switch]$Directory) {
   return $acl
 }
 
+function New-MemmyPrivateOwnershipAcl([string]$Sid, [switch]$Directory) {
+  $acl = New-MemmyPrivateAccessAcl $Sid -Directory:$Directory
+  $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier($Sid)))
+  return $acl
+}
+
+function Get-MemmyAcceptedDriveRiskPath {
+  if (-not $env:LOCALAPPDATA) { return $null }
+  return Join-Path $env:LOCALAPPDATA 'Memmy\data-layout\accepted-shared-drive-risk.json'
+}
+
+function Test-MemmyAcceptedDriveRisk([string]$DriveRoot, [string]$CurrentSid) {
+  $path = Get-MemmyAcceptedDriveRiskPath
+  if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+  try {
+    $accepted = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json
+    return [int]$accepted.schemaVersion -eq 1 -and [string]$accepted.windowsSid -eq $CurrentSid -and [string]$accepted.driveRoot -eq $DriveRoot
+  } catch { return $false }
+}
+
+function Save-MemmyAcceptedDriveRisk([string]$DriveRoot, [string]$CurrentSid) {
+  $path = Get-MemmyAcceptedDriveRiskPath
+  if (-not $path) { throw 'LOCALAPPDATA is required to record shared-drive install risk acceptance' }
+  $parent = Split-Path -Parent $path
+  if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+  $payload = [ordered]@{ schemaVersion = 1; windowsSid = $CurrentSid; driveRoot = $DriveRoot }
+  [System.IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Compress))
+}
+
 function Assert-MemmyOwnershipEvidence([string]$CurrentSid, [string]$OwnerSid, $Claim, [string]$ClaimOwnerSid) {
   if ($CurrentSid -notmatch '^S-1-(?:5-21|12-1)-\d+(?:-\d+)+$' -or $OwnerSid -ne $CurrentSid) { throw 'Cannot verify this Memmy data directory belongs to the current Windows account' }
   if ($null -ne $Claim) {
@@ -55,12 +84,21 @@ function Assert-MemmyOwnershipEvidence([string]$CurrentSid, [string]$OwnerSid, $
 function Assert-MemmySharedRuntimeOwnership([string]$RuntimeHomePath) {
   $root = Get-MemmySharedRuntimeRoot $RuntimeHomePath
   if (-not $root) { return }
-  $result = Assert-MemmyRuntimeRootOwnership $root
-  Assert-MemmyOwnershipNoReparse $RuntimeHomePath
-  if (Test-Path -LiteralPath $RuntimeHomePath) {
-    Assert-MemmyOwnershipEvidence $result.currentSid (Get-MemmyOwnershipSid $RuntimeHomePath) $null ''
+  try {
+    $result = Assert-MemmyRuntimeRootOwnership $root
+    Assert-MemmyOwnershipNoReparse $RuntimeHomePath
+    if (Test-Path -LiteralPath $RuntimeHomePath) {
+      Assert-MemmyOwnershipEvidence $result.currentSid (Get-MemmyOwnershipSid $RuntimeHomePath) $null ''
+    }
+    return $result
+  } catch {
+    if ($_.Exception.Message -like '*reparse*') { throw }
+    $drive = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($RuntimeHomePath))
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if (-not (Test-MemmyAcceptedDriveRisk $drive $sid)) { throw }
+    Assert-MemmyOwnershipNoReparse $RuntimeHomePath
+    return [ordered]@{ currentSid = $sid; ownerSid = $sid; claimOwnerSid = $sid; claimSid = $sid; fresh = $false }
   }
-  return $result
 }
 
 function Assert-MemmyRuntimeRootOwnership([string]$RootPath) {
@@ -71,10 +109,11 @@ function Assert-MemmyRuntimeRootOwnership([string]$RootPath) {
   $fresh = -not (Test-Path -LiteralPath $root)
   if ($fresh) {
     # Publish a fully private directory atomically. Never alter a raced/legacy root ACL.
+    # Create as the current user, then protect the DACL. SetOwner requires elevation.
     $staging = "$root.owner-init-$([Guid]::NewGuid().ToString('N'))"
     try {
-      $acl = New-MemmyPrivateOwnershipAcl $currentSid -Directory
-      [System.IO.Directory]::CreateDirectory($staging, $acl) | Out-Null
+      New-Item -ItemType Directory -Path $staging -ErrorAction Stop | Out-Null
+      Set-Acl -LiteralPath $staging -AclObject (New-MemmyPrivateAccessAcl $currentSid -Directory)
       [System.IO.Directory]::Move($staging, $root)
     } catch {
       if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw }
@@ -103,7 +142,7 @@ function Assert-MemmyRuntimeRootOwnership([string]$RootPath) {
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($claim | ConvertTo-Json -Compress))
     $stream = $null
     try {
-      $security = New-MemmyPrivateOwnershipAcl $currentSid
+      $security = New-MemmyPrivateAccessAcl $currentSid
       $stream = New-Object System.IO.FileStream($claimPath, [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $security)
       $stream.Write($bytes, 0, $bytes.Length)
     } catch {
@@ -136,6 +175,16 @@ function Assert-MemmyRuntimeRootOwnership([string]$RootPath) {
 if (-not $LibraryOnly) {
   try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    if ($AcceptDriveRisk) {
+      $acceptedPath = [System.IO.Path]::GetFullPath($RuntimeHomePath)
+      $acceptedDrive = [System.IO.Path]::GetPathRoot($acceptedPath)
+      $acceptedSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+      if ($acceptedDrive -notmatch '^[A-Za-z]:\\$' -or [string]::Equals($acceptedDrive, 'C:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Shared-drive risk acceptance applies only to a non-C local drive'
+      }
+      Assert-MemmyOwnershipNoReparse $acceptedPath
+      Save-MemmyAcceptedDriveRisk $acceptedDrive $acceptedSid
+    }
     $result = Assert-MemmySharedRuntimeOwnership $RuntimeHomePath
     if ($null -ne $result) { $result | ConvertTo-Json -Compress }
     exit 0

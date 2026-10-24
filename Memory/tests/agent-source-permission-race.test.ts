@@ -14,6 +14,35 @@ function deferred() {
 }
 
 describe("revoking permission during automatic integration", () => {
+  it("publishes cancelled when the permission checkpoint wins before reload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-checkpoint-revoke-"));
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, 'memmyMemory:\n  agentAccess:\n    scanPermission: scan_only\n');
+    const release = deferred();
+    let entered = false;
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService, configPath, statePath: join(root, "state.json"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "fixture", displayName: "Fixture", builtin: true, dataPath: root },
+        async detect() { entered = true; await release.promise; return true; },
+        async *scan() { /* no data required to reach the source checkpoint */ }
+      }])
+    });
+    try {
+      await executor.startScan({ sourceId: "all" });
+      await vi.waitFor(() => expect(entered).toBe(true));
+      writeFileSync(configPath, 'memmyMemory:\n  agentAccess:\n    scanPermission: none\n');
+      release.resolve();
+      await vi.waitFor(() => expect(executor.scanStatus()).toMatchObject({ status: "cancelled", running: false }));
+      await executor.reconcileScanPermission!();
+      expect(executor.scanStatus()).toMatchObject({ status: "cancelled", running: false });
+    } finally {
+      release.resolve();
+      await executor.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["discovery", "detect", "root", "install"])("drains %s before acknowledging and prevents subsequent installs", async stage => {
     const root = mkdtempSync(join(tmpdir(), "memmy-auto-revoke-"));
     const configPath = join(root, "config.yaml");
