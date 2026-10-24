@@ -64,6 +64,7 @@ import {
   type SessionRecord
 } from "../storage/repositories.js";
 import type { SerializedMemoryVector } from "../storage/sqlite-vec-store.js";
+import { memoryVector } from "../storage/memory-vector-state.js";
 import type {
   FeedbackRequest,
   HealthResponse,
@@ -301,6 +302,7 @@ export class MemoryService {
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
+  private embeddingDimensionProbe?: { key: string; value: Promise<number> };
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
   private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
@@ -3013,18 +3015,34 @@ export class MemoryService {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
   }
 
-  rebuildEmbeddings(): {
+  rebuildEmbeddings(mode: "repair" | "rebuild" = "rebuild"): Promise<{
     accepted: true;
+    mode: "repair" | "rebuild";
     enqueued: number;
     serverTime: string;
-  } {
-    this.assertMemoryAddEnabled();
+  }> {
+    return this.withModelTaskContext(async () => {
+      this.assertMemoryAddEnabled();
+      const dimension = mode === "repair" ? await this.currentEmbeddingDimension() : 0;
+      if (mode === "repair" && dimension === 0) {
+        throw new MemoryServiceError("invalid_argument", "embedding model is not configured");
+      }
+      return this.enqueueEmbeddingMaintenance(mode, dimension);
+    });
+  }
+
+  private enqueueEmbeddingMaintenance(mode: "repair" | "rebuild", dimension: number) {
     const at = nowIso();
     let offset = 0;
     let enqueued = 0;
     for (;;) {
       const memories = this.repos.memories.list({}, 250, offset);
       for (const memory of memories) {
+        if (memory.status === "deleted") continue;
+        if (mode === "repair") {
+          const vector = memoryVector(memory, memory.memoryLayer === "L1" ? "vec_summary" : "vec");
+          if (vector && (dimension === 0 || vector.length === dimension)) continue;
+        }
         this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
         enqueued += 1;
       }
@@ -3041,6 +3059,8 @@ export class MemoryService {
         offset
       });
       for (const memory of userMemories) {
+        if (mode === "repair" && memory.embedding?.length &&
+            (dimension === 0 || memory.embedding.length === dimension)) continue;
         this.workerHandlers.enqueueJob({
           jobType: "user_memory_embedding",
           userId: memory.userId,
@@ -3054,10 +3074,10 @@ export class MemoryService {
       if (userMemories.length < 250) break;
       offset += userMemories.length;
     }
-    return { accepted: true, enqueued, serverTime: at };
+    return { accepted: true as const, mode, enqueued, serverTime: at };
   }
 
-  embeddingMaintenanceStats(): {
+  embeddingMaintenanceStats(): Promise<{
     dimension: number;
     available: boolean;
     totalSlots: number;
@@ -3065,7 +3085,24 @@ export class MemoryService {
     missing: number;
     dimMismatch: number;
     needsRepair: number;
-  } {
+    dimensionError?: string;
+    retryQueue: { pending: number; active: number; stale: number; failed: number };
+  }> {
+    return this.withModelTaskContext(async () => {
+      try {
+        const dimension = await this.currentEmbeddingDimension();
+        return this.embeddingMaintenanceStatsForDimension(dimension);
+      } catch (error) {
+        // Queue monitoring must remain usable while the provider is unavailable.
+        return {
+          ...this.embeddingMaintenanceStatsForDimension(0),
+          dimensionError: error instanceof Error ? error.message : String(error)
+        };
+      }
+    });
+  }
+
+  private embeddingMaintenanceStatsForDimension(dimension: number) {
     const userId = this.config.userId?.trim() || "local-user";
     const regular = this.repos.vectors.maintenanceDimensionCounts();
     const user = this.repos.userMemories.embeddingDimensionCounts(userId);
@@ -3073,8 +3110,6 @@ export class MemoryService {
     for (const row of [...regular.dimensions, ...user.dimensions]) {
       if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
     }
-    const [dimension = 0] = [...dimensions.entries()]
-      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
     const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
     const totalSlots = regular.totalSlots + user.totalSlots;
     const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
@@ -3087,8 +3122,29 @@ export class MemoryService {
       ready,
       missing,
       dimMismatch,
-      needsRepair: missing + dimMismatch
+      needsRepair: missing + dimMismatch,
+      retryQueue: this.repos.runtime.embeddingMaintenanceQueueStats(userId)
     };
+  }
+
+  private currentEmbeddingDimension(): Promise<number> {
+    if (!this.embedder.status().configured) return Promise.resolve(0);
+    // Pin the routed model for the probe; changing any embedding configuration
+    // invalidates the cached result. Concurrent panel refreshes share one probe.
+    const key = stableHash(stableStringify(this.embedder.config));
+    if (this.embeddingDimensionProbe?.key === key) return this.embeddingDimensionProbe.value;
+    const value = probeEmbedding(this.embedder).then(result => {
+      if (!result.ok || !result.dimensions) {
+        throw new MemoryServiceError("internal", result.error ?? "embedding model returned no dimension", 502);
+      }
+      return result.dimensions;
+    });
+    const probe = { key, value };
+    this.embeddingDimensionProbe = probe;
+    void value.catch(() => {
+      if (this.embeddingDimensionProbe === probe) this.embeddingDimensionProbe = undefined;
+    });
+    return value;
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {

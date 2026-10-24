@@ -221,10 +221,14 @@ export class SqliteVecStore {
        WHERE deleted_at IS NULL AND status != 'deleted'`
     ).pluck().get() ?? 0);
     const dimensions = this.db.prepare(
-      `SELECT entries.embedding_dim AS dimension, COUNT(DISTINCT entries.memory_id) AS count
+      `SELECT entries.embedding_dim AS dimension, COUNT(*) AS count
        FROM memory_vector_entries AS entries
        INNER JOIN memories ON memories.id = entries.memory_id
        WHERE memories.deleted_at IS NULL AND memories.status != 'deleted'
+         AND entries.vector_field = CASE
+           WHEN memories.memory_layer = 'L1' THEN 'vec_summary'
+           ELSE 'vec'
+         END
        GROUP BY entries.embedding_dim
        ORDER BY count DESC, dimension DESC`
     ).all() as Array<{ dimension: number; count: number }>;

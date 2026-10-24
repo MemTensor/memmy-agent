@@ -3507,10 +3507,12 @@ export class RuntimeRepository {
     const inProgressEmbedding = includeEmbeddingRetries
       ? this.db
         .prepare(
-          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+          `SELECT CASE
+             WHEN claimed_by IS NULL OR lease_until IS NULL THEN next_attempt_at
+             ELSE MAX(next_attempt_at, lease_until)
+           END AS run_at
            FROM embedding_retry_queue
            WHERE status = 'in_progress'
-             AND lease_until IS NOT NULL
            ORDER BY run_at ASC
            LIMIT 1`
         )
@@ -3988,7 +3990,7 @@ export class RuntimeRepository {
           source_text = excluded.source_text,
           embed_role = excluded.embed_role,
           status = CASE
-            WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN 'pending'
+            WHEN embedding_retry_queue.status IN ('failed', 'succeeded', 'in_progress') THEN 'pending'
             ELSE embedding_retry_queue.status
           END,
           attempts = CASE
@@ -4003,7 +4005,13 @@ export class RuntimeRepository {
             WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN NULL
             ELSE embedding_retry_queue.last_error
           END,
-          updated_at = excluded.updated_at`
+          updated_at = excluded.updated_at
+        WHERE NOT (
+          embedding_retry_queue.status = 'in_progress'
+          AND embedding_retry_queue.claimed_by IS NOT NULL
+          AND embedding_retry_queue.lease_until IS NOT NULL
+          AND embedding_retry_queue.lease_until > excluded.next_attempt_at
+        )`
       )
       .run({
         id: input.id ?? newId("embed_retry"),
@@ -4083,6 +4091,52 @@ export class RuntimeRepository {
     return row?.count ?? 0;
   }
 
+  embeddingRetryQueueStats(now = Date.now()): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const row = this.db.prepare(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND claimed_by IS NOT NULL AND lease_until > ?) AS active,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND (claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?)) AS stale,
+         COUNT(*) FILTER (WHERE status = 'failed') AS failed
+       FROM embedding_retry_queue`
+    ).get(now, now) as { pending: number; active: number; stale: number; failed: number };
+    return row;
+  }
+
+  embeddingMaintenanceQueueStats(userId: string, now = Date.now()): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const retries = this.embeddingRetryQueueStats(now);
+    const at = new Date(now).toISOString();
+    const jobs = this.db.prepare(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'queued') AS pending,
+         COUNT(*) FILTER (WHERE status = 'leased' AND leased_until > @at) AS active,
+         COUNT(*) FILTER (WHERE status = 'leased'
+           AND (leased_until IS NULL OR leased_until <= @at)) AS stale,
+         COUNT(*) FILTER (WHERE status IN ('failed', 'dead_letter')) AS failed
+       FROM evolution_jobs
+       WHERE job_type = 'embedding'
+          OR (job_type = 'user_memory_embedding' AND user_id = @userId)`
+    ).get({ at, userId }) as { pending: number; active: number; stale: number; failed: number };
+    return {
+      pending: retries.pending + jobs.pending,
+      active: retries.active + jobs.active,
+      stale: retries.stale + jobs.stale,
+      failed: retries.failed + jobs.failed
+    };
+  }
+
   requeueEmbeddingRetriesAfterRestart(
     now = Date.now()
   ): Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> {
@@ -4149,7 +4203,9 @@ export class RuntimeRepository {
            LEFT JOIN memories m ON m.id = q.target_id
            WHERE (
              q.status = 'pending'
-             OR (q.status = 'in_progress' AND q.lease_until IS NOT NULL AND q.lease_until <= ?)
+             OR (q.status = 'in_progress' AND (
+               q.claimed_by IS NULL OR q.lease_until IS NULL OR q.lease_until <= ?
+             ))
            )
              AND q.next_attempt_at <= ?
              ${targetFilter}
@@ -4169,7 +4225,9 @@ export class RuntimeRepository {
              WHERE id = ?
                AND (
                  status = 'pending'
-                 OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
+                 OR (status = 'in_progress' AND (
+                   claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?
+                 ))
                )
                AND next_attempt_at <= ?`
           )

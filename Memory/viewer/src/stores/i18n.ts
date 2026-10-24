@@ -894,6 +894,9 @@ const en = {
   "settings.embedding.maintenance.title": "Embedding maintenance",
   "settings.embedding.maintenance.stats":
     "Ready {ready}/{total}; missing {missing}; dimension mismatch {mismatch}; current dim {dim}.",
+  "settings.embedding.maintenance.queue":
+    "Embedding tasks: pending {pending}; valid lease {active}; stale or unclaimed {stale}; failed {failed}.",
+  "settings.embedding.maintenance.dimensionError": "Unable to check the current embedding dimension: {error}",
   "settings.embedding.maintenance.unavailable":
     "Configure an embedding provider before repairing or rebuilding vectors.",
   "settings.embedding.maxInputTokens.label": "Maximum input tokens",
@@ -904,7 +907,8 @@ const en = {
     "Maximum texts per provider request. Rejected oversized batches are split automatically.",
   "settings.embedding.repair": "Repair missing/mismatched",
   "settings.embedding.rebuild": "Rebuild all vectors",
-  "settings.embedding.rebuild.running": "Rebuilding embeddings…",
+  "settings.embedding.rebuild.running": "Scheduling embedding work…",
+  "settings.embedding.rebuild.queued": "Queued {count} embedding tasks. Progress updates in the queue status above.",
   "settings.embedding.rebuild.progress":
     "Updated {updated}, failed {failed}, remaining repairs {remaining}.",
   "settings.embedding.rebuild.done": "Embedding rebuild complete: updated {updated}, failed {failed}.",
@@ -1853,6 +1857,9 @@ const zh: Record<TranslationKey, string> = {
   "settings.embedding.maintenance.title": "向量维护",
   "settings.embedding.maintenance.stats":
     "可用 {ready}/{total}；缺失 {missing}；维度不匹配 {mismatch}；当前维度 {dim}。",
+  "settings.embedding.maintenance.queue":
+    "向量任务队列：待处理 {pending}；租约有效 {active}；无主或租约失效 {stale}；失败 {failed}。",
+  "settings.embedding.maintenance.dimensionError": "无法确认当前向量维度：{error}",
   "settings.embedding.maintenance.unavailable": "请先配置嵌入模型，再修复或重建向量。",
   "settings.embedding.maxInputTokens.label": "单条输入最大 Token 数",
   "settings.embedding.maxInputTokens.hint": "已知 OpenAI Embedding 模型使用 7500 Token 分块预算；模型信息不透明的 OpenAI 兼容服务使用保守的 4000 Token 预算。上下文窗口更短时可设置更低预算，修改后请重建向量。",
@@ -1860,7 +1867,8 @@ const zh: Record<TranslationKey, string> = {
   "settings.embedding.providerBatchSize.hint": "单次模型请求最多发送的文本数；超限失败时会自动拆批。",
   "settings.embedding.repair": "修复缺失/错维",
   "settings.embedding.rebuild": "全量重建向量",
-  "settings.embedding.rebuild.running": "正在重建向量…",
+  "settings.embedding.rebuild.running": "正在提交向量任务…",
+  "settings.embedding.rebuild.queued": "已加入 {count} 个向量任务；可在上方查看队列进度。",
   "settings.embedding.rebuild.progress": "已更新 {updated}，失败 {failed}，待修复 {remaining}。",
   "settings.embedding.rebuild.done": "向量重建完成：已更新 {updated}，失败 {failed}。",
   "settings.summarizer.title": "摘要模型",
