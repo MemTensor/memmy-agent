@@ -1432,16 +1432,19 @@ function namespaceFromRequest(request: IncomingMessage, url: URL): RuntimeNamesp
   const any = userId || tenantId || projectId || workspaceId || workspacePath || source ||
     profileId || profileLabel || sessionKey;
   if (!any) return undefined;
+  // Only echo headers that were actually sent: absent headers must not surface as
+  // own properties with `undefined` values, because those overwrite the
+  // token-bound namespace when namespaces are merged.
   return {
-    userId,
-    tenantId,
-    projectId,
-    workspaceId,
-    workspacePath,
+    ...(userId ? { userId } : {}),
+    ...(tenantId ? { tenantId } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+    ...(workspacePath ? { workspacePath } : {}),
     source: source ?? DEFAULT_NAMESPACE_SOURCE,
     profileId: profileId ?? "default",
-    profileLabel,
-    sessionKey
+    ...(profileLabel ? { profileLabel } : {}),
+    ...(sessionKey ? { sessionKey } : {})
   };
 }
 
@@ -1615,13 +1618,31 @@ function mergeNamespaces(
   if (!requestNamespace && !principalNamespace) return undefined;
   const principalSource = principalNamespace?.source;
   return {
-    ...(requestNamespace ?? {}),
-    ...(principalNamespace ?? {}),
+    ...definedNamespaceFields(requestNamespace),
+    ...definedNamespaceFields(principalNamespace),
     source: principalSource && principalSource !== DEFAULT_NAMESPACE_SOURCE
       ? principalSource
       : requestNamespace?.source ?? DEFAULT_NAMESPACE_SOURCE,
     profileId: principalNamespace?.profileId ?? requestNamespace?.profileId ?? "default"
   };
+}
+
+/**
+ * Object spread copies own properties even when their value is `undefined`, which
+ * would erase a value provided by the other namespace. Drop absent fields so a
+ * token-bound namespace survives requests that only send a subset of headers.
+ */
+function definedNamespaceFields(
+  namespace: RuntimeNamespace | undefined
+): Partial<RuntimeNamespace> {
+  if (!namespace) return {};
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(namespace)) {
+    if (value !== undefined && value !== null) {
+      fields[key] = value;
+    }
+  }
+  return fields as Partial<RuntimeNamespace>;
 }
 
 function assertNamespaceScope(

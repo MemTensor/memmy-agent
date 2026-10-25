@@ -1327,6 +1327,115 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("keeps the token-bound namespace when a request sends only a subset of headers", async () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const server = createMemoryHttpServer({
+      service,
+      auth: {
+        cloudAccessTokens: {
+          "tok-host-a": {
+            source: "source-a",
+            profileId: "default",
+            userId: "tenant-acme",
+            tenantId: "acme"
+          },
+          "tok-host-b": {
+            source: "source-b",
+            profileId: "default",
+            userId: "tenant-acme",
+            tenantId: "acme"
+          }
+        }
+      }
+    });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected TCP address");
+      }
+      const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+
+      const headerless = await fetch(`${baseUrl}/sessions/open`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer tok-host-b",
+          "content-type": "application/json",
+          "x-memmy-profile-id": "default"
+        },
+        body: JSON.stringify({ sessionId: "probe-1", source: "source-b" })
+      });
+      expect(headerless.status).toBe(200);
+
+      const stored = repos.runtime.getSession("probe-1");
+      expect(stored?.userId).toBe("tenant-acme");
+      expect(stored?.source).toBe("source-b");
+
+      const explicitUser = await fetch(`${baseUrl}/sessions/open`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer tok-host-a",
+          "content-type": "application/json",
+          "x-memmy-user-id": "tenant:explicit"
+        },
+        body: JSON.stringify({ sessionId: "probe-explicit", source: "source-a" })
+      });
+      expect(explicitUser.status).toBe(200);
+      expect(repos.runtime.getSession("probe-explicit")?.userId).toBe("tenant:explicit");
+    });
+    db.close();
+  });
+
+  it("does not let partial headers erase tenantId while merging request namespaces", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({
+      service,
+      auth: {
+        cloudAccessTokens: {
+          "tok-tenant": {
+            source: "codex",
+            profileId: "bound-profile",
+            userId: "tenant:acme",
+            tenantId: "tenant:acme",
+            projectId: "bound-project"
+          }
+        }
+      }
+    });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected TCP address");
+      }
+      const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+
+      const response = await fetch(`${baseUrl}/sessions/open`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer tok-tenant",
+          "content-type": "application/json",
+          // A single header makes the request namespace non-empty; the absent
+          // tenant/user/project headers must not erase the token binding.
+          "x-memmy-profile-id": "default"
+        },
+        body: JSON.stringify({ sessionId: "probe-tenant" })
+      });
+      expect(response.status).toBe(200);
+      const stored = new Repositories(db.db);
+      const session = stored.runtime.getSession("probe-tenant");
+      expect(session?.userId).toBe("tenant:acme");
+      expect(session?.profileId).toBe("default");
+      expect(session?.projectId).toBe("bound-project");
+    });
+    db.close();
+  });
+
   it("passes REST search tags and limit through to recall", async () => {
     const { db, service } = createTestService({
       llm: createDeterministicSummaryLlm("shared beach trip detail")
