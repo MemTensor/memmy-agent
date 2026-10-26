@@ -78,6 +78,19 @@ function responseText(value: any): string {
   return String(value);
 }
 
+/** Model failures are returned on the outbound message. A clean SSE close would look like success. */
+function modelFailure(value: unknown): { message: string; code: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const metadata = (value as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const record = metadata as Record<string, unknown>;
+  if (typeof record.modelErrorCategory !== "string" || !record.modelErrorCategory.trim()) return null;
+  const detail = typeof record.modelErrorDetail === "string" ? record.modelErrorDetail.trim() : "";
+  const message = detail || responseText(value).trim();
+  if (!message) return null;
+  return { message, code: record.modelErrorCategory.trim() };
+}
+
 function responseUsage(value: any): Record<string, any> {
   const usage = value?.metadata?.usage;
   return usage && typeof usage === "object" && !Array.isArray(usage) ? usage : {};
@@ -398,7 +411,11 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
                 onStreamEnd,
               });
               controller.signal.throwIfAborted();
-              if (!emitted) {
+              const failure = modelFailure(response);
+              if (failure) {
+                write(`data: ${JSON.stringify({ error: { code: failure.code, message: failure.message } })}\n\n`);
+                failed = true;
+              } else if (!emitted) {
                 const finalText = responseText(response);
                 if (finalText.trim()) write(sseChunk(finalText, context.modelName, chunkId));
               }
@@ -443,17 +460,22 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
       controller.signal.throwIfAborted();
       const first = await invoke(baseArgs);
       controller.signal.throwIfAborted();
+      const firstFailure = modelFailure(first);
+      if (firstFailure) return { text: "", usage: responseUsage(first), failure: firstFailure };
       let textResponse = responseText(first);
       let usage = responseUsage(first);
       if (!textResponse.trim()) {
         const retry = await invoke(baseArgs);
         controller.signal.throwIfAborted();
+        const retryFailure = modelFailure(retry);
+        if (retryFailure) return { text: "", usage: mergeUsageRecords(usage, responseUsage(retry)), failure: retryFailure };
         textResponse = responseText(retry);
         usage = mergeUsageRecords(usage, responseUsage(retry));
         if (!textResponse.trim()) textResponse = EMPTY_FINAL_RESPONSE_MESSAGE;
       }
-      return { text: textResponse, usage };
+      return { text: textResponse, usage, failure: null };
     });
+    if (reply.failure) return errorJson(502, reply.failure.message, "server_error");
     return Response.json(chatCompletionResponse(reply.text, context.modelName, reply.usage));
   } catch {
     if (controller.signal.aborted) return errorJson(409, "Task cancelled by user.", "cancelled");

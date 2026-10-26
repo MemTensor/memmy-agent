@@ -399,6 +399,48 @@ it("explicit cancellation ends SSE as cancelled, never as successful completion"
   expect(text).not.toContain("successful reply");
 });
 
+it("does not return a stalled model call as a completed chat completion", async () => {
+  const app = createApp({
+    processDirect: async () => ({
+      content: "[Assistant reply unavailable due to model error.]",
+      metadata: {
+        modelErrorCategory: "model_failed",
+        modelErrorDetail: "Error calling LLM: stream stalled for more than 90 seconds",
+      },
+    }),
+  }, "m");
+  const response = await app.fetch(request({ messages: [{ role: "user", content: "go" }] }));
+  const body = await response.json() as { error: { message: string } };
+
+  expect(response.status).toBe(502);
+  expect(body.error.message).toBe("Error calling LLM: stream stalled for more than 90 seconds");
+});
+
+it("a stalled model stream stays a failure after partial text has already been sent", async () => {
+  const app = createApp({
+    processDirect: async (args: any) => {
+      await args.onStream("开始生成");
+      return {
+        content: "[Assistant reply unavailable due to model error.]",
+        metadata: {
+          modelErrorCategory: "model_failed",
+          modelErrorDetail: "Error calling LLM: stream stalled for more than 90 seconds",
+        },
+      };
+    },
+  }, "m");
+  const text = await (await app.fetch(request({ messages: [{ role: "user", content: "go" }], stream: true }))).text();
+  const payloads = ssePayloads(text).filter((line) => line !== "[DONE]").map((line) => JSON.parse(line));
+
+  expect(payloads.some((item) => item.choices?.[0]?.delta?.content === "开始生成")).toBe(true);
+  expect(payloads.at(-1).error).toEqual({
+    code: "model_failed",
+    message: "Error calling LLM: stream stalled for more than 90 seconds",
+  });
+  expect(text).not.toContain("[DONE]");
+  expect(text).not.toContain("[Assistant reply unavailable due to model error.]");
+});
+
 it("a model or tool error remains a failure, not user cancellation", async () => {
   let signal!: AbortSignal;
   const app = createApp({ processDirect: async (args: any) => {
