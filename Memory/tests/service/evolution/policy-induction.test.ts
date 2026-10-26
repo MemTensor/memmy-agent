@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, MemoryDb, type LlmClient } from "../../../src/index.js";
 import { l2CandidateIdFor } from "../../../src/algorithm/plugin-algorithms.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -1287,3 +1287,126 @@ function createBc08SummaryLlm(): LlmClient {
     })
   };
 }
+
+describe("MemoryService / evolution / policy induction evidence freshness", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each(["deleted", "ttl"] as const)("re-reads each signature bucket when evidence becomes %s mid-loop", async (invalidation) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const root = createTestRoot("policy-freshness-");
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const l2Calls: Array<{ messages: Array<{ role: string; content: string }>; options: { operation: string } }> = [];
+    let release: (() => void) | undefined;
+    let reached: (() => void) | undefined;
+    const firstCall = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+
+    // Hold the first induction call open so the other signature's evidence expires meanwhile.
+    const base = createCapturingL2Llm(l2Calls);
+    let inductionCalls = 0;
+    const llm: typeof base = {
+      ...base,
+      async completeJson<T extends Record<string, unknown>>(
+        messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+        options: { operation: string }
+      ) {
+        if (options.operation === "l2.induction.v4" && inductionCalls++ === 0) {
+          reached?.();
+          await gate;
+        }
+        return base.completeJson<T>(messages, options);
+      }
+    };
+
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      skillLlm: llm,
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, useLlm: true, minEpisodesForInduction: 1 },
+          l3Abstraction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction, useLlm: false },
+          skill: { ...DEFAULT_MEMMY_CONFIG.algorithm.skill, useLlm: false }
+        }
+      }
+    });
+
+    const userId = "user-policy-freshness";
+    const namespace = { source: "codex", profileId: "fresh", userId };
+    const session = service.openSession({ namespace, workspaceId: "workspace-policy-freshness" });
+    // Separate Episodes: expiring B must not also move A's Episode revision, so the only thing
+    // standing between expired evidence and a Policy is the per-signature reload.
+    const first = service.completeTurn("turn-fresh-a", {
+      sessionId: session.sessionId, episodeId: "episode-fresh-a",
+      query: "pytest workflow A needs a focused check", answer: "Ran the focused pytest check and verified it."
+    });
+    const second = service.completeTurn("turn-fresh-b", {
+      sessionId: session.sessionId, episodeId: "episode-fresh-b",
+      query: "pytest workflow B needs a focused check", answer: "Ran the focused pytest check and verified it."
+    });
+    // Sorted signatures decide the loop order; keep A first so B is still pending when A generates.
+    const signatureA = "pytest|python|fresh|A";
+    const signatureB = "pytest|python|fresh|B";
+    setTraceSignatureAndVectorForTest(db, first.l1MemoryId, signatureA, [1, 0, 0]);
+    setTraceSignatureAndVectorForTest(db, second.l1MemoryId, signatureB, [0, 1, 0]);
+    for (const id of [first.l1MemoryId, second.l1MemoryId]) makeTraceEligibleForL2(db, id);
+
+    const repos = new Repositories(db.db);
+    const at = new Date().toISOString();
+    for (const [signature, id] of [[signatureA, first.l1MemoryId], [signatureB, second.l1MemoryId]] as const) {
+      repos.runtime.upsertCandidatePoolTrace({
+        id: l2CandidateIdFor(signature, id),
+        userId,
+        sessionId: session.sessionId,
+        sourceMemoryId: id,
+        candidateKey: signature,
+        candidateValue: "pytest focused check",
+        score: 1,
+        evidence: { traceId: id },
+        createdAt: at,
+        updatedAt: at,
+        expiresAt: new Date(Date.parse(at) + (signature === signatureB ? 1000 : 86_400_000)).toISOString()
+      });
+    }
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
+         payload_json, attempts, max_attempts, created_at, updated_at
+       ) VALUES (?, 'l2_induction', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
+    ).run("job_policy_freshness", userId, session.sessionId, first.episodeId, first.l1MemoryId, at, at);
+
+    const running = service.runWorkerOnce(20);
+    await firstCall;
+    // Signature B's evidence stops being eligible while the first draft is still generating.
+    if (invalidation === "deleted") {
+      db.db.prepare("UPDATE memories SET status = 'deleted', deleted_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), second.l1MemoryId);
+    } else {
+      vi.setSystemTime(Date.parse(at) + 2000);
+      expect(repos.memories.get(second.l1MemoryId)).toBeDefined();
+      expect(repos.runtime.listPendingCandidatePool({ now: new Date().toISOString() })
+        .some(candidate => candidate.sourceMemoryId === second.l1MemoryId)).toBe(false);
+    }
+    release?.();
+    await running;
+
+    const rows = db.db.prepare(
+      `SELECT properties_json FROM memories WHERE user_id = ? AND memory_layer = 'L2'`
+    ).all(userId) as Array<{ properties_json: string }>;
+    const cited = rows.flatMap((row) =>
+      (JSON.parse(row.properties_json) as { internal_info?: { policy?: { source_trace_ids?: string[] } } })
+        .internal_info?.policy?.source_trace_ids ?? []);
+    expect(cited).not.toContain(second.l1MemoryId);
+    expect(inductionCalls).toBe(1);
+    // The expired bucket must not be promoted behind a Policy that never legitimately saw it.
+    const pool = db.db.prepare(
+      "SELECT candidate_key, status FROM l2_candidate_pool"
+    ).all() as Array<{ candidate_key: string; status: string }>;
+    expect(pool.find((row) => row.candidate_key === signatureA)?.status).toBe("promoted");
+    expect(pool.find((row) => row.candidate_key === signatureB)?.status).toBe("pending");
+    db.close();
+  }, 30_000);
+});

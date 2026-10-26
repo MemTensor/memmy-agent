@@ -42,12 +42,14 @@ import type { LlmClient } from "../../model/types.js";
 import { kindFromMemory, type EpisodeRecord, type EvolutionJobRecord, type Repositories, type SkillClusterRecord } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
-import { newId } from "../../utils/id.js";
+import { newId, stableHash, stableStringify } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { elapsedApiLogMs, recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
+
+import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
 
 export interface SkillClusterPipelineDeps {
   repos: Repositories;
@@ -83,64 +85,104 @@ export class SkillClusterPipeline {
       return;
     }
 
+    if (!jobRevisionIsCurrent(this.deps.repos, job)) return;
+    const inputRevision = episodeInputRevision(this.deps.repos, episode.id, true);
     const at = nowIso();
-    const features = await this.featuresForEpisode(episode);
-    const existing = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
-    let cluster: SkillClusterRecord;
-    if (existing) {
-      cluster = this.refreshClusterFeatures(existing, features, at);
-      this.deps.repos.runtime.upsertSkillClusterMember({
-        clusterId: cluster.id,
-        episodeId: episode.id,
-        outcome: features.outcome,
-        rTask: episode.rTask,
-        assignedAt: at
-      });
-    } else {
-      const candidates = this.deps.repos.runtime.listSkillClustersByScope({
-        userId: episode.userId,
-        projectId: episode.projectId
-      });
-      const decision = decideClusterAssignment(features, candidates.map(clusterFeatures), this.clusteringConfig());
-      logEvolutionDecision(job, "skill_cluster_assign", decision.reason, {
-        episodeId: episode.id,
-        clusterId: decision.clusterId,
-        score: decision.score,
-        stage: decision.stage,
-        tools: features.tools,
-        artifacts: features.artifacts,
-        hasQueryVec: Boolean(features.queryVec?.length)
-      });
-      if (decision.action === "join" && decision.clusterId) {
-        const joined = this.deps.repos.runtime.getSkillCluster(decision.clusterId);
-        if (!joined) {
-          cluster = this.createCluster(episode, features, at);
-        } else {
-          cluster = this.refreshClusterFeatures(joined, features, at);
-        }
-      } else {
-        cluster = this.createCluster(episode, features, at);
+    const cached = episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+    const features = episode.meta.clusterFeaturesInput === inputRevision && cached
+      ? cached : await this.featuresForEpisode(episode);
+    const featureCache = new Map<string, EpisodeSkillFeatures>();
+    const memberRevisions = new Map<string, string>();
+    const candidates = this.deps.repos.runtime.listSkillClustersByScope({ userId: episode.userId, projectId: episode.projectId });
+    const previousCluster = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
+    const decision = previousCluster ? undefined : decideClusterAssignment(features, candidates.map(clusterFeatures), this.clusteringConfig());
+    const selected = previousCluster ?? candidates.find(candidate => candidate.id === decision?.clusterId);
+    const clusterBefore = selected ? stableStringify(selected) : undefined;
+    const selectedMembers = new Map((selected ? this.deps.repos.runtime.listSkillClusterMembers(selected.id) : [])
+      .map(member => [member.episodeId, member]));
+    if (selected) {
+      for (const member of selectedMembers.values()) {
+        const other = this.deps.repos.runtime.getEpisode(member.episodeId);
+        if (!other || other.id === episode.id) continue;
+        const revision = episodeInputRevision(this.deps.repos, other.id, true);
+        memberRevisions.set(other.id, revision);
+        const stored = other.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+        featureCache.set(other.id, stored && other.meta.clusterFeaturesInput === revision
+          ? stored : await this.featuresForEpisode(other));
       }
-      this.deps.repos.runtime.upsertSkillClusterMember({
-        clusterId: cluster.id,
-        episodeId: episode.id,
-        outcome: features.outcome,
-        rTask: episode.rTask,
-        assignedAt: at
-      });
     }
+    this.deps.repos.transaction(() => {
+      if (episodeInputRevision(this.deps.repos, episode.id, true) !== inputRevision) {
+        throw new Error("episode inputs changed during cluster assignment; retry assignment");
+      }
+      if (selected && stableStringify(this.deps.repos.runtime.getSkillCluster(selected.id)) !== clusterBefore) {
+        throw new Error("cluster changed while loading member features; retry assignment");
+      }
+      for (const [id, revision] of memberRevisions) {
+        if (episodeInputRevision(this.deps.repos, id, true) !== revision) throw new Error("cluster member changed; retry assignment");
+        this.deps.repos.runtime.updateEpisodeMeta(id, { clusterFeatures: featureCache.get(id), clusterFeaturesInput: revision }, at);
+        const member = selectedMembers.get(id);
+        const other = this.deps.repos.runtime.getEpisode(id)!;
+        if (member) this.deps.repos.runtime.upsertSkillClusterMember({ ...member,
+          outcome: featureCache.get(id)!.outcome, rTask: other.rTask });
+      }
+      this.deps.repos.runtime.updateEpisodeMeta(episode.id, { clusterFeatures: features, clusterFeaturesInput: inputRevision }, at);
+      featureCache.set(episode.id, features);
+      const existing = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
+      let cluster: SkillClusterRecord;
+      if (existing) {
+        cluster = this.refreshClusterFeatures(existing, features, at, featureCache);
+        this.deps.repos.runtime.upsertSkillClusterMember({
+          clusterId: cluster.id,
+          episodeId: episode.id,
+          outcome: features.outcome,
+          rTask: episode.rTask,
+          assignedAt: this.deps.repos.runtime.listSkillClusterMembers(cluster.id).find(member => member.episodeId === episode.id)?.assignedAt ?? at
+        });
+      } else {
+        // Reuse the decision made before the transaction, together with the member features
+        // loaded for its target. Deciding again here could pick a cluster whose members were
+        // never loaded, and refreshing it would rebuild its features from this episode alone.
+        logEvolutionDecision(job, "skill_cluster_assign", decision?.reason ?? "no_decision", {
+          episodeId: episode.id,
+          clusterId: decision?.clusterId,
+          score: decision?.score,
+          stage: decision?.stage,
+          tools: features.tools,
+          artifacts: features.artifacts,
+          hasQueryVec: Boolean(features.queryVec?.length)
+        });
+        if (decision?.action === "join" && decision.clusterId) {
+          const joined = this.deps.repos.runtime.getSkillCluster(decision.clusterId);
+          if (!joined || joined.id !== selected?.id) {
+            throw new Error("target cluster changed while loading member features; retry assignment");
+          }
+          cluster = this.refreshClusterFeatures(joined, features, at, featureCache);
+        } else {
+          cluster = this.createCluster(episode, features, at);
+        }
+        this.deps.repos.runtime.upsertSkillClusterMember({
+          clusterId: cluster.id,
+          episodeId: episode.id,
+          outcome: features.outcome,
+          rTask: episode.rTask,
+          assignedAt: at
+        });
+      }
 
-    this.deps.repos.runtime.updateEpisodeMeta(episode.id, { skill_cluster_id: cluster.id }, at);
-    this.deps.enqueueJob({
-      jobType: "skill_batch_evolve",
-      userId: episode.userId,
-      sessionId: episode.sessionId,
-      episodeId: episode.id,
-      payload: {
-        reason: "skill_cluster_assign",
-        clusterId: cluster.id
-      },
-      createdAt: at
+      this.deps.repos.runtime.updateEpisodeMeta(episode.id, { skill_cluster_id: cluster.id }, at);
+      this.deps.enqueueJob({
+        jobType: "skill_batch_evolve",
+        userId: episode.userId,
+        sessionId: episode.sessionId,
+        episodeId: episode.id,
+        payload: {
+          reason: "skill_cluster_assign",
+          clusterRevision: this.clusterInputRevision(cluster.id),
+          clusterId: cluster.id
+        },
+        createdAt: at
+      });
     });
   }
 
@@ -158,6 +200,8 @@ export class SkillClusterPipeline {
       return;
     }
 
+    const batchRevision = this.clusterInputRevision(cluster.id);
+    if (typeof job.payload.clusterRevision === "string" && job.payload.clusterRevision !== batchRevision) return;
     const members = this.deps.repos.runtime.listSkillClusterMembers(cluster.id);
     const scoredMembers = members.flatMap((member) => {
       const episode = this.deps.repos.runtime.getEpisode(member.episodeId);
@@ -262,6 +306,7 @@ export class SkillClusterPipeline {
         existing: skillBefore,
         rebuildScope: branch.action === "rebuild" ? branch.rebuildScope ?? "retrieval" : undefined
       });
+      if (this.clusterInputRevision(cluster.id) !== batchRevision) return;
       const merged = skillBefore && branch.rebuildScope
         ? mergeProcedureByScope(skillBefore, draft.procedure, branch.rebuildScope)
         : draft.procedure;
@@ -341,6 +386,12 @@ export class SkillClusterPipeline {
     }
   }
 
+  private clusterInputRevision(clusterId: string): string {
+    return stableHash(stableStringify(this.deps.repos.runtime.listSkillClusterMembers(clusterId)
+      .map(member => ({ id: member.episodeId, revision: episodeInputRevision(this.deps.repos, member.episodeId, true) }))
+      .sort((a,b) => a.id.localeCompare(b.id))));
+  }
+
   private clusteringConfig(): DirectSkillClusteringConfig {
     const skill = this.deps.config.algorithm.skill;
     return {
@@ -364,8 +415,9 @@ export class SkillClusterPipeline {
   private async featuresForEpisode(episode: EpisodeRecord): Promise<EpisodeSkillFeatures> {
     const turns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000);
     const queryText = firstUserQuery(turns);
-    let queryVec: number[] | null = null;
-    if (queryText && this.deps.queryVector) {
+    const previous = episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+    let queryVec: number[] | null = previous?.queryText === queryText ? previous.queryVec : null;
+    if (!queryVec && queryText && this.deps.queryVector) {
       try {
         queryVec = (await this.deps.queryVector(queryText)) ?? null;
       } catch {
@@ -403,18 +455,30 @@ export class SkillClusterPipeline {
   private refreshClusterFeatures(
     cluster: SkillClusterRecord,
     features: EpisodeSkillFeatures,
-    at: string
+    at: string,
+    featureCache: Map<string, EpisodeSkillFeatures>
   ): SkillClusterRecord {
-    const alreadyMember = this.deps.repos.runtime
-      .listSkillClusterMembers(cluster.id)
-      .some((member) => member.episodeId === features.episodeId);
+    const members = this.deps.repos.runtime.listSkillClusterMembers(cluster.id).sort((a,b) => a.assignedAt.localeCompare(b.assignedAt) || a.episodeId.localeCompare(b.episodeId));
+    const alreadyMember = members.some(member => member.episodeId === features.episodeId);
+    // Members missing from the preloaded cache (an episode deleted between load and write) fall
+    // back to their stored features, so the aggregate never collapses to the current episode.
+    const rows = members.map(member => featureCache.get(member.episodeId)
+      ?? this.deps.repos.runtime.getEpisode(member.episodeId)?.meta.clusterFeatures as EpisodeSkillFeatures | undefined)
+      .filter((row): row is EpisodeSkillFeatures => Boolean(row));
+    if (!alreadyMember) rows.push(features);
+    let centroid: number[] | null = null;
+    rows.forEach((row, index) => { centroid = mergeCentroid(centroid, row.queryVec, index); });
+    const changedMembers = new Set(rows.filter(row =>
+      this.deps.repos.runtime.getEpisode(row.episodeId)?.meta.clusterProcessedFeatures !== this.processedFingerprint(row)
+    ).map(row => row.episodeId));
     const next: SkillClusterRecord = {
       ...cluster,
-      tools: uniqSorted([...cluster.tools, ...features.tools]),
-      artifacts: uniqSorted([...cluster.artifacts, ...features.artifacts]),
-      toolBigrams: uniqSorted([...cluster.toolBigrams, ...features.toolBigrams]),
-      centroid: mergeCentroid(cluster.centroid, features.queryVec, cluster.memberCount),
-      memberCount: alreadyMember ? cluster.memberCount : cluster.memberCount + 1,
+      tools: uniqSorted(rows.flatMap(row => row.tools)),
+      artifacts: uniqSorted(rows.flatMap(row => row.artifacts)),
+      toolBigrams: uniqSorted(rows.flatMap(row => row.toolBigrams)),
+      centroid,
+      memberCount: rows.length,
+      processedEpisodeIds: cluster.processedEpisodeIds.filter(id => !changedMembers.has(id)),
       updatedAt: at
     };
     return this.deps.repos.runtime.updateSkillCluster(next);
@@ -458,9 +522,29 @@ export class SkillClusterPipeline {
   }
 
   private markProcessed(cluster: SkillClusterRecord, episodeIds: string[], at: string): SkillClusterRecord {
+    for (const id of episodeIds) {
+      const episode = this.deps.repos.runtime.getEpisode(id);
+      if (episode) this.deps.repos.runtime.updateEpisodeMeta(id, {
+        clusterProcessedFeatures: this.processedFingerprint(episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined)
+      }, at);
+    }
     const processedEpisodeIds = uniqSorted([...cluster.processedEpisodeIds, ...episodeIds]);
     const next = { ...cluster, processedEpisodeIds, updatedAt: at };
     return this.deps.repos.runtime.updateSkillCluster(next);
+  }
+
+  /**
+   * Track the features and evidence actually sent to the model. Raw steps and scores can
+   * change without changing clustering features, while scoring timestamps and Episode
+   * lifecycle metadata must not turn identical evidence into a new contribution.
+   */
+  private processedFingerprint(features: EpisodeSkillFeatures | undefined): string | undefined {
+    if (!features) return undefined;
+    const episode = this.deps.repos.runtime.getEpisode(features.episodeId);
+    return stableHash(stableStringify({
+      features,
+      evidence: this.packEpisode(features.episodeId, features.outcome, episode?.rTask)
+    }));
   }
 
   private async generateProcedure(input: {
@@ -530,6 +614,7 @@ export class SkillClusterPipeline {
     successEpisodeIds: string[];
     at: string;
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
+    const previousSkill = input.existing ? skillMetaFromMemory(input.existing) : undefined;
     const invocationGuide = renderDirectSkillGuide(input.name, input.procedure);
     const evidenceAnchorIds = uniqSorted([
       ...((input.existing ? skillMetaFromMemory(input.existing)?.evidenceAnchorIds : []) ?? []),
@@ -552,11 +637,12 @@ export class SkillClusterPipeline {
       tags: uniqSorted(["skill", "direct-trace", ...input.procedure.tags, ...input.procedure.tools]),
       info: {
         name: input.name,
-        eta: 0.6,
+        eta: previousSkill?.eta ?? 0.6,
         status: "active",
         source_memory_ids: []
       },
       internal: {
+        ...(input.existing?.properties.internal_info ?? {}),
         source: DIRECT_SKILL_SOURCE,
         plugin_algorithm: DIRECT_SKILL_PLUGIN,
         read_only: false,
@@ -568,12 +654,13 @@ export class SkillClusterPipeline {
         name: input.name,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
-        eta: 0.6,
+        eta: previousSkill?.eta ?? 0.6,
         support: evidenceAnchorIds.length,
         gain: 0.4,
         skill: {
+          ...(isRecord(input.existing?.properties.internal_info.skill) ? input.existing.properties.internal_info.skill : {}),
           name: input.name,
-          eta: 0.6,
+          eta: previousSkill?.eta ?? 0.6,
           status: "active",
           support: evidenceAnchorIds.length,
           gain: 0.4,
@@ -634,6 +721,7 @@ export class SkillClusterPipeline {
       rebuildScope: string;
     }
   ): Promise<void> {
+    const inputRevision = this.clusterInputRevision(cluster.id);
     let nextMd = cluster.metaSkillMd || SEED_META_SKILL_MD;
     if (this.deps.config.algorithm.skill.useLlm && this.deps.skillLlm.isConfigured()) {
       try {
@@ -675,8 +763,11 @@ export class SkillClusterPipeline {
     } else if (input.rejectReason) {
       nextMd = `${SEED_META_SKILL_MD}\n\nLast reject: ${input.rejectReason}`;
     }
+    if (this.clusterInputRevision(cluster.id) !== inputRevision) return;
+    const current = this.deps.repos.runtime.getSkillCluster(cluster.id);
+    if (!current || current.metaSkillMd !== cluster.metaSkillMd) return;
     this.deps.repos.runtime.updateSkillCluster({
-      ...cluster,
+      ...current,
       metaSkillMd: nextMd,
       updatedAt: nowIso()
     });

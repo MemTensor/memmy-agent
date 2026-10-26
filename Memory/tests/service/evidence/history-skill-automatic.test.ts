@@ -5,6 +5,8 @@ import type { MemoryRow } from "../../../src/types.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { stableHash } from "../../../src/utils/id.js";
 import { externalSkillGeneration } from "../../../src/service/evidence/history-skill-policy.js";
+import { SkillTrialResolver } from "../../../src/service/trials/skill-trial-resolver.js";
+import { skillMetaFromMemory, traceMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
 import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
 
 const { createTestService, cleanup } = createMemoryServiceFixture();
@@ -55,6 +57,56 @@ function legacyCandidate(template: MemoryRow, id: string): MemoryRow {
 }
 
 describe("automatic History Skill lifecycle", () => {
+  it.each([false, true])("clears prior manual archive intent on human reactivation (previously archived: %s)", async manual => {
+    const config = structuredClone(DEFAULT_MEMMY_CONFIG);
+    config.algorithm.skill.archiveEta = 0.2;
+    const { service, db } = createTestService({ llm: observationModel(), skillLlm: skillModel(), config });
+    const repos = new Repositories(db.db);
+    const result = await service.suggestExternalEvidenceSkill(await seed(service));
+    const id = result.id!;
+    const session = service.openSession({ namespace: { ...namespace, sessionKey: "reactivated-skill-trial" } });
+    const turn = service.completeTurn("reactivated-trial-turn", { sessionId: session.sessionId,
+      query: "Review release notes", answer: "Reviewed the release notes." });
+    const created = service.useSkill(id, { sessionId: session.sessionId, episodeId: turn.episodeId, namespace });
+    const trial = repos.runtime.getSkillTrial(created.trialId)!;
+    const resolver = new SkillTrialResolver({ repos, config,
+      requireRawTurn: () => { throw new Error("unused"); }, assertRawTurnInScope: () => {},
+      requireExistingMemory: () => { throw new Error("unused"); }, assertMemoryInScope: () => {},
+      traceMeta: memory => memory ? traceMetaFromMemory(memory) : null, feedbackTargetFromRawTurn: () => undefined });
+    const score = (rHuman: number) => repos.transaction(() => resolver.resolvePendingSkillTrialsForReward({
+      userId: trial.userId, episodeId: trial.episodeId!, rHuman, at: new Date().toISOString() }));
+    const reactivate = () => {
+      const current = repos.memories.get(id)!;
+      service.updateExternalEvidenceSkill(id, { body: current.memoryValue + "\n\nReviewed and reactivated by the user.",
+        expectedVersion: current.version }, { namespace });
+      const updated = repos.memories.get(id)!;
+      expect(updated.status).toBe("activated");
+      expect(updated.properties.internal_info.skill_manually_archived).not.toBe(true);
+      const { externallyArchived: _previous, ...previousHistory } = current.properties.internal_info.skill_revision_history as Record<string, unknown>;
+      const { externallyArchived, ...updatedHistory } = updated.properties.internal_info.skill_revision_history as Record<string, unknown>;
+      expect(externallyArchived).not.toBe(true);
+      expect(updatedHistory).toEqual(previousHistory);
+    };
+    score(0.9);
+    expect(skillMetaFromMemory(repos.memories.get(id)!)!.eta).toBeCloseTo(0.65);
+    if (manual) service.archiveMemory(id, { namespace });
+    reactivate();
+    score(-0.9);
+    expect(repos.memories.get(id)!.status).toBe("archived");
+    score(0.9);
+    expect(repos.memories.get(id)!.status).toBe("activated");
+    expect(skillMetaFromMemory(repos.memories.get(id)!)!.eta).toBeCloseTo(0.65);
+
+    // A new manual archive remains authoritative, even after an earlier one was cleared.
+    service.archiveMemory(id, { namespace });
+    score(0);
+    expect(repos.memories.get(id)!.status).toBe("archived");
+    expect(repos.memories.get(id)!.properties.internal_info.skill_revision_history).toMatchObject({ externallyArchived: true });
+    reactivate();
+    score(0.9);
+    expect(repos.memories.get(id)!.status).toBe("activated");
+  });
+
   it.each([
     { app: "zh-CN", mode: "follow_policy", expected: "zh-CN" },
     { app: "en-US", mode: "follow_policy", expected: "en-US" },

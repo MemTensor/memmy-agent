@@ -1847,6 +1847,13 @@ export class MemoryService {
       if (!this.externalSkillSources(memory)) throw new MemoryServiceError("conflict", "Skill source memory is still processing or no longer available");
       const at = nowIso();
       const oldSkill = isRecord(memory.properties.internal_info.skill) ? memory.properties.internal_info.skill : {};
+      // Saving a human revision explicitly reactivates this Skill. Retire the old
+      // archive intent while preserving the numerical history for later replay.
+      const internal = { ...memory.properties.internal_info };
+      delete internal.skill_manually_archived;
+      if (isRecord(internal.skill_revision_history) && internal.skill_revision_history.externallyArchived === true) {
+        internal.skill_revision_history = { ...internal.skill_revision_history, externallyArchived: false };
+      }
       const editedOrigin = { ...origin };
       delete editedOrigin.generatedStepSources;
       const display = editedSkillDisplay(body);
@@ -1855,7 +1862,7 @@ export class MemoryService {
       const summary = display.summary ?? String(memory.info.summary ?? "");
       const info = { ...memory.info, title, name, summary, status: "active", eta: Math.max(HISTORY_SKILL_INITIAL_ETA, Number(oldSkill.eta) || 0) };
       const updated = this.repos.memories.update({ ...memory, status: "activated", memoryValue: body, contentHash: stableHash(body), info,
-        properties: { ...memory.properties, status: "activated", info, internal_info: { ...memory.properties.internal_info,
+        properties: { ...memory.properties, status: "activated", info, internal_info: { ...internal,
           title, summary, invocation_guide: body, procedure_json: [body],
           external_evidence_candidate: { ...editedOrigin, human_modified: true, edited_at: at, edited_content_hash: stableHash(body),
             source_status: "current", content_generation: stableHash([memory.id, body, memory.version, at]) },

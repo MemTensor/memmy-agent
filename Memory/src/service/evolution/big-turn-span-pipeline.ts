@@ -18,6 +18,8 @@ import type { EnqueueJobInput } from "../worker/job-handlers.js";
 export const SPAN_BIG_TURN_ENABLED = true;
 export const SPAN_BIG_TURN_MIN_TOOL_CALLS = 11;
 
+import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
+
 const SPAN_BIG_TURN_OPERATION = "span.big_turn.v1";
 const SPAN_BIG_TURN_PROMPT = `You segment one completed AI-agent turn into meaningful subtask spans.
 
@@ -90,7 +92,7 @@ export class BigTurnSpanPipeline {
   constructor(private readonly deps: BigTurnSpanDeps) {}
 
   async splitAndStore(job: EvolutionJobRecord): Promise<void> {
-    if (!SPAN_BIG_TURN_ENABLED || !this.deps.llm.isConfigured()) return;
+    if (!SPAN_BIG_TURN_ENABLED || !jobRevisionIsCurrent(this.deps.repos, job)) return;
     const source = job.targetMemoryId
       ? this.deps.repos.memories.get(job.targetMemoryId)
       : undefined;
@@ -98,7 +100,16 @@ export class BigTurnSpanPipeline {
     const rawTurn = rawTurnId
       ? this.deps.repos.runtime.getRawTurn(rawTurnId)
       : undefined;
-    if (!source || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS) return;
+    if (!source || !rawTurn) return;
+    const inputRevision = job.episodeId ? episodeInputRevision(this.deps.repos, job.episodeId, true) : undefined;
+    if (rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS || job.payload.retire === true) {
+      this.deps.repos.transaction(() => {
+        retireSourceSpans(this.deps.repos, source.id, [], job.createdAt, this.deps.namespaceIdFromMemory);
+        this.linkSpansToSourceTrace(source.id, [], job);
+      });
+      return;
+    }
+    if (!this.deps.llm.isConfigured()) return;
 
     const lang = steeredPromptLanguage(this.deps.config.language, [
       rawTurn.userText,
@@ -121,12 +132,21 @@ export class BigTurnSpanPipeline {
       maxTokens: 4096
     });
     const spans = validateSpanResult(result, rawTurn.toolCalls.length);
-    if (!spans) return;
     this.deps.repos.transaction(() => {
+      // The Episode was reopened while spans were generating: its next close enqueues a fresh
+      // span job for the new turn, so this output is simply discarded.
+      if (job.episodeId && episodeInputRevision(this.deps.repos, job.episodeId, true) !== inputRevision) return;
+      // The source trace itself changed underneath this job. Retry so the spans describe the
+      // current turn, rather than dropping work that nothing else will re-trigger.
+      if (this.deps.repos.memories.get(source.id)?.contentHash !== source.contentHash) {
+        throw new Error("span source trace changed during generation; retry with current content");
+      }
       const spanIds: string[] = [];
       for (const [spanIndex, span] of spans.entries()) {
-        spanIds.push(this.storeSpan({ source, rawTurn, job, span, spanIndex }));
+        const id = this.storeSpan({ source, rawTurn, job, span, spanIndex });
+        if (id) spanIds.push(id);
       }
+      retireSourceSpans(this.deps.repos, source.id, spanIds, job.createdAt, this.deps.namespaceIdFromMemory);
       this.linkSpansToSourceTrace(source.id, spanIds, job);
     });
   }
@@ -137,7 +157,7 @@ export class BigTurnSpanPipeline {
     job: EvolutionJobRecord;
     span: SpanDraft;
     spanIndex: number;
-  }): string {
+  }): string | undefined {
     const { source, rawTurn, job, span, spanIndex } = input;
     const id = spanId(source.id, span);
     const value = [
@@ -186,14 +206,17 @@ export class BigTurnSpanPipeline {
       },
       createdAt: job.createdAt
     });
-    const previous = this.deps.repos.memories.get(id);
-    const saved = previous
+    const previous = this.deps.repos.memories.getIncludingDeleted(id);
+    const saved = previous?.deletedAt || previous?.status === "deleted"
+      ? this.deps.repos.memories.restoreRetiredSpan(memory)
+      : previous
       ? this.deps.repos.memories.update({
           ...memory,
           createdAt: previous.createdAt,
           version: previous.version
         })
       : this.deps.repos.memories.insert(memory);
+    if (!saved) return undefined;
     this.deps.repos.runtime.appendChange({
       memoryId: saved.id,
       namespaceId: this.deps.namespaceIdFromMemory(saved),
@@ -201,7 +224,7 @@ export class BigTurnSpanPipeline {
       op: previous ? "updated" : "created",
       entityId: saved.id,
       userId: saved.userId,
-      changeType: previous ? "span_updated" : "span_created",
+      changeType: previous?.deletedAt ? "span_restored" : previous ? "span_updated" : "span_created",
       before: previous,
       after: saved,
       source: "worker.span_big_turn.v1",
@@ -323,8 +346,8 @@ function redactAndClip(value: string, maxChars: number): string {
 function validateSpanResult(
   result: { spans?: unknown },
   toolCallCount: number
-): SpanDraft[] | null {
-  if (Array.isArray(result.spans) && result.spans.length === 0) return null;
+): SpanDraft[] {
+  if (Array.isArray(result.spans) && result.spans.length === 0) return [];
   if (!Array.isArray(result.spans) || result.spans.length < 2 || result.spans.length > 6) {
     throw new Error("span.big_turn returned invalid span count");
   }
@@ -369,4 +392,36 @@ function number(value: unknown): number | undefined {
 
 function integer(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** Retiring the memory also removes FTS/vector visibility through MemoryRepository. */
+export function retireSourceSpans(repos: Repositories, traceId: string, keepIds: string[], at: string, namespaceId: (memory: MemoryRow) => string): void {
+  const keep = new Set(keepIds);
+  const source = repos.memories.get(traceId);
+  const trace = source?.properties.internal_info.trace;
+  // trace.span_ids already lists this trace's spans, so a normal pass needs no json scan.
+  // An empty list is authoritative; only traces written before it existed need the fallback.
+  const knownIds = isRecord(trace) && Array.isArray(trace.span_ids) ? strings(trace.span_ids) : undefined;
+  const candidates = knownIds
+    ? repos.memories.getMany(knownIds)
+    : repos.memories.listSpansForTrace(traceId);
+  for (const memory of candidates) {
+    const span = memory.properties.internal_info.span;
+    if (isRecord(span) && span.source_trace_id === traceId && !keep.has(memory.id)) {
+      const retired = repos.memories.update({ ...memory, status: "deleted", deletedAt: at, updatedAt: at,
+        properties: { ...memory.properties, status: "deleted", internal_info: { ...memory.properties.internal_info,
+          span: { ...span, retired_by: "worker.span_big_turn.v1", retired_at: at } } } });
+      repos.runtime.appendChange({ memoryId: memory.id, namespaceId: namespaceId(memory), kind: "span", op: "deleted",
+        entityId: memory.id, userId: memory.userId, changeType: "span_retired", before: memory, after: retired,
+        source: "worker.span_big_turn.v1", createdAt: at });
+    }
+  }
+  if (source && isRecord(trace) && stableStringify(trace.span_ids ?? []) !== stableStringify(keepIds)) {
+    repos.memories.update({ ...source, properties: { ...source.properties,
+      internal_info: { ...source.properties.internal_info, trace: { ...trace, span_ids: keepIds } } }, updatedAt: at });
+  }
 }

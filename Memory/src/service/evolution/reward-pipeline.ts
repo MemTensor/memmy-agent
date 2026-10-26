@@ -26,9 +26,12 @@ import type {
 } from "../feedback/feedback-experience.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import {
+  retireSourceSpans,
   SPAN_BIG_TURN_ENABLED,
   SPAN_BIG_TURN_MIN_TOOL_CALLS
 } from "./big-turn-span-pipeline.js";
+
+import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type HumanScoreResult = ReturnType<typeof heuristicHumanScore>;
@@ -71,11 +74,19 @@ export class RewardPipeline {
   constructor(private readonly deps: RewardPipelineDeps) {}
 
   async applyReward(job: EvolutionJobRecord): Promise<void> {
+    if (!jobRevisionIsCurrent(this.deps.repos, job)) return;
     const rewardSource = this.rewardSourceForJob(job);
     if (!rewardSource) return;
     const { source, trace } = rewardSource;
+    if (job.payload.afterRewardRepair === true) {
+      if (this.deps.config.algorithm.feedback.valueDistributionRepairEnabled) {
+        await this.maybeCreateValueDistributionRepair(source, this.deps.nowIso());
+      }
+      return;
+    }
     const episode = trace.episodeId ? this.deps.repos.runtime.getEpisode(trace.episodeId) : undefined;
     if (episode && episode.status !== "closed") return;
+    const inputRevision = episode ? episodeInputRevision(this.deps.repos, episode.id) : undefined;
     const phase = episode ? "final" : "feedback";
     const payloadHasFeedback =
       typeof job.payload.polarity === "string" ||
@@ -86,18 +97,30 @@ export class RewardPipeline {
       .filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
     const latestEpisodeFeedback = [...episodeFeedback].reverse().find((item) => item.channel === "explicit")
       ?? episodeFeedback[episodeFeedback.length - 1];
+    // A queued reward may start after newer feedback arrived. Attribute the result to
+    // the same authoritative feedback used for scoring, not the older queue payload.
+    const payload = latestEpisodeFeedback ? { ...job.payload, feedbackId: latestEpisodeFeedback.id,
+      channel: latestEpisodeFeedback.channel, polarity: latestEpisodeFeedback.polarity,
+      magnitude: latestEpisodeFeedback.magnitude, rationale: latestEpisodeFeedback.rationale,
+      repairId: episode?.decisionRepairIds.map(id => this.deps.repos.runtime.getDecisionRepair(id))
+        .find(repair => repair?.feedbackId === latestEpisodeFeedback.id)?.id
+    } : job.payload;
+    const rewardInputKey = stableHash(stableStringify({ inputRevision,
+      feedback: { channel: payload.channel, polarity: payload.polarity, magnitude: payload.magnitude, rationale: payload.rationale },
+      config: this.deps.config.algorithm.reward }));
+    if (episode && typeof episode.rTask === "number" && episode.meta.rewardInputRevision === rewardInputKey && !episode.meta.rewardDirty) return;
     const fallbackFeedback = heuristicHumanScore(latestEpisodeFeedback
       ? [latestEpisodeFeedback]
       : payloadHasFeedback
       ? [{
-          channel: job.payload.channel === "implicit" ? "implicit" : "explicit",
-          polarity: job.payload.polarity === "negative"
+          channel: payload.channel === "implicit" ? "implicit" : "explicit",
+          polarity: payload.polarity === "negative"
             ? "negative"
-            : job.payload.polarity === "neutral"
+            : payload.polarity === "neutral"
             ? "neutral"
             : "positive",
-          magnitude: typeof job.payload.magnitude === "number" ? job.payload.magnitude : 1,
-          rationale: typeof job.payload.rationale === "string" ? job.payload.rationale : undefined
+          magnitude: typeof payload.magnitude === "number" ? payload.magnitude : 1,
+          rationale: typeof payload.rationale === "string" ? payload.rationale : undefined
         }]
       : []);
     const episodeTraces = this.deps.repos.memories
@@ -118,7 +141,7 @@ export class RewardPipeline {
         axes: { goalAchievement: 0, processQuality: 0, userSatisfaction: 0 },
         reason: skipReason,
         scoredAt,
-        trigger: typeof job.payload.trigger === "string" ? job.payload.trigger : job.jobType,
+        trigger: typeof payload.trigger === "string" ? payload.trigger : job.jobType,
         skipped: true,
         traceCount: 0,
         traceIds: []
@@ -157,196 +180,221 @@ export class RewardPipeline {
       trace,
       episodeTraces,
       fallback: fallbackFeedback,
-      payload: job.payload
+      payload: payload
     });
-    let rewardedEpisode: EpisodeRecord | undefined;
-    if (trace.episodeId) {
-      const previousEpisode = this.deps.repos.runtime.getEpisode(trace.episodeId);
-      const rewardDetail = {
-        rHuman: feedback.rHuman,
-        phase,
-        source: feedback.source,
-        axes: feedback.axes,
-        reason: feedback.reason,
-        scoredAt: this.deps.nowIso(),
-        trigger: typeof job.payload.trigger === "string"
-          ? job.payload.trigger
-          : typeof job.payload.reason === "string"
-          ? job.payload.reason
-          : job.jobType,
-        traceCount: episodeTraces.length,
-        traceIds: episodeTraces.map((item) => item.id)
-      };
-      const savedEpisode = this.deps.repos.runtime.updateEpisodeReward(trace.episodeId, {
-        rTask: feedback.rHuman,
-        rewardDetail,
-        metaPatch: { reward: rewardDetail, rewardDirty: null }
-      });
-      rewardedEpisode = savedEpisode;
-      if (savedEpisode) {
-        this.deps.repos.runtime.appendChange({
-          memoryId: savedEpisode.id,
-          namespaceId: this.deps.namespaceIdFromMemory(source),
-          kind: "episode",
-          op: "updated",
-          entityId: savedEpisode.id,
-          userId: savedEpisode.userId,
-          changeType: "episode_reward_update",
-          before: previousEpisode,
-          after: savedEpisode,
-          source: "worker.reward.backprop.v7",
-          createdAt: savedEpisode.updatedAt
-        });
-        if (
-          this.deps.config.algorithm.negativeExperience.enabled
-          && feedback.rHuman <= this.deps.config.algorithm.negativeExperience.failureRTaskThreshold
-        ) {
-          const feedbackId = job.payload.polarity === "negative" && typeof job.payload.feedbackId === "string"
-            ? job.payload.feedbackId
-            : undefined;
-          const repairId = feedbackId && typeof job.payload.repairId === "string"
-            ? job.payload.repairId
-            : undefined;
-          this.deps.enqueueJob({
-            jobType: "negative_experience",
-            userId: savedEpisode.userId,
-            sessionId: savedEpisode.sessionId,
-            episodeId: savedEpisode.id,
-            payload: {
-              source: feedbackId ? "negative_feedback" : "episode_reward",
-              sourceEventId: feedbackId ?? savedEpisode.id,
-              rewardReason: feedback.reason,
-              ...(feedbackId ? { feedbackId } : {}),
-              ...(repairId ? { repairId } : {})
-            },
-            createdAt: savedEpisode.updatedAt
-          });
+    this.deps.repos.transaction(() => {
+      if (episode) {
+        const current = this.deps.repos.runtime.getEpisode(episode.id);
+        // A reopened Episode is rescored by its next close, so dropping this result is safe.
+        if (!current || current.status !== "closed") return;
+        // Any other content change means this score came from stale input. Throw so the worker
+        // retries, instead of marking the job done and leaving the Episode unscored.
+        if (episodeInputRevision(this.deps.repos, episode.id) !== inputRevision) {
+          throw new Error("episode reward inputs changed during scoring; retry with current evidence");
         }
       }
-      this.deps.resolvePendingSkillTrialsForReward({
-        userId: source.userId,
-        episodeId: trace.episodeId,
-        rHuman: feedback.rHuman,
-        feedbackId: typeof job.payload.feedbackId === "string" ? job.payload.feedbackId : undefined,
-        at: savedEpisode?.updatedAt ?? this.deps.nowIso()
-      });
-    }
-
-    const updates = backpropagateTraces({
-      traces: episodeTraces,
-      rHuman: feedback.rHuman,
-      gamma: this.deps.config.algorithm.reward.gamma,
-      lambda: this.deps.config.algorithm.reward.lambda,
-      delta: this.deps.config.algorithm.reward.delta,
-      decayHalfLifeDays: this.deps.config.algorithm.reward.decayHalfLifeDays
-    });
-    const at = this.deps.nowIso();
-    const l2Eligible: Array<{ memory: MemoryRow; trace: TraceMeta }> = [];
-    for (const update of updates) {
-      const current = this.deps.repos.memories.get(update.traceId);
-      if (!current) continue;
-      const previous = current;
-      const saved = this.deps.repos.memories.update(updateTraceScore(current, {
-        value: update.value,
-        alpha: update.alpha,
-        priority: update.priority,
-        rHuman: feedback.rHuman,
-        rewardReason: feedback.reason,
-        sourceFeedbackId: typeof job.payload.feedbackId === "string" ? job.payload.feedbackId : undefined,
-        updatedAt: at
-      }));
-      this.deps.repos.runtime.appendChange({
-        memoryId: saved.id,
-        namespaceId: this.deps.namespaceIdFromMemory(saved),
-        kind: kindFromMemory(saved),
-        op: "updated",
-        entityId: saved.id,
-        userId: saved.userId,
-        changeType: "reward_update",
-        before: previous,
-        after: saved,
-        source: "worker.reward.backprop.v7",
-        createdAt: at
-      });
-      const savedTrace = this.deps.traceMeta(saved);
-      const rawTurn = savedTrace?.rawTurnId
-        ? this.deps.repos.runtime.getRawTurn(savedTrace.rawTurnId)
-        : undefined;
-      if (
-        SPAN_BIG_TURN_ENABLED &&
-        job.payload.downstreamScheduled !== true &&
-        feedback.rHuman > 0 &&
-        savedTrace &&
-        savedTrace.alpha > 0 &&
-        rawTurn &&
-        rawTurn.toolCalls.length >= SPAN_BIG_TURN_MIN_TOOL_CALLS
-      ) {
-        this.deps.enqueueJob({
-          jobType: "span_big_turn",
-          userId: saved.userId,
-          sessionId: saved.sessionId,
+      let rewardedEpisode: EpisodeRecord | undefined;
+      if (trace.episodeId) {
+        const previousEpisode = this.deps.repos.runtime.getEpisode(trace.episodeId);
+        const rewardDetail = {
+          rHuman: feedback.rHuman,
+          phase,
+          source: feedback.source,
+          axes: feedback.axes,
+          reason: feedback.reason,
+          scoredAt: this.deps.nowIso(),
+          trigger: typeof payload.trigger === "string"
+            ? payload.trigger
+            : typeof payload.reason === "string"
+            ? payload.reason
+            : job.jobType,
+          traceCount: episodeTraces.length,
+          traceIds: episodeTraces.map((item) => item.id)
+        };
+        const savedEpisode = this.deps.repos.runtime.updateEpisodeReward(trace.episodeId, {
+          rTask: feedback.rHuman,
+          rewardDetail,
+          metaPatch: { reward: rewardDetail, rewardDirty: null, rewardInputRevision: rewardInputKey }
+        });
+        rewardedEpisode = savedEpisode;
+        if (savedEpisode) {
+          this.deps.repos.runtime.appendChange({
+            memoryId: savedEpisode.id,
+            namespaceId: this.deps.namespaceIdFromMemory(source),
+            kind: "episode",
+            op: "updated",
+            entityId: savedEpisode.id,
+            userId: savedEpisode.userId,
+            changeType: "episode_reward_update",
+            before: previousEpisode,
+            after: savedEpisode,
+            source: "worker.reward.backprop.v7",
+            createdAt: savedEpisode.updatedAt
+          });
+          if (
+            this.deps.config.algorithm.negativeExperience.enabled
+            && feedback.rHuman <= this.deps.config.algorithm.negativeExperience.failureRTaskThreshold
+          ) {
+            const feedbackId = payload.polarity === "negative" && typeof payload.feedbackId === "string"
+              ? payload.feedbackId
+              : undefined;
+            const repairId = feedbackId && typeof payload.repairId === "string"
+              ? payload.repairId
+              : undefined;
+            this.deps.enqueueJob({
+              jobType: "negative_experience",
+              userId: savedEpisode.userId,
+              sessionId: savedEpisode.sessionId,
+              episodeId: savedEpisode.id,
+              payload: {
+                source: feedbackId ? "negative_feedback" : "episode_reward",
+                sourceEventId: feedbackId ?? savedEpisode.id,
+                rewardReason: feedback.reason,
+                ...(feedbackId ? { feedbackId } : {}),
+                ...(repairId ? { repairId } : {})
+              },
+              createdAt: savedEpisode.updatedAt
+            });
+          }
+        }
+        if (savedEpisode && feedback.rHuman > this.deps.config.algorithm.negativeExperience.failureRTaskThreshold
+          && savedEpisode.meta.negativeExperienceSources) {
+          this.deps.enqueueJob({ jobType: "negative_experience", userId: savedEpisode.userId,
+            sessionId: savedEpisode.sessionId, episodeId: savedEpisode.id,
+            payload: { source: "episode_reward", sourceEventId: savedEpisode.id }, createdAt: savedEpisode.updatedAt });
+        }
+        this.deps.resolvePendingSkillTrialsForReward({
+          userId: source.userId,
           episodeId: trace.episodeId,
-          targetMemoryId: saved.id,
+          rHuman: feedback.rHuman,
+          feedbackId: typeof payload.feedbackId === "string" ? payload.feedbackId : undefined,
+          at: savedEpisode?.updatedAt ?? this.deps.nowIso()
+        });
+      }
+
+      const updates = backpropagateTraces({
+        traces: episodeTraces,
+        rHuman: feedback.rHuman,
+        gamma: this.deps.config.algorithm.reward.gamma,
+        lambda: this.deps.config.algorithm.reward.lambda,
+        delta: this.deps.config.algorithm.reward.delta,
+        decayHalfLifeDays: this.deps.config.algorithm.reward.decayHalfLifeDays
+      });
+      const at = this.deps.nowIso();
+      const l2Eligible: Array<{ memory: MemoryRow; trace: TraceMeta }> = [];
+      for (const update of updates) {
+        const current = this.deps.repos.memories.get(update.traceId);
+        if (!current) continue;
+        const previous = current;
+        const saved = this.deps.repos.memories.update(updateTraceScore(current, {
+          value: update.value,
+          alpha: update.alpha,
+          priority: update.priority,
+          rHuman: feedback.rHuman,
+          rewardReason: feedback.reason,
+          sourceFeedbackId: typeof payload.feedbackId === "string" ? payload.feedbackId : undefined,
+          updatedAt: at
+        }));
+        this.deps.repos.runtime.appendChange({
+          memoryId: saved.id,
+          namespaceId: this.deps.namespaceIdFromMemory(saved),
+          kind: kindFromMemory(saved),
+          op: "updated",
+          entityId: saved.id,
+          userId: saved.userId,
+          changeType: "reward_update",
+          before: previous,
+          after: saved,
+          source: "worker.reward.backprop.v7",
+          createdAt: at
+        });
+        const savedTrace = this.deps.traceMeta(saved);
+        const rawTurn = savedTrace?.rawTurnId
+          ? this.deps.repos.runtime.getRawTurn(savedTrace.rawTurnId)
+          : undefined;
+        if (
+          SPAN_BIG_TURN_ENABLED &&
+          payload.downstreamScheduled !== true &&
+          feedback.rHuman > 0 &&
+          savedTrace &&
+          savedTrace.alpha > 0 &&
+          rawTurn &&
+          rawTurn.toolCalls.length >= SPAN_BIG_TURN_MIN_TOOL_CALLS
+        ) {
+          this.deps.enqueueJob({
+            jobType: "span_big_turn",
+            userId: saved.userId,
+            sessionId: saved.sessionId,
+            episodeId: trace.episodeId,
+            targetMemoryId: saved.id,
+            payload: {
+              rawTurnId: rawTurn.id,
+              rTask: feedback.rHuman,
+              rewardReason: feedback.reason
+            },
+            createdAt: at
+          });
+        }
+        if (savedTrace && (feedback.rHuman <= 0 || savedTrace.alpha <= 0
+          || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS)) {
+          retireSourceSpans(this.deps.repos, saved.id, [], at, this.deps.namespaceIdFromMemory);
+        }
+        if (payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
+          this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
+          l2Eligible.push({ memory: saved, trace: savedTrace });
+          this.deps.enqueueJob({
+            jobType: "l2_association",
+            userId: saved.userId,
+            sessionId: saved.sessionId,
+            episodeId: trace.episodeId,
+            targetMemoryId: saved.id,
+            payload: { reason: "reward.updated" },
+            createdAt: at
+          });
+        }
+        if (this.deps.config.algorithm.feedback.valueDistributionRepairEnabled) {
+          this.deps.enqueueJob({ jobType: "reward", userId: saved.userId, sessionId: saved.sessionId,
+            episodeId: trace.episodeId, targetMemoryId: saved.id,
+            dedupeKey: `reward_repair:${saved.id}:${rewardInputKey}`, payload: { afterRewardRepair: true }, createdAt: at });
+        }
+      }
+      const inductionSeed = l2Eligible[0];
+      if (payload.downstreamScheduled !== true && inductionSeed) {
+        this.deps.enqueueJob({
+          jobType: "l2_induction",
+          userId: inductionSeed.memory.userId,
+          sessionId: inductionSeed.memory.sessionId,
+          episodeId: trace.episodeId,
+          targetMemoryId: inductionSeed.memory.id,
           payload: {
-            rawTurnId: rawTurn.id,
-            rTask: feedback.rHuman,
-            rewardReason: feedback.reason
+            reason: "reward.updated",
+            targetKind: "episode_candidate_pool",
+            sourceMemoryId: inductionSeed.memory.id,
+            episodeTraceIds: l2Eligible.map((item) => item.memory.id)
           },
           createdAt: at
         });
       }
-      if (job.payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
-        this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
-        l2Eligible.push({ memory: saved, trace: savedTrace });
+      if (rewardedEpisode) this.deps.finalizeClosedEpisode(rewardedEpisode, at, "episode_rewarded");
+      if (
+        rewardedEpisode &&
+        typeof rewardedEpisode.rTask === "number" &&
+        this.deps.config.algorithm.skill.directFromTrace
+      ) {
         this.deps.enqueueJob({
-          jobType: "l2_association",
-          userId: saved.userId,
-          sessionId: saved.sessionId,
-          episodeId: trace.episodeId,
-          targetMemoryId: saved.id,
-          payload: { reason: "reward.updated" },
+          jobType: "skill_cluster_assign",
+          userId: rewardedEpisode.userId,
+          sessionId: rewardedEpisode.sessionId,
+          episodeId: rewardedEpisode.id,
+          payload: {
+            reason: "reward.updated",
+            rTask: rewardedEpisode.rTask
+          },
           createdAt: at
         });
       }
-      if (this.deps.config.algorithm.feedback.valueDistributionRepairEnabled) {
-        await this.maybeCreateValueDistributionRepair(saved, at);
-      }
-    }
-    const inductionSeed = l2Eligible[0];
-    if (job.payload.downstreamScheduled !== true && inductionSeed) {
-      this.deps.enqueueJob({
-        jobType: "l2_induction",
-        userId: inductionSeed.memory.userId,
-        sessionId: inductionSeed.memory.sessionId,
-        episodeId: trace.episodeId,
-        targetMemoryId: inductionSeed.memory.id,
-        payload: {
-          reason: "reward.updated",
-          targetKind: "episode_candidate_pool",
-          sourceMemoryId: inductionSeed.memory.id,
-          episodeTraceIds: l2Eligible.map((item) => item.memory.id)
-        },
-        createdAt: at
-      });
-    }
-    if (rewardedEpisode) this.deps.finalizeClosedEpisode(rewardedEpisode, at, "episode_rewarded");
-    if (
-      rewardedEpisode &&
-      typeof rewardedEpisode.rTask === "number" &&
-      this.deps.config.algorithm.skill.directFromTrace
-    ) {
-      this.deps.enqueueJob({
-        jobType: "skill_cluster_assign",
-        userId: rewardedEpisode.userId,
-        sessionId: rewardedEpisode.sessionId,
-        episodeId: rewardedEpisode.id,
-        payload: {
-          reason: "reward.updated",
-          rTask: rewardedEpisode.rTask
-        },
-        createdAt: at
-      });
-    }
+    });
+
   }
 
   async scoreFeedbackWithLlm(input: {
@@ -454,71 +502,102 @@ export class RewardPipeline {
       const recent = this.deps.repos.runtime.listDecisionRepairs({ userId: triggerTrace.userId, contextHash, since, limit: 1 });
       if (recent.length > 0) return { contextHash, skipped: true, reason: "cooldown" };
     }
+    const inputRevision = this.valueDistributionRepairRevision(triggerMemory, evidence);
+    const repairId = `repair_${stableHash(`${contextHash}:${inputRevision}`).slice(0, 20)}`;
+    if (this.deps.repos.runtime.getDecisionRepair(repairId)) return { repairId, contextHash, skipped: true, reason: "already_applied" };
     const llmDraft = await this.maybeSynthesizeValueDistributionDecisionRepair(contextHash, triggerTrace, evidence);
-    const preference = llmDraft?.preference ?? valueDistributionPreference(evidence.highValueMemories[0]);
-    const antiPattern = llmDraft?.antiPattern ?? valueDistributionAntiPattern(evidence.lowValueMemories[0]);
-    const session = triggerTrace.sessionId ? this.deps.repos.runtime.getSession(triggerTrace.sessionId) : undefined;
-    const repair = this.deps.repos.runtime.insertDecisionRepair({
-      id: this.deps.newId("repair"),
-      sessionId: triggerTrace.sessionId,
-      episodeId: triggerTrace.episodeId,
-      rawTurnId: rawTurnIdFromMemory(triggerMemory),
-      userId: triggerTrace.userId,
-      projectId: session?.projectId ?? session?.workspaceId,
-      contextHash,
-      issue: `Divergent outcomes for context signature ${clip(triggerTrace.signature, 160)}`,
-      suggestion: preference,
-      preference,
-      antiPattern,
-      highValueMemoryIds: evidence.highValueMemories.map((memory) => memory.id),
-      lowValueMemoryIds: evidence.lowValueMemories.map((memory) => memory.id),
-      attachedPolicyMemoryIds: [],
-      validated: false,
-      source: {
-        source: "worker.reward.value_distribution_repair.v7",
-        trigger: "value-distribution",
-        ...(llmDraft ? { synthesis: "llm" } : {}),
-        signature: triggerTrace.signature,
-        valueDiff,
-        triggerTraceId: triggerTrace.id
-      },
-      meta: {
-        trigger: "value-distribution",
-        severity: llmDraft?.severity ?? "warn",
-        confidence: llmDraft?.confidence ?? (evidence.highValueMemories.length > 0 && evidence.lowValueMemories.length > 0 ? 0.6 : 0.4),
-        valueDiff
-      },
-      createdAt: at
-    });
-    if (triggerTrace.episodeId) this.deps.repos.runtime.appendEpisodeDecisionRepair(triggerTrace.episodeId, repair.id, at);
-    this.deps.repos.runtime.appendChange({
-      memoryId: repair.id,
-      namespaceId: this.deps.namespaceIdFromMemory(triggerMemory),
-      userId: triggerTrace.userId,
-      kind: "repair",
-      op: "created",
-      entityId: repair.id,
-      changeType: "decision_repair_created",
-      after: repair,
-      source: "worker.reward.value_distribution_repair.v7",
-      createdAt: at
-    });
-    if (triggerTrace.episodeId) {
-      this.deps.enqueueJob({
-        jobType: "negative_experience",
-        userId: triggerTrace.userId,
+    return this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(triggerMemory.id);
+      const currentTrace = current && this.deps.traceMeta(current);
+      const currentEvidence = currentTrace && this.valueDistributionRepairEvidence(currentTrace, this.deps.config.algorithm.feedback.evidenceLimit);
+      if (!current || !currentEvidence || this.valueDistributionRepairRevision(current, currentEvidence) !== inputRevision) {
+        throw new Error("Value-distribution evidence changed during synthesis; retry with current evidence");
+      }
+      if (this.deps.repos.runtime.getDecisionRepair(repairId)) return { repairId, contextHash, skipped: true, reason: "already_applied" };
+      const preference = llmDraft?.preference ?? valueDistributionPreference(evidence.highValueMemories[0]);
+      const antiPattern = llmDraft?.antiPattern ?? valueDistributionAntiPattern(evidence.lowValueMemories[0]);
+      const session = triggerTrace.sessionId ? this.deps.repos.runtime.getSession(triggerTrace.sessionId) : undefined;
+      const repair = this.deps.repos.runtime.insertDecisionRepair({
+        id: repairId,
         sessionId: triggerTrace.sessionId,
         episodeId: triggerTrace.episodeId,
-        payload: {
-          source: "value_distribution",
-          sourceEventId: repair.id,
-          repairId: repair.id,
-          confidence: repair.meta.confidence
+        rawTurnId: rawTurnIdFromMemory(triggerMemory),
+        userId: triggerTrace.userId,
+        projectId: session?.projectId ?? session?.workspaceId,
+        contextHash,
+        issue: `Divergent outcomes for context signature ${clip(triggerTrace.signature, 160)}`,
+        suggestion: preference,
+        preference,
+        antiPattern,
+        highValueMemoryIds: evidence.highValueMemories.map((memory) => memory.id),
+        lowValueMemoryIds: evidence.lowValueMemories.map((memory) => memory.id),
+        attachedPolicyMemoryIds: [],
+        validated: false,
+        source: {
+          source: "worker.reward.value_distribution_repair.v7",
+          trigger: "value-distribution",
+          ...(llmDraft ? { synthesis: "llm" } : {}),
+          signature: triggerTrace.signature,
+          valueDiff,
+          triggerTraceId: triggerTrace.id
+        },
+        meta: {
+          trigger: "value-distribution",
+          severity: llmDraft?.severity ?? "warn",
+          confidence: llmDraft?.confidence ?? (evidence.highValueMemories.length > 0 && evidence.lowValueMemories.length > 0 ? 0.6 : 0.4),
+          valueDiff
         },
         createdAt: at
       });
-    }
-    return { repairId: repair.id, contextHash, skipped: false, attachedPolicyIds: [] };
+      if (triggerTrace.episodeId) this.deps.repos.runtime.appendEpisodeDecisionRepair(triggerTrace.episodeId, repair.id, at);
+      this.deps.repos.runtime.appendChange({
+        memoryId: repair.id,
+        namespaceId: this.deps.namespaceIdFromMemory(triggerMemory),
+        userId: triggerTrace.userId,
+        kind: "repair",
+        op: "created",
+        entityId: repair.id,
+        changeType: "decision_repair_created",
+        after: repair,
+        source: "worker.reward.value_distribution_repair.v7",
+        createdAt: at
+      });
+      if (triggerTrace.episodeId) {
+        this.deps.enqueueJob({
+          jobType: "negative_experience",
+          userId: triggerTrace.userId,
+          sessionId: triggerTrace.sessionId,
+          episodeId: triggerTrace.episodeId,
+          payload: {
+            source: "value_distribution",
+            sourceEventId: repair.id,
+            repairId: repair.id,
+            confidence: repair.meta.confidence
+          },
+          createdAt: at
+        });
+      }
+      return { repairId: repair.id, contextHash, skipped: false, attachedPolicyIds: [] };
+    });
+  }
+
+  private valueDistributionRepairRevision(trigger: MemoryRow, evidence: { highValueMemories: MemoryRow[]; lowValueMemories: MemoryRow[] }): string {
+    const revisions = new Map<string, string>();
+    const snapshot = (memories: MemoryRow[]) => this.deps.decisionRepairTraceSources(memories).map(({ memory, rawTurn }) => {
+      const trace = this.deps.traceMeta(memory);
+      if (trace?.episodeId && !revisions.has(trace.episodeId)) {
+        revisions.set(trace.episodeId, episodeInputRevision(this.deps.repos, trace.episodeId, true));
+      }
+      return { id: memory.id, status: memory.status, contentHash: memory.contentHash,
+        value: trace?.value, signature: trace?.signature, summary: trace?.summary,
+        userText: trace?.userText, agentText: trace?.agentText, reflection: trace?.reflection,
+        raw: rawTurn && { userText: rawTurn.userText, assistantText: rawTurn.assistantText,
+          redactedAt: rawTurn.redactedAt, deletedAt: rawTurn.deletedAt },
+        episodeRevision: trace?.episodeId ? revisions.get(trace.episodeId) : undefined };
+    });
+    return stableHash(stableStringify({ trigger: snapshot([trigger]),
+      high: snapshot(evidence.highValueMemories), low: snapshot(evidence.lowValueMemories),
+      config: this.deps.config.algorithm.feedback }));
   }
 
   valueDistributionRepairEvidence(trace: TraceMeta, limit: number): {

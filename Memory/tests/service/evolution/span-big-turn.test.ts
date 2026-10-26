@@ -412,7 +412,20 @@ describe("MemoryService / evolution / span big turn", () => {
       expect(latestIds.every((id) => !originalSpans.includes(id))).toBe(true);
     }
     const targetIds = spanIds(task.episodeId);
-    expect(targetIds).toHaveLength(splitAgain ? 5 : 3);
+    // MEMMY-647: a second split replaces the previous span set instead of piling onto it,
+    // so stale summaries stop matching retrieval and only the latest split stays active.
+    expect(targetIds).toHaveLength(splitAgain ? 2 : 3);
+    if (splitAgain) {
+      expect(targetIds.some((id) => originalSpans.includes(id))).toBe(false);
+      const retired = db.db.prepare(`SELECT status, deleted_at FROM memories
+        WHERE id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(originalSpans)) as
+        Array<{ status: string; deleted_at: string | null }>;
+      expect(retired).toHaveLength(3);
+      for (const row of retired) {
+        expect(row.status).toBe("deleted");
+        expect(row.deleted_at).toEqual(expect.any(String));
+      }
+    }
     const control = createTask("cascade-control");
     await reward(control);
     const controlIds = spanIds(control.episodeId);
