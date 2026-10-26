@@ -108,6 +108,22 @@ describe("same-source L1 deduplication without UID", () => {
     expect(result.hits.map(hit => hit.id)).toEqual(["c"]);
   });
 
+  it("uses the same historical source for repair suggestions across accounts", async () => {
+    const {db, repos, service, seed} = setup();
+    seed("a", "account-a"); seed("b", "account-b");
+    const before = db.db.prepare("SELECT * FROM memories ORDER BY id").all();
+    for (const userId of ["account-a", "account-b", "new-account"]) {
+      const session = service.openSession({namespace: {source: "codex", profileId: "default", userId}});
+      const result = await service.repairSuggestion({sessionId: session.sessionId, issue: "shared evidence"});
+      expect(result.sourceMemoryIds).toEqual(["a"]);
+    }
+    expect(db.db.prepare("SELECT * FROM memories ORDER BY id").all()).toEqual(before);
+    repos.memories.softDelete("a");
+    const session = service.openSession({namespace: {source: "codex", profileId: "default", userId: "account-b"}});
+    const result = await service.repairSuggestion({sessionId: session.sessionId, issue: "shared evidence"});
+    expect(result.sourceMemoryIds).toEqual([]);
+  });
+
   it("folds copies returned by separate query rewrites before final fusion", async () => {
     const {repos, service, seed} = setup(false, true);
     seed("a", "account-a"); seed("b", "account-b");

@@ -2665,7 +2665,7 @@ export class MemoryService {
 
     this.repos.transaction(() => {
       const spanIds = new Set(this.repos.memories.listTaskSpanIds(
-        episode.userId, episode.id, episode.l1MemoryIds
+        episode.id, episode.l1MemoryIds
       ));
       for (const spanId of spanIds) {
         this.deleteMemory(spanId, request);

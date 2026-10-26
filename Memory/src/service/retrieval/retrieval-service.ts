@@ -71,7 +71,6 @@ import {
   normalizeRetrievalExtractKeywords
 } from "../turn/turn-normalization.js";
 import { IndexedCandidatePool } from "./indexed-candidate-pool.js";
-import { deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 import { filterL1TraceSpanRecallHits } from "./l1-trace-span-filter.js";
 
 type InternalMemorySearchRequest = MemorySearchRequest & {
@@ -1976,8 +1975,7 @@ export class RetrievalService {
       ? this.retrieveTimeFilteredTraceMemories({
           timeFilter,
           tags: request.tags,
-          limit: retrievalLimit,
-          preferredUserId: context.userId
+          limit: retrievalLimit
         })
       : await this.retrieveSearchMemories({
           userId: context.userId,
@@ -2201,7 +2199,6 @@ export class RetrievalService {
     timeFilter: RetrievalTimeFilter;
     tags?: string[];
     limit: number;
-    preferredUserId: string;
   }): { retrieval: RetrievalResult; memories: MemoryRow[] } {
     const filter: MemoryFilter = {
       memoryLayer: "L1",

@@ -73,7 +73,7 @@ import type {
   SynthesizeDecisionRepairDraft
 } from "../feedback/feedback-experience.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
-import { deduplicateCrossAccountMemoryCandidates } from "../retrieval/cross-account-candidate-dedup.js";
+import { deduplicateSameSourceL1Candidates } from "../retrieval/same-source-l1-dedup.js";
 import {
   namespaceForRawTurn,
   namespaceForSession,
@@ -2977,10 +2977,9 @@ export class SessionTurnService {
       },
       500
     ).filter((memory) => this.deps.isMemoryReadyForRetrieval(memory));
-    const candidates = deduplicateCrossAccountMemoryCandidates({
+    const candidates = deduplicateSameSourceL1Candidates({
       memories: loadedCandidates,
-      repos: this.deps.repos,
-      preferredUserId: session.userId
+      repos: this.deps.repos
     }).memories;
     const retrieval = retrievePluginMemories({
       query,

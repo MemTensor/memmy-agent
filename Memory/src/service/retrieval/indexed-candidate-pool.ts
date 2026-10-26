@@ -14,7 +14,6 @@ import type {
   MemoryLayer,
   MemoryRow
 } from "../../types.js";
-import { deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 
 export function dedupeStrings(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -152,12 +151,10 @@ export class IndexedCandidatePool {
         this.isMemoryReadyForRetrieval(memory) &&
         this.isSkillVisibleToAgent(memory, input.currentAgentId)
       );
-    return deduplicateCrossAccountMemoryCandidates({
+    return {
       memories: readyMemories,
-      repos: this.deps.repos,
-      preferredUserId: input.userId,
       channelScoresByMemory
-    });
+    };
   }
 
   private isSkillVisibleToAgent(memory: MemoryRow, currentAgentId?: string): boolean {

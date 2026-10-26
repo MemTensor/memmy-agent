@@ -334,10 +334,10 @@ describe("MemoryService / evolution / span big turn", () => {
   });
 
   it.each([
-    { name: "after the parent trace was deleted", deleteParent: true, splitAgain: false },
-    { name: "after a second successful split with different ranges", deleteParent: false, splitAgain: true },
-    { name: "after both re-splitting and deleting the parent", deleteParent: true, splitAgain: true }
-  ])("deletes all task spans $name", async ({ deleteParent, splitAgain }) => {
+    { name: "after the parent trace was deleted", deleteParent: true, splitAgain: false, episodeUserId: null },
+    { name: "after a second successful split with different ranges", deleteParent: false, splitAgain: true, episodeUserId: null },
+    { name: "after both re-splitting and deleting a historical parent", deleteParent: true, splitAgain: true, episodeUserId: "legacy-task-owner" }
+  ])("deletes all task spans $name", async ({ deleteParent, splitAgain, episodeUserId }) => {
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const firstSplit = {
       spans: [
@@ -413,6 +413,13 @@ describe("MemoryService / evolution / span big turn", () => {
     }
     const targetIds = spanIds(task.episodeId);
     expect(targetIds).toHaveLength(splitAgain ? 5 : 3);
+    // An upgraded device can contain both retained account-owned spans and new
+    // spans without a UID. Task ownership comes from episode/source links.
+    db.db.prepare("UPDATE episodes SET user_id = ? WHERE id = ?").run(episodeUserId, task.episodeId);
+    targetIds.forEach((id, index) => {
+      db.db.prepare("UPDATE memories SET user_id = ? WHERE id = ?")
+        .run(index % 2 === 0 ? "legacy-span-owner" : null, id);
+    });
     const control = createTask("cascade-control");
     await reward(control);
     const controlIds = spanIds(control.episodeId);
