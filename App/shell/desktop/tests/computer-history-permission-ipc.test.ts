@@ -51,6 +51,7 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
   const deferred: Array<() => void> = [];
   const app = { quit: vi.fn(), relaunch: vi.fn() };
   const stopComputerUseAgentForPermissionRestart = vi.fn().mockResolvedValue(undefined);
+  const warn = vi.fn();
   const createSessionId = vi.fn(randomUUID);
   let systemSessionEnding = false;
   const ipcMain = {
@@ -74,9 +75,9 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
   // Execute the real handler bodies without importing Electron's app entrypoint.
-  const lifecycle = Function("ipcMain", "app", "process", "setImmediate", "randomUUID", "writePackagedStartupLog", "stopComputerUseAgentForPermissionRestart", "isMacSystemSessionEnding", compiled)(
+  const lifecycle = Function("ipcMain", "app", "process", "setImmediate", "randomUUID", "writePackagedStartupLog", "stopComputerUseAgentForPermissionRestart", "isMacSystemSessionEnding", "console", compiled)(
     ipcMain, app, { platform, env: {}, argv: ["Memmy"] }, (callback: () => void) => deferred.push(callback), createSessionId, vi.fn(), stopComputerUseAgentForPermissionRestart,
-    () => systemSessionEnding,
+    () => systemSessionEnding, { warn },
   ) as { relaunchRequested(): boolean; finishCleanup(): void; removeHandlers(): void };
 
   let api: PermissionApi | undefined;
@@ -105,7 +106,7 @@ function loadPermissionIpc(platform: NodeJS.Platform) {
     module, module.exports, { platform },
   );
   if (!api) throw new Error("Preload did not expose the Memmy API");
-  return { api, app, deferred, handlers, createSessionId, ipcRenderer, stopComputerUseAgentForPermissionRestart,
+  return { api, app, deferred, handlers, createSessionId, ipcRenderer, stopComputerUseAgentForPermissionRestart, warn,
     setSystemSessionEnding: (next: boolean) => { systemSessionEnding = next; }, ...lifecycle };
 }
 
@@ -181,6 +182,23 @@ describe("Computer History permission IPC", () => {
     expect(shell.deferred).toHaveLength(0);
     expect(shell.app.quit).not.toHaveBeenCalled();
     expect(shell.app.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("continues permission restart through normal quit cleanup if native shutdown fails", async () => {
+    const shell = loadPermissionIpc("darwin");
+    const error = new Error("native agent shutdown timed out");
+    shell.stopComputerUseAgentForPermissionRestart.mockRejectedValueOnce(error);
+    await expect(shell.api.restartForComputerHistoryPermissions()).resolves.toBeUndefined();
+    expect(shell.warn).toHaveBeenCalledWith(
+      "Failed to stop the native Computer Use agent before permission restart:", error);
+    expect(shell.relaunchRequested()).toBe(true);
+    expect(shell.app.quit).not.toHaveBeenCalled();
+    expect(shell.deferred).toHaveLength(1);
+    shell.deferred[0]();
+    expect(shell.app.quit).toHaveBeenCalledOnce();
+    shell.finishCleanup();
+    expect(shell.app.relaunch).toHaveBeenCalledExactlyOnceWith({ args: [] });
+    expect(shell.relaunchRequested()).toBe(false);
   });
 
   it("a system-session quit overrides a pending explicit History permission restart", async () => {

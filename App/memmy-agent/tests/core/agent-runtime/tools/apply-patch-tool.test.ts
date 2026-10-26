@@ -29,7 +29,7 @@ describe("ApplyPatchTool contract", () => {
     const tool = new ApplyPatchTool({ workspace: workspace() });
 
     expect(tool.description).toBe(
-      "Apply a patch to add, update, delete, or move one or more workspace-relative files.",
+      "Apply a patch to add, update, delete, or move one or more files inside the workspace.",
     );
     expect(tool.parameters).toMatchObject({
       type: "object",
@@ -45,7 +45,9 @@ describe("ApplyPatchTool contract", () => {
     expect(tool.parameters.properties.input.description).toContain("*** Move to:");
     expect(tool.parameters.properties.input.description).toContain("@@");
     expect(tool.parameters.properties.input.description).toContain("*** End of File");
-    expect(tool.parameters.properties.input.description).toContain("workspace-relative");
+    expect(tool.parameters.properties.input.description).toContain(
+      "workspace-relative or absolute paths inside the workspace",
+    );
     expect(tool.parameters.properties.input.description).toContain("at most 20");
   });
 
@@ -125,6 +127,53 @@ describe("ApplyPatchTool operations", () => {
     expect(fs.readFileSync(path.join(root, "moved.txt"), "utf8")).toBe("after\n");
   });
 
+  it("supports absolute paths for every operation and preserves filename spaces", async () => {
+    const root = workspace();
+    const added = path.join(root, " added.txt");
+    const updated = path.join(root, " updated.txt");
+    const deleted = path.join(root, " deleted.txt");
+    const moveSource = path.join(root, " move-source.txt");
+    const moveTarget = path.join(root, " moved-target.txt");
+    fs.writeFileSync(updated, "before\n");
+    fs.writeFileSync(deleted, "delete\n");
+    fs.writeFileSync(moveSource, "move\n");
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute(input(
+      `*** Add File: ${added}`,
+      "+added",
+      `*** Update File: ${updated}`,
+      "@@",
+      "-before",
+      "+after",
+      `*** Delete File: ${deleted}`,
+      `*** Update File: ${moveSource}`,
+      `*** Move to: ${moveTarget}`,
+    ));
+
+    expect(result).toContain("Patch applied:");
+    expect(fs.readFileSync(added, "utf8")).toBe("added\n");
+    expect(fs.existsSync(path.join(root, "added.txt"))).toBe(false);
+    expect(fs.readFileSync(updated, "utf8")).toBe("after\n");
+    expect(fs.existsSync(path.join(root, "updated.txt"))).toBe(false);
+    expect(fs.existsSync(deleted)).toBe(false);
+    expect(fs.existsSync(moveSource)).toBe(false);
+    expect(fs.readFileSync(moveTarget, "utf8")).toBe("move\n");
+    expect(fs.existsSync(path.join(root, "moved-target.txt"))).toBe(false);
+  });
+
+  it("detects conflicts after absolute and relative paths are canonicalized", async () => {
+    const root = workspace();
+    const target = path.join(root, "same.txt");
+    const result = await new ApplyPatchTool({ workspace: root }).execute(input(
+      `*** Add File: ${target}`,
+      "+first",
+      "*** Delete File: same.txt",
+    ));
+
+    expect(result).toContain("duplicate file operation path: same.txt");
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
   it("creates an empty file and preserves extra blank lines", async () => {
     const root = workspace();
     const result = await new ApplyPatchTool({ workspace: root }).execute(input(
@@ -182,16 +231,23 @@ describe("ApplyPatchTool operations", () => {
   it("rejects symlink paths and non-directory parents before reading content", async () => {
     const root = workspace();
     const outside = workspace();
-    fs.writeFileSync(path.join(outside, "outside.txt"), "outside\n");
-    fs.symlinkSync(path.join(outside, "outside.txt"), path.join(root, "link.txt"));
+    const outsideFile = path.join(outside, "outside.txt");
+    const absoluteTraversal = `${root}${path.sep}nested${path.sep}..${path.sep}escaped.txt`;
+    fs.writeFileSync(outsideFile, "outside\n");
+    fs.symlinkSync(outsideFile, path.join(root, "link.txt"));
     fs.writeFileSync(path.join(root, "parent"), "file\n");
     const tool = new ApplyPatchTool({ workspace: root });
 
+    expect(await tool.execute(input(`*** Add File: ${absoluteTraversal}`, "+escaped")))
+      .toContain("must not contain '..'");
+    expect(await tool.execute(input(`*** Delete File: ${outsideFile}`)))
+      .toContain("patch path escapes workspace");
     expect(await tool.execute(input("*** Delete File: link.txt"))).toContain("symbolic links");
     expect(await tool.execute(input("*** Add File: parent/child.txt", "+x"))).toContain(
       "parent is not a directory",
     );
     expect(fs.readFileSync(path.join(outside, "outside.txt"), "utf8")).toBe("outside\n");
+    expect(fs.existsSync(path.join(root, "escaped.txt"))).toBe(false);
   });
 
   it("plans every operation before the first write", async () => {

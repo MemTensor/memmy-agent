@@ -7,6 +7,7 @@ import {
   buildAgentTasks,
   defaultAgentSidebarState,
   initialAgentState,
+  NEW_TASK_MODEL_SCOPE_KEY,
   selectedModelPresetForScope,
   type AgentState,
   updateSidebarStateForTask
@@ -5778,6 +5779,42 @@ describe("agent chat slice", () => {
     expect(state.runStartedAtByChatId["chat-1"]).toBe(4_000);
     expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-new");
     expect(state.isSending).toBe(true);
+  });
+
+  it("思考开关与档位按 session scope 写入，并在 sessions 加载时恢复", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/thinkingToggled",
+      scopeKey: "chat-1",
+      enabled: false
+    });
+    state = agentReducer(state, {
+      type: "agent/thinkingLevelChanged",
+      scopeKey: "chat-1",
+      level: "low"
+    });
+    state = agentReducer(state, {
+      type: "agent/thinkingToggled",
+      scopeKey: NEW_TASK_MODEL_SCOPE_KEY,
+      enabled: true
+    });
+
+    expect(state.thinkingStateByScope["chat-1"]).toEqual({ enabled: false, level: "low" });
+    expect(state.thinkingStateByScope[NEW_TASK_MODEL_SCOPE_KEY]).toEqual({ enabled: true });
+
+    state = agentReducer(state, {
+      type: "agent/sessionsLoaded",
+      sessions: [
+        {
+          ...sessions[0]!,
+          thinking_enabled: true,
+          thinking_level: "high"
+        }
+      ]
+    });
+
+    expect(state.thinkingStateByScope["chat-1"]).toEqual({ enabled: true, level: "high" });
+    expect(state.thinkingStateByScope[NEW_TASK_MODEL_SCOPE_KEY]).toEqual({ enabled: true });
+    expect(state.thinkingStateByScope["chat-2"]).toBeUndefined();
   });
 });
 

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   Activity,
   BookOpen,
@@ -17,8 +18,24 @@ import type { MemmyAgentSlashCommand } from "../api/memmy-agent-client.js";
 import type { MessageKey, ResolvedLanguage } from "../i18n/messages.js";
 
 export const RECENT_SLASH_COMMANDS_STORAGE_KEY = "memmy-agent-recent-slash-commands";
-export const MAX_VISIBLE_SLASH_COMMANDS = 8;
 export const MAX_RECENT_SLASH_COMMANDS = 5;
+const DEFAULT_VISIBLE_COMMAND_ROWS = 5;
+const COMMAND_ROW_HEIGHT = 56;
+const COMMAND_LIST_BOTTOM_PADDING = 6;
+
+// Literal subcommands only; free-form arguments are displayed as hints.
+const SUBCOMMANDS: Record<string, ReadonlyArray<readonly [string, string]>> = {
+  "/goal": [
+    ["status", ""], ["help", ""], ["create", "<objective>"],
+    ["pause", ""], ["resume", ""], ["edit", "<objective>"],
+    ["budget", "<positive-int|none>"], ["budget none", ""], ["clear", ""]
+  ],
+  "/pairing": [
+    ["list", ""], ["approve", "<code>"], ["deny", "<code>"],
+    ["revoke", "[channel] <user_id>"]
+  ],
+  "/model": [["list", ""]]
+};
 
 export type SlashCommandPaletteItem = MemmyAgentSlashCommand & {
   synthetic?: boolean;
@@ -132,6 +149,13 @@ export function localizeSlashCommands(
 }
 
 export function AgentCommandPalette(props: AgentCommandPaletteProps) {
+  const selectedOptionRef = useRef<HTMLButtonElement>(null);
+  const selectedCommand = props.commands[props.selectedIndex]?.command;
+
+  useEffect(() => {
+    selectedOptionRef.current?.scrollIntoView({ block: "nearest" });
+  }, [props.selectedIndex, selectedCommand]);
+
   if (!props.commands.length) {
     return null;
   }
@@ -145,7 +169,7 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
         role="listbox"
         aria-labelledby="agent-command-palette-heading"
         className="px-1.5 pb-1.5 overflow-y-auto"
-        style={{ maxHeight: "min(432px, calc(100vh - 260px))" }}
+        style={{ maxHeight: `min(${DEFAULT_VISIBLE_COMMAND_ROWS * COMMAND_ROW_HEIGHT + COMMAND_LIST_BOTTOM_PADDING}px, calc(100vh - 260px))` }}
       >
         {props.commands.map((command, index) => {
           const Icon = iconByName[command.icon] ?? Activity;
@@ -156,6 +180,8 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
               type="button"
               role="option"
               aria-selected={selected}
+              ref={selected ? selectedOptionRef : undefined}
+              style={{ height: COMMAND_ROW_HEIGHT, boxSizing: "border-box" }}
               onClick={() => props.onSelect(command)}
               className={`w-full rounded-btn px-2.5 py-2 text-left cursor-pointer transition-colors flex items-start gap-2.5 ${selected ? "bg-canvas-oat/80" : "hover:bg-canvas-oat/50"}`}
             >
@@ -178,32 +204,52 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
 }
 
 export function slashQueryFromInput(input: string): string | null {
-  if (!input.startsWith("/")) {
+  if (!/^\/(?:[^\s/]+(?:[\t ][^\r\n]*)?)?$/.test(input)) {
     return null;
   }
-  const token = input.slice(1);
-  return /\s/.test(token) ? null : token.toLowerCase();
+  return input.slice(1).replace(/[\t ]+/g, " ").toLowerCase();
 }
 
 export function buildVisibleSlashCommands(
   commands: MemmyAgentSlashCommand[],
   isSending: boolean,
-  stopCommand: SlashCommandPaletteItem
+  stopCommand: SlashCommandPaletteItem,
+  query = ""
 ): SlashCommandPaletteItem[] {
   const filtered = commands.filter((command) => command.command !== "/stop");
-  return isSending ? [stopCommand, ...filtered] : filtered;
+  return isSending || query.length > 0 ? [stopCommand, ...filtered] : filtered;
 }
 
 export function filterSlashCommands(
   commands: SlashCommandPaletteItem[],
   query: string,
-  recentCommands: string[]
+  recentCommands: string[],
+  modelPresets: ReadonlyArray<{ name: string; available: boolean }> = []
 ): SlashCommandPaletteItem[] {
-  const normalizedQuery = query.toLowerCase();
-  const matched = normalizedQuery
-    ? commands.filter((command) => commandMatchesQuery(command, normalizedQuery))
-    : sortByRecent(commands, recentCommands);
-  return matched.slice(0, MAX_VISIBLE_SLASH_COMMANDS);
+  const normalizedQuery = query.toLowerCase().replace(/[\t ]+/g, " ");
+  const descendants = commands.flatMap((parent) => {
+    const suffixes = [...(SUBCOMMANDS[parent.command.toLowerCase()] ?? [])];
+    if (parent.command.toLowerCase() === "/model") {
+      for (const preset of modelPresets) {
+        if (preset.available && !/\s/.test(preset.name) && preset.name.toLowerCase() !== "list") {
+          suffixes.push([preset.name, ""]);
+        }
+      }
+    }
+    return suffixes.map(([suffix, argHint]) => ({
+      ...parent, command: `${parent.command} ${suffix}`, argHint
+    }));
+  });
+  const candidates = [...commands, ...descendants];
+  if (!normalizedQuery) return sortByRecent(candidates, recentCommands);
+  const matched = candidates.filter((command) => commandMatchesQuery(command, normalizedQuery));
+
+  // Suggestions open above the input: the shortest remaining completion is closest.
+  return matched.sort((left, right) => right.command.length - left.command.length);
+}
+
+export function defaultSlashCommandIndex(query: string | null, count: number): number {
+  return query ? Math.max(0, count - 1) : 0;
 }
 
 export function readRecentSlashCommands(storage: SlashCommandStorageLike | null = browserStorage()): string[] {
@@ -235,8 +281,7 @@ export function updateRecentSlashCommands(command: string, previous: string[]): 
 }
 
 function commandMatchesQuery(command: SlashCommandPaletteItem, query: string): boolean {
-  return [command.command, command.title, command.description, command.argHint]
-    .some((value) => value.toLowerCase().includes(query));
+  return command.command.toLowerCase().startsWith(`/${query}`);
 }
 
 function sortByRecent(commands: SlashCommandPaletteItem[], recentCommands: string[]): SlashCommandPaletteItem[] {

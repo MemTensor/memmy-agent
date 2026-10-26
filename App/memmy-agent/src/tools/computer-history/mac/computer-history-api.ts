@@ -824,7 +824,21 @@ export class ComputerHistoryDemoService {
   /** Keep the latest failure and where it happened; never key manifests or reader stdout. */
   private saveWeChatFailure(category: string, phase: string | null, detail?: unknown): void {
     if (!/^[a-zA-Z_][a-zA-Z_:0-9-]{0,127}$/u.test(category)) return;
-    const failureDetail = weChatFailureDetail(detail);
+    let failureDetail: Record<string, string | number> | undefined = weChatFailureDetail(detail);
+    if (category === "wechat_private_storage_source_changed") {
+      const diagnostics: Record<string, string | number> = {};
+      if (detail && typeof detail === "object") {
+        const value = detail as Record<string, unknown>;
+        if (value.kind === "file" || value.kind === "directory" || value.kind === "entry") diagnostics.kind = value.kind;
+        if (["cache", "database", "other"].includes(value.area as string)) diagnostics.area = value.area as string;
+        if (typeof value.pathHash === "string" && /^[a-f0-9]{16}$/u.test(value.pathHash)) diagnostics.pathHash = value.pathHash;
+        if (typeof value.fields === "string" && /^(?:size|dev|ino|mtime_ns|ctime_ns)(?:,(?:size|dev|ino|mtime_ns|ctime_ns)){0,4}$/u.test(value.fields)) diagnostics.fields = value.fields;
+        for (const key of ["attempts", "elapsedMs"] as const) {
+          if (typeof value[key] === "number" && Number.isSafeInteger(value[key]) && value[key] >= 0) diagnostics[key] = value[key];
+        }
+      }
+      failureDetail = Object.keys(diagnostics).length ? diagnostics : undefined;
+    }
     const file = path.join(this.weChatStateDirectory, "last-connection-error.json");
     const temporary = `${file}.${crypto.randomUUID()}.tmp`;
     try {

@@ -20,6 +20,12 @@ SPEC.loader.exec_module(connect)
 
 
 class ConnectPermissionTests(unittest.TestCase):
+    def test_source_change_metadata_is_forwarded_without_changing_error_category(self):
+        error = RuntimeError("wechat_private_storage_source_changed")
+        error.detail = {"kind": "file", "area": "cache", "attempts": 3, "elapsedMs": 12000}
+        self.assertEqual(connect.connection_error_fields(error), {
+            "category": "wechat_private_storage_source_changed", "detail": error.detail})
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

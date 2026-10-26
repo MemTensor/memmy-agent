@@ -465,7 +465,7 @@ describe("memmy-agent client", () => {
     expect(paths).toEqual(["/webui/bootstrap"]);
   });
 
-  it("lists slash commands with bearer token, camelCase mapping, goal exposure, and control-command filtering", async () => {
+  it("lists all server-supported slash commands with bearer token and camelCase mapping", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/webui/bootstrap") {
@@ -495,9 +495,18 @@ describe("memmy-agent client", () => {
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
     await expect(client.listSlashCommands()).resolves.toEqual([
+      { command: "/stop", title: "Stop", description: "Stop turn", icon: "square", argHint: "" },
+      { command: "/restart", title: "Restart", description: "Restart agent", icon: "rotate-cw", argHint: "" },
+      { command: "/dream", title: "Dream", description: "Run Dream", icon: "sparkles", argHint: "" },
+      { command: "/dream-log", title: "Dream log", description: "Show Dream log", icon: "book-open", argHint: "" },
+      { command: "/dream-restore", title: "Dream restore", description: "Restore Dream", icon: "undo-2", argHint: "" },
+      { command: "/history", title: "History", description: "Show history", icon: "history", argHint: "[n]" },
       { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "<goal>" },
+      { command: "/pairing", title: "Pairing", description: "Manage pairing", icon: "shield", argHint: "" },
+      { command: "/help", title: "Help", description: "Show help", icon: "circle-help", argHint: "" },
       { command: "/status", title: "Status", description: "Show status", icon: "activity", argHint: "" },
-      { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" }
+      { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" },
+      { command: "/model", title: "Model", description: "Switch model", icon: "brain", argHint: "[preset]" }
     ]);
   });
 

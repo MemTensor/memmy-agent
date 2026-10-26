@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "npm run build -w @memmy/agent-source-core && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
-    "test": "npm run typecheck && vitest run tests/desktop-runtime-manifest.test.ts tests/language.test.ts tests/agent-source-scan.test.ts",
+    "test": "npm run typecheck && vitest run tests/desktop-runtime-manifest.test.ts tests/language.test.ts tests/model-catalog-resolver.test.ts tests/model-thinking-levels.test.ts tests/agent-source-scan.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

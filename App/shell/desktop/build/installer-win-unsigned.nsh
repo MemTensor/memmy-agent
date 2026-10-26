@@ -432,10 +432,28 @@ Function MemmyValidateSelectedDirectories
   Pop $0
   Pop $1
   StrCmp $0 "0" memmy_validate_ownership_succeeded
-  StrCpy $R8 "Cannot verify that this drive's Memmy data belongs to your Windows account. Choose C: for a per-user installation, or a separate drive. Another folder on this same drive cannot isolate the data."
-  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_failed
-  StrCpy $R8 "无法确认此盘的 Memmy 数据属于当前 Windows 账户。请选择 C 盘按用户安装，或使用独立盘；选择同一盘上的其他文件夹无法隔离数据。"
-  Goto memmy_validate_failed
+  ${If} ${Silent}
+    Goto memmy_validate_ownership_denied
+  ${EndIf}
+  StrCpy $R8 "Cannot verify that this drive's Memmy data belongs to your Windows account. Choose C: for a per-user installation, or a separate drive. Another folder on this same drive cannot isolate the data.$\r$\n$\r$\nI understand the risk and still want to install on this drive."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_ownership_confirm
+  StrCpy $R8 "无法确认此盘的 Memmy 数据属于当前 Windows 账户。请选择 C 盘按用户安装，或使用独立盘；选择同一盘上的其他文件夹无法隔离数据。$\r$\n$\r$\n我确认风险，仍要继续安装到该盘。"
+
+  memmy_validate_ownership_confirm:
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$R8" IDYES memmy_accept_drive_risk
+    Goto memmy_validate_failed
+
+  memmy_accept_drive_risk:
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\MemmyDataMigration\MemmyWindowsRuntimeOwnership.ps1" -RuntimeHomePath "$MemmyTargetRuntimeHomePath" -AcceptDriveRisk'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" memmy_validate_ownership_succeeded
+
+  memmy_validate_ownership_denied:
+    StrCpy $R8 "Cannot verify that this drive's Memmy data belongs to your Windows account. Choose C: for a per-user installation, or a separate drive. Another folder on this same drive cannot isolate the data."
+    StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_failed
+    StrCpy $R8 "无法确认此盘的 Memmy 数据属于当前 Windows 账户。请选择 C 盘按用户安装，或使用独立盘；选择同一盘上的其他文件夹无法隔离数据。"
+    Goto memmy_validate_failed
 
   memmy_validate_ownership_succeeded:
   StrCpy $R0 "$INSTDIR"

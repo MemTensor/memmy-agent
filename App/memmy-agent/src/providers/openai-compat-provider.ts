@@ -1,3 +1,4 @@
+import { requestTiming } from "../utils/request-timing.js";
 import crypto from "crypto";
 import OpenAI from "openai";
 import {
@@ -15,6 +16,10 @@ import {
   convertTools,
   parseResponseOutput,
 } from "./openai-responses/index.js";
+import {
+  chatCompletionsModelForcesNoneReasoning,
+  customModelUsesMaxCompletionTokens,
+} from "./custom-provider.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
 import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
@@ -51,7 +56,7 @@ const THINKING_STYLE_MAP: Record<string, (on: boolean) => Record<string, any>> =
 const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<string, any>> = {
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
 };
-const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0;
+const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 300.0;
 
 export const RESPONSES_FAILURE_THRESHOLD = 3;
 export const RESPONSES_PROBE_INTERVAL_S = 300;
@@ -135,7 +140,8 @@ export class OpenAICompatProvider extends LLMProvider {
     }
 
     this.defaultModel = this.model ?? "gpt-4o";
-    if (this.apiType !== "auto" && specName(this.spec) !== "openai") {
+    const name = specName(this.spec);
+    if (this.apiType !== "auto" && name !== "openai" && name !== "custom") {
       this.apiType = "auto";
     }
     if (this.apiKey && this.spec?.envKey) this.setupEnv(this.apiKey, this.apiBase);
@@ -607,7 +613,9 @@ export class OpenAICompatProvider extends LLMProvider {
 
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       kwargs.temperature = temperature;
-    if (this.spec?.supportsMaxCompletionTokens) kwargs.max_completion_tokens = maxTokens;
+    const useMaxCompletionTokens = Boolean(this.spec?.supportsMaxCompletionTokens)
+      || (specName(this.spec) === "custom" && customModelUsesMaxCompletionTokens(modelName));
+    if (useMaxCompletionTokens) kwargs.max_completion_tokens = maxTokens;
     else kwargs.max_tokens = maxTokens;
 
     for (const [pattern, overrides] of this.spec?.modelOverrides ?? []) {
@@ -617,7 +625,16 @@ export class OpenAICompatProvider extends LLMProvider {
       }
     }
 
-    if (wireEffort && semanticEffort !== "none") kwargs.reasoning_effort = wireEffort;
+    const chatCompletionsGptWithTools = this.apiType === "chatCompletions"
+      && Boolean(tools?.length)
+      && chatCompletionsModelForcesNoneReasoning(modelName);
+    const providerName = specName(this.spec);
+    const thinkingOff = !wireEffort || semanticEffort === "none";
+    const forceNoneReasoningEffort = chatCompletionsGptWithTools && (
+      providerName === "openai" || (providerName === "custom" && thinkingOff)
+    );
+    if (forceNoneReasoningEffort) kwargs.reasoning_effort = "none";
+    else if (wireEffort && semanticEffort !== "none") kwargs.reasoning_effort = wireEffort;
     if (reasoningEffort !== null) {
       const thinkingEnabled = semanticEffort !== "none" && semanticEffort !== "minimal";
       const styles = thinkingStylesFor(this.spec, modelName);
@@ -1172,11 +1189,14 @@ export class OpenAICompatProvider extends LLMProvider {
       }
       if (args.signal?.aborted) throw createProviderAbortError();
       const options = providerAbortOptions(args.signal);
+      requestTiming("model.http_start");
       const stream = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
+      requestTiming("model.http_headers");
       const chunks: any[] = [];
       for await (const chunk of timedAsyncIterable(stream, idleTimeoutS)) {
+        requestTiming("model.first_chunk", true);
         if (args.signal?.aborted) throw createProviderAbortError();
         chunks.push(chunk);
         const choice =

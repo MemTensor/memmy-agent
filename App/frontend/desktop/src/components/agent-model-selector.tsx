@@ -4,14 +4,16 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import {
-  getTaskModelCandidates,
   createModelWorkspace,
+  getTaskModelCandidates,
   resolveModelSelection,
+  resolveThinkingConfigForModel,
   type ModelWorkspaceMode
 } from "../state/model-workspace.js";
 import {
   settingsTabHash
 } from "../pages/settings-nav.js";
+import { AgentThinkingControl } from "./agent-thinking-control.js";
 import { ModelProviderLogo } from "./model-provider-logo.js";
 import { Select, type SelectOption } from "./Select.js";
 
@@ -97,6 +99,8 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
     dispatch(appActions.navigate("/settings"));
   }
 
+  const thinkingConfig = resolveThinkingConfigForModel(workspace, resolved.candidate);
+
   return (
     <div className="agent-model-selector" data-model-selector-scope={props.scopeKey}>
       <Select
@@ -112,6 +116,15 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
         className="select-control--compact select-control--subtle agent-model-selector__control"
         buttonClassName="agent-model-selector__button"
         menuClassName="agent-model-selector__menu"
+        optionAside={(option) => (
+          option.value === resolved.candidateId && thinkingConfig
+            ? <AgentThinkingControl
+                scopeKey={props.scopeKey}
+                thinkingConfig={thinkingConfig}
+                disabled={props.disabled}
+              />
+            : null
+        )}
         menuFooter={({ close }) => (
           <div className="agent-model-selector__footer">
             <button

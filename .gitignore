@@ -1,5 +1,6 @@
 node_modules/
 dist/
+App/memmy-agent/npm-packages/
 release/
 App/shell/desktop/release/
 Mac软件打包/

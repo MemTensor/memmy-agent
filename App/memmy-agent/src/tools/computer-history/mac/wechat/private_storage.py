@@ -6,6 +6,7 @@ never written, decoded, or emitted. There is deliberately no bulk-copy fallback.
 import ctypes
 import errno
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,23 @@ import secrets
 import shutil
 import stat
 import tempfile
+import time
+
+
+class SourceChangedError(RuntimeError):
+    """Metadata-only diagnostics; never include account names or chat paths."""
+
+    def __init__(self, source, kind, fields):
+        super().__init__("wechat_private_storage_source_changed")
+        parts = source.parts
+        area = "cache" if any("cache" in part.lower() for part in parts) else (
+            "database" if "db_storage" in parts else "other")
+        self.detail = {"kind": kind, "area": area, "fields": ",".join(fields),
+                       "pathHash": hashlib.sha256(os.fsencode(source)).hexdigest()[:16]}
+
+
+def _changed_fields(before, after, fields):
+    return [field for field in fields if getattr(before, "st_" + field) != getattr(after, "st_" + field)]
 
 
 _CONTAINER = "Library/Containers/com.tencent.xinWeChat"
@@ -175,6 +193,8 @@ def _clone_file(source, destination, root=None):
     operation = "open"
     try:
         source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise SourceChangedError(source, "file", ("ino",)) from None
     except OSError as error:
         raise StorageError("wechat_private_storage_clone_failed", source, operation=operation,
                            errno=error.errno) from None
@@ -183,7 +203,10 @@ def _clone_file(source, destination, root=None):
         operation = "fstat"
         info = os.fstat(source_descriptor)
         operation = "lstat"
-        expected = _source_lstat(source)
+        try:
+            expected = _source_lstat(source)
+        except FileNotFoundError:
+            raise SourceChangedError(source, "file", ("ino",)) from None
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)):
             raise StorageError("wechat_private_storage_unsafe_path", source, reason="identity")
@@ -213,8 +236,9 @@ def _clone_file(source, destination, root=None):
                 raise OSError(error_number, os.strerror(error_number))
         operation = "verify"
         after = os.fstat(source_descriptor)
-        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
-            raise RuntimeError("wechat_private_storage_source_changed")
+        changed = _changed_fields(info, after, ("size", "mtime_ns", "ctime_ns"))
+        if changed:
+            raise SourceChangedError(source, "file", changed)
         cloned = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             copied = os.fstat(cloned)
@@ -330,15 +354,22 @@ def preflight_private_storage(state, consent_id):
 
 def _clone_tree(source, destination, root, home, guard):
     guard()
-    original = _source_directory(source, root)
+    try:
+        original = _source_directory(source, root)
+        names = _source_names(source)
+    except FileNotFoundError:
+        raise SourceChangedError(source, "directory", ("ino",)) from None
     destination.mkdir(mode=0o700)
-    for name in _source_names(source):
+    for name in names:
         guard()
         path = source / name
         if _container_manager_metadata(path, root):
             continue
         copy = destination / name
-        info, target, standard_alias = _source_item(path, root, home)
+        try:
+            info, target, standard_alias = _source_item(path, root, home)
+        except FileNotFoundError:
+            raise SourceChangedError(path, "entry", ("ino",)) from None
         if stat.S_ISLNK(info.st_mode):
             relative = path.relative_to(root)
             if standard_alias:
@@ -365,14 +396,41 @@ def _clone_tree(source, destination, root, home, guard):
                 os.close(copied_descriptor)
         else:
             raise StorageError("wechat_private_storage_unsafe_path", path, reason="file_type")
-    after = _source_lstat(source)
-    if (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns) != (
-            original.st_dev, original.st_ino, original.st_mtime_ns, original.st_ctime_ns):
-        raise RuntimeError("wechat_private_storage_source_changed")
+    try:
+        after = _source_lstat(source)
+    except FileNotFoundError:
+        raise SourceChangedError(source, "directory", ("ino",)) from None
+    changed = _changed_fields(original, after, ("dev", "ino", "mtime_ns", "ctime_ns"))
+    if changed:
+        raise SourceChangedError(source, "directory", changed)
     guard()
 
 
 def create_private_storage(state, original_container=None, optional_group=None, consent_id=None):
+    """Allow exit-time writes to settle; discard every inconsistent attempt."""
+    state = _absolute(state)
+    _directory(state, private=True)
+    if os.getuid() == 0 or os.getuid() != os.geteuid():
+        raise RuntimeError("root_execution_refused")
+    _consent(state, consent_id, initial=True)
+    started = time.monotonic()
+    for attempt in range(1, 4):
+        # A vanished main process does not mean helpers have finished writing.
+        # This pause is only a settling grace period, not proof of consistency:
+        # all strict source checks below still apply on every attempt.
+        for _ in range(4 * attempt):
+            _consent(state, consent_id)
+            time.sleep(0.25)
+        _consent(state, consent_id)
+        try:
+            return _create_private_storage_once(state, original_container, optional_group, consent_id)
+        except SourceChangedError as error:
+            error.detail.update(attempts=attempt, elapsedMs=int((time.monotonic() - started) * 1000))
+            if attempt == 3:
+                raise
+
+
+def _create_private_storage_once(state, original_container=None, optional_group=None, consent_id=None):
     state = _absolute(state)
     home = _absolute(_real_home())
     _directory(state, private=True)
@@ -429,7 +487,7 @@ def create_private_storage(state, original_container=None, optional_group=None, 
             if stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (original_session.st_dev, original_session.st_ino):
                 shutil.rmtree(session)
         except OSError:
-            pass
+            raise RuntimeError("wechat_private_storage_cleanup_failed") from None
         raise
 
 

@@ -169,7 +169,7 @@ export function LoginPage() {
           <p className="text-sm font-semibold text-text-ink/60">{t("nav.login")}</p>
           <h1 className="text-2xl font-extrabold text-text-ink mt-1">{t("login.title")}</h1>
         </div>
-        <div className="px-6 pb-6 space-y-3.5">
+        <div className="login-page__body px-6 pb-6 space-y-3.5">
           <AuthCodeForm
             identifier={identifier}
             identifierType={channel}
@@ -192,6 +192,7 @@ export function LoginPage() {
             <SocialLoginButtons
               pendingProvider={socialLogin.pendingProvider}
               disabled={verificationCodeAuth.loginPending || modePersistencePending}
+              showDivider
               feedback={socialLogin.feedback}
               onLogin={(provider) => void startSocialLogin(provider)}
             />

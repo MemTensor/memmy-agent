@@ -38,7 +38,7 @@ describe("model workspace task picker layout", () => {
 
     const row = [...container.querySelectorAll<HTMLElement>(".task-model-picker__option")]
       .find((option) => option.textContent?.includes("gpt-5.4")
-        && option.textContent.includes("OpenAI 兼容")
+        && option.textContent.includes("OpenAI Completions")
         && option.textContent.includes("默认"));
     if (!row) throw new Error("Missing default custom-model row");
     const choiceButton = row.querySelector<HTMLButtonElement>('button[role="checkbox"]');

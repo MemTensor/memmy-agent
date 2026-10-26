@@ -700,6 +700,22 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row, this.db)) : undefined;
   }
 
+  listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
+    // Parent traces may already be soft-deleted, and their span_ids only describe
+    // the latest split. Use the spans' own ownership links for task deletion.
+    const rows = this.db.prepare(
+      `SELECT id FROM memories
+       WHERE user_id = ? AND memory_layer = 'L1'
+         AND deleted_at IS NULL AND status != 'deleted'
+         AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
+         AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
+         AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
+           IN (SELECT value FROM json_each(?))
+       ORDER BY id`
+    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
     const row = this.db
       .prepare(
@@ -1938,6 +1954,8 @@ export class RuntimeRepository {
     }));
   }
 
+  // userId is capture provenance. It must not partition the same local native turn
+  // when an installed Hook and the desktop scanner submit under different accounts.
   getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
       WHERE source = @source AND profile_id = @profileId

@@ -45,6 +45,7 @@ class StaticTool extends Tool {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -70,6 +71,109 @@ describe("CompositeHook", () => {
     await new CompositeHook([new H(), new H2()]).beforeIteration(ctx());
 
     expect(calls).toEqual(["A:0", "B:0"]);
+  });
+
+  it("collects beforeIteration messages in hook order", async () => {
+    class H extends AgentHook {
+      override async beforeIteration() {
+        return [{ role: "user" as const, content: "first" }];
+      }
+    }
+    class H2 extends AgentHook {
+      override async beforeIteration() {
+        return [{ role: "user" as const, content: "second" }];
+      }
+    }
+
+    await expect(new CompositeHook([new H(), new H2()]).beforeIteration(ctx())).resolves.toEqual([
+      { role: "user", content: "first" },
+      { role: "user", content: "second" },
+    ]);
+  });
+
+  it("collects beforeFinalize messages in hook order", async () => {
+    class H extends AgentHook {
+      override async beforeFinalize() {
+        return [{ role: "user" as const, content: "first review" }];
+      }
+    }
+    class H2 extends AgentHook {
+      override async beforeFinalize() {
+        return [{ role: "user" as const, content: "second review" }];
+      }
+    }
+
+    await expect(new CompositeHook([new H(), new H2()]).beforeFinalize(ctx(), "draft"))
+      .resolves.toEqual([
+        { role: "user", content: "first review" },
+        { role: "user", content: "second review" },
+      ]);
+  });
+
+  it("isolates beforeFinalize failures and keeps later feedback", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    class BadHook extends AgentHook {
+      override async beforeFinalize(): Promise<any> {
+        throw new Error("review failed");
+      }
+    }
+    class GoodHook extends AgentHook {
+      override async beforeFinalize() {
+        return [{ role: "user" as const, content: "retry safely" }];
+      }
+    }
+
+    await expect(new CompositeHook([new BadHook(), new GoodHook()]).beforeFinalize(ctx(), "draft"))
+      .resolves.toEqual([{ role: "user", content: "retry safely" }]);
+  });
+
+  it("pipes rewritten content and keeps continuation sticky", async () => {
+    class ContinueHook extends AgentHook {
+      override async rewriteLlmContent() {
+        return { content: "review", continue: true as const };
+      }
+    }
+    class SuffixHook extends AgentHook {
+      override async rewriteLlmContent(context: AgentHookContext, content: string | null) {
+        return `${content}!`;
+      }
+    }
+
+    await expect(new CompositeHook([new ContinueHook(), new SuffixHook()])
+      .rewriteLlmContent(ctx(), "draft"))
+      .resolves.toEqual({ content: "review!", continue: true });
+  });
+
+  it("isolates synchronous failures from fail-open hooks", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    class BadHook extends AgentHook {
+      override wantsStreaming(): boolean {
+        throw new Error("broken streaming check");
+      }
+      override finalizeContent(): string | null {
+        throw new Error("broken finalizer");
+      }
+    }
+
+    const hook = new CompositeHook([new BadHook(), new AgentHook()]);
+
+    expect(hook.wantsStreaming()).toBe(false);
+    expect(hook.finalizeContent(ctx(), "answer")).toBe("answer");
+  });
+
+  it("stops waiting for a fail-open asynchronous hook after the fixed timeout", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    class HangingHook extends AgentHook {
+      override async beforeRun(): Promise<void> {
+        await new Promise(() => undefined);
+      }
+    }
+    const call = new CompositeHook([new HangingHook()]).beforeRun(ctx());
+
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    await expect(call).resolves.toBeUndefined();
   });
 
   it("fans out all async methods to every hook", async () => {
@@ -306,6 +410,16 @@ describe("CompositeHook", () => {
 
   it("passes null through finalizeContent", () => {
     expect(new CompositeHook([new AgentHook()]).finalizeContent(ctx(), null)).toBeNull();
+  });
+
+  it("preserves null returned by finalizeContent", () => {
+    class RemoveContent extends AgentHook {
+      override finalizeContent(): null {
+        return null;
+      }
+    }
+
+    expect(new CompositeHook([new RemoveContent()]).finalizeContent(ctx(), "answer")).toBeNull();
   });
 
   it("orders finalizeContent as a pipeline", () => {

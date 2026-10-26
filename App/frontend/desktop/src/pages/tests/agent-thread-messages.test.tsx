@@ -647,6 +647,43 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("agent-message-copy-cluster--left");
   });
 
+  it("keeps final-answer actions for completed turns while excluding an interrupted draft", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-completed-and-interrupted-turns"
+          isSending={false}
+          messages={[
+            { id: "question-1", role: "user", content: "完成第一轮" },
+            { id: "draft-1", role: "assistant", content: "先检查第一轮资料。" },
+            {
+              id: "trace-1", role: "tool", kind: "trace", content: "", traces: [],
+              toolEvents: [{ phase: "end", call_id: "call-read-1", name: "read_file", arguments: { path: "first.md" } }],
+              activitySegmentId: "activity-completed-1"
+            },
+            { id: "answer-1", role: "assistant", content: "第一轮已完成。" },
+            { id: "question-2", role: "user", content: "完成第二轮" },
+            { id: "answer-2", role: "assistant", content: "第二轮已完成。" },
+            { id: "question-3", role: "user", content: "开始第三轮" },
+            { id: "draft-3", role: "assistant", content: "我会先整理第三轮大纲。" },
+            {
+              id: "trace-3", role: "tool", kind: "trace", content: "", traces: [],
+              toolEvents: [{ phase: "end", call_id: "call-edit-3", name: "edit_file", arguments: { path: "third.md" } }],
+              activitySegmentId: "activity-interrupted-3", stoppedByUser: true
+            },
+            { id: "steer", role: "user", content: "换一个主题" }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("第一轮已完成。");
+    expect(html).toContain("第二轮已完成。");
+    expect(html).toContain("我会先整理第三轮大纲。");
+    expect(html.match(/agent-message-copy-cluster--left/g) ?? []).toHaveLength(2);
+    expect(html.match(/agent-message-copy-button--left/g) ?? []).toHaveLength(2);
+  });
+
   it("renders short narration drafts inside the run cluster in answer style without chrome", () => {
     const draft = "好的！我来帮你规划国庆出行方案。先查一下几个热门目的地的天气情况，再搜索一些出行信息。";
     const html = renderToString(

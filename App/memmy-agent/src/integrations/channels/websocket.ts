@@ -235,6 +235,36 @@ type SessionDeletionServices = {
 };
 export type WebuiLanguage = "zh-CN" | "en-US";
 
+export type WebuiMessageDigestInput = {
+  chatId: string;
+  content: string;
+  mediaPaths: string[];
+  language: WebuiLanguage | null;
+  target: WebuiSessionTarget | null;
+  modelPreset: string | null | undefined;
+  queueSurface: "chat_composer" | null;
+  turnAdmission: "queue" | "steer";
+  expectedTurnId: string | null;
+  thinkingEnabled?: boolean;
+  thinkingLevel?: string | null;
+};
+
+export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): string {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    chat_id: input.chatId,
+    content: input.content,
+    media_paths: input.mediaPaths,
+    language: input.language,
+    target: input.target,
+    model_preset: input.modelPreset,
+    queue_surface: input.queueSurface,
+    turn_admission: input.turnAdmission,
+    expected_turn_id: input.expectedTurnId,
+    thinking_enabled: input.thinkingEnabled ?? null,
+    thinking_level: input.thinkingLevel ?? null,
+  })).digest("hex");
+}
+
 const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
 const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
@@ -967,38 +997,8 @@ export class WebSocketChannel extends BaseChannel {
     return null;
   }
 
-  private webuiMessageDigest({
-    chatId,
-    content,
-    mediaPaths,
-    language,
-    target,
-    modelPreset,
-    queueSurface,
-    turnAdmission,
-    expectedTurnId,
-  }: {
-    chatId: string;
-    content: string;
-    mediaPaths: string[];
-    language: WebuiLanguage | null;
-    target: WebuiSessionTarget | null;
-    modelPreset: string | null | undefined;
-    queueSurface: "chat_composer" | null;
-    turnAdmission: "queue" | "steer";
-    expectedTurnId: string | null;
-  }): string {
-    return crypto.createHash("sha256").update(JSON.stringify({
-      chat_id: chatId,
-      content,
-      media_paths: mediaPaths,
-      language,
-      target,
-      model_preset: modelPreset,
-      queue_surface: queueSurface,
-      turn_admission: turnAdmission,
-      expected_turn_id: expectedTurnId,
-    })).digest("hex");
+  private webuiMessageDigest(input: WebuiMessageDigestInput): string {
+    return computeWebuiMessageDigest(input);
   }
 
   private resolveMessageModel(
@@ -3571,6 +3571,8 @@ export class WebSocketChannel extends BaseChannel {
           queueSurface,
           turnAdmission,
           expectedTurnId,
+          thinkingEnabled: typeof envelope.thinking_enabled === "boolean" ? envelope.thinking_enabled : undefined,
+          thinkingLevel: typeof envelope.thinking_level === "string" ? envelope.thinking_level : undefined,
         })
       : null;
     if (existing && clientRequestId) {
@@ -3680,6 +3682,8 @@ export class WebSocketChannel extends BaseChannel {
       model: modelSelection.model,
       model_selection: modelSelectionWire(modelSelection),
     };
+    if (typeof envelope.thinking_enabled === "boolean") metadata.thinking_enabled = envelope.thinking_enabled;
+    if (typeof envelope.thinking_level === "string") metadata.thinking_level = envelope.thinking_level;
     if (clientRequestId && digest) {
       metadata.client_request_id = clientRequestId;
       metadata.webui_request_digest = digest;

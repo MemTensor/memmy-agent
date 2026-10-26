@@ -2664,6 +2664,13 @@ export class MemoryService {
     const deletedMemoryIds: string[] = [];
 
     this.repos.transaction(() => {
+      const spanIds = new Set(this.repos.memories.listTaskSpanIds(
+        episode.userId, episode.id, episode.l1MemoryIds
+      ));
+      for (const spanId of spanIds) {
+        this.deleteMemory(spanId, request);
+        deletedMemoryIds.push(spanId);
+      }
       for (const memoryId of episode.l1MemoryIds) {
         if (!this.repos.memories.get(memoryId)) continue;
         this.deleteMemory(memoryId, request);

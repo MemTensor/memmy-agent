@@ -383,10 +383,12 @@ describe("agent source service", () => {
     });
 
     await service.installSkill("cursor");
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(false);
     await service.uninstallSkill("cursor");
 
     expect(calls).toEqual(["install:cursor", "uninstall:cursor"]);
     expect(repository.listSources()[0]?.status).toBe("not_connected");
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(true);
   });
 
   it("delegates native plugin install then updates source status", async () => {
@@ -418,10 +420,12 @@ describe("agent source service", () => {
     });
 
     await service.installPlugin("openclaw");
+    expect(repository.isAutoInjectSuppressed("openclaw")).toBe(false);
     await service.uninstallPlugin("openclaw");
 
     expect(calls).toEqual(["plugin:openclaw", "unplugin:openclaw"]);
     expect(repository.listSources()[0]?.status).toBe("not_connected");
+    expect(repository.isAutoInjectSuppressed("openclaw")).toBe(true);
   });
 
   it("delegates memory plugin conflict detection to the skill distribution service", async () => {
@@ -717,6 +721,7 @@ function createRepository(): AgentSourceRepository {
       data_path       TEXT NOT NULL,
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
+      auto_inject_suppressed INTEGER NOT NULL DEFAULT 0 CHECK(auto_inject_suppressed IN (0,1)),
       last_scanned_at TEXT,
       sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),

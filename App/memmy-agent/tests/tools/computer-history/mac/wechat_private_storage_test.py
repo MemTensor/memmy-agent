@@ -38,6 +38,7 @@ class PrivateStorageTests(unittest.TestCase):
         self.native_clone = self.helper._clone_file
         self.write_consent()
         patches = [
+            mock.patch.object(self.helper.time, "sleep"),
             mock.patch.object(self.helper, "_real_home", return_value=self.home),
             mock.patch.object(self.helper, "_clone_file", side_effect=self.copy_fixture),
         ]
@@ -446,16 +447,103 @@ class PrivateStorageTests(unittest.TestCase):
         self.assertEqual(self.sessions(), [])
 
     def test_final_snapshot_source_change_is_rejected_and_partial_session_removed(self):
+        writes = 0
         def change(source, destination, root=None):
+            nonlocal writes
             self.copy_fixture(source, destination)
             # This synthetic new entry exercises the strict directory check.
-            (source.parent / "later-cache-entry").write_bytes(b"synthetic cache write")
+            writes += 1
+            (source.parent / ("later-cache-entry-" + str(writes))).write_bytes(b"synthetic cache write")
 
         self.clone.side_effect = change
         with self.assertRaisesRegex(RuntimeError, "^wechat_private_storage_source_changed$"):
             self.create()
         self.assertEqual(self.sessions(), [])
         self.assertEqual(self.file.read_bytes(), b"only synthetic fixture bytes")
+
+    def test_transient_change_retries_with_a_fresh_session(self):
+        attempts = []
+        def change_once(source, destination, root=None):
+            self.copy_fixture(source, destination)
+            if source == self.file:
+                attempts.append(destination)
+                if len(attempts) == 1:
+                    (source.parent / "later-cache-entry").write_bytes(b"synthetic cache write")
+        self.clone.side_effect = change_once
+        storage = self.create()
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(attempts[0].exists())
+        self.assertEqual(len(self.sessions()), 1)
+        self.assertEqual((Path(storage["containerPath"]) / "Data/Documents/fixture.db").read_bytes(),
+                         b"only synthetic fixture bytes")
+
+    def test_continuous_changes_stop_after_three_attempts_with_private_diagnostics(self):
+        def change(source, destination, root=None):
+            self.copy_fixture(source, destination)
+            raise self.helper.SourceChangedError(source, "file", ("mtime_ns",))
+        self.clone.side_effect = change
+        with self.assertRaises(self.helper.SourceChangedError) as caught:
+            self.create()
+        self.assertEqual(self.clone.call_count, 3)
+        self.assertEqual(self.sessions(), [])
+        self.assertEqual(caught.exception.detail["attempts"], 3)
+        self.assertEqual(caught.exception.detail["fields"], "mtime_ns")
+        self.assertNotIn(str(self.file), json.dumps(caught.exception.detail))
+        self.assertGreaterEqual(caught.exception.detail["elapsedMs"], 0)
+
+    def test_revocation_during_retry_wait_stops_before_another_clone(self):
+        def change(source, destination, root=None):
+            self.copy_fixture(source, destination)
+            raise self.helper.SourceChangedError(source, "file", ("mtime_ns",))
+        self.clone.side_effect = change
+        def revoke_during_retry(seconds):
+            if self.clone.call_count:
+                self.write_consent(enabled=False)
+        self.helper.time.sleep.side_effect = revoke_during_retry
+        with self.assertRaisesRegex(RuntimeError, "^wechat_consent_revoked$"):
+            self.create()
+        self.assertEqual(self.clone.call_count, 1)
+        self.assertEqual(self.sessions(), [])
+
+    def test_clone_failure_is_not_retried(self):
+        self.clone.side_effect = RuntimeError("wechat_private_storage_clone_failed")
+        with self.assertRaisesRegex(RuntimeError, "^wechat_private_storage_clone_failed$"):
+            self.create()
+        self.assertEqual(self.clone.call_count, 1)
+        self.assertEqual(self.sessions(), [])
+
+    def test_permission_failure_is_not_retried(self):
+        self.clone.side_effect = PermissionError("synthetic permission denial")
+        with self.assertRaises(PermissionError):
+            self.create()
+        self.assertEqual(self.clone.call_count, 1)
+        self.assertEqual(self.sessions(), [])
+
+    def test_cache_removed_after_enumeration_retries_instead_of_failing_permanently(self):
+        cache = self.data / "Caches"
+        cache.mkdir()
+        entry = cache / "temporary"
+        entry.write_bytes(b"synthetic cache")
+        original_item = self.helper._source_item
+        removed = False
+        def remove_once(path, root, home):
+            nonlocal removed
+            if path == entry and not removed:
+                removed = True
+                entry.unlink()
+            return original_item(path, root, home)
+        with mock.patch.object(self.helper, "_source_item", side_effect=remove_once):
+            storage = self.create()
+        self.assertTrue(removed)
+        self.assertEqual(len(self.sessions()), 1)
+        self.assertFalse((Path(storage["containerPath"]) / "Data/Documents/Caches/temporary").exists())
+
+    def test_failed_cleanup_prevents_retry(self):
+        self.clone.side_effect = self.helper.SourceChangedError(self.file, "file", ("mtime_ns",))
+        with mock.patch.object(self.helper.shutil, "rmtree", side_effect=OSError("fixture cleanup failed")):
+            with self.assertRaisesRegex(RuntimeError, "^wechat_private_storage_cleanup_failed$"):
+                self.create()
+        self.assertEqual(self.clone.call_count, 1)
 
     def test_preflight_rejects_unknown_external_symlink_without_creating_a_session(self):
         (self.data / "external").symlink_to(self.home / "Desktop")

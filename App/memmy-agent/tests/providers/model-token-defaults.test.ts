@@ -18,7 +18,7 @@ describe("model token defaults", () => {
       .sort();
     const tokenDefaultModels = Object.keys(MODEL_TOKEN_DEFAULTS).sort();
 
-    expect(tokenDefaultModels).toHaveLength(275);
+    expect(tokenDefaultModels).toHaveLength(276);
     expect(tokenDefaultModels).toEqual(inputCapabilityModels);
     expect(MODEL_TOKEN_DEFAULTS_REVIEWED_AT >= MODEL_INPUT_CAPABILITIES_REVIEWED_AT).toBe(true);
     expect(Object.isFrozen(MODEL_TOKEN_DEFAULTS)).toBe(true);
@@ -71,6 +71,10 @@ describe("model token defaults", () => {
       maxTokens: 384_000,
     });
     expect(getModelTokenDefaults("deepseek-v4.1-flash")).toEqual({
+      contextWindowTokens: 1_000_000,
+      maxTokens: 384_000,
+    });
+    expect(getModelTokenDefaults("deepseek-v4.1-flash-1017")).toEqual({
       contextWindowTokens: 1_000_000,
       maxTokens: 384_000,
     });

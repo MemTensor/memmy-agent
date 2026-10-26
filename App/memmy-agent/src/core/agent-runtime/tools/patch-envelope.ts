@@ -1,3 +1,5 @@
+import path from "node:path";
+
 const BEGIN_PATCH = "*** Begin Patch";
 const END_PATCH = "*** End Patch";
 const END_OF_FILE = "*** End of File";
@@ -99,25 +101,27 @@ export function normalizePatchPath(raw: string): string {
   const value = raw.trim();
   if (!value) throw new PatchError("patch path cannot be empty");
   if (value.includes("\0")) throw new PatchError(`patch path contains a null byte: ${raw}`);
-  if (
-    value.startsWith("~") ||
-    value.startsWith("/") ||
-    value.startsWith("\\") ||
-    /^[A-Za-z]:/.test(value)
-  ) {
-    throw new PatchError(`patch path must be relative: ${raw}`);
+  if (value.startsWith("~")) throw new PatchError(`patch path must not use '~': ${raw}`);
+  if (/^[A-Za-z]:/.test(value) && !path.isAbsolute(value)) {
+    throw new PatchError(`patch path has an unsupported drive prefix: ${raw}`);
+  }
+  if (value.startsWith("\\") && !path.isAbsolute(value)) {
+    throw new PatchError(`patch path has an unsupported absolute form: ${raw}`);
   }
 
-  const segments = value.replace(/\\/g, "/").split("/");
-  if (segments.some((segment) => segment === "..")) {
+  const absolute = path.isAbsolute(value);
+  const slashPath = value.replace(/\\/g, "/");
+  if (slashPath.split("/").some((segment) => segment === "..")) {
     throw new PatchError(`patch path must not contain '..': ${raw}`);
   }
-  const normalized = segments.filter((segment) => segment && segment !== ".").join("/");
+  const normalized = absolute
+    ? path.normalize(value).replace(/\\/g, "/")
+    : path.posix.normalize(slashPath);
   if (!normalized) throw new PatchError("patch path cannot be empty");
   return normalized;
 }
 
-function validatePathConflicts(operations: PatchFileOperation[]): void {
+export function validatePatchPathConflicts(operations: PatchFileOperation[]): void {
   const sources = new Map<string, PatchFileOperation>();
   const moveTargets = new Map<string, PatchUpdate>();
   const finalTargets: Array<{ key: string; path: string; line: number }> = [];
@@ -266,7 +270,7 @@ export function parsePatchEnvelope(input: string): PatchFileOperation[] {
   }
 
   if (operations.length === 0) fail(2, "a patch must contain at least one file operation");
-  validatePathConflicts(operations);
+  validatePatchPathConflicts(operations);
   return operations;
 }
 

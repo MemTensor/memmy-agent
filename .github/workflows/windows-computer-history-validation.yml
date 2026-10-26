@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/windows-computer-history-validation.yml"
       - "App/native-computer-history/**"
+      - "App/native-computer-use/**"
       - "App/memmy-agent/src/tools/computer-history/**"
       - "App/memmy-agent/tests/tools/computer-history/**"
       - "App/memmy-agent/scripts/copy-build-assets.mjs"
@@ -24,12 +25,15 @@ jobs:
   validate:
     runs-on: windows-2025
     timeout-minutes: 30
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -39,7 +43,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.12"
-          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+          cache-dependency-path: |
+            App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+            App/native-computer-use/apps/OpenComputerUseWindows/go.mod
       - name: Require Windows 11
         run: |
           $ErrorActionPreference = 'Stop'
@@ -51,6 +57,7 @@ jobs:
       - name: Install standalone agent dependencies
         run: npm ci --prefix App/memmy-agent
       - name: Validate native protocol and lifecycle without desktop access
+        id: native_history_tests
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location App/native-computer-history/apps/OpenComputerHistoryWindows
@@ -61,6 +68,15 @@ jobs:
             # unsafeptr cannot infer that callback ABI contract. Keep every other analyzer.
             go vet -unsafeptr=false ./...
             if ($LASTEXITCODE -ne 0) { throw 'Native recorder vet failed' }
+          } finally { Pop-Location }
+      - name: Validate native Computer Use Go module
+        id: native_computer_use_tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location App/native-computer-use/apps/OpenComputerUseWindows
+          try {
+            go test ./...
+            if ($LASTEXITCODE -ne 0) { throw 'Native Computer Use tests failed' }
           } finally { Pop-Location }
       - name: Build agent and native History recorder from source
         run: npm --prefix App/memmy-agent run build
@@ -155,10 +171,55 @@ jobs:
           node node_modules/vitest/vitest.mjs run
           App/shell/desktop/tests/packaged-runtime-boundary.test.ts
           -t "requires the native Windows 11 History recorder"
+      - name: Emit exact-source Windows provider receipt
+        id: windows_provider_receipt
+        if: ${{ success() && steps.native_history_tests.outcome == 'success' && steps.native_computer_use_tests.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'Windows provider receipt requires a Windows runner' }
+          $head = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:EXPECTED_SOURCE_SHA) {
+            throw "Executed checkout $head does not match expected source $env:EXPECTED_SOURCE_SHA"
+          }
+          git diff --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked source changed during validation' }
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Index changed during validation' }
+          $receipt = [ordered]@{
+            schemaVersion = 1
+            provider = 'windows'
+            status = 'passed'
+            headSha = $head
+            repository = $env:GITHUB_REPOSITORY
+            workflowRef = $env:GITHUB_WORKFLOW_REF
+            workflowSha = $env:GITHUB_WORKFLOW_SHA
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            runnerOS = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            windowsBuild = [Environment]::OSVersion.Version.Build
+            generatedAt = [DateTime]::UtcNow.ToString('o')
+            nativeModules = @(
+              'App/native-computer-history/apps/OpenComputerHistoryWindows'
+              'App/native-computer-use/apps/OpenComputerUseWindows'
+            )
+            liveCaptureValidated = $false
+            signedInstallerValidated = $false
+          }
+          $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath windows-provider-receipt.json -Encoding utf8NoBOM
+      - name: Upload exact-source Windows provider receipt
+        if: ${{ success() && steps.windows_provider_receipt.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-provider-receipt-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_attempt }}
+          path: windows-provider-receipt.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Record validation scope
         if: ${{ always() }}
         run: |
           @'
           Validates source-built Windows History recorder identity, PE architecture, exact embedded worker source, pure recorder state/lifecycle self-tests, UTF-8 app catalog output, runtime asset copy, and packaging rules. This does not start live recording or prove real UI Automation/hook behavior.
+          Both native Windows Go modules are tested. The provider receipt is limited to the checks in this job; it does not prove live capture or signed-installer acceptance.
           A signed NSIS installer and a representative real-app capture matrix still require installation testing on a Windows 11 machine.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

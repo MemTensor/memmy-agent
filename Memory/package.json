@@ -1,6 +1,6 @@
 {
   "name": "@memmy/memory",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -29,6 +29,7 @@
     "pack:npm": "npm run package:npm && npm pack ./dist/memmy-memory-npm",
     "binary": "bash src/cli/scripts/build-binary.sh",
     "runtime:package": "node src/cli/scripts/build-runtime.mjs",
+    "runtime:package:all": "node ../scripts/internal/shared/build-memory-all.mjs",
     "release:assemble": "node src/cli/scripts/assemble-release.mjs",
     "standalone:package": "node src/cli/scripts/build-standalone.mjs"
   },

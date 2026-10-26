@@ -121,13 +121,19 @@ export interface AgentSourceExecutor {
   pauseScan(input?: ScanControlInput): Promise<ScanControlResult>;
   cancelScan(input?: ScanControlInput): Promise<ScanControlResult>;
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null; attemptId?: string }>;
-  mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
+  mutateConnection(
+    sourceId: string,
+    kind: "plugin" | "skill",
+    method: "POST" | "DELETE",
+    installType?: "manual" | "auto_inject"
+  ): Promise<unknown>;
   startAutomation(): void;
   dispose(): void | Promise<void>;
 }
 
 interface PersistedSourceState {
   status: AgentConnectionStatus;
+  autoInjectSuppressed?: boolean;
   messageCount: number;
   lastScannedAt: string | null;
   latestSeenAt: string | null;
@@ -658,7 +664,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   async function mutateConnection(
     sourceId: string,
     kind: "plugin" | "skill",
-    method: "POST" | "DELETE"
+    method: "POST" | "DELETE",
+    installType: "manual" | "auto_inject" = "manual"
   ): Promise<unknown> {
     const adapter = registry.require(sourceId);
     if (!(await adapter.detect())) {
@@ -684,10 +691,16 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
     const state = await readState();
     const stored = state.sources[sourceId] ?? emptySourceState();
-    state.sources[sourceId] = {
+    const nextState: PersistedSourceState = {
       ...stored,
       status: method === "POST" ? connectionStatus(sourceId) : "not_connected"
     };
+    if (method === "DELETE") {
+      nextState.autoInjectSuppressed = true;
+    } else if (installType === "manual") {
+      delete nextState.autoInjectSuppressed;
+    }
+    state.sources[sourceId] = nextState;
     await persist(state);
     logger.info(method === "POST" ? "connection.installed" : "connection.removed", { sourceId, kind });
     return { ok: true, sourceId, status: state.sources[sourceId].status };
@@ -710,13 +723,42 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   async function runAutomation(startup: boolean): Promise<void> {
     if (disposed || clearing || scan.running || scanPaused || scan.progress?.phase === "stopped") return;
     const config = loadMemmyConfig(configPath).config.agentAccess;
+    // Refresh an existing connection even when automatic *new* connections are
+    // disabled. Explicit removal remains authoritative.
+    const refreshTarget = integrationRegistry.get("opencode");
+    if (registry.get("opencode") && refreshTarget?.isInstalledHookCurrent) {
+      const stateBeforeRefresh = await readState();
+      if (!stateBeforeRefresh.sources.opencode?.autoInjectSuppressed
+        && (stateBeforeRefresh.sources.opencode?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
+        try {
+          if (!(await refreshTarget.isInstalledHookCurrent())) {
+            const latestState = await readState();
+            if (!disposed && !clearing && !latestState.sources.opencode?.autoInjectSuppressed) {
+              await mutateConnection("opencode", "plugin", "POST", "auto_inject");
+              const installedState = await readState();
+              if (installedState.sources.opencode?.autoInjectSuppressed) {
+                await mutateConnection("opencode", "plugin", "DELETE", "auto_inject");
+              }
+            }
+          }
+        } catch (error) {
+          logger.warn("connection.auto_update_failed", { sourceId: "opencode", ...memoryErrorFields(error) });
+        }
+      }
+    }
     if (config.autoInjectSkill) {
+      const state = await readState();
       const discovered = await list();
       for (const source of discovered.sources) {
         if (disposed || clearing) return;
-        if (!source.available || source.status !== "not_connected") continue;
+        if (!source.available || source.status !== "not_connected" || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
         try {
-          await mutateConnection(source.sourceId, agentConnectionKind(source.sourceId), "POST");
+          const kind = agentConnectionKind(source.sourceId);
+          await mutateConnection(source.sourceId, kind, "POST", "auto_inject");
+          const currentState = await readState();
+          if (currentState.sources[source.sourceId]?.autoInjectSuppressed === true) {
+            await mutateConnection(source.sourceId, kind, "DELETE", "auto_inject");
+          }
         } catch (error) {
           logger.warn("connection.auto_install_failed", { sourceId: source.sourceId, ...memoryErrorFields(error) });
         }
@@ -745,6 +787,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const current = await readState();
       const sources = Object.fromEntries(Object.entries(current.sources).map(([sourceId, source]) => [sourceId, {
         status: source.status,
+        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
         messageCount: 0,
         lastScannedAt: null,
         latestSeenAt: null
@@ -1619,6 +1662,7 @@ async function loadState(path: string): Promise<PersistedState> {
       const status = source.status === "skill_installed" || source.status === "plugin_installed" ? source.status : "not_connected";
       return [sourceId, {
         status,
+        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
         messageCount: typeof source.messageCount === "number" && Number.isFinite(source.messageCount) ? Math.max(0, Math.floor(source.messageCount)) : 0,
         lastScannedAt: typeof source.lastScannedAt === "string" ? source.lastScannedAt : null,
         latestSeenAt: typeof source.latestSeenAt === "string" ? source.latestSeenAt : null,

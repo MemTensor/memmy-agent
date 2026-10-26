@@ -42,6 +42,52 @@ function model(generate: (input: Input, call: number, messages: LlmMessage[]) =>
 }
 
 describe("observation validation correction", () => {
+  it("saves the original Markdown span when the model drops bold presentation markers", async () => {
+    const content = "- **业务时点**: 2026-10-22 开工前\n- **计划周**: 2026-10-19 — 2026-10-23";
+    const quote = "业务时点: 2026-10-22 开工前\n- **计划周**: 2026-10-19 — 2026-10-23";
+    const { llm, calls } = model((input) => ({ ...grounded(input), items: [{ ...grounded(input).items[0]!, evidence_quote: quote }] }));
+    const { service, db } = createTestService({ llm });
+    const row = service.syncExternalEvidence({ ...evidence, content });
+    await runWorkerRounds(service, 2);
+    const state = observationMemoryState(new Repositories(db.db).memories.get(row.id)!);
+    expect(calls).toHaveLength(1);
+    expect(state?.status).toBe("processed");
+    const savedQuote = (state?.items as Array<{ evidence_quote: string }>)[0]!.evidence_quote;
+    expect(savedQuote).toContain("**业务时点**:");
+    expect(content).toContain(savedQuote);
+    expect(savedQuote).not.toBe(quote);
+    expect(service.memoryProcessingStatus([row.id]).items[0]?.state).toBe("ready");
+  });
+
+  it("does not expose generated metadata summaries as quoteable source content", async () => {
+    const { llm, calls } = model(grounded);
+    const { service, db } = createTestService({ llm });
+    const sourceSummary = "METADATA_ONLY_SUMMARY_SENTINEL";
+    const row = service.syncExternalEvidence({ ...evidence, summary: sourceSummary });
+    await runWorkerRounds(service, 2);
+    const input = JSON.parse(calls[0]![1]!.content) as Input;
+    expect(input.sources[0]).not.toHaveProperty("summary");
+    expect(calls[0]![1]!.content).not.toContain(sourceSummary);
+    expect(new Repositories(db.db).memories.get(row.id)!.properties.internal_info.external_evidence)
+      .toMatchObject({ source_summary: sourceSummary });
+  });
+
+  it("identifies the failing item without echoing its private quote or the prior output", async () => {
+    const { llm, calls } = model((input, call) => call === 1
+      ? { ...grounded(input), items: [grounded(input).items[0], ungrounded(input).items[0]] }
+      : grounded(input));
+    const { service } = createTestService({ llm });
+    const row = service.syncExternalEvidence(evidence);
+    await runWorkerRounds(service, 2);
+    expect(calls).toHaveLength(2);
+    const feedback = calls[1]![0]!.content.slice(calls[0]![0]!.content.length);
+    expect(feedback).toContain("Item 2 failed.");
+    expect(feedback).not.toContain("PRIVATE_SOURCE_SENTINEL");
+    expect(feedback).not.toContain("already been approved");
+    expect(feedback).not.toContain(row.id);
+    expect(service.memoryProcessingStatus([row.id]).items[0]?.state).toBe("ready");
+  });
+
   it("does not regenerate a valid first response", async () => {
     const { llm, calls } = model(grounded);
     const { service } = createTestService({ llm });
@@ -85,7 +131,7 @@ describe("observation validation correction", () => {
     expect(calls).toHaveLength(2);
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({
       state: "summary_pending", errorCode: "processing_failed", attemptCount: 1,
-      errorMessage: "observation extraction item is not grounded in its source (quote_grounding)"
+      errorMessage: "observation extraction item is not grounded in its source (quote_grounding) [item 1]"
     });
     await runWorkerRounds(service, 2);
     expect(calls).toHaveLength(6);

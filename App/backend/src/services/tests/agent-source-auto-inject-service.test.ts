@@ -53,6 +53,60 @@ describe("agent source auto inject service", () => {
     ]);
   });
 
+  it("does not reinstall manually uninstalled sources", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("cursor", "not_connected", true)];
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences,
+      isAutoInjectSuppressed: (sourceId) => sourceId === "cursor"
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      ok: true,
+      skipped: false,
+      installed: [],
+      failed: []
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("removes an auto-injected hook when manual uninstallation races with installation", async () => {
+    const calls: string[] = [];
+    let suppressed = false;
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("cursor", "not_connected", true)];
+        },
+        async installPlugin(sourceId) {
+          calls.push(`plugin:${sourceId}:auto_inject`);
+          suppressed = true;
+        },
+        async uninstallPlugin(sourceId, action) {
+          calls.push(`uninstall:${sourceId}:${action?.installType ?? "manual"}`);
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences,
+      isAutoInjectSuppressed: () => suppressed
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      ok: true,
+      skipped: false,
+      installed: [],
+      failed: []
+    });
+    expect(calls).toEqual(["plugin:cursor:auto_inject", "uninstall:cursor:auto_inject"]);
+  });
+
   it("skips unavailable builtin agents", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({
@@ -168,7 +222,7 @@ describe("agent source auto inject service", () => {
     ]);
   });
 
-  it("does not refresh installed plugins that are not hooks", async () => {
+  it("refreshes outdated OpenCode plugins without refreshing unrelated plugins", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({
       agentSources: {
@@ -190,10 +244,10 @@ describe("agent source auto inject service", () => {
     await expect(service.runOnce()).resolves.toEqual({
       ok: true,
       skipped: false,
-      installed: [],
+      installed: ["opencode"],
       failed: []
     });
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(["plugin:opencode:auto_inject"]);
   });
 
   it("skips an outdated hook when the agent is unavailable or not writable", async () => {

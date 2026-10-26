@@ -79,8 +79,51 @@ export type AgentToolRegistrationContext = {
   metadata: Record<string, any>;
 };
 
+export type AgentHookMessage = {
+  role: "user";
+  content: string;
+};
+
+export type LlmContentRewrite =
+  | string
+  | null
+  | {
+      content: string | null;
+      continue: true;
+    };
+
+export const AGENT_HOOK_TIMEOUT_MS = 600_000;
+export const AGENT_HOOK_SHUTDOWN_TIMEOUT_MS = 3_000;
+
+export async function withAgentHookTimeout<T>(
+  run: () => T | Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(run),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function hookLabel(hook: AgentHook): string {
+  return String((hook as any).externalHookSpecifier ?? hook.constructor.name);
+}
+
 export class AgentHookContext {
   spec?: any;
+  workspace: string | null;
   sessionKey?: string | null;
   session?: any;
   reason?: string | null;
@@ -101,6 +144,7 @@ export class AgentHookContext {
   metadata: Record<string, any>;
   constructor(init: Partial<AgentHookContext> = {}) {
     Object.assign(this, init);
+    this.workspace = init.workspace ?? init.spec?.workspace ?? null;
     this.sessionKey = init.sessionKey ?? null;
     this.session = init.session ?? null;
     this.reason = init.reason ?? null;
@@ -133,13 +177,28 @@ export class AgentHook {
     return false;
   }
 
-  async beforeIteration(ctx: AgentHookContext): Promise<void> { void ctx; }
+  requiresBufferedLlmContent(): boolean {
+    return false;
+  }
+
+  async beforeIteration(ctx: AgentHookContext): Promise<AgentHookMessage[] | void> { void ctx; }
   async onStream(ctx: AgentHookContext, delta: string): Promise<void> { void ctx; void delta; }
   async onStreamEnd(ctx: AgentHookContext, opts: { resuming?: boolean } = {}): Promise<void> { void ctx; void opts; }
   async beforeExecuteTools(ctx: AgentHookContext): Promise<void> { void ctx; }
   async emitReasoning(reasoningContent?: string | null): Promise<void> { void reasoningContent; }
   async emitReasoningEnd(): Promise<void> {}
   finalizeContent(ctx: AgentHookContext, content: string | null): string | null {
+    return content;
+  }
+  async beforeFinalize(
+    ctx: AgentHookContext,
+    candidate: string,
+  ): Promise<AgentHookMessage[] | void> {
+    void ctx;
+    void candidate;
+  }
+  async rewriteLlmContent(ctx: AgentHookContext, content: string | null): Promise<LlmContentRewrite> {
+    void ctx;
     return content;
   }
   onRegisterTools(ctx: AgentToolRegistrationContext): void { void ctx; }
@@ -156,6 +215,7 @@ export class AgentHook {
   async afterCompaction(ctx: AgentHookContext): Promise<void> { void ctx; }
   async subagentStart(ctx: AgentHookContext): Promise<void> { void ctx; }
   async subagentStop(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async shutdown(): Promise<void> {}
 }
 
 export class CompositeHook extends AgentHook {
@@ -167,18 +227,49 @@ export class CompositeHook extends AgentHook {
   }
 
   override wantsStreaming(): boolean {
-    return this.hooks.some((hook) => hook.wantsStreaming());
+    for (const hook of this.hooks) {
+      try {
+        if (hook.wantsStreaming?.()) return true;
+      } catch (error) {
+        if (hook.reraise) throw error;
+        console.error(`AgentHook.wantsStreaming error in ${hookLabel(hook)}:`, error);
+      }
+    }
+    return false;
+  }
+
+  override requiresBufferedLlmContent(): boolean {
+    for (const hook of this.hooks) {
+      try {
+        if (hook.requiresBufferedLlmContent?.()) return true;
+      } catch (error) {
+        if (hook.reraise) throw error;
+        console.error(`AgentHook.requiresBufferedLlmContent error in ${hookLabel(hook)}:`, error);
+      }
+    }
+    return false;
+  }
+
+  private async invokeHook<T>(hook: AgentHook, methodName: string, ...args: any[]): Promise<T> {
+    const fn = (hook as any)[methodName];
+    if (typeof fn !== "function") return undefined as T;
+    const timeoutMs = methodName === "shutdown"
+      ? AGENT_HOOK_SHUTDOWN_TIMEOUT_MS
+      : AGENT_HOOK_TIMEOUT_MS;
+    return withAgentHookTimeout(
+      () => fn.apply(hook, args),
+      timeoutMs,
+      `AgentHook.${methodName}`,
+    );
   }
 
   async forEachHookSafe(methodName: string, ...args: any[]): Promise<void> {
     for (const hook of this.hooks) {
       try {
-        const fn = (hook as any)[methodName];
-        if (typeof fn !== "function") continue;
-        await fn.apply(hook, args);
+        await this.invokeHook(hook, methodName, ...args);
       } catch (error) {
         if (hook.reraise) throw error;
-        console.error(`AgentHook.${methodName} error in ${hook.constructor.name}:`, error);
+        console.error(`AgentHook.${methodName} error in ${hookLabel(hook)}:`, error);
       }
     }
   }
@@ -191,7 +282,7 @@ export class CompositeHook extends AgentHook {
         fn.apply(hook, args);
       } catch (error) {
         if (hook.reraise) throw error;
-        console.error(`AgentHook.${methodName} error in ${hook.constructor.name}:`, error);
+        console.error(`AgentHook.${methodName} error in ${hookLabel(hook)}:`, error);
       }
     }
   }
@@ -199,8 +290,24 @@ export class CompositeHook extends AgentHook {
   override async beforeRun(ctx: AgentHookContext): Promise<void> {
     await this.forEachHookSafe("beforeRun", ctx);
   }
-  override async beforeIteration(ctx: AgentHookContext): Promise<void> {
-    await this.forEachHookSafe("beforeIteration", ctx);
+  override async beforeIteration(ctx: AgentHookContext): Promise<AgentHookMessage[]> {
+    const messages: AgentHookMessage[] = [];
+    for (const hook of this.hooks) {
+      try {
+        const result = await this.invokeHook<AgentHookMessage[] | void>(hook, "beforeIteration", ctx);
+        if (result == null) continue;
+        if (!Array.isArray(result) || result.some((item) => (
+          !item || item.role !== "user" || typeof item.content !== "string"
+        ))) {
+          throw new TypeError("beforeIteration must return user messages");
+        }
+        messages.push(...result);
+      } catch (error) {
+        if (hook.reraise) throw error;
+        console.error(`AgentHook.beforeIteration error in ${hookLabel(hook)}:`, error);
+      }
+    }
+    return messages;
   }
   override async onStream(ctx: AgentHookContext, delta: string): Promise<void> {
     await this.forEachHookSafe("onStream", ctx, delta);
@@ -219,8 +326,73 @@ export class CompositeHook extends AgentHook {
   }
   override finalizeContent(ctx: AgentHookContext, content: string | null): string | null {
     let next = content;
-    for (const hook of this.hooks) next = hook.finalizeContent(ctx, next);
+    for (const hook of this.hooks) {
+      try {
+        if (typeof hook.finalizeContent === "function") {
+          next = hook.finalizeContent(ctx, next);
+        }
+      } catch (error) {
+        if (hook.reraise) throw error;
+        console.error(`AgentHook.finalizeContent error in ${hookLabel(hook)}:`, error);
+      }
+    }
     return next;
+  }
+  override async beforeFinalize(
+    ctx: AgentHookContext,
+    candidate: string,
+  ): Promise<AgentHookMessage[]> {
+    const messages: AgentHookMessage[] = [];
+    for (const hook of this.hooks) {
+      try {
+        const result = await this.invokeHook<AgentHookMessage[] | void>(
+          hook,
+          "beforeFinalize",
+          ctx,
+          candidate,
+        );
+        if (result == null) continue;
+        if (!Array.isArray(result) || result.some((item) => (
+          !item || item.role !== "user" || typeof item.content !== "string"
+        ))) {
+          throw new TypeError("beforeFinalize must return user messages");
+        }
+        messages.push(...result.filter((item) => item.content.trim()));
+      } catch (error) {
+        console.error(`AgentHook.beforeFinalize error in ${hookLabel(hook)}:`, error);
+      }
+    }
+    return messages;
+  }
+  override async rewriteLlmContent(
+    ctx: AgentHookContext,
+    content: string | null,
+  ): Promise<LlmContentRewrite> {
+    let next = content;
+    let shouldContinue = false;
+    for (const hook of this.hooks) {
+      try {
+        const result = await this.invokeHook<LlmContentRewrite>(hook, "rewriteLlmContent", ctx, next);
+        if (result === undefined) continue;
+        if (
+          result !== null
+          && typeof result !== "string"
+          && (!result || result.continue !== true || (result.content !== null && typeof result.content !== "string"))
+        ) {
+          throw new TypeError("rewriteLlmContent returned an invalid result");
+        }
+        if (typeof result === "object" && result !== null) {
+          next = result.content;
+          shouldContinue = true;
+        } else {
+          next = result;
+        }
+      } catch (error) {
+        if (hook.reraise) throw error;
+        console.error(`AgentHook.rewriteLlmContent error in ${hookLabel(hook)}:`, error);
+      }
+    }
+    return shouldContinue ? { content: next, continue: true } : next;
   }
   override onRegisterTools(ctx: AgentToolRegistrationContext): void {
     this.forEachHookSyncSafe("onRegisterTools", ctx);
@@ -260,6 +432,9 @@ export class CompositeHook extends AgentHook {
   }
   override async subagentStop(ctx: AgentHookContext): Promise<void> {
     await this.forEachHookSafe("subagentStop", ctx);
+  }
+  override async shutdown(): Promise<void> {
+    await this.forEachHookSafe("shutdown");
   }
 }
 

@@ -153,7 +153,8 @@ describe("native source turn submission", () => {
     const reopened = new MemoryDb({ path: join(root, "memory.sqlite") });
     try {
       const restarted = createTestMemoryService({ db: reopened });
-      const second = restarted.completeSourceTurn(request({ channel: channel === "hook" ? "agent_source_scan" : "hook", sessionId: "late-hook-session" }));
+      const second = restarted.completeSourceTurn(request({ channel: channel === "hook" ? "agent_source_scan" : "hook", sessionId: "late-hook-session",
+        namespace: { ...request().namespace!, userId: "switched-after-restart" } }));
       expect(second).toMatchObject({ status: "existing", result: { rawTurnId: result.rawTurnId, l1MemoryId: result.l1MemoryId, duplicate: true, jobs: [] } });
       expect(counts(reopened)).toEqual(before);
     } finally { reopened.close(); }
@@ -314,7 +315,7 @@ describe("native source turn submission", () => {
     expect(counts(db)).toEqual(before);
   });
 
-  it("does not merge equal QA belonging to different turns or scopes", () => {
+  it("keeps different native turns but reuses the same turn across accounts", () => {
     const { service } = createTestService();
     const first = service.completeSourceTurn(request());
     const second = service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, turnId: "native-turn-2", sequence: 2, startedAt: "2099-01-01T10:02:00.000Z", completedAt: "2099-01-01T10:03:00.000Z" } }));
@@ -1099,7 +1100,7 @@ describe("native source turn submission", () => {
     expect(runtime.getEpisode(completed.result!.episodeId)?.openedAt).toBe("2099-01-01T10:02:00.000Z");
   });
 
-  it("rejects a supplied Session from another account or native conversation", () => {
+  it("rejects a supplied Session from another native conversation", () => {
     const { service } = createTestService();
     const foreign = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "other-user", sessionKey: "other-conversation" } });
     expect(() => service.completeSourceTurn(request({ sessionId: foreign.sessionId }))).toThrow("source_session_scope_conflict");

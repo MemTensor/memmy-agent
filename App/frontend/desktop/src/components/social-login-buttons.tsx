@@ -3,13 +3,12 @@ import type { SocialLoginProvider } from "@memmy/local-api-contracts";
 import type { ReactNode } from "react";
 import { useTranslation } from "../i18n/use-translation.js";
 
-// Keep the integration code available, but do not render social login until the
-// production providers are ready to be exposed again.
-const SOCIAL_LOGIN_BUTTONS_ENABLED = false;
+const SOCIAL_LOGIN_BUTTONS_ENABLED = true;
 
 export interface SocialLoginButtonsProps {
   pendingProvider: SocialLoginProvider | null;
   disabled?: boolean;
+  showDivider?: boolean;
   feedback?: { text: string; tone: "error" | "success" } | null;
   onLogin: (provider: SocialLoginProvider) => void;
 }
@@ -19,15 +18,18 @@ export function SocialLoginButtons(props: SocialLoginButtonsProps) {
   if (!SOCIAL_LOGIN_BUTTONS_ENABLED) return null;
 
   return (
-    <div className="mt-4 space-y-2.5">
-      <div className="flex flex-col gap-3">
+    <div className="social-login-actions">
+      {props.showDivider ? <div className="social-login-divider">{t("login.social.orSocial")}</div> : null}
+      <div className="social-login-actions__buttons">
         <SocialLoginButton
+          provider="google"
           label={props.pendingProvider === "google" ? t("login.social.opening") : t("login.social.google")}
           icon={<GoogleMark />}
           disabled={props.disabled || Boolean(props.pendingProvider)}
           onClick={() => props.onLogin("google")}
         />
         <SocialLoginButton
+          provider="github"
           label={props.pendingProvider === "github" ? t("login.social.opening") : t("login.social.github")}
           icon={<GitHubMark />}
           disabled={props.disabled || Boolean(props.pendingProvider)}
@@ -48,6 +50,7 @@ export function SocialLoginButtons(props: SocialLoginButtonsProps) {
 }
 
 function SocialLoginButton(props: {
+  provider: SocialLoginProvider;
   label: string;
   icon: ReactNode;
   disabled?: boolean;
@@ -58,7 +61,7 @@ function SocialLoginButton(props: {
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      className="flex min-w-0 items-center justify-center gap-2 rounded-btn border border-border-stone/80 bg-white px-3 py-3 text-sm font-semibold text-text-ink shadow-sm transition-colors hover:bg-canvas-oat/60 disabled:cursor-not-allowed disabled:opacity-45"
+      className={`social-login-button social-login-button--${props.provider}`}
     >
       {props.icon}
       <span className="truncate">{props.label}</span>

@@ -52,6 +52,7 @@ describe("local app contracts", () => {
   it("accepts StepFun and Xiaomi as text providers and canonicalises their catalog ids", () => {
     expect(ModelProviderSchema.safeParse("stepfun").success).toBe(true);
     expect(ModelProviderSchema.safeParse("xiaomi").success).toBe(true);
+    expect(ModelProviderSchema.safeParse("custom").success).toBe(false);
 
     expect(canonicalCatalogProviderId("stepfun")).toBe("stepfun");
     expect(canonicalCatalogProviderId("xiaomi")).toBe("xiaomi_mimo");
@@ -409,6 +410,13 @@ describe("local app contracts", () => {
 
     expect(input.modelId).toBe("gpt-5.5");
     expect(asrInput.capability).toBe("asr");
+    expect(ModelConfigTestInputSchema.safeParse({
+      provider: "custom",
+      endpointId: "chat",
+      protocol: "openai-chat-completions",
+      apiBase: "https://api.example.test/v1",
+      modelId: "gpt-6-sol"
+    }).success).toBe(true);
 
     const result = ModelConfigTestResultSchema.parse({
       ok: false,

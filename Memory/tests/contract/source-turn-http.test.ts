@@ -40,10 +40,10 @@ describe("source turn HTTP contract", () => {
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 
-  it.each(["hook", "agent_source_scan"] as const)("uses the configured local owner and existing Hook Session when %s arrives first", async (channel) => {
+  it.each(["hook", "agent_source_scan", "concurrent"] as const)("reuses the installed Hook owner after account switch when %s arrives first", async (channel) => {
     const { service, db } = createTestService({ config: { ...DEFAULT_MEMMY_CONFIG, userId: "configured-owner" } });
     const opened = service.openSession({
-      source: "codex", namespace: { source: "codex", profileId: "default", userId: "configured-owner", sessionKey: "codex-memory-local-conversation" },
+      source: "codex", namespace: { source: "codex", profileId: "default", userId: "installed-owner", sessionKey: "codex-memory-local-conversation" },
       l3WorldModelProtocolVersion: 2, l3WorldModelTransition: "allow_legacy_rollover",
       workspaceUri: "file:///fixture-project", workspaceHostId: "a".repeat(64)
     });
@@ -55,26 +55,30 @@ describe("source turn HTTP contract", () => {
       startedAt: "2099-01-01T10:00:00.000Z", completedAt: "2099-01-01T10:01:00.000Z", sequence: 1,
       completionEvidence: "final_answer:local-turn", query: "Fix the source capture user and Session identity.",
       answer: "The source capture reuses the existing user and Session identity.", status: "succeeded", toolCalls: [], toolResults: []
-    }, channel);
+    }, channel === "concurrent" ? "hook" : channel);
     const submit = async (source: "hook" | "agent_source_scan") => {
       const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/source-turns/complete`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, channel: source,
-          ...(source === "hook" ? { sessionId: opened.sessionId, namespace: { userId: "configured-owner" } } : {}) })
+          ...(source === "hook" ? { sessionId: opened.sessionId, namespace: { userId: "installed-owner" } } : {}) })
       });
       expect(response.status).toBe(200);
       return response.json() as Promise<{ status: string; result: { sessionId: string; l1MemoryId: string } }>;
     };
     try {
-      const first = await submit(channel);
-      const second = await submit(channel === "hook" ? "agent_source_scan" : "hook");
-      expect(first.status).toBe("stored");
-      expect(second.status).toBe("existing");
+      const [first, second] = channel === "concurrent"
+        ? await Promise.all([submit("hook"), submit("agent_source_scan")])
+        : [await submit(channel), await submit(channel === "hook" ? "agent_source_scan" : "hook")];
+      expect([first.status, second.status].sort()).toEqual(["existing", "stored"]);
       expect(first.result.sessionId).toBe(opened.sessionId);
       expect(second.result.l1MemoryId).toBe(first.result.l1MemoryId);
       const repos = new Repositories(db.db);
       expect(repos.memories.get(first.result.l1MemoryId)).toMatchObject({ userId: null, sessionId: opened.sessionId,
         info: { project_id: repos.runtime.getSession(opened.sessionId)!.projectId } });
-      expect(db.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 1 });
+      for (const table of ["sessions", "episodes", "raw_turns", "source_turn_captures"]) {
+        expect(db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 1 });
+      }
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories WHERE memory_layer = 'L1'").get()).toEqual({ n: 1 });
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'trace_summary'").get()).toEqual({ n: 1 });
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 

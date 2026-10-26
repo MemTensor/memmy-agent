@@ -328,6 +328,14 @@ export const agentActions = {
     return { type: "agent/pendingModelPresetCleared", scopeKey };
   },
 
+  thinkingToggled(scopeKey: string, enabled: boolean): AppAction {
+    return { type: "agent/thinkingToggled", scopeKey, enabled };
+  },
+
+  thinkingLevelChanged(scopeKey: string, level: string): AppAction {
+    return { type: "agent/thinkingLevelChanged", scopeKey, level };
+  },
+
   modelSelectionRequestStarted(
     scopeKey: string,
     chatId: string | null,

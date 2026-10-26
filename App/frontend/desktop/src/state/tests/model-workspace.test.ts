@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  getModelThinkingConfig,
   type ModelConfigInput,
-  type ModelConfigView
+  type ModelConfigView,
+  type ModelEndpointProtocol
 } from "@memmy/local-api-contracts";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,7 +31,9 @@ import {
   setModelAssignment,
   setTaskModelCandidates,
   upsertByokPreset,
-  upsertModelConnection
+  upsertModelConnection,
+  isCustomModelEntry,
+  resolveThinkingConfigForModel
 } from "../model-workspace.js";
 
 const fixtureRoots: string[] = [];
@@ -1085,4 +1089,92 @@ describe("canonical model workspace adapter", () => {
     expect(serialized).not.toContain("maxTokens");
     expect(serialized).not.toContain("dailyTokenLimit");
   });
+
+  it("Custom 连接保存思考配置、图片声明与 region，重开后仍在", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    const created = upsertModelConnection(createModelWorkspace(empty), "byok", {
+      provider: "custom",
+      endpoint: "https://bedrock-runtime.us-west-2.amazonaws.com",
+      protocol: "bedrock-converse",
+      region: "us-west-2",
+      apiKey: "sk-bedrock",
+      models: ["anthropic.claude-sonnet-5"],
+      modelEntries: [{
+        model: "anthropic.claude-sonnet-5",
+        capability: "chat",
+        capabilities: ["chat", "memorySummary", "memoryEvolution"],
+        custom: true,
+        thinking: {
+          switchable: true,
+          defaultEnabled: true,
+          levels: ["low", "medium", "high"],
+          defaultLevel: "medium"
+        },
+        inputModalities: ["text", "image"]
+      }]
+    });
+    expect(created.error).toBeNull();
+
+    const saved = await persistModelCatalogMutation(modelConfigInput(created.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    });
+    const reloaded = createModelWorkspace(saved);
+    const connection = reloaded.spaces.byok.connections.find((item) => item.provider === "custom")!;
+    const entry = connection.modelEntries[0]!;
+    const candidate = getTaskModelCandidates(reloaded, "byok").find((item) => item.model === "anthropic.claude-sonnet-5")!;
+
+    expect(connection.protocol).toBe("bedrock-converse");
+    expect(connection.region).toBe("us-west-2");
+    expect(entry.custom).toBe(true);
+    expect(entry.thinking).toEqual({
+      switchable: true,
+      defaultEnabled: true,
+      levels: ["low", "medium", "high"],
+      defaultLevel: "medium"
+    });
+    expect(entry.inputModalities).toEqual(["text", "image"]);
+    expect(isCustomModelEntry(reloaded, candidate)).toBe(true);
+    expect(resolveThinkingConfigForModel(reloaded, candidate)).toEqual(entry.thinking);
+    expect(saved.providers.find((provider) => provider.provider === "custom")?.models[0]).toMatchObject({
+      custom: true,
+      inputModalities: ["text", "image"]
+    });
+  });
+
+  it("OpenAI Chat Completions 的 gpt-6 不提供目录思考，Responses 仍提供", () => {
+    const chat = openaiThinkingWorkspace("openai-chat-completions", "gpt-6-sol");
+    const responses = openaiThinkingWorkspace("openai-responses", "gpt-6-sol");
+    const chatCandidate = getTaskModelCandidates(chat, "byok").find((item) => item.model === "gpt-6-sol")!;
+    const responsesCandidate = getTaskModelCandidates(responses, "byok").find((item) => item.model === "gpt-6-sol")!;
+
+    expect(resolveThinkingConfigForModel(chat, chatCandidate)).toBeNull();
+    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toEqual(getModelThinkingConfig("gpt-6-sol"));
+  });
+
+  it("OpenAI Chat Completions 的 gpt-4o 不提供目录思考，Responses 仍按目录", () => {
+    const chat = openaiThinkingWorkspace("openai-chat-completions", "gpt-4o");
+    const responses = openaiThinkingWorkspace("openai-responses", "gpt-4o");
+    const chatCandidate = getTaskModelCandidates(chat, "byok").find((item) => item.model === "gpt-4o")!;
+    const responsesCandidate = getTaskModelCandidates(responses, "byok").find((item) => item.model === "gpt-4o")!;
+
+    expect(resolveThinkingConfigForModel(chat, chatCandidate)).toBeNull();
+    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toEqual(getModelThinkingConfig("gpt-4o"));
+  });
 });
+
+function openaiThinkingWorkspace(protocol: ModelEndpointProtocol, model: string) {
+  return upsertModelConnection(createModelWorkspace(null), "byok", {
+    provider: "openai",
+    endpoint: "https://api.openai.com/v1",
+    protocol,
+    apiKey: "sk-test",
+    models: [model],
+    modelEntries: [{
+      model,
+      capability: "chat",
+      capabilities: ["chat", "memorySummary", "memoryEvolution"]
+    }]
+  }).workspace;
+}
