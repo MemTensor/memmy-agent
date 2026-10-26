@@ -1,3 +1,5 @@
+import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
+import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -301,6 +303,7 @@ export class MemoryService {
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
+  private embeddingUpgradeInFlight?: Promise<void>;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
   private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
@@ -3013,82 +3016,37 @@ export class MemoryService {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
   }
 
-  rebuildEmbeddings(): {
-    accepted: true;
-    enqueued: number;
-    serverTime: string;
-  } {
-    this.assertMemoryAddEnabled();
-    const at = nowIso();
-    let offset = 0;
-    let enqueued = 0;
-    for (;;) {
-      const memories = this.repos.memories.list({}, 250, offset);
-      for (const memory of memories) {
-        this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
-        enqueued += 1;
-      }
-      if (memories.length < 250) break;
-      offset += memories.length;
-    }
-    const userId = this.config.userId?.trim() || "local-user";
-    offset = 0;
-    for (;;) {
-      const userMemories = this.repos.userMemories.listForPanel({
-        userId,
-        status: "active",
-        limit: 250,
-        offset
-      });
-      for (const memory of userMemories) {
-        this.workerHandlers.enqueueJob({
-          jobType: "user_memory_embedding",
-          userId: memory.userId,
-          targetMemoryId: memory.id,
-          payload: { contentHash: stableHash(memory.content) },
-          maxAttempts: 6,
-          createdAt: at
-        });
-        enqueued += 1;
-      }
-      if (userMemories.length < 250) break;
-      offset += userMemories.length;
-    }
-    return { accepted: true, enqueued, serverTime: at };
+  private embeddingMaintenance(): EmbeddingMaintenance {
+    return new EmbeddingMaintenance({
+      repos: this.repos,
+      embedder: this.embedder,
+      userId: this.config.userId?.trim() || "local-user",
+      enqueueMemory: (memory, text, at, vectorField = embeddingRetryVectorFieldForMemory(memory)) => {
+        const existing = this.repos.runtime.getEmbeddingRetryByTarget(
+          embeddingRetryTargetKindForMemory(memory), memory.id, vectorField
+        );
+        // Join an already running job without clearing its worker lease.
+        if (existing?.status === "pending" || existing?.status === "in_progress") return existing.id;
+        return this.workerHandlers.enqueueEmbeddingRetry(memory, text, at, vectorField).id;
+      },
+      enqueueUserMemory: (memory, at) => this.workerHandlers.enqueueJob({
+        jobType: "user_memory_embedding", userId: memory.userId, targetMemoryId: memory.id,
+        payload: { contentHash: stableHash(memory.content) }, maxAttempts: 6, createdAt: at
+      }).id
+    });
   }
 
-  embeddingMaintenanceStats(): {
-    dimension: number;
-    available: boolean;
-    totalSlots: number;
-    ready: number;
-    missing: number;
-    dimMismatch: number;
-    needsRepair: number;
-  } {
-    const userId = this.config.userId?.trim() || "local-user";
-    const regular = this.repos.vectors.maintenanceDimensionCounts();
-    const user = this.repos.userMemories.embeddingDimensionCounts(userId);
-    const dimensions = new Map<number, number>();
-    for (const row of [...regular.dimensions, ...user.dimensions]) {
-      if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
-    }
-    const [dimension = 0] = [...dimensions.entries()]
-      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
-    const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
-    const totalSlots = regular.totalSlots + user.totalSlots;
-    const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
-    const missing = Math.max(0, totalSlots - stored);
-    const dimMismatch = Math.max(0, stored - ready);
-    return {
-      dimension,
-      available: this.embedder.status().configured,
-      totalSlots,
-      ready,
-      missing,
-      dimMismatch,
-      needsRepair: missing + dimMismatch
-    };
+  rebuildEmbeddings(mode: "repair" | "rebuild" = "rebuild") {
+    this.assertMemoryAddEnabled();
+    return this.withModelTaskContext(() => this.embeddingMaintenance().start(mode));
+  }
+
+  embeddingMaintenanceProgress(runId?: string) {
+    return this.withModelTaskContext(() => this.embeddingMaintenance().progress(runId));
+  }
+
+  embeddingMaintenanceStats() {
+    return this.withModelTaskContext(() => this.embeddingMaintenance().stats());
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -3104,7 +3062,11 @@ export class MemoryService {
   }
 
   nextWorkerRunAt(): number | undefined {
-    return this.workerRunner.nextWorkerRunAt();
+    const workerAt = this.workerRunner.nextWorkerRunAt();
+    const upgradeAt = this.config.algorithm.enableMemoryAdd && !this.isMemoryBudgetPaused()
+      ? this.embeddingMaintenance().nextUpgradeAttemptAt() : undefined;
+    const times = [workerAt, upgradeAt].filter((time): time is number => Number.isFinite(time));
+    return times.length ? Math.min(...times) : undefined;
   }
 
   memoryTokenBudgetSnapshot() {
@@ -3133,7 +3095,15 @@ export class MemoryService {
     } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     await this.ensureAppBudgetReconciled();
+    // Run the bounded one-time provenance repair through the normal durable worker.
+    // Respect explicit write/budget gates and scoped worker requests.
+    if (this.config.algorithm.enableMemoryAdd && !this.isMemoryBudgetPaused() && !request.targetMemoryIds) {
+      this.embeddingUpgradeInFlight ??= this.withModelTaskContext(() => this.embeddingMaintenance().resumeUpgrade())
+        .finally(() => { this.embeddingUpgradeInFlight = undefined; });
+      await this.embeddingUpgradeInFlight;
+    }
     const result = await this.workerRunner.runWorkerOnce(limit, request);
+    if (this.config.algorithm.enableMemoryAdd) this.embeddingMaintenance().upgradeProgress();
     this.reconcileAutomaticHistorySkills(nowIso());
     return result;
   }

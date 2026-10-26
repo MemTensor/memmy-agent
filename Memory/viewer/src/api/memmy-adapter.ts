@@ -88,7 +88,6 @@ export function adaptViewerResponse(method: string, path: string, requestBody: u
   if (method === "GET" && pathname === "/api/v1/hub/admin") return hub(data);
   if (method === "POST" && pathname === "/api/v1/models/test") return modelTest(data, record(requestBody));
   if (method === "POST" && pathname === "/api/v1/import") return importResult(data);
-  if (method === "POST" && pathname === "/api/v1/embeddings/rebuild") return embeddingRun(data);
 
   const detail = pathname.match(/^\/api\/v1\/(traces|policies|world-models|skills)\/[^/]+$/);
   if (method === "GET" && detail) {
@@ -418,20 +417,6 @@ function importResult(value: JsonRecord): JsonRecord {
   return {
     imported: Object.values(imported).reduce<number>((sum, item) => sum + number(item), 0),
     skipped: Object.values(skipped).reduce<number>((sum, item) => sum + number(item), 0)
-  };
-}
-
-function embeddingRun(value: JsonRecord): JsonRecord {
-  const enqueued = number(value.enqueued);
-  return {
-    mode: "rebuild",
-    processed: enqueued,
-    updated: enqueued,
-    failed: 0,
-    offset: enqueued,
-    nextOffset: enqueued,
-    done: true,
-    statsAfter: { dimension: 0, available: true, totalSlots: enqueued, ready: 0, missing: enqueued, dimMismatch: 0, needsRepair: enqueued }
   };
 }
 

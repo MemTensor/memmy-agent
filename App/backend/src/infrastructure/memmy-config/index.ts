@@ -929,13 +929,15 @@ function updateAccountAssignment(
     imageGeneration: "image_generation"
   } as const;
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
+  const legacyLocalEmbedding = sameOwner
+    && asRecord(asRecord(config.memmyMemory)?.embedding)?.mode === "local";
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
     const keepBuiltInLocalEmbedding = field === "embedding"
       && sameOwner
-      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+      && (current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID || legacyLocalEmbedding);
     next[field] = keepBuiltInLocalEmbedding
-      ? current
+      ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
       : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
         ? current
         : presetIds[capability];

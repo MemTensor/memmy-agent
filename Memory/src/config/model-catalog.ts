@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "../contracts/index.js";
 
 export function syncMemoryModelCatalog(
   root: Record<string, unknown>,
@@ -35,7 +36,18 @@ export function syncMemoryModelCatalog(
       const presetId = upsertMemoryCatalogPreset(root, embedding, "embedding");
       if (presetId) assignment.embedding = presetId;
     } else if (embedding.mode === "local") {
-      assignment.embedding = null;
+      // Account mode uses null for an unavailable selection, not the local model.
+      assignment.embedding = mode === "account" ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID : null;
+      if (mode === "account" && stringValue(record(root.app).userId)) {
+        assignment.ownerAccountId = stringValue(record(root.app).userId);
+      }
+    } else if (embedding.mode === "cloud" && mode === "account") {
+      const owner = stringValue(record(root.app).userId);
+      assignment.embedding = Object.entries(record(root.modelPresets)).find(([, value]) => {
+        const preset = record(value);
+        return owner && preset.source === "account" && preset.ownerAccountId === owner
+          && Array.isArray(preset.capabilities) && preset.capabilities.includes("embedding");
+      })?.[0] ?? null;
     }
   }
 
