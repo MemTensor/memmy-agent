@@ -1293,3 +1293,72 @@ describe("MEMMY-647 trial revision follow-up", () => {
     expect(skill.eta).toBeCloseTo((0.8 + 2) / 3);
   });
 });
+
+describe("MEMMY-647 cluster content revisions", () => {
+  it("re-opens a processed member when its steps change but its clustering features do not", async () => {
+    const c = setup(); const a = await prepare(c); const b = await prepare(c, "member B");
+    for (const p of [a, b]) {
+      c.repos.runtime.closeEpisode(p.first.episodeId, { closeReason: "idle_timeout" });
+      c.repos.runtime.updateEpisodeReward(p.first.episodeId, { rTask: -0.9, rewardDetail: {} });
+      await executeQueued(c, enqueue(c, p, "skill_cluster_assign"));
+      await runWorkerRounds(c.service, 2);
+    }
+    const cluster = c.repos.runtime.getSkillClusterForEpisode(a.first.episodeId)!;
+    expect(c.repos.runtime.getSkillClusterForEpisode(b.first.episodeId)!.id).toBe(cluster.id);
+    const processed = c.repos.runtime.getSkillCluster(cluster.id)!.processedEpisodeIds;
+    expect(processed).toEqual(expect.arrayContaining([a.first.episodeId, b.first.episodeId]));
+
+    // B keeps the same query, tools, artifacts and outcome, but gains a real step. Its clustering
+    // features are unchanged, so only the recorded evidence identity can reveal the difference.
+    const turn = c.repos.runtime.getRawTurn(b.first.rawTurnId)!;
+    const toolCalls = (turn.toolCalls as Array<Record<string, unknown>>)
+      .concat({ name: "run_tests", input: { index: 99 }, output: { ok: true }, success: true });
+    c.db.db.prepare("UPDATE raw_turns SET tool_calls_json = ? WHERE id = ?")
+      .run(JSON.stringify(toolCalls), b.first.rawTurnId);
+    const before = c.repos.runtime.getEpisode(b.first.episodeId)!.meta.clusterFeatures as
+      { tools?: string[]; artifacts?: string[] };
+    await executeQueued(c, enqueue(c, b, "skill_cluster_assign"));
+    const after = c.repos.runtime.getEpisode(b.first.episodeId)!.meta.clusterFeatures as
+      { tools?: string[]; artifacts?: string[] };
+    expect(after.tools).toEqual(before.tools);
+    expect(after.artifacts).toEqual(before.artifacts);
+
+    expect(c.repos.runtime.getSkillCluster(cluster.id)!.processedEpisodeIds).toEqual([a.first.episodeId]);
+  });
+
+  it.each(["reassignment", "rescoring", "lifecycle"] as const)("does not re-open unchanged evidence after %s", async (change) => {
+    const c = setup(); const a = await prepare(c); const b = await prepare(c, "member B");
+    for (const p of [a, b]) {
+      c.repos.runtime.closeEpisode(p.first.episodeId, { closeReason: "idle_timeout" });
+      c.repos.runtime.updateEpisodeReward(p.first.episodeId, { rTask: -0.9, rewardDetail: {} });
+      await executeQueued(c, enqueue(c, p, "skill_cluster_assign"));
+      await runWorkerRounds(c.service, 2);
+    }
+    const cluster = c.repos.runtime.getSkillClusterForEpisode(a.first.episodeId)!;
+    const processed = c.repos.runtime.getSkillCluster(cluster.id)!.processedEpisodeIds;
+    if (change === "rescoring") {
+      c.repos.runtime.updateEpisodeReward(a.first.episodeId, {
+        rTask: -0.9, rewardDetail: { scoredAt: new Date().toISOString(), reason: "same result" }
+      });
+    } else if (change === "lifecycle") {
+      c.repos.runtime.updateEpisodeMeta(a.first.episodeId, { processingGeneration: 1 });
+    }
+    await executeQueued(c, enqueue(c, a, "skill_cluster_assign"));
+    expect(c.repos.runtime.getSkillCluster(cluster.id)!.processedEpisodeIds).toEqual(processed);
+  });
+
+  it.each([-0.7, 0.9])("re-opens a processed member when its reward changes to %s", async (rTask) => {
+    const c = setup(); const a = await prepare(c); const b = await prepare(c, "member B");
+    for (const p of [a, b]) {
+      c.repos.runtime.closeEpisode(p.first.episodeId, { closeReason: "idle_timeout" });
+      c.repos.runtime.updateEpisodeReward(p.first.episodeId, { rTask: -0.9, rewardDetail: {} });
+      await executeQueued(c, enqueue(c, p, "skill_cluster_assign"));
+      await runWorkerRounds(c.service, 2);
+    }
+    const cluster = c.repos.runtime.getSkillClusterForEpisode(a.first.episodeId)!;
+    expect(cluster.processedEpisodeIds).toEqual(expect.arrayContaining([a.first.episodeId, b.first.episodeId]));
+    c.repos.runtime.updateEpisodeReward(a.first.episodeId, { rTask, rewardDetail: {} });
+    await executeQueued(c, enqueue(c, a, "skill_cluster_assign"));
+    expect(c.repos.runtime.getSkillCluster(cluster.id)!.processedEpisodeIds).toEqual([b.first.episodeId]);
+  });
+});

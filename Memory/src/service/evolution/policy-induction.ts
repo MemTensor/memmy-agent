@@ -197,12 +197,21 @@ export class PolicyInductionEngine {
     );
 
     for (const signature of signatures) {
-      const bucket = uniq(
-        pendingCandidates
-          .filter((candidate) => candidate.candidateKey === signature)
-          .map((candidate) => candidate.sourceMemoryId)
-      )
-        .map((traceId) => eligibleById.get(traceId))
+      // Generating a Policy for one signature takes a model round trip. Evidence for the next
+      // signature can expire meanwhile, so reload it here instead of reusing the snapshot taken
+      // before the loop: a version guard alone would compare two equally stale readings.
+      const currentCandidates = this.deps.repos.runtime.listPendingCandidatePool({
+        userId: source.userId,
+        now: this.deps.nowIso(),
+        limit: 2000
+      }).filter((candidate) => candidate.candidateKey === signature);
+      const currentEligible = new Map(this.deps.repos.memories
+        .getMany(uniq(currentCandidates.map((candidate) => candidate.sourceMemoryId)))
+        .map((memory) => this.deps.traceMeta(memory))
+        .filter((trace): trace is TraceMeta => Boolean(trace && this.isTraceEligibleForL2(trace)))
+        .map((trace) => [trace.id, trace]));
+      const bucket = uniq(currentCandidates.map((candidate) => candidate.sourceMemoryId))
+        .map((traceId) => currentEligible.get(traceId))
         .filter((trace): trace is TraceMeta => Boolean(trace));
       const distinctEpisodeCount = uniq(
         bucket

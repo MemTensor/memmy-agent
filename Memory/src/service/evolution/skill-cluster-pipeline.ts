@@ -469,7 +469,7 @@ export class SkillClusterPipeline {
     let centroid: number[] | null = null;
     rows.forEach((row, index) => { centroid = mergeCentroid(centroid, row.queryVec, index); });
     const changedMembers = new Set(rows.filter(row =>
-      this.deps.repos.runtime.getEpisode(row.episodeId)?.meta.clusterProcessedFeatures !== stableHash(stableStringify(row))
+      this.deps.repos.runtime.getEpisode(row.episodeId)?.meta.clusterProcessedFeatures !== this.processedFingerprint(row)
     ).map(row => row.episodeId));
     const next: SkillClusterRecord = {
       ...cluster,
@@ -525,12 +525,26 @@ export class SkillClusterPipeline {
     for (const id of episodeIds) {
       const episode = this.deps.repos.runtime.getEpisode(id);
       if (episode) this.deps.repos.runtime.updateEpisodeMeta(id, {
-        clusterProcessedFeatures: stableHash(stableStringify(episode.meta.clusterFeatures))
+        clusterProcessedFeatures: this.processedFingerprint(episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined)
       }, at);
     }
     const processedEpisodeIds = uniqSorted([...cluster.processedEpisodeIds, ...episodeIds]);
     const next = { ...cluster, processedEpisodeIds, updatedAt: at };
     return this.deps.repos.runtime.updateSkillCluster(next);
+  }
+
+  /**
+   * Track the features and evidence actually sent to the model. Raw steps and scores can
+   * change without changing clustering features, while scoring timestamps and Episode
+   * lifecycle metadata must not turn identical evidence into a new contribution.
+   */
+  private processedFingerprint(features: EpisodeSkillFeatures | undefined): string | undefined {
+    if (!features) return undefined;
+    const episode = this.deps.repos.runtime.getEpisode(features.episodeId);
+    return stableHash(stableStringify({
+      features,
+      evidence: this.packEpisode(features.episodeId, features.outcome, episode?.rTask)
+    }));
   }
 
   private async generateProcedure(input: {
