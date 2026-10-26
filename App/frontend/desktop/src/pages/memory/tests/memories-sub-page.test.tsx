@@ -264,8 +264,8 @@ describe("MemoriesSubPage", () => {
     });
 
     expect(displayMemoryTitle(spanItem)).toBe("读取并分析源码，分类金融策略");
-    expect(html).toContain('class="memory-card__title">读取并分析源码，分类金融策略');
-    expect(html).toContain("memory-card__summary");
+    expect(html).not.toContain('class="memory-card__title">读取并分析源码，分类金融策略');
+    expect(html).not.toContain("memory-card__summary");
     expect(html).not.toContain("memory-drawer__title");
     expect(html).not.toContain("单独生成的标题");
     expect(html).toContain("子目标");
@@ -470,6 +470,24 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain('data-icon="chevron-left"');
     expect(html).toContain('data-icon="chevron-right"');
     expect(html).not.toContain("共 43 条");
+  });
+
+  it("隐藏未评分指标和执行片段并保留真实零分", () => {
+    const render = (patch: Partial<typeof memoryListItemFixture>) => renderMemories({
+      status: "ready", data: panelItemsOutput([{ ...memoryListItemFixture, ...patch }]), detail: null
+    });
+    const pending = render({ metrics: { value: 0, alpha: 0, reflectionDone: false, valuePending: true, alphaPending: true } });
+    expect(pending).not.toContain("memory-card__score");
+    expect(pending).not.toContain("V 0.00");
+    const zero = render({ metrics: { value: 0, alpha: 0, reflectionDone: true } });
+    expect(zero).toContain("V 0.00 · α 0.00");
+    const partial = render({ metrics: { value: 0, alpha: 0.5, reflectionDone: true, valuePending: true } });
+    expect(partial).not.toContain("memory-card__score");
+    const span = render({ kind: "span", title: "hidden-span-title", metrics: undefined });
+    expect(span).not.toContain("hidden-span-title");
+    expect(span).not.toContain("V -");
+    expect(span).not.toContain("暂无评分数据");
+    expect(render({ metrics: undefined })).not.toContain("memory-card__score");
   });
 
   it("把结构化处理状态渲染成用户可理解的提示", () => {

@@ -487,6 +487,8 @@ export class PanelReadModel {
       };
     }
     const filter: MemoryFilter = {
+      // Derived spans remain searchable by recall, but are not panel records.
+      excludedMemoryKinds: ["span"],
       memoryLayer: input.layer,
       status: input.status,
       tags: input.tags,

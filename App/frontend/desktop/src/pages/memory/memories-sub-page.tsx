@@ -542,7 +542,7 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
     return <MemoryStateBox message={props.state.message} tone="error" />;
   }
 
-  const visibleItems = props.state.data.items;
+  const visibleItems = props.state.data.items.filter((item) => item.kind !== "span");
 
   return (
     <>
@@ -582,7 +582,7 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
                   {item.kind === "observed_activity" && <span className="memory-pill">{t("memory.memories.observedActivity")}</span>}
                   {skippedObservation && <span className="memory-pill">{t("memory.memories.observationSkipped")}</span>}
                   <span>{formatDateTime(item.createdAt)}</span>
-                  {item.kind !== "observed_activity" && <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>}
+                  {item.kind !== "observed_activity" && formatMemoryScore(item.metrics) && <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>}
                   {processingStatus && (
                     <span className={`memory-pill memory-pill--processing${processingStatus === "failed" ? " memory-pill--failed" : ""}`}>
                       {t(item.kind === "observed_activity" && item.processing?.errorCode === "summary_model_unconfigured"
@@ -1148,12 +1148,10 @@ function formatDateTime(value: string): string {
   return formatUserDateTime(value);
 }
 
-function formatMemoryScore(metrics: MemoryDetailOutput["item"]["metrics"] | undefined): string {
-  return `V ${formatScoreNumber(metrics?.value)} · α ${formatScoreNumber(metrics?.alpha)}`;
-}
-
-function formatScoreNumber(value: number | undefined): string {
-  return value === undefined ? "-" : value.toFixed(2);
+function formatMemoryScore(metrics: MemoryDetailOutput["item"]["metrics"] | undefined): string | null {
+  if (!metrics?.reflectionDone || metrics.valuePending || metrics.alphaPending
+    || metrics.value === undefined || metrics.alpha === undefined) return null;
+  return `V ${metrics.value.toFixed(2)} · α ${metrics.alpha.toFixed(2)}`;
 }
 
 function memoryProcessingStatus(item: Pick<PanelItemsOutput["items"][number], "processing">): MemoryProcessingStatus | null {

@@ -6573,10 +6573,20 @@ function listMetricsForMemory(memory: MemoryRow): MemoryListItem["metrics"] | un
     return undefined;
   }
 
+  // Capture/import initializes both scores to zero before reflection and reward.
+  // Preserve genuine zero results: reward evidence and reflection are independent.
+  const isTrace = kindFromMemory(memory) === "trace";
+  const rewardRecorded = numberMetric(trace.r_human) !== undefined
+    || numberMetric(internal.r_human) !== undefined
+    || numberMetric(memory.info.r_human) !== undefined;
+  const reflectionRecorded = Boolean(reflection)
+    || typeof trace.reflection_scored_at === "string";
   return {
     ...(value === undefined ? {} : { value }),
     ...(alpha === undefined ? {} : { alpha }),
-    reflectionDone: Boolean(reflection)
+    reflectionDone: Boolean(reflection),
+    ...(isTrace && value === 0 && !rewardRecorded ? { valuePending: true } : {}),
+    ...(isTrace && alpha === 0 && !reflectionRecorded && !rewardRecorded ? { alphaPending: true } : {})
   };
 }
 
@@ -6911,6 +6921,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
   addMemoryKindClause(filter.memoryKind);
+  addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
@@ -6962,7 +6973,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     params.push(...values);
   }
 
-  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined, exclude = false): void {
     if (value === undefined) return;
     const values = Array.isArray(value) ? value : [value];
     if (values.length === 0) return;
@@ -6976,7 +6987,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
         ELSE 'trace'
       END
     )`;
-    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    clauses.push(`${expression} ${exclude ? "NOT IN" : "IN"} (${values.map(() => "?").join(", ")})`);
     params.push(...values);
   }
 
