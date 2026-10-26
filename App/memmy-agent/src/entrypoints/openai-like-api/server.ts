@@ -85,8 +85,10 @@ function modelFailure(value: unknown): { message: string; code: string } | null 
   if (!metadata || typeof metadata !== "object") return null;
   const record = metadata as Record<string, unknown>;
   if (typeof record.modelErrorCategory !== "string" || !record.modelErrorCategory.trim()) return null;
+  // Prefer the user-facing text the API used to return, such as the localized
+  // image-input message. The raw provider detail is only a fallback.
   const detail = typeof record.modelErrorDetail === "string" ? record.modelErrorDetail.trim() : "";
-  const message = detail || responseText(value).trim();
+  const message = responseText(value).trim() || detail;
   if (!message) return null;
   return { message, code: record.modelErrorCategory.trim() };
 }
