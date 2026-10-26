@@ -37,6 +37,8 @@ import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
 import type { TraceCaptureSummary, TurnMemoryCaptureDecision } from "./span-pipeline.js";
 
+import { episodeInputRevision } from "./episode-revision.js";
+
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 
@@ -117,6 +119,7 @@ export class EvolutionJobProcessor {
       get config() { return owner.deps.config; },
       repos: deps.repos,
       nowIso,
+      episodeRevision: (id) => episodeInputRevision(deps.repos, id, true),
       get skillLlm() { return owner.deps.skillLlm; },
       traceMeta: deps.traceMeta,
       projectIdFromMemory,

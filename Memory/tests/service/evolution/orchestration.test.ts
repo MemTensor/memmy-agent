@@ -609,7 +609,8 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(skillJob?.target_memory_id).toBe("policy_l2_activation_downstream");
     expect(JSON.parse(skillJob!.payload_json)).toMatchObject({
       reason: "l2.policy.updated",
-      previousStatus: "active",
+      // Preserve the actual activation transition; a duplicate recompute no longer overwrites it.
+      previousStatus: "candidate",
       status: "active"
     });
 

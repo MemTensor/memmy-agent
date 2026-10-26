@@ -792,6 +792,8 @@ describe("MemoryService / feedback / decision repair", () => {
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
+    // Optional repair now has its own durable phase after reward has committed.
+    await service.runWorkerOnce(100);
 
     const repair = db.db.prepare(
       `SELECT id, context_hash, high_value_memory_ids_json, low_value_memory_ids_json, source_json,

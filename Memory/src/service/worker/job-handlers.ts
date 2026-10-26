@@ -26,6 +26,7 @@ import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
+import { jobEpisodeRevision, jobRevisionIsCurrent } from "../evolution/episode-revision.js";
 import {
   namespaceForMemory,
   namespaceForSession
@@ -207,6 +208,12 @@ export function enqueueJob(
   input: EnqueueJobInput
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();
+  const episodeRevision = jobEpisodeRevision(deps.repos, input);
+  if (episodeRevision) input = { ...input,
+    payload: { ...input.payload, episodeRevision, episodeGeneration: input.episodeId
+      ? deps.repos.runtime.getEpisode(input.episodeId)?.meta.processingGeneration ?? 0 : 0 },
+    dedupeKey: `${input.dedupeKey ?? evolutionJobDedupeKey(input)}:${episodeRevision}`
+  };
   const job = deps.repos.runtime.enqueueJob({
     id: newId("job"),
     jobType: input.jobType,
@@ -231,6 +238,7 @@ export async function processJob(
   deps: WorkerJobHandlerDeps,
   job: EvolutionJobRecord
 ): Promise<void> {
+  if (!jobRevisionIsCurrent(deps.repos, job)) return;
   switch (job.jobType) {
     case "episode_idle_close":
       closeIdleEpisodesForMemoryWrite(deps, job);
@@ -430,7 +438,7 @@ export function enqueueEpisodeRewardAfterReflection(
     episodeHasRewardForReflection(deps, episode) ||
     episodeRewardWasSkipped(episode) ||
     (
-      deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+      deps.repos.runtime.getActiveJobByDedupeKey(`reward:${episode.id}:${jobEpisodeRevision(deps.repos, { episodeId: episode.id, jobType: "reward" })}`)
       && !episode.meta.rewardDirty
     )
   ) return [];
@@ -723,7 +731,7 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId ? `skill_cluster_assign:${input.episodeId}` : undefined;
     case "skill_batch_evolve": {
       const clusterId = payloadString("clusterId");
-      return clusterId ? `skill_batch_evolve:${clusterId}` : input.episodeId ? `skill_batch_evolve:${input.episodeId}` : undefined;
+      return clusterId ? `skill_batch_evolve:${clusterId}${payloadString("clusterRevision") ? `:${payloadString("clusterRevision")}` : ""}` : input.episodeId ? `skill_batch_evolve:${input.episodeId}` : undefined;
     }
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;
