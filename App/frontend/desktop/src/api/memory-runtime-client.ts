@@ -1,3 +1,9 @@
+import { PanelTaskCheckOutputSchema, type PanelTaskCheckOutput } from "@memmy/local-api-contracts";
+import {PanelLogsOutputSchema,PanelLogDetailOutputSchema,type PanelLogsInput,type PanelLogsOutput,type PanelLogDetailOutput} from "@memmy/local-api-contracts";
+import {PanelStatsOutputSchema,type PanelStatsOutput} from "@memmy/local-api-contracts";
+import { PanelBrowseClient } from "./panel-browse-client.js";
+import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
+import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema, type PanelTaskSummariesOutput, type PanelTaskDetailOutput, type PanelTaskFieldInput, type PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 import {
   CloseSessionInputSchema,
   CloseSessionOutputSchema,
@@ -62,6 +68,7 @@ import {
 } from "@memmy/local-api-contracts";
 import { ApiRequestError, requestJson } from "./http.js";
 import { z } from "zod";
+import { PanelRequestQueue } from "./panel-request-queue.js";
 
 const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
 const UpdateObservedSkillOutputSchema = ApproveObservedSkillOutputSchema.extend({ version: z.number().int().positive() });
@@ -83,14 +90,29 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "DELETE /api/v1/memory/:id",
   "GET /api/v1/memory/recalls/:queryId",
   "GET /api/v1/memory/logs",
+  "POST /api/v1/panel/browse",
+  "GET /api/v1/panel/stats",
+  "POST /api/v1/panel/logs",
+  "GET /api/v1/panel/logs/:id",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
+  "GET /api/v1/panel/task-summaries",
+  "GET /api/v1/panel/task-details/:id",
+  "GET /api/v1/panel/task-details/:id/check",
+  "GET /api/v1/panel/task-details/:id/turns/:turnId/field",
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
 
 export interface MemoryRuntimeClient {
+  prefetchPanel?(section:string,signal:AbortSignal):Promise<void>;
+  listPanelLogs?(input:PanelLogsInput):Promise<PanelLogsOutput>;
+  getPanelLogDetail?(id:number):Promise<PanelLogDetailOutput>;
+  getPanelStats?():Promise<PanelStatsOutput>;
+  resetPanelView?(section?:string):void;
+  refreshPanelView?(section:string):void;
+  checkPanelView?(section:string):Promise<{updated:boolean}>;
   health(signal?: AbortSignal): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   openSession(input: OpenSessionInput): Promise<OpenSessionOutput>;
@@ -109,13 +131,34 @@ export interface MemoryRuntimeClient {
   listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
   getPanelOverview(): Promise<PanelOverviewOutput>;
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
-  listPanelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
-  listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
+  listPanelItems(input: PanelItemsInput, signal?: AbortSignal): Promise<PanelItemsOutput>;
+  listPanelTaskSummaries?(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTaskSummariesOutput | PanelTasksOutput>;
+  checkPanelTask?(id: string, signal?: AbortSignal): Promise<PanelTaskCheckOutput>;
+  getPanelTaskDetail?(id: string, cursor?: string, signal?: AbortSignal): Promise<PanelTaskDetailOutput>;
+  getPanelTaskField?(id: string, turnId: string, input: PanelTaskFieldInput, signal?: AbortSignal): Promise<PanelTaskFieldOutput>;
+  listPanelTasks(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
+  const panelQueue = new PanelRequestQueue();
+  const browse = new PanelBrowseClient((input, signal) => panelQueue.request(
+    `browse:${JSON.stringify(input)}`,
+    sharedSignal => requestJson({config,path:"/api/v1/panel/browse",schema:PanelBrowseOutputSchema,body:input,init:{signal:sharedSignal}}),
+    signal
+  ), isUnsupportedPanelRoute);
   return {
+    async prefetchPanel(section,signal) {
+      if (!panelQueue.idle || !browse.idle || browse.hasView(section)) return;
+      const input = section === "tasks" ? {page:1} : {layer:section as PanelItemsInput["layer"],page:1};
+      await browse.list(section,input,signal);
+    },
+    listPanelLogs:input=>panelQueue.request(`panel:logs:${JSON.stringify(input)}`,signal=>requestJson({config,path:"/api/v1/panel/logs",schema:PanelLogsOutputSchema,body:input,init:{signal}})),
+    getPanelLogDetail:id=>panelQueue.request(`panel:log:${id}`,signal=>requestJson({config,path:`/api/v1/panel/logs/${id}`,schema:PanelLogDetailOutputSchema,init:{signal}})),
+    getPanelStats:()=>panelQueue.request("panel:stats",signal=>requestJson({config,path:"/api/v1/panel/stats",schema:PanelStatsOutputSchema,init:{signal}})),
+    resetPanelView: section => { if (!section) panelQueue.clear(); browse.reset(section); },
+    refreshPanelView: section => browse.refresh(section),
+    checkPanelView: section => browse.check(section),
     async health(signal) {
       return requestJson({ config, path: "/api/v1/health", schema: MemoryHealthSnapshotSchema, init: { signal } });
     },
@@ -173,22 +216,31 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     },
 
     async deleteMemory(id) {
-      return requestJson({
+      const result = await requestJson({
         config,
         path: `/api/v1/memory/${encodeURIComponent(id)}`,
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
       });
+      browse.reset();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      return result;
     },
 
     async approveObservedSkill(id) {
-      return requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}/approve`,
+      const result = await requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}/approve`,
         schema: ApproveObservedSkillOutputSchema, body: {} });
+      browse.reset();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      return result;
     },
 
     async updateObservedSkill(id, input) {
-      return requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}`,
+      const result = await requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}`,
         schema: UpdateObservedSkillOutputSchema, body: input, init: { method: "PATCH" } });
+      browse.reset();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      return result;
     },
 
     async recallEvidence(queryId) {
@@ -233,21 +285,52 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return requestJson({ config, path: "/api/v1/panel/analysis", schema: PanelAnalysisOutputSchema });
     },
 
-    async listPanelItems(input) {
-      return requestJson({ config, path: withQuery("/api/v1/panel/items", PanelItemsInputSchema.parse(input)), schema: PanelItemsOutputSchema });
+    async listPanelItems(input, signal) {
+      const page=await browse.list(input.layer ?? "L1",input,signal);
+      if(page) return {items:page.items??[],page:page.page,pageSize:page.pageSize,total:page.total,totalPages:page.totalPages,hasNext:page.hasNext,hasPrev:page.hasPrev,serverTime:page.serverTime};
+      const path = withQuery("/api/v1/panel/items", PanelItemsInputSchema.parse(input));
+      return panelQueue.request(path, (sharedSignal) => requestJson({ config, path, schema: PanelItemsOutputSchema, init: { signal: sharedSignal } }), signal);
     },
 
-    async listPanelTasks(input) {
-      return requestJson({ config, path: withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input)), schema: PanelTasksOutputSchema });
+    async listPanelTaskSummaries(input, signal) {
+      const page=await browse.list("tasks",input,signal);
+      if(page) return {tasks:page.tasks??[],page:page.page,pageSize:page.pageSize,total:page.total,totalPages:page.totalPages,hasNext:page.hasNext,hasPrev:page.hasPrev,serverTime:page.serverTime};
+      const path = withQuery("/api/v1/panel/task-summaries", PanelTasksInputSchema.parse(input));
+      try {
+        return await panelQueue.request(path, (sharedSignal) => requestJson({ config, path, schema: PanelTaskSummariesOutputSchema, init: {signal: sharedSignal} }), signal);
+      } catch (error) {
+        if (!isUnsupportedPanelRoute(error)) throw error;
+        const legacyPath = withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input));
+        return panelQueue.request(legacyPath, (sharedSignal) => requestJson({config, path: legacyPath, schema: PanelTasksOutputSchema, init: {signal: sharedSignal}}), signal);
+      }
+    },
+    async checkPanelTask(id, signal) {
+      const path = `/api/v1/panel/task-details/${encodeURIComponent(id)}/check`;
+      return panelQueue.request(path, sharedSignal => requestJson({config, path, schema: PanelTaskCheckOutputSchema, init: {signal: sharedSignal}}), signal);
+    },
+    async getPanelTaskDetail(id, cursor, signal) {
+      const path = withQuery(`/api/v1/panel/task-details/${encodeURIComponent(id)}`, {cursor});
+      return panelQueue.request(path, (sharedSignal) => requestJson({config, path, schema: PanelTaskDetailOutputSchema, init: {signal: sharedSignal}}), signal);
+    },
+    async getPanelTaskField(id, turnId, input, signal) {
+      const path = withQuery(`/api/v1/panel/task-details/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId)}/field`, input);
+      return panelQueue.request(path, (sharedSignal) => requestJson({config, path, schema: PanelTaskFieldOutputSchema, init: {signal: sharedSignal}}), signal);
+    },
+    async listPanelTasks(input, signal) {
+      const path = withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input));
+      return panelQueue.request(path, (sharedSignal) => requestJson({ config, path, schema: PanelTasksOutputSchema, init: { signal: sharedSignal } }), signal);
     },
 
     async deletePanelTask(id) {
-      return requestJson({
+      const result = await requestJson({
         config,
         path: `/api/v1/panel/tasks/${encodeURIComponent(id)}`,
         schema: DeletePanelTaskOutputSchema,
         init: { method: "DELETE" }
       });
+      browse.reset();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      return result;
     }
   };
 }
@@ -280,6 +363,7 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
         },
         serverTime: new Date().toISOString()
       };
+
     },
     async reloadConfig() {
       throw unavailable();
@@ -362,4 +446,10 @@ function appendQueryValue(query: URLSearchParams, key: string, value: unknown): 
   }
 
   query.append(key, String(value));
+}
+
+/** A missing object, authorization error or timeout never means an old service. */
+export function isUnsupportedPanelRoute(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 404 && error.code === "not_found"
+    && (/is not registered/i.test(error.message) || /route .*not found/i.test(error.message));
 }

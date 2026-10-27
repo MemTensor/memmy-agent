@@ -239,6 +239,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     memoryDetail: createMemoryDetailService({
+      getUserId: resolveMemoryUserId,
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({

@@ -98,10 +98,12 @@ describe("open observation processing", () => {
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("这是一段对应的来源记忆。");
   });
 
-  it("refreshes a failed open drawer when a changed source or external retry appears in the list", async () => {
+  it("refreshes a failed open drawer after an external retry without reloading the list", async () => {
     let latest = detail("failed");
     const getMemory = vi.fn(async () => latest);
-    const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems: vi.fn(async () => panelItemsOutput([latest.item])) });
+    const listPanelItems = vi.fn(async () => panelItemsOutput([latest.item]));
+    const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems,
+      getMemoryProcessingStatus: vi.fn(async () => ({ items: [latest.item.processing!], serverTime: latest.item.updatedAt })) });
     await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN"><MemoriesSubPage client={client} openRequest={{ id: latest.item.id, requestId: 1 }} /></I18nProvider></AppStateProvider>));
     await act(async () => vi.advanceTimersByTimeAsync(180));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("这段历史摘要尚未整理为记忆");
@@ -111,6 +113,7 @@ describe("open observation processing", () => {
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("采购仍有审批事项需要跟进。");
     expect(getMemory).toHaveBeenCalledTimes(2);
+    expect(listPanelItems).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a queued History window pending when an older service flags it for automatic retry", async () => {

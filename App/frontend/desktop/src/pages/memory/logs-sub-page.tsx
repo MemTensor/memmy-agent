@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import {usePanelLoad} from "./use-panel-load.js";
+import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MemoryApiLog, MemoryApiLogsOutput, MemoryApiLogToolName } from "@memmy/local-api-contracts";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -52,7 +54,8 @@ export async function loadLogsData(
   client: MemoryRuntimeClient,
   page = 1,
   tool: "" | MemoryApiLogToolName = "",
-  sourceAgent = ""
+  sourceAgent = "",
+  query = ""
 ): Promise<MemoryApiLogsOutput> {
   const normalizedPage = normalizePage(page);
   const sourceAgentFilter = sourceAgent === OTHER_LOG_SOURCE_AGENT
@@ -61,6 +64,10 @@ export async function loadLogsData(
       ? { sourceAgent }
       : {};
   try {
+    if(client.listPanelLogs) {
+      try {return await client.listPanelLogs({tools:tool?[tool]:VISIBLE_TOOLS,...sourceAgentFilter,limit:LOGS_PAGE_SIZE,offset:(normalizedPage-1)*LOGS_PAGE_SIZE,q:query||undefined});}
+      catch(error) {if(!isUnsupportedPanelRoute(error))throw error;}
+    }
     return await client.listMemoryLogs({
       tools: tool ? [tool] : VISIBLE_TOOLS,
       ...sourceAgentFilter,
@@ -87,6 +94,8 @@ export function LogsSubPage(props: LogsSubPageProps) {
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<MemoryApiLogsOutput>>({ status: "loading" });
+  const generation=useRef(0);
+  const [query,setQuery]=useState("");
   const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
   function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<MemoryApiLogsOutput | undefined> {
@@ -96,28 +105,36 @@ export function LogsSubPage(props: LogsSubPageProps) {
       return Promise.reject(new Error(message));
     }
 
+    const requestId=++generation.current;
     const cacheKeys = logsCacheKeys(nextPage, nextTool, nextSourceAgent);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<MemoryApiLogsOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<MemoryApiLogsOutput>(cacheKeys) : null;
     setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    return loadLogsData(props.client, nextPage, nextTool, nextSourceAgent)
+    return loadLogsData(props.client, nextPage, nextTool, nextSourceAgent,query)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
+        if(requestId!==generation.current)return undefined;
+        if(!props.client?.resetPanelView)writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
         return data;
       })
       .catch((error) => {
+        if(requestId!==generation.current)return undefined;
         setState({ status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
-  useEffect(() => {
-    void refresh().catch(() => undefined);
-  }, [props.client, page, sourceAgent, tool, t]);
+  usePanelLoad({query,identity:[props.client,page,sourceAgent,tool,t],load:()=>refresh(),invalidate:()=>{generation.current++;}});
+  useEffect(()=>{
+    const invalidate=()=>{generation.current++;setState({status:"loading"});void refresh().catch(()=>undefined);};
+    window.addEventListener("memmy-panel-invalidated",invalidate);
+    return()=>window.removeEventListener("memmy-panel-invalidated",invalidate);
+  },[props.client]);
 
   return (
     <LogsSubPageView
       state={state}
+      client={props.client}
+      onQueryChange={value=>{setQuery(value);setPage(1);}}
       tool={tool}
       sourceAgent={sourceAgent}
       onToolChange={(nextTool) => {
@@ -150,6 +167,8 @@ export function LogsSubPage(props: LogsSubPageProps) {
 }
 
 export interface LogsSubPageViewProps {
+  client?:MemoryRuntimeClient|null;
+  onQueryChange?:(value:string)=>void;
   state: RemoteData<MemoryApiLogsOutput>;
   tool: "" | MemoryApiLogToolName;
   sourceAgent: string;
@@ -168,14 +187,14 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
   const filteredLogs = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return logs.filter((log) => {
-      if (!needle) {
+      if (!needle || log.detailAvailable) {
         return true;
       }
       return `${log.toolName} ${log.inputJson} ${log.outputJson}`.toLowerCase().includes(needle);
     });
   }, [logs, query]);
   const pagination = props.state.status === "ready"
-    ? logsPageInfo(props.state.data, query.trim() ? filteredLogs.length : undefined)
+    ? logsPageInfo(props.state.data, query.trim() && !logs.some(log => log.detailAvailable) ? filteredLogs.length : undefined)
     : null;
 
   const toggleExpanded = (id: number) => {
@@ -214,7 +233,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         </button>
         {isExpanded && (
           <div className="memory-log-card__details">
-            <LogDetail log={log} input={input} output={output} />
+            <ExpandedLog key={log.id} client={props.client} log={log} />
           </div>
         )}
       </article>
@@ -240,7 +259,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
             <input
               className="memory-search__input"
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => {setQuery(event.target.value);props.onQueryChange?.(event.target.value);}}
               placeholder={t("memory.logs.searchPlaceholder")}
               type="search"
             />
@@ -372,6 +391,17 @@ interface AddDetail {
   query?: string;
   agent?: string;
   reason?: string;
+}
+
+function ExpandedLog(props:{client?:MemoryRuntimeClient|null;log:MemoryApiLog}) {
+  const [data,setData]=useState(props.log.detailAvailable ? undefined : props.log);
+  const [error,setError]=useState<string>();const [retry,setRetry]=useState(0);const {t}=useTranslation();
+  useEffect(()=>{let active=true;
+    if(props.log.detailAvailable&&props.client?.getPanelLogDetail) void props.client.getPanelLogDetail(props.log.id).then(result=>{if(active)setData(result.log);}).catch(error=>{if(active)setError(toErrorMessage(error));});
+    return()=>{active=false;};
+  },[props.client,props.log.id,retry]);
+  if(error)return <div role="alert">{error}<button type="button" onClick={()=>{setError(undefined);setRetry(value=>value+1);}}>{t("memory.tasks.loadContent")}</button></div>;
+  return data?<LogDetail log={data} input={parseJson(data.inputJson)} output={parseJson(data.outputJson)} />:<StateBox message={t("common.loading")} />;
 }
 
 function LogDetail(props: { log: MemoryApiLog; input: unknown; output: unknown }) {

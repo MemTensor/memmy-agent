@@ -1,5 +1,9 @@
+import { canPreservePanelResult } from "./panel-view-status.js";
+import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { TaskConversation } from "./task-conversation.js";
+import { isUnsupportedPanelRoute } from "../../api/memory-runtime-client.js";
 import { useEffect, useRef, useState } from "react";
-import type { PanelTaskItem } from "@memmy/local-api-contracts";
+import type { PanelTaskItem, PanelTaskSummary, PanelTaskDetailOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime, formatUserTime } from "../../lib/user-time-zone.js";
 import {
@@ -25,6 +29,8 @@ import type { MemoryReferenceOpenRequest } from "./memory-reference-tags.js";
 import { MemoryRefreshButton } from "./memory-refresh-button.js";
 import { MemoryStateBox } from "./memory-state-box.js";
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { usePanelLoad } from "./use-panel-load.js";
+import { usePanelPoll } from "./use-panel-poll.js";
 
 export interface TasksSubPageProps {
   client: MemoryRuntimeClient | null;
@@ -55,6 +61,7 @@ export interface MemoryTask {
   titleGenerated?: boolean;
   titlePending?: boolean;
   chat: TaskChatMessage[];
+  summaryOnly?: boolean;
 }
 
 type TaskStatus = "active" | "completed" | "skipped" | "failed" | string;
@@ -108,10 +115,10 @@ type TasksState = RemoteData<MemoryTasksOutput>;
 type Translate = (key: MessageKey, values?: MessageValues) => string;
 const defaultTranslate: Translate = (key, values) => formatMessage(zhCNMessages[key], values);
 const TASKS_CACHE_SECTION = "tasks";
-const TASKS_REFRESH_INTERVAL_MS = 5_000;
 
-export async function loadTasksData(client: MemoryRuntimeClient, query = "", page = 1, t: Translate = defaultTranslate): Promise<MemoryTasksOutput> {
-  const list = await client.listPanelTasks({ q: query.trim() || undefined, page: normalizePage(page) });
+export async function loadTasksData(client: MemoryRuntimeClient, query = "", page = 1, t: Translate = defaultTranslate, signal?: AbortSignal): Promise<MemoryTasksOutput> {
+  const input = { q: query.trim() || undefined, page: normalizePage(page) };
+  const list = await (client.listPanelTaskSummaries ? client.listPanelTaskSummaries(input, signal) : signal ? client.listPanelTasks(input, signal) : client.listPanelTasks(input));
 
   return {
     tasks: list.tasks.map((task) => taskFromPanelItem(task, t)),
@@ -138,9 +145,41 @@ export function TasksSubPage(props: TasksSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<TasksState>({ status: "loading" });
   const [selectedTask, setSelectedTask] = useState<MemoryTask | null>(null);
+  const [taskDetail, setTaskDetail] = useState<RemoteData<PanelTaskDetailOutput> | null>(null);
+  const detailGeneration = useRef(0);
+  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  function closeTask() { detailGeneration.current++; setSelectedTask(null); setTaskDetail(null); }
+  async function fetchTaskDetail(id: string) {
+    const generation = ++detailGeneration.current;
+    setTaskDetail({status: "loading"});
+    try {
+      if (!props.client?.getPanelTaskDetail) throw new Error(t("memory.detailUnavailable"));
+      const data = await props.client.getPanelTaskDetail(id);
+      if (generation !== detailGeneration.current) return;
+      setSelectedTask(taskFromPanelItem(data.task, t)); setTaskDetail({status: "ready", data});
+    } catch (error) {
+      if (generation !== detailGeneration.current) return;
+      if (isUnsupportedPanelRoute(error) && props.client) { await openLegacyTask(id, generation); return; }
+      setTaskDetail({status: "error", message: toErrorMessage(error)});
+    }
+  }
+  async function openLegacyTask(id: string, generation: number) {
+    try {
+      const list = await props.client!.listPanelTasks({q: id.split("::").at(-1), page: 1});
+      if (generation !== detailGeneration.current) return;
+      const item = list.tasks.find(task => task.id === id || task.id.split("::").at(-1) === id.split("::").at(-1));
+      if (!item) throw new Error(t("memory.detailUnavailable"));
+      setSelectedTask(taskFromPanelItem(item,t)); setTaskDetail(null);
+    } catch (error) { if (generation === detailGeneration.current) setTaskDetail({status: "error", message: toErrorMessage(error)}); }
+  }
   const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t, language], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
+  usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, { useCache: false }));
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<MemoryTasksOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"tasks",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeTask(); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<MemoryTasksOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -148,21 +187,25 @@ export function TasksSubPage(props: TasksSubPageProps) {
     }
 
     const normalizedPage = normalizePage(nextPage);
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     const requestId = ++requestIdRef.current;
     const cacheKeys = tasksCacheKeys(query, normalizedPage, language);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<MemoryTasksOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<MemoryTasksOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
       setState((current) => current.status === "ready" ? current : { status: "loading" });
     }
 
-    return loadTasksData(props.client, query, normalizedPage, t)
+    return loadTasksData(props.client, query, normalizedPage, t, controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
@@ -173,21 +216,21 @@ export function TasksSubPage(props: TasksSubPageProps) {
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
-        setState({ status: "error", message: toErrorMessage(error) });
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
   function changeQuery(value: string) {
     setQuery(value);
-    setSelectedTask(null);
+    closeTask();
     setPage(1);
   }
 
   function runSearch() {
-    setSelectedTask(null);
+    closeTask();
     setPage(1);
-    void refresh(1)
+    void submitSearch(() => refresh(1), [props.client, 1, t, language])
       .then((data) => {
         if (!data) {
           return;
@@ -207,6 +250,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       filterLayer: tasksFilterLayer
     }));
     setSelectedTask(task);
+    if (task.summaryOnly) void fetchTaskDetail(task.id);
   }
 
   function openTaskById(id: string) {
@@ -215,21 +259,8 @@ export function TasksSubPage(props: TasksSubPageProps) {
       return;
     }
 
-    const localId = id.split("::").at(-1) ?? id;
-    void loadTasksData(props.client, localId, 1, t)
-      .then((data) => {
-        const task = data.tasks.find((item) => item.id === id || item.id.split("::").at(-1) === localId);
-        if (!task) {
-          setState({ status: "error", message: t("memory.detailUnavailable") });
-          return;
-        }
-
-        setQuery(localId);
-        setPage(1);
-        setState({ status: "ready", data });
-        openTask(task);
-      })
-      .catch((error) => setState({ status: "error", message: toErrorMessage(error) }));
+    if (props.client.getPanelTaskDetail) void fetchTaskDetail(id);
+    else void openLegacyTask(id, ++detailGeneration.current);
   }
 
   function changePage(nextPage: number) {
@@ -238,7 +269,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       return;
     }
 
-    setSelectedTask(null);
+    closeTask();
     setPage(normalizedPage);
   }
 
@@ -253,33 +284,18 @@ export function TasksSubPage(props: TasksSubPageProps) {
       filterLayer: tasksFilterLayer
     }));
     clearMemoryPanelCache();
-    setSelectedTask(null);
+    closeTask();
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => void refresh().catch(() => undefined), 180);
-    return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.client, query, page, t, language]);
 
   useEffect(() => {
     if (props.openRequest) {
       openTaskById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
 
-  useEffect(() => {
-    if (!props.client) {
-      return undefined;
-    }
-    const interval = window.setInterval(() => void refresh(page, { useCache: false }).catch(() => undefined), TASKS_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.client, query, page, t, language]);
-
   return (
+    <PanelViewGate status={viewStatus}>
     <TasksSubPageView
       state={state}
       query={query}
@@ -287,8 +303,10 @@ export function TasksSubPage(props: TasksSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
+      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
-        const data = await refresh(page, { useCache: false });
+        props.client?.refreshPanelView?.("tasks");
+        const data = await refresh(page, { useCache: false, preserve:true });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
             subPage: "tasks",
@@ -299,8 +317,10 @@ export function TasksSubPage(props: TasksSubPageProps) {
       }}
       onOpenTask={openTask}
       onDeleteTask={deleteTask}
-      onCloseTask={() => setSelectedTask(null)}
+      onCloseTask={closeTask}
+      conversation={taskDetail?.status === "ready" && props.client ? <TaskConversation key={`${taskDetail.data.task.id}:${detailGeneration.current}`} client={props.client} initial={taskDetail.data} /> : taskDetail ? <MemoryStateBox message={taskDetail.status === "error" ? taskDetail.message : t("common.loading")} /> : undefined}
     />
+    </PanelViewGate>
   );
 }
 
@@ -312,9 +332,11 @@ export interface TasksSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
+  viewNotice?: import("react").ReactNode;
   onOpenTask: (task: MemoryTask) => void;
   onDeleteTask: (task: MemoryTask) => Promise<void>;
   onCloseTask: () => void;
+  conversation?: import("react").ReactNode;
 }
 
 export function TasksSubPageView(props: TasksSubPageViewProps) {
@@ -331,6 +353,7 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.tasks.subtitle")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
+        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">
@@ -401,12 +424,13 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
       )}
       {props.state.status === "ready" && <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />}
 
-      {props.selectedTask && <TaskDetailDrawer task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
+      {!props.selectedTask && props.conversation}
+      {props.selectedTask && <TaskDetailDrawer conversation={props.conversation} task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
     </section>
   );
 }
 
-function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
+function TaskDetailDrawer(props: { conversation?: import("react").ReactNode; task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
   const { t } = useTranslation();
   const task = props.task;
   const skillLabel = task.skillStatus ? skillStatusLabel(task.skillStatus, t) : t("memory.tasks.skill.queued");
@@ -451,11 +475,11 @@ function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDele
 
           <section className="memory-detail-card">
             <h5 className="memory-detail-card__label">{t("memory.tasks.conversation")}</h5>
-            {task.chat.length > 0 ? (
+            {props.conversation ?? (task.chat.length > 0 ? (
               <TaskChatLog messages={task.chat} />
             ) : (
               <MemoryStateBox message={t("memory.tasks.noConversation")} />
-            )}
+            ))}
           </section>
         </div>
         <MemoryDrawerDeleteAction onDelete={() => props.onDelete(task)} />
@@ -545,9 +569,10 @@ function MemoryMetric(props: { label: string; value: string }) {
   );
 }
 
-function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
+function taskFromPanelItem(item: PanelTaskItem | PanelTaskSummary, t: Translate): MemoryTask {
+  const summaryOnly = !("turns" in item);
   const episode = item.episode;
-  const turns: TaskTurn[] = item.turns.map((turn) => ({
+  const turns: TaskTurn[] = ("turns" in item ? item.turns : []).map((turn) => ({
     id: turn.rawTurnId,
     turnId: turn.turnId,
     createdAt: turn.createdAt,
@@ -563,11 +588,11 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
   const titlePending = episode.titlePending === true;
   const waiting = titlePending && !titleGenerated;
   const title = waiting
-    ? truncate(firstString(firstChatText(chat, "user"), episode.id), 100)
-    : truncate(firstString(episode.title, episode.summary, firstChatText(chat, "user"), episode.id), 100);
+    ? truncate(firstString(summaryOnly ? item.firstUserText : firstChatText(chat, "user"), episode.id), 100)
+    : truncate(firstString(episode.title, episode.summary, summaryOnly ? item.firstUserText : firstChatText(chat, "user"), episode.id), 100);
   const summary = waiting
     ? ""
-    : truncate(firstString(episode.summary, firstChatText(chat, "assistant"), titleGenerated ? undefined : title), 180);
+    : truncate(firstString(episode.summary, summaryOnly ? item.firstAssistantText : firstChatText(chat, "assistant"), titleGenerated ? undefined : title), 180);
 
   return {
     id: item.id,
@@ -581,13 +606,14 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
     updatedAt: item.updatedAt,
     turnCount: episode.turnCount ?? uniqueChatUserTurns(chat),
     memoryCount: item.memoryIds.length,
-    toolCallCount: chat.filter((message) => message.role === "tool").length,
+    toolCallCount: summaryOnly ? item.toolCallCount : chat.filter((message) => message.role === "tool").length,
     rTask: episode.rTask,
     skillStatus: deriveTaskSkillStatus(episode),
     skillReason: firstOptionalString(episode.skillReason, episode.pipelineError),
     statusReason: taskStatusReason(episode, status, t),
     titleGenerated,
     titlePending,
+    summaryOnly,
     chat
   };
 }

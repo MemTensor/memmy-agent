@@ -1,3 +1,4 @@
+import {usePanelStats} from "./use-panel-stats.js";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { PanelOverviewOutput } from "@memmy/local-api-contracts";
 import { PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR } from "../../app/product-tour-layout.js";
@@ -6,12 +7,7 @@ import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { BarChart3, BrainCircuit, Globe2, Layers, Sparkles, UserRound, Wand2 } from "./memory-prototype-icons.js";
-import {
-  memoryPanelCacheKey,
-  readMemoryPanelCache,
-  writeMemoryPanelCache
-} from "./memory-panel-cache.js";
-import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { type RemoteData } from "./remote-state.js";
 
 interface OverviewCountCard {
   id: "memories" | "userMemories" | "skills" | "experiences" | "worldModels";
@@ -68,33 +64,9 @@ export function loadOverviewData(client: MemoryRuntimeClient): Promise<PanelOver
 
 export function OverviewSubPage(props: OverviewSubPageProps) {
   const { t } = useTranslation();
-  const [state, setState] = useState<RemoteData<PanelOverviewOutput>>({ status: "loading" });
+  const {state,snapshot,connectionError}=usePanelStats<PanelOverviewOutput>(props.client,"overview",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadOverviewData(props.client);});
 
-  useEffect(() => {
-    if (!props.client) {
-      setState({ status: "error", message: t("memory.clientNotReady") });
-      return;
-    }
-
-    let active = true;
-    const cacheKey = memoryPanelCacheKey("overview");
-    const cached = readMemoryPanelCache<PanelOverviewOutput>(cacheKey);
-    setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    void loadOverviewData(props.client)
-      .then((data) => {
-        writeMemoryPanelCache(cacheKey, data);
-        if (active) setState({ status: "ready", data });
-      })
-      .catch((error) => {
-        if (active) setState({ status: "error", message: toErrorMessage(error) });
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [props.client, t]);
-
-  return <OverviewSubPageView state={state} onNavigate={props.onNavigate} />;
+  return <>{connectionError && state.status === "ready" && <p role="alert">{connectionError}</p>}{snapshot?.generatedAt && <p>{t("memory.panel.generatedAt")} {snapshot.generatedAt}</p>}{snapshot?.status==="error" && snapshot.data && <p role="alert">{snapshot.error}</p>}<OverviewSubPageView state={state} onNavigate={props.onNavigate} /></>;
 }
 
 export function OverviewSubPageView(props: {

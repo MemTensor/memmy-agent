@@ -78,6 +78,14 @@ describe("HttpMemoryClient", () => {
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
       "/api/v1/panel/items",
+      "/api/v1/panel/logs",
+      "/api/v1/panel/logs/:id",
+      "/api/v1/panel/stats",
+      "/api/v1/panel/browse",
+      "/api/v1/panel/task-summaries",
+      "/api/v1/panel/task-details/:id/check",
+      "/api/v1/panel/task-details/:id",
+      "/api/v1/panel/task-details/:id/turns/:turnId/field",
       "/api/v1/panel/tasks",
       "/api/v1/panel/tasks/:id"
     ]);
@@ -127,6 +135,28 @@ describe("HttpMemoryClient", () => {
     failed = true;
     await expect(client.updateObservedSkill("skill 1", input)).rejects.toThrow();
     expect(calls).toHaveLength(2);
+  });
+
+  it("propagates a cancelled panel subscription to fetch without retrying", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    let observed: AbortSignal | undefined;
+    let calls = 0;
+    const client = createHttpMemoryClient({baseUrl:"http://memory.test",token:"test",timeoutMs:1000,maxRetries:3}, {
+      fetchImpl: (async (_url, init) => {
+        calls++;
+        observed = init?.signal ?? undefined;
+        started();
+        return new Promise<Response>((_resolve, reject) => observed!.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")), {once:true}));
+      }) as typeof fetch
+    });
+    const result = client.panelTaskCheck("task", {signal:controller.signal}).catch(error => error);
+    await ready;
+    controller.abort();
+    await result;
+    expect(observed?.aborted).toBe(true);
+    expect(calls).toBe(1);
   });
 
   it("calls every final runtime path and parses schema-valid responses", async () => {

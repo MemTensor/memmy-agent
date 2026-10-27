@@ -1,5 +1,10 @@
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import {PanelStats} from "./panel/stats.js";
+import { PanelReader } from "./panel/reader.js";
+import { PanelBrowse } from "./panel/browse.js";
+import { panelSafetyToken } from "../storage/panel-security.js";
+import { userMemoryPanelItem } from "./read-model/panel-read.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -300,6 +305,48 @@ export class MemoryService {
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
+  private panelReader?: PanelReader;
+  private panelBrowse?: PanelBrowse;
+  private panelStats?: PanelStats;
+  panelStatsSnapshot(input:RequestEnvelope) {
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db));
+    return this.panelStats.get(input);
+  }
+
+  async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
+    if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
+    if(this.repos.db.name !== ":memory:") {
+      this.panelReader ??= new PanelReader(this.repos.db.name);
+      const result=await this.panelReader.run<T>(method,args,method === "stats" ? 1 : 0,signal);
+      if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
+      return result;
+    }
+    const model=this.panelReadModel;
+    const data=method === "members" ? model.panelMembers(args[0] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "page" ? model.panelPageByIds(args[0] as string[],args[1] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "items" ? model.panelItems(args[0] as Parameters<PanelReadModel["panelItems"]>[0])
+      : method === "tasks" ? model.panelTaskSummaries(args[0] as Parameters<PanelReadModel["panelTaskSummaries"]>[0])
+      : method === "taskCheck" ? model.panelTaskCheck(args[0] as string,args[1] as RequestEnvelope)
+      : method === "detail" ? model.panelTaskDetail(args[0] as string,args[1] as Parameters<PanelReadModel["panelTaskDetail"]>[1])
+      : method === "field" ? model.panelTaskField(args[0] as string,args[1] as string,args[2] as Parameters<PanelReadModel["panelTaskField"]>[2],args[3] as Parameters<PanelReadModel["panelTaskField"]>[3])
+      : method === "logs" ? model.panelLogs(args[0] as Parameters<PanelReadModel["panelLogs"]>[0],args[1] as RequestEnvelope)
+      : method === "logDetail" ? model.panelLogDetail(args[0] as number)
+      : method === "overview" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
+      : method === "analysis" ? model.panelAnalysis(args[0] as RequestEnvelope)
+      : method === "legacyTasks" ? model.panelTasks(args[0] as Parameters<PanelReadModel["panelTasks"]>[0])
+      : method === "stats" ? model.panelStatistics(args[0] as RequestEnvelope) : undefined;
+    return {safety:panelSafetyToken(this.repos.db),data:data as T};
+  }
+
+  browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal) {
+    this.panelBrowse ??= new PanelBrowse({read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
+    const filter={...input.filter,...request};
+    if(input.op==="create") return this.panelBrowse.create(filter,signal);
+    if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
+    if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter);
+    if(input.op==="check") return this.panelBrowse.check(input.viewId,filter);
+    return this.panelBrowse.release(input.viewId,filter);
+  }
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
@@ -833,7 +880,10 @@ export class MemoryService {
     // slots, then keep storage alive through complete foreground business work.
     const modelsStopped = this.modelTasks.stop();
     const requestsStopped = this.concurrency.close();
-    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped]).then(() => {
+    this.panelBrowse?.clear();
+    this.panelStats?.stop();
+    const readerStopped = this.panelReader?.stop();
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
       this.stopConcurrencyMetrics();
       this.workerMetrics.stop();
     });
@@ -2346,6 +2396,14 @@ export class MemoryService {
   }
 
   getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
+    this.assertMemorySearchEnabled();
+    const userMemory = this.repos.userMemories.getForDisplay(id);
+    if (userMemory) {
+      if (!request.namespace?.userId || request.namespace.userId !== userMemory.userId) throw new MemoryServiceError("not_found", "Memory is unavailable");
+      const item = userMemoryPanelItem(userMemory);
+      const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
+      return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
+    }
     return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
   }
 
@@ -2884,7 +2942,8 @@ export class MemoryService {
         this.deleteMemory(spanId, request);
         deletedMemoryIds.push(spanId);
       }
-      for (const memoryId of episode.l1MemoryIds) {
+      const currentL1Ids = this.repos.memories.effectiveEpisodeL1Ids([episode]).get(episode.id) ?? new Set<string>();
+      for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
         this.deleteMemory(memoryId, request);
         deletedMemoryIds.push(memoryId);
@@ -3125,6 +3184,7 @@ export class MemoryService {
 
   panelItems(input: RequestEnvelope & {
     userId?: string;
+    userSummary?: boolean;
     layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
@@ -3166,6 +3226,18 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.panelReadModel.panelTasks(this.withTimeZone(input));
+  }
+
+  panelTaskSummaries(input: Parameters<PanelReadModel["panelTaskSummaries"]>[0]) {
+    return this.panelReadModel.panelTaskSummaries(this.withTimeZone(input));
+  }
+
+  panelTaskDetail(id: string, input: Parameters<PanelReadModel["panelTaskDetail"]>[1]) {
+    return this.panelReadModel.panelTaskDetail(id, this.withTimeZone(input));
+  }
+
+  panelTaskField(id: string, turnId: string, field: Parameters<PanelReadModel["panelTaskField"]>[2], input: Parameters<PanelReadModel["panelTaskField"]>[3]) {
+    return this.panelReadModel.panelTaskField(id, turnId, field, this.withTimeZone(input));
   }
 
   panelChanges(input: RequestEnvelope & {

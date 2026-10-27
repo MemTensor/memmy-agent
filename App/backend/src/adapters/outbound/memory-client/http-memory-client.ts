@@ -1,3 +1,8 @@
+import { PanelTaskCheckOutputSchema } from "@memmy/local-api-contracts";
+import {PanelLogsOutputSchema,PanelLogDetailOutputSchema} from "@memmy/local-api-contracts";
+import {PanelStatsOutputSchema} from "@memmy/local-api-contracts";
+import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
+import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema } from "@memmy/local-api-contracts";
 /** Http memory client module. */
 import {
   MemoryAgentSourceScanStateSchema,
@@ -101,7 +106,7 @@ export function createHttpMemoryClient(
             authorization: `Bearer ${config.token}`
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
-          signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
+          signal: combineAbortSignals(timeoutSignal, requestOptions.signal ?? requestOptions.context?.signal)
         });
 
         if (response.ok) {
@@ -135,7 +140,7 @@ export function createHttpMemoryClient(
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
-        shouldRetry: shouldRetryMemoryLayerError
+        shouldRetry: error => !requestOptions.signal?.aborted && !requestOptions.context?.signal?.aborted && shouldRetryMemoryLayerError(error)
       }
     );
 
@@ -292,6 +297,24 @@ export function createHttpMemoryClient(
       return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context });
     },
 
+    async panelLogs(input,context) {return request("POST","panelLogs",PanelLogsOutputSchema,{body:input,context,maxRetries:0});},
+    async panelLogDetail(id,context) {return request("GET","panelLogDetail",PanelLogDetailOutputSchema,{params:{id:String(id)},context,maxRetries:0});},
+    async panelStats(context) {return request("GET","panelStats",PanelStatsOutputSchema,{context,maxRetries:0});},
+    async panelBrowse(input,context) {
+      return request("POST","panelBrowse",PanelBrowseOutputSchema,{body:input,context,maxRetries:0});
+    },
+    async panelTaskSummaries(input, context) {
+      return request("GET", "panelTaskSummaries", PanelTaskSummariesOutputSchema, {query: input, context});
+    },
+    async panelTaskCheck(id, context) {
+      return request("GET", "panelTaskCheck", PanelTaskCheckOutputSchema, {params: {id}, context, maxRetries: 0});
+    },
+    async panelTaskDetail(id, cursor, context) {
+      return request("GET", "panelTaskDetail", PanelTaskDetailOutputSchema, {params: {id}, query: {cursor}, context});
+    },
+    async panelTaskField(id, turnId, input, context) {
+      return request("GET", "panelTaskField", PanelTaskFieldOutputSchema, {params: {id, turnId}, query: input, context});
+    },
     async panelTasks(input, context) {
       return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
     },

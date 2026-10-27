@@ -1,4 +1,7 @@
-import { useEffect, useState } from "react";
+import { canPreservePanelResult } from "./panel-view-status.js";
+import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelLoad } from "./use-panel-load.js";
+import { useEffect, useRef, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
@@ -75,10 +78,17 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
   const policiesFilterLayer = "L2";
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const detailGeneration = useRef(0);
+  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<DetailState>(null);
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"L2",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailGeneration.current++; setDetail(null); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -86,8 +96,12 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     }
 
     const normalizedPage = normalizePage(nextPage);
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
+    const requestId = ++requestIdRef.current;
     const cacheKeys = policiesCacheKeys(query, normalizedPage);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
@@ -95,28 +109,31 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     }
 
     return props.client
-      .listPanelItems({ layer: "L2", q: query.trim() || undefined, page: normalizedPage })
+      .listPanelItems({ layer: "L2", q: query.trim() || undefined, page: normalizedPage }, controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
+        if (requestId !== requestIdRef.current) return undefined;
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
         return data;
       })
       .catch((error) => {
-        setState({ status: "error", message: toErrorMessage(error) });
+        if (requestId !== requestIdRef.current) return undefined;
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
   function changeQuery(value: string) {
     setQuery(value);
-    setDetail(null);
+    detailGeneration.current++; setDetail(null);
     setPage(1);
   }
 
   function runSearch() {
-    setDetail(null);
+    detailGeneration.current++; setDetail(null);
     setPage(1);
-    void refresh(1)
+    void submitSearch(() => refresh(1), [props.client, 1, t])
       .then((data) => {
         if (!data) {
           return;
@@ -136,12 +153,12 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
       return;
     }
 
-    setDetail(null);
+    detailGeneration.current++; setDetail(null);
     setPage(normalizedPage);
-    void refresh(normalizedPage).catch(() => undefined);
   }
 
   function openDetailById(id: string) {
+    const generation = ++detailGeneration.current;
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "policies",
       filterLayer: policiesFilterLayer
@@ -154,8 +171,8 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     setDetail({ status: "loading" });
     void props.client
       .getMemory(id)
-      .then((data) => setDetail({ status: "ready", data }))
-      .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
+      .then((data) => { if (generation === detailGeneration.current) setDetail({ status: "ready", data }); })
+      .catch((error) => { if (generation === detailGeneration.current) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }
 
   function openDetail(item: MemoryListItem) {
@@ -173,23 +190,19 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
       filterLayer: policiesFilterLayer
     }));
     clearMemoryPanelCache();
-    setDetail(null);
+    detailGeneration.current++; setDetail(null);
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
-  useEffect(() => {
-    void refresh().catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.client, t]);
 
   useEffect(() => {
     if (props.openRequest) {
       openDetailById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
 
   return (
+    <PanelViewGate status={viewStatus}>
     <section className="memory-panel">
       <div className="memory-panel__header">
         <div className="memory-panel__header-main">
@@ -200,6 +213,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
           <p className="memory-panel__subtitle">{t("memory.policies.description")}</p>
         </div>
         <MemoryRefreshButton onClick={async () => {
+        props.client?.refreshPanelView?.("L2");
           const data = await refresh(page, { useCache: false });
           if (data) {
             track(buildMemoryUiPanelRefreshedEvent({
@@ -210,6 +224,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
           }
         }} />
       </div>
+      <PanelViewNotice {...viewStatus} />
       <div className="memory-toolbar">
         <label className="memory-search">
           <Search size={15} className="memory-search__icon" />
@@ -232,11 +247,12 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
         detail={detail}
         onOpenDetail={openDetail}
         onDeleteDetail={deleteDetail}
-        onCloseDetail={() => setDetail(null)}
+        onCloseDetail={() => { detailGeneration.current++; setDetail(null); }}
         onPageChange={changePage}
         onOpenMemoryReference={props.onOpenMemoryReference}
       />
     </section>
+    </PanelViewGate>
   );
 }
 

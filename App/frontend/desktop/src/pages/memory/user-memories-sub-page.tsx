@@ -1,3 +1,6 @@
+import { canPreservePanelResult } from "./panel-view-status.js";
+import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelLoad } from "./use-panel-load.js";
 import { useEffect, useRef, useState } from "react";
 import type { MemoryListItem, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
@@ -29,47 +32,64 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [selected, setSelected] = useState<MemoryListItem | null>(null);
+  const [detailStatus, setDetailStatus] = useState<RemoteData<null> | null>(null);
+  const detailGeneration = useRef(0);
+  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  function closeDetail() { detailGeneration.current++; setSelected(null); setDetailStatus(null); }
+  async function openDetail(item: MemoryListItem) {
+    const generation = ++detailGeneration.current;
+    setSelected(item); setDetailStatus(null);
+    if (!item.metadata?.fullContentAvailable || !props.client) return;
+    setDetailStatus({status: "loading"});
+    try {
+      const result = await props.client.getMemory(item.id);
+      if (generation !== detailGeneration.current) return;
+      setSelected({...result.item, summary: result.item.body}); setDetailStatus(null);
+    } catch (error) { if (generation === detailGeneration.current) setDetailStatus({status: "error", message: toErrorMessage(error)}); }
+  }
   const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
 
-  function refresh(nextPage = page): Promise<PanelItemsOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"UserMemory",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeDetail(); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, preserve = false): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
       return Promise.reject(new Error(message));
     }
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     const requestId = ++requestIdRef.current;
     setState((current) => current.status === "ready" ? current : { status: "loading" });
-    return props.client.listPanelItems(buildUserMemoryPanelItemsInput(query, nextPage))
+    return props.client.listPanelItems({...buildUserMemoryPanelItemsInput(query, nextPage), userSummary: true}, controller.signal)
       .then((data) => {
         if (requestId === requestIdRef.current) {
-          setPage(data.page);
+          viewStatus.clear();
           setState({ status: "ready", data });
         }
         return data;
       })
       .catch((error) => {
         if (requestId === requestIdRef.current) {
-          setState({ status: "error", message: toErrorMessage(error) });
+          setState(current=>preserve && canPreservePanelResult(error) && current.status==="ready" ? current : { status: "error", message: toErrorMessage(error) });
         }
+        if(preserve)throw error;
         return undefined;
       });
   }
 
-  useEffect(() => {
-    void refresh(1);
-    return () => {
-      requestIdRef.current += 1;
-    };
-  }, [props.client]);
-
   async function deleteSelected(): Promise<void> {
     if (!props.client || !selected) return;
     await props.client.deleteMemory(selected.id);
-    setSelected(null);
+    closeDetail();
     await refresh(page);
   }
 
   return (
+    <PanelViewGate status={viewStatus}>
     <section className="memory-panel">
       <div className="memory-panel__header">
         <div className="memory-panel__header-main">
@@ -80,10 +100,12 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
           <p className="memory-panel__subtitle">{t("memory.userMemories.description")}</p>
         </div>
         <MemoryRefreshButton onClick={async () => {
-          await refresh();
+        props.client?.refreshPanelView?.("UserMemory");
+          await refresh(page,true);
         }} />
       </div>
 
+      <PanelViewNotice {...viewStatus} />
       <div className="memory-toolbar">
         <label className="memory-search">
           <Search size={15} className="memory-search__icon" />
@@ -91,9 +113,9 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
             type="search"
             value={query}
             placeholder={t("memory.userMemories.searchPlaceholder")}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => { setQuery(event.target.value); setPage(1); closeDetail(); }}
             onKeyDown={(event) => {
-              if (event.key === "Enter") void refresh(1);
+              if (event.key === "Enter") { setPage(1); void submitSearch(() => refresh(1), [props.client, 1, t]); }
             }}
             className="memory-search__input"
           />
@@ -111,7 +133,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                 key={item.id}
                 type="button"
                 aria-selected={selected?.id === item.id}
-                onClick={() => setSelected(item)}
+                onClick={() => void openDetail(item)}
                 className={`memory-card w-full text-left${selected?.id === item.id ? " memory-card--selected" : ""}`}
               >
                 <div className="memory-card__body">
@@ -128,13 +150,13 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
           </div>
           <MemoryPagination
             data={state.data}
-            onPageChange={(nextPage) => void refresh(nextPage)}
+            onPageChange={(nextPage) => { closeDetail(); setPage(nextPage); }}
           />
         </>
       ) : null}
 
       {selected ? (
-        <div className="memory-drawer-backdrop" onClick={() => setSelected(null)}>
+        <div className="memory-drawer-backdrop" onClick={closeDetail}>
           <button
             type="button"
             className="memory-drawer-backdrop__close"
@@ -142,7 +164,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
             aria-hidden="true"
             onClick={(event) => {
               event.stopPropagation();
-              setSelected(null);
+              closeDetail();
             }}
           />
           <aside
@@ -162,7 +184,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                 type="button"
                 className="memory-drawer__close"
                 aria-label={t("common.close")}
-                onClick={() => setSelected(null)}
+                onClick={closeDetail}
               >
                 <X size={18} />
               </button>
@@ -170,7 +192,8 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
             <div className="memory-drawer__body">
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.userMemories.content")}</h5>
-                <div className="memory-detail-text">{selected.summary}</div>
+                {detailStatus ? <MemoryStateBox message={detailStatus.status === "error" ? detailStatus.message : t("common.loading")} /> : <div className="memory-detail-text">{selected.summary}</div>}
+                {detailStatus?.status === "error" && <button type="button" onClick={() => void openDetail(selected)}>{t("memory.tasks.loadContent")}</button>}
               </section>
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.memories.meta")}</h5>
@@ -187,6 +210,10 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                   <dd className="break-all">{metadataText(selected, "sourceTurnId")}</dd>
                   <dt>{t("memory.userMemories.expressionCount")}</dt>
                   <dd>{metadataArray(selected, "sourceTurnRefs").length}</dd>
+                  <dt>{t("memory.userMemories.sourceReferences")}</dt><dd>{metadataArray(selected, "sourceTurnRefs").join(", ") || "—"}</dd>
+                  <dt>{t("memory.userMemories.replaces")}</dt><dd>{metadataText(selected, "replacesMemoryId")}</dd>
+                  <dt>{t("memory.userMemories.replacedBy")}</dt><dd>{metadataText(selected, "replacedByMemoryId")}</dd>
+                  <dt>{t("memory.userMemories.archiveReason")}</dt><dd>{metadataText(selected, "archiveReason")}</dd>
                 </dl>
               </section>
             </div>
@@ -195,6 +222,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
         </div>
       ) : null}
     </section>
+    </PanelViewGate>
   );
 }
 

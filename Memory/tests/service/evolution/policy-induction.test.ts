@@ -36,6 +36,49 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / policy induction", () => {
+  it.each(["delete", "redact", "replace"] as const)("rejects late L2 output after evidence %s", async (change) => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }>; options: { operation: string } }> = [];
+    const skillLlm = createCapturingL2Llm(calls);
+    const originalComplete = skillLlm.completeJson.bind(skillLlm);
+    let changeEvidence: () => void = () => { throw new Error("Evidence not prepared"); };
+    let changed = false;
+    skillLlm.completeJson = async <T extends Record<string, unknown>>(
+      messages: Parameters<LlmClient["completeJson"]>[0],
+      options: Parameters<LlmClient["completeJson"]>[1]
+    ): Promise<T> => {
+      const result = await originalComplete<T>(messages, options);
+      if (options.operation === "l2.induction.v4" && !changed) {
+        changed = true;
+        changeEvidence();
+      }
+      return result;
+    };
+    const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "pytest workflow fails around sqlite migration output", "reflection-batch", "pytest failure workflow"),
+      skillLlm,
+      embedder: createCapturingEmbedder([])
+    });
+    const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "late-l2" } });
+    const turn = service.completeTurn("late-turn", {
+      sessionId: session.sessionId,
+      query: "pytest failure workflow",
+      answer: "run focused tests and inspect migration output",
+      toolCalls: [{ name: "shell", input: { cmd: "npm test" }, output: "ok", success: true }]
+    });
+    changeEvidence = () => {
+      if (change === "delete") service.deleteMemory(turn.l1MemoryId);
+      else if (change === "redact") service.redactRawTurn(turn.rawTurnId);
+      else db.db.prepare("UPDATE memories SET memory_value='replacement evidence',version=version+1 WHERE id=?").run(turn.l1MemoryId);
+    };
+    await addPositiveFeedbackForTurn(service, session.sessionId, turn);
+    service.closeSession(session.sessionId);
+    for (let i = 0; i < 8 && !changed; i++) await service.runWorkerOnce(50);
+    expect(changed).toBe(true);
+    expect(calls.some(call => call.options.operation === "l2.induction.v4")).toBe(true);
+    expect(db.db.prepare("SELECT id FROM memories WHERE memory_layer='L2'").all()).toEqual([]);
+    expect(db.db.prepare("SELECT id FROM trace_policy_links").all()).toEqual([]);
+    expect(db.db.prepare("SELECT l2_policy_ids_json AS ids FROM episodes WHERE id=?").get(turn.episodeId)).toEqual({ ids: "[]" });
+  });
   it("[BC-08] keeps task-linked feedback in both branches and activates its candidate Policy only after new successful evidence", async () => {
     const { db, service } = createTestService({
       llm: createBc08SummaryLlm(),

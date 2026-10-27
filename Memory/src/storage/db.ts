@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -19,10 +19,11 @@ export class MemoryDb {
 
   constructor(options: MemoryDbOptions = {}) {
     this.path = options.path ?? defaultDatabasePath();
-    mkdirSync(dirname(this.path), { recursive: true });
+    if (!options.readonly) mkdirSync(dirname(this.path), { recursive: true });
     const nativeBinding = packagedNativeBindingPath();
     this.db = new Database(this.path, {
       readonly: options.readonly ?? false,
+      fileMustExist: options.readonly ?? false,
       ...(nativeBinding ? { nativeBinding } : {})
     });
     const extensionPath = packagedNativeAssetPath(getSqliteVecLoadablePath());
@@ -34,7 +35,7 @@ export class MemoryDb {
       throw new Error(`sqlite-vec version mismatch: expected v${SQLITE_VEC_VERSION}, got ${loadedVersion}`);
     }
     try {
-      this.configure();
+      this.configure(options.readonly ?? false);
       if (!options.readonly) {
         this.createPreMigrationBackup();
         migrate(this.db);
@@ -57,10 +58,14 @@ export class MemoryDb {
     return getSchemaVersion(this.db);
   }
 
-  private configure(): void {
+  private configure(readonly: boolean): void {
     this.db.pragma("foreign_keys = ON");
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    if (!readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    } else {
+      this.db.pragma("query_only = ON");
+    }
     this.db.pragma("busy_timeout = 5000");
   }
 
@@ -74,9 +79,24 @@ export class MemoryDb {
     }
     if (version <= 0 || version >= SCHEMA_VERSION) return;
     const backupPath = `${this.path}.pre-v${SCHEMA_VERSION}.bak`;
-    if (existsSync(backupPath)) return;
-    this.db.pragma("wal_checkpoint(FULL)");
-    this.db.prepare("VACUUM INTO ?").run(backupPath);
+    if (existsSync(backupPath)) {
+      const backup = new Database(backupPath, {readonly:true,fileMustExist:true});
+      try {
+        if (backup.pragma("quick_check", {simple:true}) !== "ok" || getSchemaVersion(backup).version !== version) {
+          throw new Error(`Invalid migration backup: ${backupPath}; preserve it and choose a new backup location`);
+        }
+      } finally { backup.close(); }
+      return;
+    }
+    const partial = `${backupPath}.${process.pid}.partial`;
+    try {
+      this.db.pragma("wal_checkpoint(FULL)");
+      this.db.prepare("VACUUM INTO ?").run(partial);
+      renameSync(partial, backupPath);
+    } catch (error) {
+      rmSync(partial, {force:true});
+      throw error;
+    }
   }
 }
 

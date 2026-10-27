@@ -57,7 +57,7 @@ describe("History Skill post-editing", () => {
     const original = historySkill();
     const editedBody = "# 修订 Skill\n\n1. 查看当前工作。\n2. 核对结果。";
     const revised = { ...original, item: { ...original.item, version: 2, title: "修订 Skill", body: editedBody } };
-    const getMemory = vi.fn().mockResolvedValueOnce(original).mockResolvedValue(revised);
+    const getMemory = vi.fn().mockResolvedValueOnce(original).mockResolvedValueOnce(original).mockResolvedValue(revised);
     const updateObservedSkill = vi.fn(async () => ({ id: original.item.id, status: "activated" as const, version: 2, serverTime: "2026-10-09T00:00:00Z" }));
     const listPanelItems = vi.fn(async () => panelItemsOutput([original.item]));
     const client = createMemoryRuntimeClientStub({ getMemory, updateObservedSkill, listPanelItems,
@@ -69,15 +69,37 @@ describe("History Skill post-editing", () => {
     await replaceBody(editedBody);
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(updateObservedSkill).toHaveBeenCalledWith(original.item.id, { body: editedBody, expectedVersion: 1 });
-    expect(getMemory).toHaveBeenCalledTimes(2);
+    expect(getMemory).toHaveBeenCalledTimes(3);
     expect(listPanelItems).toHaveBeenCalledTimes(2);
     expect(container.querySelector("textarea")).toBeNull();
     expect(container.querySelector(".memory-drawer__title")?.textContent).toBe("修订 Skill");
   });
 
+  it("opens the latest body and version and makes a failed pre-edit read retryable", async () => {
+    const original = historySkill();
+    const latest = {...original, item: {...original.item, body: "Latest server body", version: 7}};
+    const getMemory = vi.fn().mockRejectedValueOnce(new Error("Disconnected")).mockResolvedValue(latest);
+    const client = createMemoryRuntimeClientStub({getMemory});
+    const onUpdate = vi.fn(async () => undefined);
+    await act(async () => root.render(<I18nProvider language="zh-CN"><SkillsSubPageView
+      client={client} state={{status:"ready", data:panelItemsOutput([original.item])}}
+      detail={{status:"ready",data:{detail:original,timeline:[]}}}
+      query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()} onRefresh={vi.fn()}
+      onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)} onUpdateObservedSkill={onUpdate}
+      onCloseSkill={vi.fn()} onOpenMemoryReference={vi.fn()}/></I18nProvider>));
+    await act(async () => button("修改").click());
+    expect(container.querySelector("[role=alert]")?.textContent).toBe("Disconnected");
+    expect(container.querySelector("textarea")).toBeNull();
+    await act(async () => button("修改").click());
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("Latest server body");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", {bubbles:true,cancelable:true})));
+    expect(onUpdate).toHaveBeenCalledWith(original.item.id, "Latest server body", 7);
+  });
+
   it("keeps a failed draft and its original version when a newer detail appears", async () => {
     const onUpdate = vi.fn(async () => { throw new Error("内容已更新，请重新打开后修改。"); });
     const render = async (version: number) => act(async () => root.render(<I18nProvider language="zh-CN"><SkillsSubPageView
+      client={createMemoryRuntimeClientStub({ getMemory: vi.fn(async () => historySkill(version)) })}
       state={{ status: "ready", data: panelItemsOutput([historySkill(version).item]) }}
       detail={{ status: "ready", data: { detail: historySkill(version), timeline: [] } }}
       query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()} onRefresh={vi.fn()}
@@ -97,7 +119,8 @@ describe("History Skill post-editing", () => {
     const onOpenMemoryReference = vi.fn();
     const detail = sourcedHistorySkill();
     await act(async () => root.render(<I18nProvider language="zh-CN"><SkillsSubPageView
-      state={{ status: "ready", data: panelItemsOutput([detail.item]) }}
+      client={createMemoryRuntimeClientStub({ getMemory: vi.fn(async () => detail) })}
+        state={{ status: "ready", data: panelItemsOutput([detail.item]) }}
       detail={{ status: "ready", data: { detail, timeline: [] } }}
       query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()} onRefresh={vi.fn()}
       onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)} onCloseSkill={vi.fn()}
@@ -115,6 +138,7 @@ describe("History Skill post-editing", () => {
   it("falls back to general sources for edited, legacy, and malformed step mappings", async () => {
     const render = async (detail: ReturnType<typeof sourcedHistorySkill>, language: "zh-CN" | "en-US" = "zh-CN") => {
       await act(async () => root.render(<I18nProvider language={language}><SkillsSubPageView
+        client={createMemoryRuntimeClientStub({ getMemory: vi.fn(async () => detail) })}
         state={{ status: "ready", data: panelItemsOutput([detail.item]) }}
         detail={{ status: "ready", data: { detail, timeline: [] } }}
         query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()} onRefresh={vi.fn()}
@@ -153,6 +177,7 @@ describe("History Skill post-editing", () => {
       const detail = historySkill();
       detail.item.id = id;
       await act(async () => root.render(<I18nProvider language="zh-CN"><SkillsSubPageView
+        client={createMemoryRuntimeClientStub({ getMemory: vi.fn(async () => detail) })}
         state={{ status: "ready", data: panelItemsOutput([detail.item]) }}
         detail={{ status: "ready", data: { detail, timeline: [] } }}
         query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()} onRefresh={vi.fn()}

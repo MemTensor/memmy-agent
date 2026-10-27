@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(21);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(29);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -30,12 +30,35 @@ describe("memory runtime client", () => {
       "DELETE /api/v1/memory/:id",
       "GET /api/v1/memory/recalls/:queryId",
       "GET /api/v1/memory/logs",
+      "POST /api/v1/panel/browse",
+      "GET /api/v1/panel/stats",
+      "POST /api/v1/panel/logs",
+      "GET /api/v1/panel/logs/:id",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
+      "GET /api/v1/panel/task-summaries",
+      "GET /api/v1/panel/task-details/:id",
+  "GET /api/v1/panel/task-details/:id/check",
+      "GET /api/v1/panel/task-details/:id/turns/:turnId/field",
       "DELETE /api/v1/panel/tasks/:id"
     ]);
+  });
+
+  it("falls back only for an explicitly unsupported summary route", async () => {
+    const legacy = {tasks: [], page:1, pageSize:20, total:0, totalPages:1, hasNext:false, hasPrev:false, serverTime:"2026-10-27T00:00:00Z"};
+    for (const message of ["GET /api/v1/panel/task-summaries is not registered", "Route GET:/api/v1/panel/task-summaries not found"]) {
+      const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({error:{code:"not_found",message,requestId:"test"}}),{status:404})).mockResolvedValueOnce(new Response(JSON.stringify({error:{code:"not_found",message,requestId:"test"}}),{status:404})).mockResolvedValueOnce(new Response(JSON.stringify(legacy)));
+      vi.stubGlobal("fetch",fetchMock);
+      expect(await createHttpMemoryRuntimeClient(runtimeConfig).listPanelTaskSummaries!({})).toEqual(legacy);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    }
+    for (const [status,code,message] of [[401,"unauthorized","expired"],[403,"forbidden","denied"],[404,"not_found","Task not found"],[503,"memory_layer_unavailable","timeout"]] as const) {
+      const fetchMock=vi.fn(async()=>new Response(JSON.stringify({error:{code,message,requestId:"test"}}),{status})); vi.stubGlobal("fetch",fetchMock);
+      await expect(createHttpMemoryRuntimeClient(runtimeConfig).listPanelTaskSummaries!({})).rejects.toThrow(message);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("saves observed Skill content with the original version through PATCH", async () => {
@@ -193,7 +216,7 @@ describe("memory runtime client", () => {
   });
 
   it("serializes exact and other Agent filters for L1 panel items", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new URL(String(_input)).pathname === "/api/v1/panel/browse" ? new Response(JSON.stringify({error:{code:"not_found",message:"POST /api/v1/panel/browse is not registered",requestId:"test"}}),{status:404}) : new Response(
       JSON.stringify({
         items: [],
         page: 1,
@@ -212,11 +235,11 @@ describe("memory runtime client", () => {
     await client.listPanelItems({ layer: "L1", sourceAgent: "cursor", page: 2 });
     await client.listPanelItems({ layer: "L1", excludedSourceAgents: ["memmy-agent", "cursor"], page: 1 });
 
-    const exactUrl = fetchMock.mock.calls[0]?.[0] as URL;
+    const exactUrl = fetchMock.mock.calls[1]?.[0] as URL;
     expect(exactUrl.searchParams.get("layer")).toBe("L1");
     expect(exactUrl.searchParams.get("sourceAgent")).toBe("cursor");
     expect(exactUrl.searchParams.get("page")).toBe("2");
-    const otherUrl = fetchMock.mock.calls[1]?.[0] as URL;
+    const otherUrl = fetchMock.mock.calls[2]?.[0] as URL;
     expect(otherUrl.searchParams.getAll("excludedSourceAgents")).toEqual(["memmy-agent", "cursor"]);
   });
 });

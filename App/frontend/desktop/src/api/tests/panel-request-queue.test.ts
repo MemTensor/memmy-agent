@@ -1,0 +1,82 @@
+import { describe, expect, it, vi } from "vitest";
+import { PanelRequestQueue } from "../panel-request-queue.js";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("panel request queue", () => {
+  it("shares a request and preserves the remaining subscriber when another leaves", async () => {
+    const queue = new PanelRequestQueue(1);
+    const source = deferred<string>();
+    const run = vi.fn((_signal: AbortSignal) => source.promise);
+    const a = new AbortController();
+    const first = queue.request("page", run, a.signal).catch((error) => error.name);
+    const second = queue.request("page", run);
+    await Promise.resolve();
+    a.abort();
+    expect(run.mock.calls[0]?.[0].aborted).toBe(false);
+    source.resolve("data");
+    expect(await first).toBe("AbortError");
+    expect(await second).toBe("data");
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("limits different keys and removes an obsolete queued search without running it", async () => {
+    const queue = new PanelRequestQueue(1);
+    const source = deferred<string>();
+    const first = queue.request("a", () => source.promise);
+    const abort = new AbortController();
+    const obsolete = vi.fn(async () => "obsolete");
+    const old = queue.request("old", obsolete, abort.signal).catch((error) => error.name);
+    const nextRun = vi.fn(async () => "next");
+    const next = queue.request("new", nextRun);
+    abort.abort();
+    expect(await old).toBe("AbortError");
+    expect(nextRun).not.toHaveBeenCalled();
+    source.resolve("a");
+    expect(await first).toBe("a");
+    expect(await next).toBe("next");
+    expect(obsolete).not.toHaveBeenCalled();
+  });
+
+  it("aborts the transport only after its last subscriber leaves and can retry", async () => {
+    const queue = new PanelRequestQueue(1);
+    const abort = new AbortController();
+    let transport: AbortSignal | undefined;
+    const first = queue
+      .request(
+        "a",
+        (signal) =>
+          new Promise<string>((_resolve, reject) => {
+            transport = signal;
+            signal.addEventListener("abort", () => reject(new Error("cancelled")));
+          }),
+        abort.signal
+      )
+      .catch((error) => error.name);
+    await Promise.resolve();
+    abort.abort();
+    expect(transport?.aborted).toBe(true);
+    expect(await first).toBe("AbortError");
+    expect(await queue.request("a", async () => "retry")).toBe("retry");
+  });
+  it("does not share a cancelled scope's in-flight result with the next scope", async () => {
+    const queue = new PanelRequestQueue(2);
+    let finish!: (value: string) => void;
+    const old = queue.request("same", () => new Promise<string>(resolve => { finish = resolve; })).catch(error => error);
+    await Promise.resolve();
+    queue.clear();
+    const fresh = queue.request("same", async () => "new account");
+    finish("old account");
+    expect((await old).name).toBe("AbortError");
+    expect(await fresh).toBe("new account");
+  });
+
+});

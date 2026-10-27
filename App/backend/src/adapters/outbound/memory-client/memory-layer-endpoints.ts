@@ -33,6 +33,14 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   panelOverview: "/api/v1/panel/overview",
   panelAnalysis: "/api/v1/panel/analysis",
   panelItems: "/api/v1/panel/items",
+  panelLogs: "/api/v1/panel/logs",
+  panelLogDetail: "/api/v1/panel/logs/:id",
+  panelStats: "/api/v1/panel/stats",
+  panelBrowse: "/api/v1/panel/browse",
+  panelTaskSummaries: "/api/v1/panel/task-summaries",
+  panelTaskCheck: "/api/v1/panel/task-details/:id/check",
+  panelTaskDetail: "/api/v1/panel/task-details/:id",
+  panelTaskField: "/api/v1/panel/task-details/:id/turns/:turnId/field",
   panelTasks: "/api/v1/panel/tasks",
   deletePanelTask: "/api/v1/panel/tasks/:id"
 } as const);

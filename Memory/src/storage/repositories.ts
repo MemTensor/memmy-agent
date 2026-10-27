@@ -1,6 +1,8 @@
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, RAW_SOURCE_SQL } from "./memory-relations.js";
+import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
   canonicalJson,
@@ -61,6 +63,7 @@ import {
 import { QueueSchedulingStore, type SchedulingMetadata } from "./queue-scheduling-store.js";
 import { mainQueueEligibility, retryQueueEligibility, type QueueEligibilityOptions } from "./queue-eligibility.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { DISPLAY_MEMORY_COLUMNS, DISPLAY_USER_MEMORY_COLUMNS, PANEL_MEMORY_COLUMNS } from "./panel-projection.js";
 
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
@@ -589,6 +592,10 @@ export class MemoryRepository {
   ) {}
 
   insert(memory: MemoryRow): MemoryRow {
+    return this.db.transaction(() => this.insertRow(memory))();
+  }
+
+  private insertRow(memory: MemoryRow): MemoryRow {
     const prepared = prepareMemoryForStorage(memory);
     this.db
       .prepare(
@@ -607,15 +614,16 @@ export class MemoryRepository {
       .run(memoryToSql(prepared.memory));
     this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
     this.reindexFts(prepared.memory);
+    maintainMemoryRelations(this.db, prepared.memory.id, false);
     return attachMemoryVectors(prepared.memory, prepared.vectors);
   }
 
   update(memory: MemoryRow): MemoryRow {
-    return this.updateRow(memory, true);
+    return this.db.transaction(() => this.updateRow(memory, true))();
   }
 
   updateMaintenance(memory: MemoryRow): MemoryRow {
-    return this.updateRow(memory, false);
+    return this.db.transaction(() => this.updateRow(memory, false))();
   }
 
   private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
@@ -665,6 +673,14 @@ export class MemoryRepository {
       }
     }
     this.reindexFts(updated);
+    maintainMemoryRelations(this.db, updated.id);
+    const provenance = (value: MemoryRow) => {
+      const internal = value.properties.internal_info;
+      return JSON.stringify([internal.source_raw_turn_id,internal.raw_turn_id,
+        isRecordLike(internal.trace) ? internal.trace.episode_id : undefined,
+        internal.source_trace_ids,isRecordLike(internal.policy) ? internal.policy.source_trace_ids : undefined]);
+    };
+    if (provenance(existing) !== provenance(updated)) invalidatePanelViews(this.db);
     return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
   }
 
@@ -723,6 +739,68 @@ export class MemoryRepository {
       .prepare(`SELECT * FROM memories WHERE id = ?`)
       .get(id) as MemorySqlRow | undefined;
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
+  }
+
+  /** Read-only display data; do not use as input to storage updates. */
+  getForDisplay(id: string): MemoryRow | undefined {
+    return this.getManyForDisplay([id])[0];
+  }
+
+  getManyForDisplay(ids: readonly string[]): MemoryRow[] {
+    return this.readDisplayIds(ids, DISPLAY_MEMORY_COLUMNS);
+  }
+
+  getManyForPanel(ids: readonly string[]): MemoryRow[] {
+    return this.readDisplayIds(ids, PANEL_MEMORY_COLUMNS);
+  }
+
+  private readDisplayIds(ids: readonly string[], columns: string): MemoryRow[] {
+    if (ids.length === 0) return [];
+    const rows = this.db.prepare(
+      `SELECT ${columns} FROM memories
+       WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL`
+    ).all(toJson(ids)) as MemorySqlRow[];
+    const byId = new Map(rows.map((row) => [row.id, memoryFromSql(row)]));
+    return ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+  }
+
+  listForPanel(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
+    return this.listDisplayRows(filter, limit, offset, PANEL_MEMORY_COLUMNS);
+  }
+
+  listForDisplay(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
+    return this.listDisplayRows(filter, limit, offset, DISPLAY_MEMORY_COLUMNS);
+  }
+
+  private listDisplayRows(filter: MemoryFilter, limit: number, offset: number, columns: string): MemoryRow[] {
+    const built = buildMemoryWhere(filter);
+    return (this.db.prepare(
+      `SELECT ${columns} FROM memories WHERE ${built.where}
+       ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?`
+    ).all(...built.params, limit, offset) as MemorySqlRow[]).map(memoryFromSql);
+  }
+
+  /** Validate evidence endpoints without hydrating their dialogue or vectors. */
+  visibleEvidenceIds(ids: readonly string[]): Set<string> {
+    if (!ids.length) return new Set();
+    return new Set(this.db.prepare(`SELECT m.id FROM memories m
+      LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
+      WHERE m.id IN (SELECT value FROM json_each(?)) AND m.deleted_at IS NULL AND m.status!='deleted'
+      AND (${RAW_SOURCE_SQL} IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=m.user_id))`
+    ).pluck().all(toJson(ids)) as string[]);
+  }
+
+  effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; l1MemoryIds: string[]}>): Map<string, Set<string>> {
+    return effectiveEpisodeMemoryIds(this.db, episodes);
+  }
+
+  /** Historical references remain stored; only live endpoints count in the UI. */
+  existingIds(ids: readonly string[]): Set<string> {
+    if (ids.length === 0) return new Set();
+    return new Set((this.db.prepare(
+      `SELECT id FROM memories WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+       AND deleted_at IS NULL AND status != 'deleted'`
+    ).all(toJson(ids)) as Array<{ id: string }>).map((row) => row.id));
   }
 
   listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
@@ -1133,6 +1211,14 @@ export class MemoryRepository {
       updatedAt: memory.updatedAt,
       source: memory.memoryLayer === "Skill" ? "skill" : "search"
     }));
+  }
+
+  panelMemberIds(filter: MemoryFilter = {}, query?: string): string[] {
+    const built = buildMemoryWhere(query?.trim() ? {...filter, status: filter.status ?? ["activated", "resolving"]} : filter);
+    const search = query?.trim() ? buildMemorySearchWhere(query, true) : undefined;
+    return this.db.prepare(`SELECT id FROM memories WHERE ${built.where} ${search?.where ? `AND (${search.where})` : ""}
+      ORDER BY ${search ? "updated_at DESC, id DESC" : "created_at DESC, updated_at DESC, id DESC"}`)
+      .pluck().all(...built.params, ...(search?.params ?? [])) as string[];
   }
 
   searchPanelIds(query: string, filter: MemoryFilter = {}, limit = 20, offset = 0): MemorySearchIdHit[] {
@@ -1572,6 +1658,11 @@ export class UserMemoryRepository {
     return row ? userMemoryFromSql(row) : undefined;
   }
 
+  getForDisplay(id: string): UserMemoryRecord | undefined {
+    const row = this.db.prepare(`SELECT ${DISPLAY_USER_MEMORY_COLUMNS} FROM user_memories WHERE id=? AND deleted_at IS NULL AND status != 'deleted'`).get(id) as UserMemorySqlRow | undefined;
+    return row ? userMemoryFromSql(row) : undefined;
+  }
+
   getIncludingDeleted(id: string): UserMemoryRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM user_memories WHERE id = ?`)
       .get(id) as UserMemorySqlRow | undefined;
@@ -1603,14 +1694,27 @@ export class UserMemoryRepository {
     sourceAgent?: string;
     limit: number;
     offset: number;
+    summaryOnly?: boolean;
   }): UserMemoryRecord[] {
     const { where, params } = userMemoryPanelFilter(input);
     return (this.db.prepare(
-      `SELECT * FROM user_memories
+      `SELECT ${input.summaryOnly ? DISPLAY_USER_MEMORY_COLUMNS.replace(" content,", " substr(content,1,180) AS content,") : DISPLAY_USER_MEMORY_COLUMNS} FROM user_memories
        WHERE ${where}
        ORDER BY updated_at DESC, id DESC
        LIMIT ? OFFSET ?`
     ).all(...params, input.limit, input.offset) as UserMemorySqlRow[]).map(userMemoryFromSql);
+  }
+
+  panelMemberIds(input: {userId: string; status?: UserMemoryStatus; query?: string; sourceAgent?: string}): string[] {
+    const {where,params} = userMemoryPanelFilter(input);
+    return this.db.prepare(`SELECT id FROM user_memories WHERE ${where} ORDER BY updated_at DESC,id DESC`).pluck().all(...params) as string[];
+  }
+
+  getManyForPanel(ids: string[], userId: string): UserMemoryRecord[] {
+    const columns = DISPLAY_USER_MEMORY_COLUMNS.replace(" content,", " substr(content,1,180) AS content,");
+    const rows = this.db.prepare(`SELECT ${columns} FROM user_memories WHERE user_id=? AND deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`).all(userId,JSON.stringify(ids)) as UserMemorySqlRow[];
+    const byId = new Map(rows.map(row => [row.id, userMemoryFromSql(row)]));
+    return ids.flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
   }
 
   countForPanel(input: {
@@ -2351,6 +2455,17 @@ export class RuntimeRepository {
     return counts;
   }
 
+  panelEpisodeIds(userId?: string, query?: string, sourceAgent?: string): string[] {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
+    return this.db.prepare(`SELECT id FROM episodes WHERE ${built.where} ORDER BY opened_at DESC, updated_at DESC, id DESC`).pluck().all(...built.params) as string[];
+  }
+
+  getEpisodesForPanel(ids: string[]): EpisodeRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM episodes WHERE id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(ids)) as SqlEpisodeRow[];
+    const byId = new Map(rows.map(row => [row.id, episodeFromSql(row)]));
+    return ids.flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
+  }
+
   countEpisodes(userId?: string, query?: string, sourceAgent?: string): number {
     const built = buildEpisodeWhere(userId, query, sourceAgent);
     const row = this.db
@@ -2645,23 +2760,38 @@ export class RuntimeRepository {
     at = nowIso()
   ): void {
     if (fromEpisodeId === toEpisodeId) return;
-    const fromEpisode = this.getEpisode(fromEpisodeId);
-    if (!fromEpisode || !this.getEpisode(toEpisodeId)) {
-      throw new Error("cannot rebind a raw turn to a missing episode");
-    }
-    const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
-    this.db
-      .prepare(
-        `UPDATE episodes
-         SET raw_turn_ids_json = ?,
-             turn_count = ?,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
-    this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
-    this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
-    this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+    this.db.transaction(() => {
+      const fromEpisode = this.getEpisode(fromEpisodeId);
+      const toEpisode = this.getEpisode(toEpisodeId);
+      if (!fromEpisode || !toEpisode || fromEpisode.userId !== toEpisode.userId) {
+        throw new Error("cannot rebind a raw turn to a missing episode");
+      }
+      const currentRaw = this.db.prepare("SELECT episode_id,user_id FROM raw_turns WHERE id=? AND deleted_at IS NULL AND redacted_at IS NULL").get(rawTurnId) as {episode_id:string;user_id:string}|undefined;
+      if (!currentRaw || currentRaw.episode_id !== fromEpisodeId || currentRaw.user_id !== fromEpisode.userId) throw new Error("raw turn ownership changed before rebind");
+      const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
+      this.db
+        .prepare(
+          `UPDATE episodes
+           SET raw_turn_ids_json = ?,
+               turn_count = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
+      this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
+      this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
+      this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+      const ids = this.db.prepare(`SELECT m.id FROM memories m WHERE ${RAW_SOURCE_SQL}=? AND m.memory_layer='L1'`).pluck().all(rawTurnId) as string[];
+      for (const id of ids) {
+        this.db.prepare(`UPDATE memories SET
+          info_json=json_set(info_json,'$.episode_id',?),
+          properties_json=json_set(properties_json,'$.internal_info.trace.episode_id',?),
+          updated_at=?,version=version+1 WHERE id=?`).run(toEpisodeId,toEpisodeId,at,id);
+        maintainMemoryRelations(this.db,id);
+        const policies=this.db.prepare("SELECT DISTINCT l2_memory_id FROM trace_policy_links WHERE l1_memory_id=?").pluck().all(id) as string[];
+        for (const policyId of policies) maintainMemoryRelations(this.db,policyId);
+      }
+    })();
   }
 
   appendEpisodeFeedback(episodeId: string, feedbackId: string, at = nowIso()): EpisodeRecord | undefined {
@@ -3929,6 +4059,15 @@ export class RuntimeRepository {
       ORDER BY ${embeddingRetryOrderSql()} LIMIT ? OFFSET ?`)
       .all(...eligibility.params, ...(input.excludedIds?.length ? [JSON.stringify(input.excludedIds)] : []),
         Math.min(200, Math.floor(input.limit)), Math.max(0, Math.floor(input.offset ?? 0))) as SqlEmbeddingRetryRow[]).map(embeddingRetryFromSql);
+  }
+
+  episodesWithJob(episodeIds: readonly string[], jobType: JobType, statuses: JobStatus[]): Set<string> {
+    if (episodeIds.length === 0 || statuses.length === 0) return new Set();
+    return new Set((this.db.prepare(
+      `SELECT DISTINCT episode_id FROM evolution_jobs
+       WHERE episode_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+       AND job_type = ? AND status IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+    ).all(toJson(episodeIds), jobType, toJson(statuses)) as Array<{ episode_id: string }>).map((row) => row.episode_id));
   }
 
   leaseQueuedJobs(
@@ -5376,6 +5515,8 @@ export class RuntimeRepository {
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
+          // Runtime panel tokens belong to this database instance, never to an export.
+          if (table === "runtime_kv" && row.key === "panel_safety_token") continue;
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
           const identity = bundleIdentity(table, normalized);
@@ -5435,6 +5576,10 @@ export class RuntimeRepository {
           }
         }
       }
+      for (const row of Array.isArray(tables.memories) ? tables.memories : []) {
+        if (row && typeof row.id === "string") maintainMemoryRelations(this.db,row.id,false);
+      }
+      invalidatePanelViews(this.db);
     })();
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
@@ -6580,6 +6725,7 @@ export class Repositories {
               .run(...sequenceTables);
           }
         }
+        invalidatePanelViews(this.db);
         return cleared;
       })();
     } finally {
@@ -7390,7 +7536,7 @@ function memoryDisplayedSourceSql(fallback: string): string {
  * ids derived from them ("memmy-onboarding" under "memmy-agent"), because the panel
  * shows all of them as the same Agent.
  */
-function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
+export function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
   const normalizedColumn = normalizedAgentIdSql(column);
   const roots = agentSourceFamilyRoots(value);
   if (roots.length === 0) {
@@ -7403,7 +7549,7 @@ function agentIdMatchClause(column: string, value: string): { sql: string; param
 }
 
 /** True when the column matches none of the excluded Agents (the "other Agents" filter). */
-function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
+export function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
   const matches = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
     .map((value) => agentIdMatchClause(column, value));
   if (matches.length === 0) {

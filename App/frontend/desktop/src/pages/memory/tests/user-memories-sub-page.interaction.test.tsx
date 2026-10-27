@@ -59,7 +59,7 @@ describe("UserMemoriesSubPage interaction", () => {
       );
     });
 
-    expect(listPanelItems).toHaveBeenCalledWith({ layer: "UserMemory", page: 1 });
+    expect(listPanelItems).toHaveBeenCalledWith({ layer: "UserMemory", page: 1, userSummary: true }, expect.any(AbortSignal));
     act(() => container.querySelector<HTMLButtonElement>(".memory-card")?.click());
     const deleteButton = container.querySelector<HTMLButtonElement>(".memory-delete-button");
     act(() => deleteButton?.click());

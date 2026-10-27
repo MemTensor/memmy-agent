@@ -1,3 +1,7 @@
+import { canPreservePanelResult } from "./panel-view-status.js";
+import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
+import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelLoad } from "./use-panel-load.js";
 import { useEffect, useRef, useState } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
@@ -127,6 +131,12 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   const demoEnabled = isSkillsDemoEnabled();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const detailGeneration = useRef(0);
+  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t, demoEnabled], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<SkillDetailState>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
@@ -134,6 +144,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   selectedSkillIdRef.current = selectedSkillId;
 
   function openSkill(skillId: string) {
+    const generation = ++detailGeneration.current;
     setSelectedSkillId(skillId);
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "skills",
@@ -158,13 +169,14 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     setDetail({ status: "loading" });
     void Promise.all([
       loadSkillDetail(props.client, skillId),
-      loadSkillTimeline(props.client, skillId).catch(() => [])
+      props.client.listPanelLogs ? Promise.resolve([]) : loadSkillTimeline(props.client, skillId)
     ])
-      .then(([skillDetail, timeline]) => setDetail({ status: "ready", data: { detail: skillDetail, timeline } }))
-      .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
+      .then(([skillDetail, timeline]) => { if (generation === detailGeneration.current) setDetail({ status: "ready", data: { detail: skillDetail, timeline } }); })
+      .catch((error) => { if (generation === detailGeneration.current) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"Skill",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeSkill(); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
     const normalizedPage = normalizePage(nextPage);
 
     if (demoEnabled) {
@@ -187,22 +199,29 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       return Promise.reject(new Error(message));
     }
 
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
+    const requestId = ++requestIdRef.current;
     const cacheKeys = skillsCacheKeys(query, normalizedPage);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
       setState((current) => current.status === "ready" ? current : { status: "loading" });
     }
 
-    return loadSkillsDataPage(props.client, query, normalizedPage)
+    return props.client.listPanelItems({ layer: "Skill", q: query.trim() || undefined, page: normalizedPage }, controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
+        if (requestId !== requestIdRef.current) return undefined;
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
         return data;
       })
       .catch((error) => {
-        setState({ status: "error", message: toErrorMessage(error) });
+        if (requestId !== requestIdRef.current) return undefined;
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
@@ -216,7 +235,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   function runSearch() {
     closeSkill();
     setPage(1);
-    void refresh(1)
+    void submitSearch(() => refresh(1), [props.client, 1, t, demoEnabled])
       .then((data) => {
         if (!data) {
           return;
@@ -238,10 +257,10 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
     closeSkill();
     setPage(normalizedPage);
-    void refresh(normalizedPage).catch(() => undefined);
   }
 
   function closeSkill() {
+    detailGeneration.current++;
     setDetail(null);
     setSelectedSkillId(null);
   }
@@ -268,11 +287,13 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
   async function approveObservedSkill(id: string) {
     if (!props.client?.approveObservedSkill) throw new Error(t("memory.clientNotReady"));
+    const generation=detailGeneration.current;
+    const current=await loadSkillDetail(props.client,id);
+    if(generation!==detailGeneration.current||current.item.id!==id)return;
     await props.client.approveObservedSkill(id);
     clearMemoryPanelCache();
     const skillDetail = await loadSkillDetail(props.client, id);
-    const timeline = await loadSkillTimeline(props.client, id).catch(() => []);
-    setDetail({ status: "ready", data: { detail: skillDetail, timeline } });
+    if(selectedSkillIdRef.current===id)setDetail({status:"ready",data:{detail:skillDetail,timeline:[]}});
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
@@ -288,10 +309,6 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
-  useEffect(() => {
-    void refresh().catch(() => undefined);
-
-  }, [props.client, t, demoEnabled]);
 
   useEffect(() => {
     if (props.openRequest) {
@@ -301,6 +318,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   }, [props.openRequest?.requestId]);
 
   return (
+    <PanelViewGate status={viewStatus}>
     <SkillsSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
       detail={detail}
@@ -309,8 +327,10 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
+      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
-        const data = await refresh(page, { useCache: false });
+        props.client?.refreshPanelView?.("Skill");
+        const data = await refresh(page, { useCache: false, preserve:true });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
             subPage: "skills",
@@ -319,6 +339,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
           }));
         }
       }}
+      client={props.client}
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
       onApproveObservedSkill={approveObservedSkill}
@@ -326,10 +347,12 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onCloseSkill={closeSkill}
       onOpenMemoryReference={props.onOpenMemoryReference}
     />
+    </PanelViewGate>
   );
 }
 
 export interface SkillsSubPageViewProps {
+  client?:MemoryRuntimeClient|null;
   state: RemoteData<PanelItemsOutput> | ({ status: "ready"; data: PanelItemsOutput; detail: SkillDetailState });
   detail?: SkillDetailState;
   selectedSkillId?: string | null;
@@ -338,6 +361,7 @@ export interface SkillsSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
+  viewNotice?: import("react").ReactNode;
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
   onApproveObservedSkill?: (id: string) => Promise<void>;
@@ -360,6 +384,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.skills.description")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
+        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">
@@ -411,6 +436,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
         </>
       )}
       <SkillDrawer
+        client={props.client}
         detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
         onClose={props.onCloseSkill}
         onDelete={props.onDeleteSkill}
@@ -430,6 +456,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
  * @returns The skill detail node.
  */
 function SkillDrawer(props: {
+  client?:MemoryRuntimeClient|null;
   detail: SkillDetailState;
   onClose: () => void;
   onDelete: (id: string) => Promise<void>;
@@ -444,6 +471,7 @@ function SkillDrawer(props: {
   const [editedBody, setEditedBody] = useState("");
   const [editedVersion, setEditedVersion] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [openingEditor, setOpeningEditor] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const detailId = props.detail?.status === "ready" ? props.detail.data.detail.item.id : undefined;
   const currentDetailId = useRef(detailId);
@@ -455,6 +483,8 @@ function SkillDrawer(props: {
     setEditedBody("");
     setEditedVersion(0);
     setSaving(false);
+    setOpeningEditor(false);
+    setApproving(false);
     setSaveError(null);
     setApproveError(null);
     return () => { saveRequestEpoch.current += 1; };
@@ -503,12 +533,22 @@ function SkillDrawer(props: {
                 ? origin.human_modified === true
                   ? "memory.skills.humanEditedNotice" : "memory.skills.autoGeneratedNotice"
                 : "memory.skills.historyCandidateNotice")}</p>
-              {editableHistorySkill && props.onUpdate && !editing ? <button className="memory-skill-editor__button" type="button" onClick={() => {
-                setEditedBody(readyDetail.detail.item.body);
-                setEditedVersion(readyDetail.detail.item.version);
+              {editableHistorySkill && props.onUpdate && !editing ? <button className="memory-skill-editor__button" type="button" disabled={openingEditor || !props.client} onClick={() => {
                 setSaveError(null);
-                setEditing(true);
-              }}>{t("common.edit")}</button> : null}
+                if (!props.client) return;
+                const id = readyDetail.detail.item.id;
+                const epoch = ++saveRequestEpoch.current;
+                const isCurrent = () => currentDetailId.current === id && saveRequestEpoch.current === epoch;
+                setOpeningEditor(true);
+                void props.client.getMemory(id).then(latest => {
+                  if (latest.item.id !== id || !isCurrent()) return;
+                  setEditedBody(latest.item.body);
+                  setEditedVersion(latest.item.version);
+                  setEditing(true);
+                }).catch(error => { if (isCurrent()) setSaveError(toErrorMessage(error)); })
+                  .finally(() => { if (isCurrent()) setOpeningEditor(false); });
+              }}>{t(openingEditor ? "common.loading" : "common.edit")}</button> : null}
+              {!editing && saveError ? <p role="alert">{saveError}</p> : null}
             </section>
           ) : null}
           {editing && readyDetail ? (
@@ -544,11 +584,14 @@ function SkillDrawer(props: {
               <p>{t("memory.skills.observedCandidateReview")}</p>
               {props.onApprove ? <button className="memory-skill-editor__button" type="button" disabled={approving} onClick={() => {
                 if (!readyDetail) return;
+                const id = readyDetail.detail.item.id;
+                const epoch = saveRequestEpoch.current;
+                const isCurrent = () => currentDetailId.current === id && saveRequestEpoch.current === epoch;
                 setApproving(true);
                 setApproveError(null);
                 void props.onApprove!(readyDetail.detail.item.id).catch((error) => {
-                  setApproveError(error instanceof Error ? error.message : String(error));
-                }).finally(() => setApproving(false));
+                  if (isCurrent()) setApproveError(error instanceof Error ? error.message : String(error));
+                }).finally(() => { if (isCurrent()) setApproving(false); });
               }}>{t("memory.skills.approveObservedCandidate")}</button> : null}
               {approveError ? <p role="alert">{approveError}</p> : null}
             </section>
@@ -557,6 +600,7 @@ function SkillDrawer(props: {
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
           {props.detail.status === "ready" && (
             <SkillDetail
+              client={props.client}
               detail={props.detail.data.detail}
               timeline={props.detail.data.timeline}
               onOpenMemoryReference={props.onOpenMemoryReference}
@@ -599,6 +643,7 @@ function generatedHistoryStepSources(detail: GetMemoryOutput): Array<{ stepIndex
 }
 
 function SkillDetail(props: {
+  client?:MemoryRuntimeClient|null;
   detail: GetMemoryOutput;
   timeline: SkillTimelineEntry[];
   onOpenMemoryReference: OpenMemoryReference;
@@ -633,7 +678,7 @@ function SkillDetail(props: {
         )}
       </section>
 
-      <SkillTimelineSection entries={props.timeline} />
+      {props.client?.listPanelLogs ? <PagedSkillTimeline key={props.detail.item.id} client={props.client} skillId={props.detail.item.id} /> : <SkillTimelineSection entries={props.timeline} />}
       {skill.usageGuide && <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.usageGuide} />}
       <section className="memory-detail-card">
         <h5 className="memory-detail-card__label">{t("memory.skills.body")}</h5>
@@ -736,6 +781,35 @@ function LinkedIdsSection(props: {
       )}
     </section>
   );
+}
+
+function PagedSkillTimeline(props:{client:MemoryRuntimeClient;skillId:string}) {
+  const {t}=useTranslation();const [logs,setLogs]=useState<MemoryApiLog[]>([]);const [legacy,setLegacy]=useState<SkillTimelineEntry[]>();
+  const [cursor,setCursor]=useState<string>();const [busy,setBusy]=useState(true);const [error,setError]=useState<string>();
+  const generation=useRef(0);
+  async function load(next?:string) {
+    const epoch = generation.current;
+    const isCurrent = () => epoch === generation.current;
+    setBusy(true);setError(undefined);
+    try {
+      let result;
+      try {result=await props.client.listPanelLogs!({skillId:props.skillId,cursor:next,limit:20});}
+      catch(error) {if(!isUnsupportedPanelRoute(error))throw error;const entries=await loadSkillTimeline(props.client,props.skillId);if(isCurrent())setLegacy(entries);return;}
+      if(isCurrent()){setLogs(current=>next?[...current,...result.logs.filter(log=>!current.some(old=>old.id===log.id))]:result.logs);setCursor(result.nextCursor);}
+    } catch(error){if(isCurrent())setError(toErrorMessage(error));}
+    finally {if(isCurrent())setBusy(false);}
+  }
+  useEffect(() => {
+    generation.current++;
+    setLogs([]); setLegacy(undefined); setCursor(undefined);
+    void load();
+    return () => { generation.current++; };
+  }, [props.client,props.skillId]);
+  return <>{(logs.length > 0 || legacy !== undefined || (!busy && !error)) && <SkillTimelineSection entries={legacy??skillTimelineFromLogs(logs,props.skillId)} />}
+    {busy&&<MemoryStateBox message={t("common.loading")} />}
+    {error&&<p role="alert">{error}</p>}
+    {(cursor||error)&&<button type="button" disabled={busy} onClick={()=>void load(cursor)}>{t("memory.tasks.loadContent")}</button>}
+  </>;
 }
 
 function SkillTimelineSection(props: { entries: SkillTimelineEntry[] }) {
