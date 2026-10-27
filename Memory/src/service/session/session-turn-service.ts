@@ -1433,10 +1433,6 @@ export class SessionTurnService {
     const texts = legacyImportTexts(memory);
     const deleted = memory.status === "deleted" || Boolean(memory.deletedAt);
     if (!deleted && texts.user && texts.agent && (texts.user !== normalized.query || texts.agent !== normalized.answer)) {
-      if (isRepairablePollutedCursorImport(request, texts, normalized)) {
-        this.retirePollutedLegacyImport(memory, request);
-        return undefined;
-      }
       return { status: "conflict", reason: "legacy_import_content_conflict" };
     }
     const response: SourceTurnCompleteResponse = deleted
@@ -1453,39 +1449,6 @@ export class SessionTurnService {
       createdAt: nowIso()
     });
     return response;
-  }
-
-  private retirePollutedLegacyImport(memory: MemoryRow, request: SourceTurnCompleteRequest): void {
-    const at = nowIso();
-    const deleted = this.deps.repos.memories.softDelete(memory.id, at);
-    if (!deleted) throw new MemoryServiceError("not_found", `legacy import memory not found: ${memory.id}`);
-    this.deps.repos.runtime.appendChange({
-      memoryId: deleted.id,
-      namespaceId: this.deps.namespaceIdFromMemory(deleted),
-      kind: "trace",
-      op: "deleted",
-      entityId: deleted.id,
-      userId: deleted.userId,
-      changeType: "delete",
-      version: deleted.version,
-      before: memory,
-      after: deleted,
-      source: "source_turn.legacy_import_repair",
-      createdAt: at
-    });
-    this.deps.repos.runtime.insertAudit({
-      userId: deleted.userId,
-      sessionId: deleted.sessionId,
-      actor: request.namespace ? { ...request.namespace } : {},
-      action: "repair_legacy_import",
-      targetKind: "trace",
-      targetId: deleted.id,
-      before: memory,
-      after: deleted,
-      meta: { reason: "cursor_assistant_suffix_contamination" },
-      createdAt: at
-    });
-    this.deps.invalidateMemoryDependencies(memory, at);
   }
 
   private captureDetachedLegacyHistory(
@@ -3808,26 +3771,6 @@ function legacyImportTexts(memory: MemoryRow): { user?: string; agent?: string }
     user: recordText(trace, "user_text") ?? recordText(trace, "userText"),
     agent: recordText(trace, "agent_text") ?? recordText(trace, "agentText")
   };
-}
-
-function isRepairablePollutedCursorImport(
-  request: SourceTurnCompleteRequest,
-  texts: { user?: string; agent?: string },
-  normalized: TurnCompleteRequest
-): boolean {
-  if (!allowsLegacyHistoryCapture(request) || request.sourceTurn.source !== "cursor") return false;
-  const previousUser = normalizeLegacyImportText(texts.user);
-  const previousAgent = normalizeLegacyImportText(texts.agent);
-  const currentUser = normalizeLegacyImportText(normalized.query);
-  const currentAgent = normalizeLegacyImportText(normalized.answer);
-  return Boolean(
-    previousUser && currentUser && previousUser === currentUser &&
-    currentAgent && previousAgent.startsWith(`${currentAgent}\n\n`)
-  );
-}
-
-function normalizeLegacyImportText(value: string | undefined): string {
-  return (value ?? "").replace(/\r\n?/g, "\n").trim();
 }
 
 function legacyImportMatchesScope(
