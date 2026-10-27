@@ -31,6 +31,8 @@ export type UpdatePhase =
 export interface UpdateFeedback {
   key: MessageKey;
   values?: MessageValues;
+  /** A failed install records its reason only in the updates log directory. */
+  showLogs?: boolean;
 }
 
 export interface UpdateCoordinatorValue {
@@ -255,7 +257,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         preparedUpdatePath: null,
         downloadProgress: null,
         dialog: null,
-        feedback: { key: "settings.about.updateInstallFailed" }
+        feedback: { key: "settings.about.updateInstallFailed", showLogs: true }
       }));
     } finally {
       if (downloadInFlightRef.current === request) {
@@ -390,7 +392,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         phase: "prepared",
         dialog: null,
         downloadProgress: null,
-        feedback: { key: "settings.about.updateInstallFailed" }
+        feedback: { key: "settings.about.updateInstallFailed", showLogs: true }
       }));
     } finally {
       installInFlightRef.current = null;

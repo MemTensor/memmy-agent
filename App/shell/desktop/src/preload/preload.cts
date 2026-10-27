@@ -89,6 +89,7 @@ interface MemmyPreloadApi {
   installCliTools(): Promise<unknown>;
   restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
   openLogsDirectory(): Promise<void>;
+  openUpdateLogs(): Promise<void>;
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
@@ -373,6 +374,10 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async openLogsDirectory(): Promise<void> {
     return ipcRenderer.invoke("memmy:open-logs-directory");
+  },
+
+  async openUpdateLogs(): Promise<void> {
+    return ipcRenderer.invoke("memmy:open-update-logs");
   },
 
   async exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult> {

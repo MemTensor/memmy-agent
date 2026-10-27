@@ -7,13 +7,40 @@ export interface MacUpdateValidationOptions {
   currentVersion?: string;
 }
 
+const MEMMY_BUNDLE_ID = "cn.memtensor.memmy";
+/** Apple Developer ID intermediate/leaf extension marking a notarizable Developer ID certificate. */
+const APPLE_DEVELOPER_ID_CERTIFICATE_EXTENSION = "1.2.840.113635.100.6.1.13";
+
+/**
+ * Builds the literal `codesign --requirements` expression used to pin an update to the installed
+ * bundle identity and signing team.
+ *
+ * Two details matter for `codesign` to treat the value as an inline requirement instead of a file:
+ * - The leading `=` marks a literal requirement; without it `codesign` reports
+ *   "No such file or directory" because it looks for a requirement file.
+ * - Certificate extension OIDs must carry the `field.` prefix, otherwise the requirement parser
+ *   fails at the first dot of the OID ("unexpected char: '.'").
+ *
+ * @param teamIdentifier The TeamIdentifier of the currently installed app.
+ * @param bundleIdentifier The expected application bundle identifier.
+ * @returns A literal requirement string starting with `=`.
+ */
+export function buildMacSigningRequirement(teamIdentifier: string, bundleIdentifier: string = MEMMY_BUNDLE_ID): string {
+  if (!teamIdentifier) throw new Error("Mac signing requirement requires a team identifier");
+  if (/["\\]/.test(teamIdentifier) || /["\\]/.test(bundleIdentifier)) {
+    throw new Error("Mac signing requirement values cannot contain quotes or backslashes");
+  }
+  return `=anchor apple generic and identifier "${bundleIdentifier}" and certificate leaf[field.${APPLE_DEVELOPER_ID_CERTIFICATE_EXTENSION}] exists and certificate leaf[subject.OU] = "${teamIdentifier}"`;
+}
+
 function quotedShellValue(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
 function macBundleValidationScript(options: MacUpdateValidationOptions): string {
   if (!options.teamIdentifier && !options.allowUnsigned) throw new Error("Signed macOS update requires a signing team");
-  return `EXPECTED_BUNDLE_ID='cn.memtensor.memmy'
+  const signingRequirement = options.teamIdentifier ? buildMacSigningRequirement(options.teamIdentifier) : "";
+  return `EXPECTED_BUNDLE_ID=${quotedShellValue(MEMMY_BUNDLE_ID)}
 EXPECTED_ARCH=${quotedShellValue(options.architecture === "x64" ? "x86_64" : "arm64")}
 EXPECTED_TEAM=${quotedShellValue(options.teamIdentifier ?? "")}
 EXPECTED_VERSION=${quotedShellValue(options.expectedVersion ?? "")}
@@ -83,7 +110,7 @@ validate_app_bundle() {
     exit 1
   fi
   if [[ -n "$EXPECTED_TEAM" ]]; then
-    local signing_requirement=${quotedShellValue(`anchor apple generic and identifier "cn.memtensor.memmy" and certificate leaf[1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${options.teamIdentifier ?? ""}"`)}
+    local signing_requirement=${quotedShellValue(signingRequirement)}
     if ! /usr/bin/codesign --verify --deep --strict -R "$signing_requirement" "$app_path"; then
       echo "Memmy update does not have the installed Apple Developer ID identity"
       exit 1

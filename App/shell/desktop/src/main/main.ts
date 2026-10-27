@@ -1700,6 +1700,10 @@ function registerIpcHandlers(): void {
     await openLogsDirectory();
   });
 
+  ipcMain.handle("memmy:open-update-logs", async () => {
+    await openUpdateLogs();
+  });
+
   ipcMain.handle("memmy:export-diagnostics-report", async (event) => exportDiagnosticsReport(BrowserWindow.fromWebContents(event.sender)));
 
   ipcMain.handle("memmy:get-log-level", () => getCurrentLogLevel());
@@ -6136,6 +6140,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:install-cli-tools");
   ipcMain.removeHandler("memmy:restart-memory-service");
   ipcMain.removeHandler("memmy:open-logs-directory");
+  ipcMain.removeHandler("memmy:open-update-logs");
   ipcMain.removeHandler("memmy:export-diagnostics-report");
   ipcMain.removeHandler("memmy:get-launch-at-login");
   ipcMain.removeHandler("memmy:set-launch-at-login");
@@ -6662,6 +6667,23 @@ async function openLogsDirectory(): Promise<void> {
   const logsDirectory = resolveLogsDirectory();
   await mkdir(logsDirectory, { recursive: true });
   const openError = await shell.openPath(logsDirectory);
+  if (openError) {
+    throw new Error(openError);
+  }
+}
+
+/**
+ * Opens the update staging/install log directory in the system file manager.
+ *
+ * Update helper scripts write `mac-update-install.log` / `win-update-install.log` here, which is
+ * the only place a failed in-app install records its concrete reason.
+ *
+ * @returns Resolves once opened; throws an error when the system refuses to open it.
+ */
+async function openUpdateLogs(): Promise<void> {
+  const updatesDirectory = resolveUpdatesDirectory();
+  await mkdir(updatesDirectory, { recursive: true });
+  const openError = await shell.openPath(updatesDirectory);
   if (openError) {
     throw new Error(openError);
   }

@@ -517,6 +517,62 @@ describe("SettingsPageView", () => {
     expect(html).toContain("512.0 KB / 1.0 MB");
   });
 
+  it("更新失败时在关于区提供更新日志入口，而不是只显示稍后再试", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "zh-CN",
+      createUpdateViewModel({
+        phase: "error",
+        feedback: { key: "settings.about.updateInstallFailed", showLogs: true }
+      })
+    ));
+
+    expect(html).toContain("安装更新失败，请稍后再试。");
+    expect(html).toContain("查看更新日志");
+    expect(html).toContain('class="ml-2 underline underline-offset-2');
+
+    // An install failure keeps the prepared phase, so the entry follows the feedback flag, not the phase.
+    const preparedFailureHtml = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "zh-CN",
+      createUpdateViewModel({
+        phase: "prepared",
+        preparedUpdatePath: "/tmp/Memmy-update.dmg",
+        feedback: { key: "settings.about.updateInstallFailed", showLogs: true }
+      })
+    ));
+    expect(preparedFailureHtml).toContain("查看更新日志");
+
+    // Success states keep the plain feedback line without a log entry.
+    const successHtml = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "zh-CN",
+      createUpdateViewModel({
+        phase: "latest",
+        feedback: { key: "settings.about.upToDate", values: { version: "2.1.0" } }
+      })
+    ));
+    expect(successHtml).not.toContain("查看更新日志");
+
+    const englishHtml = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "en-US",
+      createUpdateViewModel({
+        phase: "error",
+        feedback: { key: "settings.about.updateInstallFailed", showLogs: true }
+      })
+    ));
+    expect(englishHtml).toContain("View update logs");
+
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    expect(source).toContain("window.memmy?.openUpdateLogs");
+    expect(source).toContain("function openUpdateLogs()");
+    expect(source).toContain("onClick={openUpdateLogs}");
+
+    const coordinatorSource = readFileSync(updateCoordinatorSourcePath, "utf8");
+    expect(coordinatorSource).toContain('feedback: { key: "settings.about.updateInstallFailed", showLogs: true }');
+  });
+
   it("菜单栏图标开关保存到应用设置并同步桌面 bridge", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 

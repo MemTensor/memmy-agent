@@ -1324,6 +1324,22 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }
 
   /**
+   * Opens the update log directory in the system file manager.
+   *
+   * Update helper scripts only record their failure reason in the updates directory, so the About
+   * tab exposes it directly instead of leaving the user with a generic "try again later" message.
+   */
+  function openUpdateLogs() {
+    const openLogs = typeof window === "undefined" ? undefined : window.memmy?.openUpdateLogs;
+    if (typeof openLogs !== "function") {
+      return;
+    }
+    void openLogs().catch((error: unknown) => {
+      console.warn("open update logs failed", error);
+    });
+  }
+
+  /**
    * Opens the desktop log directory in the system file manager.
    */
   function openDeveloperLogs() {
@@ -1887,8 +1903,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               <LinkButton label={t("settings.about.terms")} onClick={() => void openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))} />
             </div>
             {update.feedback && (
-              <div className={`text-xs ${update.phase === "error" ? "text-status-error" : "text-text-ink/45"}`}>
+              <div className={`text-xs ${update.phase === "error" || update.feedback.showLogs ? "text-status-error" : "text-text-ink/45"}`}>
                 {t(update.feedback.key, update.feedback.values)}
+                {update.feedback.showLogs && (
+                  <button
+                    type="button"
+                    onClick={openUpdateLogs}
+                    className="ml-2 underline underline-offset-2 hover:text-action-sky transition-colors cursor-pointer"
+                  >
+                    {t("settings.about.openUpdateLogs")}
+                  </button>
+                )}
               </div>
             )}
             {update.phase === "downloading" && (

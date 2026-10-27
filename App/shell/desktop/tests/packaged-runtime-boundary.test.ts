@@ -1173,6 +1173,11 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("buildDiagnosticsReport()");
     expect(mainSource).toContain("await writeFile(selected.filePath, report, \"utf8\")");
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:open-logs-directory")');
+    expect(preloadSource).toContain("openUpdateLogs(): Promise<void>;");
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:open-update-logs")');
+    expect(mainSource).toContain('ipcMain.handle("memmy:open-update-logs"');
+    expect(mainSource).toContain("async function openUpdateLogs()");
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:open-update-logs")');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:export-diagnostics-report")');
   });
 

@@ -104,6 +104,7 @@ declare global {
       installCliTools(): Promise<MemmyCliInstallResult>;
       restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
       openLogsDirectory(): Promise<void>;
+      openUpdateLogs(): Promise<void>;
       exportDiagnosticsReport(): Promise<MemmyDiagnosticsReportExportResult>;
       getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
       setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
