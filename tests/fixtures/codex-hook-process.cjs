@@ -14,7 +14,7 @@ const hooks = () => Object.entries(read(hooksPath).hooks || {}).flatMap(([event,
     const currentHash = createHash("sha256").update(hook.command).digest("hex");
     const trusted = read(trustPath)[key]?.trusted_hash === currentHash;
     return { key, event, eventName: event[0].toLowerCase() + event.slice(1), handlerType: "command",
-      command: hook.command, source: "user", sourcePath: hooksPath, currentHash,
+      command: hook.command, source: "user", sourcePath: process.argv.includes("canonical-path") ? fs.realpathSync(hooksPath) : hooksPath, currentHash,
       trustStatus: trusted ? "trusted" : "untrusted", enabled: trusted, isManaged: false };
   })));
 

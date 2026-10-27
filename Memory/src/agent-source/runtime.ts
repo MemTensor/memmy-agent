@@ -516,7 +516,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     installType: "manual" | "auto_inject" = "manual"
   ): Promise<unknown> {
     const adapter = registry.require(sourceId);
-    if (!(await adapter.detect())) {
+    if (method === "POST" && !(await adapter.detect())) {
       throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
     }
     const target = integrationRegistry.get(sourceId);

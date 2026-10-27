@@ -1,7 +1,6 @@
 /** Codex hook trust persistence through the Codex app-server protocol. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { normalize } from "node:path";
-import { resolveCodexExecutable } from "@memmy/agent-source-core";
+import { canonicalCodexPath, resolveCodexExecutable } from "@memmy/agent-source-core";
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
 const APP_SERVER_CLOSE_TIMEOUT_MS = 1_000;
@@ -125,12 +124,12 @@ function selectMemmyHooks(
   hooksFilePath: string,
   hookCommand: string
 ): CodexHookMetadata[] {
-  const sourcePath = normalize(hooksFilePath);
+  const sourcePath = canonicalCodexPath(hooksFilePath);
   const selected = hooks.filter((hook) =>
     hook.source === "user" &&
     !hook.isManaged &&
     hook.handlerType === "command" &&
-    normalize(hook.sourcePath) === sourcePath &&
+    canonicalCodexPath(hook.sourcePath) === sourcePath &&
     hook.command === hookCommand &&
     MEMMY_HOOK_EVENTS.has(hook.eventName)
   );

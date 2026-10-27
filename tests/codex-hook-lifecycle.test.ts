@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,76 @@ describe.each([
   { name: "Memory", createTarget: memoryTarget, trust: memoryTrust },
   { name: "Backend", createTarget: backendTarget, trust: backendTrust }
 ])("$name Codex installation lifecycle", ({ createTarget, trust }) => {
+  it("trusts a canonical hooks path returned for a linked CODEX_HOME", async () => {
+    const f = fixture();
+    const physical = join(f.rootDirectory, "physical"); mkdirSync(physical);
+    const alias = join(f.rootDirectory, "linked home"); symlinkSync(physical, alias, "junction");
+    const target = createTarget({ ...f, rootDirectory: alias, trustHooks: options => trust({ ...options, codexExecutable: process.execPath, appServerArguments: [fixtureProcess, "canonical-path"] }) });
+    await target.installPlugin!("codex");
+    expect(await target.isInstalled("codex")).toBe(true);
+    await target.uninstallPlugin!("codex");
+  });
+  it("rolls back hooks if bootstrap installation fails", async () => {
+    const f = fixture();
+    mkdirSync(join(f.rootDirectory, "AGENTS.md"));
+    const target = createTarget({ ...f, trustHooks: async () => {} });
+    await expect(target.installPlugin!("codex")).rejects.toThrow();
+    expect(existsSync(join(f.rootDirectory, "hooks.json"))).toBe(false);
+    expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+  });
+  it("restores previous skills and instructions when trust fails after replacing them", async () => {
+    const f = fixture();
+    const original = createTarget({ ...f, trustHooks: async () => {} });
+    await original.installPlugin!("codex");
+    const previousInstructions = readFileSync(join(f.rootDirectory, "AGENTS.md"), "utf8");
+    const skill = join(f.rootDirectory, "skills", "memmy-memory", "SKILL.md");
+    writeFileSync(skill, "previous skill");
+    const updating = createTarget({ ...f, trustHooks: async () => { throw new Error("trust failed"); } });
+    await expect(updating.installPlugin!("codex")).rejects.toThrow("trust failed");
+    expect(readFileSync(skill, "utf8")).toBe("previous skill");
+    expect(readFileSync(join(f.rootDirectory, "AGENTS.md"), "utf8")).toBe(previousInstructions);
+  });
+  it("updates and removes Windows CRLF instruction markers without duplication", async () => {
+    const f = fixture();
+    const target = createTarget({ ...f, trustHooks: async () => {} });
+    const instructions = join(f.rootDirectory, "AGENTS.md");
+    writeFileSync(instructions, "Keep my instructions\r\n");
+    await target.installPlugin!("codex");
+    writeFileSync(instructions, readFileSync(instructions, "utf8").replace(/\r?\n/g, "\r\n"));
+    await target.installPlugin!("codex");
+    expect(readFileSync(instructions, "utf8").match(/memmy:start/g)).toHaveLength(1);
+    writeFileSync(instructions, readFileSync(instructions, "utf8").replace(/\r?\n/g, "\r\n"));
+    await target.uninstallPlugin!("codex");
+    expect(readFileSync(instructions, "utf8")).toBe("Keep my instructions\r\n");
+  });
+  it("restores a preexisting non-directory skill path when trust fails", async () => {
+    const f = fixture();
+    const skills = join(f.rootDirectory, "skills"); mkdirSync(skills);
+    const skillPath = join(skills, "memmy-memory"); writeFileSync(skillPath, "previous file");
+    const target = createTarget({ ...f, trustHooks: async () => { throw new Error("trust failed"); } });
+    await expect(target.installPlugin!("codex")).rejects.toThrow("trust failed");
+    expect(readFileSync(skillPath, "utf8")).toBe("previous file");
+  });
+  it.each([false, true])("serializes removal after an in-flight installation (trust failure: %s)", async (fail) => {
+    const f = fixture();
+    const original = createTarget({ ...f, trustHooks: async () => {} });
+    await original.installPlugin!("codex");
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const updating = createTarget({ ...f, trustHooks: async () => { entered(); await gate; if (fail) throw new Error("trust failed"); } });
+    const install = updating.installPlugin!("codex");
+    const observedInstall = install.catch(error => error);
+    await started;
+    const removing = original.uninstallPlugin!("codex");
+    // Give an uncoordinated removal time to finish before trust completes.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    release();
+    await observedInstall; await removing;
+    expect(await original.isInstalled("codex")).toBe(false);
+    expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(f.rootDirectory, "hooks.json"), "utf8")).hooks).toBeUndefined();
+  });
   it("fails executable preflight before writing any hook or skill file", async () => {
     const f = fixture();
     vi.stubEnv("MEMMY_CODEX_EXECUTABLE", join(f.rootDirectory, "missing-codex"));
@@ -97,6 +167,8 @@ describe.each([
       expect(captures).toHaveLength(1);
       expect(captures[0]!.body).toMatchObject({ adapterId: "memmy-codex-hook", namespace: { source: "codex", userId: "fixture-owner" } });
       expect(JSON.stringify(captures[0]!.body)).toContain("Parser fixed");
+      // Removal must still work when the executable is gone or its override is invalid.
+      vi.stubEnv("MEMMY_CODEX_EXECUTABLE", join(f.rootDirectory, "removed-codex"));
       await target.uninstallPlugin!("codex");
       await target.uninstallPlugin!("codex");
       expect(JSON.parse(readFileSync(join(f.rootDirectory, "hooks.json"), "utf8"))).toEqual({ hooks: unrelated });
