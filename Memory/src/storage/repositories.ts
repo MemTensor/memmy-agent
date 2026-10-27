@@ -974,6 +974,12 @@ export class MemoryRepository {
   }
 
   listStats(): MemoryStatsRow[] {
+    return Array.from(this.iterateStats());
+  }
+
+  /** A bounded consumer can yield between rows without materializing a large
+   * native SQLite result in one uninterruptible call. */
+  *iterateStats(): IterableIterator<MemoryStatsRow> {
     const rows = this.db
       .prepare(
         `SELECT conversation_id,
@@ -989,7 +995,7 @@ export class MemoryRepository {
          FROM memories
          WHERE deleted_at IS NULL`
       )
-      .all() as Array<{
+      .iterate() as IterableIterator<{
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -1001,7 +1007,7 @@ export class MemoryRepository {
         info_source: unknown;
         internal_source: unknown;
       }>;
-    return rows.map((row) => ({
+    for (const row of rows) yield {
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
@@ -1012,7 +1018,7 @@ export class MemoryRepository {
       updatedAt: row.updated_at,
       infoSource: row.info_source,
       internalSource: row.internal_source
-    }));
+    };
   }
 
   listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {

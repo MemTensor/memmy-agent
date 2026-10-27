@@ -28,7 +28,8 @@ export class PanelReader {
   run<T>(method: string, args: unknown[], priority = 0, signal?: AbortSignal): Promise<Result<T>> {
     if (this.closed) return Promise.reject(new Error("Panel reader stopped"));
     if (signal?.aborted) return Promise.reject(abortError());
-    if (this.pending.length >= 32)
+    const interruptStats = this.active?.method === "stats" && priority < this.active.priority;
+    if (this.pending.length + (interruptStats ? 1 : 0) >= 32)
       return Promise.reject(new MemoryServiceError("rate_limited", "Panel reader is busy"));
     return new Promise<Result<unknown>>((resolve, reject) => {
       const abort = () => {
@@ -48,8 +49,27 @@ export class PanelReader {
       signal?.addEventListener("abort", abort, { once: true });
       this.pending.push(itemToQueue);
       this.pending.sort((a, b) => a.priority - b.priority);
+      if (interruptStats) this.yieldStatistics();
       this.dispatch();
     }) as Promise<Result<T>>;
+  }
+  /** Synchronous statistics cannot yield inside SQLite. End that readonly worker
+   * before starting another, and retry the unpublished statistics after foreground
+   * work. Keep the caller's promise and cancellation listener attached. */
+  private yieldStatistics() {
+    const active = this.active;
+    const worker = this.worker;
+    if (!active || active.method !== "stats" || !worker) return;
+    clearTimeout(this.timer);
+    this.active = undefined;
+    this.worker = undefined;
+    this.pending.push(active);
+    this.pending.sort((a, b) => a.priority - b.priority);
+    this.stopping = worker.terminate();
+    void this.stopping.finally(() => {
+      this.stopping = undefined;
+      this.dispatch();
+    });
   }
   private dispatch() {
     if (this.closed || this.stopping || this.active || !this.pending.length) return;

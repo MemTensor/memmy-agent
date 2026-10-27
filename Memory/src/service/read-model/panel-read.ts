@@ -400,8 +400,7 @@ export class PanelReadModel {
     };
   }
 
-  panelStatistics(input:RequestEnvelope) {
-    const rows=this.deps.repos.memories.listStats();
+  panelStatistics(input:RequestEnvelope, rows=this.deps.repos.memories.listStats()) {
     return {overview:this.panelOverviewSummary(input,rows),analysis:this.panelAnalysis(input,rows)};
   }
 
