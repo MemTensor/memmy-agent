@@ -262,6 +262,8 @@ Hermes likewise allows one active Memory Provider. Memmy asks for confirmation b
 
 When you click **Remove Hook**, **Remove plugin**, or **Remove Skill**, Memmy cleans up the integration content it manages. Other configuration is preserved, and memories already stored in Memmy are not deleted.
 
+Seeing Codex in the list means its session directory was found. Hook installation also requires a runnable Codex CLI. Memmy checks the plugin directory, PATH, macOS application bundles, the Windows desktop runtime cache, and common npm locations. For a custom installation, set `MEMMY_CODEX_EXECUTABLE` to the absolute CLI path and restart Memmy. `CODEX_CLI_PATH` is also supported, with the Memmy-specific setting taking precedence. Select the CLI, not the desktop application's launcher. An unavailable path fails installation before new Hook files are written.
+
 ### Local access and failure behavior
 
 - Hooks and plugins read the Memory service endpoint and token from `~/.memmy/config.yaml` and keep the runtime configuration they need in the Agent's local config directory. Do not publish these config files.

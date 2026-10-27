@@ -15,7 +15,7 @@ import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
-import { trustMemmyCodexHooks, type TrustMemmyCodexHooks } from "./hook-trust.js";
+import { prepareCodexHookTrust, type TrustMemmyCodexHooks } from "./hook-trust.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CODEX_TARGET_ID = "codex";
@@ -46,7 +46,6 @@ export interface CreateCodexSkillTargetDeps {
 export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): SkillTarget {
   const rootDirectory = deps.rootDirectory ?? resolveCodexHomeDirectory();
   const memmyConfigPath = deps.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml");
-  const trustHooks = deps.trustHooks ?? trustMemmyCodexHooks;
 
   return {
     targetId: CODEX_TARGET_ID,
@@ -97,6 +96,7 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         throw new Error("Codex is not installed or its directory is unavailable");
       }
 
+      const trustHooks = deps.trustHooks ?? prepareCodexHookTrust(root);
       const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
       const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
