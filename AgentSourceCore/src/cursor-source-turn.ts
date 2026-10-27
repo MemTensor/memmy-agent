@@ -64,11 +64,12 @@ export async function* readCursorComposer(
 
   let current: CursorBubble[] = [];
   let turnBubbleId = "";
+  let turnRequestId = "";
   let sequence = 0;
 
   function finish(isLastTurn: boolean): RawSourceMessage[] {
     if (!turnBubbleId || current.length === 0) {
-      current = []; turnBubbleId = ""; return [];
+      current = []; turnBubbleId = ""; turnRequestId = ""; return [];
     }
     const messages = current.flatMap(toStagedMessage(composerId));
     const query = current.filter(bubble => bubble.type === USER_BUBBLE).map(bubble => bubble.text).join("\n\n");
@@ -100,7 +101,7 @@ export async function* readCursorComposer(
       toolCalls: pairSourceToolCalls(toolCalls, toolResults).map(redactCall), toolResults: toolResults.map(redactResult)
     };
     const staged = stageSourceTurnMessages(messages, { turnId: turnBubbleId, sequence, startedAt, reason, turn });
-    current = []; turnBubbleId = "";
+    current = []; turnBubbleId = ""; turnRequestId = "";
     return staged;
   }
 
@@ -113,9 +114,19 @@ export async function* readCursorComposer(
     if (bubble.type === USER_BUBBLE && bubble.text.trim()) {
       yield* finish(false);
       turnBubbleId = bubble.bubbleId;
+      turnRequestId = bubble.requestId;
       sequence = index;
     }
     if (!turnBubbleId) continue;
+    // Cursor can insert a user bubble without typed text between two generations.
+    // The text boundary does not see it, but requestId still identifies the next
+    // generation. Stop the current turn before any later reply can replace its
+    // closing assistant message.
+    if (turnRequestId && bubble.requestId && bubble.requestId !== turnRequestId) {
+      yield* finish(false);
+      continue;
+    }
+    if (!turnRequestId && bubble.requestId) turnRequestId = bubble.requestId;
     if (bubble.type === ASSISTANT_BUBBLE && !bubble.text && !bubble.tool) continue;
     current.push(bubble);
   }

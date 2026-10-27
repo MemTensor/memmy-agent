@@ -750,6 +750,135 @@ describe("native source turn submission", () => {
     expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(0);
   });
 
+  it("repairs a polluted legacy Cursor trace during a full scan", () => {
+    const { db, service } = createTestService();
+    const conversationId = "cursor-background-notifications";
+    const firstUserMessageId = "cursor-user-notification";
+    const importedTurnId = legacyImportTurnId("cursor", conversationId, firstUserMessageId);
+    const query = "<system_notification>The following task has notified.</system_notification>";
+    const correctAnswer = "当前最新实例启动正常。";
+    const unrelatedAnswers = [
+      "已精简 README，并完成文档检查。",
+      "已提交并推送两个仓库。",
+      "我会继续检查 thinkingMode 的参数转换。"
+    ];
+    const imported = service.addMemory({
+      namespace: { source: "cursor", profileId: "default", userId: "source-user" },
+      adapterId: "agent-source:cursor",
+      turnId: importedTurnId,
+      source: "cursor",
+      content: [
+        "## user", query,
+        "## assistant", correctAnswer,
+        ...unrelatedAnswers.flatMap((answer) => ["## assistant", answer])
+      ].join("\n\n"),
+      layer: "L1",
+      title: query,
+      tags: ["agent-source", "cursor"]
+    });
+    const storedAgentText = () => (db.db.prepare(
+      "SELECT json_extract(properties_json, '$.internal_info.trace.agent_text') AS agentText FROM memories WHERE id = ?"
+    ).get(imported.id) as { agentText: string }).agentText;
+    expect(storedAgentText()).toBe([correctAnswer, ...unrelatedAnswers].join("\n\n"));
+
+    const replay = service.completeSourceTurn(request({
+      namespace: { source: "cursor", profileId: "default", userId: "source-user" },
+      source: "cursor",
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      legacyImportTurnId: importedTurnId,
+      sourceTurn: {
+        source: "cursor",
+        profileId: "default",
+        conversationId,
+        turnId: firstUserMessageId,
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:00:20.000Z",
+        sequence: 0,
+        completionEvidence: "assistant_text:cursor-assistant-correct"
+      },
+      query,
+      answer: correctAnswer,
+      toolCalls: [],
+      toolResults: []
+    }));
+
+    expect(replay.status).toBe("stored");
+    expect(replay.result?.l1MemoryId).toBeTruthy();
+    expect(new Repositories(db.db).memories.getIncludingDeleted(imported.id)).toMatchObject({ status: "deleted" });
+    const repairedAgentText = (db.db.prepare(
+      "SELECT COALESCE(json_extract(properties_json, '$.internal_info.trace.agentText'), json_extract(properties_json, '$.internal_info.trace.agent_text')) AS agentText FROM memories WHERE id = ?"
+    ).get(replay.result!.l1MemoryId!) as { agentText: string }).agentText;
+    expect(repairedAgentText).toBe(correctAnswer);
+    expect((db.db.prepare("SELECT assistant_text AS assistantText FROM raw_turns").get() as { assistantText: string }).assistantText).toBe(correctAnswer);
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(1);
+
+    const repeated = service.completeSourceTurn(request({
+      namespace: { source: "cursor", profileId: "default", userId: "source-user" },
+      source: "cursor",
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      legacyImportTurnId: importedTurnId,
+      sourceTurn: {
+        source: "cursor",
+        profileId: "default",
+        conversationId,
+        turnId: firstUserMessageId,
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:00:20.000Z",
+        sequence: 0,
+        completionEvidence: "assistant_text:cursor-assistant-correct"
+      },
+      query,
+      answer: correctAnswer,
+      toolCalls: [],
+      toolResults: []
+    }));
+    expect(repeated.status).toBe("existing");
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(1);
+  });
+
+  it("keeps an ordinary legacy Cursor content conflict unchanged", () => {
+    const { db, service } = createTestService();
+    const conversationId = "cursor-content-conflict";
+    const firstUserMessageId = "cursor-user";
+    const importedTurnId = legacyImportTurnId("cursor", conversationId, firstUserMessageId);
+    const imported = service.addMemory({
+      namespace: { source: "cursor", profileId: "default", userId: "source-user" },
+      adapterId: "agent-source:cursor",
+      turnId: importedTurnId,
+      source: "cursor",
+      content: "## user\n\nOriginal request.\n\n## assistant\n\nA different historical answer.",
+      layer: "L1",
+      title: "Original request.",
+      tags: ["agent-source", "cursor"]
+    });
+    const replay = service.completeSourceTurn(request({
+      namespace: { source: "cursor", profileId: "default", userId: "source-user" },
+      source: "cursor",
+      channel: "agent_source_scan",
+      captureLegacyHistory: true,
+      legacyImportTurnId: importedTurnId,
+      sourceTurn: {
+        source: "cursor",
+        profileId: "default",
+        conversationId,
+        turnId: firstUserMessageId,
+        startedAt: "2000-01-01T10:00:00.000Z",
+        completedAt: "2000-01-01T10:00:20.000Z",
+        sequence: 0,
+        completionEvidence: "assistant_text:cursor-assistant"
+      },
+      query: "Original request.",
+      answer: "The current answer does not prefix the historical answer.",
+      toolCalls: [],
+      toolResults: []
+    }));
+    expect(replay).toMatchObject({ status: "conflict", reason: "legacy_import_content_conflict" });
+    expect(new Repositories(db.db).memories.getIncludingDeleted(imported.id)).toMatchObject({ status: "activated" });
+    expect((db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count).toBe(0);
+  });
+
   it("does not reuse an old import from the same project and a different workspace", () => {
     const { db, service } = createTestService();
     const conversationId = "workspace-scope";

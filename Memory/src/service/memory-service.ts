@@ -690,6 +690,7 @@ export class MemoryService {
       maybeCreateDecisionRepair: this.feedbackExperience.maybeCreateDecisionRepair.bind(this.feedbackExperience),
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
       memorySearchEnabled: this.memorySearchEnabled.bind(this),
+      invalidateMemoryDependencies: this.evolutionJobs.invalidateMemoryDependencies.bind(this.evolutionJobs),
       observeToolNoWrite: this.observeToolNoWrite.bind(this),
       openSessionNoWrite: this.openSessionNoWrite.bind(this),
       pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
