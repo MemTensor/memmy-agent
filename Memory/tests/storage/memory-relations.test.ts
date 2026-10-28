@@ -20,7 +20,87 @@ function setup() {
   const episode = repos.runtime.getEpisode(turn.episodeId)!;
   return { ...fixture, repos, raw, trace, episode };
 }
+function withSpan() {
+  const fixture=setup(), {repos,raw,trace,episode}=fixture;
+  const span={...trace,id:"owned-span",memoryKey:"owned-span",info:{raw_turn_id:raw.id,episode_id:episode.id},
+    properties:{...trace.properties,internal_info:{memory_layer:"L1" as const,memory_kind:"span" as const,
+      span:{episode_id:episode.id,raw_turn_id:raw.id,source_trace_id:trace.id}}}};
+  repos.memories.insert(span);
+  const target={...episode,id:"span-target",l1MemoryIds:[],rawTurnIds:[],turnCount:0};
+  repos.runtime.createEpisode(target);
+  return {...fixture,span,target};
+}
 describe("declared memory relationships", () => {
+  it.each(["visible","redacted","deleted","missing"])("preserves moved spans through %s sources and deletes them with the current task",state=>{
+    const {db,service,repos,raw,trace,episode,span,target}=withSpan();
+    repos.runtime.rebindRawTurnEpisode(raw.id,episode.id,target.id);
+    expect(repos.memories.get(span.id)?.properties.internal_info.span).toMatchObject({episode_id:target.id});
+    // A historical stale span must still use the current raw/trace ownership.
+    db.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.span.episode_id',?) WHERE id=?").run(episode.id,span.id);
+    if(state==="missing")db.db.prepare("DELETE FROM raw_turns WHERE id=?").run(raw.id);
+    else if(state!=="visible")service.redactRawTurn(raw.id,{mode:state==="deleted"?"delete":"redact"});
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).not.toContain(span.id);
+    expect(repos.memories.get(span.id)).toBeDefined();
+    expect(repos.memories.get(trace.id)).toBeDefined();
+    const removed=service.deletePanelTask(target.id).deletedMemoryIds;
+    expect(removed).toEqual(expect.arrayContaining([trace.id,span.id]));
+    expect(repos.memories.getIncludingDeleted(span.id)?.deletedAt).toBeDefined();
+  });
+
+  it("uses a parent trace's current ownership for a legacy span without a direct raw reference",()=>{
+    const {service,repos,raw,trace,episode,span,target}=withSpan();
+    repos.memories.update({...span,info:{episode_id:episode.id},properties:{internal_info:{memory_layer:"L1",memory_kind:"span",span:{episode_id:episode.id,source_trace_id:trace.id}}}});
+    repos.runtime.rebindRawTurnEpisode(raw.id,episode.id,target.id);
+    expect(repos.memories.get(span.id)?.properties.internal_info.span).toMatchObject({episode_id:target.id});
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).not.toContain(span.id);
+    expect(service.deletePanelTask(target.id).deletedMemoryIds).toContain(span.id);
+    expect(repos.memories.getIncludingDeleted(span.id)?.deletedAt).toBeDefined();
+  });
+
+  it("rolls back all raw, trace and span ownership when rebinding fails",()=>{
+    const {db,repos,raw,trace,episode,span,target}=withSpan();
+    db.db.exec("CREATE TRIGGER fail_span_rebind BEFORE UPDATE ON memories WHEN new.id='owned-span' BEGIN SELECT RAISE(ABORT,'rebind failure'); END");
+    expect(()=>repos.runtime.rebindRawTurnEpisode(raw.id,episode.id,target.id)).toThrow("rebind failure");
+    expect(repos.runtime.getRawTurn(raw.id)?.episodeId).toBe(episode.id);
+    expect(repos.memories.get(trace.id)?.info.episode_id).toBe(episode.id);
+    expect(repos.memories.get(span.id)?.properties.internal_info.span).toMatchObject({episode_id:episode.id});
+    expect(repos.runtime.getEpisode(target.id)?.l1MemoryIds).toEqual([]);
+  });
+
+  it.each(["trace","raw"])("does not delete spans with a foreign %s owner",source=>{
+    const {service,repos,raw,trace,episode,span}=withSpan();
+    if(source==="trace"){
+      repos.memories.insert({...trace,id:"foreign-parent",memoryKey:"foreign-parent",userId:"other-owner"});
+      repos.memories.update({...span,properties:{...span.properties,internal_info:{...span.properties.internal_info,
+        span:{...span.properties.internal_info.span,source_trace_id:"foreign-parent"}}}});
+    }else{
+      repos.runtime.insertRawTurn({...raw,id:"foreign-source",turnId:"foreign-source",userId:"other-owner"});
+      repos.memories.update({...span,info:{...span.info,raw_turn_id:"foreign-source"},properties:{...span.properties,
+        internal_info:{...span.properties.internal_info,span:{...span.properties.internal_info.span,raw_turn_id:"foreign-source"}}}});
+    }
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).not.toContain(span.id);
+    expect(repos.memories.get(span.id)).toBeDefined();
+  });
+
+  it("rolls back span and trace deletion together if task deletion fails",()=>{
+    const {db,service,repos,raw,trace,episode,span}=withSpan();
+    db.db.exec("CREATE TRIGGER fail_span_task_delete BEFORE DELETE ON episodes BEGIN SELECT RAISE(ABORT,'delete failure'); END");
+    expect(()=>service.deletePanelTask(episode.id)).toThrow("delete failure");
+    for(const id of [span.id,trace.id]){
+      expect(repos.memories.get(id)).toBeDefined();
+      expect(repos.memories.getIncludingDeleted(id)?.deletedAt).toBeNull();
+    }
+    expect(repos.runtime.getRawTurn(raw.id)?.episodeId).toBe(episode.id);
+  });
+
+  it("does not rewrite another user's forged raw-turn references during rebind",()=>{
+    const {repos,raw,trace,episode,target}=withSpan();
+    repos.memories.insert({...trace,id:"foreign-rebind",memoryKey:"foreign-rebind",userId:"other-owner"});
+    const before=repos.memories.getIncludingDeleted("foreign-rebind");
+    repos.runtime.rebindRawTurnEpisode(raw.id,episode.id,target.id);
+    expect(repos.memories.getIncludingDeleted("foreign-rebind")).toEqual(before);
+  });
+
   it("moves effective L1 membership on raw-turn rebind while retaining old history", () => {
     const { db, repos, raw, trace, episode } = setup();
     const target = { ...episode, id: "target", l1MemoryIds: [], rawTurnIds: [], turnCount: 0 };

@@ -12,6 +12,37 @@ function deferred<T>() {
 }
 
 describe("panel request queue", () => {
+  it.each([false, true])("allows immediate same-key reentry after settlement (failed: %s)", async (failed) => {
+    const queue = new PanelRequestQueue(1);
+    const first = queue.request("same", async () => { if (failed) throw new Error("first failure"); return "first"; });
+    if (failed) {
+      try { await first; throw new Error("unexpected success"); }
+      catch (error) { expect((error as Error).message).toBe("first failure"); }
+    } else expect(await first).toBe("first");
+    expect(queue.idle).toBe(true);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([queue.request("same", async () => "second"),
+        new Promise(resolve => { timer = setTimeout(() => resolve("TIMEOUT"), 150); })])).toBe("second");
+      expect(queue.idle).toBe(true);
+    } finally { clearTimeout(timer); }
+  });
+
+  it("lets both completed subscribers immediately request their next shared key", async () => {
+    const queue = new PanelRequestQueue(1);
+    const source = deferred<string>();
+    const next = vi.fn(async () => "next");
+    const a = queue.request("same", () => source.promise).then(() => queue.request("same", next));
+    const b = queue.request("same", () => source.promise).then(() => queue.request("same", next));
+    source.resolve("first");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([Promise.all([a,b]), new Promise(resolve => { timer=setTimeout(()=>resolve("TIMEOUT"),150); })])).toEqual(["next","next"]);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(queue.idle).toBe(true);
+    } finally { clearTimeout(timer); }
+  });
+
   it("shares a request and preserves the remaining subscriber when another leaves", async () => {
     const queue = new PanelRequestQueue(1);
     const source = deferred<string>();

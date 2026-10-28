@@ -141,11 +141,29 @@ export function ownedEpisodeMemoryIds(
   episode: { id: string; userId: string; l1MemoryIds: string[] }
 ): string[] {
   if (!episode.l1MemoryIds.length) return [];
+  return selectOwnedL1Ids(db, episode, "m.id IN(SELECT value FROM json_each(?))", episode.l1MemoryIds);
+}
+
+/** Old split generations may be absent from a parent's latest span_ids. */
+export function ownedTaskSpanIds(db: Database.Database, userId: string, id: string, sourceTraceIds: string[]): string[] {
+  if (!sourceTraceIds.length) return [];
+  return selectOwnedL1Ids(db, {userId,id},
+    "json_extract(m.properties_json,'$.internal_info.memory_kind')='span' AND json_extract(m.properties_json,'$.internal_info.span.source_trace_id') IN(SELECT value FROM json_each(?))",
+    sourceTraceIds);
+}
+
+function selectOwnedL1Ids(db: Database.Database, episode: {userId:string;id:string}, selection: string, ids: string[]): string[] {
+  const traceRaw = RAW_SOURCE_SQL.replaceAll("m.", "t.");
+  const traceEpisode = EPISODE_SOURCE_SQL.replaceAll("m.", "t.");
   return db.prepare(`SELECT m.id FROM memories m
-    LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
-    WHERE m.id IN(SELECT value FROM json_each(?))
-      AND m.user_id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'
-      AND (r.id IS NULL OR r.user_id=m.user_id)
-      AND coalesce(r.episode_id,${EPISODE_SOURCE_SQL},?)=?
-    ORDER BY m.id`).pluck().all(JSON.stringify(episode.l1MemoryIds), episode.userId, episode.id, episode.id) as string[];
+    LEFT JOIN memories t ON t.id=CASE WHEN json_extract(m.properties_json,'$.internal_info.memory_kind')='span'
+      THEN json_extract(m.properties_json,'$.internal_info.span.source_trace_id') END
+    LEFT JOIN raw_turns r ON r.id=coalesce(${RAW_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.raw_turn_id'))
+    LEFT JOIN raw_turns tr ON tr.id=${traceRaw}
+    WHERE ${selection} AND m.user_id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'
+      AND (t.id IS NULL OR (t.user_id=m.user_id AND t.memory_layer='L1'))
+      AND (r.id IS NULL OR (r.user_id=m.user_id AND r.episode_id=?))
+      AND (tr.id IS NULL OR (tr.user_id=m.user_id AND tr.episode_id=?))
+      AND coalesce(tr.episode_id,r.episode_id,${traceEpisode},${EPISODE_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.episode_id'),?)=?
+    ORDER BY m.id`).pluck().all(JSON.stringify(ids),episode.userId,episode.id,episode.id,episode.id,episode.id) as string[];
 }

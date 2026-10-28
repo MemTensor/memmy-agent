@@ -1,7 +1,7 @@
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
-import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, RAW_SOURCE_SQL } from "./memory-relations.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL } from "./memory-relations.js";
 import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
@@ -808,19 +808,7 @@ export class MemoryRepository {
   }
 
   listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
-    // Parent traces may already be soft-deleted, and their span_ids only describe
-    // the latest split. Use the spans' own ownership links for task deletion.
-    const rows = this.db.prepare(
-      `SELECT id FROM memories
-       WHERE user_id = ? AND memory_layer = 'L1'
-         AND deleted_at IS NULL AND status != 'deleted'
-         AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
-         AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
-         AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
-           IN (SELECT value FROM json_each(?))
-       ORDER BY id`
-    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
-    return rows.map((row) => row.id);
+    return ownedTaskSpanIds(this.db, userId, episodeId, sourceTraceIds);
   }
 
   getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
@@ -2791,12 +2779,22 @@ export class RuntimeRepository {
       this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
       this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
       this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
-      const ids = this.db.prepare(`SELECT m.id FROM memories m WHERE ${RAW_SOURCE_SQL}=? AND m.memory_layer='L1'`).pluck().all(rawTurnId) as string[];
+      const spanRaw = `coalesce(${RAW_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.raw_turn_id'))`;
+      const parentRaw = RAW_SOURCE_SQL.replaceAll("m.", "t.");
+      const ids = this.db.prepare(`SELECT m.id FROM memories m
+        LEFT JOIN memories t ON t.id=CASE WHEN json_extract(m.properties_json,'$.internal_info.memory_kind')='span'
+          THEN json_extract(m.properties_json,'$.internal_info.span.source_trace_id') END
+        WHERE m.memory_layer='L1' AND m.user_id=?
+          AND (t.id IS NULL OR (t.user_id=m.user_id AND t.memory_layer='L1'))
+          AND (${spanRaw}=? OR (${spanRaw} IS NULL AND ${parentRaw}=?))
+        ORDER BY m.id`).pluck().all(fromEpisode.userId,rawTurnId,rawTurnId) as string[];
       for (const id of ids) {
         this.db.prepare(`UPDATE memories SET
           info_json=json_set(info_json,'$.episode_id',?),
-          properties_json=json_set(properties_json,'$.internal_info.trace.episode_id',?),
-          updated_at=?,version=version+1 WHERE id=?`).run(toEpisodeId,toEpisodeId,at,id);
+          properties_json=CASE WHEN json_extract(properties_json,'$.internal_info.memory_kind')='span'
+            THEN json_set(properties_json,'$.internal_info.trace.episode_id',?,'$.internal_info.span.episode_id',?)
+            ELSE json_set(properties_json,'$.internal_info.trace.episode_id',?) END,
+          updated_at=?,version=version+1 WHERE id=?`).run(toEpisodeId,toEpisodeId,toEpisodeId,toEpisodeId,at,id);
         maintainMemoryRelations(this.db,id);
         const policies=this.db.prepare("SELECT DISTINCT l2_memory_id FROM trace_policy_links WHERE l1_memory_id=?").pluck().all(id) as string[];
         for (const policyId of policies) maintainMemoryRelations(this.db,policyId);

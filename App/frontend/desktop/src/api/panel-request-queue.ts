@@ -1,7 +1,12 @@
+interface Subscriber<T> {
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+  detach: () => void;
+}
 interface Pending<T> {
   controller: AbortController;
   run: (signal: AbortSignal) => Promise<T>;
-  subscribers: Set<{ resolve: (value: T) => void; reject: (error: unknown) => void; detach: () => void }>;
+  subscribers: Set<Subscriber<T>>;
   started: boolean;
 }
 
@@ -67,20 +72,24 @@ export class PanelRequestQueue {
         })
         .then(
           (value) => {
-            for (const subscriber of task.subscribers) subscriber.resolve(value);
+            this.finish(key, task, (subscriber) => subscriber.resolve(value));
           },
           (error) => {
-            for (const subscriber of task.subscribers) subscriber.reject(error);
+            this.finish(key, task, (subscriber) => subscriber.reject(error));
           }
-        )
-        .finally(() => {
-          for (const subscriber of task.subscribers) subscriber.detach();
-          task.subscribers.clear();
-          if (this.pending.get(key) === task) this.pending.delete(key);
-          this.active--;
-          this.drain();
-        });
+        );
     }
+  }
+
+  private finish(key: string, task: Pending<unknown>, notify: (subscriber: Subscriber<unknown>) => void): void {
+    // A consumer can request the same key in its next microtask. Retire this
+    // execution completely before resolving/rejecting any of its subscribers.
+    if (this.pending.get(key) === task) this.pending.delete(key);
+    this.active--;
+    const subscribers = [...task.subscribers];
+    task.subscribers.clear();
+    for (const subscriber of subscribers) { subscriber.detach(); notify(subscriber); }
+    this.drain();
   }
 }
 

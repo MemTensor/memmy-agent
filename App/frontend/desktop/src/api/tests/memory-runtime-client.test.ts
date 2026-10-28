@@ -7,6 +7,19 @@ const runtimeConfig = {
 };
 
 describe("memory runtime client", () => {
+  it("completes consecutive public stats calls without retaining a settled queue entry", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({status:"preparing",serverTime:"2026-10-28T00:00:00Z"})));
+    vi.stubGlobal("fetch",fetchMock);
+    const client=createHttpMemoryRuntimeClient(runtimeConfig);
+    expect((await client.getPanelStats!()).status).toBe("preparing");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([client.getPanelStats!(),new Promise(resolve=>{timer=setTimeout(()=>resolve("TIMEOUT"),150);})]))
+        .toMatchObject({status:"preparing"});
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { clearTimeout(timer); }
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
