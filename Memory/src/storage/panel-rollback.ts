@@ -1,12 +1,15 @@
 import type Database from "better-sqlite3";
 import { getSchemaVersion } from "./schema.js";
 
-/** Explicit offline downgrade for v10's additive panel objects. Facts written
+export const PANEL_BASE_SCHEMA_VERSION = 13;
+const PANEL_SCHEMA_VERSION = 14;
+
+/** Explicit offline downgrade for v14's additive panel objects. Facts written
  * after upgrade remain intact; restoring the pre-upgrade backup would lose them. */
 export function rollbackPanelSchema(db: Database.Database): void {
   const version = getSchemaVersion(db).version;
-  if (version === 9) return;
-  if (version !== 10) throw new Error(`Panel rollback supports schema 10, received ${version}`);
+  if (version === PANEL_BASE_SCHEMA_VERSION) return;
+  if (version !== PANEL_SCHEMA_VERSION) throw new Error(`Panel rollback supports schema ${PANEL_SCHEMA_VERSION}, received ${version}`);
   db.transaction(() => {
     for (const name of [
       "idx_memories_panel_created",
@@ -23,9 +26,9 @@ export function rollbackPanelSchema(db: Database.Database): void {
       .all() as string[];
     for (const name of triggers) db.exec(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
     db.prepare("DELETE FROM runtime_kv WHERE key='panel_safety_token'").run();
-    db.prepare("DELETE FROM schema_migrations WHERE version=10").run();
+    db.prepare("DELETE FROM schema_migrations WHERE version=?").run(PANEL_SCHEMA_VERSION);
     db.prepare(
-      "INSERT INTO schema_migrations(id,version,applied_at,checksum) VALUES('009_token_usage_outbox',9,?,'panel-rollback') ON CONFLICT(id) DO NOTHING"
+      "INSERT INTO schema_migrations(id,version,applied_at,checksum) VALUES('013_embedding_retry_lease_counters',13,?,'panel-rollback') ON CONFLICT(id) DO NOTHING"
     ).run(new Date().toISOString());
   })();
 }

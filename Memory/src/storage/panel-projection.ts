@@ -16,7 +16,7 @@ const internalFields = [
   "source_trace_ids"
 ];
 const nestedFields: Record<string, string[]> = {
-  trace: ["title", "userText", "user_text", "value", "alpha", "reflection"],
+  trace: ["title", "summary", "userText", "user_text", "value", "alpha", "reflection"],
   policy: ["title", "procedure", "source_trace_ids"],
   world_model: ["title", "summary", "body"],
   skill: ["title", "name", "invocation_guide", "invocationGuide"],

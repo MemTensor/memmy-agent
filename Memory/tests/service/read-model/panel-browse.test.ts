@@ -85,7 +85,7 @@ describe("file-backed fixed panel browsing", () => {
   it("executes legacy task, detail and statistics contracts in a real readonly worker", async () => {
     const { service } = createTestService();
     const session = service.openSession({ namespace: { userId: "owner", source: "codex", profileId: "default" } });
-    const turn = service.completeTurn("turn", {
+    const turn = await service.completeTurn("turn", {
       sessionId: session.sessionId,
       query: "worker user",
       answer: "worker answer"

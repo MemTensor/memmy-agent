@@ -3,10 +3,49 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryDb } from "../../src/storage/db.js";
-import { rollbackPanelSchema } from "../../src/storage/panel-rollback.js";
+import { rollbackPanelSchema, PANEL_BASE_SCHEMA_VERSION } from "../../src/storage/panel-rollback.js";
 import { migrate, SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "../../src/storage/schema.js";
+import { Repositories } from "../../src/storage/repositories.js";
 
 describe("panel index migration", () => {
+  it("upgrades and rolls back v13 panel objects without changing queue claims or retry counters", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-queue-v13-"));
+    const path = join(root,"memory.sqlite");
+    let db: MemoryDb | undefined;
+    try {
+      db = new MemoryDb({path});
+      const repos = new Repositories(db.db), at = "2026-10-28T00:00:00.000Z";
+      repos.runtime.enqueueJob({id:"preserved-claim",jobType:"reflection",status:"queued",userId:"synthetic",attempts:0,maxAttempts:3,payload:{},createdAt:at,updatedAt:at});
+      repos.runtime.leaseQueuedJobs(1);
+      repos.runtime.enqueueEmbeddingRetry({targetKind:"trace",targetId:"retry-source",vectorField:"vec_summary",sourceText:"synthetic",now:Date.parse(at)});
+      repos.runtime.claimDueEmbeddingRetries({now:Date.parse(at),workerId:"synthetic-worker",leaseUntil:Date.parse(at)+60_000});
+      const capture = () => ({
+        jobs: db!.db.prepare("SELECT * FROM evolution_jobs ORDER BY id").all(),
+        retries: db!.db.prepare("SELECT * FROM embedding_retry_queue ORDER BY id").all(),
+        deadlines: db!.db.prepare("SELECT * FROM worker_deadline_revision ORDER BY singleton").all()
+      });
+      const before = capture();
+      rollbackPanelSchema(db.db);
+      expect(db.schemaVersion().version).toBe(13);
+      db.close();
+      db = new MemoryDb({path});
+      expect(db.schemaVersion().version).toBe(14);
+      expect(capture()).toEqual(before);
+      const backup = new MemoryDb({path:`${path}.pre-v14.bak`,readonly:true});
+      try { expect(backup.schemaVersion().version).toBe(13); }
+      finally { backup.close(); }
+      rollbackPanelSchema(db.db);
+      expect(db.schemaVersion().version).toBe(13);
+      expect(capture()).toEqual(before);
+      migrate(db.db);
+      expect(db.schemaVersion().version).toBe(14);
+      expect(capture()).toEqual(before);
+    } finally {
+      if(db?.db.open)db.close();
+      rmSync(root,{recursive:true,force:true});
+    }
+  });
+
   it("backs up an old file library and can reopen and repeat without changing facts", () => {
     const root = mkdtempSync(join(tmpdir(), "panel-migration-"));
     const path = join(root, "memory.sqlite");
@@ -78,13 +117,13 @@ describe("panel index migration", () => {
       db.db.prepare("INSERT INTO runtime_kv VALUES('new-fact','123','now')").run();
       rollbackPanelSchema(db.db);
       rollbackPanelSchema(db.db);
-      expect(db.schemaVersion().version).toBe(9);
+      expect(db.schemaVersion().version).toBe(PANEL_BASE_SCHEMA_VERSION);
       expect(db.db.prepare("SELECT value_json FROM runtime_kv WHERE key='new-fact'").pluck().get()).toBe("123");
       expect(
         db.db.prepare("SELECT name FROM sqlite_master WHERE name='idx_memories_panel_created'").get()
       ).toBeUndefined();
       migrate(db.db);
-      expect(db.schemaVersion().version).toBe(10);
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
       expect(db.db.prepare("SELECT value_json FROM runtime_kv WHERE key='new-fact'").pluck().get()).toBe("123");
     } finally {
       db.close();
@@ -104,11 +143,11 @@ describe("panel index migration", () => {
       const pages = Number(db.db.pragma("page_count", { simple: true }));
       db.db.pragma(`max_page_count=${pages}`);
       expect(() => migrate(db.db)).toThrow(/full/);
-      expect(db.schemaVersion().version).toBe(9);
+      expect(db.schemaVersion().version).toBe(PANEL_BASE_SCHEMA_VERSION);
       expect(db.db.prepare("SELECT count(*) FROM memories").pluck().get()).toBe(1500);
       db.db.pragma(`max_page_count=${pages + 1000}`);
       migrate(db.db);
-      expect(db.schemaVersion().version).toBe(10);
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
     } finally {
       db.close();
     }
@@ -121,14 +160,14 @@ describe("panel index migration", () => {
       const db = new MemoryDb({ path });
       rollbackPanelSchema(db.db);
       db.close();
-      writeFileSync(`${path}.pre-v10.bak`, "incomplete backup");
+      writeFileSync(`${path}.pre-v${SCHEMA_VERSION}.bak`, "incomplete backup");
       expect(() => new MemoryDb({ path })).toThrow();
       const original = new MemoryDb({ path, readonly: true });
-      expect(original.schemaVersion().version).toBe(9);
+      expect(original.schemaVersion().version).toBe(PANEL_BASE_SCHEMA_VERSION);
       original.close();
-      rmSync(`${path}.pre-v10.bak`);
+      rmSync(`${path}.pre-v${SCHEMA_VERSION}.bak`);
       const retry = new MemoryDb({ path });
-      expect(retry.schemaVersion().version).toBe(10);
+      expect(retry.schemaVersion().version).toBe(SCHEMA_VERSION);
       retry.close();
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -210,11 +210,11 @@ describe("stored memory -> panel/detail -> rendered trace title", () => {
     expect(detailFromMemory(stored).body).toContain(input);
   });
 
-  it("refreshes existing log summaries to empty without replacing missing records or span goals", () => {
+  it("refreshes live summaries, preserves an empty span goal fallback, and hides unavailable references", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "review-log" } });
-    const completed = service.completeTurn("preview-log-turn", { sessionId: session.sessionId, query: request, answer: "完成。" });
+    const completed = await service.completeTurn("preview-log-turn", { sessionId: session.sessionId, query: request, answer: "完成。" });
     const storedLog = db.db.prepare("SELECT output_json FROM api_logs WHERE tool_name = 'memory_add'").get() as { output_json: string };
     expect(JSON.parse(storedLog.output_json).details[0].summary).toBe("");
     const row = repos.memories.get(completed.l1MemoryId)!;
@@ -222,19 +222,24 @@ describe("stored memory -> panel/detail -> rendered trace title", () => {
     row.properties.internal_info.summary = "";
     (row.properties.internal_info.trace as Record<string, unknown>).summary = "";
     repos.memories.update(row);
+    const span = repos.memories.insert({ ...row, id: "review-log-span", memoryKey: "review-log-span",
+      properties: { ...row.properties, internal_info: { ...row.properties.internal_info, memory_kind: "span", span: {} } } });
     const log = service.apiLogs({ tools: ["memory_add"], limit: 1 }).logs[0]!;
     const output = JSON.parse(log.outputJson);
     output.details = [
       { role: "trace", traceId: row.id, summary: "旧标签摘要" },
-      { role: "trace", traceId: "missing", summary: "历史摘要" },
-      { role: "span", spanId: "missing_span", spanGoal: "历史目标" }
+      { role: "span", spanId: span.id, spanGoal: "历史目标" }
     ];
     db.db.prepare("UPDATE api_logs SET output_json = ? WHERE id = ?").run(JSON.stringify(output), log.id);
     const refreshed = JSON.parse(service.apiLogs({ tools: ["memory_add"], limit: 1 }).logs[0]!.outputJson);
     expect(refreshed.details).toEqual([
       { role: "trace", traceId: row.id, summary: "" },
-      { role: "trace", traceId: "missing", summary: "历史摘要" },
-      { role: "span", spanId: "missing_span", spanGoal: "历史目标" }
+      { role: "span", spanId: span.id, spanGoal: "历史目标" }
     ]);
+    output.details.push({ role: "trace", traceId: "missing", summary: "历史摘要" },
+      { role: "span", spanId: "missing_span", spanGoal: "历史目标" });
+    db.db.prepare("UPDATE api_logs SET output_json = ? WHERE id = ?").run(JSON.stringify(output), log.id);
+    expect(service.apiLogs({ tools: ["memory_add"], limit: 1 }).logs).toEqual([]);
+    await expect(service.readPanel("logDetail", [log.id])).rejects.toThrow("unavailable");
   });
 });

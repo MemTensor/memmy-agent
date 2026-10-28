@@ -5,26 +5,28 @@ import { PanelTaskDetailOutputSchema, PanelTaskSummariesOutputSchema } from "../
 const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(() => {
   vi.restoreAllMocks();
-  cleanup();
+  return cleanup();
 });
 
-function setup() {
+async function setup() {
   const fixture = createTestService();
   const namespace = { userId: "task-owner", source: "codex", profileId: "default" };
   const session = fixture.service.openSession({ namespace });
-  const first = fixture.service.completeTurn("first", {
+  const first = await fixture.service.completeTurn("first", {
     sessionId: session.sessionId,
     query: "First user request",
     answer: "First answer"
   });
   const repos = new Repositories(fixture.db.db);
-  const raw = repos.runtime.listRawTurnsByEpisode(first.episodeId)[0]!;
-  return { ...fixture, repos, raw, namespace, id: first.episodeId };
+  const id = first.episodeId;
+  if (!id) throw new Error("Fixture turn must be assigned to a task");
+  const raw = repos.runtime.listRawTurnsByEpisode(id)[0]!;
+  return { ...fixture, repos, raw, namespace, id };
 }
 
 describe("bounded panel task reads", () => {
-  it("returns an explicit summary without reading dialogue objects and keeps legacy turns", () => {
-    const { service, raw, repos, id } = setup();
+  it("returns an explicit summary without reading dialogue objects and keeps legacy turns", async () => {
+    const { service, raw, repos, id } = await setup();
     repos.runtime.updateRawTurn({ ...raw, toolCalls: [{ name: "test", input: "x".repeat(7_000_000) }] });
     const read = vi.spyOn(RuntimeRepository.prototype, "listRawTurnsByEpisode").mockImplementation(() => {
       throw new Error("eager turns");
@@ -43,8 +45,8 @@ describe("bounded panel task reads", () => {
     expect(service.panelTasks({}).tasks[0]?.turns).toHaveLength(1);
   });
 
-  it("paginates same-timestamp turns without duplicates and bounds huge text and tool payloads", () => {
-    const { service, repos, raw, id } = setup();
+  it("paginates same-timestamp turns without duplicates and bounds huge text and tool payloads", async () => {
+    const { service, repos, raw, id } = await setup();
     for (let i = 0; i < 45; i++)
       repos.runtime.insertRawTurn({
         ...raw,
@@ -72,8 +74,8 @@ describe("bounded panel task reads", () => {
     expect(() => service.panelTaskDetail(id, { cursor: "garbage" })).toThrow("Invalid task turn cursor");
   });
 
-  it("reconstructs full Unicode fields and rejects changed, redacted or invisible content", () => {
-    const { service, repos, raw, id } = setup();
+  it("reconstructs full Unicode fields and rejects changed, redacted or invisible content", async () => {
+    const { service, repos, raw, id } = await setup();
     const content = "正文😀".repeat(6000);
     repos.runtime.updateRawTurn({ ...raw, userText: content });
     let page = service.panelTaskField(id, raw.id, "userText", {});
@@ -100,8 +102,8 @@ describe("bounded panel task reads", () => {
     expect(() => service.panelTaskField(id, raw.id, "userText", {})).toThrow("unavailable");
     expect(service.panelTaskDetail(id, {}).turns).toHaveLength(0);
   });
-  it("lists tool descriptions and reads one large tool without mixing revisions", () => {
-    const { service, repos, raw, id } = setup();
+  it("lists tool descriptions and reads one large tool without mixing revisions", async () => {
+    const { service, repos, raw, id } = await setup();
     const large = { name: "large", id: "tool-a", output: "数据😀".repeat(3000) };
     repos.runtime.updateRawTurn({ ...raw, toolCalls: [large, { name: "small", id: "tool-b", input: "small" }] });
     const detail = service.panelTaskDetail(id, {});
@@ -123,8 +125,8 @@ describe("bounded panel task reads", () => {
     expect(() => service.panelTaskField(id, raw.id, "toolCalls", { toolId: tools[0]!.id })).toThrow("changed");
   });
 
-  it("reads 1000 turns and reconstructs a 7 MB tool within bounded responses", () => {
-    const { service, repos, raw, id } = setup();
+  it("reads 1000 turns and reconstructs a 7 MB tool within bounded responses", async () => {
+    const { service, repos, raw, id } = await setup();
     repos.db.transaction(() => {
       for (let i = 0; i < 999; i++)
         repos.runtime.insertRawTurn({

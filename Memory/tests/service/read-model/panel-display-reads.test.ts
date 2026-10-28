@@ -4,12 +4,12 @@ import { SqliteVecStore } from "../../../src/storage/sqlite-vec-store.js";
 import { attachMemoryVector, memoryVectorEntries } from "../../../src/storage/memory-vector-state.js";
 import { panelListItemFromMemory } from "../../../src/service/read-model/panel.js";
 import type { MemoryLayer, MemoryRow } from "../../../src/types.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { createBatchReflectionLlm, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(() => {
   vi.restoreAllMocks();
-  cleanup();
+  return cleanup();
 });
 
 function memory(id: string, layer: MemoryLayer = "L1"): MemoryRow {
@@ -47,6 +47,18 @@ function memory(id: string, layer: MemoryLayer = "L1"): MemoryRow {
 }
 
 describe("panel display reads", () => {
+  it("reads an unassigned session timeline without hydrating vectors", async () => {
+    const { service } = createTestService({llm:createBatchReflectionLlm([])});
+    const session=service.openSession({namespace:{userId:"pending-display",source:"codex",profileId:"default"}});
+    const turn=await service.completeTurn("pending-display-turn",{sessionId:session.sessionId,query:"Pending task display",answer:"Stored before assignment"});
+    expect(turn.episodeId).toBeUndefined();
+    const vectors=vi.spyOn(SqliteVecStore.prototype,"getMany").mockImplementation(()=>{throw new Error("timeline hydrated vectors");});
+    const timeline=service.timeline({sessionId:session.sessionId,layers:["L1"]});
+    expect(timeline.items.map(item=>item.id)).toContain(turn.l1MemoryId);
+    expect(timeline.rawTurns?.map(raw=>raw.rawTurnId)).toContain(turn.rawTurnId);
+    expect(vectors).not.toHaveBeenCalled();
+  });
+
   it("keeps old display fallbacks for every layer while excluding unrelated JSON and vectors", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
@@ -94,17 +106,18 @@ describe("panel display reads", () => {
     ).toContain("trace_legacy");
   });
 
-  it("reads lists, evidence, detail, episode timeline and logs without a vector query", () => {
+  it("reads lists, evidence, detail, episode timeline and logs without a vector query", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const session = service.openSession({
       namespace: { source: "codex", userId: "display-user", profileId: "default" }
     });
-    const turn = service.completeTurn("display-turn", {
+    const turn = await service.completeTurn("display-turn", {
       sessionId: session.sessionId,
       query: "Need evidence text",
       answer: "Complete answer"
     });
+    if (!turn.episodeId) throw new Error("Fixture turn must be assigned to a task");
     const trace = repos.memories.get(turn.l1MemoryId)!;
     repos.memories.update(attachMemoryVector(trace, { vectorField: "vec_summary", vector: [1, 0] }));
     repos.memories.insert({

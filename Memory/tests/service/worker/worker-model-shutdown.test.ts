@@ -1,10 +1,29 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemoryModelTaskRouter } from "../../../src/model/task-routing.js";
 import { createBatchReflectionLlm, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 describe("MemoryService model business shutdown", () => {
+  it("waits for both the panel reader and foreground business before stopping", async () => {
+    const { db, service } = createTestService();
+    let releaseReader!:()=>void, releaseBusiness!:()=>void;
+    const readerGate = new Promise<void>(resolve=>{releaseReader=resolve;});
+    const businessGate = new Promise<void>(resolve=>{releaseBusiness=resolve;});
+    const readerStop = vi.fn(()=>readerGate);
+    (service as unknown as {panelReader:{stop:()=>Promise<void>}}).panelReader={stop:readerStop};
+    const tasks = (service as unknown as {modelTasks:MemoryModelTaskRouter}).modelTasks;
+    const business = tasks.run(async()=>{await businessGate;db.db.prepare("SELECT 1").get();});
+    await tick();
+    let completed = false;
+    const stop=service.stop().then(()=>{completed=true;});
+    try {
+      expect(readerStop).toHaveBeenCalledTimes(1);
+      releaseBusiness();await business;await tick();expect(completed).toBe(false);
+      releaseReader();await stop;expect(completed).toBe(true);
+    } finally { releaseBusiness();releaseReader();await Promise.all([business,stop]); }
+  });
+
   it("rejects foreground shutdown reentry without stopping the service", async () => {
     const llm = createBatchReflectionLlm([]);
     const { service } = createTestService({ llm });

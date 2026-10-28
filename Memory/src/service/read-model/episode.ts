@@ -203,7 +203,7 @@ export class EpisodeReadModel {
         ...(timelineEpisodes ?? []).flatMap(episode => timelineMemoryIdsForEpisode(episode, new Set(layers))),
         ...pending.flatMap(turn => this.deps.repos.runtime.l1MemoryIdsForRawTurn(turn.id))
       ]);
-      items = this.deps.repos.memories.getMany(ids)
+      items = this.deps.repos.memories.getManyForDisplay(ids)
         .filter(memory => layers.includes(memory.memoryLayer) && this.deps.memoryMatchesTags(memory, input.tags))
         .sort((a, b) => this.deps.traceSortKey(a) - this.deps.traceSortKey(b) || a.id.localeCompare(b.id))
         .slice(cursor, cursor + limit).map(memory => this.deps.repos.memories.toListItem(memory));

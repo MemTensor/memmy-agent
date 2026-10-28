@@ -73,10 +73,11 @@ describe("panel logs", () => {
     });
     expect(JSON.parse(reader.list({tools:["memory_search"]}).logs[0]!.outputJson).stats).toEqual({ ranked: 3, finalReturned: 2 });
   });
-  it("does not resurrect deleted or redacted trace content through log detail", () => {
+  it("does not resurrect deleted or redacted trace content through log detail", async () => {
     const {db, service} = createTestService(); const reader = new PanelLogReader(db.db);
     const session = service.openSession({namespace:{userId:"owner",source:"codex",profileId:"default"}});
-    const turn = service.completeTurn("log-turn", {sessionId:session.sessionId,query:"private question",answer:"private answer"});
+    const turn = await service.completeTurn("log-turn", {sessionId:session.sessionId,query:"private question",answer:"private answer"});
+    if (!turn.episodeId) throw new Error("Fixture turn must be assigned to a task");
     const log = reader.list({tools:["memory_add"]}).logs[0]!;
     expect(reader.detail(log.id).outputJson).toContain("private answer");
     service.redactRawTurn(turn.rawTurnId);

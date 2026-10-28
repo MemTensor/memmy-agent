@@ -23,7 +23,8 @@ import {
   createCapturingEmbedder,
   createBatchReflectionLlm,
   createMemoryServiceFixture,
-  runWorkerRounds
+  runWorkerRounds,
+  settleCaptureAssignments
 } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -59,12 +60,14 @@ describe("MemoryService / evolution / policy induction", () => {
       embedder: createCapturingEmbedder([])
     });
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "late-l2" } });
-    const turn = service.completeTurn("late-turn", {
+    const turn = await service.completeTurn("late-turn", {
       sessionId: session.sessionId,
       query: "pytest failure workflow",
       answer: "run focused tests and inspect migration output",
       toolCalls: [{ name: "shell", input: { cmd: "npm test" }, output: "ok", success: true }]
     });
+    await settleCaptureAssignments(service);
+    const episodeId = assignedEpisodeId(service, turn);
     changeEvidence = () => {
       if (change === "delete") service.deleteMemory(turn.l1MemoryId);
       else if (change === "redact") service.redactRawTurn(turn.rawTurnId);
@@ -77,7 +80,7 @@ describe("MemoryService / evolution / policy induction", () => {
     expect(calls.some(call => call.options.operation === "l2.induction.v4")).toBe(true);
     expect(db.db.prepare("SELECT id FROM memories WHERE memory_layer='L2'").all()).toEqual([]);
     expect(db.db.prepare("SELECT id FROM trace_policy_links").all()).toEqual([]);
-    expect(db.db.prepare("SELECT l2_policy_ids_json AS ids FROM episodes WHERE id=?").get(turn.episodeId)).toEqual({ ids: "[]" });
+    expect(db.db.prepare("SELECT l2_policy_ids_json AS ids FROM episodes WHERE id=?").get(episodeId)).toEqual({ ids: "[]" });
   });
   it("[BC-08] keeps task-linked feedback in both branches and activates its candidate Policy only after new successful evidence", async () => {
     const { db, service } = createTestService({

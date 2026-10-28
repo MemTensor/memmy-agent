@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MemoryDb, SCHEMA_MIGRATION_ID, SCHEMA_VERSION } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import { TokenUsageOutbox } from "../../src/storage/token-usage-outbox.js";
-import { SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "../../src/storage/schema.js";
 
 const roots: string[] = [];
 
