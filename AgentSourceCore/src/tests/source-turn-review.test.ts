@@ -121,6 +121,87 @@ describe("review regressions for native source turns", () => {
     expect(result.turn?.answer).toBe("Configuration inspected.");
   });
 
+  it("stops a Cursor turn at an untyped user bubble from the next request", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Check the latest instance.", createdAt: t, requestId: "req-1" },
+      a: { type: 2, text: "The latest instance is running normally.", createdAt: t, requestId: "req-1" },
+      hidden: { type: 1, text: "", createdAt: "2099-01-01T10:01:00.000Z", requestId: "req-2" },
+      unrelated: { type: 2, text: "Updated an unrelated README.", createdAt: "2099-01-01T10:01:01.000Z", requestId: "req-2" }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({
+        status: "completed",
+        fullConversationHeadersOnly: Object.entries(bubbles).map(([bubbleId, bubble]) => ({
+          bubbleId,
+          type: bubble.type
+        }))
+      }),
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req-1" });
+    expect(result.turn?.answer).toBe("The latest instance is running normally.");
+    expect(result.turn?.completionEvidence).toBe("assistant_text:a");
+  });
+
+  it("keeps Cursor progress and tools that share the turn request id", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Inspect the repository.", createdAt: t, requestId: "req" },
+      progress: { type: 2, text: "I will inspect it first.", createdAt: t, requestId: "req" },
+      tool: {
+        type: 2,
+        createdAt: t,
+        requestId: "req",
+        toolFormerData: { toolCallId: "call", name: "read", status: "completed", result: "ok" }
+      },
+      answer: { type: 2, text: "Inspection completed.", createdAt: t, requestId: "req" }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({
+        status: "completed",
+        fullConversationHeadersOnly: Object.entries(bubbles).map(([bubbleId, bubble]) => ({
+          bubbleId,
+          type: bubble.type
+        }))
+      }),
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
+    expect(result.turn?.answer).toBe("Inspection completed.");
+    expect(result.turn?.toolCalls).toHaveLength(1);
+    expect(result.turn?.toolResults).toHaveLength(1);
+  });
+
+  it("does not split a Cursor turn when assistant and tool request ids differ", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Inspect the repository.", createdAt: t, requestId: "req-user" },
+      progress: { type: 2, text: "I will inspect it first.", createdAt: t, requestId: "req-progress" },
+      tool: {
+        type: 2,
+        createdAt: t,
+        requestId: "req-tool",
+        toolFormerData: { toolCallId: "call", name: "read", status: "completed", result: "ok" }
+      },
+      answer: { type: 2, text: "Inspection completed.", createdAt: t, requestId: "req-answer" }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({
+        status: "completed",
+        fullConversationHeadersOnly: Object.entries(bubbles).map(([bubbleId, bubble]) => ({
+          bubbleId,
+          type: bubble.type
+        }))
+      }),
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req-user" });
+    expect(result.turn?.answer).toBe("Inspection completed.");
+    expect(result.turn?.toolCalls).toHaveLength(1);
+    expect(result.turn?.toolResults).toHaveLength(1);
+  });
+
   it("keeps an OpenCode turn on the user message agent after session.agent changes", async () => {
     const messages = () => [
       { id: "u", data: { role: "user", agent: "build", time: { created: 4_070_944_800_000 } } },
