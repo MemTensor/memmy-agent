@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { isUnsupportedPanelRoute } from "../../api/memory-runtime-client.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 
 /** Warm one lightweight first page at a time, only after visible work is idle. */
@@ -18,20 +19,46 @@ export function usePanelPrefetch(client: MemoryRuntimeClient | null, current: st
       "user-memories": "UserMemory"
     };
     const remaining = sections.filter((section) => section !== mapped[current]);
+    let warmOverviewStats = Boolean(client.getPanelOverviewStats);
+    let warmAnalysis = Boolean(client.getPanelStats);
+    const previewInterval = client.getPanelOverviewStats ? 250 : 2000;
     async function next() {
-      if (stopped || document.hidden || !remaining.length) return;
+      if (stopped || document.hidden) return;
+      if (warmOverviewStats && client!.getPanelOverviewStats) {
+        try {
+          const snapshot = current === "analysis" && client!.getPanelStats
+            ? await client!.getPanelStats()
+            : await client!.getPanelOverviewStats();
+          if (stopped) return;
+          if (snapshot.status === "preparing") {
+            timer = setTimeout(next, 2000);
+            return;
+          }
+        } catch (error) {
+          if (!isUnsupportedPanelRoute(error)) return;
+        }
+        warmOverviewStats = false;
+      }
+      if (!remaining.length) {
+        if (warmAnalysis) {
+          warmAnalysis = false;
+          try { await client!.getPanelStats!(); } catch { /* Best effort warmup. */ }
+        }
+        return;
+      }
       try {
-        await client!.prefetchPanel!(remaining.shift()!, controller.signal);
+        const warmed = await client!.prefetchPanel!(remaining[0]!, controller.signal);
+        if (warmed !== false) remaining.shift();
       } catch {
         return;
       } // No prefetch retries or startup request burst.
-      if (!stopped) timer = setTimeout(next, 2000);
+      if (!stopped) timer = setTimeout(next, previewInterval);
     }
     const visibility = () => {
       clearTimeout(timer);
-      if (!document.hidden && !stopped) timer = setTimeout(next, 2000);
+      if (!document.hidden && !stopped) timer = setTimeout(next, warmOverviewStats ? 250 : 2000);
     };
-    timer = setTimeout(next, 2000);
+    timer = setTimeout(next, warmOverviewStats ? 250 : 2000);
     document.addEventListener("visibilitychange", visibility);
     return () => {
       stopped = true;

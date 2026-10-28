@@ -1,6 +1,7 @@
 import type { PanelTaskCheckOutput } from "@memmy/local-api-contracts";
 import type {PanelLogsInput,PanelLogsOutput,PanelLogDetailOutput} from "@memmy/local-api-contracts";
 import type {PanelStatsOutput} from "@memmy/local-api-contracts";
+import type {PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
 import type { PanelBrowseInput, PanelBrowseOutput } from "@memmy/local-api-contracts";
 import type { PanelTaskSummariesOutput, PanelTaskDetailOutput, PanelTaskFieldInput, PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 /** Panel service module. */
@@ -27,6 +28,7 @@ export interface PanelService {
   logs(input:PanelLogsInput,ctx:RuntimeContext):Promise<PanelLogsOutput>;
   logDetail(id:number,ctx:RuntimeContext):Promise<PanelLogDetailOutput>;
   stats(ctx:RuntimeContext):Promise<PanelStatsOutput>;
+  overviewStats(ctx:RuntimeContext):Promise<PanelOverviewStatsOutput>;
   browse(input:PanelBrowseInput,ctx:RuntimeContext):Promise<PanelBrowseOutput>;
   taskSummaries(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTaskSummariesOutput>;
   taskCheck(id: string, ctx: RuntimeContext): Promise<PanelTaskCheckOutput>;
@@ -56,6 +58,7 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
     async logs(input,ctx) {return deps.memoryClient.panelLogs(input,context(ctx));},
     async logDetail(id,ctx) {return deps.memoryClient.panelLogDetail(id,context(ctx));},
     async stats(ctx) {return deps.memoryClient.panelStats(context(ctx));},
+    async overviewStats(ctx) {return deps.memoryClient.panelOverviewStats(context(ctx));},
     async browse(input,ctx) {
       // Section travels on each call so task views keep the established device scope.
       return deps.memoryClient.panelBrowse(input,input.filter?.section === "tasks" ? {...ctx,userId:undefined} : context(ctx));

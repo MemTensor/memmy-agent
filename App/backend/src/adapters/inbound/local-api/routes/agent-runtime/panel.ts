@@ -55,6 +55,7 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
     return reply.send(await deps.services.panel.logDetail(id,panelRequestContext(request,reply,deps.timeZone)));
   }));
   app.get("/api/v1/panel/stats",{preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>reply.send(await deps.services.panel.stats(panelRequestContext(request,reply,deps.timeZone)))));
+  app.get("/api/v1/panel/overview-stats",{preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>reply.send(await deps.services.panel.overviewStats(panelRequestContext(request,reply,deps.timeZone)))));
   app.post("/api/v1/panel/browse", {preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>{
     return reply.send(await deps.services.panel.browse(PanelBrowseInputSchema.parse(request.body),panelRequestContext(request,reply,deps.timeZone)));
   }));

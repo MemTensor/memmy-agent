@@ -33,3 +33,25 @@ describe("statistics failure lifecycle", () => {
     } finally { await act(async () => root.unmount()); }
   });
 });
+
+it("loads the dedicated overview without waiting for analysis and does not downgrade denial", async () => {
+  vi.useFakeTimers();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const getPanelOverviewStats = vi.fn().mockResolvedValueOnce({status: "ready", data: {count: 42}})
+    .mockRejectedValue(new ApiRequestError("denied", 403));
+  const getPanelStats = vi.fn();
+  const client = createMemoryRuntimeClientStub({getPanelOverviewStats, getPanelStats});
+  function Fixture() {
+    const {state} = usePanelStats(client, "overview", async () => ({count: 0}));
+    return <div>{JSON.stringify(state)}</div>;
+  }
+  try {
+    await act(async () => root.render(<Fixture/>));
+    expect(container.textContent).toContain('"count":42');
+    expect(getPanelStats).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(container.textContent).not.toContain('"count":42');
+    expect(getPanelStats).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); }
+});

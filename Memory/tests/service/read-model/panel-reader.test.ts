@@ -26,6 +26,7 @@ describe("bounded readonly executor", () => {
       const foreground = reader.run<string[]>("members", [{ layer: "L1" }]);
       expect((await foreground).data.length).toBe(expected.overview.counts.memories);
       expect((await stats).data).toEqual(expected);
+      expect((await reader.run("overviewStats", [input], 1)).data).toEqual(expected.overview);
       expect((await reader.run("stats", [input], 1)).data).toEqual(expected);
     } finally {
       await reader.stop();

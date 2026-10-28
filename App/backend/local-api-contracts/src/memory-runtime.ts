@@ -922,6 +922,8 @@ export type PanelBrowseOutput = z.infer<typeof PanelBrowseOutputSchema>;
 
 export const PanelStatsOutputSchema=z.object({status:z.enum(["preparing","ready","error"]),data:z.object({overview:PanelOverviewOutputSchema,analysis:PanelAnalysisOutputSchema}).optional(),generatedAt:IsoTimeSchema.optional(),error:z.string().optional(),serverTime:IsoTimeSchema});
 export type PanelStatsOutput=z.infer<typeof PanelStatsOutputSchema>;
+export const PanelOverviewStatsOutputSchema=z.object({status:z.enum(["preparing","ready","error"]),data:PanelOverviewOutputSchema.optional(),generatedAt:IsoTimeSchema.optional(),error:z.string().optional(),serverTime:IsoTimeSchema});
+export type PanelOverviewStatsOutput=z.infer<typeof PanelOverviewStatsOutputSchema>;
 
 /** Schema for deleting a task from the memory panel. */
 export const DeletePanelTaskOutputSchema = z.object({

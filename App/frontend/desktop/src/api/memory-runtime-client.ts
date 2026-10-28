@@ -1,6 +1,6 @@
 import { PanelTaskCheckOutputSchema, type PanelTaskCheckOutput } from "@memmy/local-api-contracts";
 import {PanelLogsOutputSchema,PanelLogDetailOutputSchema,type PanelLogsInput,type PanelLogsOutput,type PanelLogDetailOutput} from "@memmy/local-api-contracts";
-import {PanelStatsOutputSchema,type PanelStatsOutput} from "@memmy/local-api-contracts";
+import {PanelStatsOutputSchema,PanelOverviewStatsOutputSchema,type PanelStatsOutput,type PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
 import { PanelBrowseClient } from "./panel-browse-client.js";
 import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
 import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema, type PanelTaskSummariesOutput, type PanelTaskDetailOutput, type PanelTaskFieldInput, type PanelTaskFieldOutput } from "@memmy/local-api-contracts";
@@ -92,6 +92,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/memory/logs",
   "POST /api/v1/panel/browse",
   "GET /api/v1/panel/stats",
+  "GET /api/v1/panel/overview-stats",
   "POST /api/v1/panel/logs",
   "GET /api/v1/panel/logs/:id",
   "GET /api/v1/panel/overview",
@@ -106,10 +107,11 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
 ] as const;
 
 export interface MemoryRuntimeClient {
-  prefetchPanel?(section:string,signal:AbortSignal):Promise<void>;
+  prefetchPanel?(section:string,signal:AbortSignal):Promise<boolean | void>;
   listPanelLogs?(input:PanelLogsInput):Promise<PanelLogsOutput>;
   getPanelLogDetail?(id:number):Promise<PanelLogDetailOutput>;
   getPanelStats?():Promise<PanelStatsOutput>;
+  getPanelOverviewStats?():Promise<PanelOverviewStatsOutput>;
   resetPanelView?(section?:string):void;
   refreshPanelView?(section:string):void;
   checkPanelView?(section:string):Promise<{updated:boolean}>;
@@ -149,13 +151,16 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
   ), isUnsupportedPanelRoute);
   return {
     async prefetchPanel(section,signal) {
-      if (!panelQueue.idle || !browse.idle || browse.hasView(section)) return;
+      if (browse.hasView(section)) return true;
+      if (!panelQueue.idle || !browse.idle) return false;
       const input = section === "tasks" ? {page:1} : {layer:section as PanelItemsInput["layer"],page:1};
       await browse.list(section,input,signal);
+      return true;
     },
     listPanelLogs:input=>panelQueue.request(`panel:logs:${JSON.stringify(input)}`,signal=>requestJson({config,path:"/api/v1/panel/logs",schema:PanelLogsOutputSchema,body:input,init:{signal}})),
     getPanelLogDetail:id=>panelQueue.request(`panel:log:${id}`,signal=>requestJson({config,path:`/api/v1/panel/logs/${id}`,schema:PanelLogDetailOutputSchema,init:{signal}})),
     getPanelStats:()=>panelQueue.request("panel:stats",signal=>requestJson({config,path:"/api/v1/panel/stats",schema:PanelStatsOutputSchema,init:{signal}})),
+    getPanelOverviewStats:()=>panelQueue.request("panel:overview-stats",signal=>requestJson({config,path:"/api/v1/panel/overview-stats",schema:PanelOverviewStatsOutputSchema,init:{signal}})),
     resetPanelView: section => { if (!section) panelQueue.clear(); browse.reset(section); },
     refreshPanelView: section => browse.refresh(section),
     checkPanelView: section => browse.check(section),

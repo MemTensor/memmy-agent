@@ -28,7 +28,7 @@ export class PanelReader {
   run<T>(method: string, args: unknown[], priority = 0, signal?: AbortSignal): Promise<Result<T>> {
     if (this.closed) return Promise.reject(new Error("Panel reader stopped"));
     if (signal?.aborted) return Promise.reject(abortError());
-    const interruptStats = this.active?.method === "stats" && priority < this.active.priority;
+    const interruptStats = isStatisticsMethod(this.active?.method) && priority < this.active!.priority;
     if (this.pending.length + (interruptStats ? 1 : 0) >= 32)
       return Promise.reject(new MemoryServiceError("rate_limited", "Panel reader is busy"));
     return new Promise<Result<unknown>>((resolve, reject) => {
@@ -59,7 +59,7 @@ export class PanelReader {
   private yieldStatistics() {
     const active = this.active;
     const worker = this.worker;
-    if (!active || active.method !== "stats" || !worker) return;
+    if (!active || !isStatisticsMethod(active.method) || !worker) return;
     clearTimeout(this.timer);
     this.active = undefined;
     this.worker = undefined;
@@ -134,6 +134,10 @@ export class PanelReader {
     this.fail(new Error("Panel reader stopped"));
     await this.stopping;
   }
+}
+
+function isStatisticsMethod(method: string | undefined): boolean {
+  return method === "stats" || method === "overviewStats";
 }
 function abortError() {
   return new DOMException("Panel request cancelled", "AbortError");

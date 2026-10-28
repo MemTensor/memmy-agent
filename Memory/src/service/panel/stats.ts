@@ -3,13 +3,13 @@ import { resolveTimeZone } from "../../utils/time.js";
 import { panelDateKey } from "../read-model/model-costs.js";
 import type { RequestEnvelope } from "../../types.js";
 type StatsInput = RequestEnvelope & { userId?: string };
-type Data = {
+export type PanelStatsData = {
   overview: ReturnType<PanelReadModel["panelOverviewSummary"]>;
   analysis: ReturnType<PanelReadModel["panelAnalysis"]>;
 };
-interface Entry {
+interface Entry<TData> {
   input: StatsInput;
-  data?: Data;
+  data?: TData;
   generatedAt?: string;
   safety: string;
   running: boolean;
@@ -20,11 +20,11 @@ interface Entry {
   disposed: boolean;
   generation: number;
 }
-export class PanelStats {
-  private entries = new Map<string, Entry>();
+export class PanelStats<TData = PanelStatsData> {
+  private entries = new Map<string, Entry<TData>>();
   private stopped = false;
   constructor(
-    private readonly read: (input: StatsInput) => Promise<{ safety: string; data: Data }>,
+    private readonly read: (input: StatsInput) => Promise<{ safety: string; data: TData }>,
     private readonly safety: () => string
   ) {}
   get(input: StatsInput) {
@@ -64,7 +64,7 @@ export class PanelStats {
   private day(timeZone?: string) {
     return panelDateKey(new Date().toISOString(), resolveTimeZone(timeZone));
   }
-  private validate(entry: Entry) {
+  private validate(entry: Entry<TData>) {
     const safety = this.safety();
     const day = this.day(entry.input.timeZone);
     if (entry.safety !== safety || entry.day !== day) {
@@ -77,7 +77,7 @@ export class PanelStats {
       entry.lastAttempt = undefined;
     }
   }
-  private generate(entry: Entry) {
+  private generate(entry: Entry<TData>) {
     if (this.stopped || entry.disposed || entry.running) return;
     this.validate(entry);
     entry.running = true;
@@ -107,7 +107,7 @@ export class PanelStats {
         }
       });
   }
-  private dispose(entry: Entry) {
+  private dispose(entry: Entry<TData>) {
     entry.disposed = true;
     entry.generation++;
     clearTimeout(entry.timer);

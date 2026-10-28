@@ -1,6 +1,7 @@
 import { PanelTaskCheckOutputSchema } from "@memmy/local-api-contracts";
 import {PanelLogsOutputSchema,PanelLogDetailOutputSchema} from "@memmy/local-api-contracts";
 import {PanelStatsOutputSchema} from "@memmy/local-api-contracts";
+import {PanelOverviewStatsOutputSchema} from "@memmy/local-api-contracts";
 import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
 import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema } from "@memmy/local-api-contracts";
 /** Http memory client module. */
@@ -300,6 +301,7 @@ export function createHttpMemoryClient(
     async panelLogs(input,context) {return request("POST","panelLogs",PanelLogsOutputSchema,{body:input,context,maxRetries:0});},
     async panelLogDetail(id,context) {return request("GET","panelLogDetail",PanelLogDetailOutputSchema,{params:{id:String(id)},context,maxRetries:0});},
     async panelStats(context) {return request("GET","panelStats",PanelStatsOutputSchema,{context,maxRetries:0});},
+    async panelOverviewStats(context) {return request("GET","panelOverviewStats",PanelOverviewStatsOutputSchema,{context,maxRetries:0});},
     async panelBrowse(input,context) {
       return request("POST","panelBrowse",PanelBrowseOutputSchema,{body:input,context,maxRetries:0});
     },

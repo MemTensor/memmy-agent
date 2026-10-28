@@ -98,6 +98,7 @@ export const API_ROUTES = [
   "POST /api/v1/worker/import-summaries/enqueue",
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
+  "GET /api/v1/panel/overview-stats",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
@@ -599,6 +600,11 @@ async function routeRequest(
   const path = url.pathname;
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
+    // Desktop health checks establish the authenticated scope before the panel
+    // opens. Start its bounded background cache without awaiting aggregation.
+    if ((principal.kind === "local" || principal.kind === "cloud") && principal.timeZone) {
+      service.panelOverviewStatsSnapshot({ namespace: principal.namespace, timeZone: principal.timeZone });
+    }
     return service.health([...API_ROUTES]);
   }
   if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
@@ -1048,6 +1054,10 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/panel/stats") {
     requirePanelRead(principal);
     return service.panelStatsSnapshot({namespace:principal.namespace,timeZone:principal.timeZone});
+  }
+  if (method === "GET" && path === "/api/v1/panel/overview-stats") {
+    requirePanelRead(principal);
+    return service.panelOverviewStatsSnapshot({namespace:principal.namespace,timeZone:principal.timeZone});
   }
   if (method === "POST" && path === "/api/v1/panel/browse") {
     requirePanelRead(principal);

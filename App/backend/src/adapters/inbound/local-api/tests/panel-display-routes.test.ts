@@ -12,7 +12,7 @@ describe("panel display contracts", () => {
   it("forwards tool identifiers, snapshot filters and log cursors behind authentication", async () => {
     const calls: unknown[][] = [];
     const panel = Object.fromEntries(
-      ["taskField", "browse", "logs", "taskDetail", "stats"].map((name) => [
+      ["taskField", "browse", "logs", "taskDetail", "stats", "overviewStats"].map((name) => [
         name,
         async (...args: unknown[]) => {
           calls.push([name, ...args]);
@@ -54,7 +54,7 @@ describe("panel display contracts", () => {
       payload: { skillId: "skill", cursor: "earlier", q: "full text" }
     });
     expect(calls[2]?.[1]).toEqual({ skillId: "skill", cursor: "earlier", q: "full text" });
-    for (const url of ["/api/v1/panel/stats", `/api/v1/panel/task-details/task/turns/raw/field?${query}`])
+    for (const url of ["/api/v1/panel/overview-stats", "/api/v1/panel/stats", `/api/v1/panel/task-details/task/turns/raw/field?${query}`])
       expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
   });
   it("keeps device task scope and resolves the live account for personal views", async () => {

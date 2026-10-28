@@ -308,16 +308,21 @@ export class MemoryService {
   private panelReader?: PanelReader;
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
+  private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
   panelStatsSnapshot(input:RequestEnvelope) {
     this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db));
     return this.panelStats.get(input);
+  }
+  panelOverviewStatsSnapshot(input:RequestEnvelope) {
+    this.panelOverviewStats ??= new PanelStats(input=>this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db));
+    return this.panelOverviewStats.get(input);
   }
 
   async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
     if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
     if(this.repos.db.name !== ":memory:") {
       this.panelReader ??= new PanelReader(this.repos.db.name);
-      const result=await this.panelReader.run<T>(method,args,method === "stats" ? 1 : 0,signal);
+      const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
       if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
       return result;
     }
@@ -334,6 +339,7 @@ export class MemoryService {
       : method === "overview" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
       : method === "analysis" ? model.panelAnalysis(args[0] as RequestEnvelope)
       : method === "legacyTasks" ? model.panelTasks(args[0] as Parameters<PanelReadModel["panelTasks"]>[0])
+      : method === "overviewStats" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
       : method === "stats" ? model.panelStatistics(args[0] as RequestEnvelope) : undefined;
     return {safety:panelSafetyToken(this.repos.db),data:data as T};
   }
@@ -882,6 +888,7 @@ export class MemoryService {
     const requestsStopped = this.concurrency.close();
     this.panelBrowse?.clear();
     this.panelStats?.stop();
+    this.panelOverviewStats?.stop();
     const readerStopped = this.panelReader?.stop();
     this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
       this.stopConcurrencyMetrics();

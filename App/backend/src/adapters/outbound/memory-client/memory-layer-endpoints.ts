@@ -36,6 +36,7 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   panelLogs: "/api/v1/panel/logs",
   panelLogDetail: "/api/v1/panel/logs/:id",
   panelStats: "/api/v1/panel/stats",
+  panelOverviewStats: "/api/v1/panel/overview-stats",
   panelBrowse: "/api/v1/panel/browse",
   panelTaskSummaries: "/api/v1/panel/task-summaries",
   panelTaskCheck: "/api/v1/panel/task-details/:id/check",

@@ -1,6 +1,7 @@
 import type { PanelTaskCheckOutput } from "@memmy/local-api-contracts";
 import type {PanelLogsInput,PanelLogsOutput,PanelLogDetailOutput} from "@memmy/local-api-contracts";
 import type {PanelStatsOutput} from "@memmy/local-api-contracts";
+import type {PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
 import type { PanelBrowseInput, PanelBrowseOutput } from "@memmy/local-api-contracts";
 import type { PanelTaskSummariesOutput, PanelTaskDetailOutput, PanelTaskFieldInput, PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 /** Types module. */
@@ -114,6 +115,7 @@ export interface MemoryClient {
   panelLogs(input:PanelLogsInput,context?:MemoryRequestContext):Promise<PanelLogsOutput>;
   panelLogDetail(id:number,context?:MemoryRequestContext):Promise<PanelLogDetailOutput>;
   panelStats(context?:MemoryRequestContext):Promise<PanelStatsOutput>;
+  panelOverviewStats(context?:MemoryRequestContext):Promise<PanelOverviewStatsOutput>;
   panelBrowse(input:PanelBrowseInput,context?:MemoryRequestContext):Promise<PanelBrowseOutput>;
   panelTaskSummaries(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTaskSummariesOutput>;
   panelTaskCheck(id: string, context?: MemoryRequestContext): Promise<PanelTaskCheckOutput>;

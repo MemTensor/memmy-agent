@@ -2,7 +2,7 @@ import { LEGACY_TEST_CONFIG } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createMemoryHttpServer,
   type Embedder,
@@ -42,6 +42,19 @@ describe("REST panel contract", () => {
         endpoint,
         token: "panel-token"
       });
+      const statsHeaders = {authorization: "Bearer panel-token", "x-memmy-time-zone": "+08:00"};
+      await fetch(`${endpoint}/api/v1/health`, {headers: statsHeaders});
+      let overviewStats;
+      await vi.waitFor(async () => {
+        const response = await fetch(`${endpoint}/api/v1/panel/overview-stats`, {headers: statsHeaders});
+        expect(response.status).toBe(200);
+        overviewStats = await response.json() as {status: string; data?: unknown; generatedAt?: string};
+        expect(overviewStats.status).toBe("ready");
+      });
+      expect(overviewStats).toHaveProperty("generatedAt");
+      expect(overviewStats).toHaveProperty("data.counts.memories", 0);
+      expect(overviewStats).not.toHaveProperty("data.analysis");
+      expect((await fetch(`${endpoint}/api/v1/panel/overview-stats`)).status).toBe(401);
       const viewerResponse = await fetch(`${endpoint}/viewer`);
       const viewerHtml = await viewerResponse.text();
       expect(viewerResponse.status).toBe(200);

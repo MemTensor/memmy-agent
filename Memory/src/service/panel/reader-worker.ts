@@ -9,7 +9,7 @@ import type { PanelReadModel } from "../read-model/panel-read.js";
 const db = new MemoryDb({ path: workerData.path, readonly: true });
 const model = createPanelReaderModel(db);
 const repos = new Repositories(db.db);
-async function statistics(input: Parameters<PanelReadModel["panelStatistics"]>[0]) {
+async function statistics(method: "stats" | "overviewStats", input: Parameters<PanelReadModel["panelStatistics"]>[0]) {
   db.db.exec("BEGIN");
   try {
     const safety = panelSafetyToken(db.db);
@@ -20,7 +20,9 @@ async function statistics(input: Parameters<PanelReadModel["panelStatistics"]>[0
       // Keep one read snapshot, but allow cancellation every bounded batch.
       if (rows.length % 256 === 0) await setImmediate();
     }
-    const data = model.panelStatistics(input, rows);
+    const data = method === "overviewStats"
+      ? model.panelOverviewSummary(input, rows)
+      : model.panelStatistics(input, rows);
     db.db.exec("COMMIT");
     return { safety, data };
   } catch (error) {
@@ -30,7 +32,9 @@ async function statistics(input: Parameters<PanelReadModel["panelStatistics"]>[0
 }
 parentPort!.on("message", async ({ id, method, args }) => {
   try {
-    const result = method === "stats" ? await statistics(args[0]) : db.db.transaction(() => {
+    const result = method === "stats" || method === "overviewStats"
+      ? await statistics(method, args[0])
+      : db.db.transaction(() => {
       const safety = panelSafetyToken(db.db);
       switch (method) {
         case "members":

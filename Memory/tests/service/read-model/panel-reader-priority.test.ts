@@ -23,10 +23,10 @@ const tick = async () => { for (let i = 0; i < 10; i++) await Promise.resolve();
 afterEach(() => { workers.instances.length = 0; });
 
 describe("foreground reads during background statistics", () => {
-  it("waits for the old worker to terminate, serves the page, then retries unpublished statistics", async () => {
+  it.each(["stats", "overviewStats"])("waits for %s to yield, serves the page, and retries the unpublished result", async (method) => {
     const reader = new PanelReader("synthetic.sqlite");
     const statsDone = vi.fn();
-    const stats = reader.run("stats", [{}], 1).then(statsDone);
+    const stats = reader.run(method, [{}], 1).then(statsDone);
     const old = workers.instances[0]!;
     const oldStats = old.messages[0]!;
     const page = reader.run("members", [{}]);
@@ -40,7 +40,7 @@ describe("foreground reads during background statistics", () => {
     expect(next.messages.map(item => item.method)).toEqual(["members"]);
     next.emit("message", { id: next.messages[0]!.id, result: { safety: "new", data: ["visible"] } });
     await expect(page).resolves.toEqual({ safety: "new", data: ["visible"] });
-    expect(next.messages.map(item => item.method)).toEqual(["members", "stats"]);
+    expect(next.messages.map(item => item.method)).toEqual(["members", method]);
     next.emit("message", { id: next.messages[1]!.id, result: { safety: "new", data: "complete" } });
     await stats;
     expect(statsDone).toHaveBeenCalledExactlyOnceWith({ safety: "new", data: "complete" });

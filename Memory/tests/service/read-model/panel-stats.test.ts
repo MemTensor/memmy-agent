@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PanelStats } from "../../../src/service/panel/stats.js";
+import { PanelStats, type PanelStatsData } from "../../../src/service/panel/stats.js";
 const tick = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
@@ -10,7 +10,7 @@ describe("background panel stats", () => {
       safety: "a",
       data: { overview: { user: input.userId }, analysis: {} } as never
     }));
-    const stats = new PanelStats(read, () => "a");
+    const stats = new PanelStats<PanelStatsData>(read, () => "a");
     try {
       stats.get({ userId: "first", timeZone: "UTC" });
       stats.get({ userId: "second", timeZone: "UTC" });
@@ -31,7 +31,7 @@ describe("background panel stats", () => {
       if (fail) throw new Error("busy");
       return { safety, data: { overview: {}, analysis: {} } as never };
     });
-    const stats = new PanelStats(read, () => safety);
+    const stats = new PanelStats<PanelStatsData>(read, () => safety);
     expect(stats.get({ timeZone: "UTC" }).status).toBe("preparing");
     await tick();
     expect(stats.get({ timeZone: "UTC" }).status).toBe("ready");
@@ -52,7 +52,7 @@ describe("background panel stats", () => {
           finish = resolve;
         })
     );
-    const stats = new PanelStats(read, () => "a");
+    const stats = new PanelStats<PanelStatsData>(read, () => "a");
     stats.get({ timeZone: "UTC" });
     vi.setSystemTime(new Date("2026-10-28T00:00:01Z"));
     finish({ safety: "a", data: {} as never });
@@ -72,7 +72,7 @@ describe("background panel stats", () => {
           finishes.push(() => resolve({ safety: "a", data: {} as never }))
         )
     );
-    const stats = new PanelStats(read, () => "a");
+    const stats = new PanelStats<PanelStatsData>(read, () => "a");
     for (let i = 0; i < 17; i++) stats.get({ namespace: { userId: String(i), source: "codex", profileId: "default" } });
     finishes[0]!();
     await tick();
