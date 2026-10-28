@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
@@ -27,6 +28,7 @@ export function buildUserMemoryPanelItemsInput(query: string, page: number): Pan
 }
 
 export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -54,6 +56,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"UserMemory",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeDetail(); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, preserve = false): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });

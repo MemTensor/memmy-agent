@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
@@ -125,6 +126,7 @@ function skillsCacheKeys(query: string, page: number): string[] {
 }
 
 export function SkillsSubPage(props: SkillsSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const skillsFilterLayer = "Skill";
@@ -177,6 +179,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"Skill",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeSkill(); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     const normalizedPage = normalizePage(nextPage);
 
     if (demoEnabled) {
@@ -288,22 +291,27 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
   async function approveObservedSkill(id: string) {
     if (!props.client?.approveObservedSkill) throw new Error(t("memory.clientNotReady"));
+    if (!canRead()) return;
     const generation=detailGeneration.current;
     const current=await loadSkillDetail(props.client,id);
     if(generation!==detailGeneration.current||current.item.id!==id)return;
     await props.client.approveObservedSkill(id);
     clearMemoryPanelCache();
+    if (!canRead() || generation !== detailGeneration.current) return;
     const skillDetail = await loadSkillDetail(props.client, id);
-    if(selectedSkillIdRef.current===id)setDetail({status:"ready",data:{detail:skillDetail,timeline:[]}});
+    if(canRead() && generation === detailGeneration.current && selectedSkillIdRef.current===id)setDetail({status:"ready",data:{detail:skillDetail,timeline:[]}});
     void refresh(page, { useCache: false }).catch(() => undefined);
   }
 
   async function updateObservedSkill(id: string, body: string, expectedVersion: number) {
     if (!props.client?.updateObservedSkill) throw new Error(t("memory.clientNotReady"));
+    if (!canRead()) return;
+    const generation = detailGeneration.current;
     await props.client.updateObservedSkill(id, { body, expectedVersion });
     clearMemoryPanelCache();
+    if (!canRead() || generation !== detailGeneration.current) return;
     const skillDetail = await loadSkillDetail(props.client, id);
-    if (selectedSkillIdRef.current === id) {
+    if (canRead() && generation === detailGeneration.current && selectedSkillIdRef.current === id) {
       setDetail((current) => ({ status: "ready", data: { detail: skillDetail,
         timeline: current?.status === "ready" ? current.data.timeline : [] } }));
     }

@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -113,6 +114,7 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 }
 
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
@@ -134,6 +136,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"L1",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailRequestIdRef.current++; setDetail(null); setSelectedMemoryId(null); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });

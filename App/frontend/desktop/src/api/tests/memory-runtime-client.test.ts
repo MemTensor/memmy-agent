@@ -7,6 +7,41 @@ const runtimeConfig = {
 };
 
 describe("memory runtime client", () => {
+  it.each(["deleteMemory", "approveObservedSkill", "updateObservedSkill", "deletePanelTask"] as const)(
+    "%s isolates both statistics reads from an unfinished pre-mutation request", async (mutation) => {
+      const before = "2026-10-28T00:00:00Z", after = "2026-10-28T00:00:01Z";
+      const oldResponses: Array<(response: Response) => void> = [];
+      let reads = 0;
+      const fetchMock = vi.fn(async (url: URL | RequestInfo) => {
+        if (/\/panel\/(stats|overview-stats)$/.test(String(url))) {
+          if (++reads <= 2) return await new Promise<Response>(resolve => oldResponses.push(resolve));
+          return new Response(JSON.stringify({ status: "preparing", serverTime: after }));
+        }
+        const result = mutation === "deleteMemory"
+          ? { ok: true, id: "memory", kind: "trace", status: "deleted", changeSeq: 1, syncCursor: "1", serverTime: after }
+          : mutation === "deletePanelTask"
+            ? { ok: true, id: "task", deletedMemoryIds: [], serverTime: after }
+            : { id: "skill", status: "activated", version: 2, serverTime: after };
+        return new Response(JSON.stringify(result));
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const client = createHttpMemoryRuntimeClient(runtimeConfig);
+      const oldStats = expect(client.getPanelStats!()).rejects.toMatchObject({ name: "AbortError" });
+      const oldOverview = expect(client.getPanelOverviewStats!()).rejects.toMatchObject({ name: "AbortError" });
+      // Let both underlying reads start; the transport deliberately ignores abort.
+      await Promise.resolve(); await Promise.resolve();
+      expect(oldResponses).toHaveLength(2);
+      if (mutation === "updateObservedSkill") await client.updateObservedSkill!("skill", { body: "updated", expectedVersion: 1 });
+      else await client[mutation]!("memory");
+      await Promise.all([oldStats, oldOverview]);
+      const freshStats = client.getPanelStats!(), freshOverview = client.getPanelOverviewStats!();
+      oldResponses.forEach(resolve => resolve(new Response(JSON.stringify({ status: "preparing", serverTime: before }))));
+      await expect(freshStats).resolves.toMatchObject({ serverTime: after });
+      await expect(freshOverview).resolves.toMatchObject({ serverTime: after });
+      expect(reads).toBe(4);
+    }
+  );
+
   it("completes consecutive public stats calls without retaining a settled queue entry", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({status:"preparing",serverTime:"2026-10-28T00:00:00Z"})));
     vi.stubGlobal("fetch",fetchMock);

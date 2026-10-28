@@ -6,6 +6,11 @@ import { PanelVisibilityContext } from "../panel-visibility.js";
 import { usePanelViewStatus } from "../panel-view-status.js";
 import { usePanelStats } from "../use-panel-stats.js";
 import { createMemoryRuntimeClientStub } from "./fixtures.js";
+import { memoryDetailFixture, panelItemsFixture } from "./fixtures.js";
+import { PoliciesSubPage } from "../policies-sub-page.js";
+import { AppStateProvider } from "../../../state/app-state.js";
+import { I18nProvider } from "../../../i18n/i18n-provider.js";
+import { clearMemoryPanelCache } from "../memory-panel-cache.js";
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -53,4 +58,40 @@ it.each(["inactive page", "background window"])("defers invalidated list and sta
     expect(container.textContent).toContain("fresh list");
     expect(container.textContent).toContain('"count":42');
   } finally { await act(async () => root.unmount()); }
+});
+
+it.each(["inactive page", "background window"])("does not let a completed delete reload an %s", async (mode) => {
+  clearMemoryPanelCache();
+  const foreground = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const container = document.createElement("div"), root = createRoot(container);
+  let finishDelete!: () => void;
+  const pending = new Promise<void>(resolve => { finishDelete = resolve; });
+  const listPanelItems = vi.fn(async () => panelItemsFixture);
+  const client = createMemoryRuntimeClientStub({ listPanelItems, getMemory: vi.fn(async () => memoryDetailFixture),
+    deleteMemory: vi.fn(async () => { await pending; window.dispatchEvent(new Event("memmy-panel-invalidated")); return {} as never; }),
+    checkPanelView: vi.fn(async () => ({ updated: false })) } as never);
+  const request = { id: memoryDetailFixture.item.id, requestId: 1 };
+  const render = async (visible: boolean) => act(async () => root.render(
+    <AppStateProvider><I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}>
+      <PoliciesSubPage client={client} openRequest={request} onOpenMemoryReference={() => {}} />
+    </PanelVisibilityContext.Provider></I18nProvider></AppStateProvider>
+  ));
+  const click = async (label: string) => act(async () => {
+    const button = [...container.querySelectorAll("button")].find(x => x.textContent === label);
+    expect(button).toBeDefined(); button!.click();
+  });
+  try {
+    await render(true);
+    await click("删除"); await click("确认删除");
+    expect(client.deleteMemory).toHaveBeenCalledTimes(1);
+    if (mode === "inactive page") await render(false);
+    else await act(async () => { foreground.mockReturnValue(true); document.dispatchEvent(new Event("visibilitychange")); });
+    listPanelItems.mockClear();
+    await act(async () => finishDelete());
+    expect(listPanelItems).not.toHaveBeenCalled();
+    expect(container.querySelector(".memory-drawer")).toBeNull();
+    if (mode === "inactive page") await render(true);
+    else await act(async () => { foreground.mockReturnValue(false); document.dispatchEvent(new Event("visibilitychange")); });
+    expect(listPanelItems).toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); clearMemoryPanelCache(); }
 });

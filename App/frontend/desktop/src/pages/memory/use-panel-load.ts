@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { usePanelVisible } from "./panel-visibility.js";
 
 /** Search alone waits; initial entry, filters and page navigation run immediately. */
 export function usePanelLoad<T>(input: {
@@ -7,6 +8,7 @@ export function usePanelLoad<T>(input: {
   load: () => Promise<T>;
   invalidate: () => void;
 }): (load?: () => Promise<T>, nextIdentity?: readonly unknown[]) => Promise<T> {
+  const visible = usePanelVisible();
   const latest = useRef(input);
   latest.current = input;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -27,6 +29,7 @@ export function usePanelLoad<T>(input: {
   }
 
   useEffect(() => {
+    if (!visible) return;
     const current = latest.current;
     const old = previous.current;
     previous.current = { query: current.query, identity: current.identity };
@@ -50,7 +53,7 @@ export function usePanelLoad<T>(input: {
       if (!submitted.current) latest.current.invalidate();
     };
     // Identity is deliberately supplied by callers: client, page, filters and language.
-  }, [input.query, ...input.identity]);
+  }, [input.query, ...input.identity, visible]);
 
   useEffect(() => () => latest.current.invalidate(), []);
 

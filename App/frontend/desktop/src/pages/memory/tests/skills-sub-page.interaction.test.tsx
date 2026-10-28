@@ -6,6 +6,7 @@ import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { AppStateProvider } from "../../../state/app-state.js";
 import { SkillsSubPage, SkillsSubPageView } from "../skills-sub-page.js";
 import { clearMemoryPanelCache } from "../memory-panel-cache.js";
+import { PanelVisibilityContext } from "../panel-visibility.js";
 import { createMemoryRuntimeClientStub, panelItemsOutput, skillPanelDetailFixture } from "./fixtures.js";
 
 function historySkill(version = 1) {
@@ -52,6 +53,40 @@ describe("History Skill post-editing", () => {
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
+
+  it("does not read detail or list when an in-flight edit finishes after the page is hidden", async () => {
+    const original = historySkill();
+    let finishUpdate!: () => void;
+    const pending = new Promise<void>(resolve => { finishUpdate = resolve; });
+    const getMemory = vi.fn(async () => original);
+    const listPanelItems = vi.fn(async () => panelItemsOutput([original.item]));
+    const updateObservedSkill = vi.fn(async () => {
+      await pending;
+      window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      return { id: original.item.id, status: "activated" as const, version: 2, serverTime: "2026-10-28T00:00:00Z" };
+    });
+    const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems, updateObservedSkill,
+      listMemoryLogs: vi.fn(async () => ({ logs: [], total: 0, limit: 500, offset: 0, serverTime: "2026-10-28T00:00:00Z" })) });
+    const request = { id: original.item.id, requestId: 1 };
+    const render = async (visible: boolean) => act(async () => root.render(
+      <AppStateProvider><I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}>
+        <SkillsSubPage client={client} openRequest={request} onOpenMemoryReference={() => {}} />
+      </PanelVisibilityContext.Provider></I18nProvider></AppStateProvider>
+    ));
+    await render(true);
+    await act(async () => button("修改").click());
+    await replaceBody("# Revised while visible");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(updateObservedSkill).toHaveBeenCalledTimes(1);
+    await render(false);
+    getMemory.mockClear(); listPanelItems.mockClear();
+    await act(async () => finishUpdate());
+    expect(getMemory).not.toHaveBeenCalled();
+    expect(listPanelItems).not.toHaveBeenCalled();
+    expect(container.querySelector(".memory-drawer")).toBeNull();
+    await render(true);
+    expect(listPanelItems).toHaveBeenCalled();
+  });
 
   it("saves the edited body then refreshes the open detail and list", async () => {
     const original = historySkill();

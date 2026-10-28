@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { TaskConversation } from "./task-conversation.js";
@@ -138,6 +139,7 @@ function tasksCacheKeys(query: string, page: number, language: ResolvedLanguage 
 }
 
 export function TasksSubPage(props: TasksSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t, language } = useTranslation();
   const { track } = useAnalytics();
   const tasksFilterLayer = "tasks";
@@ -180,6 +182,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"tasks",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeTask(); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<MemoryTasksOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });

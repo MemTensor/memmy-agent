@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import {usePanelLoad} from "./use-panel-load.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -88,6 +89,7 @@ function logsCacheKeys(page: number, tool: "" | MemoryApiLogToolName, sourceAgen
 }
 
 export function LogsSubPage(props: LogsSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const [tool, setTool] = useState<"" | MemoryApiLogToolName>("");
@@ -99,6 +101,7 @@ export function LogsSubPage(props: LogsSubPageProps) {
   const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
   function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<MemoryApiLogsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });

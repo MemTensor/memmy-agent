@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
@@ -73,6 +74,7 @@ function policiesCacheKeys(query: string, page: number): string[] {
 }
 
 export function PoliciesSubPage(props: PoliciesSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const policiesFilterLayer = "L2";
@@ -89,6 +91,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"L2",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailGeneration.current++; setDetail(null); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });

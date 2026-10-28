@@ -149,6 +149,12 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     sharedSignal => requestJson({config,path:"/api/v1/panel/browse",schema:PanelBrowseOutputSchema,body:input,init:{signal:sharedSignal}}),
     signal
   ), isUnsupportedPanelRoute);
+  const invalidatePanel = () => {
+    // Retire old statistics/details before new-generation listeners subscribe.
+    panelQueue.clear();
+    browse.reset();
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+  };
   return {
     async prefetchPanel(section,signal) {
       if (browse.hasView(section)) return true;
@@ -230,24 +236,21 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
       });
-      browse.reset();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      invalidatePanel();
       return result;
     },
 
     async approveObservedSkill(id) {
       const result = await requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}/approve`,
         schema: ApproveObservedSkillOutputSchema, body: {} });
-      browse.reset();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      invalidatePanel();
       return result;
     },
 
     async updateObservedSkill(id, input) {
       const result = await requestJson({ config, path: `/api/v1/evidence/skills/${encodeURIComponent(id)}`,
         schema: UpdateObservedSkillOutputSchema, body: input, init: { method: "PATCH" } });
-      browse.reset();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      invalidatePanel();
       return result;
     },
 
@@ -336,8 +339,7 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: DeletePanelTaskOutputSchema,
         init: { method: "DELETE" }
       });
-      browse.reset();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("memmy-panel-invalidated"));
+      invalidatePanel();
       return result;
     }
   };

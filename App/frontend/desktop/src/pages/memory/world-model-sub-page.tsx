@@ -1,3 +1,4 @@
+import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
@@ -104,6 +105,7 @@ function worldModelCacheKeys(query: string, page: number): string[] {
 
 /** Handles world model sub page. */
 export function WorldModelSubPage(props: WorldModelSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const worldModelFilterLayer = "L3";
@@ -121,6 +123,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
 
   const viewStatus=usePanelViewStatus(props.client,"L3",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeWorldModel(); setState({status:"loading"});},()=>search());
   function search(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
