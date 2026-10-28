@@ -16,6 +16,7 @@ import type {
 } from "../../storage/repositories.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 import { completeStrictJson } from "../l3-world-model/strict-json-completion.js";
+import { isNeutralFeedback } from "./turn-judge.js";
 
 type FieldUpdateOperation = "noop" | "create" | "update";
 
@@ -149,7 +150,8 @@ export class L3WorldModelTraceFieldPipeline {
     const feedbackByRawTurn = new Map<string, FeedbackRecord[]>();
     for (const feedbackId of batch.feedbackIds) {
       const feedback = this.deps.repos.runtime.getFeedback(feedbackId);
-      if (!feedback) continue;
+      // A neutral reaction says nothing about the result and is not evidence.
+      if (!feedback || isNeutralFeedback(feedback)) continue;
       const trace = feedback.rawTurnId
         ? traceByRawTurn.get(feedback.rawTurnId)
         : feedback.l1MemoryId

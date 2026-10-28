@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -103,7 +104,7 @@ describe("MemoryService / facade / config and storage", () => {
       "status",
       "l1_memory_id"
     ]));
-    expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(1);
+    expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(0);
     const recallColumns = db.db.prepare(`PRAGMA table_info(recall_events)`).all() as Array<{ name: string }>;
     expect(recallColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
       "namespace_id",
@@ -291,7 +292,7 @@ describe("MemoryService / facade / config and storage", () => {
     db.close();
   });
 
-  it("generates semantic ids for future memory writes", () => {
+  it("generates semantic ids for future memory writes", async () => {
     const { service } = createTestService();
     const namespace = {
       source: "codex",
@@ -299,11 +300,11 @@ describe("MemoryService / facade / config and storage", () => {
       userId: "user-id-prefix"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-id-prefix", {
+    const complete = (await service.completeTurn("turn-id-prefix", {
       sessionId: session.sessionId,
       query: "Remember that generated IDs should use semantic prefixes.",
       answer: "Trace memories and episodes should expose their entity type in the ID."
-    });
+    }));
 
     const policy = service.addMemory({
       namespace,
@@ -325,7 +326,7 @@ describe("MemoryService / facade / config and storage", () => {
     });
 
     expect(complete.l1MemoryId).toMatch(/^trace_[a-f0-9]{20}$/);
-    expect(complete.episodeId).toMatch(/^episode_[a-f0-9]{20}$/);
+    expect(assignedEpisodeId(service, complete)).toMatch(/^episode_[a-f0-9]{20}$/);
     expect(policy.id).toMatch(/^policy_[a-f0-9]{20}$/);
     expect(world.id).toMatch(/^world_[a-f0-9]{20}$/);
     expect(skill.id).toMatch(/^skill_[a-f0-9]{20}$/);
@@ -381,12 +382,12 @@ describe("MemoryService / facade / config and storage", () => {
     });
     expect(start.hits.map((hit) => hit.id)).toContain(seed.id);
     expect(start.status).toContain("memory_add:disabled:no_turn_write");
-    const complete = readOnly.completeTurn("readonly-turn", {
+    const complete = (await readOnly.completeTurn("readonly-turn", {
       namespace,
       sessionId: session.sessionId,
       query: "Use the banana routing fixture database memory.",
       answer: "Used the seed memory."
-    });
+    }));
     expect(complete.l1MemoryIds).toEqual([]);
     expect(complete.scheduledEvolution).toBe(false);
     expect(() => readOnly.addMemory({

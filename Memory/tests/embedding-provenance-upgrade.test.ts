@@ -46,7 +46,7 @@ function setup(model = embedder()) {
 
 async function feedbackSession(service: ReturnType<typeof setup>["service"]) {
   const session = service.openSession({ namespace: { source: "codex", profileId: "test", userId: "local-user" } });
-  const turn = service.completeTurn("positive-provenance", {
+  const turn = await service.completeTurn("positive-provenance", {
     sessionId: session.sessionId, query: "Parse SEC 13F issuer fields", answer: "Parsed and checked the issuer fields."
   });
   return { sessionId: session.sessionId, episodeId: turn.episodeId, l1MemoryId: turn.l1MemoryId,

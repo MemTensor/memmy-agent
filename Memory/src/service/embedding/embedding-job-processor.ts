@@ -1,3 +1,4 @@
+import type { EpisodeSelectionContext } from "../session/episode-selection.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
 import { isRecord } from "../../utils/json.js";
 
@@ -16,9 +17,17 @@ import { clip,firstLine } from "../../utils/text.js";
  * transitions, model calls, and change records.
  */
 import type { TraceCaptureSummary } from "../evolution/span-pipeline.js";
+import {
+  prunedTurnJudgeInput,
+  storedTurnJudgeInput,
+  TURN_JUDGE_PROMPT_VERSION,
+  turnJudgeSnapshotFromPayload,
+  type TurnJudgeSnapshot,
+  type TurnJudgment
+} from "../evolution/turn-judge.js";
 import { retrievalDocumentSourceHash,traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { Embedder,LlmClient } from "../../model/types.js";
-import type { EmbeddingRetryRecord,EmbeddingRetryVectorField,EpisodeRecord,EvolutionJobRecord,Repositories } from "../../storage/repositories.js";
+import type { EmbeddingRetryRecord,EmbeddingRetryVectorField,EpisodeRecord,EvolutionJobRecord,RawTurnRecord,Repositories } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
 import type { JobType,MemoryProcessingState,MemoryRow,ToolCallPayload,UserMemoryType } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
@@ -65,6 +74,19 @@ type TurnCaptureDecision = {
   correctedUserMemoryContent?: string;
   l1Evidence: Array<{ quote: string; sourceRole: "user" | "assistant" | "tool"; kind: string }>;
   reason: string;
+  // turn.judge.v1 only. unverifiedAnswer is the final flag after the tool check;
+  // turnJudge carries what the model said and the checks recorded.
+  unverifiedAnswer?: boolean;
+  turnJudge?: TurnJudgeRecord;
+};
+
+type TurnJudgeRecord = {
+  promptVersion: typeof TURN_JUDGE_PROMPT_VERSION;
+  relation: TurnJudgment["relation"];
+  feedback: TurnJudgment["feedback"];
+  reason: string;
+  modelUnverifiedAnswer?: boolean;
+  diagnostics: TurnJudgment["diagnostics"];
 };
 
 type UserMemoryCaptureResult = {
@@ -155,7 +177,34 @@ export interface EmbeddingJobProcessorDeps {
     reflectionText: string;
     mustKeep?: boolean;
   }): Promise<TurnCaptureDecision>;
+  buildTurnJudgeSnapshot(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    mustKeep: boolean;
+    catchUp?: boolean;
+    at: string;
+  }): TurnJudgeSnapshot;
+  judgeTurnForCapture(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    snapshot: TurnJudgeSnapshot;
+  }): Promise<TurnJudgment>;
   finalizeClosedEpisode(episode: EpisodeRecord, at: string): EvolutionJobRecord[];
+  // turn.judge.v1 (PR-2): files the judged turn and records its feedback.
+  withEpisodeSelection?<T>(context: EpisodeSelectionContext, operation: () => T): Promise<T>;
+  applyTurnJudgment?(input: {
+    rawTurnId: string;
+    relation: TurnJudgment["relation"];
+    feedback: TurnJudgment["feedback"];
+    reason: string;
+    filedByRule?: string;
+    baseEpisodeId?: string;
+    previousRawTurnId?: string;
+    previousL1MemoryId?: string;
+    at: string;
+  }): { affectedEpisodeIds: string[]; jobs: EvolutionJobRecord[] };
+  // algorithm.session.turnJudgeKeepInput: keep the stored input after a successful judgment.
+  turnJudgeKeepInput?(): boolean;
 }
 
 export class EmbeddingJobProcessor {
@@ -367,9 +416,20 @@ export class EmbeddingJobProcessor {
     if (!trace) throw new Error(`trace payload is missing: ${memory.id}`);
     if (!this.deps.llm.isConfigured()) throw new SummaryModelUnconfiguredError();
 
+    const turnJudge = job.payload.turnJudge === true;
+    if (turnJudge && typeof job.payload.turnJudgeNoise === "string") {
+      this.skipNoiseTurn(job, memory, trace, job.payload.turnJudgeNoise);
+      return;
+    }
     const decideCapture = job.payload.decideCapture === true;
-    const mustKeep = isForcedL1Capture(memory, trace);
-    const proposedDecision = decideCapture
+    const mustKeep = turnJudge ? isDeviceMemoryForcedCapture(memory, trace) : isForcedL1Capture(memory, trace);
+    const judged = turnJudge
+      ? await this.judgeCapturedTurn(job, memory, trace, mustKeep)
+      : undefined;
+    const judgment = judged?.judgment;
+    const proposedDecision = judgment
+      ? captureDecisionFromTurnJudgment(judgment)
+      : decideCapture
       ? await this.deps.decideTurnMemoryForCapture({
           trace,
           userText: trace.userText,
@@ -388,7 +448,9 @@ export class EmbeddingJobProcessor {
     const currentTrace = traceMetaFromMemory(current);
     if (!currentTrace) throw new Error(`trace payload is missing: ${current.id}`);
     const decision = proposedDecision
-      ? constrainTurnMemoryDecision(proposedDecision, current, currentTrace)
+      ? judgment
+        ? constrainTurnJudgeDecision(proposedDecision, current, currentTrace)
+        : constrainTurnMemoryDecision(proposedDecision, current, currentTrace)
       : undefined;
     const title = (decision?.l1Title ?? proposedSummary.title).trim();
     const summary = decision?.l1Summary ?? proposedSummary.summary;
@@ -397,7 +459,28 @@ export class EmbeddingJobProcessor {
     }
 
     let finalizedEpisodeId: string | undefined;
-    this.deps.repos.transaction(() => {
+    const affectedEpisodeIds: string[] = [];
+    // Filing the turn and its feedback commit with the capture result, after the
+    // L1 row is written (the move rewrites its episode); the closing work of
+    // every episode it touched runs after the commit.
+    const applyJudgment = () => {
+      if (!judged || !currentTrace.rawTurnId) return;
+      this.recordTurnJudgment(currentTrace.rawTurnId, judged.judgment, at);
+      const applied = this.deps.applyTurnJudgment?.({
+        rawTurnId: currentTrace.rawTurnId,
+        relation: judged.snapshot.taskEmpty ? null : judged.judgment.relation,
+        feedback: judged.snapshot.taskEmpty ? null : judged.judgment.feedback,
+        reason: judged.judgment.reason,
+        ...(judged.snapshot.filedByRule ? { filedByRule: judged.snapshot.filedByRule } : {
+          baseEpisodeId: judged.snapshot.baseEpisodeId,
+          previousRawTurnId: judged.snapshot.previousRawTurnId,
+          previousL1MemoryId: judged.snapshot.previousL1MemoryId
+        }),
+        at
+      });
+      if (applied) affectedEpisodeIds.push(...applied.affectedEpisodeIds);
+    };
+    const commitCapture = () => this.deps.repos.transaction(() => {
       let userMemoryCapture = userMemoryCaptureFromJob(job);
       if (decision?.createUserMemory && job.payload.captureUserMemory === true) {
         userMemoryCapture = this.captureUserMemoryFromDecision(current, currentTrace, decision, job, at);
@@ -414,6 +497,7 @@ export class EmbeddingJobProcessor {
         if (episodeId) {
           finalizedEpisodeId = episodeId;
         }
+        applyJudgment();
         return;
       }
       const previous = current;
@@ -439,11 +523,190 @@ export class EmbeddingJobProcessor {
         at
       });
       if (decision) finalizedEpisodeId = currentTrace.episodeId ?? job.episodeId;
+      applyJudgment();
+    });
+    if (this.deps.withEpisodeSelection) {
+      const raw = currentTrace.rawTurnId ? this.deps.repos.runtime.getRawTurn(currentTrace.rawTurnId) : undefined;
+      await this.deps.withEpisodeSelection({ userText: raw?.userText ?? "", rawTurnId: raw?.id }, () => {
+        affectedEpisodeIds.length = 0;
+        commitCapture();
+      });
+    } else {
+      commitCapture();
+    }
+    const movedTo = judged && currentTrace.rawTurnId
+      ? this.deps.repos.runtime.getRawTurn(currentTrace.rawTurnId)?.episodeId
+      : undefined;
+    for (const episodeId of new Set([finalizedEpisodeId, movedTo, ...affectedEpisodeIds])) {
+      if (!episodeId) continue;
+      const episode = this.deps.repos.runtime.getEpisode(episodeId);
+      if (episode?.status === "closed") this.deps.finalizeClosedEpisode(episode, at);
+    }
+  }
+
+  // A host-generated turn (task notification, heartbeat, ...) is recognised by
+  // its structure and never sent to the model: no L1, no routing, no feedback.
+  private skipNoiseTurn(job: EvolutionJobRecord, memory: MemoryRow, trace: TraceMeta, noiseKind: string): void {
+    const at = this.deps.nowIso();
+    let finalizedEpisodeId: string | undefined;
+    this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(memory.id);
+      if (!current || !processingJobMatchesMemory(job, current)) return;
+      const rawTurn = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+      if (rawTurn) {
+        this.deps.repos.runtime.updateRawTurn({
+          ...rawTurn,
+          messagePayload: {
+            ...rawTurn.messagePayload,
+            turn_judge: { prompt_version: TURN_JUDGE_PROMPT_VERSION, status: "skipped", noise_kind: noiseKind, judged_at: at }
+          }
+        });
+      }
+      const pending = isRecord(current.properties.internal_info.capture_decision) ? current.properties.internal_info.capture_decision : {};
+      const rejected = this.deps.repos.memories.update({
+        ...current,
+        properties: {
+          ...current.properties,
+          internal_info: {
+            ...current.properties.internal_info,
+            capture_decision: {
+              ...pending,
+              status: "rejected",
+              create_l1: false,
+              prompt_version: TURN_JUDGE_PROMPT_VERSION,
+              reason: `noise:${noiseKind}`,
+              decided_at: at
+            }
+          }
+        },
+        updatedAt: at
+      });
+      const deleted = this.deps.repos.memories.softDelete(rejected.id, at);
+      if (deleted) this.appendMemoryChange(deleted, current, "worker.turn_judge.noise", at);
+      this.deps.repos.processing.delete(current.id);
+      finalizedEpisodeId = trace.episodeId ?? job.episodeId;
     });
     if (finalizedEpisodeId) {
       const episode = this.deps.repos.runtime.getEpisode(finalizedEpisodeId);
       if (episode?.status === "closed") this.deps.finalizeClosedEpisode(episode, at);
     }
+  }
+
+  // A per-turn judgment that failed on every attempt: the L1 is not written,
+  // the turn stays where it was filed, no feedback is recorded, and the
+  // capture record is marked failed so the task's closing work can run. A
+  // manual retry rebuilds the job with the same flags and input.
+  markTurnJudgeFailed(job: EvolutionJobRecord): void {
+    const at = this.deps.nowIso();
+    let finalizedEpisodeId: string | undefined;
+    this.deps.repos.transaction(() => {
+      const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+      if (!memory) return;
+      const pending = isRecord(memory.properties.internal_info.capture_decision) ? memory.properties.internal_info.capture_decision : {};
+      if (pending.status !== "pending") return;
+      const failed = this.deps.repos.memories.update({
+        ...memory,
+        properties: {
+          ...memory.properties,
+          internal_info: {
+            ...memory.properties.internal_info,
+            capture_decision: {
+              ...pending,
+              status: "failed",
+              prompt_version: TURN_JUDGE_PROMPT_VERSION,
+              failed_at: at,
+              error: job.lastError ?? null
+            }
+          }
+        },
+        updatedAt: at
+      });
+      this.appendMemoryChange(failed, memory, "worker.turn_judge.failed", at);
+      const trace = traceMetaFromMemory(failed);
+      const rawTurn = trace?.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+      if (rawTurn) {
+        const stored = isRecord(rawTurn.messagePayload?.turn_judge) ? rawTurn.messagePayload.turn_judge : {};
+        this.deps.repos.runtime.updateRawTurn({
+          ...rawTurn,
+          messagePayload: {
+            ...rawTurn.messagePayload,
+            turn_judge: { ...stored, prompt_version: TURN_JUDGE_PROMPT_VERSION, status: "failed", failed_at: at }
+          }
+        });
+      }
+      finalizedEpisodeId = trace?.episodeId ?? job.episodeId;
+    });
+    if (finalizedEpisodeId) {
+      const episode = this.deps.repos.runtime.getEpisode(finalizedEpisodeId);
+      if (episode?.status === "closed") this.deps.finalizeClosedEpisode(episode, at);
+    }
+  }
+
+  // Builds the input once (stored on the raw turn) and reuses it on every
+  // retry, so a later attempt does not see turns stored after this one.
+  private async judgeCapturedTurn(
+    job: EvolutionJobRecord,
+    memory: MemoryRow,
+    trace: TraceMeta,
+    mustKeep: boolean
+  ): Promise<{ judgment: TurnJudgment; snapshot: TurnJudgeSnapshot }> {
+    const rawTurn = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+    if (!rawTurn) throw new Error(`turn judgment raw turn is missing: ${memory.id}`);
+    const previousDecision = isRecord(memory.properties.internal_info.capture_decision)
+      ? memory.properties.internal_info.capture_decision
+      : undefined;
+    if (previousDecision?.status === "failed") {
+      // A rerun after the failed state: hold the task's closing work again until it is judged.
+      this.deps.repos.memories.update({
+        ...memory,
+        properties: {
+          ...memory.properties,
+          internal_info: { ...memory.properties.internal_info, capture_decision: { ...previousDecision, status: "pending" } }
+        }
+      });
+    }
+    const stored = isRecord(rawTurn.messagePayload?.turn_judge) ? rawTurn.messagePayload.turn_judge : {};
+    let snapshot = turnJudgeSnapshotFromPayload(stored.input);
+    if (!snapshot) {
+      snapshot = this.deps.buildTurnJudgeSnapshot({
+        trace,
+        rawTurn,
+        mustKeep,
+        catchUp: job.payload.turnJudgeCatchUp === true,
+        at: this.deps.nowIso()
+      });
+      this.deps.repos.runtime.updateRawTurn({
+        ...rawTurn,
+        messagePayload: {
+          ...rawTurn.messagePayload,
+          turn_judge: { ...stored, prompt_version: TURN_JUDGE_PROMPT_VERSION, status: "pending", input: storedTurnJudgeInput(snapshot) }
+        }
+      });
+    }
+    return { judgment: await this.deps.judgeTurnForCapture({ trace, rawTurn, snapshot }), snapshot };
+  }
+
+  private recordTurnJudgment(rawTurnId: string, judgment: TurnJudgment, at: string): void {
+    const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
+    if (!rawTurn) return;
+    const stored = isRecord(rawTurn.messagePayload?.turn_judge) ? rawTurn.messagePayload.turn_judge : {};
+    this.deps.repos.runtime.updateRawTurn({
+      ...rawTurn,
+      messagePayload: {
+        ...rawTurn.messagePayload,
+        turn_judge: {
+          ...stored,
+          ...(this.deps.turnJudgeKeepInput?.() ? {} : { input: prunedTurnJudgeInput(stored.input) }),
+          prompt_version: TURN_JUDGE_PROMPT_VERSION,
+          status: "judged",
+          judged_at: at,
+          relation: judgment.relation,
+          feedback: judgment.feedback,
+          reason: judgment.reason,
+          diagnostics: judgment.diagnostics
+        }
+      }
+    });
   }
 
   private isRejectedCaptureTarget(memoryId: string): boolean {
@@ -687,9 +950,24 @@ function acceptTurnMemoryDecision(
 ): MemoryRow {
   const internal = memory.properties.internal_info;
   const pending = isRecord(internal.capture_decision) ? internal.capture_decision : {};
-  const originalEvidenceStatus = typeof pending.original_evidence_status === "string"
+  const pendingEvidenceStatus = typeof pending.original_evidence_status === "string"
     ? pending.original_evidence_status
     : undefined;
+  // turn.judge.v1: only the model's unverified_answer (after the tool check)
+  // marks an L1 provisional; a verified tool observation stays verified.
+  const originalEvidenceStatus = decision.unverifiedAnswer === undefined
+    ? pendingEvidenceStatus
+    : decision.unverifiedAnswer
+      ? "provisional"
+      : pendingEvidenceStatus === "verified" ? "verified" : undefined;
+  const observedAt = typeof internal.observed_at === "string" ? internal.observed_at : updatedAt;
+  const unverifiedFields = decision.unverifiedAnswer === true ? { observed_at: observedAt } : {};
+  const unverifiedClaims = decision.unverifiedAnswer === true
+    ? {
+        observed_at: observedAt,
+        claims: [{ source_role: "agent", evidence_status: "provisional", observed_at: observedAt }]
+      }
+    : {};
   const { evidence_status: _infoEvidenceStatus, ...info } = memory.info;
   const { evidence_status: _propertyInfoEvidenceStatus, ...propertyInfo } = memory.properties.info ?? {};
   const { evidence_status: _internalEvidenceStatus, ...internalWithoutEvidence } = internal;
@@ -698,6 +976,7 @@ function acceptTurnMemoryDecision(
     status: "activated",
     info: {
       ...info,
+      ...unverifiedFields,
       policy_eligible: decision.policyEligible,
       ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
     },
@@ -706,11 +985,13 @@ function acceptTurnMemoryDecision(
       status: "activated",
       info: {
         ...propertyInfo,
+        ...unverifiedFields,
         policy_eligible: decision.policyEligible,
         ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
       },
       internal_info: {
         ...internalWithoutEvidence,
+        ...unverifiedClaims,
         policy_eligible: decision.policyEligible,
         ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {}),
         capture_decision: recordTurnMemoryDecisionFields(pending, decision, "accepted", updatedAt)
@@ -764,8 +1045,100 @@ function recordTurnMemoryDecisionFields(
       kind: item.kind
     })),
     reason: decision.reason,
-    decided_at: updatedAt
+    decided_at: updatedAt,
+    ...(decision.turnJudge ? {
+      prompt_version: decision.turnJudge.promptVersion,
+      ...(decision.turnJudge.modelUnverifiedAnswer !== undefined
+        ? { unverified_answer: decision.turnJudge.modelUnverifiedAnswer }
+        : {}),
+      turn_judge: {
+        relation: decision.turnJudge.relation,
+        feedback: decision.turnJudge.feedback,
+        reason: decision.turnJudge.reason,
+        dropped_quotes: decision.turnJudge.diagnostics.droppedQuotes,
+        quote_fixes: decision.turnJudge.diagnostics.quoteFixes,
+        violations: decision.turnJudge.diagnostics.violations
+      }
+    } : {})
   };
+}
+
+function captureDecisionFromTurnJudgment(judgment: TurnJudgment): TurnCaptureDecision {
+  const l1 = judgment.l1;
+  const user = judgment.user;
+  const userMemoryEvidence = user?.evidence ?? [];
+  return {
+    createL1: Boolean(l1),
+    l1Title: l1?.title ?? "",
+    l1Summary: l1?.summary ?? "",
+    policyEligible: Boolean(l1?.evidence.some((item) =>
+      item.kind === "user_preference" ||
+      item.kind === "user_directive" ||
+      item.kind === "decision" ||
+      item.kind === "correction" ||
+      item.kind === "task_outcome"
+    )),
+    createUserMemory: Boolean(user),
+    userMemoryTypes: uniq(userMemoryEvidence.map((item) => item.type)),
+    userMemoryEvidence,
+    userMemoryAction: user?.action === "confirm"
+      ? "confirm_existing"
+      : user?.action === "correct"
+        ? "correct_existing"
+        : user ? "create" : "none",
+    ...(user && user.action !== "create" ? { matchedUserMemoryId: user.target } : {}),
+    ...(user?.action === "correct" ? { correctedUserMemoryContent: user.replacement } : {}),
+    l1Evidence: l1?.evidence ?? [],
+    reason: "",
+    ...(l1 ? { unverifiedAnswer: l1.unverifiedAnswer } : {}),
+    turnJudge: {
+      promptVersion: TURN_JUDGE_PROMPT_VERSION,
+      relation: judgment.relation,
+      feedback: judgment.feedback,
+      reason: judgment.reason,
+      ...(l1 ? { modelUnverifiedAnswer: l1.unverifiedAnswer } : {}),
+      diagnostics: judgment.diagnostics
+    }
+  };
+}
+
+// turn.judge.v1 keeps only the checks that rules can settle: no real-time
+// keyword guard, and an L1 the model marks unverified stays unverified only
+// when the turn has no non-recall tool result.
+function constrainTurnJudgeDecision(
+  decision: TurnCaptureDecision,
+  memory: MemoryRow,
+  trace: TraceMeta
+): TurnCaptureDecision {
+  const userMemoryTypes = uniq(decision.userMemoryEvidence.map((item) => item.type));
+  const verifiedToolObservation = hasVerifiedDurableToolObservation(memory, trace, false);
+  const createUserMemory = userMemoryTypes.length > 0 &&
+    decision.createUserMemory && decision.userMemoryEvidence.length > 0;
+  const guards: string[] = [];
+  if (decision.createUserMemory && decision.userMemoryEvidence.length === 0) {
+    guards.push("user-memory-evidence-missing");
+  }
+  if (decision.createL1 && decision.l1Evidence.length === 0) {
+    guards.push("l1-evidence-missing");
+  }
+  const unverified = decision.createL1 && decision.unverifiedAnswer === true && !verifiedToolObservation;
+  return {
+    ...decision,
+    policyEligible: unverified ? false : isPolicyEligibleCapture(decision, decision.createL1, verifiedToolObservation),
+    createUserMemory,
+    userMemoryTypes: createUserMemory ? userMemoryTypes : [],
+    userMemoryAction: createUserMemory ? decision.userMemoryAction : "none",
+    matchedUserMemoryId: createUserMemory ? decision.matchedUserMemoryId : undefined,
+    correctedUserMemoryContent: createUserMemory ? decision.correctedUserMemoryContent : undefined,
+    ...(decision.createL1 ? { unverifiedAnswer: unverified } : {}),
+    reason: guards.length > 0 ? `guards=${guards.join(",")}` : ""
+  };
+}
+
+// turn.judge.v1 narrows forced L1 to the device memory observation (BC-04),
+// with its original conditions unchanged.
+export function isDeviceMemoryForcedCapture(memory: MemoryRow, trace: TraceMeta): boolean {
+  return (memory.memoryKey ?? "").startsWith("trace:environment:device:") && isForcedL1Capture(memory, trace);
 }
 
 function constrainTurnMemoryDecision(

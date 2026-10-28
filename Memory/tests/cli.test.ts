@@ -1,3 +1,4 @@
+import { LEGACY_TEST_CONFIG } from "./fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,7 @@ describe("memmy CLI", () => {
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
     const service = new MemoryService({
       db,
+      config: LEGACY_TEST_CONFIG,
       mode: "dev",
       embedder: createTestEmbedder(),
       fetchAppMemoryBudget: async () => null
@@ -195,6 +197,7 @@ describe("memmy CLI", () => {
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
     const service = new MemoryService({
       db,
+      config: LEGACY_TEST_CONFIG,
       mode: "dev",
       embedder: createTestEmbedder(),
       fetchAppMemoryBudget: async () => null

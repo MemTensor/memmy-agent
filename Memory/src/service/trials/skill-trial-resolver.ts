@@ -295,7 +295,7 @@ outcomeForSkillTrial(
 resolveSkillTrialEvidence(
     request: SkillUseRequest,
     session: SessionRecord,
-    episode: EpisodeRecord
+    episode: EpisodeRecord | undefined
   ): {
     l1MemoryId?: string;
     rawTurnId?: string;
@@ -306,7 +306,7 @@ resolveSkillTrialEvidence(
       if (rawTurn.sessionId !== session.id) {
         throw new MemoryServiceError("conflict", "skill trial raw turn does not belong to the requested session");
       }
-      if (rawTurn.episodeId !== episode.id) {
+      if (episode && rawTurn.episodeId !== episode.id) {
         throw new MemoryServiceError("conflict", "skill trial raw turn does not belong to the requested episode");
       }
     }
@@ -321,7 +321,7 @@ resolveSkillTrialEvidence(
       if (memory.sessionId && memory.sessionId !== session.id) {
         throw new MemoryServiceError("conflict", "skill trial memory does not belong to the requested session");
       }
-      if (trace.episodeId && trace.episodeId !== episode.id) {
+      if (episode && trace.episodeId && trace.episodeId !== episode.id) {
         throw new MemoryServiceError("conflict", "skill trial memory does not belong to the requested episode");
       }
       const traceRawTurnId = rawTurnIdFromMemory(memory);

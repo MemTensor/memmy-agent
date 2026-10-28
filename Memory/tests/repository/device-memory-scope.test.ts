@@ -23,9 +23,11 @@ function legacyProject(user: string) {
   const workspaceId = sha256Hex(`${user}\0local\0${host}\0${uri}`);
   return {projectId: `ws_${workspaceId}`, workspaceId};
 }
-function seedV9(path: string) {
+function seedV9(path: string, pendingEpisodeAssignment = false) {
   const db = new Database(path);
-  db.exec(readFileSync(new URL("../fixtures/schema-v9.sql", import.meta.url), "utf8"));
+  const schema = readFileSync(new URL("../fixtures/schema-v9.sql", import.meta.url), "utf8");
+  db.exec(pendingEpisodeAssignment ? schema.replace(/episode_id TEXT NOT NULL/g, "episode_id TEXT") : schema);
+  if (pendingEpisodeAssignment) db.exec("UPDATE schema_migrations SET version=10, id='010_pending_episode_assignment'");
   for (const user of ["account-a", "account-b"]) {
     const {projectId, workspaceId} = legacyProject(user);
     const namespaceKey = stableHash({tenantId: null, projectId, workspaceId});
@@ -97,6 +99,25 @@ async function triggerLogRetention(db: MemoryDb, repos: Repositories) {
 }
 
 describe("device memory / review regressions", () => {
+  it.each([false, true])("preserves rowids while combining device and pending-Episode upgrades (upstream v10=%s)", pending => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-combined-scope-upgrade-"));
+    const path = join(root, "memory.sqlite");
+    let upgraded: MemoryDb | undefined;
+    try {
+      const legacy = seedV9(path, pending);
+      legacy.exec("UPDATE raw_turns SET rowid=rowid+100");
+      const before = legacy.prepare("SELECT rowid,* FROM raw_turns ORDER BY rowid").all();
+      legacy.close();
+      upgraded = new MemoryDb({ path });
+      expect(upgraded.db.prepare("SELECT rowid,* FROM raw_turns ORDER BY rowid").all()).toEqual(before);
+      const columns = upgraded.db.prepare("PRAGMA table_info(raw_turns)").all() as Array<{name: string; notnull: number}>;
+      expect(columns.filter(column => ["user_id", "episode_id"].includes(column.name)).map(column => column.notnull)).toEqual([0, 0]);
+      upgraded.db.prepare("INSERT INTO raw_turns(id,session_id,turn_id,created_at) VALUES ('pending-turn','session-account-a','new-turn',?)").run(at);
+      expect(upgraded.db.prepare("SELECT episode_id,user_id FROM raw_turns WHERE id='pending-turn'").get()).toEqual({episode_id: null,user_id: null});
+      expect(upgraded.db.pragma("foreign_key_check")).toEqual([]);
+    } finally { upgraded?.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("does not apply an unowned deletion override when its device memory was skipped", () => {
     const {db} = fixture.createTestService(), repos = new Repositories(db.db);
     repos.l3WorldModels.upsertField({userId: null, projectId: "project-p", targetField: "project_contract", value: "Keep target rule"});
@@ -715,7 +736,7 @@ describe("device memory / preserved schema-v9 history", () => {
       } finally {db.close();}
     } finally {rmSync(root,{recursive:true,force:true});}
   });
-  it("shares writes and project identity across accounts, retaining separate host identities", () => {
+  it("shares writes and project identity across accounts, retaining separate host identities", async () => {
     const {db,service} = fixture.createTestService();
     const namespace = {source:"codex",profileId:"default",sessionKey:"shared-session",userId:"account-a"};
     const request = {l3WorldModelProtocolVersion:2 as const,l3WorldModelTransition:"resume_only" as const,workspaceUri:uri,workspaceHostId:host,namespace};
@@ -724,7 +745,7 @@ describe("device memory / preserved schema-v9 history", () => {
     expect(second.projectId).toBe(first.projectId);
     expect(resolveWorkspaceIdentity("account-c",{workspaceUri:uri,workspaceHostId:host})).toEqual(identity);
     expect(resolveWorkspaceIdentity(null,{workspaceUri:uri,workspaceHostId:"b".repeat(64)}).projectId).not.toBe(identity.projectId);
-    service.completeTurn("shared-turn",{sessionId:first.sessionId,namespace,query:"我最喜欢的水果是苹果",answer:"记住了。"});
+    (await service.completeTurn("shared-turn",{sessionId:first.sessionId,namespace,query:"我最喜欢的水果是苹果",answer:"记住了。"}));
     const a = service.panelItems({layer:"UserMemory",namespace}), b = service.panelItems({layer:"UserMemory",namespace:{...namespace,userId:"account-b"}});
     expect(a.items.length).toBeGreaterThan(0);
     expect(b.items).toEqual(a.items);
@@ -773,7 +794,7 @@ describe("device memory / preserved schema-v9 history", () => {
       db.close();
     } finally {rmSync(root,{recursive:true,force:true});}
   });
-  it("retries new and historical idempotency entries across accounts without accepting changed content", () => {
+  it("retries new and historical idempotency entries across accounts without accepting changed content", async () => {
     const {db,service} = fixture.createTestService();
     const repos = new Repositories(db.db);
     const request = {adapterId:"fixture",requestId:"open",timeZone:"+00:00",namespace:{source:"codex",profileId:"default",userId:"account-a"}};
@@ -786,12 +807,12 @@ describe("device memory / preserved schema-v9 history", () => {
     expect(service.openSession({...request,namespace:{...request.namespace,userId:"account-b"}})).toMatchObject({userId:null,duplicate:true});
     expect(()=>service.openSession({...request,source:"different"})).toThrow(/different session.open request/);
     const turn = {adapterId:"fixture",requestId:"complete",timeZone:"+00:00",sessionId:opened.sessionId,namespace:request.namespace,query:"Remember UTF-8",answer:"Confirmed"};
-    const completed = service.completeTurn("turn",turn);
+    const completed = (await service.completeTurn("turn",turn));
     const switched = {...turn,namespace:{...turn.namespace,userId:"account-b"}};
-    expect(service.completeTurn("turn",switched)).toMatchObject({duplicate:true,rawTurnId:completed.rawTurnId,jobs:[]});
+    expect((await service.completeTurn("turn",switched))).toMatchObject({duplicate:true,rawTurnId:completed.rawTurnId,jobs:[]});
     repos.runtime.saveIdempotency("turn.complete:fixture:complete",stableHash({turnId:"turn",request:turn}),completed);
-    expect(service.completeTurn("turn",switched)).toMatchObject({duplicate:true,rawTurnId:completed.rawTurnId});
-    expect(()=>service.completeTurn("turn",{...switched,answer:"Different"})).toThrow(/different request body/);
+    expect((await service.completeTurn("turn",switched))).toMatchObject({duplicate:true,rawTurnId:completed.rawTurnId});
+    await expect(service.completeTurn("turn",{...switched,answer:"Different"})).rejects.toThrow(/different request body/);
   });
   it("invalidates ambiguous imported aliases and keeps remote identity without session evidence", () => {
     const {db,service} = fixture.createTestService();

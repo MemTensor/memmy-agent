@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { deriveWorkspaceHostId } from "../../../src/contracts/index.js";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
@@ -70,23 +71,23 @@ describe("MemoryService / session / lifecycle", () => {
     expect(resumedHostSession.resumed).toBe(true);
     expect(resumedHostSession.duplicate).toBeUndefined();
 
-    const complete = service.completeTurn("turn-1", {
+    const complete = (await service.completeTurn("turn-1", {
       adapterId: "test-adapter",
       requestId: "request-1",
       sessionId: session.sessionId,
       query: "把记忆插件迁移为 SQLite 本地记忆底座服务",
       answer: "已创建 REST 和 CLI 的服务框架。",
       tags: ["migration"]
-    });
+    }));
 
-    const duplicate = service.completeTurn("turn-1", {
+    const duplicate = (await service.completeTurn("turn-1", {
       adapterId: "test-adapter",
       requestId: "request-1",
       sessionId: session.sessionId,
       query: "把记忆插件迁移为 SQLite 本地记忆底座服务",
       answer: "已创建 REST 和 CLI 的服务框架。",
       tags: ["migration"]
-    });
+    }));
 
     expect(duplicate.l1MemoryId).toBe(complete.l1MemoryId);
     expect(duplicate.duplicate).toBe(true);
@@ -101,7 +102,7 @@ describe("MemoryService / session / lifecycle", () => {
        FROM evolution_jobs
        WHERE job_type = 'episode_idle_close'
          AND episode_id = ?`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(idleCloseJobs.count).toBe(1);
     expect(complete.changeSeq).toBeGreaterThan(0);
     expect(complete.syncCursor).toMatch(/^cur_/);
@@ -134,21 +135,21 @@ describe("MemoryService / session / lifecycle", () => {
       `SELECT turn_count
        FROM episodes
        WHERE id = ?`
-    ).get(complete.episodeId) as { turn_count: number };
+    ).get(assignedEpisodeId(service, complete)) as { turn_count: number };
     expect(episodeState.turn_count).toBe(1);
     const initialChangeKinds = db.db.prepare(
       `SELECT kind, op, entity_id
        FROM memory_change_log
        WHERE entity_id IN (?, ?, ?, ?)
        ORDER BY seq ASC`
-    ).all(session.sessionId, complete.episodeId, complete.rawTurnId, complete.l1MemoryId) as Array<{
+    ).all(session.sessionId, assignedEpisodeId(service, complete), complete.rawTurnId, complete.l1MemoryId) as Array<{
       kind: string;
       op: string;
       entity_id: string;
     }>;
     expect(initialChangeKinds).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "session", op: "created", entity_id: session.sessionId }),
-      expect.objectContaining({ kind: "episode", op: "created", entity_id: complete.episodeId }),
+      expect.objectContaining({ kind: "episode", op: "created", entity_id: assignedEpisodeId(service, complete) }),
       expect.objectContaining({ kind: "raw_turn", op: "created", entity_id: complete.rawTurnId }),
       expect.objectContaining({ kind: "trace", op: "created", entity_id: complete.l1MemoryId })
     ]));
@@ -316,7 +317,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
-  it("keeps host-key session recovery isolated by tenant while sharing within a tenant across accounts", () => {
+  it("keeps host-key session recovery isolated by tenant while sharing within a tenant across accounts", async () => {
     const { db, service } = createTestService();
     const open = (tenantId: string | undefined, userId: string) => service.openSession({
       namespace: { source: "codex", profileId: "default", sessionKey: "shared-host-key", tenantId, userId }
@@ -337,12 +338,12 @@ describe("MemoryService / session / lifecycle", () => {
     db.db.prepare("UPDATE sessions SET meta_json = ? WHERE id = ?").run(JSON.stringify(camelOnlyMeta), tenantB.sessionId);
     expect(open("tenant-b", "account-e")).toMatchObject({ sessionId: tenantB.sessionId, resumed: true });
 
-    const captured = service.completeTurn("tenant-a-native-turn", {
+    const captured = (await service.completeTurn("tenant-a-native-turn", {
       sessionId: tenantA.sessionId,
       query: "Tenant source metadata must follow the session.",
       answer: "The session tenant is retained in capture context.",
       status: "succeeded"
-    });
+    }));
     const rawTurn = db.db.prepare("SELECT message_payload_json FROM raw_turns WHERE id = ?")
       .get(captured.rawTurnId) as { message_payload_json: string };
     expect(JSON.parse(rawTurn.message_payload_json)).toMatchObject({
@@ -509,7 +510,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
-  it("refreshes explicit source when reopening an existing session", () => {
+  it("refreshes explicit source when reopening an existing session", async () => {
     const { db, service } = createTestService();
     const sessionId = "openclaw-memory-default";
     const stale = service.openSession({
@@ -542,11 +543,11 @@ describe("MemoryService / session / lifecycle", () => {
       workspace_path: "/tmp/openclaw-workspace"
     });
 
-    const complete = service.completeTurn("turn-openclaw-source-refresh", {
+    const complete = (await service.completeTurn("turn-openclaw-source-refresh", {
       sessionId,
       query: "remember source refresh",
       answer: "source refresh captured"
-    });
+    }));
     const memoryRow = db.db
       .prepare(`SELECT agent_id FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { agent_id: string };
@@ -554,7 +555,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
-  it("derives and fixes protocol-v2 project scope from canonical workspace identity", () => {
+  it("derives and fixes protocol-v2 project scope from canonical workspace identity", async () => {
     const { db, service } = createTestService();
     const workspaceHostId = deriveWorkspaceHostId("session-lifecycle-installation");
     const base = {
@@ -648,11 +649,11 @@ describe("MemoryService / session / lifecycle", () => {
       sessionId: opened.sessionId,
       workspaceHostId: deriveWorkspaceHostId("conflicting-installation")
     })).toThrow(/scope_conflict/u);
-    const complete = service.completeTurn("v2-project-turn", {
+    const complete = (await service.completeTurn("v2-project-turn", {
       sessionId: opened.sessionId,
       query: "add a project rule",
       answer: "the project rule was added"
-    });
+    }));
     expect(complete.jobs.map((job) => job.jobType)).toEqual([
       "trace_summary",
       "episode_idle_close",
@@ -736,7 +737,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
-  it("rolls a legacy host session into protocol v2 only on an explicit lifecycle transition", () => {
+  it("rolls a legacy host session into protocol v2 only on an explicit lifecycle transition", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -745,11 +746,11 @@ describe("MemoryService / session / lifecycle", () => {
       userId: "rollover-user"
     };
     const legacy = service.openSession({ namespace });
-    const complete = service.completeTurn("legacy-rollover-turn", {
+    const complete = (await service.completeTurn("legacy-rollover-turn", {
       sessionId: legacy.sessionId,
       query: "legacy task",
       answer: "legacy result"
-    });
+    }));
     expect(() => service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -772,7 +773,7 @@ describe("MemoryService / session / lifecycle", () => {
       status: "closed",
       close_reason: "l3_world_model_protocol_v2"
     });
-    expect(db.db.prepare(`SELECT status FROM episodes WHERE id = ?`).get(complete.episodeId))
+    expect(db.db.prepare(`SELECT status FROM episodes WHERE id = ?`).get(assignedEpisodeId(service, complete)))
       .toEqual({ status: "closed" });
     expect(db.db.prepare(
       `SELECT json_extract(meta_json, '$.l3_world_model_protocol_version') AS protocol
@@ -781,7 +782,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
-  it("records turn artifacts in the artifact table and change log", () => {
+  it("records turn artifacts in the artifact table and change log", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -789,7 +790,7 @@ describe("MemoryService / session / lifecycle", () => {
       userId: "user-turn-artifacts"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-artifact", {
+    const complete = (await service.completeTurn("turn-artifact", {
       sessionId: session.sessionId,
       query: "create an artifact for export",
       answer: "created the artifact reference",
@@ -798,7 +799,7 @@ describe("MemoryService / session / lifecycle", () => {
         uri: "file:///tmp/memmy-report.txt",
         name: "memmy-report.txt"
       }]
-    });
+    }));
 
     const artifacts = db.db.prepare(
       `SELECT id, session_id, episode_id, raw_turn_id, user_id, kind, uri, payload_json
@@ -817,7 +818,7 @@ describe("MemoryService / session / lifecycle", () => {
     expect(artifacts).toHaveLength(1);
     expect(artifacts[0]).toMatchObject({
       session_id: session.sessionId,
-      episode_id: complete.episodeId,
+      episode_id: assignedEpisodeId(service, complete),
       raw_turn_id: complete.rawTurnId,
       user_id: null,
       kind: "file",
@@ -854,7 +855,7 @@ describe("MemoryService / session / lifecycle", () => {
 });
 
 describe("L3 World Model trace boundaries", () => {
-  it("reads the trace head and freezes exactly through the submitted original L1", () => {
+  it("reads the trace head and freezes exactly through the submitted original L1", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -867,20 +868,20 @@ describe("L3 World Model trace boundaries", () => {
       l3WorldModelTransition: "resume_only",
       namespace
     });
-    const first = service.completeTurn("trace-boundary-turn-1", {
+    const first = (await service.completeTurn("trace-boundary-turn-1", {
       sessionId: opened.sessionId,
       query: "Do not overwrite files without confirmation.",
       answer: "I preserved the original file.",
       toolCalls: [{ name: "write", input: { path: "a.txt" } }],
       toolResults: [{ name: "write", output: "confirmation required", exitCode: 1 }]
-    });
-    const second = service.completeTurn("trace-boundary-turn-2", {
+    }));
+    const second = (await service.completeTurn("trace-boundary-turn-2", {
       sessionId: opened.sessionId,
       query: "Keep destructive operations recoverable.",
       answer: "I moved the file to trash.",
       toolCalls: [{ name: "trash", input: { path: "b.txt" } }],
       toolResults: [{ name: "trash", output: "ok", exitCode: 0 }]
-    });
+    }));
     const envelope = {
       requestId: "f476cd4c-a075-4d28-ae39-355ce9511b22",
       adapterId: "codex-memory",

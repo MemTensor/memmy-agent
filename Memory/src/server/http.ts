@@ -485,6 +485,9 @@ function createAutoWorkerDrain(
     scheduleNextDueJob();
   });
 
+  // Capture failures still leave durable work, even when the HTTP response fails.
+  service.setCapturePendingListener(schedule);
+
   service.setPersistRecoveredListener(() => {
     if (disposed || !workerStarted) {
       return;
@@ -520,6 +523,7 @@ function createAutoWorkerDrain(
       disposed = true;
       service.setAppBudgetReconcileListener(undefined);
       service.setPersistRecoveredListener(undefined);
+      service.setCapturePendingListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -749,7 +753,7 @@ async function routeRequest(
         request,
         completeSourceTurn,
       )
-      : completeSourceTurn();
+      : await completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
     return result;
   }
@@ -1175,6 +1179,7 @@ function publicCompleteTurnResponse(result: unknown): Record<string, unknown> {
     turnId: record.turnId,
     sessionId: record.sessionId,
     episodeId: record.episodeId,
+    assignmentStatus: record.assignmentStatus,
     rawTurnId: record.rawTurnId,
     userMemoryId: record.userMemoryId,
     userMemoryIds: record.userMemoryIds,

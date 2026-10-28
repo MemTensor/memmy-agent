@@ -30,7 +30,7 @@ function deletedBackup() {
 }
 
 describe("UID decoupling origin and import boundaries", () => {
-  it.each(["project", "workspace", "both"])("keeps independent evidence after empty %s is filled", boundary => {
+  it.each(["project", "workspace", "both"])("keeps independent evidence after empty %s is filled", async boundary => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const common = { source: "codex", profileId: "default", userId: "account-a" };
@@ -40,12 +40,12 @@ describe("UID decoupling origin and import boundaries", () => {
     const second = { ...common, sessionKey: "b", projectId: "project-b", workspaceId: "workspace-b" };
     const a = service.openSession({ namespace: first, meta: { conversationId: "native-chat" } });
     const b = service.openSession({ namespace: second, meta: { conversationId: "native-chat" } });
-    const capture = (sessionId: string, namespace: typeof first) => service.completeTurn("native-turn", {
+    const capture = async (sessionId: string, namespace: typeof first) => (await service.completeTurn("native-turn", {
       sessionId, namespace, query: "Inspect package.json and report the test command.", answer: "Use npm test.",
       toolCalls: [{ id: "read", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read", output: "npm test" }]
-    });
-    const ta = capture(a.sessionId, first), tb = capture(b.sessionId, second);
+    }));
+    const ta = (await capture(a.sessionId, first)), tb = (await capture(b.sessionId, second));
     expect(ta.l1MemoryId).not.toBe(tb.l1MemoryId);
     for (const [key, turn, session] of [["a", ta, a], ["b", tb, b]] as const) {
       repos.runtime.upsertCandidatePoolTrace({ id: key, userId: null, sessionId: session.sessionId,
@@ -90,7 +90,7 @@ describe("UID decoupling origin and import boundaries", () => {
     const start = service.startTurn({ sessionId: a.sessionId, turnId: "turn", query: turnInput.query });
     service.openSession({ sessionId: a.sessionId, namespace: { source: "codex", profileId: "default", projectId: "later", workspaceId: "later-w" } });
     await start;
-    const completed = service.completeTurn("turn", { sessionId: a.sessionId, ...turnInput });
+    const completed = (await service.completeTurn("turn", { sessionId: a.sessionId, ...turnInput }));
     const memory = repos.memories.get(completed.l1MemoryId!)!;
     expect(memory.info.native_origin_v1).toMatchObject({ projectId: null, workspaceId: null });
     expect(memory.info.project_id).toBeNull();
@@ -98,17 +98,17 @@ describe("UID decoupling origin and import boundaries", () => {
     expect(db.db.prepare("SELECT key FROM runtime_kv WHERE key LIKE 'native_turn_origin:%'").all()).toEqual([]);
   });
 
-  it("keeps true copies together after a session moves, preserving group deletion and promotion", () => {
+  it("keeps true copies together after a session moves, preserving group deletion and promotion", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const ns = { source: "codex", projectId: "p", workspaceId: "w", profileId: "default" };
-    const memories = ["a", "b"].map(key => {
+    const memories = (await Promise.all(["a", "b"].map(async key => {
       const session = service.openSession({ namespace: { ...ns, sessionKey: key, userId: key }, meta: { conversationId: "chat" } });
-      const turn = service.completeTurn("turn", { sessionId: session.sessionId, namespace: ns, ...turnInput });
+      const turn = (await service.completeTurn("turn", { sessionId: session.sessionId, namespace: ns, ...turnInput }));
       repos.runtime.upsertCandidatePoolTrace({ id: key, userId: key, sessionId: session.sessionId,
         sourceMemoryId: turn.l1MemoryId!, candidateKey: "policy", candidateValue: "evidence", score: 1, evidence: {}, createdAt: at, updatedAt: at });
       return repos.memories.get(turn.l1MemoryId!)!;
-    });
+    })));
     service.openSession({ sessionId: memories[0]!.sessionId, namespace: { source: "codex", profileId: "default", projectId: "different" } });
     for (const memory of memories) expect(new Set(repos.memories.nativeDuplicates(memory).ids)).toEqual(new Set(memories.map(row => row.id)));
     repos.runtime.markCandidatePoolPromoted({ candidateKey: "policy", sourceMemoryIds: [memories[1]!.id], policyId: "policy", at });
@@ -117,21 +117,21 @@ describe("UID decoupling origin and import boundaries", () => {
     expect(repos.memories.nativeDuplicates(memories[1]!).deleted).toBe(true);
   });
 
-  it("rejects a reused turn with an explicitly different scope without changing its stored evidence", () => {
+  it("rejects a reused turn with an explicitly different scope without changing its stored evidence", async () => {
     const { db, service } = fixture.createTestService();
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "a" }, meta: { conversationId: "chat" } });
-    const turn = service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput });
+    const turn = (await service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput }));
     const before = db.db.prepare("SELECT * FROM raw_turns WHERE id=?").get(turn.rawTurnId);
     const namespace = { source: "codex", profileId: "default", projectId: "later" };
     service.openSession({ sessionId: session.sessionId, namespace });
-    expect(() => service.completeTurn("turn", { sessionId: session.sessionId, namespace, ...turnInput })).toThrow("turn origin conflicts");
+    await expect(service.completeTurn("turn", { sessionId: session.sessionId, namespace, ...turnInput })).rejects.toThrow("turn origin conflicts");
     expect(db.db.prepare("SELECT * FROM raw_turns WHERE id=?").get(turn.rawTurnId)).toEqual(before);
   });
 
-  it("retains the session tenant when completion omits its namespace", () => {
+  it("retains the session tenant when completion omits its namespace", async () => {
     const { db, service } = fixture.createTestService();
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "a", tenantId: "tenant-a" }, meta: { conversationId: "chat" } });
-    const turn = service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput });
+    const turn = (await service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput }));
     expect(new Repositories(db.db).memories.get(turn.l1MemoryId!)!.info.native_origin_v1).toMatchObject({ tenantId: "tenant-a" });
   });
 
@@ -158,10 +158,10 @@ describe("UID decoupling origin and import boundaries", () => {
     const session = service.openSession({ namespace: { ...namespace, sessionKey: "codex-memory-native-conversation" } });
     await service.startTurn({ sessionId: session.sessionId, turnId: "native-turn", namespace, query: turnInput.query });
     expect(repos.runtime.getRawTurnBySessionTurn(session.sessionId, "native-turn")).toBeUndefined();
-    const result = service.completeSourceTurn({ sessionId: session.sessionId, namespace, source: "codex", channel: "hook",
+    const result = (await service.completeSourceTurn({ sessionId: session.sessionId, namespace, source: "codex", channel: "hook",
       sourceTurn: { source: "codex", profileId: "default", conversationId: "native-conversation", turnId: "native-turn",
         startedAt: "2099-01-01T10:00:00.000Z", completedAt: "2099-01-01T10:01:00.000Z", sequence: 1, completionEvidence: "task_complete:10" },
-      ...turnInput });
+      ...turnInput }));
     expect(result.status).toBe("stored");
     if (result.status !== "stored" || !result.result) throw new Error("source capture was not stored");
     const memory = repos.memories.get(result.result.l1MemoryId!)!;
@@ -179,11 +179,11 @@ describe("UID decoupling origin and import boundaries", () => {
     const start = service.startTurn({ sessionId: session.sessionId, turnId: "shared-turn", query: turnInput.query });
     service.openSession({ sessionId: session.sessionId, namespace: { ...common, source: "claude" } });
     await start;
-    const completed = service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput });
+    const completed = (await service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput }));
     const memory = repos.memories.get(completed.l1MemoryId!)!;
     expect(memory.agentId).toBe("codex");
     expect(db.db.prepare("SELECT source FROM memory_capture_claims WHERE primary_memory_id=?").get(memory.id)).toEqual({ source: "codex" });
-    expect(service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput }).l1MemoryId).toBe(memory.id);
+    expect((await service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput })).l1MemoryId).toBe(memory.id);
     const scan = service.addMemory({ namespace: { ...common, source: "claude", sessionKey: "shared-chat" },
       adapterId: "agent-source:claude", requestId: "independent-scan", layer: "L1", source: "claude", tags: ["agent-source", "claude"],
       turnId: "shared-turn", content: `## user\n\n${turnInput.query}\n\n## assistant\n\n${turnInput.answer}` });
@@ -191,42 +191,42 @@ describe("UID decoupling origin and import boundaries", () => {
     expect(repos.memories.get(scan.id)!.agentId).toBe("claude");
   });
 
-  it.each(["original", "moved"])("checks completed historical turns against %s immutable scope", scope => {
+  it.each(["original", "moved"])("checks completed historical turns against %s immutable scope", async scope => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const common = { source: "codex", profileId: "default" };
     const original = { ...common, projectId: "project-a", workspaceId: "workspace-a" };
     const moved = { ...common, projectId: "project-b", workspaceId: "workspace-b" };
     const session = service.openSession({ namespace: { ...original, sessionKey: "host-a" }, meta: { conversationId: "shared-chat" } });
-    const first = service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput });
+    const first = (await service.completeTurn("shared-turn", { sessionId: session.sessionId, ...turnInput }));
     service.openSession({ sessionId: session.sessionId, namespace: moved });
     repos.runtime.closeSession(session.sessionId, "2099-01-01T00:00:00.000Z");
-    const scan = service.completeSourceTurn({ namespace: scope === "original" ? original : moved, source: "codex", channel: "agent_source_scan",
+    const scan = (await service.completeSourceTurn({ namespace: scope === "original" ? original : moved, source: "codex", channel: "agent_source_scan",
       captureLegacyHistory: true, sourceTurn: { source: "codex", profileId: "default", conversationId: "shared-chat", turnId: "shared-turn",
-        startedAt: "2000-01-01T10:00:00.000Z", completedAt: "2000-01-01T10:01:00.000Z", completionEvidence: "task_complete:10" }, ...turnInput });
+        startedAt: "2000-01-01T10:00:00.000Z", completedAt: "2000-01-01T10:01:00.000Z", completionEvidence: "task_complete:10" }, ...turnInput }));
     expect(scan.status).toBe(scope === "original" ? "pending" : "stored");
     expect(repos.memories.get(first.l1MemoryId!)!.info.project_id).toBe("project-a");
     if (scope === "moved") expect(scan.result?.l1MemoryId).not.toBe(first.l1MemoryId);
   });
 
-  it("does not rebuild an immutable completed turn when another capture already exists", () => {
+  it("does not rebuild an immutable completed turn when another capture already exists", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const namespace = { source: "codex", profileId: "default", projectId: "project-a", workspaceId: "workspace-a" };
     const old = service.openSession({ namespace: { ...namespace, sessionKey: "host-old" }, meta: { conversationId: "shared-chat" } });
-    service.completeTurn("shared-turn", { sessionId: old.sessionId, ...turnInput });
+    (await service.completeTurn("shared-turn", { sessionId: old.sessionId, ...turnInput }));
     service.openSession({ sessionId: old.sessionId, namespace: { ...namespace, projectId: "project-b", workspaceId: "workspace-b" } });
     repos.runtime.closeSession(old.sessionId, "2099-01-01T00:00:00.000Z");
-    const scan = (turnId: string, minute: string) => service.completeSourceTurn({ namespace, source: "codex", channel: "agent_source_scan",
+    const scan = async (turnId: string, minute: string) => (await service.completeSourceTurn({ namespace, source: "codex", channel: "agent_source_scan",
       captureLegacyHistory: true, sourceTurn: { source: "codex", profileId: "default", conversationId: "shared-chat", turnId,
-        startedAt: `2000-01-01T10:${minute}:00.000Z`, completedAt: `2000-01-01T10:${minute}:30.000Z`, completionEvidence: "task_complete:10" }, ...turnInput });
-    expect(scan("earlier-turn", "00").status).toBe("stored");
+        startedAt: `2000-01-01T10:${minute}:00.000Z`, completedAt: `2000-01-01T10:${minute}:30.000Z`, completionEvidence: "task_complete:10" }, ...turnInput }));
+    expect((await scan("earlier-turn", "00")).status).toBe("stored");
     const before = db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns WHERE turn_id='shared-turn'").get();
-    expect(scan("shared-turn", "02")).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
+    expect((await scan("shared-turn", "02"))).toMatchObject({ status: "pending", reason: "legacy_source_turn_already_completed" });
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM raw_turns WHERE turn_id='shared-turn'").get()).toEqual(before);
   });
 
-  it("uses the retained Session scope when deciding whether imported L3 evidence can resume", () => {
+  it("uses the retained Session scope when deciding whether imported L3 evidence can resume", async () => {
     const target = fixture.createTestService(), source = fixture.createTestService();
     const tr = new Repositories(target.db.db), sr = new Repositories(source.db.db);
     const opened = target.service.openSession({ namespace: { source: "codex", profileId: "default", projectId: "project-p", sessionKey: "host" } });
@@ -234,7 +234,7 @@ describe("UID decoupling origin and import boundaries", () => {
     tr.l3WorldModels.upsertField({ userId: null, projectId: "project-p", targetField: "project_contract", value: "Keep target rule", at });
     sr.runtime.importBundleTables(tr.runtime.exportBundleTables(true));
     source.db.db.prepare("UPDATE sessions SET project_id='project-q' WHERE id=?").run(opened.sessionId);
-    const captured = source.service.completeTurn("other-project-turn", { sessionId: opened.sessionId, ...turnInput });
+    const captured = (await source.service.completeTurn("other-project-turn", { sessionId: opened.sessionId, ...turnInput }));
     const incoming = sr.runtime.exportBundleTables(true);
     tr.runtime.importBundleTables(incoming, { conflictStrategy: "skip" });
     expect(tr.runtime.getSession(opened.sessionId)!.projectId).toBe("project-p");
@@ -245,13 +245,13 @@ describe("UID decoupling origin and import boundaries", () => {
     expect(tr.l3WorldModels.fields(null, "project-p").projectContract).toBe("Keep target rule");
   });
 
-  it.each(["batch", "scope"])("does not import jobs authorized by a skipped %s identity", dependency => {
+  it.each(["batch", "scope"])("does not import jobs authorized by a skipped %s identity", async dependency => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", projectId: "project-p", sessionKey: "host" } });
     db.db.prepare("UPDATE sessions SET meta_json=? WHERE id=?").run(JSON.stringify({ l3_world_model_protocol_version: 2 }), session.sessionId);
     repos.l3WorldModels.upsertField({ userId: null, projectId: "project-p", targetField: "project_contract", value: "Keep target rule", at });
-    service.completeTurn("target-turn", { sessionId: session.sessionId, ...turnInput });
+    (await service.completeTurn("target-turn", { sessionId: session.sessionId, ...turnInput }));
     repos.l3WorldModels.freezeBatches({ sessionId: session.sessionId, trigger: "session_close" });
     const before = repos.runtime.exportBundleTables(true);
     const batch = before.l3_world_model_evidence_batches!.find(row => row.project_id === "project-p")!;
@@ -276,25 +276,25 @@ describe("UID decoupling origin and import boundaries", () => {
     expect(plan.some(row => row.detail.includes("idx_source_turn_captures_turn"))).toBe(true);
   });
 
-  it.each([null, "tenant-a"])("preserves tenant provenance through session reuse (tenant=%s)", tenant => {
+  it.each([null, "tenant-a"])("preserves tenant provenance through session reuse (tenant=%s)", async tenant => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
-    const memoryIds = [tenant, "tenant-b"].map((tenantId, i) => {
+    const memoryIds = (await Promise.all([tenant, "tenant-b"].map(async (tenantId, i) => {
       const namespace = { source: "codex", profileId: "default", sessionKey: `host-${i}`, tenantId: tenantId ?? undefined, projectId: "p", workspaceId: "w" };
       const session = service.openSession({ namespace, meta: { conversationId: "chat" } });
-      return service.completeTurn("turn", { sessionId: session.sessionId, namespace, ...turnInput }).l1MemoryId!;
-    });
+      return (await service.completeTurn("turn", { sessionId: session.sessionId, namespace, ...turnInput })).l1MemoryId!;
+    })));
     repos.memories.softDelete(memoryIds[0]!);
     expect(repos.memories.nativeDuplicates(repos.memories.get(memoryIds[1]!)!)).toEqual({ ids: [memoryIds[1]], deleted: false });
   });
 
-  it("keeps legacy records with absent or contradictory capture evidence separate", () => {
+  it("keeps legacy records with absent or contradictory capture evidence separate", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
-    const ids = ["a", "b"].map(key => {
+    const ids = (await Promise.all(["a", "b"].map(async key => {
       const session = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: key }, meta: { conversationId: "chat" } });
-      return service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput }).l1MemoryId!;
-    });
+      return (await service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput })).l1MemoryId!;
+    })));
     db.db.exec("UPDATE memories SET info_json=json_remove(info_json,'$.native_origin_v1'),properties_json=json_remove(properties_json,'$.info.native_origin_v1'); UPDATE raw_turns SET message_payload_json=json_remove(message_payload_json,'$.native_origin_v1')");
     repos.memories.softDelete(ids[0]!);
     expect(repos.memories.nativeDuplicates(repos.memories.get(ids[1]!)!)).toEqual({ ids: [ids[1]], deleted: false });
@@ -303,7 +303,7 @@ describe("UID decoupling origin and import boundaries", () => {
   it.each([true, false])("keeps origins across restart and bundle restore (raw=%s)", async includeRawText => {
     const { db, service, root } = fixture.createTestService();
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "a" }, meta: { conversationId: "chat" } });
-    const turn = service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput });
+    const turn = (await service.completeTurn("turn", { sessionId: session.sessionId, ...turnInput }));
     service.openSession({ sessionId: session.sessionId, namespace: { source: "codex", profileId: "default", projectId: "later" } });
     const bundle = service.exportBundle({ includeRawText });
     await service.stop(); db.close();

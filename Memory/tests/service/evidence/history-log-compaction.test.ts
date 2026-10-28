@@ -188,7 +188,7 @@ describe("History change-log compaction", () => {
     const source = service.syncExternalEvidence(evidence);
     const repos = new Repositories(db.db), current = repos.memories.get(source.id)!;
     const session = service.openSession({ namespace: { ...namespace, source: "codex" } });
-    const turn = service.completeTurn("ordinary-trace-log", { sessionId: session.sessionId,
+    const turn = await service.completeTurn("ordinary-trace-log", { sessionId: session.sessionId,
       query: "TRACE_RAW_CONTENT_SENTINEL Keep the release review scoped.", answer: "The review stayed within that scope." });
     const trace = repos.memories.get(turn.l1MemoryId)!;
     const traceJson = JSON.stringify(trace);

@@ -69,7 +69,7 @@
     "agent:test:tui-cursor": "npm --prefix App/memmy-agent run test:tui-cursor",
     "memory:lint": "npm run typecheck -w @memmy/memory",
     "smoke:memory-layer": "npm run build -w @memmy/backend && npm run smoke:memory-layer:test && npm run smoke:memory-layer:typecheck && tsx tests/smoke/memory-layer-smoke.ts",
-    "smoke:memory-layer:test": "vitest run tests/smoke/memory-layer-smoke-plan.test.ts",
+    "smoke:memory-layer:test": "vitest run tests/smoke/memory-layer-smoke-plan.test.ts tests/smoke/async-capture-http.test.ts",
     "smoke:memory-layer:typecheck": "tsc -p tests/smoke/tsconfig.json --noEmit",
     "smoke:local-agent-memory": "npm run memory:build && npm run build -w @memmy/backend && npm --prefix App/memmy-agent run build && npm run smoke:local-agent-memory:test && npm run smoke:local-agent-memory:typecheck && tsx tests/smoke/local-agent-memory-smoke.ts",
     "smoke:local-agent-memory:cursor": "npm run memory:build && npm run build -w @memmy/backend && npm --prefix App/memmy-agent run build && npm run smoke:local-agent-memory:test && npm run smoke:local-agent-memory:typecheck && tsx tests/smoke/local-agent-memory-smoke.ts --sources=cursor",

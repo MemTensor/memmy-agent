@@ -41,6 +41,8 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
+  "episode_assignment",
+  "episode_finalize",
   "episode_idle_close",
   "episode_title",
   "trace_summary",
@@ -240,7 +242,7 @@ export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 /** Schema for raw turn summary. */
 export const RawTurnSummarySchema = z.object({
   rawTurnId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
   turnId: NonEmptyStringSchema,
   userText: z.string().optional(),
   assistantText: z.string().optional(),
@@ -466,7 +468,8 @@ export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 export const CompleteTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
+  assignmentStatus: z.enum(["pending", "assigned"]).optional(),
   rawTurnId: NonEmptyStringSchema,
   userMemoryId: z.string().optional(),
   userMemoryIds: z.array(NonEmptyStringSchema).optional(),

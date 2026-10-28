@@ -190,7 +190,7 @@ describe("repository sqlite schema contract", () => {
         "idx_episodes_project_updated",
         "idx_episodes_pipeline"
       ]));
-      expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(1);
+      expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(0);
       expect(skillTrialColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
         "status",
         "outcome",

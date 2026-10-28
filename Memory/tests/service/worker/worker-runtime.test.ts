@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { localCalendarDate } from "@memmy/agent-source-core";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
@@ -212,11 +213,11 @@ describe("MemoryService / worker / runtime", () => {
         userId: "user-expired-job"
       }
     });
-    const complete = service.completeTurn("turn-expired-job", {
+    const complete = (await service.completeTurn("turn-expired-job", {
       sessionId: session.sessionId,
       query: "recover an expired worker lease",
       answer: "the expired lease should be picked up by the next worker run"
-    });
+    }));
     const old = new Date(Date.now() - 120_000).toISOString();
     const jobId = "job_expired_lease";
     db.db.prepare(
@@ -224,7 +225,7 @@ describe("MemoryService / worker / runtime", () => {
         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
         payload_json, attempts, max_attempts, leased_until, last_error, created_at, updated_at
       ) VALUES (?, 'reflection', 'leased', ?, ?, ?, ?, '{}', 1, 3, ?, NULL, ?, ?)`
-    ).run(jobId, "user-expired-job", session.sessionId, complete.episodeId, complete.l1MemoryId, old, old, old);
+    ).run(jobId, "user-expired-job", session.sessionId, assignedEpisodeId(service, complete), complete.l1MemoryId, old, old, old);
 
     const run = await service.runWorkerOnce(10);
     expect(run.jobs).toEqual(expect.arrayContaining([
@@ -514,7 +515,8 @@ describe("MemoryService / worker / runtime", () => {
         async complete() {
           return "{}";
         },
-        async completeJson<T extends Record<string, unknown>>() {
+        async completeJson<T extends Record<string, unknown>>(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
           return {} as T;
         },
         status: () => ({ provider: "host", model: "none", configured: false, remote: false })

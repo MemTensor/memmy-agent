@@ -153,6 +153,33 @@ describe("Codex native source turns", () => {
     expect(sourceTurnFromMessages(messages)).toMatchObject({ turnId: "turn-1", query: "Fix the issue", answer: "Done" });
   });
 
+  it("drops labelled auto-review content but keeps the next unlabelled-model turn", async () => {
+    const review = [
+      prefix[0],
+      event("event_msg", { type: "task_started", turn_id: "turn-review" }),
+      event("turn_context", { turn_id: "turn-review", model: "codex-auto-review" }),
+      event("response_item", {
+        type: "message", role: "user",
+        content: [{ text: "The following is the Codex agent history whose request action you are assessing." }],
+        internal_chat_message_metadata_passthrough: { content_item_kinds: ["user.text"] }
+      }),
+      message("assistant", '{"outcome":"allow"}'),
+      event("event_msg", { type: "task_complete", turn_id: "turn-review" })
+    ];
+    const messages = await read([...review, ...prefix.slice(1), ...end]);
+    expect(sourceTurnFromMessages(messages)).toMatchObject({ turnId: "turn-1", query: "Fix the issue" });
+    expect(messages.some(item => item.content.includes("Codex agent history"))).toBe(false);
+  });
+
+  it.each([undefined, "unknown-model"])("does not reject review-like user text without model evidence: %s", async (model) => {
+    const query = "The following is the Codex agent history whose request action you are assessing.";
+    const messages = await read([
+      ...prefix.slice(0, 2), event("turn_context", { turn_id: "turn-1", model }),
+      message("user", query), ...end
+    ]);
+    expect(sourceTurnFromMessages(messages)?.query).toBe(query);
+  });
+
   it("keeps only the person's own text when Codex packs injected context into a user message", async () => {
     const injected = event("response_item", {
       type: "message",

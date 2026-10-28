@@ -63,7 +63,7 @@ function setup(time = false, rewrite = false) {
 }
 
 describe("same-source L1 deduplication without UID", () => {
-  it.each(["profile", "source", "conversation"])("preserves the recorded %s when the same session is reopened", boundary => {
+  it.each(["profile", "source", "conversation"])("preserves the recorded %s when the same session is reopened", async boundary => {
     const {db, repos, service} = setup();
     const rows: MemoryRow[] = [];
     for (const profile of ["a", "b"]) {
@@ -71,9 +71,9 @@ describe("same-source L1 deduplication without UID", () => {
         profileId: boundary === "profile" ? `profile-${profile}` : "default", userId: `user-${profile}`,
         sessionKey: `host-${profile}`, projectId: "project-p", workspaceId: "workspace-w"};
       const opened = service.openSession({namespace, meta: {conversationId: boundary === "conversation" ? `conversation-${profile}` : "native-conversation"}});
-      const turn = service.completeTurn("native-turn", {sessionId: opened.sessionId, namespace,
+      const turn = (await service.completeTurn("native-turn", {sessionId: opened.sessionId, namespace,
         query: "Please inspect the project and report its test command.", answer: "The test command is npm test.",
-        toolCalls: [{id: "read", name: "read_file", input: {path: "package.json"}}], toolResults: [{id: "read", output: "npm test"}]});
+        toolCalls: [{id: "read", name: "read_file", input: {path: "package.json"}}], toolResults: [{id: "read", output: "npm test"}]}));
       const row = repos.memories.get(turn.l1MemoryId!)!;
       expect(row.info.profile_id).toBe(namespace.profileId); rows.push(row);
       repos.runtime.upsertCandidatePoolTrace({id: `candidate-${profile}`, userId: null, sessionId: opened.sessionId,

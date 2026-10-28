@@ -1,5 +1,6 @@
 const CACHE_PREFIX = "memmy.memory-panel.";
-const CACHE_VERSION = 1;
+// Invalidate source previews and summaries manufactured from legacy bodies.
+const CACHE_VERSION = 3;
 const CACHE_TTL_MS = 30_000;
 
 interface CacheEnvelope<T> {

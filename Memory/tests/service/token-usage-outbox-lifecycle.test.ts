@@ -76,7 +76,7 @@ describe("MemoryService token usage outbox lifecycle", () => {
 
   it("does not resume budgeted title work after retrieval while budget writes still fail", async () => {
     const counts = createUsageFetch();
-    const { service, db, sessionId } = createTitleWorkerHarness();
+    const { service, db, sessionId } = (await createTitleWorkerHarness());
     installBudgetWriteFailure(db);
     const first = await service.runWorkerOnce(1);
     expect(first.succeeded).toBe(1);
@@ -100,7 +100,7 @@ describe("MemoryService token usage outbox lifecycle", () => {
 
   it("resumes queued title jobs after writes recover without manufacturing usage", async () => {
     const counts = createUsageFetch();
-    const { service, db } = createTitleWorkerHarness();
+    const { service, db } = (await createTitleWorkerHarness());
     installBudgetWriteFailure(db);
     const first = await service.runWorkerOnce(1);
     expect(first.succeeded).toBe(1);
@@ -122,10 +122,10 @@ describe("MemoryService token usage outbox lifecycle", () => {
 
   it("wakes queued title jobs from the production scheduler after persist recovers", async () => {
     const counts = createUsageFetch();
-    const { service, db } = createTitleWorkerHarness({
+    const { service, db } = (await createTitleWorkerHarness({
       jobCount: 6,
       fetchAppMemoryBudget: async () => ({ dailyUsed: 0, lifetimeUsed: 0 })
-    });
+    }));
     await waitFor(() => Boolean(
       db.db.prepare("SELECT 1 AS ok FROM runtime_kv WHERE key = 'memory_byok_budget_v1'").get()
     ));
@@ -152,7 +152,7 @@ describe("MemoryService token usage outbox lifecycle", () => {
 
   it("does not clear a budget-write fault after a cache-only budgeted model probe", async () => {
     const counts = createUsageFetch({ provider: "anthropic" });
-    const { service, db } = createTitleWorkerHarness({ anthropic: true });
+    const { service, db } = (await createTitleWorkerHarness({ anthropic: true }));
     installBudgetWriteFailure(db);
     const first = await service.runWorkerOnce(1);
     expect(first.succeeded).toBe(1);
@@ -176,15 +176,15 @@ describe("MemoryService token usage outbox lifecycle", () => {
   });
 });
 
-function createTitleWorkerHarness(options: {
+async function createTitleWorkerHarness(options: {
   jobCount?: number;
   anthropic?: boolean;
   fetchAppMemoryBudget?: () => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
-} = {}): {
+} = {}): Promise<{
   service: MemoryService;
   db: MemoryDb;
   sessionId: string;
-} {
+}> {
   const root = fixture.createTestRoot();
   const db = new MemoryDb({ path: join(root, "memory.sqlite") });
   extraDatabases.push(db);
@@ -230,11 +230,27 @@ function createTitleWorkerHarness(options: {
       namespace: { ...namespace, sessionKey: `outbox-worker-${index}` }
     });
     sessionId = session.sessionId;
-    service.completeTurn(`turn-outbox-worker-${index}`, {
-      sessionId: session.sessionId,
-      query: "Review database persistence behavior",
-      answer: "Checked the SQLite write behavior.",
-      status: "succeeded"
+    // Seed an existing untitled task: these tests exercise background title
+    // accounting, independently of the new foreground episode selection call.
+    const at = new Date().toISOString();
+    const episodeId = `episode-outbox-${index}`;
+    const rawTurnId = `raw-outbox-${index}`;
+    repos.runtime.createEpisode({
+      id: episodeId, sessionId, userId: namespace.userId, status: "open",
+      l1MemoryIds: [], rawTurnIds: [rawTurnId], feedbackIds: [], decisionRepairIds: [],
+      l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [], turnCount: 1,
+      rewardDetail: {}, pipelineStatus: "idle", meta: {}, openedAt: at, updatedAt: at
+    });
+    repos.runtime.insertRawTurn({
+      id: rawTurnId, sessionId, episodeId, turnId: `turn-outbox-worker-${index}`,
+      userId: namespace.userId, userText: "Review database persistence behavior",
+      assistantText: "Checked the SQLite write behavior.", toolCalls: [], toolResults: [],
+      sourceMemoryIds: [], usage: {}, messagePayload: {}, status: "succeeded", createdAt: at
+    });
+    repos.runtime.enqueueJob({
+      id: `title-outbox-${index}`, jobType: "episode_title", episodeId, sessionId,
+      userId: namespace.userId, status: "queued", payload: { stage: "provisional" },
+      attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at
     });
   }
   db.db.exec("DELETE FROM evolution_jobs WHERE job_type != 'episode_title'");

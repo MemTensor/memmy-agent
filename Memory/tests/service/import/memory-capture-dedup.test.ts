@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { MemoryService } from "../../../src/index.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -18,18 +19,18 @@ const namespace = {
 };
 
 describe("MemoryService / import / QA capture dedup", () => {
-  it.each([false, true])("uses the native conversation ID of a prefixed Hook session (legacy claim=%s)", (legacy) => {
+  it.each([false, true])("uses the native conversation ID of a prefixed Hook session (legacy claim=%s)", async (legacy) => {
     const { db, service } = createTestService();
     const ns = { ...namespace, sessionKey: "codex-memory-native-conversation" };
     const session = service.openSession({ namespace: ns, meta: { conversationId: "native-conversation" } });
     const query = "Read package.json and report the test command.";
     const answer = "The test command is npm test.";
-    const first = service.completeTurn("native-turn", {
+    const first = (await service.completeTurn("native-turn", {
       adapterId: "memmy-codex-hook", requestId: "prefixed-hook-turn",
       sessionId: session.sessionId, namespace: ns, query, answer,
       toolCalls: [{ id: "read", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read", output: "npm test" }]
-    });
+    }));
     if (legacy) {
       db.db.prepare("UPDATE memories SET user_id='historical-account' WHERE id=?").run(first.l1MemoryId);
       db.db.prepare("UPDATE memory_capture_claims SET user_id='historical-account',qa_hash=? WHERE primary_memory_id=?")
@@ -142,7 +143,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     expect(l1Count(db.db)).toBe(0);
   });
 
-  it.each([false, true])("keeps a proven same-turn hook capture across accounts (legacy claim=%s)", (legacy) => {
+  it.each([false, true])("keeps a proven same-turn hook capture across accounts (legacy claim=%s)", async (legacy) => {
     const { db, service } = createTestService();
     const session = service.openSession({
       adapterId: "memmy-codex-hook",
@@ -151,7 +152,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     });
     const query = "检查项目配置并说明使用哪个包管理器。";
     const answer = "项目使用 pnpm workspace。";
-    const completed = service.completeTurn("hook-first-turn", {
+    const completed = (await service.completeTurn("hook-first-turn", {
       adapterId: "memmy-codex-hook",
       requestId: "hook-first-complete",
       sessionId: session.sessionId,
@@ -159,7 +160,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       answer,
       toolCalls: [{ id: "read-1", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read-1", name: "read_file", output: "packageManager: pnpm" }]
-    });
+    }));
     const beforeCount = l1Count(db.db);
     if (legacy) db.db.prepare("UPDATE memory_capture_claims SET qa_hash = ?, user_id = 'old-account'")
       .run(memoryCaptureQaHash(query, answer));
@@ -182,7 +183,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     ).get()).toEqual({ captured_by: "turn_complete" });
   });
 
-  it("keeps the scan capture and still records the hook raw turn and episode link", () => {
+  it("keeps the scan capture and still records the hook raw turn and episode link", async () => {
     const { db, service } = createTestService();
     const query = "汇总当前仓库的测试命令。";
     const answer = "运行 npm test 即可执行完整测试。";
@@ -199,7 +200,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       namespace
     });
 
-    const completed = service.completeTurn("scan-first-hook-turn", {
+    const completed = (await service.completeTurn("scan-first-hook-turn", {
       adapterId: "memmy-codex-hook",
       requestId: "scan-first-hook-complete",
       sessionId: session.sessionId,
@@ -207,7 +208,7 @@ describe("MemoryService / import / QA capture dedup", () => {
       answer,
       toolCalls: [{ id: "read-2", name: "read_file", input: { path: "package.json" } }],
       toolResults: [{ id: "read-2", name: "read_file", output: "test: vitest run" }]
-    });
+    }));
 
     expect(l1Count(db.db)).toBe(1);
     expect(completed.l1MemoryIds).toEqual([scanned.id]);
@@ -217,7 +218,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     ).get(completed.rawTurnId)).toEqual({ count: 1 });
     const episode = db.db.prepare(
       `SELECT l1_memory_ids_json, raw_turn_ids_json FROM episodes WHERE id = ?`
-    ).get(completed.episodeId) as { l1_memory_ids_json: string; raw_turn_ids_json: string };
+    ).get(assignedEpisodeId(service, completed)) as { l1_memory_ids_json: string; raw_turn_ids_json: string };
     expect(JSON.parse(episode.l1_memory_ids_json)).toContain(scanned.id);
     expect(JSON.parse(episode.raw_turn_ids_json)).toContain(completed.rawTurnId);
     expect(db.db.prepare(
@@ -248,7 +249,7 @@ describe("MemoryService / import / QA capture dedup", () => {
     expect(l1Count(db.db)).toBe(2);
   });
 
-  it.each(["project", "conversation", "turn", "missing-origin"] as const)("does not merge equal QA with a different %s", (difference) => {
+  it.each(["project", "conversation", "turn", "missing-origin"] as const)("does not merge equal QA with a different %s", async (difference) => {
     const { db, service } = createTestService();
     const firstNamespace = { ...namespace, projectId: "project-a" };
     const otherNamespace = { ...firstNamespace, userId: "account-b",
@@ -257,9 +258,9 @@ describe("MemoryService / import / QA capture dedup", () => {
       ...(difference === "missing-origin" ? { sessionKey: undefined } : {}) };
     const scanned = addScannedTurn(service, { namespace: firstNamespace, requestId: "first", turnId: "native-turn", query: "Run tests", answer: "Tests passed" });
     const session = service.openSession({ namespace: otherNamespace });
-    const completed = service.completeTurn(difference === "turn" ? "another-turn" : "native-turn", {
+    const completed = (await service.completeTurn(difference === "turn" ? "another-turn" : "native-turn", {
       sessionId: session.sessionId, query: "Run tests", answer: "Tests passed"
-    });
+    }));
     expect(completed.l1MemoryIds).not.toContain(scanned.id);
     expect(l1Count(db.db)).toBe(2);
   });

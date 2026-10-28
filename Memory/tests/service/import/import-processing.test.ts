@@ -161,7 +161,7 @@ describe("MemoryService / import / processing", () => {
     expect(summaryCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCall?.options.maxTokens).toBe(512);
     expect(summaryCall?.messages[0]?.content).toContain("at most 30 characters");
-    expect(summaryCall?.messages[0]?.content).toContain("at most 180 characters");
+    expect(summaryCall?.messages[0]?.content).toContain("at most 300 characters");
     expect(summaryCall?.messages[0]?.content).toContain("future retrieval");
     expect(summaryCall?.messages[0]?.content).toContain("concrete retrieval anchors");
     expect(summaryCall?.messages[0]?.content).toContain("atomic real-world facts");
@@ -320,6 +320,7 @@ describe("MemoryService / import / processing", () => {
     });
 
     expect(added.title).toBe("修复 Cursor 记忆标题。");
+    expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === added.id)?.sourceText).toBe("修复 Cursor 记忆标题。");
 
     const notification = service.addMemory({
       adapterId: "agent-source:cursor",
@@ -342,7 +343,33 @@ describe("MemoryService / import / processing", () => {
     });
 
     expect(notification.title).toBe("cursor conversation");
+    expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === notification.id)?.sourceText).toBeUndefined();
     db.close();
+  });
+
+  it.each([
+    '<manually_attached_skills><user_query>技能示例</user_query></manually_attached_skills>\n<timestamp>today</timestamp>\n<user_query>修复标题</user_query>',
+    '<attached_files>附件</attached_files>\n<user_query>修复标题</user_query>',
+    '\uFEFF<timestamp>today</timestamp>\n<external_links>链接</external_links>\n<user_query>修复标题</user_query>',
+    '<system-reminder>提醒</system-reminder>\n修复标题'
+  ])("persists a semantic import title and preview for source envelopes: %s", (userText) => {
+    const { db, service } = createTestService();
+    try {
+      const added = service.addMemory({
+        adapterId: "agent-source:cursor", requestId: "cursor-envelope-regression",
+        layer: "L1", source: "cursor", tags: ["agent-source", "cursor"],
+        title: "<attached_files>", turnId: "cursor:envelope-regression",
+        content: `## user\n\n${userText}\n\n## assistant\n\n已修复。`
+      });
+      expect(added.title).toBe("修复标题");
+      const stored = db.db.prepare("SELECT info_json, properties_json FROM memories WHERE id = ?").get(added.id) as { info_json: string; properties_json: string };
+      expect(JSON.parse(stored.info_json).title).toBe("修复标题");
+      // Import section parsing already trims leading whitespace, including BOM.
+      expect(JSON.parse(stored.properties_json).internal_info.trace.userText).toBe(userText.trim());
+      expect(service.panelItems({ layer: "L1" }).items.find(item => item.id === added.id)?.sourceText).toBe("修复标题");
+    } finally {
+      db.close();
+    }
   });
 
   it("uses the standard summary prompt for account summaries", async () => {
@@ -493,6 +520,7 @@ describe("MemoryService / import / processing", () => {
         messages: LlmMessage[],
         options: LlmCompletionOptions
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         summaryCalls.push({ messages, options });
         throw new Error("summary endpoint returned HTTP 405");
       }
@@ -552,6 +580,7 @@ describe("MemoryService / import / processing", () => {
         messages: LlmMessage[],
         options: LlmCompletionOptions
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         if (failureMessage) throw new Error(failureMessage);
         return baseLlm.completeJson<T>(messages, options);
       }
@@ -668,7 +697,8 @@ describe("MemoryService / import / processing", () => {
     const baseLlm = createFailingLlm();
     const llm: LlmClient = {
       ...baseLlm,
-      async completeJson() {
+      async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
         throw new ModelHttpError(
           "openai_compatible HTTP 403: quota exhausted",
           "openai_compatible",
@@ -732,7 +762,8 @@ describe("MemoryService / import / processing", () => {
     const baseLlm = createFailingLlm();
     const llm: LlmClient = {
       ...baseLlm,
-      async completeJson() {
+      async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
         throw new Error(
           "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response; check the configured model endpoint"
         );
@@ -1052,13 +1083,13 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("clips imported L1 summaries to 180 characters", async () => {
+  it("clips imported L1 summaries to 300 characters", async () => {
     const root = createTestRoot("mindock-memory-import-summary-cap-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
-    const longSummary = "s".repeat(240);
+    const longSummary = "s".repeat(360);
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1087,9 +1118,9 @@ describe("MemoryService / import / processing", () => {
       };
     };
     expect(calls.find((call) => call.options.operation === "capture.summarize")?.messages[0]?.content)
-      .toContain("at most 180 characters");
-    expect(properties.internal_info.trace.summary).toHaveLength(180);
-    expect(properties.internal_info.trace.summary).toBe(`${"s".repeat(177)}...`);
+      .toContain("at most 300 characters");
+    expect(properties.internal_info.trace.summary).toHaveLength(300);
+    expect(properties.internal_info.trace.summary).toBe(`${"s".repeat(297)}...`);
     db.close();
   });
 
@@ -1174,7 +1205,7 @@ describe("MemoryService / import / processing", () => {
     const summaryRun = await service.runWorkerOnce(10, { targetMemoryIds: [first.id] });
     const embeddingRun = await service.runWorkerOnce(10, { targetMemoryIds: [first.id] });
 
-    expect(summaryRun.jobs).toEqual([
+    expect(summaryRun.jobs.filter(job => !["episode_assignment", "episode_finalize"].includes(job.jobType))).toEqual([
       expect.objectContaining({ jobType: "import_summary", targetMemoryId: first.id })
     ]);
     expect(embeddingRun.jobs).toEqual([
@@ -1446,17 +1477,17 @@ describe("MemoryService / import / processing", () => {
       "2026-06-10T12:00:00.000Z"
     );
     const session = service.openSession({ namespace });
-    const live = service.completeTurn("turn-live-priority", {
+    const live = (await service.completeTurn("turn-live-priority", {
       sessionId: session.sessionId,
       query: "Remember the new interactive preference.",
       answer: "The new interactive preference is dark mode."
-    });
+    }));
 
     const summaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
     const embeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
     const scanRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
 
-    expect(summaryRun.jobs).toEqual([
+    expect(summaryRun.jobs.filter(job => !["episode_assignment", "episode_finalize"].includes(job.jobType))).toEqual([
       expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
     ]);
     expect(embeddingRun.jobs).toEqual([
@@ -1495,11 +1526,11 @@ describe("MemoryService / import / processing", () => {
       "first-report-priority-scan"
     );
     const session = service.openSession({ namespace });
-    const live = service.completeTurn("turn-first-report-priority-live", {
+    const live = (await service.completeTurn("turn-first-report-priority-live", {
       sessionId: session.sessionId,
       query: "Remember this interactive task.",
       answer: "The interactive task is queued."
-    });
+    }));
     const firstReport = service.addMemory({
       namespace,
       adapterId: "agent-source:memmy-onboarding",
@@ -1534,7 +1565,7 @@ describe("MemoryService / import / processing", () => {
     expect(reportEmbeddingRun.jobs).toEqual([
       expect.objectContaining({ jobType: "embedding", targetMemoryId: firstReport.id })
     ]);
-    expect(liveSummaryRun.jobs).toEqual([
+    expect(liveSummaryRun.jobs.filter(job => !["episode_assignment", "episode_finalize"].includes(job.jobType))).toEqual([
       expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
     ]);
     expect(liveSummaryRun.jobs.map((job) => job.targetMemoryId)).not.toContain(scanned.id);

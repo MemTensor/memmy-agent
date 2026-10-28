@@ -503,7 +503,7 @@ function TaskChatBubble(props: { message: TaskChatMessage }) {
           {message.role === "tool" && message.tool ? (
             <TaskToolBubble tool={message.tool} />
           ) : (
-            <MemoryMarkdown text={message.text ?? ""} />
+            <MemoryMarkdown text={message.text ?? ""} literalHtml />
           )}
         </div>
       </div>

@@ -235,6 +235,7 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       episodeId: request.episodeId ?? attribution.episodeId,
       sessionId: request.sessionId ?? attribution.sessionId
     };
+    const attributionPending = this.deps.repos.runtime.isRawTurnAttributionPending(attributedRequest.rawTurnId);
     const recallOutcome = recallOutcomeFromFeedback(request);
     let recallEvent: RecallEventRecord | undefined;
     if (request.recallEventId) {
@@ -273,9 +274,12 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
         feedback,
         feedbackContextHash
       );
-    const isRevisionFeedback = isRecord(request.rawPayload)
-      && request.rawPayload.source === "relation_classifier"
-      && request.rawPayload.relation === "revision";
+    // Model-judged negatives (old revision, turn.judge.v1 negative) get a repair
+    // only from a model draft, never one filled in by rules.
+    const isRevisionFeedback = isRecord(request.rawPayload) && (
+      (request.rawPayload.source === "relation_classifier" && request.rawPayload.relation === "revision") ||
+      (request.rawPayload.source === "turn_judge" && request.rawPayload.feedback === "negative")
+    );
     const repair = isRevisionFeedback && !repairDraft
       ? undefined
       : this.maybeCreateDecisionRepair(
@@ -322,7 +326,14 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       }));
     }
     if (feedback.polarity !== "negative") {
-      const queued = deferDecisionRepair
+      const queued = attributionPending
+        ? this.deps.enqueueJob({
+          jobType: "feedback_experience", userId: context.userId,
+          sessionId: attributedRequest.sessionId, targetMemoryId: attributedRequest.l1MemoryId,
+          dedupeKey: `feedback_experience:${feedback.id}`,
+          payload: { feedbackId: feedback.id, rawTurnId: attributedRequest.rawTurnId }
+        })
+        : deferDecisionRepair
         ? this.enqueueDeferredFeedbackExperience({
           userId: context.userId,
           sessionId: attributedRequest.sessionId,
@@ -341,7 +352,8 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     const rewardEpisode = attributedRequest.episodeId
       ? this.deps.repos.runtime.getEpisode(attributedRequest.episodeId)
       : undefined;
-    if ((attributedRequest.l1MemoryId || attributedRequest.episodeId) && rewardEpisode?.status !== "open") {
+    if ((attributedRequest.l1MemoryId || attributedRequest.episodeId) && rewardEpisode?.status !== "open"
+      && !attributionPending) {
       jobs.push(
         this.deps.enqueueJob({
           jobType: "reward",
@@ -677,6 +689,10 @@ maybeCreateDecisionRepair(
     const feedback = this.deps.repos.runtime.getFeedback(feedbackId);
     if (!feedback || feedback.polarity === "negative") {
       return;
+    }
+    if (feedback.rawTurnId) {
+      const raw = this.deps.repos.runtime.getRawTurn(feedback.rawTurnId);
+      if (!raw || raw.deletedAt || raw.redactedAt) return;
     }
     const request: FeedbackRequest = {
       sessionId: feedback.sessionId,

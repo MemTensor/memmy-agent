@@ -1171,7 +1171,7 @@ async function ingestStagedMessages(
           ...(resolvedScanMode ? { scanMode: resolvedScanMode } : {})
         };
         addStartedAt = Date.now();
-        const result = service.completeSourceTurn({
+        const result = await service.completeSourceTurn({
           ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
           ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
           ...(scanMode === "initial_subset" || scanMode === "full" ? { captureLegacyHistory: true } : {})
