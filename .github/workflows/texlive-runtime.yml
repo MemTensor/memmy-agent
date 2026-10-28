@@ -46,11 +46,10 @@ jobs:
         run: |
           TL="$TEXLIVE_BUILD_SOURCE/$TEXLIVE_BUILD_BIN"
           export PATH="$TL:$PATH"
-          "$TL/tlmgr" option repository https://mirror.ctan.org/systems/texlive/tlnet
+          "$TL/tlmgr" option repository https://ctan.math.illinois.edu/systems/texlive/tlnet
           "$TL/tlmgr" update --self
           "$TL/tlmgr" --no-execute-actions update --all
           "$TL/tlmgr" --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
-          "$TL/tlmgr" generate fmtutil
           "$TL/mktexlsr"
           "$TL/updmap-sys"
           "$TL/fmtutil-sys" --byfmt xelatex
@@ -61,7 +60,7 @@ jobs:
           $bin = Join-Path $env:TEXLIVE_BUILD_SOURCE $env:TEXLIVE_BUILD_BIN
           $tlmgr = Join-Path $bin 'tlmgr.bat'
           $env:PATH = "$bin;$env:PATH"
-          & $tlmgr option repository https://mirror.ctan.org/systems/texlive/tlnet
+          & $tlmgr option repository https://ctan.math.illinois.edu/systems/texlive/tlnet
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr repository failed' }
           & $tlmgr update --self
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr update failed' }
@@ -69,8 +68,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'TeX baseline update failed' }
           & $tlmgr --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr package installation failed' }
-          & $tlmgr generate fmtutil
-          if ($LASTEXITCODE -ne 0) { throw 'TeX format configuration failed' }
           & (Join-Path $bin 'mktexlsr.exe')
           if ($LASTEXITCODE -ne 0) { throw 'TeX index generation failed' }
           & (Join-Path $bin 'updmap-sys.exe')
