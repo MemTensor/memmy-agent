@@ -288,7 +288,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
     }));
     clearMemoryPanelCache();
     closeTask();
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   useEffect(() => {

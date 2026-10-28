@@ -1,4 +1,4 @@
-import { usePanelReadGuard } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisible } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -115,6 +115,7 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const canRead = usePanelReadGuard(props.client);
+  const visible = usePanelVisible();
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
@@ -133,6 +134,12 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const detailRequestIdRef = useRef(0);
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    retryRequestIdRef.current++;
+    setRetryFeedback(null);
+    if (retryResetTimerRef.current !== null) window.clearTimeout(retryResetTimerRef.current);
+    retryResetTimerRef.current = null;
+  }, [props.client, visible]);
 
   const viewStatus=usePanelViewStatus(props.client,"L1",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailRequestIdRef.current++; setDetail(null); setSelectedMemoryId(null); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
@@ -271,7 +278,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     clearMemoryPanelCache();
     setDetail(null);
     setSelectedMemoryId(null);
-    void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   function updateOpenDetailProcessing(memoryId: string, processing: MemoryProcessingRecord) {
@@ -287,6 +294,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   }
 
   async function retryMemoryProcessing(memoryId: string) {
+    if (!canRead()) return;
     if (!props.client) {
       setRetryFeedback({
         memoryId,
@@ -304,11 +312,13 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setRetryFeedback({ memoryId, status: "running" });
     try {
       const retry = await props.client.retryMemoryProcessing(memoryId);
+      if (requestId !== retryRequestIdRef.current || !canRead()) return;
       updateOpenDetailProcessing(memoryId, retry.processing);
       const deadline = Date.now() + 10 * 60_000;
       while (Date.now() < deadline) {
+        if (requestId !== retryRequestIdRef.current || !canRead()) return;
         const status = await props.client.getMemoryProcessingStatus([memoryId]);
-        if (requestId !== retryRequestIdRef.current) return;
+        if (requestId !== retryRequestIdRef.current || !canRead()) return;
         const processing = status.items.find((item) => item.memoryId === memoryId);
         if (!processing) throw new Error(t("memory.memories.processing.missing"));
         updateOpenDetailProcessing(memoryId, processing);
@@ -319,9 +329,9 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
           clearMemoryPanelCache();
           const [detailData] = await Promise.all([
             props.client.getMemory(memoryId),
-            refresh(page, sourceAgent, { useCache: false })
+            viewStatus.reloadCurrent()
           ]);
-          if (requestId !== retryRequestIdRef.current) return;
+          if (requestId !== retryRequestIdRef.current || !canRead()) return;
           setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId
             ? { status: "ready", data: detailData }
             : current);
@@ -336,7 +346,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       }
       throw new Error(t("memory.memories.processing.retryTimeout"));
     } catch (error) {
-      if (requestId !== retryRequestIdRef.current) return;
+      if (requestId !== retryRequestIdRef.current || !canRead()) return;
       setRetryFeedback({
         memoryId,
         status: "error",
@@ -344,7 +354,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
         failedAt: new Date().toISOString()
       });
       clearMemoryPanelCache();
-      void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
+      void viewStatus.reloadCurrent().catch(() => undefined);
       void props.client.getMemory(memoryId).then((data) => {
         if (requestId !== retryRequestIdRef.current) return;
         setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId

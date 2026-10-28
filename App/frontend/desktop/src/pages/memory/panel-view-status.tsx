@@ -74,6 +74,9 @@ export function usePanelViewStatus(
     expired,
     checking: Boolean(client?.checkPanelView) && checkedScope !== scope,
     connectionError,
+    reloadCurrent: () => visible && !document.hidden && scope === currentScope.current
+      ? latest.current.reload?.() ?? Promise.resolve()
+      : Promise.resolve(),
     retry: () => void check().catch(() => undefined),
     clear: () => {
       setUpdated(false);

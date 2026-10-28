@@ -286,7 +286,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     }));
     clearMemoryPanelCache();
     closeSkill();
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   async function approveObservedSkill(id: string) {
@@ -300,7 +300,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     if (!canRead() || generation !== detailGeneration.current) return;
     const skillDetail = await loadSkillDetail(props.client, id);
     if(canRead() && generation === detailGeneration.current && selectedSkillIdRef.current===id)setDetail({status:"ready",data:{detail:skillDetail,timeline:[]}});
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   async function updateObservedSkill(id: string, body: string, expectedVersion: number) {
@@ -315,7 +315,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       setDetail((current) => ({ status: "ready", data: { detail: skillDetail,
         timeline: current?.status === "ready" ? current.data.timeline : [] } }));
     }
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
 

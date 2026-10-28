@@ -89,7 +89,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
     if (!props.client || !selected) return;
     await props.client.deleteMemory(selected.id);
     closeDetail();
-    await refresh(page);
+    await viewStatus.reloadCurrent();
   }
 
   return (

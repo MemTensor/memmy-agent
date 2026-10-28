@@ -195,7 +195,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     }));
     clearMemoryPanelCache();
     detailGeneration.current++; setDetail(null);
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
 

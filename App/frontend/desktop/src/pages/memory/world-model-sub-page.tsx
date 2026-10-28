@@ -199,7 +199,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }));
     clearMemoryPanelCache();
     closeWorldModel();
-    void search(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   function changeQuery(value: string) {

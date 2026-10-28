@@ -8,6 +8,7 @@ import { MemoriesSubPage } from "../memories-sub-page.js";
 import { createMemoryRuntimeClientStub, memoryDetailFixture, panelItemsOutput } from "./fixtures.js";
 import type { GetMemoryOutput, MemoryProcessingRecord } from "@memmy/local-api-contracts";
 import { clearMemoryPanelCache } from "../memory-panel-cache.js";
+import { PanelVisibilityContext } from "../panel-visibility.js";
 
 function detail(state: MemoryProcessingRecord["state"]): GetMemoryOutput {
   const processed = state === "ready";
@@ -50,6 +51,32 @@ describe("open observation processing", () => {
     container.remove();
     vi.useRealTimers();
     clearMemoryPanelCache();
+  });
+
+  it("stops retry follow-up reads when its page becomes hidden while the retry is in flight", async () => {
+    const failed = detail("failed");
+    let finishRetry!: () => void;
+    const pending = new Promise<void>(resolve => { finishRetry = resolve; });
+    const getMemory = vi.fn(async () => failed);
+    const getMemoryProcessingStatus = vi.fn(async () => ({items:[failed.item.processing!],serverTime:"2026-10-28T00:00:00Z"}));
+    const retryMemoryProcessing = vi.fn(async () => { await pending; return {processing:failed.item.processing!} as never; });
+    const client = createMemoryRuntimeClientStub({ getMemory, getMemoryProcessingStatus, retryMemoryProcessing,
+      listPanelItems: vi.fn(async () => panelItemsOutput([failed.item])) });
+    const request = {id:failed.item.id,requestId:1};
+    const render = async (visible: boolean) => act(async () => root.render(
+      <AppStateProvider><I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}>
+        <MemoriesSubPage client={client} openRequest={request}/>
+      </PanelVisibilityContext.Provider></I18nProvider></AppStateProvider>
+    ));
+    await render(true);
+    await act(async () => container.querySelector<HTMLButtonElement>(".memory-processing-action--primary")!.click());
+    expect(retryMemoryProcessing).toHaveBeenCalledTimes(1);
+    await render(false); getMemory.mockClear(); getMemoryProcessingStatus.mockClear();
+    await act(async () => finishRetry());
+    expect(getMemoryProcessingStatus).not.toHaveBeenCalled();
+    expect(getMemory).not.toHaveBeenCalled();
+    await render(true);
+    expect(container.textContent).not.toContain("正在重试");
   });
 
   it("updates an open pending drawer when processing finishes and stops polling", async () => {

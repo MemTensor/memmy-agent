@@ -95,3 +95,32 @@ it.each(["inactive page", "background window"])("does not let a completed delete
     expect(listPanelItems).toHaveBeenCalled();
   } finally { await act(async () => root.unmount()); clearMemoryPanelCache(); }
 });
+
+it("reloads the current filter when a delete finishes after its drawer was closed", async () => {
+  vi.useFakeTimers(); clearMemoryPanelCache();
+  const container = document.createElement("div"), root = createRoot(container);
+  let finishDelete!: () => void;
+  const pending = new Promise<void>(resolve => { finishDelete = resolve; });
+  const listPanelItems = vi.fn(async (_input: { q?: string }) => panelItemsFixture);
+  const client = createMemoryRuntimeClientStub({ listPanelItems, getMemory: vi.fn(async () => memoryDetailFixture),
+    deleteMemory: vi.fn(async () => { await pending; window.dispatchEvent(new Event("memmy-panel-invalidated")); return {} as never; }) });
+  try {
+    await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN">
+      <PoliciesSubPage client={client} openRequest={{id:memoryDetailFixture.item.id,requestId:1}} onOpenMemoryReference={()=>{}} />
+    </I18nProvider></AppStateProvider>));
+    const click = async (label: string) => act(async () => [...container.querySelectorAll("button")].find(x=>x.textContent===label)!.click());
+    await click("删除"); await click("确认删除");
+    await act(async () => container.querySelector<HTMLButtonElement>(".memory-drawer-backdrop__close")!.click());
+    await act(async () => {
+      const input = container.querySelector<HTMLInputElement>('input[type="search"]')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!.call(input,"latest-filter");
+      input.dispatchEvent(new Event("input",{bubbles:true}));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(180));
+    expect(listPanelItems.mock.calls.at(-1)?.[0]).toMatchObject({q:"latest-filter"});
+    listPanelItems.mockClear();
+    await act(async () => finishDelete());
+    expect(listPanelItems).toHaveBeenCalled();
+    for(const call of listPanelItems.mock.calls) expect(call[0]).toMatchObject({q:"latest-filter"});
+  } finally { await act(async()=>root.unmount()); clearMemoryPanelCache(); }
+});
