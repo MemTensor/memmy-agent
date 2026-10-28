@@ -4,6 +4,7 @@ import { usePanelPoll } from "./use-panel-poll.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ApiRequestError } from "../../api/http.js";
 import { usePanelVisible } from "./panel-visibility.js";
+import { RefreshCw } from "./memory-prototype-icons.js";
 export function usePanelViewStatus(
   client: MemoryRuntimeClient | null,
   section: string,
@@ -96,7 +97,10 @@ export function PanelViewGate(props: { status: ReturnType<typeof usePanelViewSta
 export function PanelViewNotice(props: { updated: boolean; expired: boolean }) {
   const { t } = useTranslation();
   return props.updated || props.expired ? (
-    <p role="status">{t(props.expired ? "memory.panel.expired" : "memory.panel.updated")}</p>
+    <p className="memory-panel-update-notice" role="status">
+      <RefreshCw size={14} className="memory-panel-update-notice__icon" />
+      <span>{t(props.expired ? "memory.panel.expired" : "memory.panel.updated")}</span>
+    </p>
   ) : null;
 }
 
