@@ -1,0 +1,76 @@
+% Memmy Literature Review — original orange brand layout, 2026-10-23.
+% Companion: memmy-logo.png, rendered from Memmy docs/assets/logo-light.svg.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{memmy-review}[2026/10/23 Memmy branded literature review]
+\RequirePackage[a4paper,top=27mm,bottom=24mm,left=25mm,right=25mm,headheight=32pt,headsep=6mm,footskip=11mm]{geometry}
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{fancyhdr}
+\RequirePackage{caption}
+\RequirePackage{colortbl}
+\definecolor{MemmyOrange}{HTML}{FD8934}
+\definecolor{MemmyAccent}{HTML}{A34F17}
+\definecolor{MemmyInk}{HTML}{292724}
+\definecolor{MemmyMuted}{HTML}{74685E}
+\definecolor{MemmyTint}{HTML}{FFF7F0}
+\definecolor{MemmyBorder}{HTML}{F0D9C6}
+\providecommand{\memmyreviewlabel}{LITERATURE REVIEW}
+\providecommand{\memmyabstractlabel}{Abstract}
+\providecommand{\memmydisclaimer}{}
+\providecommand{\memmyfullnotice}{}
+\providecommand{\memmygeneratedby}{Generated with Memmy}
+\providecommand{\memmyrunningtitle}{Memmy Literature Review}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5.5pt plus 1pt minus 0.5pt}
+\linespread{1.12}
+\setcounter{secnumdepth}{3}
+\clubpenalty=10000
+\widowpenalty=10000
+\emergencystretch=1.5em
+\urlstyle{same}
+\captionsetup{font=small,labelfont={bf,color=MemmyAccent},labelsep=period,skip=7pt}
+\fancypagestyle{memmybody}{%
+  \fancyhf{}%
+  \fancyhead[L]{\includegraphics[height=5.6mm]{memmy-logo.png}}%
+  \fancyhead[R]{\sffamily\fontsize{8}{10}\selectfont\color{MemmyMuted}\memmyreviewlabel}%
+  \fancyfoot[L]{\fontsize{7}{9}\selectfont\color{MemmyMuted}\memmydisclaimer}%
+  \fancyfoot[R]{\sffamily\fontsize{8}{10}\selectfont\color{MemmyAccent}\thepage}%
+  \renewcommand{\headrulewidth}{0.6pt}%
+  \renewcommand{\headrule}{\hbox to\headwidth{\color{MemmyOrange}\leaders\hrule height\headrulewidth\hfill}}%
+  \renewcommand{\footrulewidth}{0pt}%
+}
+\pagestyle{memmybody}
+\def\@seccntformat#1{\textcolor{MemmyAccent}{\csname the#1\endcsname}\hspace{0.65em}}
+% Keep a chapter heading with its following subheading and opening prose.
+\newcommand{\memmysectionspace}{\par\ifdim\dimexpr\pagegoal-\pagetotal\relax<6\baselineskip\newpage\fi}
+\renewcommand{\section}{\memmysectionspace\@startsection{section}{1}{\z@}{-17pt plus -3pt minus -2pt}{7pt}{\normalfont\fontsize{13}{17}\selectfont\bfseries\color{MemmyInk}\raggedright}}
+\renewcommand{\subsection}{\@startsection{subsection}{2}{\z@}{-13pt plus -2pt minus -1pt}{5pt}{\normalfont\fontsize{11.5}{15}\selectfont\bfseries\color{MemmyInk}\raggedright}}
+\renewcommand{\subsubsection}{\@startsection{subsubsection}{3}{\z@}{-11pt plus -2pt minus -1pt}{4pt}{\normalfont\normalsize\bfseries\color{MemmyInk}\raggedright}}
+\renewcommand{\maketitle}{%
+  \thispagestyle{memmybody}%
+  \begingroup\setlength{\parskip}{0pt}\centering%
+  {\sffamily\fontsize{21}{28}\selectfont\bfseries\color{MemmyInk}\@title\par}%
+  \vspace{3mm}%
+  {\color{MemmyBorder}\rule{\linewidth}{0.4pt}\par}%
+  \vspace{3mm}%
+  {\sffamily\small\bfseries\color{MemmyInk}\memmygeneratedby\par}%
+  \endgroup%
+  \vspace{3mm}%
+}
+\newsavebox{\memmyabstractbox}
+\renewenvironment{abstract}{%
+  \begin{lrbox}{\memmyabstractbox}%
+  \begin{minipage}{\dimexpr\linewidth-22pt-0.8pt\relax}%
+  \setlength{\parskip}{4pt}%
+  {\centering\sffamily\bfseries\color{MemmyAccent}\memmyabstractlabel\par}%
+  \small\color{MemmyInk}\ignorespaces
+}{%
+  \par\end{minipage}\end{lrbox}%
+  \begingroup\setlength{\fboxsep}{11pt}\setlength{\fboxrule}{0.4pt}%
+  \noindent\fcolorbox{MemmyBorder}{MemmyTint}{\usebox{\memmyabstractbox}}\par\endgroup%
+  \vspace{1mm}%
+  {\fontsize{7}{10}\selectfont\color{MemmyMuted}\memmyfullnotice\par}%
+  \vspace{1mm}%
+}
+\AtBeginDocument{\color{MemmyInk}\raggedbottom}
+\endinput

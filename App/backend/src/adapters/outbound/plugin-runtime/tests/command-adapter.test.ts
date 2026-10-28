@@ -483,6 +483,18 @@ describe("CommandPluginAdapter", () => {
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
   });
 
+  it("automatically resolves the TeX runtime from the literature registry when missing", async () => {
+    const pluginContext = context();
+    vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
+    vi.stubEnv("MEMMY_TEXLIVE_RUNTIME_PREFER_MANAGED", "1");
+    vi.stubEnv("MEMMY_TEXLIVE_RUNTIME_CATALOG_URL", "");
+    delete process.env.MEMMY_TEXLIVE_RUNTIME_CATALOG_URL;
+    const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["texlive"] };
+    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/literature-review/runtimes/win32-${process.arch}`);
+  });
+
   it("keeps plugin CLR/PowerShell variables out of the privileged Windows launcher", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interpreter: "node", env: { COR_ENABLE_PROFILING: "1", COR_PROFILER_PATH: "untrusted.dll", PSModulePath: "untrusted-modules", SystemRoot: "untrusted-root", LOCALAPPDATA: "untrusted-profile" } };

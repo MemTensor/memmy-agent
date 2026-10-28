@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -20,6 +19,7 @@ import { z } from "zod";
 import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
 import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, PluginSession } from "./types.js";
 import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
+import { createTexliveRuntimeInstaller, resolveTexliveRuntime, type TexliveRuntimeInstaller } from "./texlive-installer.js";
 import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -83,6 +83,7 @@ export interface CreateCommandPluginAdapterOptions {
   pluginDataRoot?: string;
   /** Host-created dependency installer; null disables downloading (offline deployments/tests). */
   officeRuntimeInstaller?: OfficeRuntimeInstaller | null;
+  texliveRuntimeInstaller?: TexliveRuntimeInstaller | null;
   /** Host-owned services callable over the private command runtime protocol. */
   hostServices?: PluginHostServiceInvoker;
   /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
@@ -120,7 +121,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         options.fileInputRoots ?? [],
         options.pluginDataRoot,
         runtimeDependencies.readRoots,
-        runtimeDependencies.executableRoots
+        runtimeDependencies.executableRoots,
+        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT
       )
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
@@ -145,7 +147,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         code: "plugin_permission_denied"
       });
       const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
-        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
+        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot),
+        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot));
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -485,11 +488,13 @@ export async function buildPluginSandboxLaunch(
   fileInputRoots: readonly string[] = [],
   pluginDataRoot?: string,
   runtimeReadRoots: readonly string[] = [],
-  runtimeExecutableRoots: readonly string[] = []
+  runtimeExecutableRoots: readonly string[] = [],
+  runtimeWritableRoot?: string
 ): Promise<SandboxLaunch> {
   const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
   const runtimeRoot = interpreter === "node" ? (platform === "win32" ? dirname(runtimeCommand) : resolve(dirname(runtimeCommand), "..")) : null;
   const filesystem = await filesystemRules(context, fileInputRoots, pluginDataRoot);
+  if (runtimeWritableRoot) filesystem.push({ path: await realpath(runtimeWritableRoot), writable: true });
 
   if (platform === "win32") {
     if (networkEnabled) throw new Error("Windows AppContainer plugins currently require no network capability");
@@ -539,7 +544,8 @@ export interface ResolvedCommandRuntimeDependencies {
 export async function resolveCommandRuntimeDependencies(
   dependencies: readonly z.infer<typeof CommandRuntimeDependencySchema>[],
   platform: NodeJS.Platform = process.platform,
-  officeInstaller?: OfficeRuntimeInstaller
+  officeInstaller?: OfficeRuntimeInstaller,
+  texliveInstaller?: TexliveRuntimeInstaller
 ): Promise<ResolvedCommandRuntimeDependencies> {
   const resolved: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
   if (dependencies.includes("office")) {
@@ -549,21 +555,12 @@ export async function resolveCommandRuntimeDependencies(
     resolved.executableRoots.push(...office.executableRoots);
     Object.assign(resolved.environment, office.environment);
   }
-  if (!dependencies.includes("texlive")) return resolved;
-
-  if (platform === "darwin") {
-    const binaryRoot = await realpath("/Library/TeX/texbin").catch(() => null);
-    const distributionRoot = await realpath("/usr/local/texlive").catch(() => null);
-    const userTexmfRoot = await realpath(resolve(homedir(), "Library", "texmf")).catch(() => null);
-    if (binaryRoot) resolved.pathEntries.push(binaryRoot);
-    if (distributionRoot) {
-      resolved.readRoots.push(distributionRoot);
-      resolved.executableRoots.push(distributionRoot);
-    }
-    if (userTexmfRoot) {
-      resolved.readRoots.push(userTexmfRoot);
-      resolved.environment.TEXMFHOME = userTexmfRoot;
-    }
+  if (dependencies.includes("texlive")) {
+    const tex = await resolveTexliveRuntime(platform, texliveInstaller);
+    resolved.pathEntries.push(...tex.pathEntries);
+    resolved.readRoots.push(...tex.readRoots);
+    resolved.executableRoots.push(...tex.executableRoots);
+    Object.assign(resolved.environment, tex.environment);
   }
   return resolved;
 }
@@ -627,6 +624,16 @@ function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller
     ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
   if (!catalogUrl) return undefined;
   return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
+}
+
+function defaultTexliveInstaller(pluginDataRoot?: string): TexliveRuntimeInstaller | undefined {
+  if (!pluginDataRoot) return undefined;
+  const registry = resolvePluginRegistryBaseUrl(process.env);
+  const catalogUrl = process.env.MEMMY_TEXLIVE_RUNTIME_CATALOG_URL
+    ?? (registry ? new URL("/api/v1/plugins/literature-review/runtimes/{target}", registry).href : undefined);
+  if (!catalogUrl) return undefined;
+  return createTexliveRuntimeInstaller({ cacheRoot: process.env.MEMMY_TEXLIVE_RUNTIME_CACHE
+    ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "texlive"), catalogUrl });
 }
 
 interface FilesystemRule {
