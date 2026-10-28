@@ -48,6 +48,7 @@ jobs:
           export PATH="$TL:$PATH"
           "$TL/tlmgr" option repository https://mirror.ctan.org/systems/texlive/tlnet
           "$TL/tlmgr" update --self
+          "$TL/tlmgr" --no-execute-actions update --all
           "$TL/tlmgr" --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
           "$TL/tlmgr" generate fmtutil
           "$TL/mktexlsr"
@@ -64,6 +65,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr repository failed' }
           & $tlmgr update --self
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr update failed' }
+          & $tlmgr --no-execute-actions update --all
+          if ($LASTEXITCODE -ne 0) { throw 'TeX baseline update failed' }
           & $tlmgr --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr package installation failed' }
           & $tlmgr generate fmtutil
