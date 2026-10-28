@@ -19,46 +19,41 @@ export function usePanelPrefetch(client: MemoryRuntimeClient | null, current: st
       "user-memories": "UserMemory"
     };
     const remaining = sections.filter((section) => section !== mapped[current]);
-    let warmOverviewStats = Boolean(client.getPanelOverviewStats);
-    let warmAnalysis = Boolean(client.getPanelStats);
+    const stats = (current === "analytics" ? ["analysis", "overview"] : ["overview", "analysis"])
+      .filter(kind => kind === "overview" ? Boolean(client.getPanelOverviewStats) : Boolean(client.getPanelStats));
     const previewInterval = client.getPanelOverviewStats ? 250 : 2000;
     async function next() {
       if (stopped || document.hidden) return;
-      if (warmOverviewStats && client!.getPanelOverviewStats) {
+      while (stats.length) {
         try {
-          const snapshot = current === "analysis" && client!.getPanelStats
-            ? await client!.getPanelStats()
-            : await client!.getPanelOverviewStats();
-          if (stopped) return;
+          const snapshot = stats[0] === "analysis"
+            ? await client!.getPanelStats!()
+            : await client!.getPanelOverviewStats!();
+          if (stopped || document.hidden) return;
           if (snapshot.status === "preparing") {
-            timer = setTimeout(next, 2000);
+            timer = setTimeout(next, 500);
             return;
           }
         } catch (error) {
           if (!isUnsupportedPanelRoute(error)) return;
         }
-        warmOverviewStats = false;
+        if (stopped || document.hidden) return;
+        stats.shift();
       }
-      if (!remaining.length) {
-        if (warmAnalysis) {
-          warmAnalysis = false;
-          try { await client!.getPanelStats!(); } catch { /* Best effort warmup. */ }
-        }
-        return;
-      }
+      if (!remaining.length) return;
       try {
         const warmed = await client!.prefetchPanel!(remaining[0]!, controller.signal);
         if (warmed !== false) remaining.shift();
       } catch {
         return;
       } // No prefetch retries or startup request burst.
-      if (!stopped) timer = setTimeout(next, previewInterval);
+      if (!stopped && !document.hidden) timer = setTimeout(next, previewInterval);
     }
     const visibility = () => {
       clearTimeout(timer);
-      if (!document.hidden && !stopped) timer = setTimeout(next, warmOverviewStats ? 250 : 2000);
+      if (!document.hidden && !stopped) timer = setTimeout(next, stats.length ? 250 : previewInterval);
     };
-    timer = setTimeout(next, warmOverviewStats ? 250 : 2000);
+    timer = setTimeout(next, stats.length ? 250 : previewInterval);
     document.addEventListener("visibilitychange", visibility);
     return () => {
       stopped = true;

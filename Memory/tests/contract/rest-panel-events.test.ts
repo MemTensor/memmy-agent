@@ -42,8 +42,16 @@ describe("REST panel contract", () => {
         endpoint,
         token: "panel-token"
       });
-      const statsHeaders = {authorization: "Bearer panel-token", "x-memmy-time-zone": "+08:00"};
+      const statsHeaders = {authorization: "Bearer panel-token", "x-memmy-time-zone": "+08:00", "x-memmy-user-id": "local-user"};
+      const warmOverview = vi.spyOn(service, "panelOverviewStatsSnapshot");
+      const warmAnalysis = vi.spyOn(service, "panelStatsSnapshot");
+      expect((await fetch(`${endpoint}/api/v1/health`)).status).toBe(200);
+      expect((await fetch(`${endpoint}/api/v1/health`, {headers: {...statsHeaders, authorization: "Bearer invalid"}})).status).toBe(200);
+      expect(warmOverview).not.toHaveBeenCalled();
+      expect(warmAnalysis).not.toHaveBeenCalled();
       await fetch(`${endpoint}/api/v1/health`, {headers: statsHeaders});
+      expect(warmOverview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({namespace: expect.objectContaining({userId: "local-user"}),timeZone: "+08:00"}));
+      expect(warmAnalysis).toHaveBeenCalledTimes(1);
       let overviewStats;
       await vi.waitFor(async () => {
         const response = await fetch(`${endpoint}/api/v1/panel/overview-stats`, {headers: statsHeaders});

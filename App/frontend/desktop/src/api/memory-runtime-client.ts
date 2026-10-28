@@ -153,7 +153,10 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     async prefetchPanel(section,signal) {
       if (browse.hasView(section)) return true;
       if (!panelQueue.idle || !browse.idle) return false;
-      const input = section === "tasks" ? {page:1} : {layer:section as PanelItemsInput["layer"],page:1};
+      const input = section === "tasks" ? {page:1} : {
+        layer:section as PanelItemsInput["layer"],page:1,
+        ...(section === "UserMemory" ? {userSummary:true} : {})
+      };
       await browse.list(section,input,signal);
       return true;
     },

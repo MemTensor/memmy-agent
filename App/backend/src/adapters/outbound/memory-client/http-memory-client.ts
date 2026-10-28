@@ -157,8 +157,8 @@ export function createHttpMemoryClient(
       pause: (input) => request("POST", "agentSourcePause", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 }),
       cancel: (input) => request("POST", "agentSourceCancel", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 })
     },
-    async health() {
-      return request("GET", "health", MemoryHealthSnapshotSchema);
+    async health(context) {
+      return request("GET", "health", MemoryHealthSnapshotSchema, { context });
     },
 
     async reloadConfig(input = {}) {

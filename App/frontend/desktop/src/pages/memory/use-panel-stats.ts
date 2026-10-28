@@ -98,7 +98,7 @@ export function usePanelStats<T>(
     window.addEventListener("memmy-panel-invalidated", clear);
     return () => window.removeEventListener("memmy-panel-invalidated", clear);
   }, [client, section]);
-  const preparingInterval = section === "overview" && client?.getPanelOverviewStats && !overviewStatsUnsupported.current ? 500 : 2000;
+  const preparingInterval = 100;
   usePanelPoll(Boolean(client), load, snapshot?.status === "preparing" ? preparingInterval : 60_000);
   return { state, snapshot, connectionError };
 }

@@ -244,3 +244,19 @@ describe("memory runtime client", () => {
     expect(otherUrl.searchParams.getAll("excludedSourceAgents")).toEqual(["memmy-agent", "cursor"]);
   });
 });
+
+it("reuses the prefetched user-memory view on its first real page read", async () => {
+  const operations: unknown[] = [];
+  const page = {viewId:"users",instanceId:"service",safety:"safe",createdAt:"2026-10-28T00:00:00Z",serverTime:"2026-10-28T00:00:00Z",page:1,pageSize:20,total:0,totalPages:1,hasNext:false,hasPrev:false,items:[]};
+  vi.stubGlobal("fetch",vi.fn(async (_url: unknown,init: RequestInit) => {
+    const body=JSON.parse(String(init.body));operations.push(body);
+    return new Response(JSON.stringify(body.op==="check"?{viewId:"users",instanceId:"service",safety:"safe",updated:false,serverTime:page.serverTime}:page));
+  }));
+  try {
+    const client=createHttpMemoryRuntimeClient(runtimeConfig);
+    await client.prefetchPanel!("UserMemory",new AbortController().signal);
+    await client.listPanelItems({layer:"UserMemory",page:1,userSummary:true});
+    expect(operations).toMatchObject([{op:"create",filter:{layer:"UserMemory",userSummary:true}},{op:"check"}]);
+    expect(operations).toHaveLength(2);
+  } finally { vi.unstubAllGlobals(); }
+});

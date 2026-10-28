@@ -602,8 +602,10 @@ async function routeRequest(
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     // Desktop health checks establish the authenticated scope before the panel
     // opens. Start its bounded background cache without awaiting aggregation.
-    if ((principal.kind === "local" || principal.kind === "cloud") && principal.timeZone) {
-      service.panelOverviewStatsSnapshot({ namespace: principal.namespace, timeZone: principal.timeZone });
+    if ((principal.kind === "local" || principal.kind === "cloud") && principal.timeZone && principal.namespace?.userId) {
+      const input = { namespace: principal.namespace, timeZone: principal.timeZone };
+      service.panelOverviewStatsSnapshot(input);
+      service.panelStatsSnapshot(input);
     }
     return service.health([...API_ROUTES]);
   }
@@ -1468,9 +1470,7 @@ function authenticate(
   url: URL,
   options: MemoryHttpServerOptions
 ): AuthPrincipal {
-  if (url.pathname === "/health" || url.pathname === "/api/v1/health") {
-    return { kind: "anonymous", scopes: ["health:read"] };
-  }
+  const healthRequest = url.pathname === "/health" || url.pathname === "/api/v1/health";
   const auth = options.auth;
   const localToken = auth?.localServiceToken ?? options.apiKey;
   const candidate = tokenFromRequest(request, url);
@@ -1492,6 +1492,9 @@ function authenticate(
       scopes: ["*"]
     };
   }
+  // Health remains public, but a verified local/cloud token can establish the
+  // real user scope for background warming. Invalid probes never start work.
+  if (healthRequest) return { kind: "anonymous", scopes: ["health:read"] };
   const scoped = candidate ? auth?.scopedApiKeys?.[candidate] : undefined;
   if (scoped) {
     return {

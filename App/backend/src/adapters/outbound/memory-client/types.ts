@@ -76,7 +76,7 @@ export interface AgentSourceScanClient {
 
 export interface MemoryClient {
   agentSources?: AgentSourceScanClient;
-  health(): Promise<MemoryHealthSnapshot>;
+  health(context?: MemoryRequestContext): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
   exportBundle?(): Promise<Record<string, unknown>>;

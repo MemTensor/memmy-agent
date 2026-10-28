@@ -55,3 +55,19 @@ it("loads the dedicated overview without waiting for analysis and does not downg
     expect(getPanelStats).not.toHaveBeenCalled();
   } finally { await act(async () => root.unmount()); }
 });
+
+it("publishes prepared analysis on a short status poll instead of waiting two seconds", async () => {
+  vi.useFakeTimers();
+  const container = document.createElement("div"); const root = createRoot(container);
+  const getPanelStats = vi.fn().mockResolvedValueOnce({status: "preparing"})
+    .mockResolvedValue({status: "ready",data: {analysis: {count: 42}}});
+  const client = createMemoryRuntimeClientStub({getPanelStats});
+  function Fixture() { const {state} = usePanelStats(client,"analysis",async()=>({count:0}));return <div>{JSON.stringify(state)}</div>; }
+  try {
+    await act(async () => root.render(<Fixture/>));
+    expect(container.textContent).toContain("loading");
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(container.textContent).toContain('"count":42');
+    expect(getPanelStats).toHaveBeenCalledTimes(2);
+  } finally { await act(async () => root.unmount()); }
+});
