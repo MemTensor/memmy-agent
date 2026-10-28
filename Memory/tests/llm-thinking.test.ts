@@ -16,6 +16,23 @@ afterEach(() => {
 });
 
 describe("memory LLM thinking configuration", () => {
+  it.each(["openai_responses", "sglang", "vllm"] as const)(
+    "preserves the explicit %s provider in fixed memory configuration",
+    (provider) => {
+      const root = mkdtempSync(join(tmpdir(), "memmy-provider-"));
+      roots.push(root);
+      const file = join(root, "config.yaml");
+      writeFileSync(file, YAML.stringify({
+        memmyMemory: {
+          roleRouting: { summary: "fixed" },
+          summary: { provider, endpoint: "https://api.example.test/v1", model: "qwen3.8-27b" }
+        }
+      }));
+
+      expect(loadMemmyConfig(file).config.summary.provider).toBe(provider);
+    }
+  );
+
   it("sends every Bailian thinking switch to the Memmy account gateway", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -270,6 +287,66 @@ describe("memory LLM thinking configuration", () => {
 
     expect(requestBody(fetchMock)).toMatchObject({ enable_thinking: true });
     expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
+  });
+
+  it.each(["sglang", "vllm"] as const)(
+    "routes Qwen thinking through chat_template_kwargs for the %s provider",
+    async (provider) => {
+      const fetchMock = openAiFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      const client = createLlmClient(llmConfig({
+        provider,
+        vendor: "qwen",
+        endpoint: `https://${provider}.example/v1`,
+        model: "qwen3.8-27b",
+        enableThinking: true,
+        extraBody: { chat_template_kwargs: { tokenizer_option: "preserved" } }
+      }));
+
+      await client.complete([{ role: "user", content: "filter" }], {
+        operation: "retrieval.filter",
+        thinkingMode: "disabled"
+      });
+      expect(requestBody(fetchMock)).toMatchObject({
+        chat_template_kwargs: {
+          enable_thinking: false,
+          tokenizer_option: "preserved"
+        }
+      });
+      expect(requestBody(fetchMock)).not.toHaveProperty("enable_thinking");
+
+      fetchMock.mockClear();
+      await client.complete([{ role: "user", content: "evolve" }], {
+        operation: "evolution.induction",
+        thinkingMode: "enabled"
+      });
+      expect(requestBody(fetchMock)).toMatchObject({
+        chat_template_kwargs: { enable_thinking: true }
+      });
+    }
+  );
+
+  it("keeps chat_template_kwargs opt-in data isolated on the generic OpenAI-compatible provider", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      provider: "openai_compatible",
+      vendor: "qwen",
+      endpoint: "https://cloud-provider.example/v1",
+      model: "qwen3.8-27b",
+      extraBody: { chat_template_kwargs: { tokenizer_option: "preserved" } }
+    }));
+
+    await client.complete([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+
+    expect(requestBody(fetchMock)).toMatchObject({
+      enable_thinking: false,
+      chat_template_kwargs: { tokenizer_option: "preserved" }
+    });
+    expect(requestBody(fetchMock).chat_template_kwargs).toEqual({ tokenizer_option: "preserved" });
   });
 
   it.each([
