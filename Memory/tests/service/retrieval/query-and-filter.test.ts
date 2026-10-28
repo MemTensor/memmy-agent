@@ -594,6 +594,17 @@ describe("MemoryService / retrieval / query and filtering", () => {
       stats: { llmFilter: { durationMs?: number } };
     }).stats;
     expect(timeFilterStats.llmFilter.durationMs).toBeUndefined();
+    const bounded = await service.search({
+      namespace: { source: "codex", profileId: "jiang", userId: "user-time-filter" },
+      timeZone: "Asia/Shanghai", query: "我今天做了什么，总结一下", limit: 100, contextBudget: 40
+    });
+    expect(bounded.hits.map(hit => hit.id)).toEqual(recall.hits.map(hit => hit.id));
+    expect(bounded.injectedContext.tokenEstimate).toBeLessThanOrEqual(40);
+    expect(bounded.sourceMemoryIds.length).toBeGreaterThan(0);
+    expect(bounded.sourceMemoryIds.length).toBeLessThan(recall.sourceMemoryIds.length);
+    expect(bounded.droppedDueToBudget.length + bounded.sourceMemoryIds.length).toBe(20);
+    expect(bounded.droppedDueToBudget.every(item => item.reason === "token_budget")).toBe(true);
+
     db.close();
   });
 

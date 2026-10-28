@@ -423,6 +423,7 @@ export const StartTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   turnId: NonEmptyStringSchema.optional(),
   contextHints: UnknownRecordSchema.optional(),
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget: z.number().int().nonnegative().optional()
 });
 export type StartTurnInput = z.infer<typeof StartTurnInputSchema>;
