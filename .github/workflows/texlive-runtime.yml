@@ -51,7 +51,7 @@ jobs:
           "$TL/tlmgr" --no-execute-actions update --all
           "$TL/tlmgr" --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
           "$TL/mktexlsr"
-          "$TL/updmap-sys"
+          "$TL/updmap-sys" --syncwithtrees --force
           "$TL/fmtutil-sys" --byfmt xelatex
       - name: Provision review packages (Windows release builder only)
         if: runner.os == 'Windows'
@@ -70,7 +70,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr package installation failed' }
           & (Join-Path $bin 'mktexlsr.exe')
           if ($LASTEXITCODE -ne 0) { throw 'TeX index generation failed' }
-          & (Join-Path $bin 'updmap-sys.exe')
+          & (Join-Path $bin 'updmap-sys.exe') --syncwithtrees --force
           if ($LASTEXITCODE -ne 0) { throw 'TeX font map generation failed' }
           & (Join-Path $bin 'fmtutil-sys.exe') --byfmt xelatex
           if ($LASTEXITCODE -ne 0) { throw 'XeLaTeX format generation failed' }
