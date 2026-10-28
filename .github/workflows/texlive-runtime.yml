@@ -45,23 +45,33 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           TL="$TEXLIVE_BUILD_SOURCE/$TEXLIVE_BUILD_BIN"
+          export PATH="$TL:$PATH"
           "$TL/tlmgr" option repository https://mirror.ctan.org/systems/texlive/tlnet
           "$TL/tlmgr" update --self
-          "$TL/tlmgr" install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
-          "$TL/fmtutil-sys" --byfmt xelatex
+          "$TL/tlmgr" --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
+          "$TL/tlmgr" generate fmtutil
           "$TL/mktexlsr"
+          "$TL/updmap-sys"
+          "$TL/fmtutil-sys" --byfmt xelatex
       - name: Provision review packages (Windows release builder only)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $bin = Join-Path $env:TEXLIVE_BUILD_SOURCE $env:TEXLIVE_BUILD_BIN
           $tlmgr = Join-Path $bin 'tlmgr.bat'
+          $env:PATH = "$bin;$env:PATH"
           & $tlmgr option repository https://mirror.ctan.org/systems/texlive/tlnet
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr repository failed' }
           & $tlmgr update --self
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr update failed' }
-          & $tlmgr install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
+          & $tlmgr --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
           if ($LASTEXITCODE -ne 0) { throw 'tlmgr package installation failed' }
+          & $tlmgr generate fmtutil
+          if ($LASTEXITCODE -ne 0) { throw 'TeX format configuration failed' }
+          & (Join-Path $bin 'mktexlsr.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'TeX index generation failed' }
+          & (Join-Path $bin 'updmap-sys.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'TeX font map generation failed' }
           & (Join-Path $bin 'fmtutil-sys.exe') --byfmt xelatex
           if ($LASTEXITCODE -ne 0) { throw 'XeLaTeX format generation failed' }
           & (Join-Path $bin 'mktexlsr.exe')
