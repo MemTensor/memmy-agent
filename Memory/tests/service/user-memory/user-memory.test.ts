@@ -5,7 +5,7 @@ import {
   type LlmCompletionOptions,
   type LlmMessage
 } from "../../../src/index.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { configWithMemoryGates, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
 
@@ -790,10 +790,11 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("uses this turn's recalled User Memory candidates to confirm a semantic repeat", async () => {
+  it.each([false, true])("uses this turn's recalled User Memory candidates to confirm a semantic repeat (recall enabled: %s)", async (enableUserMemoryRecall) => {
     let existingMemoryId = "";
     let sawCandidate = false;
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall }),
       llm: captureDecisionRouterLlm((payload) => {
         const second = payload.includes("苹果是我最喜欢的水果");
         if (second) {
@@ -847,13 +848,14 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-02 correction] uses the summary model to archive an explicitly corrected recalled User Memory", async () => {
+  it.each([false, true])("[BC-02 correction] uses the summary model to archive an explicitly corrected recalled User Memory (recall enabled: %s)", async (enableUserMemoryRecall) => {
     let appleMemoryId = "";
     let sawCorrectionCandidate = false;
     const original = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
     const correction = "前面说错了，我在大学的时候最喜欢吃的是西瓜";
     const revised = "我在大学的时候最喜欢吃西瓜，我现在爱看的书是《百年孤独》";
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall }),
       llm: captureDecisionRouterLlm((payload) => {
         const isCorrection = payload.includes(correction);
         if (isCorrection) {
@@ -920,7 +922,7 @@ describe("User Memory", () => {
     ]));
     const evidence = service.recallEvidence(started.turnId);
     expect(evidence.diagnostics).toMatchObject({
-      candidateMemoryIds: expect.arrayContaining([appleMemoryId]),
+      candidateMemoryIds: enableUserMemoryRecall ? expect.arrayContaining([appleMemoryId]) : [],
       injectedMemoryIds: expect.not.arrayContaining([appleMemoryId]),
       capture: {
         status: "completed",
@@ -973,7 +975,9 @@ describe("User Memory", () => {
   });
 
   it("includes User Memory in search log candidates and statistics", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "user-memory-log-user");
     const completed = (await service.completeTurn("turn-user-memory-log", {
       sessionId: session.sessionId,
@@ -1019,7 +1023,9 @@ describe("User Memory", () => {
   });
 
   it("limits the User Memory recall lane to the requested TopK", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "user-memory-top-k-user");
     for (let index = 0; index < 12; index += 1) {
       (await service.completeTurn(`turn-user-memory-top-k-${index}`, {
@@ -1045,7 +1051,9 @@ describe("User Memory", () => {
   });
 
   it("excludes User Memory from automatic injection for the current session's latest 8 turns", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "recent-user-memory-user");
     const completed = (await service.completeTurn("turn-recent-user-memory", {
       sessionId: session.sessionId,
@@ -1149,6 +1157,7 @@ describe("User Memory", () => {
     let appleMemoryId = "";
     let sawHistoricalCandidate = false;
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true }),
       llm: captureDecisionRouterLlm((payload) => {
         const current = payload.includes("我现在最喜欢的水果是西瓜");
         if (current) {
@@ -1222,7 +1231,9 @@ describe("User Memory", () => {
   });
 
   it("[BC-28] stores a compound user statement as one record and no L1", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "compound-user");
     const content = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
     const completed = (await service.completeTurn("turn-compound", {
@@ -1250,7 +1261,9 @@ describe("User Memory", () => {
   });
 
   it("[BC-25] independently creates User Memory and L1, then merges them by source turn", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "same-turn-user");
     const completed = (await service.completeTurn("turn-code-feedback", {
       sessionId: session.sessionId,

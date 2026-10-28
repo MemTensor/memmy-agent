@@ -183,6 +183,7 @@ export function addAgentSourceImport(
 export function configWithMemoryGates(gates: {
   enableMemoryAdd?: boolean;
   enableMemorySearch?: boolean;
+  enableUserMemoryRecall?: boolean;
   enableQueryRewrite?: boolean;
 }): typeof DEFAULT_MEMMY_CONFIG {
   return {

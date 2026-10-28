@@ -485,7 +485,7 @@ describe("AgentLoop turn persistence", () => {
   });
 
   it("applies per-tool result limits when saving and reloading a session", () => {
-    const loop = makeLoop({ maxToolResultChars: 16_000 });
+    const loop = makeLoop({ maxToolResultChars: 16_000, toolResultCompressionEnabled: true });
     const session = new Session({ key: "tool-result-limits" });
     const execBoundary = "e".repeat(50_000);
     const execOver = "x".repeat(50_001);
@@ -519,7 +519,7 @@ describe("AgentLoop turn persistence", () => {
   });
 
   it("uses the read_file limit for structured text while preserving image placeholders", () => {
-    const loop = makeLoop({ maxToolResultChars: 16_000 });
+    const loop = makeLoop({ maxToolResultChars: 16_000, toolResultCompressionEnabled: true });
     const session = new Session({ key: "structured-tool-result" });
     const text = "r".repeat(128_001);
 

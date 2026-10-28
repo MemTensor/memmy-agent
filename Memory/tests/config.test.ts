@@ -78,6 +78,7 @@ describe("memmy memory config", () => {
 
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
+    expect(loadMemmyConfig(configPath).config.algorithm.enableUserMemoryRecall).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm).not.toHaveProperty("lightweightMemory");
     expect(loadMemmyConfig(configPath).config).not.toHaveProperty("logging");
@@ -103,6 +104,28 @@ describe("memmy memory config", () => {
       dailyLimitM: 10,
       totalLimitM: 500
     });
+  });
+
+  it.each([undefined, null, "true", 1, {}, false, true])(
+    "only enables User Memory recall for an explicit boolean true (%j)", (enableUserMemoryRecall) => {
+      const configPath = join(tempRoot(), "config.yaml");
+      writeFileSync(configPath, YAML.stringify({
+        memmyMemory: { algorithm: { enableUserMemoryRecall } }
+      }));
+      expect(loadMemmyConfig(configPath).config.algorithm.enableUserMemoryRecall)
+        .toBe(enableUserMemoryRecall === true);
+    }
+  );
+
+  it("allows the environment to disable and re-enable User Memory recall", () => {
+    const configPath = join(tempRoot(), "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: { algorithm: { enableUserMemoryRecall: true } }
+    }));
+    setEnv("MEMMY_ENABLE_USER_MEMORY_RECALL", "false");
+    expect(loadMemmyConfig(configPath).config.algorithm.enableUserMemoryRecall).toBe(false);
+    setEnv("MEMMY_ENABLE_USER_MEMORY_RECALL", "true");
+    expect(loadMemmyConfig(configPath).config.algorithm.enableUserMemoryRecall).toBe(true);
   });
 
   it("reads query extract history limits from retrieval config and defaults them", () => {

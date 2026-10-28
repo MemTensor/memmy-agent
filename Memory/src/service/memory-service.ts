@@ -1354,8 +1354,13 @@ export class MemoryService {
     if (!this.memoryAddEnabled()) {
       return scopedRun();
     }
+    // Recall responses depend on this gate. Do not replay a pre-gate response
+    // or a response produced while the opposite setting was active.
+    const recallPolicyKey = operation === "turn.start" || operation === "memory.search"
+      ? `:user-memory-recall:${this.config.algorithm.enableUserMemoryRecall === true}`
+      : "";
     const idempotencyKey = request.adapterId && request.requestId
-      ? `${operation}:${request.adapterId}:${request.requestId}`
+      ? `${operation}:${request.adapterId}:${request.requestId}${recallPolicyKey}`
       : undefined;
     if (!idempotencyKey) {
       return scopedRun();
@@ -4231,6 +4236,7 @@ function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
     embeddingMode: config.embedding.mode,
     memoryAddEnabled: config.algorithm.enableMemoryAdd,
     memorySearchEnabled: config.algorithm.enableMemorySearch,
+    userMemoryRecallEnabled: config.algorithm.enableUserMemoryRecall,
     summaryModel: {
       provider: config.summary.provider,
       vendor: config.summary.vendor,

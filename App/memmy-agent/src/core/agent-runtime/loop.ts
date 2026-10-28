@@ -3,6 +3,7 @@ import { requestTiming } from "../../utils/request-timing.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
 import fs from "node:fs";
+import type { MemmyMemoryReplaySnapshot } from "../../memmy-memory/protocol.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -360,6 +361,7 @@ type AgentLoopInit = {
   providerRetryMode?: string;
   toolHintMaxLength?: number;
   maxToolResultChars?: number;
+  toolResultCompressionEnabled?: boolean;
   maxMessages?: number;
   unifiedSession?: boolean;
   timezone?: string | null;
@@ -800,6 +802,7 @@ export class AgentLoop {
   providerRetryMode: string;
   toolHintMaxLength: number;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
   maxMessages: number;
   unifiedSession: boolean;
   backgroundTasks: Array<Promise<any>> = [];
@@ -895,8 +898,9 @@ export class AgentLoop {
     this.providerRetryMode = init.providerRetryMode ?? defaults.providerRetryMode;
     this.toolHintMaxLength = init.toolHintMaxLength ?? defaults.toolHintMaxLength;
     this.maxToolResultChars = init.maxToolResultChars ?? defaults.maxToolResultChars;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? defaults.toolResultCompressionEnabled;
     const requestedMaxMessages = init.maxMessages ?? defaults.maxMessages;
-    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 120;
+    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 80;
     this.maxMessages = normalizedMaxMessages;
     this.defaultModelPreset = new ModelPresetConfig({
       endpoint: "default",
@@ -953,6 +957,7 @@ export class AgentLoop {
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
       maxToolResultChars: this.maxToolResultChars,
+      toolResultCompressionEnabled: this.toolResultCompressionEnabled,
       llmWallTimeoutForSession: (sessionKey) => runnerWallLlmTimeoutS(this.sessions, sessionKey),
       lifecycleHook: () => this.lifecycleHook(),
       computerUseTools: () => [...this.tools].map(([, tool]) => tool)
@@ -986,6 +991,7 @@ export class AgentLoop {
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
     this.dream = this.fileMemoryEnabled
       ? new Dream({
+          toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           store: this.context.memory,
           provider: this.provider,
           model: this.model ?? "",
@@ -2439,7 +2445,11 @@ export class AgentLoop {
   }
 
   syncSubagentRuntimeLimits(): void {
-    if (this.subagents) (this.subagents as any).maxIterations = this.maxIterations;
+    if (this.subagents) {
+      this.subagents.maxIterations = this.maxIterations;
+      this.subagents.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
+    }
+    if (this.dream) this.dream.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
   }
 
   buildModelPresetSnapshot(name: string): Record<string, any> {
@@ -2770,6 +2780,8 @@ export class AgentLoop {
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
+      ...(msg.internal || msg.channel === "system" || msg.senderId === "subagent"
+        ? { internal_context: "runtime_notification" } : {}),
       ...(clientRequestId
         ? { client_request_id: clientRequestId }
         : {}),
@@ -3012,6 +3024,7 @@ export class AgentLoop {
     if (!content.trim()) return false;
     ctx.session!.addMessage("user", content, {
       internal_context: "goal_continuation",
+      turn_id: ctx.turnId,
       ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg) } : {}),
     });
     this.sessions.save(ctx.session!, { fsync: true });
@@ -3479,9 +3492,9 @@ export class AgentLoop {
       if (role === "assistant" && !content && !entry.tool_calls?.length) continue;
       if (role === "tool") {
         const maxChars = resolveToolResultMaxChars(entry.name, this.maxToolResultChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME);
-        if (typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
+        if (this.toolResultCompressionEnabled && typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
         else if (Array.isArray(content)) {
-          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: true, maxTextChars: maxChars });
+          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: this.toolResultCompressionEnabled, maxTextChars: maxChars });
           if (!filtered.length) continue;
           entry.content = filtered;
         }
@@ -3815,6 +3828,9 @@ export class AgentLoop {
       },
     });
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
+    const requestIndex = initialMessages.length - 1;
+    const originalRequestContent = structuredClone(initialMessages[requestIndex]?.content);
+    const turnMemory: { snapshot: MemmyMemoryReplaySnapshot | null } = { snapshot: null };
     const deliveryKey = session?.key ?? null;
     // Subagents keep using this after the turn ends: always the session's current metadata.
     const outputLocation = new OutputDelivery(deliveryKey ? {
@@ -3838,6 +3854,7 @@ export class AgentLoop {
           ?? activeProvider?.generation?.reasoningEffort
           ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
+        toolResultCompressionEnabled: this.toolResultCompressionEnabled,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
         outputLocation,
@@ -3868,6 +3885,18 @@ export class AgentLoop {
         }),
         internalTurnContext,
         actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
+        memoryContextCallback: (ownerTurnId, content) => {
+          turnMemory.snapshot = {
+            turnId: ownerTurnId,
+            // Preserve the existing rule that saved images become path placeholders.
+            content: this.sanitizePersistedBlocks(structuredClone(content)),
+          };
+          const owner = session?.messages.findLast((message) => message.role === "user" && message.turn_id === ownerTurnId);
+          if (owner) {
+            owner.memmy_memory = structuredClone(turnMemory.snapshot);
+            this.sessions.save(session!);
+          }
+        },
         onMaxFinalizationStarting,
         currentTurnMessageStartIndex: midTurnContext?.transcriptStartIndex ?? null,
         beforeFollowupModelRequest: midTurnContext && session && consolidator
@@ -3881,6 +3910,13 @@ export class AgentLoop {
           : null,
       }),
     );
+    // Normal turns were persisted early; system turns are saved by their existing saveTurn path.
+    const request = result.messages?.[requestIndex];
+    if (turnMemory.snapshot && request?.role === "user") {
+      request.memmy_memory = turnMemory.snapshot;
+      request.turn_id = turnMemory.snapshot.turnId;
+      request.content = originalRequestContent;
+    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {
@@ -4155,12 +4191,12 @@ export class AgentLoop {
                   turnSource: parseTurnSource(entry.metadata.turn_source),
                 })
               : ctx.msg;
-            this.appendUserMessage(source, session, {}, entry?.receivedAt);
+            this.appendUserMessage(source, session, { turn_id: ctx.turnId }, entry?.receivedAt);
           },
         );
         ctx.userPersistedEarly = Boolean(persisted.entry || ctx.msg.content.trim() || ctx.msg.media.length);
       } else {
-        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
+        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!, { turn_id: ctx.turnId });
         requestTiming("agent.user_persisted");
       }
     }

@@ -47,6 +47,9 @@ export interface PolicyRefreshResult {
 
 /** A metadata projection and read-only candidate adapter; never claims or completes jobs. */
 export class QueueSchedulingStore {
+  // Cache statements, never eligibility results; each store owns one connection.
+  private readonly eligibilityStatements = new Map<string, Database.Statement>();
+
   constructor(private readonly db: Database.Database) {}
 
   getDeadlineRevision(): { revision: number; rescanRevision: number } {
@@ -68,8 +71,20 @@ export class QueueSchedulingStore {
     const condition = candidate.queue === "main" ? mainQueueEligibility(at, options)
       : retryQueueEligibility(Date.parse(at), options.targetMemoryIds);
     const table = candidate.queue === "main" ? "evolution_jobs" : "embedding_retry_queue q";
-    return !!this.db.prepare(`SELECT 1 FROM ${table} WHERE ${condition.sql} AND id = ? AND enqueue_seq = ?`)
-      .get(...condition.params, candidate.id, candidate.enqueueSeq);
+    const sql = `SELECT 1 FROM ${table} WHERE ${condition.sql} AND id = ? AND enqueue_seq = ?`;
+    let statement = this.eligibilityStatements.get(sql);
+    if (statement) {
+      this.eligibilityStatements.delete(sql);
+    } else {
+      statement = this.db.prepare(sql);
+      // Filters can produce different placeholder counts. Keep the cache bounded.
+      if (this.eligibilityStatements.size >= 32) {
+        const oldest = this.eligibilityStatements.keys().next().value;
+        if (oldest !== undefined) this.eligibilityStatements.delete(oldest);
+      }
+    }
+    this.eligibilityStatements.set(sql, statement);
+    return !!statement.get(...condition.params, candidate.id, candidate.enqueueSeq);
   }
 
   readSnapshot<T>(read: () => T): T {
