@@ -1,15 +1,15 @@
 /** Install an actual native release via the Host's download/verification path.
  * Registry/archive responses are streamed from a local release directory, so this
  * validation needs no published endpoint. It writes the resolved child env as JSON.
- * Usage: tsx scripts/texlive/smoke-install.ts RELEASE_DIR CACHE_DIR OUTPUT_ENV_JSON
+ * Usage: tsx scripts/texlive/smoke-install.ts RELEASE_DIR CACHE_DIR OUTPUT_ENV_JSON VERIFIED_FIXTURE_DIR
  */
 import { createReadStream } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { Readable } from "node:stream";
 import { createTexliveRuntimeInstaller, resolveTexliveRuntime } from "../../App/backend/src/adapters/outbound/plugin-runtime/texlive-installer.js";
-const [release, cache, output] = process.argv.slice(2);
-if (!release || !cache || !output) throw new Error("Required: RELEASE_DIR CACHE_DIR OUTPUT_ENV_JSON");
+const [release, cache, output, fixtures] = process.argv.slice(2);
+if (!release || !cache || !output || !fixtures) throw new Error("Required: RELEASE_DIR CACHE_DIR OUTPUT_ENV_JSON VERIFIED_FIXTURE_DIR");
 const target = `${process.platform}-${process.arch}`;
 let downloads = 0;
 const installer = createTexliveRuntimeInstaller({
@@ -40,9 +40,8 @@ console.log(`Native ${target} installation, package/font probe, and offline reus
 const { execFile } = await import("node:child_process");
 const { promisify } = await import("node:util");
 const { cp, mkdir } = await import("node:fs/promises");
-const { fileURLToPath } = await import("node:url");
 const run = promisify(execFile);
-const fixtureRoot = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const fixtureRoot = resolve(fixtures);
 const qa = resolve(output + ".qa"); await mkdir(qa, { recursive: true });
 const systemPath = process.platform === "win32" ? [process.env.SystemRoot + "\\System32", process.env.SystemRoot].join(";") : "/usr/bin:/bin:/usr/sbin:/sbin";
 const cleanEnv = { ...process.env, ...runtime.environment, PATH: [...runtime.pathEntries, systemPath].join(process.platform === "win32" ? ";" : ":") };
