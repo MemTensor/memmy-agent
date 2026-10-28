@@ -1,3 +1,5 @@
+import { embeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../../model/embedding-identity.js";
+import { updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import type {
   FeedbackTextClassification,
   FeedbackTextShape,
@@ -774,12 +776,14 @@ async maybeCreateFeedbackExperience(
       episode,
       trace
     });
+    const requestedIdentity = embeddingIdentity(this.deps.embedder.config);
     const vector = await this.deps.embedder.embedOne(draft.vectorText, "query");
+    const identity = vectorEmbeddingIdentity(vector) ?? requestedIdentity;
     const existing = this.findSimilarFeedbackExperience(draft, vector);
     const at = feedback.createdAt;
     const saved = existing
-      ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at)
-      : this.insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at);
+      ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at, identity)
+      : this.insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at, identity);
     for (const episodeId of draft.sourceEpisodeIds) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", saved.id, at);
     }
@@ -1111,7 +1115,8 @@ insertFeedbackExperiencePolicy(
     context: ResolvedContext,
     draft: FeedbackExperienceDraft,
     vector: number[],
-    at: string
+    at: string,
+    identity: EmbeddingIdentity
   ): MemoryRow {
     const key = `feedback:${stableHash(`${draft.type}:${draft.title}:${draft.trigger}`).slice(0, 16)}`;
     const l2 = this.deps.buildMemory({
@@ -1179,13 +1184,14 @@ insertFeedbackExperiencePolicy(
           decision_guidance: policyDecisionGuidanceForStorage(draft.decisionGuidance),
           verifier_meta: draft.verifierMeta,
           skill_eligible: draft.skillEligible,
-          signature: `feedback|${draft.type}|${draft.polarity}`,
-          vec: vector
+          signature: `feedback|${draft.type}|${draft.polarity}`
         }
       },
       createdAt: at
     });
-    const upsert = this.deps.repos.memories.upsertByKey(l2);
+    const upsert = this.deps.repos.memories.upsertByKey(
+      updateMemoryVectorField(l2, "vec", vector, { ...identity, updatedAt: at })
+    );
     this.deps.repos.runtime.appendChange({
       memoryId: upsert.memory.id,
       namespaceId: namespaceIdFromMemory(upsert.memory),
@@ -1206,7 +1212,8 @@ mergeFeedbackExperiencePolicy(
     memory: MemoryRow,
     draft: FeedbackExperienceDraft,
     vector: number[],
-    at: string
+    at: string,
+    identity: EmbeddingIdentity
   ): MemoryRow {
     const previous = memory;
     const policy = policyMetaFromMemory(memory);
@@ -1259,8 +1266,7 @@ mergeFeedbackExperiencePolicy(
       source_feedback_ids: sourceFeedbackIds,
       decision_guidance: policyDecisionGuidanceForStorage(decisionGuidance),
       verifier_meta: internalPolicy.verifier_meta ?? draft.verifierMeta,
-      skill_eligible: skillEligible,
-      vec: vector
+      skill_eligible: skillEligible
     };
     const mergedDraft = {
       ...draft,
@@ -1326,7 +1332,9 @@ mergeFeedbackExperiencePolicy(
       updatedAt: at,
       contentHash: stableHash(renderFeedbackExperienceBody(mergedDraft))
     };
-    const saved = this.deps.repos.memories.update(next);
+    const saved = this.deps.repos.memories.update(
+      updateMemoryVectorField(next, "vec", vector, { ...identity, updatedAt: at })
+    );
     this.deps.repos.runtime.appendChange({
       memoryId: saved.id,
       namespaceId: namespaceIdFromMemory(saved),

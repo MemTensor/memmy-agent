@@ -399,6 +399,68 @@ it("explicit cancellation ends SSE as cancelled, never as successful completion"
   expect(text).not.toContain("successful reply");
 });
 
+it("does not return a stalled model call as a completed chat completion", async () => {
+  const app = createApp({
+    processDirect: async () => ({
+      content: "Error calling LLM: stream stalled for more than 90 seconds",
+      metadata: {
+        modelErrorCategory: "model_failed",
+        modelErrorDetail: "Error calling LLM: stream stalled for more than 90 seconds",
+      },
+    }),
+  }, "m");
+  const response = await app.fetch(request({ messages: [{ role: "user", content: "go" }] }));
+  const body = await response.json() as { error: { message: string } };
+
+  expect(response.status).toBe(502);
+  expect(body.error.message).toBe("Error calling LLM: stream stalled for more than 90 seconds");
+});
+
+it("a model failure keeps the user-facing reply text instead of the raw provider body", async () => {
+  const app = createApp({
+    processDirect: async () => ({
+      content: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+      metadata: {
+        modelErrorCategory: "image_input_unsupported",
+        modelErrorDetail: 'Error: {"error":{"message":"image_url is not supported","request_id":"abc"}}',
+      },
+    }),
+  }, "m");
+  const text = await (await app.fetch(request({ messages: [{ role: "user", content: "看图" }], stream: true }))).text();
+  const payloads = ssePayloads(text).filter((line) => line !== "[DONE]").map((line) => JSON.parse(line));
+
+  expect(payloads.at(-1).error).toEqual({
+    code: "image_input_unsupported",
+    message: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+  });
+  expect(text).not.toContain("request_id");
+});
+
+it("a stalled model stream stays a failure after partial text has already been sent", async () => {
+  const app = createApp({
+    processDirect: async (args: any) => {
+      await args.onStream("开始生成");
+      return {
+        content: "Error calling LLM: stream stalled for more than 90 seconds",
+        metadata: {
+          modelErrorCategory: "model_failed",
+          modelErrorDetail: "Error calling LLM: stream stalled for more than 90 seconds",
+        },
+      };
+    },
+  }, "m");
+  const text = await (await app.fetch(request({ messages: [{ role: "user", content: "go" }], stream: true }))).text();
+  const payloads = ssePayloads(text).filter((line) => line !== "[DONE]").map((line) => JSON.parse(line));
+
+  expect(payloads.some((item) => item.choices?.[0]?.delta?.content === "开始生成")).toBe(true);
+  expect(payloads.at(-1).error).toEqual({
+    code: "model_failed",
+    message: "Error calling LLM: stream stalled for more than 90 seconds",
+  });
+  expect(text).not.toContain("[DONE]");
+  expect(text).not.toContain("[Assistant reply unavailable due to model error.]");
+});
+
 it("a model or tool error remains a failure, not user cancellation", async () => {
   let signal!: AbortSignal;
   const app = createApp({ processDirect: async (args: any) => {

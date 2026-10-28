@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { deriveWorkspaceHostId } from "../../../src/contracts/index.js";
+import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup,
+  createTestMemoryService,
   createTestService
 } = createMemoryServiceFixture();
 
@@ -311,6 +313,199 @@ describe("MemoryService / session / lifecycle", () => {
          AND entity_id = ?`
     ).get(recall.sourceMemoryIds[0]) as { kind: string; op: string };
     expect(recallMemoryChange).toEqual({ kind: "trace", op: "updated" });
+    db.close();
+  });
+
+  it("keeps host-key session recovery isolated by tenant while sharing within a tenant across accounts", () => {
+    const { db, service } = createTestService();
+    const open = (tenantId: string | undefined, userId: string) => service.openSession({
+      namespace: { source: "codex", profileId: "default", sessionKey: "shared-host-key", tenantId, userId }
+    });
+
+    const tenantA = open("tenant-a", "account-a");
+    const tenantB = open("tenant-b", "account-b");
+    expect(tenantB.sessionId).not.toBe(tenantA.sessionId);
+    expect(tenantB.resumed).toBe(false);
+    expect(open("tenant-a", "account-c")).toMatchObject({ sessionId: tenantA.sessionId, resumed: true });
+    expect(open(undefined, "account-d").sessionId).not.toBe(tenantA.sessionId);
+
+    const row = db.db.prepare("SELECT meta_json FROM sessions WHERE id = ?").get(tenantB.sessionId) as { meta_json: string };
+    expect(JSON.parse(row.meta_json).tenant_id).toBe("tenant-b");
+    const camelOnlyMeta = JSON.parse(row.meta_json) as Record<string, unknown>;
+    delete camelOnlyMeta.tenant_id;
+    camelOnlyMeta.tenantId = "tenant-b";
+    db.db.prepare("UPDATE sessions SET meta_json = ? WHERE id = ?").run(JSON.stringify(camelOnlyMeta), tenantB.sessionId);
+    expect(open("tenant-b", "account-e")).toMatchObject({ sessionId: tenantB.sessionId, resumed: true });
+
+    const captured = service.completeTurn("tenant-a-native-turn", {
+      sessionId: tenantA.sessionId,
+      query: "Tenant source metadata must follow the session.",
+      answer: "The session tenant is retained in capture context.",
+      status: "succeeded"
+    });
+    const rawTurn = db.db.prepare("SELECT message_payload_json FROM raw_turns WHERE id = ?")
+      .get(captured.rawTurnId) as { message_payload_json: string };
+    expect(JSON.parse(rawTurn.message_payload_json)).toMatchObject({
+      native_origin_v1: { tenantId: "tenant-a" }
+    });
+    expect(db.db.prepare(
+      "SELECT namespace_id FROM memory_change_log WHERE entity_id = ? AND change_type = 'raw_turn_created'"
+    ).get(captured.rawTurnId)).toEqual({ namespace_id: "tenant-a:codex:default" });
+
+    const beforeExplicitOpen = db.db.prepare(
+      "SELECT status, last_seen_at, updated_at FROM sessions WHERE id = ?"
+    ).get(tenantA.sessionId);
+    expect(() => service.openSession({
+      sessionId: tenantA.sessionId,
+      namespace: { source: "codex", profileId: "default", sessionKey: "shared-host-key", tenantId: "tenant-b" }
+    })).toThrow(/different tenant/u);
+    expect(db.db.prepare(
+      "SELECT status, last_seen_at, updated_at FROM sessions WHERE id = ?"
+    ).get(tenantA.sessionId)).toEqual(beforeExplicitOpen);
+    expect(() => service.closeSession(tenantA.sessionId, {
+      namespace: { source: "codex", profileId: "default", sessionKey: "shared-host-key", tenantId: "tenant-b" }
+    })).toThrow(/different tenant/u);
+    expect(db.db.prepare("SELECT status FROM sessions WHERE id = ?").get(tenantA.sessionId)).toEqual({ status: "open" });
+
+    const untrustedMetaSession = service.openSession({
+      namespace: { source: "codex", profileId: "default", sessionKey: "meta-tenant-spoof", userId: "account-e" },
+      meta: { tenant_id: "spoofed-tenant", tenantId: "also-spoofed" }
+    });
+    const untrustedMeta = db.db.prepare("SELECT meta_json FROM sessions WHERE id = ?").get(untrustedMetaSession.sessionId) as { meta_json: string };
+    expect(JSON.parse(untrustedMeta.meta_json)).not.toHaveProperty("tenant_id");
+    expect(JSON.parse(untrustedMeta.meta_json)).not.toHaveProperty("tenantId");
+
+    const conflicting = open("tenant-c", "account-f");
+    const conflictingMetaRow = db.db.prepare("SELECT meta_json FROM sessions WHERE id = ?")
+      .get(conflicting.sessionId) as { meta_json: string };
+    const conflictingMeta = JSON.parse(conflictingMetaRow.meta_json) as Record<string, unknown>;
+    conflictingMeta.tenantId = "tenant-other";
+    db.db.prepare("UPDATE sessions SET meta_json = ? WHERE id = ?")
+      .run(JSON.stringify(conflictingMeta), conflicting.sessionId);
+    expect(() => service.closeSession(conflicting.sessionId)).toThrow(/conflicting tenant metadata/u);
+    expect(db.db.prepare("SELECT status FROM sessions WHERE id = ?").get(conflicting.sessionId)).toEqual({ status: "open" });
+    db.close();
+  });
+
+  it("keeps protocol-v2 host-key recovery and explicit resume isolated by tenant", () => {
+    const { db, service } = createTestService();
+    const openV2 = (tenantId: string, userId: string) => service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/v2-tenant-isolation",
+      workspaceHostId: "c".repeat(64),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "v2-shared-host-key",
+        tenantId,
+        userId
+      }
+    });
+
+    const tenantA = openV2("tenant-a", "account-a");
+    const tenantB = openV2("tenant-b", "account-b");
+    expect(tenantB.sessionId).not.toBe(tenantA.sessionId);
+    expect(tenantB.resumed).toBe(false);
+    expect(openV2("tenant-a", "account-c")).toMatchObject({ sessionId: tenantA.sessionId, resumed: true });
+    const before = db.db.prepare(
+      "SELECT last_seen_at, updated_at FROM sessions WHERE id = ?"
+    ).get(tenantA.sessionId);
+    expect(() => service.openSession({
+      sessionId: tenantA.sessionId,
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/v2-tenant-isolation",
+      workspaceHostId: "c".repeat(64),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "v2-shared-host-key",
+        tenantId: "tenant-b",
+        userId: "account-b"
+      }
+    })).toThrow(/scope_conflict/u);
+    expect(db.db.prepare(
+      "SELECT last_seen_at, updated_at FROM sessions WHERE id = ?"
+    ).get(tenantA.sessionId)).toEqual(before);
+    db.close();
+  });
+
+  it("keeps read-only session lookup tenant-scoped without partitioning by account UID", () => {
+    const { db, service: writer } = createTestService();
+    const existing = writer.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "readonly-shared-host-key",
+        tenantId: "tenant-a",
+        userId: "account-a"
+      }
+    });
+    const readOnlyConfig = {
+      ...DEFAULT_MEMMY_CONFIG,
+      algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm, enableMemoryAdd: false }
+    };
+    const reader = createTestMemoryService({ db, mode: "dev", config: readOnlyConfig });
+    const tenantB = reader.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "readonly-shared-host-key",
+        tenantId: "tenant-b",
+        userId: "account-b"
+      }
+    });
+    const sameTenantDifferentAccount = reader.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "readonly-shared-host-key",
+        tenantId: "tenant-a",
+        userId: "account-c"
+      }
+    });
+    expect(tenantB).toMatchObject({ resumed: false });
+    expect(tenantB.sessionId).not.toBe(existing.sessionId);
+    expect(sameTenantDifferentAccount).toMatchObject({ sessionId: existing.sessionId, resumed: true });
+
+    const fallbackA = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a", userId: "account-a" }
+    });
+    const fallbackAWithOtherAccount = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a", userId: "account-c" }
+    });
+    const fallbackB = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-b", userId: "account-b" }
+    });
+    expect(fallbackAWithOtherAccount.sessionId).toBe(fallbackA.sessionId);
+    expect(fallbackB.sessionId).not.toBe(fallbackA.sessionId);
+
+    const projectA = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a", userId: "account-a" },
+      projectId: "project-a"
+    });
+    const projectAWithOtherAccount = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a", userId: "account-c" },
+      projectId: "project-a"
+    });
+    const projectB = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a", userId: "account-a" },
+      projectId: "project-b"
+    });
+    expect(projectAWithOtherAccount.sessionId).toBe(projectA.sessionId);
+    expect(projectB.sessionId).not.toBe(projectA.sessionId);
+
+    const conversationA = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a" },
+      meta: { conversationId: "conversation-a" }
+    });
+    const conversationB = reader.openSession({
+      namespace: { source: "codex", profileId: "default", tenantId: "tenant-a" },
+      meta: { conversationId: "conversation-b" }
+    });
+    expect(conversationB.sessionId).not.toBe(conversationA.sessionId);
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM sessions").get()).toEqual({ count: 1 });
     db.close();
   });
 

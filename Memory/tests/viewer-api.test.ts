@@ -25,6 +25,26 @@ afterEach(async () => {
 });
 
 describe("local Viewer API", () => {
+  it("passes maintenance modes through and exposes durable progress", async () => {
+    const fixture = await startFixture();
+    const start = vi.spyOn(fixture.service, "rebuildEmbeddings");
+    const invalid = await viewerFetch(fixture.baseUrl, "/api/v1/embeddings/rebuild", {
+      method: "POST", body: JSON.stringify({ mode: "invalid" })
+    });
+    expect(invalid.status).toBe(400);
+    expect(start).not.toHaveBeenCalled();
+    for (const mode of ["repair", "rebuild"]) {
+      const response = await viewerFetch(fixture.baseUrl, "/api/v1/embeddings/rebuild", {
+        method: "POST", body: JSON.stringify({ mode })
+      });
+      expect(response.status).toBe(202);
+      expect(start).toHaveBeenLastCalledWith(mode);
+      const result = await response.json();
+      const progress = await viewerFetch(fixture.baseUrl, `/api/v1/embeddings/rebuild?runId=${result.runId}`);
+      expect(await progress.json()).toMatchObject({ runId: result.runId, mode, updated: 0, failed: 0, done: true });
+    }
+  });
+
   it("serves versioned health and protects config writes and secrets", async () => {
     const fixture = await startFixture();
     const health = await fetch(`${fixture.baseUrl}/health`);

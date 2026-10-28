@@ -715,6 +715,8 @@ export class WebSearchConfig extends Base {
   baseUrl = "";
   maxResults = 5;
   timeout = 30;
+  // Explicit opt-in only; fallback credentials come from their provider environment variables.
+  fallbackProviders: string[] = [];
   constructor(init: Dict = {}) {
     super();
     this.provider = pick(init, ["provider"], this.provider);
@@ -722,6 +724,8 @@ export class WebSearchConfig extends Base {
     this.baseUrl = pick(init, ["baseUrl"], "");
     this.maxResults = pick(init, ["maxResults"], 5);
     this.timeout = pick(init, ["timeout"], 30);
+    const fallbacks: unknown = pick(init, ["fallbackProviders"], []);
+    this.fallbackProviders = Array.isArray(fallbacks) ? fallbacks.filter((value): value is string => typeof value === "string") : [];
   }
 }
 
@@ -808,6 +812,7 @@ export class ExecToolConfig extends Base {
   timeout = 60;
   pathAppend = "";
   sandbox = "";
+  // Additional parent variables beyond the platform and selected runtime defaults.
   allowedEnvKeys: string[] = [];
   allowPatterns: string[] = [];
   denyPatterns: string[] = [];

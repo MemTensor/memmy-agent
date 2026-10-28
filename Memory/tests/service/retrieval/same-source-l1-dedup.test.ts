@@ -4,6 +4,8 @@ import { Repositories } from "../../../src/storage/repositories.js";
 import { refreshProjectAliases } from "../../../src/storage/device-scope.js";
 import { sha256Hex } from "../../../src/contracts/index.js";
 import { stableHash } from "../../../src/utils/id.js";
+import { attachMemoryVector, memoryVectorEntries } from "../../../src/storage/memory-vector-state.js";
+import { compileRetrievalQuery, retrievePluginMemories } from "../../../src/algorithm/plugin-algorithms.js";
 import { deduplicateSameSourceL1Candidates } from "../../../src/service/retrieval/same-source-l1-dedup.js";
 import { IndexedCandidatePool } from "../../../src/service/retrieval/indexed-candidate-pool.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -42,9 +44,9 @@ function setup(time = false, rewrite = false) {
     refreshProjectAliases(state.db.db);
     const turn = options.turn ?? "native-turn";
     const row: MemoryRow = {
-      id, userId: null, sessionId: opened.sessionId, timeline: at, agentId: "codex",
+      id, userId: null, sessionId: opened.sessionId, timeline: at, agentId: options.source ?? "codex",
       memoryLayer: options.layer ?? "L1", memoryType: "LongTermMemory", status: "activated", visibility: "private",
-      memoryKey: `trace:${id}`, memoryValue: "shared evidence unchanged", tags: ["trace"], info: {turn_id: turn},
+      memoryKey: `trace:${id}`, memoryValue: "shared evidence unchanged", tags: ["trace"], appId: workspaceId, info: {turn_id: turn, project_id: projectId},
       properties: {internal_info: {memory_layer: options.layer ?? "L1", memory_kind: options.work ? "work_memory" : "trace", trace: {
         key: `trace:${id}`, ts: Date.parse(at), turn_id: turn, raw_turn_id: `raw-${id}`,
         ...(options.step === null ? {} : {step_index: options.step ?? 0}), sub_step_total: 1,
@@ -61,6 +63,72 @@ function setup(time = false, rewrite = false) {
 }
 
 describe("same-source L1 deduplication without UID", () => {
+  it.each(["profile", "source", "conversation"])("preserves the recorded %s when the same session is reopened", boundary => {
+    const {db, repos, service} = setup();
+    const rows: MemoryRow[] = [];
+    for (const profile of ["a", "b"]) {
+      const namespace = {source: boundary === "source" && profile === "b" ? "claude" : "codex",
+        profileId: boundary === "profile" ? `profile-${profile}` : "default", userId: `user-${profile}`,
+        sessionKey: `host-${profile}`, projectId: "project-p", workspaceId: "workspace-w"};
+      const opened = service.openSession({namespace, meta: {conversationId: boundary === "conversation" ? `conversation-${profile}` : "native-conversation"}});
+      const turn = service.completeTurn("native-turn", {sessionId: opened.sessionId, namespace,
+        query: "Please inspect the project and report its test command.", answer: "The test command is npm test.",
+        toolCalls: [{id: "read", name: "read_file", input: {path: "package.json"}}], toolResults: [{id: "read", output: "npm test"}]});
+      const row = repos.memories.get(turn.l1MemoryId!)!;
+      expect(row.info.profile_id).toBe(namespace.profileId); rows.push(row);
+      repos.runtime.upsertCandidatePoolTrace({id: `candidate-${profile}`, userId: null, sessionId: opened.sessionId,
+        sourceMemoryId: row.id, candidateKey: "policy", candidateValue: "same evidence", score: 1,
+        evidence: {}, createdAt: at, updatedAt: at});
+    }
+    const a = rows[0]!, b = rows[1]!;
+    service.openSession({sessionId: a.sessionId, namespace: {source: b.agentId!, profileId: b.info.profile_id as string,
+      projectId: "project-p", workspaceId: "workspace-w"}, meta: {conversationId: b.conversationId}});
+    repos.runtime.markCandidatePoolPromoted({candidateKey: "policy", sourceMemoryIds: [b.id], policyId: "policy-b", at});
+    expect(db.db.prepare("SELECT id,status FROM l2_candidate_pool ORDER BY id").all()).toEqual([
+      {id: "candidate-a", status: "pending"}, {id: "candidate-b", status: "promoted"}
+    ]);
+    repos.memories.softDelete(a.id);
+    const history = db.db.prepare("SELECT * FROM memories ORDER BY id").all();
+    expect(repos.memories.nativeDuplicates(b)).toEqual({ids: [b.id], deleted: false});
+    expect(deduplicateSameSourceL1Candidates({repos, memories: [b]}).memories.map(row => row.id)).toEqual([b.id]);
+    expect(db.db.prepare("SELECT * FROM memories ORDER BY id").all()).toEqual(history);
+  });
+
+  it.each([
+    ["project", false], ["project", true], ["workspace", false], ["workspace", true]
+  ] as const)("does not propagate deletion or L2 promotion after a session changes %s (deleted before move=%s)", async (boundary, deletedBeforeMove) => {
+    const {db, repos, service, seed} = setup();
+    const a = seed("a", "account-a", {project: boundary === "project" ? "project-a" : "shared-project"});
+    const b = seed("b", "account-b", {project: boundary === "project" ? "project-b" : "shared-project"});
+    // Historical hook sessions need not have a frozen source_namespace_key.
+    db.db.prepare("UPDATE sessions SET meta_json='{}' WHERE id IN (?,?)").run(a.sessionId, b.sessionId);
+    for (const memory of [a, b]) repos.runtime.upsertCandidatePoolTrace({
+      id: `candidate-${memory.id}`, userId: null, sessionId: memory.sessionId, sourceMemoryId: memory.id,
+      candidateKey: "shared-policy", candidateValue: "shared evidence", score: 1, evidence: {}, createdAt: at, updatedAt: at
+    });
+    if (deletedBeforeMove) repos.memories.softDelete("a");
+    service.openSession({sessionId: a.sessionId, namespace: {source: "codex", profileId: "default",
+      userId: "account-a", projectId: b.info.project_id as string, workspaceId: b.appId}});
+    expect(repos.memories.nativeDuplicates(a)).toEqual({ids: ["a"], deleted: deletedBeforeMove});
+    expect(repos.memories.nativeDuplicates(b)).toEqual({ids: ["b"], deleted: false});
+    if (!deletedBeforeMove) {
+      expect(deduplicateSameSourceL1Candidates({repos, memories: [a, b]}).memories).toHaveLength(2);
+      repos.memories.softDelete("a");
+    }
+    const history = db.db.prepare("SELECT * FROM memories ORDER BY id").all();
+    for (const userId of ["account-a", "account-b", "new-account"]) {
+      const result = await service.search({namespace: {source: "codex", profileId: "default", userId},
+        query: "shared evidence", layers: ["L1"], limit: 10});
+      expect(result.hits.map(hit => hit.id)).toEqual(["b"]);
+      expect(repos.runtime.listPendingCandidatePool({userId}).map(row => row.sourceMemoryId)).toEqual(["b"]);
+    }
+    expect(repos.memories.nativeDuplicates(repos.memories.getIncludingDeleted("a")!)).toEqual({ids: ["a"], deleted: true});
+    repos.runtime.markCandidatePoolPromoted({candidateKey: "shared-policy", sourceMemoryIds: ["b"], policyId: "policy-b", at});
+    expect(db.db.prepare("SELECT source_memory_id,status FROM l2_candidate_pool ORDER BY source_memory_id").all())
+      .toEqual([{source_memory_id: "a", status: "pending"}, {source_memory_id: "b", status: "promoted"}]);
+    expect(db.db.prepare("SELECT * FROM memories ORDER BY id").all()).toEqual(history);
+  });
+
   it.each([["account-a", "account-b"], ["account-a", "account-a"], [null, null], ["account-a", null]])(
     "folds same-source copies (%s / %s), preserving rows, content and channel scores", (a, b) => {
       const {db, repos, seed} = setup();
@@ -74,6 +142,108 @@ describe("same-source L1 deduplication without UID", () => {
       expect(db.db.prepare("SELECT * FROM memories ORDER BY id").all()).toEqual(before);
     }
   );
+
+  it("uses the latest same-source revision when only an older copy is a candidate", () => {
+    const makeMemory = (input: {id: string; value: string; summary: string; updatedAt: string; version: number}): MemoryRow => ({
+      id: input.id, timeline: at, userId: null, agentId: "codex", memoryType: "LongTermMemory",
+      status: "activated", visibility: "private", memoryKey: `trace:${input.id}`, memoryValue: input.value,
+      tags: ["trace"], info: {}, memoryLayer: "L1", contentHash: stableHash(input.value), version: input.version,
+      createdAt: at, updatedAt: input.updatedAt,
+      properties: {internal_info: {memory_layer: "L1", memory_kind: "trace", trace: {
+        summary: input.summary, userText: "shared evidence", agentText: input.value, tool_calls: [], reflection: null
+      }}}
+    });
+    const older = attachMemoryVector(makeMemory({id: "copy-a", value: "original evidence", summary: "original summary", updatedAt: at, version: 1}), {
+      vectorField: "vec_summary", vector: [1, 0, 0], embeddingModel: "old-model"
+    });
+    const newer = attachMemoryVector(makeMemory({id: "copy-b", value: "revised evidence", summary: "revised summary",
+      updatedAt: "2026-10-02T00:00:00.000Z", version: 2}), {
+      vectorField: "vec_summary", vector: [0, 1, 0], embeddingModel: "new-model"
+    });
+    const byId = new Map([[older.id, older], [newer.id, newer]]);
+    const repos = {memories: {
+      nativeDuplicates: () => ({ids: ["copy-a", "copy-b"], deleted: false}),
+      getMany: (ids: string[]) => ids.flatMap(id => byId.get(id) ? [byId.get(id)!] : [])
+    }} as unknown as Repositories;
+
+    const result = deduplicateSameSourceL1Candidates({
+      memories: [older], repos,
+      channelScoresByMemory: new Map([
+        ["copy-a", {fts: 0.99, vec_summary: 0.95}],
+        ["copy-b", {fts: 0.1}]
+      ])
+    });
+
+    expect(result.memories.map(memory => memory.id)).toEqual(["copy-b"]);
+    expect(result.memories[0]?.memoryValue).toBe("revised evidence");
+    expect(memoryVectorEntries(result.memories[0]!)).toMatchObject([
+      {vectorField: "vec_summary", vector: [0, 1, 0], embeddingModel: "new-model"}
+    ]);
+    expect(result.channelScoresByMemory.get("copy-b")).toBeUndefined();
+    expect(result.memoryIdByMemoryId).toEqual(new Map([["copy-a", "copy-b"], ["copy-b", "copy-b"]]));
+    expect(memoryVectorEntries(older)).toHaveLength(1);
+
+    const config = structuredClone(DEFAULT_MEMMY_CONFIG);
+    Object.assign(config.algorithm.retrieval, {
+      minRecallScore: 0, relativeThresholdFloor: 0, smartSeed: false, llmFilterEnabled: false, minTraceSim: 0.1
+    });
+    const retrieval = retrievePluginMemories({
+      query: "revised evidence", queryVector: [0, 1, 0], memories: result.memories, layers: ["L1"], limit: 1,
+      channelScoresByMemory: result.channelScoresByMemory, config: config.algorithm.retrieval
+    });
+    expect(retrieval.hits.map(hit => hit.id)).toEqual(["copy-b"]);
+
+    const fallback = deduplicateSameSourceL1Candidates({
+      memories: [older], repos, isMemoryEligible: memory => memory.id === "copy-a"
+    });
+    expect(fallback.memories.map(memory => memory.id)).toEqual(["copy-a"]);
+
+    const outOfScopeLatest = deduplicateSameSourceL1Candidates({
+      memories: [older], repos,
+      isMemoryEligible: () => true,
+      isMemoryInScope: memory => memory.id === "copy-a"
+    });
+    expect(outOfScopeLatest.memories).toEqual([]);
+  });
+
+  it("expands an L1 route when same-source copies fill its candidate slots", async () => {
+    const {repos, seed} = setup();
+    seed("copy-a", "account-a");
+    seed("copy-b", "account-b");
+    seed("distinct-c", "account-c", {turn: "distinct-turn"});
+    const routeFilters: Array<{excludedIds?: string[]}> = [];
+    vi.spyOn(repos.memories, "searchFtsIds").mockImplementation((_match, filter = {}, limit = 20) => {
+      routeFilters.push(filter);
+      return ["copy-a", "copy-b", "distinct-c"]
+        .filter(id => !filter.excludedIds?.includes(id))
+        .slice(0, limit)
+        .map((id, index) => ({id, score: 1 / (index + 1), channel: "fts"}));
+    });
+    const candidatePool = new IndexedCandidatePool({repos, memoryHasImportPipeline: () => false});
+    const result = await candidatePool.indexedRetrievalCandidatePool({
+      userId: null,
+      compiledQuery: {
+        ...compileRetrievalQuery("shared evidence"),
+        patternTerms: [],
+        structuralFragments: []
+      },
+      layers: ["L1"],
+      config: {
+        tier1TopK: 1,
+        tier2TopK: 2,
+        tier3TopK: 1,
+        candidatePoolFactor: 1,
+        keywordTopK: 2,
+        tagFilter: "off"
+      }
+    });
+    const collapsed = deduplicateSameSourceL1Candidates({memories: result.memories, repos});
+
+    expect(routeFilters).toHaveLength(2);
+    expect(routeFilters[0]?.excludedIds).toEqual([]);
+    expect(routeFilters[1]?.excludedIds).toEqual(expect.arrayContaining(["copy-a", "copy-b"]));
+    expect(collapsed.memories.map(memory => memory.id)).toEqual(["copy-a", "distinct-c"]);
+  });
 
   it.each([
     {turn: "other-turn"}, {step: 1}, {project: "other-project"}, {conversation: "other-chat"},

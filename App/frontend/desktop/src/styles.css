@@ -7083,6 +7083,16 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   text-transform: uppercase;
 }
 
+.memory-processing-notice--progress {
+  border-color: var(--color-border-stone);
+  background: var(--color-background-paper);
+}
+
+.memory-processing-notice--progress .agent-model-error-notice__icon,
+.memory-processing-notice--progress .agent-model-error-notice__title {
+  color: var(--color-text-ink);
+}
+
 .memory-processing-notice--success {
   border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
   background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));

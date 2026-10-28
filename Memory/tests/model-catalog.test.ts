@@ -5,6 +5,7 @@ import { join } from "node:path";
 import YAML from "yaml";
 import { loadMemmyConfig } from "../src/config/index.js";
 import { syncMemoryModelCatalog } from "../src/config/model-catalog.js";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "../src/contracts/index.js";
 
 function platformFixture(): Record<string, any> {
   const connection = { provider: "openai_compatible", sourceProvider: "memmy_account", endpoint: "https://platform.example.test/v1", model: "memory_evolution", apiKey: "fixture-token" };
@@ -18,6 +19,25 @@ function platformFixture(): Record<string, any> {
 }
 
 describe("Memory model catalog inheritance", () => {
+  it("persists an explicit account local choice and allows switching back to its cloud model", () => {
+    const root: any = {
+      app: { userMode: "account", userId: "owner-a" },
+      modelAssignments: { account: { ownerAccountId: "owner-a", embedding: "platform-a" } },
+      modelPresets: {
+        "platform-b": { source: "account", ownerAccountId: "owner-b", capabilities: ["embedding"] },
+        "platform-a": { source: "account", ownerAccountId: "owner-a", capabilities: ["embedding"] }
+      }
+    };
+    const memory = { embedding: { mode: "local" } };
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account).toMatchObject({
+      ownerAccountId: "owner-a", embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+    });
+    memory.embedding.mode = "cloud";
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account.embedding).toBe("platform-a");
+  });
+
   it.each(["sourceProvider", "provider"])("does not copy a platform connection into BYOK when %s identifies its source", (field) => {
     const root = platformFixture();
     const connection = root.memmyMemory.evolution;

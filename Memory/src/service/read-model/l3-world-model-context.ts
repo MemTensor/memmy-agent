@@ -1,5 +1,7 @@
 import {
+  canonicalJson,
   renderL3WorldModelFields,
+  sha256Hex,
   type SessionL3WorldModelContextResponse
 } from "../../contracts/index.js";
 import type { Repositories, SessionRecord } from "../../storage/repositories.js";
@@ -27,7 +29,9 @@ export class L3WorldModelContextReadModel {
       schemaVersion: 2,
       projectId,
       memoryId: memory.id,
-      memoryVersion: memory.version,
+      // Clients cache the projected context, not the stored row. Scan validity
+      // and inherited provenance can change without changing the stored text.
+      memoryVersion: Number.parseInt(sha256Hex(canonicalJson({ fields: { ...fields }, sourceMemoryIds })).slice(0, 12), 16) || 1,
       renderedContext: renderL3WorldModelFields(fields),
       sourceMemoryIds,
       generalRulesAndSafetyConstraints: fields.generalRulesAndSafetyConstraints,

@@ -4377,7 +4377,7 @@ export function retrievePluginMemories(input: {
         traceVectorTags,
         traceVectorTagsRequired,
         seededChannelScores: input.channelScoresByMemory?.get(memory.id),
-        useSeededChannelScores: input.channelScoresByMemory !== undefined,
+        useSeededChannelScores: input.channelScoresByMemory?.has(memory.id) ?? false,
         config
       }
     ))
@@ -5201,7 +5201,7 @@ function hasTaggedTraceVectorMatch(
     if (shouldExcludeTraceFromTurnContext(trace, options)) return false;
     return vectorChannelsForMemory(memory, queryVec, options.config, {
       seededChannelScores: options.channelScoresByMemory?.get(memory.id),
-      useSeededChannelScores: options.channelScoresByMemory !== undefined
+      useSeededChannelScores: options.channelScoresByMemory?.has(memory.id) ?? false
     }).channels.some((channel) =>
       channel.channel === "vec_summary" || channel.channel === "vec_action"
     );

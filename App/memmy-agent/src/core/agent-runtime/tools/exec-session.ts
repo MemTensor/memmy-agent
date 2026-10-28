@@ -335,6 +335,10 @@ export class ExecSession {
     return processExited(this.process);
   }
 
+  get finished(): boolean {
+    return this.streamsClosed;
+  }
+
   async write(data: string): Promise<string | null> {
     if (this.isDone()) return "session has already exited";
     if (!this.process.stdin.writable) return "session stdin is closed";

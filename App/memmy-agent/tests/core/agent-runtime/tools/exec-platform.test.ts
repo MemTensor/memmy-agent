@@ -6,6 +6,14 @@ import { ExecTool, setIsWindowsForTest } from "../../../../src/core/agent-runtim
 
 const WINDOWS_COMMAND_NOT_FOUND = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。\r\n";
 
+const SELECTED_UNIX_ENV = {
+  PATH: "/opt/selected/bin:/usr/bin:/bin",
+  VIRTUAL_ENV: "/opt/selected",
+  CONDA_PREFIX: "/opt/conda/envs/selected",
+  CONDA_DEFAULT_ENV: "selected",
+  CONDA_SHLVL: "1",
+};
+
 const WINDOWS_ENV_KEYS = new Set([
   "APPDATA",
   "LOCALAPPDATA",
@@ -41,17 +49,54 @@ function fakeChild(stdout: string | Buffer = "hello world\n", stderr: string | B
 afterEach(() => {
   restorePlatform();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   delete process.env.OPENAI_API_KEY;
   delete process.env.MEMMY_AGENT_TOKEN;
 });
 
 describe("ExecTool buildEnv on Unix", () => {
-  it("contains only the expected base keys", () => {
+  it("preserves the selected runtime paths and identity with the base keys", () => {
     setIsWindowsForTest(false);
+    for (const [key, value] of Object.entries(SELECTED_UNIX_ENV)) vi.stubEnv(key, value);
 
     const env = new ExecTool().buildEnv();
 
-    expect(new Set(Object.keys(env))).toEqual(new Set(["HOME", "LANG", "TERM"]));
+    expect(new Set(Object.keys(env))).toEqual(new Set(["HOME", "LANG", "TERM", ...Object.keys(SELECTED_UNIX_ENV)]));
+    expect(env).toMatchObject(SELECTED_UNIX_ENV);
+  });
+
+  it("does not invent missing runtime environment values", () => {
+    setIsWindowsForTest(false);
+    for (const key of Object.keys(SELECTED_UNIX_ENV)) vi.stubEnv(key, undefined);
+
+    expect(new Set(Object.keys(new ExecTool().buildEnv()))).toEqual(new Set(["HOME", "LANG", "TERM"]));
+  });
+
+  it("preserves an intentionally empty PATH", () => {
+    setIsWindowsForTest(false);
+    vi.stubEnv("PATH", "");
+
+    expect(new ExecTool().buildEnv().PATH).toBe("");
+  });
+
+  it("keeps explicit allowed keys additive to the runtime environment", () => {
+    setIsWindowsForTest(false);
+    for (const [key, value] of Object.entries(SELECTED_UNIX_ENV)) vi.stubEnv(key, value);
+    vi.stubEnv("MEMMY_EXEC_CUSTOM_TEST_VALUE", "custom-value");
+
+    const env = new ExecTool({ allowedEnvKeys: ["MEMMY_EXEC_CUSTOM_TEST_VALUE"] }).buildEnv();
+
+    expect(env).toMatchObject({ ...SELECTED_UNIX_ENV, MEMMY_EXEC_CUSTOM_TEST_VALUE: "custom-value" });
+  });
+
+  it("does not broadly inherit runtime hooks or variables sharing a runtime prefix", () => {
+    setIsWindowsForTest(false);
+    const excludedKeys = ["CONDA_PRIVATE_TOKEN", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "BASH_ENV", "LD_PRELOAD"];
+    for (const key of excludedKeys) vi.stubEnv(key, "synthetic-value");
+
+    const env = new ExecTool().buildEnv();
+
+    for (const key of excludedKeys) expect(env[key]).toBeUndefined();
   });
 
   it("uses HOME from the parent environment", () => {

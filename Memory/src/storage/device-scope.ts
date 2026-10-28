@@ -10,17 +10,17 @@ const aliases = new WeakMap<Database.Database, Map<string, string>>();
 /** Account identities are never memory scopes. Only evidence-backed workspace aliases are persisted. */
 export function installDeviceScope(db: Database.Database): void {
   if (installed.has(db)) return;
-  aliases.set(db, new Map((db.prepare("SELECT legacy_id, project_id FROM memory_project_aliases").all() as Array<{legacy_id: string; project_id: string}>).map(row => [row.legacy_id, row.project_id])));
+  aliases.set(db, readProjectAliases(db));
   db.function("memory_project_id", (value: unknown) => canonicalProjectId(db, typeof value === "string" ? value : null));
   namespaces.set(db, new Map());
   db.function("memory_namespace_key", (value: unknown) => typeof value === "string" ? canonicalNamespaceKey(db, value) : null);
-  installed.add(db);
   refreshProjectAliases(db);
+  installed.add(db);
 }
 
 export function canonicalProjectId(db: Database.Database, id: string | null | undefined): string | null {
   if (!id?.trim()) return null;
-  return aliases.get(db)?.get(id) ?? id;
+  return resolveAlias(aliases.get(db), id);
 }
 
 export function registerProjectAlias(db: Database.Database, legacyId: string, uri: string, host?: string | null): string {
@@ -36,9 +36,26 @@ export function registerProjectAlias(db: Database.Database, legacyId: string, ur
 }
 
 export function refreshProjectAliases(db: Database.Database): void {
-  const storedNamespaces = db.prepare("SELECT legacy_key, namespace_key FROM memory_namespace_aliases").all() as Array<{legacy_key:string;namespace_key:string}>;
-  namespaces.set(db, new Map(storedNamespaces.map(row=>[row.legacy_key,row.namespace_key])));
-  aliases.set(db, new Map((db.prepare("SELECT legacy_id, project_id FROM memory_project_aliases").all() as Array<{legacy_id:string;project_id:string}>).map(row => [row.legacy_id,row.project_id])));
+  reloadDeviceScopeAliases(db);
+  refreshProjectAliasEvidence(db);
+}
+
+/** Reload committed mappings after a transaction rolls back; do not infer or write. */
+export function reloadDeviceScopeAliases(db: Database.Database): void {
+  const hasNamespaceAliases = tableExists(db, "memory_namespace_aliases");
+  const hasProjectAliases = tableExists(db, "memory_project_aliases");
+  const storedNamespaces = hasNamespaceAliases
+    ? db.prepare("SELECT legacy_key, namespace_key FROM memory_namespace_aliases").all() as Array<{legacy_key:string;namespace_key:string}>
+    : [];
+  if (hasNamespaceAliases || !db.readonly || !namespaces.has(db)) {
+    namespaces.set(db, new Map(storedNamespaces.map(row=>[row.legacy_key,row.namespace_key])));
+  }
+  if (hasProjectAliases || !db.readonly || !aliases.has(db)) {
+    aliases.set(db, readProjectAliases(db));
+  }
+}
+
+function refreshProjectAliasEvidence(db: Database.Database): void {
   const rows = db.prepare(`SELECT project_id, workspace_id, meta_json FROM sessions WHERE project_id IS NOT NULL`).all() as Array<{ project_id: string; workspace_id: string | null; meta_json: string }>;
   // Resolve all evidence before writing any mapping; conflicting identities remain isolated.
   const candidates = new Map<string, Map<string, { uri: string; host?: string }>>();
@@ -112,13 +129,36 @@ export function refreshProjectAliases(db: Database.Database): void {
 }
 
 export function canonicalNamespaceKey(db: Database.Database, key: string): string {
-  return namespaces.get(db)?.get(key) ?? key;
+  return resolveAlias(namespaces.get(db), key);
+}
+
+function resolveAlias(map: ReadonlyMap<string, string> | undefined, key: string): string {
+  let current = key;
+  const seen = new Set<string>();
+  while (map?.has(current) && map.get(current) !== current) {
+    if (seen.has(current)) return key; // Invalid historical cycles do not merge identities.
+    seen.add(current); current = map.get(current)!;
+  }
+  return current;
 }
 
 export function deviceNamespace(db: Database.Database, namespace: RuntimeNamespace): RuntimeNamespace {
   return {...namespace, userId: null,
     projectId: canonicalProjectId(db, namespace.projectId) ?? undefined,
     workspaceId: canonicalProjectId(db, namespace.workspaceId) ?? undefined};
+}
+
+function readProjectAliases(db: Database.Database): Map<string, string> {
+  if (!tableExists(db, "memory_project_aliases")) return new Map();
+  const rows = db.prepare("SELECT legacy_id, project_id FROM memory_project_aliases").all() as Array<{
+    legacy_id: string;
+    project_id: string;
+  }>;
+  return new Map(rows.map(row => [row.legacy_id, row.project_id]));
+}
+
+function tableExists(db: Database.Database, name: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 }
 
 /** Normalize only protocol envelopes, never user content or nested tool payloads. */

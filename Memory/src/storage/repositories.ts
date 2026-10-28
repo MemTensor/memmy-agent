@@ -1,9 +1,14 @@
-import { canonicalNamespaceKey, installDeviceScope, canonicalProjectId, refreshProjectAliases } from "./device-scope.js";
+import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
+import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
+import { planBundleImport } from "./bundle-import-plan.js";
+import { canonicalNamespaceKey, installDeviceScope, canonicalProjectId, refreshProjectAliases, reloadDeviceScopeAliases } from "./device-scope.js";
+import { captureNativeOrigin, freezeMemoryOrigin, nativeIdentity, pendingOriginKey, readNativeOrigin, resolveNativeIdentity, withMemoryOrigin } from "./native-memory-origin.js";
 import type Database from "better-sqlite3";
 import {
   canonicalJson,
   renderL3WorldModelFields,
   sha256Hex,
+  L3WorldModelFieldNameSchema,
   type JsonValue,
   type L3WorldModelFieldName,
   type L3WorldModelFields,
@@ -31,6 +36,7 @@ import type {
   MemoryStatsRow,
   MemoryStatus,
   RecallHit,
+  RuntimeNamespace,
   SourceTurnCompleteResponse,
   UserMemoryRecord,
   UserMemoryStatus,
@@ -39,7 +45,8 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
-import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
+import { asStringArray, isRecord, parseJson, toJson } from "../utils/json.js";
 import { firstSemanticUserLine } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
 import {
@@ -56,13 +63,47 @@ import {
   type VectorSearchCandidate
 } from "./sqlite-vec-store.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { legacyL3FieldEditsFromChanges, preserveLegacyL3FieldEdits, type LegacyL3Change, type LegacyL3FieldEdit } from "./legacy-l3-field-edits.js";
+import { getSchemaVersion, SCHEMA_VERSION } from "./schema.js";
 
 type SqlValue = string | number | Buffer | null;
+const OPTIONAL_PREVIOUS_SCHEMA_TABLES = new Set([
+  "memory_project_aliases",
+  "memory_namespace_aliases",
+  "memory_l3_overrides",
+  "memory_l3_legacy_field_edits"
+]);
+
+function hasSqliteTable(db: Database.Database, table: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function isMissingOptionalTableFromPreviousSchema(db: Database.Database, table: string): boolean {
+  return db.readonly && OPTIONAL_PREVIOUS_SCHEMA_TABLES.has(table) && !hasSqliteTable(db, table) &&
+    getSchemaVersion(db).version < SCHEMA_VERSION;
+}
+
+/** Materialize archive evidence before its bounded audit/history log can be pruned. */
+function preserveExplicitL3ArchiveMarkers(db: Database.Database): void {
+  db.prepare(`UPDATE memories
+    SET properties_json = json_set(properties_json,
+      '$.internal_info.l3_world_model_explicitly_archived', json('true'))
+    WHERE memory_layer = 'L3' AND status = 'archived'
+      AND json_type(properties_json, '$.internal_info') = 'object'
+      AND json_extract(properties_json, '$.internal_info.schema_version') = 2
+      AND json_extract(properties_json, '$.internal_info.l3_world_model_explicitly_archived') IS NOT 1
+      AND (
+        EXISTS (SELECT 1 FROM audit_logs WHERE action = 'archive' AND target_id = memories.id)
+        OR EXISTS (SELECT 1 FROM memory_change_log WHERE change_type = 'archive' AND memory_id = memories.id)
+      )`).run();
+}
+
 const BUNDLE_TABLES = [
   "memory_project_aliases",
   "memory_namespace_aliases",
   "memory_l3_overrides",
   "memories",
+  "memory_l3_legacy_field_edits",
   "memory_capture_claims",
   "source_turn_captures",
   "l3_world_model_scopes",
@@ -92,7 +133,7 @@ const BUNDLE_TABLES = [
   "audit_logs"
 ] as const;
 const CLEAR_MEMORY_TABLES = [
-  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures" && table !== "memory_project_aliases" && table !== "memory_namespace_aliases"),
+  ...BUNDLE_TABLES.filter((table) => table !== "memory_project_aliases" && table !== "memory_namespace_aliases"),
   "memories_fts",
   "user_memories_fts",
   "memory_vector_entries",
@@ -233,6 +274,20 @@ export interface MemoryCaptureClaimRecord {
   primaryMemoryId: string;
   capturedBy: MemoryCaptureClaimOrigin;
   createdAt: string;
+  identity?: MemoryCaptureIdentity;
+}
+
+export interface MemoryCaptureScope {
+  projectId: string | null;
+  workspaceId: string | null;
+  tenantId: string | null;
+  profileId: string;
+  conversationId: string | null;
+}
+
+export interface MemoryCaptureIdentity extends MemoryCaptureScope {
+  conversationId: string;
+  turnId: string;
 }
 
 export interface FeedbackRecord {
@@ -326,6 +381,16 @@ export interface EvolutionJobRecord {
   leasedUntil?: string | null;
   lastError?: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmbeddingMaintenanceTask {
+  targetId: string;
+  userMemory: boolean;
+  vectorField?: MemoryVectorField;
+  contentHash?: string;
+  sourceText?: string;
+  status: "pending" | "active" | "stale" | "failed";
   updatedAt: string;
 }
 
@@ -429,6 +494,7 @@ export interface MemorySearchIdHit {
 export type MemorySearchChannel = EmbeddingRetryVectorField | "fts" | "pattern" | "structural";
 
 export interface MemoryVectorSearchOptions {
+  identity?: EmbeddingIdentity;
   anyOfTags?: string[];
 }
 
@@ -563,7 +629,7 @@ export class MemoryRepository {
   ) {}
 
   insert(memory: MemoryRow): MemoryRow {
-    memory = { ...memory, userId: null };
+    memory = freezeMemoryOrigin(this.db, { ...memory, userId: null });
     const prepared = prepareMemoryForStorage(memory);
     this.db
       .prepare(
@@ -599,6 +665,8 @@ export class MemoryRepository {
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
     }
+    const origin = readNativeOrigin(existing.info.native_origin_v1);
+    if (origin) memory = withMemoryOrigin(memory, origin);
     const prepared = prepareMemoryForStorage(memory);
     const updated = {
       ...prepared.memory,
@@ -643,14 +711,17 @@ export class MemoryRepository {
     return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
   }
 
-  upsertByKey(memory: MemoryRow): {
+  upsertByKey(memory: MemoryRow, existingMemoryId?: string): {
     memory: MemoryRow;
     created: boolean;
     previous?: MemoryRow;
   } {
-    const previous = memory.memoryKey
+    const previous = existingMemoryId ? this.get(existingMemoryId) : memory.memoryKey
       ? this.getByKey(memory.memoryLayer, memory.memoryKey)
       : undefined;
+    if (existingMemoryId && (!previous || previous.memoryLayer !== memory.memoryLayer || previous.memoryKey !== memory.memoryKey)) {
+      throw new Error('memory upsert target no longer matches its verified key');
+    }
     if (!previous) {
       return { memory: this.insert(memory), created: true };
     }
@@ -1143,6 +1214,7 @@ export class MemoryRepository {
       status: filter.status ?? ["activated", "resolving"]
     });
     const anyTag = buildAnyTagWhere(options.anyOfTags);
+    const identity = options.identity ?? vectorEmbeddingIdentity(query);
     const candidateWindow = VECTOR_SEARCH_WINDOW;
     const rows = this.db
       .prepare(
@@ -1153,11 +1225,13 @@ export class MemoryRepository {
          JOIN memories ON memories.id = memory_vector_entries.memory_id
          WHERE ${built.where}
            AND memory_vector_entries.vector_field = ?
+           AND memory_vector_entries.embedding_dim = ?
+           ${identity ? "AND memory_vector_entries.embedding_provider = ? AND memory_vector_entries.embedding_model = ?" : ""}
            ${anyTag.where ? `AND ${anyTag.where}` : ""}
          ORDER BY memory_vector_entries.updated_at DESC, memory_vector_entries.id DESC
          LIMIT ?`
       )
-      .all(...built.params, vectorField, ...anyTag.params, candidateWindow) as Array<{
+      .all(...built.params, vectorField, query.length, ...(identity ? [identity.provider, identity.model] : []), ...anyTag.params, candidateWindow) as Array<{
         id: string;
         vector_id: number;
         embedding_dim: number;
@@ -1248,40 +1322,31 @@ export class MemoryRepository {
     });
   }
 
-  /** Native source identity, never text alone, defines historical L1 duplicates. */
+  /** Only immutable capture evidence can propagate deletion or promotion. */
   nativeDuplicates(memory: MemoryRow): { ids: string[]; deleted: boolean } {
-    const fallback = {ids: [memory.id], deleted: Boolean(memory.deletedAt)};
-    if (memory.memoryLayer !== "L1" || memory.properties.internal_info.memory_kind === "work_memory" || !memory.sessionId) return fallback;
-    const session = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(memory.sessionId) as SqlSessionRow | undefined;
-    if (!session?.conversation_id) return fallback;
+    const fallback = { ids: [memory.id], deleted: Boolean(memory.deletedAt || memory.status === "deleted") };
+    if (memory.memoryLayer !== "L1" || memory.properties.internal_info.memory_kind === "work_memory") return fallback;
+    const identity = resolveNativeIdentity(this.db, memory);
+    if (!identity) return fallback;
     const trace = memory.properties.internal_info.trace as Record<string, unknown> | undefined;
-    const turn = memory.info.turn_id ?? trace?.turn_id;
-    if (typeof turn !== "string" || !turn) return fallback;
-    const meta = parseJson<Record<string, unknown>>(session.meta_json, {});
-    const tenantId = meta.tenant_id ?? meta.tenantId ?? null;
-    const namespaceKey = stableHash({tenantId, projectId:canonicalProjectId(this.db,session.project_id),
-      workspaceId:canonicalProjectId(this.db,session.workspace_id)});
-    const sourceNamespaceKey = typeof meta.source_namespace_key === "string"
-      ? canonicalNamespaceKey(this.db,meta.source_namespace_key) : namespaceKey;
-    const rows = this.db.prepare(`SELECT m.id, m.deleted_at, m.status
-      FROM memories m JOIN sessions s ON s.id = m.session_id
-      WHERE m.memory_layer = 'L1' AND s.source = ? AND s.profile_id = ? AND s.conversation_id = ?
-        AND memory_project_id(s.project_id) IS memory_project_id(?)
-        AND memory_project_id(s.workspace_id) IS memory_project_id(?)
-        AND COALESCE(json_extract(s.meta_json, '$.tenant_id'), json_extract(s.meta_json, '$.tenantId'), '') = ?
-        AND COALESCE(memory_namespace_key(json_extract(s.meta_json, '$.source_namespace_key')), ?) = ?
-        AND COALESCE(json_extract(m.info_json, '$.turn_id'), json_extract(m.properties_json, '$.internal_info.trace.turn_id')) = ?
-        AND (json_extract(m.properties_json, '$.internal_info.trace.step_index') = ?
-          OR (? IS NULL AND json_extract(m.properties_json, '$.internal_info.trace.step_index') IS NULL
-            AND m.content_hash IS ? AND m.memory_value = ?))
-        AND COALESCE(json_extract(m.properties_json, '$.internal_info.memory_kind'), 'trace') = ?
-      ORDER BY m.created_at, m.id`).all(session.source, session.profile_id, session.conversation_id,
-        session.project_id, session.workspace_id,
-        tenantId ?? "", namespaceKey, sourceNamespaceKey,
-        turn, typeof trace?.step_index === "number" ? trace.step_index : null,
-        typeof trace?.step_index === "number" ? trace.step_index : null, memory.contentHash ?? null, memory.memoryValue,
-        memory.properties.internal_info.memory_kind ?? "trace") as Array<{id: string; deleted_at: string | null; status: string}>;
-    return {ids: rows.map(row => row.id), deleted: rows.some(row => row.deleted_at || row.status === "deleted")};
+    const step = typeof trace?.step_index === "number" ? trace.step_index : null;
+    // Use the native-turn index. Session scope is mutable and cannot restrict this set.
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer='L1'
+        AND COALESCE(json_extract(info_json, '$.turn_id'), json_extract(properties_json, '$.internal_info.trace.turn_id')) = ?
+        AND COALESCE(json_extract(properties_json, '$.internal_info.memory_kind'), 'trace') = ?
+        AND (json_extract(properties_json, '$.internal_info.trace.step_index') = ?
+          OR (? IS NULL AND json_extract(properties_json, '$.internal_info.trace.step_index') IS NULL
+            AND content_hash IS ? AND memory_value = ?))
+      ORDER BY created_at, id`).all(identity.turnId, memory.properties.internal_info.memory_kind ?? "trace",
+        step, step, memory.contentHash ?? null, memory.memoryValue) as MemorySqlRow[];
+    const key = stableHash(identity);
+    const members = rows.filter(row => {
+      const candidate = resolveNativeIdentity(this.db, memoryFromSql(row, this.db));
+      return candidate !== undefined && stableHash(candidate) === key;
+    });
+    return members.length ? { ids: members.map(row => row.id),
+      deleted: members.some(row => row.deleted_at || row.status === "deleted") } : fallback;
   }
 
   softDelete(id: string, deletedAt = nowIso()): MemoryRow | undefined {
@@ -1417,34 +1482,78 @@ export class MemoryRepository {
 export class MemoryCaptureClaimRepository {
   constructor(private readonly db: Database.Database) {}
 
+  scope(namespace: Partial<RuntimeNamespace>, sessionId?: string): MemoryCaptureScope {
+    const session = sessionId ? this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId) as SqlSessionRow | undefined : undefined;
+    const meta = parseJson<Record<string, unknown>>(session?.meta_json, {});
+    const tenantId = meta.tenant_id ?? meta.tenantId ?? namespace.tenantId;
+    const conversationId = session?.conversation_id?.trim() ? session.conversation_id : session?.host_session_key ?? namespace.sessionKey;
+    return {
+      projectId: canonicalProjectId(this.db, session?.project_id ?? namespace.projectId),
+      workspaceId: canonicalProjectId(this.db, session?.workspace_id ?? namespace.workspaceId),
+      tenantId: typeof tenantId === 'string' && tenantId ? tenantId : null,
+      profileId: session?.profile_id ?? namespace.profileId ?? 'default',
+      conversationId: conversationId?.trim() ? conversationId : null
+    };
+  }
+
+  identity(namespace: Partial<RuntimeNamespace>, turnId?: string, sessionId?: string): MemoryCaptureIdentity | undefined {
+    const scope = this.scope(namespace, sessionId);
+    // Missing conversation evidence disables claim reuse, not project isolation.
+    if (!scope.conversationId || !turnId?.trim()) return undefined;
+    return { ...scope, conversationId: scope.conversationId, turnId };
+  }
+
+  matchesOrigin(memoryId: string, source: string, identity: MemoryCaptureIdentity): boolean {
+    const row = this.db.prepare("SELECT * FROM memories WHERE id=?").get(memoryId) as MemorySqlRow | undefined;
+    if (!row) return false;
+    const origin = resolveNativeIdentity(this.db, memoryFromSql(row, this.db), true);
+    const expected = nativeIdentity(this.db, captureNativeOrigin({ ...identity, source }), identity.turnId);
+    return origin !== undefined && expected !== undefined && stableHash(origin) === stableHash(expected);
+  }
+
+  private scopedHash(qaHash: string, identity: MemoryCaptureIdentity): string {
+    return `v2:${stableHash({ qaHash, ...identity,
+      projectId: canonicalProjectId(this.db, identity.projectId),
+      workspaceId: canonicalProjectId(this.db, identity.workspaceId) })}`;
+  }
+
   claim(input: MemoryCaptureClaimRecord): {
     claimed: boolean;
     claim: MemoryCaptureClaimRecord;
   } {
     return this.db.transaction(() => {
-      const existing = this.get(null, input.source, input.qaHash);
+      if (!input.identity) return { claimed: true, claim: { ...input, userId: null } };
+      const existing = this.get(null, input.source, input.qaHash, input.identity);
       if (existing) return { claimed: false, claim: existing };
       this.db.prepare(`INSERT INTO memory_capture_claims (
         user_id, source, qa_hash, primary_memory_id, captured_by, created_at
       ) VALUES (NULL, ?, ?, ?, ?, ?)`)
-        .run(input.source, input.qaHash, input.primaryMemoryId, input.capturedBy, input.createdAt);
+        .run(input.source, this.scopedHash(input.qaHash, input.identity), input.primaryMemoryId, input.capturedBy, input.createdAt);
       return { claimed: true, claim: { ...input, userId: null } };
     })();
   }
 
-  get(userId: string | null, source: string, qaHash: string): MemoryCaptureClaimRecord | undefined {
-    const row = this.db.prepare(
+  get(userId: string | null, source: string, qaHash: string, identity?: MemoryCaptureIdentity): MemoryCaptureClaimRecord | undefined {
+    if (!identity) return undefined;
+    const scopedHash = this.scopedHash(qaHash, identity);
+    const rows = this.db.prepare(
       `SELECT user_id, source, qa_hash, primary_memory_id, captured_by, created_at
        FROM memory_capture_claims
-       WHERE source = ? AND qa_hash = ? ORDER BY created_at, primary_memory_id LIMIT 1`
-    ).get(source, qaHash) as {
+       WHERE source = ? AND qa_hash IN (?, ?) ORDER BY created_at, primary_memory_id`
+    ).all(source, scopedHash, qaHash) as Array<{
       user_id: string;
       source: string;
       qa_hash: string;
       primary_memory_id: string;
       captured_by: MemoryCaptureClaimOrigin;
       created_at: string;
-    } | undefined;
+    }>;
+    const row = rows.find(candidate => {
+      if (candidate.qa_hash === scopedHash) return true;
+      // Keep v1 claims on disk, but reuse one only when its referenced memory
+      // supplies the same complete origin. Legacy text-only claims stay inert.
+      return this.matchesOrigin(candidate.primary_memory_id, source, identity);
+    });
     return row ? {
       userId: null,
       source: row.source,
@@ -1620,7 +1729,17 @@ export class UserMemoryRepository {
     return row.count;
   }
 
-  embeddingDimensionCounts(userId: string | null): {
+  embeddingMaintenanceEntries(_userId: string | null): EmbeddingMaintenanceEntry[] {
+    return this.db.prepare(`
+      SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
+             embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
+      FROM user_memories
+      WHERE status = 'active' AND deleted_at IS NULL AND ${ACTIVE_USER_MEMORY_VIEW_SQL}
+      ORDER BY id
+    `).all() as EmbeddingMaintenanceEntry[];
+  }
+
+  embeddingDimensionCounts(_userId: string | null): {
     totalSlots: number;
     dimensions: Array<{ dimension: number; count: number }>;
   } {
@@ -1726,10 +1845,10 @@ export class UserMemoryRepository {
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
   }
 
-  searchVectorIds(userId: string | null, query: readonly number[], limit: number): MemorySearchIdHit[] {
+  searchVectorIds(userId: string | null, query: readonly number[], limit: number, identity = vectorEmbeddingIdentity(query)): MemorySearchIdHit[] {
     if (query.length === 0 || limit <= 0) return [];
     return this.listActive(userId)
-      .flatMap((memory) => memory.embedding?.length === query.length
+      .flatMap((memory) => memory.embedding?.length === query.length && (!identity || sameEmbeddingIdentity(memory, identity))
         ? [{ id: memory.id, score: cosineVectors(query, memory.embedding), channel: "vec" as const }]
         : [])
       .filter((hit) => hit.score > 0)
@@ -1753,6 +1872,7 @@ const AUTO_RETRY_SCHEDULED_SQL = `EXISTS(
                 SELECT 1 FROM evolution_jobs
                 WHERE evolution_jobs.id = memory_processing_state.active_job_id
                   AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts > 0
                   AND evolution_jobs.last_error IS NOT NULL
                   AND evolution_jobs.attempts < evolution_jobs.max_attempts
               ) AS auto_retry_scheduled`;
@@ -2034,11 +2154,27 @@ export class RuntimeRepository {
     scope: Pick<RawTurnRecord, "id" | "sessionId" | "userId" | "turnId">,
     conversationId: string
   ): boolean {
+    const origin = readNativeOrigin(this.getRawTurn(scope.id)?.messagePayload?.native_origin_v1);
+    if (origin?.conversationId && origin.conversationId !== conversationId) return false;
     const result = this.db.prepare(`UPDATE raw_turns SET conversation_id = @conversationId
       WHERE id = @id AND session_id = @sessionId AND turn_id = @turnId
         AND (conversation_id IS NULL OR conversation_id = '' OR conversation_id = @conversationId)`)
       .run({ ...scope, conversationId });
+    if (result.changes === 1 && origin && !origin.conversationId) {
+      this.db.prepare("UPDATE raw_turns SET message_payload_json=json_set(message_payload_json,'$.native_origin_v1.conversationId',?) WHERE id=?")
+        .run(conversationId, scope.id);
+    }
     return result.changes === 1;
+  }
+
+  bindPendingTurnSourceConversation(sessionId: string, turnId: string, conversationId: string): boolean {
+    const key = pendingOriginKey(sessionId, turnId);
+    const pending = this.getKv(key);
+    if (!pending) return true;
+    const origin = readNativeOrigin(pending.value);
+    if (!origin || (origin.conversationId && origin.conversationId !== conversationId)) return false;
+    if (!origin.conversationId) this.setKv(key, { ...origin, conversationId }, nowIso());
+    return true;
   }
 
   createSession(session: SessionRecord): SessionRecord {
@@ -2079,7 +2215,7 @@ export class RuntimeRepository {
   }
 
   findOpenSessionByHostKey(input: {
-    userId: string | null;
+    tenantId: string | null;
     source: string;
     profileId: string;
     hostSessionKey: string;
@@ -2090,7 +2226,8 @@ export class RuntimeRepository {
       ORDER BY opened_at ASC, id ASC`)
       .all(input.source,input.profileId,input.hostSessionKey) as SqlSessionRow[];
     const candidates = rows.map(row => sessionFromSql(row,this.db)).filter(session =>
-      input.projectId === undefined || (session.projectId ?? null) === canonicalProjectId(this.db,input.projectId));
+      sessionMatchesTenant(session, input.tenantId)
+      && (input.projectId === undefined || (session.projectId ?? null) === canonicalProjectId(this.db,input.projectId)));
     if (new Set(candidates.map(session=>session.projectId ?? "")).size > 1) return undefined;
     return candidates[0];
   }
@@ -2654,6 +2791,15 @@ export class RuntimeRepository {
 
   insertRawTurn(rawTurn: RawTurnRecord): RawTurnRecord {
     rawTurn = { ...rawTurn, userId: null };
+    const originKey = pendingOriginKey(rawTurn.sessionId, rawTurn.turnId);
+    const pendingOrigin = readNativeOrigin(this.getKv(originKey)?.value);
+    if (pendingOrigin) {
+      rawTurn = { ...rawTurn, messagePayload: { ...rawTurn.messagePayload, native_origin_v1: pendingOrigin } };
+    } else if (!Object.hasOwn(rawTurn.messagePayload ?? {}, "native_origin_v1")) {
+      const session = this.getSession(rawTurn.sessionId);
+      if (session) rawTurn = { ...rawTurn, messagePayload: { ...rawTurn.messagePayload,
+        native_origin_v1: captureNativeOrigin({ ...session, conversationId: rawTurn.conversationId }) } };
+    }
     this.db
       .prepare(
         `INSERT INTO raw_turns (
@@ -2683,11 +2829,14 @@ export class RuntimeRepository {
         redactedAt: rawTurn.redactedAt ?? null,
         deletedAt: rawTurn.deletedAt ?? null
       });
+    this.db.prepare("DELETE FROM runtime_kv WHERE key=?").run(originKey);
     return rawTurn;
   }
 
   updateRawTurn(rawTurn: RawTurnRecord): RawTurnRecord {
     rawTurn = { ...rawTurn, userId: null };
+    const origin = this.getRawTurn(rawTurn.id)?.messagePayload?.native_origin_v1;
+    if (origin !== undefined) rawTurn = { ...rawTurn, messagePayload: { ...rawTurn.messagePayload, native_origin_v1: origin } };
     this.db
       .prepare(
         `UPDATE raw_turns
@@ -2808,11 +2957,28 @@ export class RuntimeRepository {
     storedProjectId: string | null;
     workspaceId: string | null;
   }): boolean {
+    // Captured provenance must be checked even if its Session has moved away
+    // from the requested scope. Never let the mutable fallback override it.
+    const captured = this.db.prepare(`SELECT message_payload_json FROM raw_turns
+      WHERE turn_id = ? AND json_type(message_payload_json, '$.turn_complete') = 'object'
+        AND json_type(message_payload_json, '$.native_origin_v1') IS NOT NULL`)
+      .all(input.turnId) as Array<{ message_payload_json: string }>;
+    for (const row of captured) {
+      const origin = readNativeOrigin(parseJson<Record<string, unknown>>(row.message_payload_json, {}).native_origin_v1);
+      const identity = origin ? nativeIdentity(this.db, origin, input.turnId) : undefined;
+      if (identity && identity.source === normalizeMemoryCaptureSource(input.source)
+        && identity.profileId === input.profileId && identity.conversationId === input.conversationId
+        && (identity.namespaceKey === canonicalNamespaceKey(this.db, input.namespaceKey)
+          || (!origin!.namespaceKey && identity.namespaceKey === stableHash({ tenantId: input.tenantId,
+            projectId: canonicalProjectId(this.db, input.storedProjectId),
+            workspaceId: canonicalProjectId(this.db, input.workspaceId) })))) return true;
+    }
     const row = this.db.prepare(`
       SELECT 1 AS found
       FROM raw_turns
       WHERE raw_turns.turn_id = @turnId
         AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
+        AND json_type(raw_turns.message_payload_json, '$.native_origin_v1') IS NULL
         AND EXISTS (
           SELECT 1
           FROM sessions
@@ -3074,7 +3240,7 @@ export class RuntimeRepository {
     const row = this.db
       .prepare(`SELECT * FROM feedback WHERE id = ?`)
       .get(id) as SqlFeedbackRow | undefined;
-    return row ? feedbackFromSql(row) : undefined;
+    return row ? feedbackFromSql(row, this.db) : undefined;
   }
 
   listFeedback(input: {
@@ -3101,7 +3267,7 @@ export class RuntimeRepository {
          LIMIT ?`
       )
       .all(...params, input.limit ?? 20) as SqlFeedbackRow[];
-    return rows.map(feedbackFromSql);
+    return rows.map(row => feedbackFromSql(row, this.db));
 
     function addOptional(column: string, value: string | undefined): void {
       if (value === undefined) return;
@@ -3567,10 +3733,12 @@ export class RuntimeRepository {
     const inProgressEmbedding = includeEmbeddingRetries
       ? this.db
         .prepare(
-          `SELECT MAX(next_attempt_at, lease_until) AS run_at
+          `SELECT CASE
+             WHEN claimed_by IS NULL OR lease_until IS NULL THEN next_attempt_at
+             ELSE MAX(next_attempt_at, lease_until)
+           END AS run_at
            FROM embedding_retry_queue
            WHERE status = 'in_progress'
-             AND lease_until IS NOT NULL
            ORDER BY run_at ASC
            LIMIT 1`
         )
@@ -3744,7 +3912,20 @@ export class RuntimeRepository {
                        (SELECT memory_project_id(project_id) FROM sessions WHERE id = evolution_jobs.session_id)
                      AND json_extract(shared_job.payload_json, '$.targetField') IS json_extract(evolution_jobs.payload_json, '$.targetField')
                      AND (shared_job.status = 'leased' OR (
-                       shared_job.status IN ('queued', 'failed') AND
+                       shared_job.status = 'queued'
+                       AND shared_job.scope_seq IS NOT NULL
+                       AND shared_job.attempts < shared_job.max_attempts
+                       AND (json_extract(shared_job.payload_json, '$.runAfter') IS NULL
+                         OR CAST(json_extract(shared_job.payload_json, '$.runAfter') AS TEXT) <= ?)
+                       -- Only runnable scope heads compete globally. Comparing a
+                       -- later chunk by UUID against another scope creates cycles.
+                       AND NOT EXISTS (
+                         SELECT 1 FROM evolution_jobs AS shared_predecessor
+                         WHERE shared_predecessor.job_type = shared_job.job_type
+                           AND shared_predecessor.scope_key = shared_job.scope_key
+                           AND shared_predecessor.scope_seq < shared_job.scope_seq
+                           AND shared_predecessor.status IN ('queued', 'leased', 'failed')
+                       ) AND
                        (shared_job.created_at < evolution_jobs.created_at OR
                          (shared_job.created_at = evolution_jobs.created_at AND shared_job.id < evolution_jobs.id))
                      ))
@@ -3765,7 +3946,7 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+        .all(at, at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
           queue_priority: number;
         }>;
       const queuePriority = candidates[0]?.queue_priority;
@@ -4062,7 +4243,7 @@ export class RuntimeRepository {
           source_text = excluded.source_text,
           embed_role = excluded.embed_role,
           status = CASE
-            WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN 'pending'
+            WHEN embedding_retry_queue.status IN ('failed', 'succeeded', 'in_progress') THEN 'pending'
             ELSE embedding_retry_queue.status
           END,
           attempts = CASE
@@ -4077,7 +4258,13 @@ export class RuntimeRepository {
             WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN NULL
             ELSE embedding_retry_queue.last_error
           END,
-          updated_at = excluded.updated_at`
+          updated_at = excluded.updated_at
+        WHERE NOT (
+          embedding_retry_queue.status = 'in_progress'
+          AND embedding_retry_queue.claimed_by IS NOT NULL
+          AND embedding_retry_queue.lease_until IS NOT NULL
+          AND embedding_retry_queue.lease_until > excluded.next_attempt_at
+        )`
       )
       .run({
         id: input.id ?? newId("embed_retry"),
@@ -4157,6 +4344,103 @@ export class RuntimeRepository {
     return row?.count ?? 0;
   }
 
+  embeddingRetryQueueStats(now = Date.now()): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const row = this.db.prepare(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND claimed_by IS NOT NULL AND lease_until > ?) AS active,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND (claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?)) AS stale,
+         COUNT(*) FILTER (WHERE status = 'failed') AS failed
+       FROM embedding_retry_queue`
+    ).get(now, now) as { pending: number; active: number; stale: number; failed: number };
+    return row;
+  }
+
+  embeddingMaintenanceQueueStats(
+    userId: string | null,
+    now = Date.now(),
+    isCurrentWork: (task: EmbeddingMaintenanceTask) => boolean = () => true
+  ): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const at = new Date(now).toISOString();
+    const retries = this.db.prepare(
+      `SELECT target_id, vector_field, source_text, status, claimed_by, lease_until, updated_at
+       FROM embedding_retry_queue WHERE status != 'succeeded'`
+    ).all() as Array<Pick<SqlEmbeddingRetryRow,
+      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>;
+    const jobs = this.db.prepare(
+      `SELECT j.target_memory_id, j.job_type, j.payload_json, j.status, j.leased_until, j.updated_at,
+         m.memory_layer
+       FROM evolution_jobs j LEFT JOIN memories m ON m.id = j.target_memory_id
+       WHERE j.status != 'succeeded' AND (
+         j.job_type = 'embedding' OR (j.job_type = 'user_memory_embedding' AND (? IS NULL OR j.user_id = ?)))`
+    ).all(userId, userId) as Array<Pick<SqlJobRow,
+      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>;
+    const tasks: EmbeddingMaintenanceTask[] = [
+      ...retries.map(row => ({
+        targetId: row.target_id, userMemory: false, vectorField: row.vector_field,
+        sourceText: row.source_text, updatedAt: new Date(row.updated_at).toISOString(),
+        status: row.status === "pending" ? "pending" as const : row.status === "failed" ? "failed" as const
+          : row.claimed_by && row.lease_until !== null && row.lease_until > now ? "active" as const : "stale" as const
+      })),
+      ...jobs.flatMap(row => {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        return [{
+          targetId: row.target_memory_id ?? "", userMemory: row.job_type === "user_memory_embedding",
+          vectorField: row.memory_layer === "L1" ? "vec_summary" as const : "vec" as const,
+          contentHash: typeof payload.contentHash === "string" ? payload.contentHash : undefined,
+          updatedAt: row.updated_at,
+          status: row.status === "queued" ? "pending" as const
+            : row.status === "leased" ? row.leased_until && row.leased_until > at ? "active" as const : "stale" as const
+              : "failed" as const
+        }];
+      })
+    ];
+    const counts = { pending: 0, active: 0, stale: 0, failed: 0 };
+    const failures = new Set<string>();
+    for (const task of tasks) {
+      if (!isCurrentWork(task)) continue;
+      if (task.status === "failed") {
+        // History can contain multiple failures for the same still-unresolved target.
+        failures.add(`${task.userMemory ? "user" : "memory"}:${task.targetId}:${task.vectorField ?? "default"}`);
+      } else counts[task.status]++;
+    }
+    counts.failed = failures.size;
+    return counts;
+  }
+
+  hasSuccessfulEmbeddingWork(input: {
+    targetId: string;
+    userMemory: boolean;
+    vectorField: MemoryVectorField;
+    contentHash: string;
+    sourceTexts: string[];
+    since: string;
+  }): boolean {
+    const job = input.vectorField !== "vec_action" && this.db.prepare(
+      `SELECT 1 FROM evolution_jobs WHERE target_memory_id = ? AND job_type = ?
+       AND status = 'succeeded' AND updated_at >= ?
+       AND json_extract(payload_json, '$.contentHash') = ? LIMIT 1`
+    ).get(input.targetId, input.userMemory ? "user_memory_embedding" : "embedding", input.since, input.contentHash);
+    if (job) return true;
+    if (input.userMemory) return false;
+    return Boolean(this.db.prepare(
+      `SELECT 1 FROM embedding_retry_queue WHERE target_id = ? AND vector_field = ?
+       AND status = 'succeeded' AND updated_at >= ? AND source_text IN (${input.sourceTexts.map(() => "?").join(",")}) LIMIT 1`
+    ).get(input.targetId, input.vectorField, Date.parse(input.since), ...input.sourceTexts));
+  }
+
   requeueEmbeddingRetriesAfterRestart(
     now = Date.now()
   ): Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> {
@@ -4223,7 +4507,9 @@ export class RuntimeRepository {
            LEFT JOIN memories m ON m.id = q.target_id
            WHERE (
              q.status = 'pending'
-             OR (q.status = 'in_progress' AND q.lease_until IS NOT NULL AND q.lease_until <= ?)
+             OR (q.status = 'in_progress' AND (
+               q.claimed_by IS NULL OR q.lease_until IS NULL OR q.lease_until <= ?
+             ))
            )
              AND q.next_attempt_at <= ?
              ${targetFilter}
@@ -4243,7 +4529,9 @@ export class RuntimeRepository {
              WHERE id = ?
                AND (
                  status = 'pending'
-                 OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
+                 OR (status = 'in_progress' AND (
+                   claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?
+                 ))
                )
                AND next_attempt_at <= ?`
           )
@@ -4898,10 +5186,24 @@ export class RuntimeRepository {
 
   exportBundleTables(includeRawText = false): Record<string, Array<Record<string, unknown>>> {
     const tables: Record<string, Array<Record<string, unknown>>> = {};
+    const explicitArchiveEvidence = new Set<string>();
+    if (hasSqliteTable(this.db, "audit_logs")) {
+      for (const row of this.db.prepare("SELECT target_id FROM audit_logs WHERE action = 'archive'").all() as Array<{target_id: string | null}>) {
+        if (row.target_id) explicitArchiveEvidence.add(row.target_id);
+      }
+    }
+    if (hasSqliteTable(this.db, "memory_change_log")) {
+      for (const row of this.db.prepare("SELECT memory_id FROM memory_change_log WHERE change_type = 'archive'").all() as Array<{memory_id: string | null}>) {
+        if (row.memory_id) explicitArchiveEvidence.add(row.memory_id);
+      }
+    }
     for (const table of BUNDLE_TABLES) {
+      if (isMissingOptionalTableFromPreviousSchema(this.db, table)) continue;
       const rows = this.db.prepare(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>;
       tables[table] = rows.map((row) => {
-        const projected = table === "memory_change_log" ? compactHistoryChangeRow(row) : row;
+        const projected = table === "memory_change_log"
+          ? compactHistoryChangeRow(row)
+          : table === "memories" ? bundleMemoryArchiveProjection(row, explicitArchiveEvidence) : row;
         return serializeBundleRow(table, includeRawText ? projected : redactBundleRow(table, projected));
       });
     }
@@ -4914,6 +5216,7 @@ export class RuntimeRepository {
       conflictStrategy?: "skip" | "replace" | "error";
     } = {}
   ): {
+    skippedMemoryIds: Set<string>;
     inserted: Record<string, number>;
     skipped: Record<string, number>;
     replaced: Record<string, number>;
@@ -4928,6 +5231,7 @@ export class RuntimeRepository {
   } {
     const conflictStrategy = options.conflictStrategy ?? "skip";
     const result = {
+      skippedMemoryIds: new Set<string>(),
       inserted: {} as Record<string, number>,
       skipped: {} as Record<string, number>,
       replaced: {} as Record<string, number>,
@@ -4940,7 +5244,34 @@ export class RuntimeRepository {
         action: "skipped" | "replaced" | "error";
       }>
     };
-    this.db.transaction(() => {
+    try { this.db.transaction(() => {
+      const normalizedTables = Object.fromEntries(BUNDLE_TABLES.map(table => [table,
+        (Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : []).map(row =>
+          applyBundleDefaults(table, deserializeBundleRow(row)))
+      ]));
+      for (const table of BUNDLE_TABLES) {
+        const seen = new Map<string, string>();
+        for (const row of normalizedTables[table]!) {
+          const identity = bundleIdentity(table, row);
+          if (!identity) continue;
+          const signature = stableHash(row);
+          const previous = seen.get(identity.sourceId);
+          if (previous && previous !== signature) throw new Error(`contradictory duplicate identity in bundle: ${table}.${identity.sourceId}`);
+          seen.set(identity.sourceId, signature);
+        }
+      }
+      const plan = planBundleImport(this.db, normalizedTables, conflictStrategy);
+      const world = new L3WorldModelRepository(this.db, new MemoryRepository(this.db, new SqliteVecStore(this.db)));
+      const projection = (project: string | null) => {
+        const memory = world.getMemory(null, project);
+        return stableHash(memory ? { id: memory.id, version: memory.version, status: memory.status,
+          fields: memory.properties.internal_info.world_model,
+          sources: memory.info.source_memory_ids ?? [], scan: memory.info.project_environment_applied_scan_id ?? null } : null);
+      };
+      const before = new Map([...plan.originalProjects].map(project => [project, projection(project)]));
+      result.skippedMemoryIds = plan.skippedMemoryIds;
+      const importedMemoryIds = new Set<string>();
+      const importedLegacyChanges: LegacyL3Change[] = [];
       const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
         SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
         SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
@@ -4950,6 +5281,26 @@ export class RuntimeRepository {
         for (const row of rows) {
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          if (plan.shouldSkip(table, normalized)) {
+            const identity = bundleIdentity(table, normalized);
+            if (identity) {
+              recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
+              result.conflicts.push({ table, primaryKey: identity.primaryKey, sourceId: identity.sourceId,
+                targetId: identity.sourceId, action: "skipped" });
+            }
+            result.skipped[table] = (result.skipped[table] ?? 0) + 1;
+            continue;
+          }
+          // Log sequence numbers belong to the source database. A collision must
+          // not discard the deletion history of successfully imported memories.
+          if (table === "memory_change_log"
+            && (normalized.change_type === "l3_world_model_create" || normalized.change_type === "l3_world_model_update")
+            && typeof normalized.memory_id === "string" && typeof normalized.created_at === "string"
+            && typeof normalized.seq === "number") {
+            importedLegacyChanges.push({memory_id: normalized.memory_id, created_at: normalized.created_at,
+              seq: normalized.seq, before_json: typeof normalized.before_json === "string" ? normalized.before_json : null,
+              after_json: typeof normalized.after_json === "string" ? normalized.after_json : null});
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -4993,6 +5344,7 @@ export class RuntimeRepository {
           this.db
             .prepare(`${verb} INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`)
             .run(...values);
+          if (table === "memories" && typeof normalized.id === "string") importedMemoryIds.add(normalized.id);
           if (existed) {
             result.conflicts.push({
               table,
@@ -5007,8 +5359,15 @@ export class RuntimeRepository {
           }
         }
       }
-    })();
-    refreshProjectAliases(this.db);
+      preserveLegacyL3FieldEdits(this.db, importedLegacyChanges.filter(change => importedMemoryIds.has(change.memory_id)));
+      refreshProjectAliases(this.db);
+      for (const [project, expected] of before) {
+        if (projection(project) !== expected) throw new Error(`skip import changes protected L3 scope: ${project ?? "<global>"}`);
+      }
+    })(); } catch (error) {
+      reloadDeviceScopeAliases(this.db);
+      throw error;
+    }
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
     return result;
@@ -5084,18 +5443,22 @@ export class RuntimeRepository {
   }
 
   private pruneLogTable(table: LogTableName): number {
-    const result = this.db
-      .prepare(
-        `DELETE FROM ${table}
+    return this.db.transaction(() => {
+      if (table === "memory_change_log") preserveLegacyL3FieldEdits(this.db);
+      if (table === "memory_change_log" || table === "audit_logs") preserveExplicitL3ArchiveMarkers(this.db);
+      const result = this.db
+        .prepare(
+          `DELETE FROM ${table}
          WHERE rowid IN (
            SELECT rowid
            FROM ${table}
            ORDER BY ${LOG_TABLE_RETENTION_ORDER[table]}
            LIMIT -1 OFFSET ?
          )`
-      )
-      .run(LOG_TABLE_RETENTION_LIMIT);
-    return result.changes;
+        )
+        .run(LOG_TABLE_RETENTION_LIMIT);
+      return result.changes;
+    })();
   }
 
   insertArtifact(input: {
@@ -5363,6 +5726,39 @@ export class L3WorldModelRepository {
     return row.deleted_at ?? undefined;
   }
 
+  /** Read explicit legacy field edits without rewriting historical rows or
+   * treating an uninitialized null field as a deletion. */
+  private legacyFieldEdits(projectId: string | null) {
+    type EditOrder = { at: string; seq: number };
+    const deletions = new Map<keyof L3WorldModelFields, EditOrder>();
+    const writes = new Map<string, Map<keyof L3WorldModelFields, EditOrder>>();
+    const rows = this.db.prepare(`SELECT change.memory_id, change.before_json, change.after_json, change.created_at, change.seq
+      FROM memory_change_log AS change
+      JOIN l3_world_model_scopes AS scope ON scope.memory_id = change.memory_id
+      WHERE scope.user_id IS NOT NULL AND memory_project_id(scope.project_id) IS ?
+        AND change.change_type IN ('l3_world_model_create', 'l3_world_model_update')
+      ORDER BY change.created_at, change.seq`).all(projectId) as LegacyL3Change[];
+    // Read-only v10 databases still use their available log evidence until upgraded.
+    const hasDurableEdits = !this.db.readonly || Boolean(this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_l3_legacy_field_edits'").get());
+    const persisted = hasDurableEdits ? this.db.prepare(`SELECT edits.* FROM memory_l3_legacy_field_edits AS edits
+      JOIN l3_world_model_scopes AS scope ON scope.memory_id = edits.memory_id
+      WHERE scope.user_id IS NOT NULL AND memory_project_id(scope.project_id) IS ?`).all(projectId) as LegacyL3FieldEdit[] : [];
+    const edits = [...persisted, ...legacyL3FieldEditsFromChanges(rows)]
+      .sort((a, b) => a.edited_at.localeCompare(b.edited_at) || a.change_seq - b.change_seq);
+    for (const row of edits) {
+      const property = l3WorldModelFieldProperty(row.field);
+      const order = { at: row.edited_at, seq: row.change_seq };
+      if (row.deleted) deletions.set(property, order);
+      else {
+        const written = writes.get(row.memory_id) ?? new Map();
+        written.set(property, order);
+        writes.set(row.memory_id, written);
+      }
+    }
+    return { deletions, writes };
+  }
+
   getMemory(_userId: string | null, projectId?: string | null): MemoryRow | undefined {
     projectId = canonicalProjectId(this.db, projectId);
     const scopes = this.db.prepare(`SELECT * FROM l3_world_model_scopes
@@ -5376,10 +5772,14 @@ export class L3WorldModelRepository {
       return [{ memory, canonical: scope.user_id === null }];
     });
     if (!candidates.length) return undefined;
-    const overrides = this.db.prepare(`SELECT field, deleted FROM memory_l3_overrides WHERE project_key = ?`)
-      .all(projectId ?? '') as Array<{field: keyof L3WorldModelFields; deleted: number}>;
+    const overrides = isMissingOptionalTableFromPreviousSchema(this.db, "memory_l3_overrides")
+      ? []
+      : this.db.prepare(`SELECT field, deleted FROM memory_l3_overrides WHERE project_key = ?`)
+        .all(projectId ?? '') as Array<{field: keyof L3WorldModelFields; deleted: number}>;
     const fields = emptyL3WorldModelFields();
     const deletedAt = this.latestDeletion(projectId);
+    const legacyEdits = this.legacyFieldEdits(projectId);
+    const selectedSources: string[] = [];
     let profileScanId: unknown;
     for (const property of Object.keys(fields) as Array<keyof L3WorldModelFields>) {
       const override = overrides.find(row => row.field === property);
@@ -5388,23 +5788,49 @@ export class L3WorldModelRepository {
         if (override && !candidate.canonical) continue;
         if (deletedAt && (candidate.memory.updatedAt < deletedAt ||
           (!candidate.canonical && candidate.memory.updatedAt === deletedAt))) continue;
+        const fieldDeletedAt = legacyEdits.deletions.get(property);
+        // A later edit to another field is not evidence that this field was
+        // recreated. A proven later write (or an explicit device override) is.
+        const fieldWrittenAt = legacyEdits.writes.get(candidate.memory.id)?.get(property)
+          ?? { at: candidate.memory.createdAt, seq: -1 };
+        if (!override && fieldDeletedAt && (fieldWrittenAt.at < fieldDeletedAt.at ||
+          (fieldWrittenAt.at === fieldDeletedAt.at && fieldWrittenAt.seq <= fieldDeletedAt.seq))) continue;
         const value = fieldsFromL3WorldModelMemory(candidate.memory)[property];
         if (value !== null) {
           fields[property] = value;
+          selectedSources.push(...l3WorldModelSourceMemoryIds(candidate.memory));
           if (property === "projectEnvironmentProfile") profileScanId = candidate.memory.info.project_environment_applied_scan_id;
           break;
         }
       }
     }
     const base = candidates[0]!.memory;
+    const explicitlyArchived = candidates.some(({memory}) => {
+      const markerAt = isExplicitlyArchivedL3WorldModel(memory) ? memory.updatedAt : undefined;
+      const auditAt = this.latestExplicitArchiveAt(memory.id);
+      const archivedAt = [markerAt, auditAt].filter((value): value is string => Boolean(value)).sort().at(-1);
+      return Boolean(archivedAt && (!deletedAt || archivedAt > deletedAt));
+    });
+    const sourceMemoryIds = uniq(selectedSources).slice(-256);
     const memoryValue = renderL3WorldModelFields(fields);
+    const projectedVersionState = explicitlyArchived ? { fields, explicitlyArchived: true } : fields;
+    const projectedInternalInfo = {
+      ...base.properties.internal_info, body: memoryValue, source_memory_ids: sourceMemoryIds
+    };
+    if (explicitlyArchived) Object.assign(projectedInternalInfo, {l3_world_model_explicitly_archived: true});
+    else delete (projectedInternalInfo as typeof projectedInternalInfo & {
+      l3_world_model_explicitly_archived?: boolean;
+    }).l3_world_model_explicitly_archived;
     return {
       ...base, memoryValue, contentHash: sha256Hex(memoryValue),
-      info: {...base.info, project_environment_applied_scan_id: profileScanId},
-      status: memoryValue ? "activated" : "archived",
-      version: candidates.length > 1 || deletedAt ? Number.parseInt(sha256Hex(canonicalJson(fields)).slice(0, 12), 16) : base.version,
+      info: {...base.info, source_memory_ids: sourceMemoryIds, project_environment_applied_scan_id: profileScanId},
+      // Explicit governance wins over legacy field merging; empty projections remain archived.
+      status: explicitlyArchived || !memoryValue ? "archived" : "activated",
+      version: candidates.length > 1 || deletedAt || explicitlyArchived
+        ? Number.parseInt(sha256Hex(canonicalJson(projectedVersionState)).slice(0, 12), 16)
+        : base.version,
       properties: { ...base.properties, internal_info: {
-        ...base.properties.internal_info, body: memoryValue,
+        ...projectedInternalInfo,
         world_model: {
           general_rules_and_safety_constraints: fields.generalRulesAndSafetyConstraints,
           project_environment_profile: fields.projectEnvironmentProfile,
@@ -5413,6 +5839,46 @@ export class L3WorldModelRepository {
         }
       }}
     };
+  }
+
+  archiveScopeMemory(memoryId: string, at = nowIso()): MemoryRow | undefined {
+    return this.db.transaction(() => {
+      const memory = this.memories.get(memoryId);
+      if (!memory) return undefined;
+      const projectId = projectIdFromL3WorldModelMemory(memory);
+      validateL3WorldModelMemory(memory, null, projectId);
+      const archived = this.memories.update({
+        ...memory,
+        status: "archived",
+        properties: {
+          ...memory.properties,
+          status: "archived",
+          internal_info: {
+            ...memory.properties.internal_info,
+            l3_world_model_explicitly_archived: true
+          }
+        },
+        updatedAt: at
+      });
+      this.db.prepare("UPDATE l3_world_model_scopes SET updated_at = ? WHERE memory_id = ?")
+        .run(at, memoryId);
+      return archived;
+    })();
+  }
+
+  private latestExplicitArchiveAt(memoryId: string): string | undefined {
+    const timestamps: string[] = [];
+    if (hasSqliteTable(this.db, "audit_logs")) {
+      const row = this.db.prepare(`SELECT MAX(created_at) AS created_at
+        FROM audit_logs WHERE action = 'archive' AND target_id = ?`).get(memoryId) as {created_at: string | null};
+      if (row.created_at) timestamps.push(row.created_at);
+    }
+    if (hasSqliteTable(this.db, "memory_change_log")) {
+      const row = this.db.prepare(`SELECT MAX(created_at) AS created_at
+        FROM memory_change_log WHERE change_type = 'archive' AND memory_id = ?`).get(memoryId) as {created_at: string | null};
+      if (row.created_at) timestamps.push(row.created_at);
+    }
+    return timestamps.sort().at(-1);
   }
 
   fields(userId: string | null, projectId?: string | null): L3WorldModelFields {
@@ -5468,6 +5934,17 @@ export class L3WorldModelRepository {
       }
       assertL3WorldModelFieldOwnership(batch.projectId ?? null, input.targetField);
 
+      let memory = this.getMemory(batch.userId, batch.projectId);
+      if (isExplicitlyArchivedL3WorldModel(memory)) {
+        this.db.prepare(
+          `UPDATE l3_world_model_batch_targets
+           SET status = 'applied', no_change = 1, applied_at = ?, updated_at = ?
+           WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+        ).run(at, at, input.batchId, input.targetField);
+        updateL3WorldModelBatchTerminalOutcome(this.db, input.batchId, at);
+        return { alreadyApplied: false, noChange: true, memory };
+      }
+
       const fields = this.fields(batch.userId, batch.projectId);
       const currentField = fields[l3WorldModelFieldProperty(input.targetField)];
       if (sha256Hex(currentField ?? "") !== input.expectedFieldHash) {
@@ -5481,7 +5958,6 @@ export class L3WorldModelRepository {
       }
 
       let noChange = false;
-      let memory = this.getMemory(batch.userId, batch.projectId);
       const deletedAt = this.latestDeletion(batch.projectId);
       if (deletedAt && batch.createdAt <= deletedAt) {
         // An immutable pre-upgrade batch must not recreate a subsequently deleted scope.
@@ -5804,11 +6280,16 @@ export class L3WorldModelRepository {
     const projectId = canonicalProjectId(this.db, input.projectId);
     assertL3WorldModelFieldOwnership(projectId, input.targetField);
     const at = input.at ?? nowIso();
+    // Inherit each field together with metadata from the same selected historical
+    // record. An explicit archive must stop automated writes before creating a
+    // replacement device scope or changing its sequence.
+    const inherited = this.getMemory(null, projectId);
+    if (isExplicitlyArchivedL3WorldModel(inherited)) return inherited;
     const scope = this.ensureScope(input.userId, projectId, at);
     const existing = scope.memoryId ? this.memories.get(scope.memoryId) : undefined;
     if (scope.memoryId && !existing) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
     if (existing) validateL3WorldModelMemory(existing, input.userId, projectId);
-    const fields = this.fields(null, projectId);
+    const fields = inherited ? fieldsFromL3WorldModelMemory(inherited) : emptyL3WorldModelFields();
     const property = l3WorldModelFieldProperty(input.targetField);
     fields[property] = normalizeL3WorldModelFieldValue(input.value);
     this.db.prepare(`INSERT INTO memory_l3_overrides(project_key, field, deleted) VALUES (?, ?, ?)
@@ -5817,7 +6298,7 @@ export class L3WorldModelRepository {
     const memoryValue = renderL3WorldModelFields(fields);
     if (!existing && !memoryValue) return undefined;
 
-    const existingSourceMemoryIds = l3WorldModelSourceMemoryIds(existing);
+    const existingSourceMemoryIds = l3WorldModelSourceMemoryIds(inherited);
     const sourceMemoryIds = input.eligibleL1MemoryIds === undefined
       ? existingSourceMemoryIds
       : this.orderedRecentSourceMemoryIds(
@@ -5833,7 +6314,7 @@ export class L3WorldModelRepository {
       ...(projectId ? { project_id: projectId } : {}),
       source_memory_ids: sourceMemoryIds
     };
-    const existingScanId = existing?.info.project_environment_applied_scan_id;
+    const existingScanId = inherited?.info.project_environment_applied_scan_id;
     const scanId = input.projectEnvironmentAppliedScanId === undefined
       ? existingScanId
       : input.projectEnvironmentAppliedScanId;
@@ -6304,6 +6785,10 @@ export function isL3WorldModelV2Memory(memory: MemoryRow): boolean {
   } catch {
     return false;
   }
+}
+
+function isExplicitlyArchivedL3WorldModel(memory: MemoryRow | undefined): boolean {
+  return memory?.properties.internal_info.l3_world_model_explicitly_archived === true;
 }
 
 export function fieldsFromL3WorldModelMemory(memory: MemoryRow): L3WorldModelFields {
@@ -7091,6 +7576,10 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
+  if (filter.excludedIds?.length) {
+    clauses.push("memories.id NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))");
+    params.push(JSON.stringify(filter.excludedIds));
+  }
   addMemoryKindClause(filter.memoryKind);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
@@ -7404,6 +7893,15 @@ function sessionFromSql(row: SqlSessionRow, db?: Database.Database): SessionReco
   };
 }
 
+function sessionMatchesTenant(session: SessionRecord, tenantId: string | null): boolean {
+  const snake = session.meta.tenant_id;
+  const camel = session.meta.tenantId;
+  const snakeId = typeof snake === "string" && snake.length > 0 ? snake : null;
+  const camelId = typeof camel === "string" && camel.length > 0 ? camel : null;
+  if (snakeId !== null && camelId !== null && snakeId !== camelId) return false;
+  return (snakeId ?? camelId) === tenantId;
+}
+
 interface SqlEpisodeRow {
   id: string;
   session_id: string;
@@ -7578,11 +8076,11 @@ function rawTurnFromSql(row: SqlRawTurnRow): RawTurnRecord {
   };
 }
 
-function feedbackFromSql(row: SqlFeedbackRow): FeedbackRecord {
+function feedbackFromSql(row: SqlFeedbackRow, db: Database.Database): FeedbackRecord {
   return {
     id: row.id,
     userId: null,
-    projectId: row.project_id ?? undefined,
+    projectId: canonicalProjectId(db, row.project_id) ?? undefined,
     conversationId: row.conversation_id ?? undefined,
     sessionId: row.session_id ?? undefined,
     episodeId: row.episode_id ?? undefined,
@@ -8059,6 +8557,7 @@ function bundleIdentity(
     memory_project_aliases: ["legacy_id"],
     memory_namespace_aliases: ["legacy_key"],
     memory_l3_overrides: ["project_key", "field"],
+    memory_l3_legacy_field_edits: ["memory_id", "field", "deleted"],
     memory_capture_claims: ["user_id", "source", "qa_hash"],
     source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
@@ -8126,6 +8625,25 @@ function nestedString(record: Record<string, unknown>, ...path: string[]): strin
     value = value[key];
   }
   return stringLike(value);
+}
+
+function bundleMemoryArchiveProjection(
+  row: Record<string, unknown>,
+  explicitArchiveEvidence: ReadonlySet<string>
+): Record<string, unknown> {
+  if (row.memory_layer !== "L3" || row.status !== "archived" || typeof row.id !== "string" ||
+      !explicitArchiveEvidence.has(row.id) || typeof row.properties_json !== "string") return row;
+  const properties = parseJson<Record<string, unknown>>(row.properties_json, {});
+  const internal = properties.internal_info;
+  if (!isRecord(internal) || internal.schema_version !== 2 ||
+      internal.l3_world_model_explicitly_archived === true) return row;
+  return {
+    ...row,
+    properties_json: toJson({
+      ...properties,
+      internal_info: { ...internal, l3_world_model_explicitly_archived: true }
+    })
+  };
 }
 
 function redactBundleRow(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {

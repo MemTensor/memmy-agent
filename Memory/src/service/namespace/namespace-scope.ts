@@ -41,7 +41,15 @@ export function resolveV2WorkspaceIdentityForOpenRequest(
 }
 
 export function namespaceForSession(session: SessionRecord): RuntimeNamespace {
-  return { source: session.source, profileId: session.profileId, profileLabel: session.profileLabel, projectId: session.projectId, workspaceId: session.workspaceId, workspacePath: session.workspacePath, sessionKey: session.hostSessionKey, userId: session.userId };
+  const snakeTenant = session.meta.tenant_id;
+  const camelTenant = session.meta.tenantId;
+  const snakeId = typeof snakeTenant === "string" && snakeTenant ? snakeTenant : undefined;
+  const camelId = typeof camelTenant === "string" && camelTenant ? camelTenant : undefined;
+  if (snakeId && camelId && snakeId !== camelId) {
+    throw new Error("session has conflicting tenant metadata");
+  }
+  const tenantId = snakeId ?? camelId;
+  return { source: session.source, profileId: session.profileId, profileLabel: session.profileLabel, projectId: session.projectId, workspaceId: session.workspaceId, workspacePath: session.workspacePath, sessionKey: session.hostSessionKey, userId: session.userId, tenantId };
 }
 
 export function namespaceForMemory(memory: MemoryRow): RuntimeNamespace {

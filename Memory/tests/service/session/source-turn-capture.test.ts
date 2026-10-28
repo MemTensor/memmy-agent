@@ -164,7 +164,9 @@ describe("native source turn submission", () => {
     const { db, service } = createTestService();
     const input = request();
     const opened = service.openSession({ namespace: { ...input.namespace!, sessionKey: input.sourceTurn.conversationId }, meta: { conversationId: input.sourceTurn.conversationId } });
-    new Repositories(db.db).captureClaims.claim({ userId: "source-user", source: "codex", qaHash: memoryCaptureQaHash(input.query, input.answer), primaryMemoryId: "deleted-old-memory", capturedBy: "agent_source_scan", createdAt: "2026-01-01" });
+    db.db.prepare(`INSERT INTO memory_capture_claims(user_id,source,qa_hash,primary_memory_id,captured_by,created_at)
+      VALUES ('source-user','codex',?,'deleted-old-memory','agent_source_scan','2026-01-01')`)
+      .run(memoryCaptureQaHash(input.query, input.answer));
     const stored = service.completeSourceTurn(request({ channel: "agent_source_scan" }));
     expect(stored.result?.sessionId).toBe(opened.sessionId);
     expect(counts(db).sessions).toBe(1);
@@ -715,7 +717,7 @@ describe("native source turn submission", () => {
     expect(activeMemories()).toBe(deletedBefore);
   });
 
-  it("reuses an old agent-source import and keeps it deleted", () => {
+  it.each(["legacy", "scoped", "session"])("reuses an agent-source import (%s key) and keeps it deleted", (keyKind) => {
     const { db, service } = createTestService();
     const conversationId = request().sourceTurn.conversationId;
     const firstUserMessageId = "legacy-user-message";
@@ -725,7 +727,7 @@ describe("native source turn submission", () => {
       answer: "Implemented and verified the capture identity transaction."
     };
     const imported = service.addMemory({
-      namespace: request().namespace,
+      namespace: { ...request().namespace!, ...(keyKind === "session" ? { sessionKey: conversationId } : {}) },
       adapterId: "agent-source:codex",
       turnId: importedTurnId,
       source: "codex",
@@ -734,6 +736,9 @@ describe("native source turn submission", () => {
       title: content.query,
       tags: ["agent-source", "codex"]
     });
+    if (keyKind === "legacy") {
+      db.db.prepare("UPDATE memories SET memory_key=? WHERE id=?").run(`memory.add:agent-source:codex:turn:${importedTurnId}`, imported.id);
+    }
     const historical = () => service.completeSourceTurn(request({
       channel: "agent_source_scan",
       captureLegacyHistory: true,
@@ -866,7 +871,7 @@ describe("native source turn submission", () => {
   );
 
   it("still treats an unkeyed project session as completed for a default-scope scan", () => {
-    const { service } = createTestService();
+    const { db, service } = createTestService();
     const conversationId = "unkeyed-project-to-default";
     const content = {
       query: "Implement capture identity transactions.",
@@ -877,6 +882,8 @@ describe("native source turn submission", () => {
       meta: { conversationId }
     });
     service.completeTurn("same-native-turn", { sessionId: opened.sessionId, ...content });
+    // This compatibility case models an old writer without immutable provenance.
+    db.db.prepare("UPDATE raw_turns SET message_payload_json=json_remove(message_payload_json,'$.native_origin_v1') WHERE session_id=?").run(opened.sessionId);
     service.closeSession(opened.sessionId);
     expect(service.completeSourceTurn(request({
       channel: "agent_source_scan",
@@ -1022,6 +1029,30 @@ describe("native source turn submission", () => {
     expect(first.service.completeSourceTurn(request())).toMatchObject({ status: "existing", result: { l1MemoryId: reimported.result!.l1MemoryId } });
     expect(first.service.completeSourceTurn(request({ sourceTurn: { ...request().sourceTurn, turnId: "after-clear",
       startedAt: "2099-01-01T10:02:00.000Z", completedAt: "2099-01-01T10:03:00.000Z" } })).status).toBe("stored");
+  });
+
+
+  it.each([false, true])("continues the same native conversation immediately after full clear (restart=%s)", (restart) => {
+    const {root,db,service} = createTestService();
+    const first = service.completeSourceTurn(request());
+    service.deleteMemory(first.result!.l1MemoryId);
+    expect(service.completeSourceTurn(request())).toMatchObject({status:"rejected",reason:"capture_deleted"});
+    const activation = new Repositories(db.db).runtime.getKv("source_turn_capture_activated_at");
+    service.clearAllData();
+    expect(counts(db).source_turn_captures).toBe(0);
+    let activeDb = db, activeService = service;
+    if (restart) {
+      db.close();
+      activeDb = new MemoryDb({path:join(root,"memory.sqlite")});
+      activeService = createTestMemoryService({db:activeDb});
+    }
+    const next = request({namespace:{...request().namespace!,userId:"another-account"},sourceTurn:{...request().sourceTurn,
+      turnId:"next-after-clear",sequence:2,startedAt:"2099-01-01T10:02:00.000Z",completedAt:"2099-01-01T10:03:00.000Z"}});
+    const stored = activeService.completeSourceTurn(next);
+    expect(stored.status).toBe("stored");
+    expect(stored.result!.sessionId).not.toBe(first.result!.sessionId);
+    expect(activeService.completeSourceTurn(next)).toMatchObject({status:"existing",result:{l1MemoryId:stored.result!.l1MemoryId}});
+    expect(new Repositories(activeDb.db).runtime.getKv("source_turn_capture_activated_at")).toEqual(activation);
   });
 
   it("reimports pre-activation scan history after full clear while preserving the hook boundary", () => {

@@ -109,6 +109,8 @@ export interface MemoryHttpServerOptions {
   auth?: MemoryHttpAuthOptions;
   workerStartupFallbackMs?: number;
   workerPostHealthDelayMs?: number;
+  /** Maximum delay before an idle worker checks for orphaned or overdue work. */
+  workerIdlePollMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
   memoryAddAnalytics?: Pick<
@@ -151,12 +153,14 @@ interface AutoWorkerDrain {
 
 const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
 const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+const DEFAULT_WORKER_IDLE_POLL_MS = 30_000;
 const serverCleanup = new WeakMap<Server, () => Promise<void>>();
 
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
   const autoWorker = createAutoWorkerDrain(options.service, {
     startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
-    postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
+    postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS,
+    idlePollMs: Math.max(10, options.workerIdlePollMs ?? DEFAULT_WORKER_IDLE_POLL_MS)
   });
   const desktopIdentity = () => readDesktopAnalyticsIdentity(options.configPath);
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics({
@@ -353,6 +357,7 @@ function createAutoWorkerDrain(
   options: {
     startupFallbackMs: number;
     postHealthDelayMs: number;
+    idlePollMs: number;
   }
 ): AutoWorkerDrain {
   let running = false;
@@ -434,14 +439,14 @@ function createAutoWorkerDrain(
       return;
     }
     const delayMs = nextWorkerRunAfterDelayMs(service);
-    if (delayMs === undefined) {
-      return;
-    }
+    // Recheck even with no known due job: a legacy writer or another process
+    // may leave an orphan after the worker has already become idle.
+    const wakeAfterMs = Math.min(delayMs ?? options.idlePollMs, options.idlePollMs);
     delayedTimer = setTimeout(() => {
       delayedTimer = undefined;
       requested = true;
       void drain();
-    }, delayMs);
+    }, wakeAfterMs);
   }
 
   function schedule(): void {

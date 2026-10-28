@@ -1,8 +1,9 @@
 import type Database from "better-sqlite3";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
+import { preserveLegacyL3FieldEdits } from "./legacy-l3-field-edits.js";
 
-export const SCHEMA_VERSION = 10;
-export const SCHEMA_MIGRATION_ID = "010_device_memory_scope";
+export const SCHEMA_VERSION = 11;
+export const SCHEMA_MIGRATION_ID = "011_legacy_l3_field_edits";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -71,6 +72,14 @@ const statements = [
     next_scope_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_scope_seq >= 1),
     updated_at TEXT NOT NULL,
     CHECK (workspace_uri IS NULL OR (project_id IS NOT NULL AND length(workspace_uri) > 0))
+  )`,
+  `CREATE TABLE IF NOT EXISTS memory_l3_legacy_field_edits (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    field TEXT NOT NULL CHECK (field IN ('general_rules_and_safety_constraints', 'project_environment_profile', 'project_contract', 'domain_knowledge')),
+    deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+    edited_at TEXT NOT NULL,
+    change_seq INTEGER NOT NULL,
+    PRIMARY KEY(memory_id, field, deleted)
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scopes_general
     ON l3_world_model_scopes (user_id)
@@ -529,6 +538,8 @@ const statements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_conversation
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_turn
+    ON source_turn_captures (turn_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_turn
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, turn_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_conversation
@@ -695,7 +706,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -776,6 +787,7 @@ export function migrate(db: Database.Database): void {
       if (hasMemories && version > 0 && version < 7) {
         backfillMemoryCaptureClaims(db);
       }
+      if (version < 11) preserveLegacyL3FieldEdits(db);
 
       db.prepare(
         `INSERT INTO schema_migrations (id, version, applied_at, checksum)

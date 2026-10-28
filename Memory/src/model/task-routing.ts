@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { embeddingIdentity, rememberEmbeddingIdentity } from "./embedding-identity.js";
 import type { MemmyConfig } from "../config/index.js";
 import type {
   Embedder,
@@ -54,11 +55,20 @@ class TaskRoutedEmbedder implements Embedder {
   }
 
   embed(texts: string[], role?: "query" | "document"): Promise<number[][]> {
-    return this.router.run(() => this.delegate().embed(texts, role));
+    return this.router.run(async () => {
+      const delegate = this.delegate();
+      const identity = embeddingIdentity(delegate.config);
+      const vectors = await delegate.embed(texts, role);
+      return vectors.map((vector) => rememberEmbeddingIdentity(vector, identity));
+    });
   }
 
   embedOne(text: string, role?: "query" | "document"): Promise<number[]> {
-    return this.router.run(() => this.delegate().embedOne(text, role));
+    return this.router.run(async () => {
+      const delegate = this.delegate();
+      const identity = embeddingIdentity(delegate.config);
+      return rememberEmbeddingIdentity(await delegate.embedOne(text, role), identity);
+    });
   }
 
   status(): ModelStatus {

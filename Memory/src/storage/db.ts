@@ -59,8 +59,10 @@ export class MemoryDb {
 
   private configure(): void {
     this.db.pragma("foreign_keys = ON");
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    if (!this.db.readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    }
     this.db.pragma("busy_timeout = 5000");
   }
 

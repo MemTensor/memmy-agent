@@ -1,5 +1,6 @@
 import type { RuntimeNamespace } from "../../types.js";
 import { canonicalProjectId, deviceNamespace } from "../../storage/device-scope.js";
+import { captureNativeOrigin, nativeClaimIdentity, pendingOriginKey, readNativeOrigin } from "../../storage/native-memory-origin.js";
 import {
   captureTurnSteps,
   classifyIntent,
@@ -586,7 +587,7 @@ export class SessionTurnService {
     const hostSessionKey = namespace.sessionKey;
     if (hostSessionKey && !options.createNew) {
       const existingSession = this.deps.repos.runtime.findOpenSessionByHostKey({
-        userId: namespace.userId,
+        tenantId: namespace.tenantId ?? null,
         source: request.source ?? namespace.source,
         profileId: request.profileId ?? namespace.profileId,
         hostSessionKey
@@ -631,6 +632,7 @@ export class SessionTurnService {
       status: "open" as const,
       meta: {
         ...sanitizedSessionMeta(request.meta),
+        ...(namespace.tenantId !== undefined ? { tenant_id: namespace.tenantId } : {}),
         ...(request.timeZone ? { time_zone: request.timeZone } : {})
       },
       openedAt: at,
@@ -699,7 +701,7 @@ export class SessionTurnService {
       let existing = request.sessionId
         ? this.deps.repos.runtime.getSession(request.sessionId)
         : this.deps.repos.runtime.findOpenSessionByHostKey({
-            userId: namespace.userId,
+            tenantId: namespace.tenantId ?? null,
             source,
             profileId,
             hostSessionKey: namespace.sessionKey!,
@@ -810,6 +812,7 @@ export class SessionTurnService {
     const requestWorkspaceId = request.workspaceId === undefined ? namespace.workspaceId : canonicalProjectId(this.deps.repos.db, request.workspaceId) ?? undefined;
     const mismatch = session.source !== (request.source ?? namespace.source) ||
       session.profileId !== (request.profileId ?? namespace.profileId) ||
+      !sessionTenantMatches(session, namespace.tenantId ?? null) ||
       session.hostSessionKey !== namespace.sessionKey ||
       (requestProjectId !== undefined && requestProjectId !== session.projectId) ||
       (requestWorkspaceId !== undefined && requestWorkspaceId !== session.workspaceId) ||
@@ -1187,6 +1190,10 @@ export class SessionTurnService {
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     const turnId = request.turnId ?? newId("turn");
+    const originKey = pendingOriginKey(session.id, turnId);
+    if (!this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId) && !this.deps.repos.runtime.getKv(originKey)) {
+      this.deps.repos.runtime.setKv(originKey, captureNativeOrigin({ ...session, tenantId: request.namespace?.tenantId }), nowIso());
+    }
     const intentDecision = classifyIntent(request.query);
     const endTopicDecision = explicitEndTopicDecision(request.query);
     const latestEpisode = this.deps.repos.runtime.latestEpisodeForSession(session.id);
@@ -1351,6 +1358,9 @@ export class SessionTurnService {
       let gapEpisode: EpisodeRecord | undefined;
       let targetSessionId = previous?.sessionId;
       const legacyBackfill = allowsLegacyHistoryCapture(request);
+      if (legacyBackfill && this.completedLegacySourceTurn(namespace, scope, sourceTurn.turnId)) {
+        return { status: "pending", reason: "legacy_source_turn_already_completed" };
+      }
       const detachLegacyHistory = (reason: string): SourceTurnCompleteResponse => {
         if (!legacyBackfill) return { status: "pending", reason };
         return this.captureDetachedLegacyHistory(request, normalized, sourceTurn, scope, contentHash);
@@ -1427,6 +1437,9 @@ export class SessionTurnService {
       }, identity.conversationId)) {
         throw new MemoryServiceError("forbidden", "source_raw_turn_scope_conflict");
       }
+      if (!this.deps.repos.runtime.bindPendingTurnSourceConversation(session.id, identity.turnId, identity.conversationId)) {
+        throw new MemoryServiceError("forbidden", "source_pending_turn_scope_conflict");
+      }
       const result = this.completeTurn(identity.turnId, { ...normalized, sessionId: session.id,
         ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn);
       if (gapEpisode) this.deps.repos.runtime.orderEpisodeTurnsBySourceTime(gapEpisode.id);
@@ -1453,10 +1466,12 @@ export class SessionTurnService {
     const legacyTurnId = request.legacyImportTurnId?.trim();
     if (!legacyTurnId) return undefined;
     const source = request.sourceTurn.source;
-    const memories = this.deps.repos.memories.listUserMemoriesByKeyIncludingDeleted(
-      namespace.userId,
-      `memory.add:agent-source:${source}:turn:${legacyTurnId}`
-    ).filter((memory) => legacyImportMatchesScope(memory, namespace, source, legacyTurnId));
+    const legacyKey = `memory.add:agent-source:${source}:turn:${legacyTurnId}`;
+    // Accept pre-scope keys and newer imports with/without native session evidence.
+    const keys = new Set([legacyKey, ...[null, request.sourceTurn.conversationId].map(conversationId =>
+      `${legacyKey}:scope:${stableHash({ ...this.deps.repos.captureClaims.scope(namespace), conversationId, turnId: legacyTurnId })}`)]);
+    const memories = [...keys].flatMap(key => this.deps.repos.memories.listUserMemoriesByKeyIncludingDeleted(namespace.userId, key))
+      .filter((memory) => legacyImportMatchesScope(memory, namespace, source, legacyTurnId));
     if (memories.length === 0) return undefined;
     const distinctContent = new Set(memories.filter(memory => !memory.deletedAt && memory.status !== "deleted")
       .map(memory => stableHash(legacyImportTexts(memory))));
@@ -1717,6 +1732,18 @@ export class SessionTurnService {
       const session = this.deps.requireOpenSession(request.sessionId);
       this.deps.assertSessionInScope(session, request.namespace);
       const existingRawTurn = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
+      const capturedOrigin = readNativeOrigin(existingRawTurn?.messagePayload?.native_origin_v1)
+        ?? readNativeOrigin(this.deps.repos.runtime.getKv(pendingOriginKey(session.id, turnId))?.value);
+      if (capturedOrigin && request.namespace) {
+        const ns = request.namespace;
+        if ((ns.projectId !== undefined && canonicalProjectId(this.deps.repos.db, ns.projectId) !== canonicalProjectId(this.deps.repos.db, capturedOrigin.projectId))
+          || (ns.workspaceId !== undefined && canonicalProjectId(this.deps.repos.db, ns.workspaceId) !== canonicalProjectId(this.deps.repos.db, capturedOrigin.workspaceId))
+          || (ns.tenantId !== undefined && ns.tenantId !== capturedOrigin.tenantId)
+          || (ns.profileId !== undefined && ns.profileId !== capturedOrigin.profileId)
+          || (ns.source !== undefined && normalizeMemoryCaptureSource(ns.source) !== capturedOrigin.source)) {
+          throw new MemoryServiceError("conflict", "turn origin conflicts with the captured namespace");
+        }
+      }
       if (existingRawTurn) {
         this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
       }
@@ -1726,8 +1753,10 @@ export class SessionTurnService {
         const existingCaptureClaim = !sourceTurn && existingRawTurn.userText && existingRawTurn.assistantText
           ? this.deps.repos.captureClaims.get(
               session.userId,
-              normalizeMemoryCaptureSource(session.source),
-              memoryCaptureQaHash(existingRawTurn.userText, existingRawTurn.assistantText)
+              normalizeMemoryCaptureSource(capturedOrigin?.source ?? session.source),
+              memoryCaptureQaHash(existingRawTurn.userText, existingRawTurn.assistantText),
+              capturedOrigin ? nativeClaimIdentity(capturedOrigin, existingRawTurn.turnId)
+                : this.deps.repos.captureClaims.identity({}, existingRawTurn.turnId, session.id)
             )
           : undefined;
         const l1MemoryIds = episode.l1MemoryIds.filter((memoryId: string) => {
@@ -1930,6 +1959,7 @@ export class SessionTurnService {
           sourceMemoryIds,
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
+            native_origin_v1: captureNativeOrigin({ ...session, tenantId: request.namespace?.tenantId }),
             ...(sourceTurn ? { source_turn: sourceTurn } : {}),
             turn_start: turnStartPayload,
             turn_complete: {
@@ -2042,6 +2072,7 @@ export class SessionTurnService {
           }),
           tags: step.tags,
           info: {
+            native_origin_v1: sourceRawTurn.messagePayload?.native_origin_v1,
             turn_id: step.turnId,
             raw_turn_id: stepRawTurnId,
             episode_id: episode.id,
@@ -2109,10 +2140,13 @@ export class SessionTurnService {
           const qaQuery = sourceRawTurn.userText ?? "";
           const qaAnswer = sourceRawTurn.assistantText ?? "";
           if (qaQuery.trim() && qaAnswer.trim()) {
+            const origin = readNativeOrigin(sourceRawTurn.messagePayload?.native_origin_v1);
             const capture = this.deps.repos.captureClaims.claim({
               userId: session.userId,
-              source: normalizeMemoryCaptureSource(session.source),
+              source: normalizeMemoryCaptureSource(origin?.source ?? session.source),
               qaHash: memoryCaptureQaHash(qaQuery, qaAnswer),
+              identity: origin ? nativeClaimIdentity(origin, sourceRawTurn.turnId)
+                : this.deps.repos.captureClaims.identity({}, sourceRawTurn.turnId, session.id),
               primaryMemoryId: l1Memory.id,
               capturedBy: "turn_complete",
               createdAt: at
@@ -2979,7 +3013,10 @@ export class SessionTurnService {
     ).filter((memory) => this.deps.isMemoryReadyForRetrieval(memory));
     const candidates = deduplicateSameSourceL1Candidates({
       memories: loadedCandidates,
-      repos: this.deps.repos
+      repos: this.deps.repos,
+      isMemoryEligible: memory => repairLayers.includes(memory.memoryLayer) &&
+        (memory.status === "activated" || memory.status === "resolving") &&
+        this.deps.isMemoryReadyForRetrieval(memory)
     }).memories;
     const retrieval = retrievePluginMemories({
       query,
@@ -3762,6 +3799,8 @@ function sanitizedSessionMeta(meta?: Record<string, unknown>): Record<string, un
   delete sanitized.l3_world_model_protocol_version;
   delete sanitized.workspace_uri;
   delete sanitized.workspace_host_id;
+  delete sanitized.tenant_id;
+  delete sanitized.tenantId;
   return sanitized;
 }
 
@@ -3772,11 +3811,21 @@ function v2SessionMeta(
 ): Record<string, unknown> {
   return {
     ...sanitizedSessionMeta(request.meta),
+    ...(request.namespace?.tenantId !== undefined ? { tenant_id: request.namespace.tenantId } : {}),
     l3_world_model_protocol_version: 2,
     ...(workspace.workspaceUri ? { workspace_uri: workspace.workspaceUri } : {}),
     ...(workspace.workspaceHostId ? { workspace_host_id: workspace.workspaceHostId } : {}),
     ...(timeZone ? { time_zone: timeZone } : {})
   };
+}
+
+function sessionTenantMatches(session: SessionRecord, tenantId: string | null): boolean {
+  const snake = session.meta.tenant_id;
+  const camel = session.meta.tenantId;
+  const snakeId = typeof snake === "string" && snake.length > 0 ? snake : null;
+  const camelId = typeof camel === "string" && camel.length > 0 ? camel : null;
+  if (snakeId !== null && camelId !== null && snakeId !== camelId) return false;
+  return (snakeId ?? camelId) === tenantId;
 }
 
 function optionalMetaString(meta: Record<string, unknown>, key: string): string | undefined {

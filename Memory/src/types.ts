@@ -196,6 +196,7 @@ export interface MemoryFilter {
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];
   ids?: string[];
+  excludedIds?: string[];
   memoryKind?: MemoryKind | MemoryKind[];
   workMemoryUserId?: string | null;
   workMemoryProjectId?: string | null;

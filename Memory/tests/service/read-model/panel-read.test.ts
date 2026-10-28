@@ -592,6 +592,45 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
+  it("filters the merged L3 status after collapsing archived legacy account copies", () => {
+    const { db, service } = createTestService();
+    const repos = (service as unknown as { repos: Repositories }).repos;
+    const active = repos.l3WorldModels.upsertField({
+      userId: "panel-active-account",
+      projectId: "panel-archived-legacy-project",
+      targetField: "project_contract",
+      value: "The shared project rule remains active.",
+      at: "2026-06-01T00:00:00.000Z"
+    })!;
+    const source = db.db.prepare("SELECT info_json, properties_json FROM memories WHERE id = ?")
+      .get(active.id) as { info_json: string; properties_json: string };
+    const properties = JSON.parse(source.properties_json) as {
+      status?: string;
+      internal_info: { world_model: Record<string, unknown> };
+    };
+    properties.status = "archived";
+    properties.internal_info.world_model.project_contract = null;
+    db.db.prepare(`INSERT INTO memories (
+      id, timeline, user_id, memory_key, memory_value, info_json, properties_json,
+      memory_layer, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, '', ?, ?, 'L3', 'archived', ?, ?)`)
+      .run("empty-archived-legacy-copy", "2026-06-02T00:00:00.000Z", "panel-old-account",
+        "world_model:project:panel-old-account:panel-archived-legacy-project", source.info_json,
+        JSON.stringify(properties), "2026-06-02T00:00:00.000Z", "2026-06-02T00:00:00.000Z");
+    db.db.prepare(`INSERT INTO l3_world_model_scopes (
+      scope_key, user_id, project_id, memory_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?)`)
+      .run("empty-archived-legacy-scope", "panel-old-account", "panel-archived-legacy-project",
+        "empty-archived-legacy-copy", "2026-06-02T00:00:00.000Z");
+
+    expect(service.panelItems({ layer: "L3", status: "archived" }).items).toEqual([]);
+    expect(service.panelItems({ layer: "L3", status: "activated" }).items).toEqual([
+      expect.objectContaining({ id: active.id, status: "activated" })
+    ]);
+
+    db.close();
+  });
+
   it("adds typed general and project scope to L3 panel items with one batched lookup", () => {
     const { db, service } = createTestService();
     const repos = (service as unknown as { repos: Repositories }).repos;

@@ -1,3 +1,4 @@
+import { followEmbeddingMaintenance, type EmbeddingMaintenanceStats, type EmbeddingMaintenanceRunResult } from "../api/embedding-maintenance";
 /**
  * Settings view.
  *
@@ -118,28 +119,6 @@ interface ResolvedConfig {
   };
   telemetry?: { enabled?: boolean };
   agentAccess?: AgentAccessBlock;
-}
-
-interface EmbeddingMaintenanceStats {
-  dimension: number;
-  available: boolean;
-  totalSlots: number;
-  ready: number;
-  missing: number;
-  dimMismatch: number;
-  needsRepair: number;
-}
-
-interface EmbeddingMaintenanceRunResult {
-  mode: "repair" | "rebuild";
-  processed: number;
-  updated: number;
-  failed: number;
-  offset: number;
-  nextOffset: number;
-  done: boolean;
-  statsAfter: EmbeddingMaintenanceStats;
-  error?: string;
 }
 
 const SECRET_MASKED = (s: string | undefined | null): boolean =>
@@ -759,7 +738,7 @@ function modelProviderLabel(
   return provider;
 }
 
-function EmbeddingMaintenancePanel() {
+export function EmbeddingMaintenancePanel() {
   const [stats, setStats] = useState<EmbeddingMaintenanceStats | null>(null);
   const [running, setRunning] = useState<"repair" | "rebuild" | null>(null);
   const [status, setStatus] = useState<{ kind: "ok" | "error" | "muted"; text: string } | null>(null);
@@ -772,60 +751,62 @@ function EmbeddingMaintenancePanel() {
     }
   };
 
+  const controller = useRef<AbortController | null>(null);
+  const showProgress = (r: EmbeddingMaintenanceRunResult) => {
+    setStats(r.statsAfter);
+    setStatus({
+      kind: r.error || r.failed > 0 ? "error" : r.done ? "ok" : "muted",
+      text: r.error || t(r.done ? "settings.embedding.rebuild.done" : "settings.embedding.rebuild.progress", {
+        updated: r.updated, failed: r.failed, remaining: r.pending, retrying: r.retrying,
+      }),
+    });
+  };
+  const follow = async (initial: EmbeddingMaintenanceRunResult, signal: AbortSignal) => {
+    setRunning(initial.mode);
+    try {
+      await followEmbeddingMaintenance(initial, showProgress, signal);
+    } catch (err) {
+      if (!signal.aborted) setStatus({ kind: "error", text: (err as Error).message });
+    } finally {
+      if (!signal.aborted) { setRunning(null); void refresh(); }
+    }
+  };
+
   useEffect(() => {
+    const next = new AbortController();
+    controller.current = next;
     void refresh();
+    void api.get<EmbeddingMaintenanceRunResult | null>("/api/v1/embeddings/rebuild", { signal: next.signal })
+      .then((result) => { if (result && !next.signal.aborted) return follow(result, next.signal); })
+      .catch((err) => { if (!next.signal.aborted) setStatus({ kind: "error", text: (err as Error).message }); });
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => { window.clearInterval(timer); controller.current?.abort(); };
   }, []);
 
   const run = async (mode: "repair" | "rebuild") => {
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
     setRunning(mode);
     setStatus({ kind: "muted", text: t("settings.embedding.rebuild.running") });
-    let offset = 0;
-    let updated = 0;
-    let failed = 0;
     try {
-      for (;;) {
-        const r = await api.post<EmbeddingMaintenanceRunResult>(
-          "/api/v1/embeddings/rebuild",
-          { mode, offset },
-        );
-        updated += r.updated;
-        failed += r.failed;
-        offset = r.nextOffset;
-        setStats(r.statsAfter);
-        setStatus({
-          kind: "muted",
-          text: t("settings.embedding.rebuild.progress", {
-            updated,
-            failed,
-            remaining: r.statsAfter.needsRepair,
-          }),
-        });
-        if (r.error) {
-          setStatus({ kind: "error", text: r.error });
-          break;
-        }
-        if (r.done) {
-          setStatus({
-            kind: failed > 0 ? "error" : "ok",
-            text: t("settings.embedding.rebuild.done", { updated, failed }),
-          });
-          break;
-        }
-      }
+      const initial = await api.post<EmbeddingMaintenanceRunResult>("/api/v1/embeddings/rebuild", { mode }, { signal: next.signal });
+      if (!next.signal.aborted) await follow(initial, next.signal);
     } catch (err) {
-      setStatus({ kind: "error", text: (err as Error).message });
-    } finally {
-      setRunning(null);
-      void refresh();
+      if (!next.signal.aborted) { setStatus({ kind: "error", text: (err as Error).message }); setRunning(null); }
     }
   };
 
   const healthText = stats
-    ? t("settings.embedding.maintenance.stats", {
+    ? stats.dimensionError
+      ? t("settings.embedding.maintenance.dimensionError", { error: stats.dimensionError })
+      : t("settings.embedding.maintenance.stats", {
         ready: stats.ready,
         total: stats.totalSlots,
         missing: stats.missing,
         mismatch: stats.dimMismatch,
+        modelMismatch: stats.modelMismatch,
+        contentMismatch: stats.contentMismatch ?? 0,
         dim: stats.dimension,
       })
     : t("common.loading");
@@ -843,6 +824,14 @@ function EmbeddingMaintenancePanel() {
           <div class="muted" style="font-size:var(--fs-xs);margin-top:2px">
             {healthText}
           </div>
+          {stats?.retryQueue && <div class="muted" style="font-size:var(--fs-xs);margin-top:2px">
+            {t("settings.embedding.maintenance.queue", {
+              pending: stats.retryQueue.pending,
+              active: stats.retryQueue.active,
+              stale: stats.retryQueue.stale,
+              failed: stats.retryQueue.failed,
+            })}
+          </div>}
         </div>
         <div class="hstack" style="gap:var(--sp-2);flex-wrap:wrap">
           <button class="btn btn--sm" onClick={() => void refresh()} disabled={!!running}>

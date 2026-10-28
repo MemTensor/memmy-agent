@@ -77,6 +77,89 @@ describe("runtime log retention", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("persists legacy explicit L3 archives before their audit evidence is pruned", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-l3-archive-retention-"));
+    const path = join(root, "memory.sqlite");
+    let db: MemoryDb | undefined;
+    let restored: MemoryDb | undefined;
+    try {
+      db = new MemoryDb({ path });
+      const repos = new Repositories(db.db);
+      const memory = repos.l3WorldModels.upsertField({
+        userId: "legacy-archive-account",
+        projectId: "legacy-archive-project",
+        targetField: "project_contract",
+        value: "This legacy project rule was manually archived.",
+        at: isoAt(0)
+      })!;
+      const row = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?").get(memory.id) as {
+        properties_json: string;
+      };
+      const properties = JSON.parse(row.properties_json) as {
+        status?: string;
+        internal_info: Record<string, unknown>;
+      };
+      properties.status = "archived";
+      delete properties.internal_info.l3_world_model_explicitly_archived;
+      db.db.prepare("UPDATE memories SET status = 'archived', properties_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(properties), isoAt(1), memory.id);
+      repos.runtime.insertAudit({
+        id: "legacy-l3-archive-audit",
+        userId: "legacy-archive-account",
+        actor: {},
+        action: "archive",
+        targetKind: "world_model",
+        targetId: memory.id,
+        meta: {},
+        createdAt: isoAt(-1)
+      });
+      expect(repos.l3WorldModels.getMemory(null, "legacy-archive-project")?.status).toBe("archived");
+
+      const exportWithoutAudit = repos.runtime.exportBundleTables(true);
+      delete exportWithoutAudit.audit_logs;
+      const exportedMemory = exportWithoutAudit.memories!.find((row) => row.id === memory.id)!;
+      expect(JSON.parse(String(exportedMemory.properties_json)).internal_info.l3_world_model_explicitly_archived)
+        .toBe(true);
+      expect(JSON.parse((db.db.prepare("SELECT properties_json FROM memories WHERE id = ?").get(memory.id) as {
+        properties_json: string;
+      }).properties_json).internal_info.l3_world_model_explicitly_archived).toBeUndefined();
+      restored = new MemoryDb({ path: join(root, "restored.sqlite") });
+      const restoredRepos = new Repositories(restored.db);
+      restoredRepos.runtime.importBundleTables(exportWithoutAudit);
+      expect(restoredRepos.l3WorldModels.getMemory(null, "legacy-archive-project")?.status).toBe("archived");
+      restored.close();
+      restored = undefined;
+
+      seedAuditLogs(db, LOG_RETENTION_LIMIT);
+      repos.runtime.insertAudit({
+        id: "audit-trigger-retention",
+        userId: "user",
+        actor: {},
+        action: "test",
+        targetKind: "fixture",
+        targetId: "fixture",
+        meta: {},
+        createdAt: isoAt(LOG_RETENTION_LIMIT + 1)
+      });
+      await waitForRowCount(db, "audit_logs", LOG_RETENTION_LIMIT);
+
+      expect(db.db.prepare("SELECT id FROM audit_logs WHERE id = 'legacy-l3-archive-audit'").get()).toBeUndefined();
+      const archived = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?").get(memory.id) as {
+        properties_json: string;
+      };
+      expect(JSON.parse(archived.properties_json).internal_info.l3_world_model_explicitly_archived).toBe(true);
+      expect(repos.l3WorldModels.getMemory(null, "legacy-archive-project")?.status).toBe("archived");
+
+      db.close();
+      db = new MemoryDb({ path, readonly: true });
+      expect(new Repositories(db.db).l3WorldModels.getMemory(null, "legacy-archive-project")?.status).toBe("archived");
+    } finally {
+      db?.close();
+      restored?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function seedApiLogs(db: MemoryDb, count: number): void {

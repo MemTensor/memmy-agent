@@ -1,4 +1,4 @@
-import { deduplicateSameSourceL1Candidates } from "./same-source-l1-dedup.js";
+import { deduplicateSameSourceL1Candidates, memoryMatchesRequestedTags } from "./same-source-l1-dedup.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -2214,7 +2214,13 @@ export class RetrievalService {
       .filter((memory) => kindFromMemory(memory) === "observed_activity" || Boolean(traceMetaFromMemory(memory)?.summary.trim()));
     const { memories: candidates } = deduplicateSameSourceL1Candidates({
       memories: rawCandidates,
-      repos: this.deps.repos
+      repos: this.deps.repos,
+      isMemoryEligible: memory => memory.memoryLayer === "L1" &&
+        (memory.status === "activated" || memory.status === "resolving") &&
+        this.isMemoryReadyForRetrieval(memory),
+      isMemoryInScope: memory => memory.createdAt >= input.timeFilter.startAt &&
+        memory.createdAt < input.timeFilter.endAt && memoryMatchesRequestedTags(memory, input.tags) &&
+        (kindFromMemory(memory) === "observed_activity" || Boolean(traceMetaFromMemory(memory)?.summary.trim()))
     });
     const selected = [...candidates]
       .sort(compareTimeFilteredTraceRecency)
@@ -2344,12 +2350,17 @@ export class RetrievalService {
         tags: input.tags,
         targetSkillId: input.targetSkillId,
         currentAgentId: input.currentAgentId,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
         config
       });
       const { memories, channelScoresByMemory } = deduplicateSameSourceL1Candidates({
         ...candidatePool,
         repos: this.deps.repos,
-        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
+        isMemoryEligible: memory => input.layers.includes(memory.memoryLayer) &&
+          (memory.status === "activated" || memory.status === "resolving") &&
+          this.isMemoryReadyForRetrieval(memory),
+        isMemoryInScope: memory => memoryMatchesRequestedTags(memory, input.tags)
       });
       if (memories.length === 0) {
         return { retrieval: emptyRetrievalResult(), memories };
@@ -2399,7 +2410,8 @@ export class RetrievalService {
     const hitsById = new Map(outputs.flatMap(output => output.retrieval.hits).map(hit => [hit.id, hit]));
     const dedup = deduplicateSameSourceL1Candidates({
       memories: allMemories.filter(memory => hitsById.has(memory.id)),
-      repos: this.deps.repos
+      repos: this.deps.repos,
+      includeUnreturnedCopies: false
     });
     const retrievals = outputs.map(output => {
       const seen = new Set<string>();

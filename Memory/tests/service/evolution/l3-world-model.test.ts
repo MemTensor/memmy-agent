@@ -321,6 +321,77 @@ describe("L3 World Model trace field pipeline", () => {
     db.close();
   });
 
+  it("keeps an explicitly archived project L3 suppressed when a queued trace result arrives", async () => {
+    const complete = vi.fn<LlmClient["complete"]>().mockResolvedValue(JSON.stringify({
+      reason: "A queued result must not reopen a user-archived project model.",
+      op: "update",
+      project_contract: "Late worker result"
+    }));
+    const llm = strictCompletionLlm(complete);
+    const { db, service } = createTestService({ skillLlm: llm });
+    const opened = openProject(service, "explicit-archive-user", "explicit-archive-session");
+    const repos = new Repositories(db.db);
+    const created = repos.l3WorldModels.upsertField({
+      userId: "explicit-archive-user",
+      projectId: opened.projectId,
+      targetField: "project_contract",
+      value: "Original project contract"
+    })!;
+    service.completeTurn("explicit-archive-queued-turn", {
+      sessionId: opened.sessionId,
+      query: "Keep the current project boundary.",
+      answer: "The current boundary is still in effect.",
+      status: "succeeded"
+    });
+    service.closeSession(opened.sessionId);
+    const job = repos.runtime.listJobs("queued", 100).find(
+      candidate => candidate.jobType === "l3_world_model_update" &&
+        candidate.payload.targetField === "project_contract"
+    );
+    expect(job).toBeDefined();
+
+    service.archiveMemory(created.id, {
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        projectId: opened.projectId ?? undefined,
+        userId: "explicit-archive-user"
+      }
+    });
+    const archivedRow = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?")
+      .get(created.id) as { properties_json: string };
+    expect(JSON.parse(archivedRow.properties_json).internal_info.l3_world_model_explicitly_archived).toBe(true);
+    const legacyProperties = JSON.parse(archivedRow.properties_json) as Record<string, unknown>;
+    const legacyInternal = legacyProperties.internal_info as Record<string, unknown>;
+    delete legacyInternal.l3_world_model_explicitly_archived;
+    db.db.prepare("UPDATE memories SET properties_json = ? WHERE id = ?")
+      .run(JSON.stringify(legacyProperties), created.id);
+    expect(repos.l3WorldModels.getMemory(null, opened.projectId)?.status).toBe("archived");
+
+    await new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm }).updateField(job!);
+    repos.runtime.completeJob(job!.id);
+
+    const archived = repos.l3WorldModels.getMemory(null, opened.projectId)!;
+    expect(archived.status).toBe("archived");
+    expect(archived.memoryValue).toContain("Original project contract");
+    expect(archived.memoryValue).not.toContain("Late worker result");
+    expect(archived.properties.internal_info.l3_world_model_explicitly_archived).toBe(true);
+    expect(repos.l3WorldModels.getTarget(
+      String(job!.payload.batchId),
+      "project_contract"
+    )).toMatchObject({ status: "applied", noChange: true });
+    expect(repos.l3WorldModels.upsertField({
+      userId: "explicit-archive-user",
+      projectId: opened.projectId,
+      targetField: "project_contract",
+      value: "Later direct field write"
+    })?.status).toBe("archived");
+    expect(repos.l3WorldModels.getMemory(null, opened.projectId)?.status).toBe("archived");
+    expect(complete).toHaveBeenCalledTimes(1);
+
+    db.close();
+  });
+
   it("keeps source IDs in evidence order and caps them at the latest 256 across opposite field completion orders", async () => {
     const complete = vi.fn<LlmClient["complete"]>(async (messages) => {
       const system = messages[0]?.content ?? "";

@@ -642,6 +642,7 @@ export class OpenAICompatProvider extends LLMProvider {
         specName(this.spec),
         modelName,
         semanticEffort,
+        this.defaultHeaders["X-Agent-Region"] ?? null,
       );
       if (memmyStyle && !styles.includes(memmyStyle)) styles.push(memmyStyle);
       for (const style of styles) {

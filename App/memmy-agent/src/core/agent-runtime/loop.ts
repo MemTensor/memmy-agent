@@ -1,3 +1,4 @@
+import { OUTPUT_FEEDBACK_KEY, OutputDelivery, clearOutputDelivery, DELIVERY_NOT_CONFIRMED, hasOutputObligations } from "./tools/output-location.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
@@ -2701,6 +2702,12 @@ export class AgentLoop {
     if (waits.length) await Promise.allSettled(waits);
     const subagents = this.subagents as any;
     const subCancelled = subagents?.cancelBySession ? await subagents.cancelBySession(key) : subagents?.cancel_by_session ? await subagents.cancel_by_session(key) : 0;
+    // Stopping also ends an unfinished file task, unless a retained task is still running it.
+    const session = this.sessions.get(key);
+    if (!retained.length && hasOutputObligations(session?.metadata)) {
+      clearOutputDelivery(session!.metadata);
+      this.sessions.save(session!);
+    }
     return cancelled + Number(subCancelled || 0);
   }
 
@@ -3464,6 +3471,7 @@ export class AgentLoop {
   ): void {
     let lastAssistantIdx: number | null = null;
     for (const message of messages.slice(skip)) {
+      if (message[OUTPUT_FEEDBACK_KEY]) continue;
       const entry = { ...message };
       delete entry.webui_queue_steer_origin;
       const role = entry.role;
@@ -3747,6 +3755,7 @@ export class AgentLoop {
       midTurnContext = null,
       consolidator = null,
       onTokenCompactionEvent = null,
+      outputUserText = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3771,6 +3780,8 @@ export class AgentLoop {
       midTurnContext?: MidTurnContextDescriptor | null;
       consolidator?: Consolidator | null;
       onTokenCompactionEvent?: TokenCompactionEventCallback | null;
+      /** The live user message of this turn; null for system, subagent and internal turns. */
+      outputUserText?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3804,6 +3815,15 @@ export class AgentLoop {
       },
     });
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
+    const deliveryKey = session?.key ?? null;
+    // Subagents keep using this after the turn ends: always the session's current metadata.
+    const outputLocation = new OutputDelivery(deliveryKey ? {
+      metadata: () => (this.sessions.get(deliveryKey) ?? session!).metadata,
+      save: () => {
+        const current = this.sessions.get(deliveryKey);
+        if (current) this.sessions.save(current);
+      },
+    } : {}, sessionWorkspace, outputUserText);
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
@@ -3820,6 +3840,7 @@ export class AgentLoop {
         maxToolResultChars: this.maxToolResultChars,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
+        outputLocation,
         sessionKey: activeSessionKey,
         hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
@@ -3838,6 +3859,7 @@ export class AgentLoop {
         hook,
         concurrentTools: true,
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey, msg => {
+          if (!msg.internal && msg.channel !== "system") outputLocation.addUserText(msg.content);
           const request = computerUseRequestContext(msg, turnId);
           // A real user steer replaces the blocked/approved message scope.
           // Automatic subagent notices never confer a new user authorization.
@@ -3919,7 +3941,7 @@ export class AgentLoop {
       ? errorCategory ?? "model_failed"
       : null;
     const messageTool = (tools ?? this.tools).get("message");
-    if (messageTool instanceof MessageTool && messageTool.sentInTurn) {
+    if (messageTool instanceof MessageTool && messageTool.sentInTurn && !finalContent?.startsWith(DELIVERY_NOT_CONFIRMED)) {
       if (stopReason !== "maxIterations" && (!hadInjections || stopReason === "emptyFinalResponse")) return null;
     }
     return new OutboundMessage({
@@ -4332,6 +4354,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
+      outputUserText: ctx.msg.internal || ctx.msg.channel === "system" || ctx.msg.metadata?.injectedEvent ? null : ctx.msg.content,
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -4948,6 +4971,8 @@ export class AgentLoop {
               this.clearPendingUserTurn(session);
               this.clearRuntimeCheckpoint(session);
             }
+            // An explicit cancel ends the file task; it is not reported as undelivered later.
+            clearOutputDelivery(session.metadata);
             this.sessions.save(session, { fsync: sessionKey.startsWith("cli:") });
           }
         }

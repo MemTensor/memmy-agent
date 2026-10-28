@@ -495,16 +495,17 @@ export class PanelReadModel {
     };
     const projectedWorlds = input.layer === "L3" ? (() => {
       const seen = new Set<string>();
-      return this.deps.repos.memories.list(filter, 100000, 0).flatMap(memory => {
+      const projectionFilter = { ...filter, status: undefined };
+      return this.deps.repos.memories.list(projectionFilter, 100000, 0).flatMap(memory => {
         if (memory.properties.internal_info.schema_version !== 2) return [memory];
         const project = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
         if (seen.has(project ?? "")) return [];
         seen.add(project ?? "");
         const shared = this.deps.repos.l3WorldModels.getMemory(null, project);
         if (!shared) return [memory];
-        if (shared.status === "archived" && input.status !== "archived") return [];
         return [shared];
-      }).filter(memory => !input.q?.trim() || memory.memoryValue.toLowerCase().includes(input.q.trim().toLowerCase()));
+      }).filter(memory => (!input.status || memory.status === input.status) &&
+        (!input.q?.trim() || memory.memoryValue.toLowerCase().includes(input.q.trim().toLowerCase())));
     })() : undefined;
     const total = projectedWorlds ? projectedWorlds.length : input.q?.trim()
       ? this.deps.repos.memories.searchCount(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] })

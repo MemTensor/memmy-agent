@@ -86,6 +86,10 @@ describe("memory retrieval indexes", () => {
       }).map((hit) => hit.id)).not.toContain("trace_indexed");
       expect(repos.memories.searchFtsIds("\"specialterm\"", { memoryLayer: "L1" }, 5)
         .map((hit) => hit.id)).toContain("trace_indexed");
+      expect(repos.memories.searchFtsIds("\"specialterm\"", {
+        memoryLayer: "L1",
+        excludedIds: ["trace_indexed"]
+      }, 5)).toEqual([]);
       expect(repos.memories.searchFtsIds("\"trace_indexed\"", { memoryLayer: "L1" }, 5)
         .map((hit) => hit.id)).toContain("trace_indexed");
       expect(repos.memories.search("trace_indexed", { memoryLayer: "L1" }, 5)

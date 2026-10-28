@@ -1,5 +1,6 @@
 import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
-import type { EvolutionJobRecord,SessionRecord } from "../../storage/repositories.js";
+import { captureNativeOrigin } from "../../storage/native-memory-origin.js";
+import type { EvolutionJobRecord, SessionRecord, MemoryCaptureClaimRepository } from "../../storage/repositories.js";
 import type {
   JobRef,
   JobType,
@@ -97,7 +98,8 @@ export interface ImportJobProcessorDeps {
     get(id: string): MemoryRow | undefined;
     getIncludingDeleted(id: string): MemoryRow | undefined;
     getByKeyIncludingDeleted(layer: MemoryLayer, key: string): MemoryRow | undefined;
-    upsertByKey(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
+    listUserMemoriesByKeyIncludingDeleted(userId: string | null, key: string): MemoryRow[];
+    upsertByKey(memory: MemoryRow, existingMemoryId?: string): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
     archivePriorReadOnlySkillVersions(input: {
       sourceAgentId: string;
       sourceSkillIdentity: string;
@@ -111,19 +113,7 @@ export interface ImportJobProcessorDeps {
     toListItem(memory: MemoryRow): { id: string; kind: MemoryKind; memoryLayer: MemoryLayer; status: MemoryStatus; title: string; summary: string; tags: string[] };
     update(memory: MemoryRow): MemoryRow;
   };
-  captureClaims: {
-    claim(input: {
-      userId: string | null;
-      source: string;
-      qaHash: string;
-      primaryMemoryId: string;
-      capturedBy: "agent_source_scan";
-      createdAt: string;
-    }): {
-      claimed: boolean;
-      claim: { primaryMemoryId: string; capturedBy: "turn_complete" | "agent_source_scan" };
-    };
-  };
+  captureClaims: Pick<MemoryCaptureClaimRepository, "claim" | "identity" | "scope" | "matchesOrigin">;
   processing: {
     get(memoryId: string): MemoryProcessingRecord | undefined;
     getMany(memoryIds: string[]): MemoryProcessingRecord[];
@@ -173,7 +163,17 @@ export class ImportJobProcessor {
         : request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
     const importSummary = importTrace ? stringFromRecord(importTrace, "summary") || IMPORT_SUMMARY_QUEUED_TAG : undefined;
     const tags = d.memoryAddTags(request, importTrace !== null, importTrace ? stringArray(importTrace.tags) : []);
-    const memoryKey = d.memoryAddKey(request, layer, title);
+    const captureNamespace = { ...request.namespace, ...context.namespace };
+    const captureIdentity = agentSourceImport
+      ? d.captureClaims.identity(captureNamespace, request.turnId, session?.id)
+      : undefined;
+    const importKey = d.memoryAddKey(request, layer, title);
+    // Even incomplete origins retain every known namespace boundary. UID and QA
+    // are deliberately excluded so account switches and edits keep one identity.
+    const importIdentity = agentSourceImport
+      ? captureIdentity ?? { ...d.captureClaims.scope(captureNamespace, session?.id), turnId: request.turnId ?? null }
+      : undefined;
+    const memoryKey = importIdentity ? `${importKey}:scope:${stableHash(importIdentity)}` : importKey;
     const deletedReadOnlySkill = readOnlySkill
       ? d.memories.getByKeyIncludingDeleted(layer, memoryKey)
       : undefined;
@@ -196,7 +196,7 @@ export class ImportJobProcessor {
       conversationId: session?.conversationId,
       sessionId: session?.id ?? request.sessionId,
       agentId: session?.source ?? request.source?.trim() ?? context.namespace.source,
-      appId: session?.workspaceId,
+      appId: session?.workspaceId ?? captureNamespace.workspaceId,
       projectId: session?.projectId ?? context.namespace.projectId,
       profileId: session?.profileId ?? context.namespace.profileId,
       layer, kind, memoryType: layer === "Skill" ? "SkillMemory" : "LongTermMemory",
@@ -209,6 +209,16 @@ export class ImportJobProcessor {
       }) : request.content,
       tags,
       info: {
+        ...(agentSourceImport ? { native_origin_v1: captureNativeOrigin({
+          source: session?.source ?? request.source?.trim() ?? captureNamespace.source ?? "memmy",
+          profileId: session?.profileId ?? captureNamespace.profileId ?? "default",
+          projectId: session ? session.projectId ?? null : captureNamespace.projectId,
+          workspaceId: session ? session.workspaceId ?? null : captureNamespace.workspaceId,
+          tenantId: captureNamespace.tenantId, meta: session?.meta,
+          // The claim compatibility fallback is not verified native identity.
+          conversationId: session?.conversationId ?? null,
+          hostSessionKey: session?.hostSessionKey ?? captureNamespace.sessionKey ?? null
+        }) } : {}),
         title,
         summary: importSummary ?? firstLine(request.content),
         source: request.source ?? "manual",
@@ -271,33 +281,49 @@ export class ImportJobProcessor {
       ? d.normalizeMemoryCaptureSource(memory.agentId ?? request.source ?? context.namespace.source ?? "")
       : "";
     const persisted = d.transaction(() => {
+      let verifiedTarget: MemoryRow | undefined;
+      if (captureIdentity && captureSource && !d.memories.getByKeyIncludingDeleted(layer, memoryKey)) {
+        const legacy = d.memories.listUserMemoriesByKeyIncludingDeleted(null, importKey)
+          .filter(candidate => d.captureClaims.matchesOrigin(candidate.id, captureSource, captureIdentity))
+          .sort((a, b) => Number(Boolean(b.deletedAt || b.status === "deleted")) - Number(Boolean(a.deletedAt || a.status === "deleted")))[0];
+        // Content revisions cannot be matched by QA hash. Reuse a legacy key
+        // only with complete, equal native origin evidence; never rewrite it.
+        if (legacy) {
+          if (legacy.status === "deleted" || legacy.deletedAt) return { duplicateMemory: legacy } as const;
+          memory.memoryKey = legacy.memoryKey;
+          verifiedTarget = legacy;
+        }
+      }
       if (qaPair && captureSource) {
-        const priorCaptureMemory = d.memories.getByKeyIncludingDeleted(layer, memoryKey);
-        const capturePrimaryMemoryId = priorCaptureMemory &&
-          priorCaptureMemory.status !== "deleted" &&
-          !priorCaptureMemory.deletedAt
-          ? priorCaptureMemory.id
-          : memory.id;
+        const priorCaptureMemory = verifiedTarget ?? d.memories.getByKeyIncludingDeleted(layer, memory.memoryKey!);
+        if (priorCaptureMemory?.status === "deleted" || priorCaptureMemory?.deletedAt) return { duplicateMemory: priorCaptureMemory } as const;
+        const capturePrimaryMemoryId = priorCaptureMemory?.id ?? memory.id;
         const capture = d.captureClaims.claim({
           userId: memory.userId,
           source: captureSource,
           qaHash: d.memoryCaptureQaHash(qaPair.query, qaPair.answer),
+          identity: captureIdentity,
           primaryMemoryId: capturePrimaryMemoryId,
           capturedBy: "agent_source_scan",
           createdAt: at
         });
-        if (!capture.claimed && capture.claim.capturedBy !== "agent_source_scan") {
+        if (!capture.claimed) {
           const existing = d.memories.getIncludingDeleted(capture.claim.primaryMemoryId);
           if (!existing) {
             throw d.createError("conflict", "memory capture claim points to a missing memory");
           }
           d.assertMemoryInScope(existing, request.namespace);
-          return { duplicateMemory: existing } as const;
+          if (capture.claim.capturedBy !== "agent_source_scan") return { duplicateMemory: existing } as const;
+          if (existing.status === "deleted" || existing.deletedAt) return { duplicateMemory: existing } as const;
+          // A proven legacy claim may point at the old, unscoped import key.
+          // Keep its identity when the same scanner revises that native turn.
+          memory.memoryKey = existing.memoryKey;
+          verifiedTarget = existing;
         }
       }
-      const existingByKey = memory.memoryKey
+      const existingByKey = verifiedTarget ?? (memory.memoryKey
         ? d.memories.getByKeyIncludingDeleted(layer, memory.memoryKey)
-        : undefined;
+        : undefined);
       if (
         importTrace &&
         existingByKey &&
@@ -308,7 +334,7 @@ export class ImportJobProcessor {
         repairPlaceholderImportSummary(d, existingByKey, receivedAt);
         return { upsert: { memory: existingByKey, created: false, previous: existingByKey }, changeSeq: 0, duplicateMemory: existingByKey } as const;
       }
-      const upsert = d.memories.upsertByKey(memory);
+      const upsert = d.memories.upsertByKey(memory, verifiedTarget?.id);
       const inserted = upsert.memory;
       const changeSeq = d.runtime.appendChange({
         memoryId: inserted.id, namespaceId: d.namespaceIdFromMemory(inserted), kind: d.kindFromMemory(inserted),

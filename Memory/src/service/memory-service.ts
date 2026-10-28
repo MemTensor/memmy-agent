@@ -1,4 +1,6 @@
-import { deviceNamespace, memoryFingerprint, matchesLegacyMemoryFingerprint } from "../storage/device-scope.js";
+import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
+import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import { canonicalProjectId, deviceNamespace, memoryFingerprint, matchesLegacyMemoryFingerprint, reloadDeviceScopeAliases } from "../storage/device-scope.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -61,10 +63,13 @@ import {
   type ChangeLogRecord,
   type EpisodeRecord,
   type EvolutionJobRecord,
+  type EmbeddingMaintenanceTask,
   type RawTurnRecord,
   type SessionRecord
 } from "../storage/repositories.js";
 import type { SerializedMemoryVector } from "../storage/sqlite-vec-store.js";
+import { memoryVectorEntries } from "../storage/memory-vector-state.js";
+import { embeddingTextForMemory, traceSummaryEmbeddingText, traceActionEmbeddingText } from "./embedding/embedding-pipeline.js";
 import type {
   FeedbackRequest,
   HealthResponse,
@@ -182,7 +187,7 @@ import {
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
 import { SkillTrialResolver } from "./trials/skill-trial-resolver.js";
-import { WorkMemoryPipeline } from "./work-memory/work-memory-pipeline.js";
+import { WorkMemoryPipeline, canonicalWorkMemoryText } from "./work-memory/work-memory-pipeline.js";
 import { ObservationMemoryPipeline } from "./evidence/observation-memory-pipeline.js";
 import { lookupExternalEvidence, lookupExternalEvidenceSkill, externalEvidenceSourceMatchesMemory, externalEvidenceNamespaceForMemory } from "./external-evidence-source.js";
 import { observationMemoryState, isObservationMemoryProcessed, OBSERVATION_SUMMARY_MODEL_UNCONFIGURED } from "./observation-memory-state.js";
@@ -306,6 +311,8 @@ export class MemoryService {
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
+  private embeddingDimensionProbe?: { key: string; value: Promise<number> };
+  private embeddingUpgradeInFlight?: Promise<void>;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
   private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
@@ -786,6 +793,10 @@ export class MemoryService {
 
   private memoryBudgetJobConsumes(jobType: string): boolean {
     return jobTypeConsumesMemoryBudget(jobType, this.budgetModelSources());
+  }
+
+  private shouldDeferBudgetedEmbedding(): boolean {
+    return this.isMemoryBudgetPaused() && this.memoryBudgetJobConsumes("embedding");
   }
 
   private shouldDeferBudgetedEvolutionLlm(): boolean {
@@ -2359,50 +2370,58 @@ export class MemoryService {
     if (!request.bundle || !request.bundle.tables || typeof request.bundle.tables !== "object") {
       throw new MemoryServiceError("invalid_argument", "import bundle must contain tables");
     }
-    const context = this.resolveContext(request);
-    const importedAt = nowIso();
-    const result = this.repos.runtime.importBundleTables(request.bundle.tables, {
-      conflictStrategy: request.conflictStrategy ?? "skip"
-    });
-    const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
-    this.repos.vectors.importRows(importedVectors);
-    result.inserted.memory_vectors = importedVectors.length;
-    const reembedMemoryIds = importedReembedMemoryIds(
-      request.bundle.tables,
-      this.embedder.config.model ?? this.embedder.config.provider
-    );
-    const audit = this.repos.runtime.insertAudit({
-      userId: context.userId,
-      actor: request.namespace ? { ...request.namespace } : {},
-      action: "import",
-      targetKind: "bundle",
-      targetId: `import_${stableHash(importedAt).slice(0, 16)}`,
-      meta: {
-        sourceSchemaVersion: request.bundle.schemaVersion,
-        sourceExportedAt: request.bundle.exportedAt,
-        conflictStrategy: request.conflictStrategy ?? "skip",
-        inserted: result.inserted,
-        skipped: result.skipped,
-        replaced: result.replaced,
-        migrationMap: result.migrationMap,
-        conflicts: result.conflicts,
-        reembedMemoryIds
-      },
-      createdAt: importedAt
-    });
-    return {
-      ok: true,
-      importedAt,
-      conflictStrategy: request.conflictStrategy ?? "skip",
-      inserted: result.inserted,
-      skipped: result.skipped,
-      replaced: result.replaced,
-      migrationMap: result.migrationMap,
-      conflicts: result.conflicts,
-      reembedMemoryIds,
-      auditId: audit.id,
-      serverTime: nowIso()
-    };
+    try {
+      return this.repos.transaction(() => {
+        const context = this.resolveContext(request);
+        const importedAt = nowIso();
+        const result = this.repos.runtime.importBundleTables(request.bundle.tables, {
+          conflictStrategy: request.conflictStrategy ?? "skip"
+        });
+        const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors)
+          .filter(row => !result.skippedMemoryIds.has(row.memory_id));
+        this.repos.vectors.importRows(importedVectors);
+        result.inserted.memory_vectors = importedVectors.length;
+        const reembedMemoryIds = importedReembedMemoryIds(
+          { ...request.bundle.tables, memory_vectors: importedVectors },
+          this.embedder.config.model ?? this.embedder.config.provider
+        );
+        const audit = this.repos.runtime.insertAudit({
+          userId: context.userId,
+          actor: request.namespace ? { ...request.namespace } : {},
+          action: "import",
+          targetKind: "bundle",
+          targetId: `import_${stableHash(importedAt).slice(0, 16)}`,
+          meta: {
+            sourceSchemaVersion: request.bundle.schemaVersion,
+            sourceExportedAt: request.bundle.exportedAt,
+            conflictStrategy: request.conflictStrategy ?? "skip",
+            inserted: result.inserted,
+            skipped: result.skipped,
+            replaced: result.replaced,
+            migrationMap: result.migrationMap,
+            conflicts: result.conflicts,
+            reembedMemoryIds
+          },
+          createdAt: importedAt
+        });
+        return {
+          ok: true,
+          importedAt,
+          conflictStrategy: request.conflictStrategy ?? "skip",
+          inserted: result.inserted,
+          skipped: result.skipped,
+          replaced: result.replaced,
+          migrationMap: result.migrationMap,
+          conflicts: result.conflicts,
+          reembedMemoryIds,
+          auditId: audit.id,
+          serverTime: nowIso()
+        };
+      });
+    } catch (error) {
+      reloadDeviceScopeAliases(this.repos.db);
+      throw error;
+    }
   }
 
   archiveMemory(id: string, request: MemoryGovernanceRequest = {}): {
@@ -2420,47 +2439,52 @@ export class MemoryService {
     this.assertMemoryInScope(memory, request.namespace);
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const archived = this.repos.memories.archive(memory.id, at);
-    if (!archived) {
-      throw new MemoryServiceError("not_found", `memory not found: ${id}`);
-    }
-    const changeSeq = this.repos.runtime.appendChange({
-      memoryId: archived.id,
-      namespaceId: namespaceIdFromMemory(archived),
-      kind: kindFromMemory(archived),
-      op: "archived",
-      entityId: archived.id,
-      userId: archived.userId,
-      changeType: "archive",
-      version: archived.version,
-      before: memory,
-      after: archived,
-      source: "panel.archive",
-      createdAt: archived.updatedAt
-    });
-    const audit = this.repos.runtime.insertAudit({
-      userId: archived.userId,
-      sessionId: archived.sessionId,
-      actor: request.namespace ? { ...request.namespace } : {},
-      action: "archive",
-      targetKind: kindFromMemory(archived),
-      targetId: archived.id,
-      before: memory,
-      after: archived,
-      meta: { reason: request.reason },
-      createdAt: archived.updatedAt
-    });
-    this.evolutionJobs.invalidateMemoryDependencies(memory, at);
-    return {
-      ok: true,
-      id: archived.id,
-      kind: kindFromMemory(archived),
-      status: "archived",
-      changeSeq,
-      syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(archived)),
-      auditId: audit.id,
-      serverTime: nowIso()
+    const archive = () => {
+      const archived = isStrictL3WorldModelV2Memory(memory)
+        ? this.repos.l3WorldModels.archiveScopeMemory(memory.id, at)
+        : this.repos.memories.archive(memory.id, at);
+      if (!archived) {
+        throw new MemoryServiceError("not_found", `memory not found: ${id}`);
+      }
+      const changeSeq = this.repos.runtime.appendChange({
+        memoryId: archived.id,
+        namespaceId: namespaceIdFromMemory(archived),
+        kind: kindFromMemory(archived),
+        op: "archived",
+        entityId: archived.id,
+        userId: archived.userId,
+        changeType: "archive",
+        version: archived.version,
+        before: memory,
+        after: archived,
+        source: "panel.archive",
+        createdAt: archived.updatedAt
+      });
+      const audit = this.repos.runtime.insertAudit({
+        userId: archived.userId,
+        sessionId: archived.sessionId,
+        actor: request.namespace ? { ...request.namespace } : {},
+        action: "archive",
+        targetKind: kindFromMemory(archived),
+        targetId: archived.id,
+        before: memory,
+        after: archived,
+        meta: { reason: request.reason },
+        createdAt: archived.updatedAt
+      });
+      this.evolutionJobs.invalidateMemoryDependencies(memory, at);
+      return {
+        ok: true as const,
+        id: archived.id,
+        kind: kindFromMemory(archived),
+        status: "archived" as const,
+        changeSeq,
+        syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(archived)),
+        auditId: audit.id,
+        serverTime: nowIso()
+      };
     };
+    return isStrictL3WorldModelV2Memory(memory) ? this.repos.transaction(archive) : archive();
   }
 
   deleteMemory(id: string, request: MemoryGovernanceRequest = {}): {
@@ -3011,82 +3035,138 @@ export class MemoryService {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
   }
 
-  rebuildEmbeddings(): {
-    accepted: true;
-    enqueued: number;
-    serverTime: string;
-  } {
-    this.assertMemoryAddEnabled();
-    const at = nowIso();
-    let offset = 0;
-    let enqueued = 0;
-    for (;;) {
-      const memories = this.repos.memories.list({}, 250, offset);
-      for (const memory of memories) {
-        this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
-        enqueued += 1;
-      }
-      if (memories.length < 250) break;
-      offset += memories.length;
-    }
-    const userId = null;
-    offset = 0;
-    for (;;) {
-      const userMemories = this.repos.userMemories.listForPanel({
-        userId,
-        status: "active",
-        limit: 250,
-        offset
-      });
-      for (const memory of userMemories) {
-        this.workerHandlers.enqueueJob({
-          jobType: "user_memory_embedding",
-          userId: memory.userId,
-          targetMemoryId: memory.id,
-          payload: { contentHash: stableHash(memory.content) },
-          maxAttempts: 6,
-          createdAt: at
-        });
-        enqueued += 1;
-      }
-      if (userMemories.length < 250) break;
-      offset += userMemories.length;
-    }
-    return { accepted: true, enqueued, serverTime: at };
+  private embeddingMaintenance(): EmbeddingMaintenance {
+    return new EmbeddingMaintenance({
+      repos: this.repos,
+      embedder: this.embedder,
+      userId: null,
+      currentWork: dimension => this.currentEmbeddingMaintenanceState(null, dimension),
+      enqueueMemory: (memory, text, at, vectorField = embeddingRetryVectorFieldForMemory(memory)) => {
+        const existing = this.repos.runtime.getEmbeddingRetryByTarget(
+          embeddingRetryTargetKindForMemory(memory), memory.id, vectorField
+        );
+        // Join an already running job without clearing its worker lease.
+        if (existing?.status === "pending" || existing?.status === "in_progress") return existing.id;
+        return this.workerHandlers.enqueueEmbeddingRetry(memory, text, at, vectorField).id;
+      },
+      enqueueUserMemory: (memory, at) => this.workerHandlers.enqueueJob({
+        jobType: "user_memory_embedding", userId: memory.userId, targetMemoryId: memory.id,
+        payload: { contentHash: stableHash(memory.content) }, maxAttempts: 6, createdAt: at
+      }).id
+    });
   }
 
-  embeddingMaintenanceStats(): {
-    dimension: number;
-    available: boolean;
-    totalSlots: number;
-    ready: number;
-    missing: number;
-    dimMismatch: number;
-    needsRepair: number;
-  } {
-    const userId = null;
-    const regular = this.repos.vectors.maintenanceDimensionCounts();
-    const user = this.repos.userMemories.embeddingDimensionCounts(userId);
-    const dimensions = new Map<number, number>();
-    for (const row of [...regular.dimensions, ...user.dimensions]) {
-      if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
-    }
-    const [dimension = 0] = [...dimensions.entries()]
-      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
-    const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
-    const totalSlots = regular.totalSlots + user.totalSlots;
-    const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
-    const missing = Math.max(0, totalSlots - stored);
-    const dimMismatch = Math.max(0, stored - ready);
-    return {
-      dimension,
-      available: this.embedder.status().configured,
-      totalSlots,
-      ready,
-      missing,
-      dimMismatch,
-      needsRepair: missing + dimMismatch
+  rebuildEmbeddings(mode: "repair" | "rebuild" = "rebuild") {
+    this.assertMemoryAddEnabled();
+    return this.withModelTaskContext(async () => {
+      const dimension = mode === "repair" ? await this.currentEmbeddingDimension() : undefined;
+      if (mode === "repair" && !dimension) throw new MemoryServiceError("invalid_argument", "embedding model is not configured");
+      return this.embeddingMaintenance().start(mode, dimension);
+    });
+  }
+
+  embeddingMaintenanceProgress(runId?: string) {
+    return this.withModelTaskContext(() => this.embeddingMaintenance().progress(runId));
+  }
+
+  embeddingMaintenanceStats() {
+    return this.withModelTaskContext(async () => {
+      try {
+        return this.embeddingMaintenance().stats(await this.currentEmbeddingDimension());
+      } catch (error) {
+        return { ...this.embeddingMaintenance().stats(0), dimensionError: error instanceof Error ? error.message : String(error) };
+      }
+    });
+  }
+
+  private currentEmbeddingMaintenanceState(userId: string | null, dimension: number) {
+    // Key by target and vector field so upstream action-vector maintenance also
+    // uses the same current-content checks as the panel and repair enqueueing.
+    const outdatedVectors = new Set<string>();
+    const memories = new Map<string, ReturnType<typeof this.repos.memories.get>>();
+    const userMemories = new Map<string, ReturnType<typeof this.repos.userMemories.get>>();
+    const model = this.embedder.config;
+    const isCurrentWork = (task: EmbeddingMaintenanceTask): boolean => {
+      const id = task.targetId;
+      // Pending, active and stale rows describe actual queue occupancy, even if
+      // their target was edited or deleted. Only historical failures are filtered.
+      const retainQueueRow = task.status !== "failed";
+      let vector: number[] | undefined;
+      let provider: string | null | undefined;
+      let embeddingModel: string | null | undefined;
+      let contentHash: string;
+      let sourceTexts: string[];
+      let vectorField = task.vectorField;
+      if (task.userMemory) {
+        if (!userMemories.has(id)) userMemories.set(id, this.repos.userMemories.get(id));
+        const memory = userMemories.get(id);
+        if (!memory || memory.status !== "active" || memory.deletedAt) return retainQueueRow;
+        contentHash = stableHash(memory.content);
+        vector = memory.embedding;
+        provider = memory.embeddingProvider;
+        embeddingModel = memory.embeddingModel;
+        sourceTexts = [memory.content];
+        vectorField = "vec";
+      } else {
+        if (!memories.has(id)) memories.set(id, this.repos.memories.get(id));
+        const memory = memories.get(id);
+        if (!memory || memory.status === "deleted" || memory.deletedAt) return retainQueueRow;
+        contentHash = memory.contentHash ?? stableHash(memory.memoryValue);
+        const primaryField = memory.memoryLayer === "L1" ? "vec_summary" : "vec";
+        vectorField ??= primaryField;
+        const entry = memoryVectorEntries(memory).find(value => value.vectorField === vectorField);
+        vector = entry?.vector;
+        provider = entry?.embeddingProvider;
+        embeddingModel = entry?.embeddingModel;
+        sourceTexts = (vectorField === "vec_action" ? [traceActionEmbeddingText(memory)]
+          : [memory.memoryValue, embeddingTextForMemory(memory), traceSummaryEmbeddingText(memory)])
+          .filter((text): text is string => text !== undefined);
+        if (kindFromMemory(memory) === "work_memory") {
+          const internal = memory.properties.internal_info;
+          sourceTexts.push(canonicalWorkMemoryText(
+            typeof internal.work_topic === "string" ? internal.work_topic : "Work requirements",
+            typeof internal.requirement === "string" ? internal.requirement : "",
+            typeof internal.reason === "string" ? internal.reason : ""
+          ));
+        }
+        if (task.sourceText && !sourceTexts.includes(task.sourceText)) return retainQueueRow;
+      }
+      if (task.contentHash && task.contentHash !== contentHash) return retainQueueRow;
+      // Merely retaining a vector does not prove current content was embedded.
+      if (dimension === 0 || vector?.length !== dimension ||
+          provider !== model.provider || embeddingModel !== (model.model ?? model.provider)) return true;
+      const completed = this.repos.runtime.hasSuccessfulEmbeddingWork({
+        targetId: id, userMemory: task.userMemory, vectorField,
+        contentHash, sourceTexts, since: task.updatedAt
+      });
+      if (!completed) outdatedVectors.add(`${task.userMemory ? "user_memory" : "memory"}:${id}:${vectorField}`);
+      return retainQueueRow || !completed;
     };
+    const retryQueue = this.repos.runtime.embeddingMaintenanceQueueStats(userId, Date.now(), isCurrentWork);
+    return { retryQueue, outdatedVectors };
+  }
+
+  private currentEmbeddingDimension(): Promise<number> {
+    if (!this.embedder.status().configured) return Promise.resolve(0);
+    const requested = this.embedder.config.extraBody?.dimensions;
+    if (typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0) return Promise.resolve(requested);
+    if (this.embedder.config.provider === "local" && this.embedder.config.model === "Xenova/all-MiniLM-L6-v2") return Promise.resolve(384);
+    // Pin the routed model for the probe; changing any embedding configuration
+    // invalidates the cached result. Concurrent panel refreshes share one probe.
+    const key = stableHash(stableStringify(this.embedder.config));
+    if (this.embeddingDimensionProbe?.key === key) return this.embeddingDimensionProbe.value;
+    const value = probeEmbedding(this.embedder).then(result => {
+      if (!result.ok || !result.dimensions) {
+        throw new MemoryServiceError("internal", result.error ?? "embedding model returned no dimension", 502);
+      }
+      return result.dimensions;
+    });
+    const probe = { key, value };
+    this.embeddingDimensionProbe = probe;
+    void value.catch(() => {
+      if (this.embeddingDimensionProbe === probe) this.embeddingDimensionProbe = undefined;
+    });
+    return value;
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -3102,7 +3182,11 @@ export class MemoryService {
   }
 
   nextWorkerRunAt(): number | undefined {
-    return this.workerRunner.nextWorkerRunAt();
+    const workerAt = this.workerRunner.nextWorkerRunAt();
+    const upgradeAt = this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding()
+      ? this.embeddingMaintenance().nextUpgradeAttemptAt() : undefined;
+    const times = [workerAt, upgradeAt].filter((time): time is number => Number.isFinite(time));
+    return times.length ? Math.min(...times) : undefined;
   }
 
   memoryTokenBudgetSnapshot() {
@@ -3131,7 +3215,15 @@ export class MemoryService {
     } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     await this.ensureAppBudgetReconciled();
+    // Run the bounded one-time provenance repair through the normal durable worker.
+    // Respect explicit write/budget gates and scoped worker requests.
+    if (this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding() && !request.targetMemoryIds) {
+      this.embeddingUpgradeInFlight ??= this.withModelTaskContext(() => this.embeddingMaintenance().resumeUpgrade())
+        .finally(() => { this.embeddingUpgradeInFlight = undefined; });
+      await this.embeddingUpgradeInFlight;
+    }
     const result = await this.workerRunner.runWorkerOnce(limit, request);
+    if (this.config.algorithm.enableMemoryAdd) this.embeddingMaintenance().upgradeProgress();
     this.reconcileAutomaticHistorySkills(nowIso());
     return result;
   }
@@ -3260,7 +3352,7 @@ export class MemoryService {
       ? this.repos.runtime.getSession(request.sessionId)
       : namespace.sessionKey
         ? this.repos.runtime.findOpenSessionByHostKey({
-            userId: namespace.userId,
+            tenantId: namespace.tenantId ?? null,
             source: request.source ?? namespace.source,
             profileId: request.profileId ?? namespace.profileId,
             hostSessionKey: namespace.sessionKey
@@ -3283,10 +3375,13 @@ export class MemoryService {
       };
     }
     const sessionId = request.sessionId ?? `session_${stableHash({
-      userId: namespace.userId,
       source: request.source ?? namespace.source,
       profileId: request.profileId ?? namespace.profileId,
-      sessionKey: namespace.sessionKey ?? "readonly"
+      sessionKey: namespace.sessionKey ?? "readonly",
+      projectId: canonicalProjectId(this.repos.db, request.projectId) ?? namespace.projectId ?? namespace.workspaceId ?? null,
+      workspaceId: canonicalProjectId(this.repos.db, request.workspaceId) ?? namespace.workspaceId ?? null,
+      conversationId: stringFromMeta(request.meta, "conversationId") ?? null,
+      tenantId: namespace.tenantId ?? null
     }).slice(0, 20)}`;
     return {
       sessionId,
@@ -3490,8 +3585,18 @@ export class MemoryService {
   }
 
   private assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void {
-    void session;
-    void namespace;
+    const snakeTenant = session.meta.tenant_id;
+    const camelTenant = session.meta.tenantId;
+    const snakeId = typeof snakeTenant === "string" && snakeTenant.length > 0 ? snakeTenant : null;
+    const camelId = typeof camelTenant === "string" && camelTenant.length > 0 ? camelTenant : null;
+    if (snakeId !== null && camelId !== null && snakeId !== camelId) {
+      throw new MemoryServiceError("forbidden", "session has conflicting tenant metadata");
+    }
+    if (!namespace) return;
+    const requestedTenant = namespace.tenantId ?? null;
+    if ((snakeId ?? camelId) !== requestedTenant) {
+      throw new MemoryServiceError("forbidden", "session belongs to a different tenant");
+    }
   }
 
   private assertL3WorldModelSessionScope(session: SessionRecord, namespace: RuntimeNamespace): void {
@@ -3503,7 +3608,7 @@ export class MemoryService {
       normalized.source !== session.source,
       normalized.profileId !== session.profileId,
       (normalized.projectId ?? null) !== (session.projectId ?? null),
-      Boolean(namespace.workspaceId && namespace.workspaceId !== session.workspaceId),
+      Boolean(normalized.workspaceId && normalized.workspaceId !== session.workspaceId),
       Boolean(namespace.sessionKey && namespace.sessionKey !== session.hostSessionKey)
     ];
     if (conflicts.some(Boolean)) {

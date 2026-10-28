@@ -6,6 +6,10 @@ import {
   isMemoryReadyForRetrieval
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  deduplicateSameSourceL1Candidates,
+  memoryMatchesRequestedTags
+} from "./same-source-l1-dedup.js";
+import {
   Repositories,
   type MemorySearchIdHit
 } from "../../storage/repositories.js";
@@ -76,6 +80,7 @@ export class IndexedCandidatePool {
     projectId?: string | null;
     targetSkillId?: string;
     currentAgentId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     config: {
       tier1TopK: number;
       tier2TopK: number;
@@ -109,24 +114,36 @@ export class IndexedCandidatePool {
 
       if (queryVector) {
         if (layer === "L1") {
-          addRoute(() => this.searchTraceVectorRoutes(queryVector, filter, vectorPool, input.compiledQuery, input.config));
+          addRoute(() => this.expandL1Route(filter, vectorPool, (excludedFilter, limit) =>
+            this.searchTraceVectorRoutes(queryVector, excludedFilter, limit, input.compiledQuery, input.config),
+          input.excludeTraceRawTurnIds));
         } else {
           addRoute(() => this.deps.repos.memories.searchVectorIds(queryVector, "vec", filter, vectorPool));
         }
       }
 
       if (input.compiledQuery.ftsMatch) {
-        addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
+        addRoute(() => layer === "L1"
+          ? this.expandL1Route(filter, keywordPool, (excludedFilter, limit) =>
+            this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, excludedFilter, limit),
+          input.excludeTraceRawTurnIds)
+          : this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
       }
       if (input.compiledQuery.patternTerms.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
+        addRoute(() => layer === "L1"
+          ? this.expandL1Route(filter, keywordPool, (excludedFilter, limit) =>
+            this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, excludedFilter, limit),
+          input.excludeTraceRawTurnIds)
+          : this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
       }
       if (layer === "L1" && input.compiledQuery.structuralFragments.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchStructuralIds(
-          input.compiledQuery.structuralFragments,
-          filter,
-          Math.max(input.config.tier2TopK, 10)
-        ));
+        const structuralPool = Math.max(input.config.tier2TopK, 10);
+        addRoute(() => this.expandL1Route(filter, structuralPool, (excludedFilter, limit) =>
+          this.deps.repos.memories.searchStructuralIds(
+            input.compiledQuery.structuralFragments,
+            excludedFilter,
+            limit
+          ), input.excludeTraceRawTurnIds));
       }
     }
 
@@ -191,6 +208,57 @@ export class IndexedCandidatePool {
     const tagged = search(tags);
     if (tagged.length > 0 || config.tagFilter === "on") return tagged;
     return this.deps.repos.memories.searchVectorIds(queryVector, "vec_summary", filter, vectorPool);
+  }
+
+  private expandL1Route(
+    filter: MemoryFilter,
+    limit: number,
+    search: (filter: MemoryFilter, limit: number) => MemorySearchIdHit[],
+    excludeTraceRawTurnIds?: ReadonlySet<string>
+  ): MemorySearchIdHit[] {
+    const hits: MemorySearchIdHit[] = [];
+    const candidateIds = new Set<string>();
+    const excludedIds = new Set<string>();
+    let sourceCount = 0;
+
+    while (true) {
+      if (sourceCount >= limit) break;
+
+      const batch = search({ ...filter, excludedIds: [...excludedIds] }, Math.max(1, limit - sourceCount));
+      const batchIds = new Set<string>();
+      const freshHits = batch.filter(hit => {
+        if (candidateIds.has(hit.id) || batchIds.has(hit.id)) return false;
+        batchIds.add(hit.id);
+        return true;
+      });
+      if (freshHits.length === 0) break;
+      const freshIds = freshHits.map(hit => hit.id);
+      const candidateMemories = this.deps.repos.memories.getMany(freshIds);
+      const deduplicated = deduplicateSameSourceL1Candidates({
+        memories: candidateMemories,
+        repos: this.deps.repos,
+        excludeTraceRawTurnIds,
+        isMemoryEligible: memory => (memory.status === "activated" || memory.status === "resolving") &&
+          this.isMemoryReadyForRetrieval(memory),
+        isMemoryInScope: memory => memoryMatchesRequestedTags(memory, filter.tags)
+      });
+      sourceCount += deduplicated.memories.length;
+      const memoriesById = new Map(candidateMemories.map(memory => [memory.id, memory]));
+      for (const hit of freshHits) {
+        hits.push(hit);
+        candidateIds.add(hit.id);
+        const memory = memoriesById.get(hit.id);
+        if (!memory) {
+          excludedIds.add(hit.id);
+          continue;
+        }
+        for (const id of deduplicated.sourceIdsByCandidateId.get(hit.id) ?? [memory.id]) {
+          excludedIds.add(id);
+        }
+      }
+    }
+
+    return hits;
   }
 
   isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
