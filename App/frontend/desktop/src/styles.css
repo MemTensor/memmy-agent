@@ -5740,7 +5740,6 @@ code {
 .memory-panel-update-notice {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
   max-width: 100%;
   margin: 0 0 16px;
   padding: 7px 10px;
@@ -5753,10 +5752,6 @@ code {
   font-weight: 500;
   line-height: 18px;
   overflow-wrap: anywhere;
-}
-
-.memory-panel-update-notice__icon {
-  flex: 0 0 auto;
 }
 
 .memory-panel__header:has(> .memory-panel-update-notice) {
