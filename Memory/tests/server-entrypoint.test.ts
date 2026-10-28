@@ -142,6 +142,125 @@ describe("memmy memory server entrypoint", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("authorizes configured scoped api keys and enforces their scopes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-memory-scoped-auth-"));
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {
+      storage: {
+        mode: "local",
+        backend: "sqlite",
+        sqlitePath: join(root, "memory.sqlite"),
+        scopedApiKeys: {
+          "scoped-agent-a-key": {
+            namespace: { source: "agent-a", profileId: "default" },
+            scopes: ["memory:read"]
+          }
+        }
+      }
+    } }));
+    const listen = vi.spyOn(memoryHttp, "listenMemoryHttpServer");
+    const running = main(["--config", configPath, "--host", "127.0.0.1", "--port", "0"]);
+    try {
+      const endpoint = await waitForWrittenEndpoint(configPath);
+      const scopedHeaders = { "x-api-key": "scoped-agent-a-key" };
+
+      const readResponse = await fetch(`${endpoint}/api/v1/admin/memory-token-budget`, {
+        headers: scopedHeaders
+      });
+      expect(readResponse.status).toBe(200);
+
+      const writeResponse = await fetch(`${endpoint}/api/v1/memory/add`, {
+        method: "POST",
+        headers: { ...scopedHeaders, "content-type": "application/json" },
+        body: "{}"
+      });
+      expect(writeResponse.status).toBe(403);
+    } finally {
+      listen.mock.calls[0]?.[0].onShutdownRequested?.();
+      await running;
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses anonymous and unknown-token access when scoped api keys are configured", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-memory-scoped-anonymous-"));
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {
+      storage: {
+        mode: "local",
+        backend: "sqlite",
+        sqlitePath: join(root, "memory.sqlite"),
+        scopedApiKeys: {
+          "scoped-agent-a-key": {
+            namespace: { source: "agent-a", profileId: "default" },
+            scopes: ["memory:read"]
+          }
+        }
+      }
+    } }));
+    const listen = vi.spyOn(memoryHttp, "listenMemoryHttpServer");
+    const running = main(["--config", configPath, "--host", "127.0.0.1", "--port", "0"]);
+    try {
+      const endpoint = await waitForWrittenEndpoint(configPath);
+      const readUrl = `${endpoint}/api/v1/admin/memory-token-budget`;
+
+      const anonymous = await fetch(readUrl);
+      expect(anonymous.status).toBe(401);
+
+      const unknownToken = await fetch(readUrl, { headers: { "x-api-key": "not-a-configured-key" } });
+      expect(unknownToken.status).toBe(401);
+    } finally {
+      listen.mock.calls[0]?.[0].onShutdownRequested?.();
+      await running;
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the storage token authoritative when scoped api keys are configured too", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-memory-scoped-token-"));
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {
+      storage: {
+        mode: "local",
+        backend: "sqlite",
+        sqlitePath: join(root, "memory.sqlite"),
+        token: "local-admin-token",
+        scopedApiKeys: {
+          "scoped-agent-a-key": {
+            namespace: { source: "agent-a", profileId: "default" },
+            scopes: ["memory:read"]
+          }
+        }
+      }
+    } }));
+    const listen = vi.spyOn(memoryHttp, "listenMemoryHttpServer");
+    const running = main(["--config", configPath, "--host", "127.0.0.1", "--port", "0"]);
+    try {
+      const endpoint = await waitForWrittenEndpoint(configPath);
+      const readUrl = `${endpoint}/api/v1/admin/memory-token-budget`;
+
+      const withToken = await fetch(readUrl, {
+        headers: { authorization: "Bearer local-admin-token" }
+      });
+      expect(withToken.status).toBe(200);
+
+      const withScopedKey = await fetch(readUrl, {
+        headers: { "x-api-key": "scoped-agent-a-key" }
+      });
+      expect(withScopedKey.status).toBe(200);
+
+      const anonymous = await fetch(readUrl);
+      expect(anonymous.status).toBe(401);
+    } finally {
+      listen.mock.calls[0]?.[0].onShutdownRequested?.();
+      await running;
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function waitForWrittenEndpoint(configPath: string): Promise<string> {

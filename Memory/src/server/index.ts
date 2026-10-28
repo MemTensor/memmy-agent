@@ -5,10 +5,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createStorageBackend, type StorageBackend } from "../storage/backend.js";
-import { loadMemmyConfig } from "../config/index.js";
+import { loadMemmyConfig, type MemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
-import { closeMemoryHttpServer, listenMemoryHttpServer } from "./http.js";
+import { closeMemoryHttpServer, listenMemoryHttpServer, type MemoryHttpAuthOptions } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
@@ -50,6 +50,27 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         process.off("SIGINT", shutdown);
         process.off("SIGTERM", shutdown);
     }
+}
+
+/**
+ * Builds the HTTP auth options for the packaged service entry. Precedence is
+ * `localServiceToken` (storage token, scope `*`) over `scopedApiKeys` over
+ * `allowAnonymous`: anonymous access is only offered when the operator
+ * configured neither credential type, so a configured scoped key can never
+ * silently fall back to an open service.
+ */
+export function memoryServiceAuth(config: MemmyConfig): MemoryHttpAuthOptions {
+    const auth: MemoryHttpAuthOptions = {};
+    if (config.storage.token) {
+        auth.localServiceToken = config.storage.token;
+    }
+    if (config.storage.scopedApiKeys) {
+        auth.scopedApiKeys = config.storage.scopedApiKeys;
+    }
+    if (!auth.localServiceToken && !auth.scopedApiKeys) {
+        auth.allowAnonymous = true;
+    }
+    return auth;
 }
 
 async function runMemoryService(argv: string[], lifecycle: {
@@ -118,9 +139,7 @@ async function runMemoryService(argv: string[], lifecycle: {
                     requestShutdown();
                 }
             }),
-            auth: config.storage.token
-                ? { localServiceToken: config.storage.token }
-                : { allowAnonymous: true },
+            auth: memoryServiceAuth(config),
             configPath,
             startAgentSourceAutomation: true
         });
