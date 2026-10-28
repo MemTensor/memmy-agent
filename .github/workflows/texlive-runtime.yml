@@ -2,7 +2,7 @@ name: Managed XeLaTeX runtimes
 on:
   push:
     branches: [codex/managed-texlive-runtime-v1.2.5]
-    paths: ['.github/workflows/texlive-runtime.yml', 'scripts/texlive/**', 'App/backend/src/adapters/outbound/plugin-runtime/**', 'plugins/office/scripts/package-runtime.mjs']
+    paths: ['.github/workflows/texlive-runtime.yml', 'scripts/texlive/*.mjs', 'scripts/texlive/*.ts', 'scripts/texlive/*.py', 'scripts/texlive/fixtures/**', 'App/backend/src/adapters/outbound/plugin-runtime/**', 'plugins/office/scripts/package-runtime.mjs']
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,6 +20,8 @@ jobs:
             target: linux-arm64
           - runner: macos-26
             target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
