@@ -61,14 +61,14 @@ export function usePanelViewStatus(
       setExpired(true);
       setCheckedScope(undefined);
       latest.current.invalidate();
-      void latest.current.reload?.().catch(() => undefined);
+      if (visible && !document.hidden) void latest.current.reload?.().catch(() => undefined);
     };
     window.addEventListener("memmy-panel-invalidated", handler);
     return () => {
       generation.current++;
       window.removeEventListener("memmy-panel-invalidated", handler);
     };
-  }, [client]);
+  }, [client, visible]);
   return {
     updated,
     expired,

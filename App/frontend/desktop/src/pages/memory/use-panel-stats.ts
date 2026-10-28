@@ -93,11 +93,11 @@ export function usePanelStats<T>(
       generation.current++;
       setState({ status: "loading" });
       setSnapshot(undefined);
-      void load().catch(() => undefined);
+      if (visible && !document.hidden) void load().catch(() => undefined);
     };
     window.addEventListener("memmy-panel-invalidated", clear);
     return () => window.removeEventListener("memmy-panel-invalidated", clear);
-  }, [client, section]);
+  }, [client, section, visible]);
   const preparingInterval = 100;
   usePanelPoll(Boolean(client), load, snapshot?.status === "preparing" ? preparingInterval : 60_000);
   return { state, snapshot, connectionError };
