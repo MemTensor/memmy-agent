@@ -146,6 +146,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
         if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
         viewStatus.clear();
         setState({ status: "ready", data });
+        if (data.page !== normalizedPage) setPage(data.page);
         return data;
       })
       .catch((error) => {

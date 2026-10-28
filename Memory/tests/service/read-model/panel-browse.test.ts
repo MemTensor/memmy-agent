@@ -1,10 +1,47 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { PanelBrowse } from "../../../src/service/panel/browse.js";
+import { panelSafetyToken } from "../../../src/storage/panel-security.js";
 const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 describe("file-backed fixed panel browsing", () => {
+  it("propagates a service page abort and never caches the delayed cancelled result", async () => {
+    const { service, db } = createTestService();
+    for (let i = 0; i < 25; i++) service.addMemory({ content: `cancel member ${i}`, source: "codex" });
+    const original = service.readPanel.bind(service);
+    let hold = false;
+    let observed: AbortSignal | undefined;
+    let finish = () => {};
+    const spy = vi.spyOn(service, "readPanel").mockImplementation(async <T>(method: string, args: unknown[], signal?: AbortSignal) => {
+      if (hold && method === "page") {
+        observed = signal;
+        return new Promise<{ safety: string; data: T }>(resolve => {
+          finish = () => resolve({ safety: panelSafetyToken(db.db), data: { items: [] } as T });
+        });
+      }
+      return original<T>(method, args, signal);
+    });
+    try {
+      const view = await service.browsePanel({ op: "create", filter: { layer: "L1" } }, {});
+      if (!("viewId" in view)) throw new Error("Missing view");
+      hold = true;
+      const controller = new AbortController();
+      const pending = Promise.resolve(service.browsePanel({ op: "page", viewId: view.viewId, page: 2 }, {}, controller.signal)).catch(error => error);
+      for (let i = 0; i < 15; i++) await Promise.resolve();
+      expect(observed).toBeDefined();
+      controller.abort();
+      expect((await pending).name).toBe("AbortError");
+      expect(observed!.aborted).toBe(true);
+      finish();
+      for (let i = 0; i < 15; i++) await Promise.resolve();
+      hold = false;
+      const retry = await service.browsePanel({ op: "page", viewId: view.viewId, page: 2 }, {});
+      expect("items" in retry && retry.items).toHaveLength(5);
+    } finally {
+      finish(); spy.mockRestore(); await service.stop();
+    }
+  });
   it("uses a readonly worker and preserves membership and visited pages until security invalidation", async () => {
     const { service, db } = createTestService();
     const repos = new Repositories(db.db);

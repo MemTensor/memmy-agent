@@ -113,4 +113,54 @@ describe("declared memory relationships", () => {
         ?.has(trace.id)
     ).toBe(true);
   });
+
+  it.each(["redacted", "deleted", "missing"])("deletes task-owned L1 after the raw source is %s", (state) => {
+    const { db, service, repos, raw, trace, episode } = setup();
+    if (state === "missing") db.db.prepare("DELETE FROM raw_turns WHERE id=?").run(raw.id);
+    else service.redactRawTurn(raw.id, { mode: state === "deleted" ? "delete" : "redact" });
+    const result = service.deletePanelTask(episode.id);
+    expect(result.deletedMemoryIds).toContain(trace.id);
+    expect(repos.memories.get(trace.id)).toBeUndefined();
+    expect(repos.memories.getIncludingDeleted(trace.id)?.deletedAt).toBeDefined();
+    expect(repos.runtime.getEpisode(episode.id)).toBeUndefined();
+  });
+
+  it("preserves a moved redacted trace until its current task is deleted", () => {
+    const { service, repos, raw, trace, episode } = setup();
+    const target = { ...episode, id: "redacted-target", l1MemoryIds: [], rawTurnIds: [], turnCount: 0 };
+    repos.runtime.createEpisode(target);
+    repos.runtime.rebindRawTurnEpisode(raw.id, episode.id, target.id);
+    service.redactRawTurn(raw.id);
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).not.toContain(trace.id);
+    expect(repos.memories.get(trace.id)).toBeDefined();
+    expect(service.deletePanelTask(target.id).deletedMemoryIds).toContain(trace.id);
+    expect(repos.memories.get(trace.id)).toBeUndefined();
+  });
+
+  it("does not delete another user's L1 from a forged historical task reference", () => {
+    const { db, service, repos, trace, episode } = setup();
+    const foreign = { ...trace, id: "foreign-trace", memoryKey: "foreign-trace", userId: "other-owner" };
+    repos.memories.insert(foreign);
+    db.db.prepare("UPDATE episodes SET l1_memory_ids_json=? WHERE id=?")
+      .run(JSON.stringify([trace.id, foreign.id]), episode.id);
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).not.toContain(foreign.id);
+    expect(repos.memories.get(foreign.id)).toBeDefined();
+  });
+
+  it("deletes a task-owned legacy trace without a raw-turn reference", () => {
+    const { service, repos, trace, episode } = setup();
+    repos.memories.insert({ ...trace, id: "legacy-owned", memoryKey: "legacy-owned", info: {},
+      properties: { ...trace.properties, internal_info: { memory_layer: "L1", trace: { episode_id: episode.id } } } });
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).toContain("legacy-owned");
+    expect(repos.memories.get("legacy-owned")).toBeUndefined();
+  });
+
+  it("rolls back task-owned trace deletion when deleting the task fails", () => {
+    const { db, service, repos, raw, trace, episode } = setup();
+    service.redactRawTurn(raw.id);
+    db.db.exec("CREATE TRIGGER fail_task_delete BEFORE DELETE ON episodes BEGIN SELECT RAISE(ABORT,'task failure'); END");
+    expect(() => service.deletePanelTask(episode.id)).toThrow("task failure");
+    expect(repos.memories.get(trace.id)).toBeDefined();
+    expect(repos.runtime.getEpisode(episode.id)).toBeDefined();
+  });
 });

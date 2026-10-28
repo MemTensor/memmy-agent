@@ -23,6 +23,25 @@ const tick = async () => { for (let i = 0; i < 10; i++) await Promise.resolve();
 afterEach(() => { workers.instances.length = 0; });
 
 describe("foreground reads during background statistics", () => {
+  it("terminates a cancelled active read before starting queued work and ignores its late reply", async () => {
+    const reader = new PanelReader("synthetic.sqlite");
+    const controller = new AbortController();
+    const cancelled = reader.run("page", [[], {}], 0, controller.signal).catch(error => error);
+    const old = workers.instances[0]!;
+    const nextRead = reader.run("members", [{}]);
+    controller.abort();
+    expect((await cancelled).name).toBe("AbortError");
+    old.emit("message", { id: old.messages[0]!.id, result: { safety: "old", data: "discard" } });
+    await tick();
+    expect(workers.instances).toHaveLength(1);
+    old.finishTermination(); await tick();
+    const next = workers.instances[1]!;
+    expect(next.messages.map(item => item.method)).toEqual(["members"]);
+    next.emit("message", { id: next.messages[0]!.id, result: { safety: "new", data: ["visible"] } });
+    await expect(nextRead).resolves.toEqual({ safety: "new", data: ["visible"] });
+    const stop = reader.stop(); next.finishTermination(); await stop;
+  });
+
   it.each(["stats", "overviewStats"])("waits for %s to yield, serves the page, and retries the unpublished result", async (method) => {
     const reader = new PanelReader("synthetic.sqlite");
     const statsDone = vi.fn();

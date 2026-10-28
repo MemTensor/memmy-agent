@@ -1,7 +1,7 @@
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
-import { effectiveEpisodeMemoryIds, maintainMemoryRelations, RAW_SOURCE_SQL } from "./memory-relations.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, RAW_SOURCE_SQL } from "./memory-relations.js";
 import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
@@ -792,6 +792,10 @@ export class MemoryRepository {
 
   effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; l1MemoryIds: string[]}>): Map<string, Set<string>> {
     return effectiveEpisodeMemoryIds(this.db, episodes);
+  }
+
+  ownedEpisodeL1Ids(episode: { id: string; userId: string; l1MemoryIds: string[] }): string[] {
+    return ownedEpisodeMemoryIds(this.db, episode);
   }
 
   /** Historical references remain stored; only live endpoints count in the UI. */

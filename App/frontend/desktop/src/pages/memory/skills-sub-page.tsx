@@ -217,6 +217,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
         if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
         viewStatus.clear();
         setState({ status: "ready", data });
+        if (data.page !== normalizedPage) setPage(data.page);
         return data;
       })
       .catch((error) => {

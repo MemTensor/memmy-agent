@@ -115,6 +115,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
         if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
         viewStatus.clear();
         setState({ status: "ready", data });
+        if (data.page !== normalizedPage) setPage(data.page);
         return data;
       })
       .catch((error) => {
@@ -214,7 +215,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
         </div>
         <MemoryRefreshButton onClick={async () => {
         props.client?.refreshPanelView?.("L2");
-          const data = await refresh(page, { useCache: false });
+          const data = await refresh(page, { useCache: false, preserve: true });
           if (data) {
             track(buildMemoryUiPanelRefreshedEvent({
               subPage: "policies",

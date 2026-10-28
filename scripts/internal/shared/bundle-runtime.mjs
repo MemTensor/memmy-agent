@@ -67,7 +67,7 @@ export async function bundleRuntime({ source, destination, packageDirectory, kin
         if (file.endsWith(".js") && !code.startsWith("..") && !/(?:^|\/)(?:skills|viewer|templates)(?:\/|$)/u.test(posix(code))) {
           const entry = posix(code);
           if (kind === "agent" ? entry === "runtime-main.js" || /^tools\/(?:computer-history\/mac\/(?:record-human-history|summarize-history)|computer-use\/extract-workflow-candidate)\.js$/u.test(entry)
-            : ["src/server/index.js", "src/cli/index.js"].includes(entry)) entryPoints.push({ in: file, out: kind === "agent" && entry === "runtime-main.js" ? "main" : entry.slice(0, -3) });
+            : ["src/server/index.js", "src/cli/index.js", "src/service/panel/reader-worker.js"].includes(entry)) entryPoints.push({ in: file, out: kind === "agent" && entry === "runtime-main.js" ? "main" : entry.slice(0, -3) });
         }
         else if (!file.endsWith(".map") && !/\.d\.[cm]?ts$/u.test(file)) assets.push(file);
       }
@@ -81,7 +81,9 @@ export async function bundleRuntime({ source, destination, packageDirectory, kin
   if (!entryPoints.length) throw new Error(`No compiled ${kind} runtime entrypoints in ${codeRoot}.`);
 
   // These modules are resolved by strings passed to workers or child processes.
-  const dynamicPackages = kind === "agent" ? ["isomorphic-git", "@playwright/mcp", "open-computer-use"] : [];
+  const dynamicPackages = kind === "agent"
+    ? ["isomorphic-git", "@playwright/mcp", "open-computer-use"]
+    : ["ignore"].filter(name => manifest.dependencies?.[name]);
   for (const name of dynamicPackages) {
     const directory = findPackage(name, packageRoot, source);
     if (!directory) throw new Error(`Missing dynamic runtime dependency: ${name}`);

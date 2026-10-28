@@ -349,7 +349,7 @@ export class MemoryService {
     const filter={...input.filter,...request};
     if(input.op==="create") return this.panelBrowse.create(filter,signal);
     if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
-    if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter);
+    if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter,signal);
     if(input.op==="check") return this.panelBrowse.check(input.viewId,filter);
     return this.panelBrowse.release(input.viewId,filter);
   }
@@ -2949,7 +2949,7 @@ export class MemoryService {
         this.deleteMemory(spanId, request);
         deletedMemoryIds.push(spanId);
       }
-      const currentL1Ids = this.repos.memories.effectiveEpisodeL1Ids([episode]).get(episode.id) ?? new Set<string>();
+      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode);
       for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
         this.deleteMemory(memoryId, request);

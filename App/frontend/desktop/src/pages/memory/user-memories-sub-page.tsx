@@ -69,6 +69,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
         if (requestId === requestIdRef.current) {
           viewStatus.clear();
           setState({ status: "ready", data });
+          if (data.page !== nextPage) setPage(data.page);
         }
         return data;
       })

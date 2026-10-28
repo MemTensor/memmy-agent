@@ -133,3 +133,19 @@ export function effectiveEpisodeMemoryIds(
     ])
   );
 }
+
+/** Governance uses current ownership, including invisible raw-turn tombstones.
+ * Historical membership alone must not delete a trace rebound to another task. */
+export function ownedEpisodeMemoryIds(
+  db: Database.Database,
+  episode: { id: string; userId: string; l1MemoryIds: string[] }
+): string[] {
+  if (!episode.l1MemoryIds.length) return [];
+  return db.prepare(`SELECT m.id FROM memories m
+    LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
+    WHERE m.id IN(SELECT value FROM json_each(?))
+      AND m.user_id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'
+      AND (r.id IS NULL OR r.user_id=m.user_id)
+      AND coalesce(r.episode_id,${EPISODE_SOURCE_SQL},?)=?
+    ORDER BY m.id`).pluck().all(JSON.stringify(episode.l1MemoryIds), episode.userId, episode.id, episode.id) as string[];
+}

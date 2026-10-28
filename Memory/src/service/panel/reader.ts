@@ -11,8 +11,8 @@ interface Pending {
   detach: () => void;
 }
 
-/** One readonly connection. Cancelling running synchronous SQL discards its result;
- * a bounded execution timeout terminates the worker before starting another. */
+/** One readonly connection. Cancellation and timeout terminate a running worker
+ * before dispatching another read; replies from the old worker are discarded. */
 export class PanelReader {
   private worker?: Worker;
   private pending: Pending[] = [];
@@ -33,6 +33,10 @@ export class PanelReader {
       return Promise.reject(new MemoryServiceError("rate_limited", "Panel reader is busy"));
     return new Promise<Result<unknown>>((resolve, reject) => {
       const abort = () => {
+        if (this.active === itemToQueue) {
+          this.fail(abortError());
+          return;
+        }
         this.pending = this.pending.filter((item) => item !== itemToQueue);
         itemToQueue.detach();
         reject(abortError());
