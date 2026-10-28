@@ -8017,6 +8017,105 @@ ol.memory-markdown__list {
   color: var(--color-status-error);
 }
 
+.memory-panel-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+  border: 1px solid color-mix(in srgb, var(--color-status-error) 28%, transparent);
+  border-radius: var(--radius-card-lg);
+  background: var(--color-background-paper);
+  padding: 16px 18px;
+  color: var(--color-text-ink);
+}
+
+.memory-panel-error--compact {
+  padding: 12px 14px;
+}
+
+.memory-panel-error__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--color-status-error);
+}
+
+.memory-panel-error__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memory-panel-error__title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.memory-panel-error__status {
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+}
+
+.memory-panel-error__detail {
+  font-size: 11px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.memory-panel-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.memory-panel-error__actions .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-panel-error__feedback {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.memory-panel-error__feedback--success {
+  color: var(--color-status-success);
+}
+
+.memory-panel-error__feedback--error {
+  color: var(--color-status-error);
+}
+
+.memory-panel-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-card);
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.memory-panel-status--success {
+  background: color-mix(in srgb, var(--color-status-success) 10%, transparent);
+  color: var(--color-status-success);
+}
+
+.memory-panel-status--error {
+  background: color-mix(in srgb, var(--color-status-error) 10%, transparent);
+  color: var(--color-status-error);
+}
+
 @media (max-width: 760px) {
   body:has(.memory-drawer) .window-drag-region {
     right: min(100vw, calc(100vw - 10px));
