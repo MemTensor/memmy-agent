@@ -1,3 +1,5 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
+import { sharedProjectIds } from "../namespace/shared-project.js";
 import {
   canonicalJson,
   sha256Hex,
@@ -245,7 +247,7 @@ export class WorkMemoryPipeline {
       throw new Error(`work memory trajectory hash mismatch: ${job.id}`);
     }
     const session = job.sessionId ? this.deps.repos.runtime.getSession(job.sessionId) : undefined;
-    if (!session || session.userId !== job.userId) {
+    if (!session) {
       throw new Error(`work memory job session scope mismatch: ${job.id}`);
     }
     const projectId = normalizeProjectId(session.projectId);
@@ -294,7 +296,7 @@ export class WorkMemoryPipeline {
     const batch = this.deps.repos.l3WorldModels.getBatch(batchId);
     if (!batch) throw new Error(`work memory batch not found: ${batchId}`);
     const session = this.deps.repos.runtime.getSession(batch.sessionId);
-    if (!session || session.userId !== batch.userId || normalizeProjectId(session.projectId) !== normalizeProjectId(batch.projectId)) {
+    if (!session || normalizeProjectId(session.projectId) !== normalizeProjectId(batch.projectId)) {
       throw new Error(`work memory batch session scope mismatch: ${batchId}`);
     }
     return this.scheduleQaInTransaction({
@@ -320,7 +322,7 @@ export class WorkMemoryPipeline {
   ): WorkMemoryQaPair | undefined {
     const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
     if (!rawTurn || rawTurn.deletedAt || rawTurn.redactedAt) return undefined;
-    if (rawTurn.userId !== scope.userId || rawTurn.sessionId !== scope.sessionId) {
+    if (rawTurn.sessionId !== scope.sessionId) {
       throw new Error(`work memory RawTurn scope mismatch: ${rawTurnId}`);
     }
     const user = normalizeQaText(rawTurn.userText ?? "");
@@ -340,9 +342,10 @@ export class WorkMemoryPipeline {
     at: string
   ): EvolutionJobRecord | undefined {
     const session = this.deps.repos.runtime.getSession(input.sessionId);
-    if (!session || session.userId !== input.userId) {
+    if (!session) {
       throw new Error(`work memory session scope mismatch: ${input.sessionId}`);
     }
+    input = { ...input, userId: DEVICE_MEMORY_OWNER };
     const qa = input.qa;
     const trajectoryHash = trajectoryHashForQa(qa);
     const projectId = normalizeProjectId(input.projectId);
@@ -427,7 +430,7 @@ export class WorkMemoryPipeline {
         ? ftsIds
         : this.deps.repos.memories.searchPatternIds(terms, filter, WORK_MEMORY_CANDIDATE_TOP_K);
       const memories = this.deps.repos.memories.getMany(fallbackIds.map((hit) => hit.id));
-      return { candidate, matches: memories.filter((memory) => isWorkMemoryInScope(memory, filter)) };
+      return { candidate, matches: memories.filter((memory) => isWorkMemoryInScope(memory, filter, sharedProjectIds(this.deps.repos.db, filter.workMemoryProjectId ?? null))) };
     });
   }
 
@@ -775,11 +778,10 @@ function validateDecisionOutput(
   });
 }
 
-function isWorkMemoryInScope(memory: MemoryRow, filter: MemoryFilter): boolean {
+function isWorkMemoryInScope(memory: MemoryRow, filter: MemoryFilter, projectIds: Array<string | null>): boolean {
   if (memory.memoryLayer !== "L1" || memory.properties.internal_info.memory_kind !== "work_memory") return false;
-  if (filter.workMemoryUserId !== undefined && memory.userId !== filter.workMemoryUserId) return false;
   const project = normalizeProjectId(typeof memory.info.project_id === "string" ? memory.info.project_id : null);
-  return filter.workMemoryProjectId === undefined || project === filter.workMemoryProjectId;
+  return filter.workMemoryProjectId === undefined || projectIds.includes(project);
 }
 
 function workTopicFromMemory(memory: MemoryRow): string {

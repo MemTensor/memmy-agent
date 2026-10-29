@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1007,6 +1009,41 @@ describe("standalone Agent source executor", () => {
     expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).not.toContain("memmy-resume-hook.mjs");
     expect((await executor.list()).sources[0]?.status).toBe("not_connected");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
+
+    // Reverse acceptance in a fresh process: stored removal must suppress
+    // automatic installation and leave no command for a new native event.
+    const hookSettings = readFileSync(join(cursorRoot, "hooks.json"), "utf8");
+    const moduleUrl = (relative: string) => new URL(relative, import.meta.url).href;
+    const childScript = `
+      import { readFileSync } from "node:fs";
+      import { createAgentSourceExecutor } from ${JSON.stringify(moduleUrl("../src/agent-source/runtime.ts"))};
+      import { createSourceRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/adapters/source-registry.ts"))};
+      import { createCursorSkillTarget } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/cursor/index.ts"))};
+      import { createSkillTargetRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/target-registry.ts"))};
+      let writes = 0;
+      const executor = createAgentSourceExecutor({
+        service: { addMemory() { writes += 1; }, completeSourceTurn() { writes += 1; } },
+        configPath: ${JSON.stringify(configPath)}, statePath: ${JSON.stringify(statePath)},
+        initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+        sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "cursor", displayName: "Cursor", builtin: true, dataPath: ${JSON.stringify(cursorRoot)} }, detect: async () => true, async *scan() {} }]),
+        integrationRegistry: createSkillTargetRegistry([createCursorSkillTarget({ rootDirectory: ${JSON.stringify(cursorRoot)}, memmyConfigPath: ${JSON.stringify(configPath)} })])
+      });
+      executor.startAutomation();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const settings = JSON.parse(readFileSync(${JSON.stringify(join(cursorRoot, "hooks.json"))}, "utf8"));
+      const commands = Object.values(settings.hooks ?? {}).flat().filter(entry => String(entry.command ?? "").includes("memmy-resume-hook"));
+      const status = (await executor.list()).sources[0]?.status;
+      await executor.dispose();
+      console.log(JSON.stringify({ writes, hookCommands: commands.length, status }));
+    `;
+    const fresh = spawnSync(process.execPath, ["--import", fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      "--input-type=module", "--eval", childScript], {
+      env: { ...process.env, MEMMY_HOME: root, MEMMY_MEMORY_HOME: join(root, "memory-service") },
+      encoding: "utf8", timeout: 10_000
+    });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(JSON.parse(fresh.stdout.trim().split("\n").at(-1)!)).toEqual({ writes: 0, hookCommands: 0, status: "not_connected" });
+    expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).toBe(hookSettings);
 
     await executor.mutateConnection("cursor", "plugin", "POST", "auto_inject");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);

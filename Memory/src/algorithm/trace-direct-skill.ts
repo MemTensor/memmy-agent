@@ -421,7 +421,6 @@ export function decideClusterAssignment(
     stage: "coarse" | "fine";
   } | undefined;
   for (const cluster of clusters) {
-    if (cluster.userId !== episode.userId) continue;
     if (episode.projectId && cluster.projectId && episode.projectId !== cluster.projectId) continue;
     const scored = scoreClusterJoin(episode, cluster, config);
     if (scored.score === null) continue;

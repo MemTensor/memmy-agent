@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import { EpisodeSelectionRequired, selectionInput, selectionKey, selectEpisode, type EpisodeSelectionContext, type EpisodeSelectionResult } from "./episode-selection.js";
 import {
   captureTurnSteps,
@@ -148,7 +149,7 @@ export function toolOutcomeFromObservation(input: ToolObserveRequest, rawTurn: R
   return { toolId: input.toolName, success: input.error !== undefined ? false : resultSuccess, reason: failureReasonFromToolObservation(event, call) };
 }
 
-export function toolRepairContext(session: SessionRecord, episode: EpisodeRecord): string { return [session.userId, session.projectId ?? session.workspaceId ?? session.conversationId ?? "default", episode.id].join(":"); }
+export function toolRepairContext(session: SessionRecord, episode: EpisodeRecord): string { return [session.projectId ?? session.workspaceId ?? session.conversationId ?? "default", episode.id].join(":"); }
 export function toolSignalKey(toolId: string, context: string): string { return `${toolId}|${context}`; }
 export function toolRepairContextHash(toolId: string, context: string): string { return stableHash(`${toolId}\n${context}`).slice(0, 16); }
 export function repairEvidenceValueDiff(high: MemoryRow[], low: MemoryRow[]): number { if (!high.length || !low.length) return Number.POSITIVE_INFINITY; return Math.abs(meanTraceValue(high) - meanTraceValue(low)); }
@@ -605,17 +606,17 @@ export class SessionTurnService {
         if (!raw) {
           const observation = operation === "observeTool" ? toolObservationEvent(request as unknown as ToolObserveRequest) : undefined;
           raw = this.deps.repos.runtime.insertRawTurn({ id: rawTurnIdForSessionTurn(session.id, turnId), sessionId: session.id,
-            userId: session.userId, conversationId: session.conversationId, turnId,
+            userId: DEVICE_MEMORY_OWNER, conversationId: session.conversationId, turnId,
             userText: typeof request.task === "string" ? request.task : undefined,
             toolCalls: observation ? [observation.toolCall] : [], toolResults: observation?.toolResult ? [observation.toolResult] : [],
             sourceMemoryIds: [], usage: {}, messagePayload: { legacy_event: { operation, subagentId: request.subagentId, metadata: request.metadata } },
             status: operation === "subagentStart" ? "started" : "observed", createdAt: row.created_at });
-          this.deps.repos.runtime.insertArtifact({ sessionId: session.id, rawTurnId: raw.id, userId: session.userId,
+          this.deps.repos.runtime.insertArtifact({ sessionId: session.id, rawTurnId: raw.id, userId: DEVICE_MEMORY_OWNER,
             kind: operation === "observeTool" ? "tool_call" : operation === "useSkill" ? "skill_use" : "subagent_start",
             payload: observation ? { phase: observation.phase, value: observation.event } : { subagentId: request.subagentId, task: request.task, skillId: args[0], metadata: request.metadata }, createdAt: row.created_at });
           this.queueAssignment(raw);
           if (operation === "useSkill") this.deps.repos.runtime.insertSkillTrial({ id: `trial_${stableHash(row.id).slice(0, 20)}`,
-            userId: session.userId, sessionId: session.id, skillMemoryId: String(args[0]), rawTurnId: raw.id,
+            userId: DEVICE_MEMORY_OWNER, sessionId: session.id, skillMemoryId: String(args[0]), rawTurnId: raw.id,
             turnId, status: "pending", outcome: "unknown", createdAt: row.created_at });
         }
       }
@@ -701,7 +702,7 @@ export class SessionTurnService {
       if (selection.episodeId && !target && !continueBase) throw new Error("selected episode was removed");
       if (!target) {
         target = this.deps.repos.runtime.createEpisode({
-          id: typeof state.requestedEpisodeId === "string" ? state.requestedEpisodeId : newId("episode"), sessionId: session.id, userId: session.userId,
+          id: typeof state.requestedEpisodeId === "string" ? state.requestedEpisodeId : newId("episode"), sessionId: session.id, userId: DEVICE_MEMORY_OWNER,
           projectId: session.projectId ?? session.workspaceId, conversationId: session.conversationId,
           status: "open", l1MemoryIds: [], rawTurnIds: [], feedbackIds: [], decisionRepairIds: [],
           l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [], turnCount: 0,
@@ -745,7 +746,7 @@ export class SessionTurnService {
         const closed = this.deps.repos.runtime.closeEpisode(target.id, { closeReason: "session_closed" }, at);
         if (closed) this.deps.finalizeClosedEpisode(closed, at, "session_closed");
       } else {
-        this.deps.enqueueJob({ jobType: "episode_idle_close", userId: session.userId, sessionId: session.id,
+        this.deps.enqueueJob({ jobType: "episode_idle_close", userId: DEVICE_MEMORY_OWNER, sessionId: session.id,
           episodeId: target.id, dedupeKey: `episode_idle_close:${raw.id}`,
           payload: { triggerRawTurnId: raw.id, triggerEpisodeId: target.id, triggeredAt: raw.createdAt }, createdAt: at });
       }
@@ -906,7 +907,7 @@ export class SessionTurnService {
       kind: "session",
       op: "created",
       entityId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "session_opened",
       after: session,
       source: "session.open",
@@ -914,7 +915,7 @@ export class SessionTurnService {
     });
     const body = {
       sessionId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       source: session.source,
       profileId: session.profileId,
       projectId: session.projectId,
@@ -1025,7 +1026,7 @@ export class SessionTurnService {
         kind: "session",
         op: "created",
         entityId: session.id,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         changeType: "session_opened",
         after: session,
         source: "session.open",
@@ -1068,15 +1069,14 @@ export class SessionTurnService {
     const savedWorkspaceHostId = optionalMetaString(session.meta, "workspace_host_id");
     const requestProjectId = request.projectId ?? request.namespace?.projectId;
     const requestWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
-    const mismatch = session.userId !== namespace.userId ||
-      session.source !== (request.source ?? namespace.source) ||
+    const mismatch = session.source !== (request.source ?? namespace.source) ||
       session.profileId !== (request.profileId ?? namespace.profileId) ||
       session.hostSessionKey !== namespace.sessionKey ||
       (requestProjectId !== undefined && requestProjectId !== session.projectId) ||
       (requestWorkspaceId !== undefined && requestWorkspaceId !== session.workspaceId) ||
       (request.workspaceUri !== undefined && request.workspaceUri !== savedWorkspaceUri) ||
       (request.workspaceHostId !== undefined && request.workspaceHostId !== savedWorkspaceHostId) ||
-      (request.workspaceUri !== undefined && workspace.projectId !== (session.projectId ?? null));
+      (request.workspaceUri !== undefined && !savedWorkspaceUri && workspace.projectId !== (session.projectId ?? null));
     if (mismatch) {
       throw new MemoryServiceError("conflict", "l3_world_model_v2_session_scope_conflict");
     }
@@ -1117,7 +1117,7 @@ export class SessionTurnService {
       kind: "session",
       op: "updated",
       entityId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "session_closed",
       before: session,
       after: closedWithMeta,
@@ -1132,7 +1132,7 @@ export class SessionTurnService {
   ): ReturnType<SessionTurnService["openSession"]> {
     return {
       sessionId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       source: session.source,
       profileId: session.profileId,
       projectId: session.projectId ?? null,
@@ -1203,7 +1203,7 @@ export class SessionTurnService {
         kind: "session",
         op: "updated",
         entityId: sessionId,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         changeType: "session_closed",
         before: existing,
         after: session,
@@ -1263,7 +1263,7 @@ export class SessionTurnService {
       sessionId: session.id,
       episodeId: episode?.id,
       turnId,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       conversationId: session.conversationId,
       assistantText: summary,
       toolCalls: [],
@@ -1290,7 +1290,7 @@ export class SessionTurnService {
       kind: "raw_turn",
       op: "created",
       entityId: rawTurn.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "raw_turn_created",
       after: rawTurn,
       source: "session.compact",
@@ -1303,7 +1303,7 @@ export class SessionTurnService {
       const timeZone = request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone");
       const l1 = this.deps.buildMemory({
         id: `trace_${stableHash(`compact:L1:${rawTurn.id}`).slice(0, 20)}`,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         conversationId: session.conversationId,
         sessionId: session.id,
         agentId: session.source,
@@ -1378,7 +1378,7 @@ export class SessionTurnService {
         kind: "trace",
         op: upsert.created ? "created" : "updated",
         entityId: upsert.memory.id,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         changeType: upsert.created ? "create" : "update",
         before: upsert.previous,
         after: upsert.memory,
@@ -1388,7 +1388,7 @@ export class SessionTurnService {
       if (episode) this.deps.repos.runtime.appendEpisodeTurn(episode?.id, rawTurn.id, upsert.memory.id, at);
       jobs.push(this.deps.enqueueJob({
         jobType: "embedding",
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         sessionId: session.id,
         episodeId: episode?.id,
         targetMemoryId: upsert.memory.id,
@@ -1397,7 +1397,7 @@ export class SessionTurnService {
       }));
     }
     this.deps.repos.runtime.insertAudit({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       actor: request.namespace ? { ...request.namespace } : {},
       action: "compact",
@@ -1614,10 +1614,6 @@ export class SessionTurnService {
       const adoptedImport = this.adoptLegacyImport(request, namespace, normalized, scope, contentHash);
       if (adoptedImport) return adoptedImport;
       const previous = this.deps.repos.runtime.latestSourceTurnCapture(scope);
-      if (previous) {
-        namespace.userId = previous.userId;
-        scope.userId = previous.userId;
-      }
       normalized.namespace = namespace;
       request = { ...request, namespace };
       let gapEpisode: EpisodeRecord | undefined;
@@ -1665,8 +1661,6 @@ export class SessionTurnService {
       const session = resolved as SessionRecord;
       // A scan may be the first completion of a Hook Session opened by another account.
       // Keep the Session owner and all persisted capture references consistent.
-      namespace.userId = session.userId;
-      scope.userId = session.userId;
       const observed = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, identity.turnId);
       if (observed?.episodeId && this.deps.repos.runtime.getEpisode(observed.episodeId)?.status !== "open") {
         return detachLegacyHistory("source_episode_closed");
@@ -1675,7 +1669,7 @@ export class SessionTurnService {
       const episode = requestedEpisodeId
         ? this.deps.repos.runtime.getEpisode(requestedEpisodeId)
         : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-      if (request.episodeId && (!episode || episode.sessionId !== session.id || episode.userId !== session.userId)) {
+      if (request.episodeId && (!episode || episode.sessionId !== session.id)) {
         throw new MemoryServiceError("forbidden", "source_episode_scope_conflict");
       }
       if (episode && episode.status !== "open") {
@@ -1704,7 +1698,7 @@ export class SessionTurnService {
         throw new MemoryServiceError("conflict", "source_session_scope_conflict");
       }
       if (observed && !this.deps.repos.runtime.bindRawTurnSourceConversation({
-        id: observed.id, sessionId: session.id, userId: session.userId, turnId: identity.turnId
+        id: observed.id, sessionId: session.id, userId: DEVICE_MEMORY_OWNER, turnId: identity.turnId
       }, identity.conversationId)) {
         throw new MemoryServiceError("forbidden", "source_raw_turn_scope_conflict");
       }
@@ -1823,8 +1817,6 @@ export class SessionTurnService {
     const episode = this.deps.repos.runtime.getEpisode(request.episodeId);
     const episodeSession = episode ? this.deps.repos.runtime.getSession(episode.sessionId) : undefined;
     const inScope = Boolean(episode && episodeSession &&
-      episode.userId === namespace.userId &&
-      episodeSession.userId === namespace.userId &&
       episodeSession.source === sourceTurn.source &&
       episodeSession.profileId === sourceTurn.profileId &&
       (!episodeSession.conversationId || episodeSession.conversationId === sourceTurn.conversationId) &&
@@ -1888,7 +1880,7 @@ export class SessionTurnService {
       kind: "session",
       op: "updated",
       entityId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "session_closed",
       before: existing,
       after: session,
@@ -2216,7 +2208,7 @@ export class SessionTurnService {
           sessionId: session.id,
           episodeId: episode?.id,
           turnId,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           conversationId: session.conversationId,
           userText: request.query,
           assistantText: request.answer,
@@ -2264,7 +2256,7 @@ export class SessionTurnService {
           kind: "raw_turn",
           op: "created",
           entityId: rawTurn.id,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           changeType: "raw_turn_created",
           after: rawTurn,
           source: "turn.complete",
@@ -2277,7 +2269,7 @@ export class SessionTurnService {
           kind: "raw_turn",
           op: "updated",
           entityId: rawTurn.id,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           changeType: "raw_turn_update",
           before: existingRawTurn,
           after: rawTurn,
@@ -2320,7 +2312,7 @@ export class SessionTurnService {
         const signature = signatureFromTraceParts(step.tags, step.toolCalls, step.reflection.text ?? "");
         const l1Memory = this.deps.buildMemory({
           id: `trace_${stableHash(`L1:${session.id}:${step.turnId}:${step.stepIndex}`).slice(0, 20)}`,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           conversationId: session.conversationId,
           sessionId: session.id,
           agentId: session.source,
@@ -2409,7 +2401,7 @@ export class SessionTurnService {
           const qaAnswer = sourceRawTurn.assistantText ?? "";
           if (qaQuery.trim() && qaAnswer.trim()) {
             const capture = this.deps.repos.captureClaims.claim({
-              userId: session.userId,
+              userId: DEVICE_MEMORY_OWNER,
               source: normalizeMemoryCaptureSource(session.source),
               qaHash: memoryCaptureQaHash(qaQuery, qaAnswer),
               primaryMemoryId: l1Memory.id,
@@ -2462,7 +2454,7 @@ export class SessionTurnService {
           kind: "trace",
           op: upsert.created ? "created" : "updated",
           entityId: upsert.memory.id,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           changeType: upsert.created ? "create" : "update",
           before: upsert.previous,
           after: upsert.memory,
@@ -2494,7 +2486,7 @@ export class SessionTurnService {
           });
           jobs.push(this.deps.enqueueJob({
             jobType: "trace_summary",
-            userId: session.userId,
+            userId: DEVICE_MEMORY_OWNER,
             sessionId: session.id,
             episodeId: episode?.id,
             targetMemoryId: upsert.memory.id,
@@ -2528,7 +2520,7 @@ export class SessionTurnService {
           sessionId: session.id,
           episodeId: episode?.id,
           rawTurnId: rawTurn.id,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           kind: artifact.kind,
           uri: artifact.uri,
           payload: artifact.payload,
@@ -2540,14 +2532,14 @@ export class SessionTurnService {
           kind: "artifact",
           op: "created",
           entityId: artifactId,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           changeType: "artifact_created",
           after: {
             id: artifactId,
             sessionId: session.id,
             episodeId: episode?.id,
             rawTurnId: rawTurn.id,
-            userId: session.userId,
+            userId: DEVICE_MEMORY_OWNER,
             kind: artifact.kind,
             uri: artifact.uri,
             payload: artifact.payload,
@@ -2590,7 +2582,7 @@ export class SessionTurnService {
       if (episode && rawTurnFirstCompleted && !completedEndTopicDecision) {
         jobs.push(this.deps.enqueueJob({
           jobType: "episode_idle_close",
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           sessionId: session.id,
           episodeId: episode?.id,
           dedupeKey: `episode_idle_close:${rawTurn.id}`,
@@ -2607,7 +2599,7 @@ export class SessionTurnService {
         if (!episode.title?.trim()) {
           jobs.push(this.deps.enqueueJob({
             jobType: "episode_title",
-            userId: session.userId,
+            userId: DEVICE_MEMORY_OWNER,
             sessionId: session.id,
             episodeId: episode?.id,
             payload: { stage: "provisional" },
@@ -2719,7 +2711,7 @@ export class SessionTurnService {
         sessionId: session.id,
         episodeId: episode?.id,
         turnId,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         conversationId: session.conversationId,
         toolCalls: [],
         toolResults: [],
@@ -2758,7 +2750,7 @@ export class SessionTurnService {
         sessionId: session.id,
         episodeId: episode?.id,
         rawTurnId: rawTurn.id,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         kind: "tool_call",
         payload: {
           phase: observation.phase,
@@ -2780,7 +2772,7 @@ export class SessionTurnService {
         kind: "raw_turn",
         op: createdRawTurn ? "created" : "updated",
         entityId: rawTurn.id,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         changeType: createdRawTurn ? "raw_turn_created" : "raw_turn_update",
         before: createdRawTurn ? undefined : rawTurn,
         after: updatedRawTurn,
@@ -2824,7 +2816,7 @@ export class SessionTurnService {
       if (window.some(item => item.success) || window.length < this.deps.config.algorithm.feedback.failureThreshold) continue;
       const contextHash = toolRepairContextHash(event.toolId, context);
       const since = new Date(Date.parse(event.at) - this.deps.config.algorithm.feedback.cooldownMs).toISOString();
-      if (this.deps.config.algorithm.feedback.cooldownMs > 0 && this.deps.repos.runtime.listDecisionRepairs({ userId: session.userId, contextHash, since, limit: 1 }).length) continue;
+      if (this.deps.config.algorithm.feedback.cooldownMs > 0 && this.deps.repos.runtime.listDecisionRepairs({ userId: DEVICE_MEMORY_OWNER, contextHash, since, limit: 1 }).length) continue;
       const evidence = this.failureBurstRepairEvidence({ session, toolId: event.toolId, reason: event.reason ?? "tool failed", limit: this.deps.config.algorithm.feedback.evidenceLimit });
       const valueDiff = repairEvidenceValueDiff(evidence.highValueMemories, evidence.lowValueMemories);
       if (valueDiff < this.deps.config.algorithm.feedback.valueDelta) continue;
@@ -2935,7 +2927,7 @@ export class SessionTurnService {
     if (cooldownMs > 0) {
       const since = new Date(Date.parse(at) - cooldownMs).toISOString();
       const recent = this.deps.repos.runtime.listDecisionRepairs({
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         contextHash: burst.contextHash,
         since,
         limit: 1
@@ -2985,7 +2977,7 @@ export class SessionTurnService {
       sessionId: session.id,
       episodeId: episode.id,
       rawTurnId: rawTurn.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId ?? session.workspaceId,
       contextHash: burst.contextHash,
       issue: `Repeated ${burst.toolId} failure: ${clip(reason, 180)}`,
@@ -3025,7 +3017,7 @@ export class SessionTurnService {
     this.deps.repos.runtime.appendChange({
       memoryId: repair.id,
       namespaceId: this.deps.namespaceIdFromSession(session),
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       kind: "repair",
       op: "created",
       entityId: repair.id,
@@ -3036,7 +3028,7 @@ export class SessionTurnService {
     });
     this.deps.enqueueJob({
       jobType: "negative_experience",
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       episodeId: episode.id,
       payload: {
@@ -3051,7 +3043,7 @@ export class SessionTurnService {
     if (deferDecisionRepair) {
       this.deps.enqueueJob({
         jobType: "decision_repair",
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         sessionId: session.id,
         episodeId: episode.id,
         dedupeKey: `decision_repair:${repair.id}`,
@@ -3188,7 +3180,7 @@ export class SessionTurnService {
       sessionId: session.id,
       episodeId: episode?.id,
       turnId,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       conversationId: session.conversationId,
       userText: input.task,
       toolCalls: [],
@@ -3213,7 +3205,7 @@ export class SessionTurnService {
       kind: "raw_turn",
       op: "created",
       entityId: rawTurn.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "raw_turn_created",
       after: rawTurn,
       source: "subagent.start",
@@ -3223,7 +3215,7 @@ export class SessionTurnService {
       sessionId: session.id,
       episodeId: episode?.id,
       rawTurnId: rawTurn.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       kind: "subagent_start",
       payload: {
         subagentId,
@@ -3233,7 +3225,7 @@ export class SessionTurnService {
       createdAt: at
     });
     this.deps.repos.runtime.insertAudit({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       actor: input.namespace ? { ...input.namespace } : {},
       action: "subagent_start",
@@ -3393,7 +3385,7 @@ export class SessionTurnService {
       });
     const repairs = contextHash
       ? this.deps.repos.runtime.listDecisionRepairs({
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           contextHash,
           limit: 5
         })
@@ -3493,7 +3485,7 @@ export class SessionTurnService {
     const correction = request.userMemoryCorrection;
     if (correction) {
       const target = this.deps.repos.userMemories.get(correction.targetMemoryId);
-      if (!target || target.userId !== rawTurn.userId || target.status !== "active") {
+      if (!target || target.status !== "active") {
         throw new MemoryServiceError("not_found", `active user memory not found: ${correction.targetMemoryId}`);
       }
       const content = correction.revisedContent.trim();
@@ -3942,7 +3934,7 @@ export class SessionTurnService {
     const target = previousL1MemoryId ? this.deps.repos.memories.get(previousL1MemoryId) : undefined;
     const feedback = this.deps.repos.runtime.insertFeedback({
       id: newId("feedback"),
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       conversationId: session.conversationId,
       sessionId: session.id,
@@ -3968,7 +3960,7 @@ export class SessionTurnService {
     if (attitude === "negative") {
       jobs.push(this.deps.enqueueJob({
         jobType: "decision_repair",
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         sessionId: session.id,
         episodeId: previous.episodeId,
         payload: {
@@ -3983,7 +3975,7 @@ export class SessionTurnService {
       for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
         jobs.push(this.deps.enqueueJob({
           jobType: "skill_trial_resolve",
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           sessionId: trial.sessionId,
           episodeId: trial.episodeId,
           payload: {
@@ -4002,7 +3994,7 @@ export class SessionTurnService {
       kind: "feedback",
       op: "created",
       entityId: feedback.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "feedback",
       after: feedback,
       source: "turn.judge",
@@ -4333,7 +4325,7 @@ export class SessionTurnService {
       method: classification.method
     }).slice(0, 32);
     const duplicate = this.deps.repos.runtime.listFeedback({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       episodeId: episode.id,
       l1MemoryId: target.id,
@@ -4350,7 +4342,7 @@ export class SessionTurnService {
     };
     const feedback = this.deps.repos.runtime.insertFeedback({
       id: newId("feedback"),
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       conversationId: session.conversationId,
       sessionId: session.id,
@@ -4368,7 +4360,7 @@ export class SessionTurnService {
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
     this.deps.enqueueJob({
       jobType: "decision_repair",
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       episodeId: episode.id,
       payload: {
@@ -4381,7 +4373,7 @@ export class SessionTurnService {
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         sessionId: trial.sessionId,
         episodeId: trial.episodeId,
         payload: {
@@ -4399,7 +4391,7 @@ export class SessionTurnService {
       kind: "feedback",
       op: "created",
       entityId: feedback.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "feedback",
       after: feedback,
       source: "turn.feedback_classifier",
@@ -4423,7 +4415,7 @@ export class SessionTurnService {
       userText
     }).slice(0, 32);
     const duplicate = this.deps.repos.runtime.listFeedback({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       episodeId: episode.id,
       l1MemoryId: target.id,
@@ -4439,7 +4431,7 @@ export class SessionTurnService {
     };
     const feedback = this.deps.repos.runtime.insertFeedback({
       id: newId("feedback"),
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       conversationId: session.conversationId,
       sessionId: session.id,
@@ -4457,7 +4449,7 @@ export class SessionTurnService {
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
     this.deps.enqueueJob({
       jobType: "decision_repair",
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.id,
       episodeId: episode.id,
       payload: {
@@ -4470,7 +4462,7 @@ export class SessionTurnService {
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         sessionId: trial.sessionId,
         episodeId: trial.episodeId,
         payload: {
@@ -4488,7 +4480,7 @@ export class SessionTurnService {
       kind: "feedback",
       op: "created",
       entityId: feedback.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       changeType: "feedback",
       after: feedback,
       source,
@@ -4566,7 +4558,7 @@ export class SessionTurnService {
     const episode = this.deps.repos.runtime.createEpisode({
       id: episodeId ?? newId("episode"),
       sessionId: session.id,
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId ?? session.workspaceId,
       conversationId: session.conversationId,
       status: "open",

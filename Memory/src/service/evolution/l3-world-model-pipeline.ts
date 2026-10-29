@@ -133,7 +133,7 @@ export class L3WorldModelTraceFieldPipeline {
     const batch = this.deps.repos.l3WorldModels.getBatch(batchId);
     if (!batch) throw new L3WorldModelTerminalEvidenceError(`missing batch: ${batchId}`);
     const session = this.deps.repos.runtime.getSession(batch.sessionId);
-    if (!session || session.userId !== batch.userId || (session.projectId ?? null) !== (batch.projectId ?? null)) {
+    if (!session || (session.projectId ?? null) !== (batch.projectId ?? null)) {
       throw new L3WorldModelTerminalEvidenceError("L3 World Model batch session scope mismatch");
     }
     const traces = this.deps.repos.l3WorldModels.listBatchTraces(batchId);
@@ -158,7 +158,6 @@ export class L3WorldModelTraceFieldPipeline {
           : undefined;
       if (
         !trace ||
-        feedback.userId !== batch.userId ||
         feedback.sessionId !== batch.sessionId ||
         (feedback.projectId ?? null) !== (batch.projectId ?? null)
       ) {
@@ -184,7 +183,7 @@ export class L3WorldModelTraceFieldPipeline {
     for (const trace of traces) {
       const memory = this.deps.repos.memories.get(trace.l1MemoryId);
       if (!memory) continue;
-      if (memory.userId !== batch.userId || memory.sessionId !== batch.sessionId) {
+      if (memory.sessionId !== batch.sessionId) {
         throw new L3WorldModelTerminalEvidenceError(`L1 scope mismatch: ${memory.id}`);
       }
       if (!memory.deletedAt && memory.status !== "deleted" && usableRawTurnIds.has(trace.rawTurnId)) {
@@ -267,7 +266,8 @@ function assertJsonArray(value: unknown[], label: string): JsonValue[] {
 }
 
 function assertRawTurnScope(rawTurn: RawTurnRecord, userId: string, sessionId: string): void {
-  if (rawTurn.userId !== userId || rawTurn.sessionId !== sessionId) {
+  void userId;
+  if (rawTurn.sessionId !== sessionId) {
     throw new L3WorldModelTerminalEvidenceError(`RawTurn scope mismatch: ${rawTurn.id}`);
   }
 }

@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { MemmyConfig } from "../../config/index.js";
 import { isRecord } from "../../utils/json.js";
 import type { StorageBackendCapabilities } from "../../storage/backend.js";
@@ -367,13 +368,13 @@ export class PanelReadModel {
     dailyActivity: Array<{ date: string; count: number }>;
   } {
     const memories = this.deps.repos.memories.listStats();
-    const userId = input.userId ?? input.namespace?.userId;
+    const userId = DEVICE_MEMORY_OWNER;
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
     return {
       counts: {
         memories: memories.filter((memory) => memory.memoryLayer === "L1").length,
-        userMemories: userId ? this.deps.repos.userMemories.countForPanel({ userId }) : 0,
+        userMemories: this.deps.repos.userMemories.countForPanel({ userId }),
         skills: memories.filter((memory) => memory.memoryLayer === "Skill").length,
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
@@ -450,9 +451,9 @@ export class PanelReadModel {
   } {
     const pageSize = normalizePanelItemsLimit(input.limit);
     if (input.layer === "UserMemory") {
-      const userId = input.userId ?? input.namespace?.userId;
+      const userId = DEVICE_MEMORY_OWNER;
       const requestedPage = normalizePageNumber(input.page);
-      if (!userId || input.status === "resolving") {
+      if (input.status === "resolving") {
         return emptyPanelItems(requestedPage, pageSize, this.now());
       }
       const status = input.status === "activated"

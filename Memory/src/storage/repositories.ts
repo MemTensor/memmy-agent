@@ -1,3 +1,5 @@
+import { sharedProjectIds } from "../service/namespace/shared-project.js";
+import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
@@ -588,8 +590,12 @@ export class MemoryRepository {
     private readonly vectors: SqliteVecStore
   ) {}
 
+  private memoryWhere(filter: MemoryFilter) {
+    return buildMemoryWhere(filter, this.db);
+  }
+
   insert(memory: MemoryRow): MemoryRow {
-    const prepared = prepareMemoryForStorage(memory);
+    const prepared = prepareMemoryForStorage({ ...memory, userId: DEVICE_MEMORY_OWNER });
     this.db
       .prepare(
         `INSERT INTO memories (
@@ -623,7 +629,7 @@ export class MemoryRepository {
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
     }
-    const prepared = prepareMemoryForStorage(memory);
+    const prepared = prepareMemoryForStorage({ ...memory, userId: existing.userId });
     const updated = {
       ...prepared.memory,
       version: bumpVersion ? memory.version + 1 : existing.version
@@ -730,14 +736,14 @@ export class MemoryRepository {
     // the latest split. Use the spans' own ownership links for task deletion.
     const rows = this.db.prepare(
       `SELECT id FROM memories
-       WHERE user_id = ? AND memory_layer = 'L1'
+       WHERE memory_layer = 'L1'
          AND deleted_at IS NULL AND status != 'deleted'
          AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
          AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
          AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
            IN (SELECT value FROM json_each(?))
        ORDER BY id`
-    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
+    ).all(episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
 
@@ -789,9 +795,9 @@ export class MemoryRepository {
   listUserMemoriesByKeyIncludingDeleted(userId: string, memoryKey: string): MemoryRow[] {
     const rows = this.db.prepare(`
       SELECT * FROM memories
-      WHERE user_id = ? AND memory_layer = 'L1' AND memory_key = ?
+      WHERE memory_layer = 'L1' AND memory_key = ?
       ORDER BY updated_at DESC, id DESC
-    `).all(userId, memoryKey) as MemorySqlRow[];
+    `).all(memoryKey) as MemorySqlRow[];
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
   }
 
@@ -882,7 +888,7 @@ export class MemoryRepository {
   }
 
   list(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
-    const built = buildMemoryWhere(filter);
+    const built = this.memoryWhere(filter);
     const rows = this.db
       .prepare(
         `SELECT *
@@ -1079,7 +1085,7 @@ export class MemoryRepository {
   }
 
   count(filter: MemoryFilter = {}): number {
-    const built = buildMemoryWhere(filter);
+    const built = this.memoryWhere(filter);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -1091,7 +1097,7 @@ export class MemoryRepository {
   }
 
   search(query: string, filter: MemoryFilter = {}, limit = 8, offset = 0): RecallHit[] {
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1136,7 +1142,7 @@ export class MemoryRepository {
   }
 
   searchPanelIds(query: string, filter: MemoryFilter = {}, limit = 20, offset = 0): MemorySearchIdHit[] {
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1159,7 +1165,7 @@ export class MemoryRepository {
   }
 
   searchCount(query: string, filter: MemoryFilter = {}): number {
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1187,7 +1193,7 @@ export class MemoryRepository {
     options: MemoryVectorSearchOptions = {}
   ): MemorySearchIdHit[] {
     if (query.length === 0 || limit <= 0) return [];
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1226,7 +1232,7 @@ export class MemoryRepository {
   }
 
   hasVectorRows(filter: MemoryFilter = {}): boolean {
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1254,7 +1260,7 @@ export class MemoryRepository {
 
   searchFtsIds(ftsMatch: string | null | undefined, filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
     if (!ftsMatch || limit <= 0) return [];
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1406,7 +1412,7 @@ export class MemoryRepository {
       .filter(Boolean)
       .slice(0, 16);
     if (normalized.length === 0 || limit <= 0) return [];
-    const built = buildMemoryWhere({
+    const built = this.memoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
@@ -1509,7 +1515,7 @@ export class UserMemoryRepository {
     updatedAt: string;
   }): { memory: UserMemoryRecord; previous: UserMemoryRecord } | undefined {
     const previous = this.get(input.id);
-    if (!previous || previous.userId !== input.userId || previous.status !== "active") return undefined;
+    if (!previous || previous.status !== "active") return undefined;
     const memory = this.update({
       ...previous,
       memoryTypes: uniq([...previous.memoryTypes, ...input.memoryTypes]),
@@ -1522,6 +1528,7 @@ export class UserMemoryRepository {
   }
 
   insert(memory: UserMemoryRecord): UserMemoryRecord {
+    memory = { ...memory, userId: DEVICE_MEMORY_OWNER };
     this.db.prepare(
       `INSERT INTO user_memories (
          id, source_turn_id, user_id, memory_types_json, content,
@@ -1591,9 +1598,9 @@ export class UserMemoryRepository {
   listActive(userId: string, limit = 2000): UserMemoryRecord[] {
     return (this.db.prepare(
       `SELECT * FROM user_memories
-       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+       WHERE status = 'active' AND deleted_at IS NULL
        ORDER BY updated_at DESC, id DESC LIMIT ?`
-    ).all(userId, limit) as UserMemorySqlRow[]).map(userMemoryFromSql);
+    ).all(limit) as UserMemorySqlRow[]).map(userMemoryFromSql);
   }
 
   listForPanel(input: {
@@ -1629,26 +1636,26 @@ export class UserMemoryRepository {
     return this.db.prepare(`
       SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
              embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
-      FROM user_memories WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+      FROM user_memories WHERE status = 'active' AND deleted_at IS NULL
       ORDER BY id
-    `).all(userId) as EmbeddingMaintenanceEntry[];
+    `).all() as EmbeddingMaintenanceEntry[];
   }
 
   embeddingDimensionCounts(userId: string): {
     totalSlots: number;
     dimensions: Array<{ dimension: number; count: number }>;
   } {
-    const where = "user_id = ? AND status = 'active' AND deleted_at IS NULL";
+    const where = "status = 'active' AND deleted_at IS NULL";
     const totalSlots = Number(this.db.prepare(
       `SELECT COUNT(*) FROM user_memories WHERE ${where}`
-    ).pluck().get(userId) ?? 0);
+    ).pluck().get() ?? 0);
     const dimensions = this.db.prepare(
       `SELECT json_array_length(embedding_json) AS dimension, COUNT(*) AS count
        FROM user_memories
        WHERE ${where} AND embedding_json IS NOT NULL
        GROUP BY json_array_length(embedding_json)
        ORDER BY count DESC, dimension DESC`
-    ).all(userId) as Array<{ dimension: number; count: number }>;
+    ).all() as Array<{ dimension: number; count: number }>;
     return { totalSlots, dimensions };
   }
 
@@ -1658,7 +1665,7 @@ export class UserMemoryRepository {
        WHERE user_id = ? AND normalized_user_text_hash = ?
          AND status = 'active' AND deleted_at IS NULL
        ORDER BY updated_at DESC, id DESC LIMIT 1`
-    ).get(userId, hash) as UserMemorySqlRow | undefined;
+    ).get(DEVICE_MEMORY_OWNER, hash) as UserMemorySqlRow | undefined;
     return row ? userMemoryFromSql(row) : undefined;
   }
 
@@ -1716,12 +1723,11 @@ export class UserMemoryRepository {
         `SELECT user_memories.id AS id
          FROM user_memories_fts
          JOIN user_memories ON user_memories.id = user_memories_fts.id
-         WHERE user_memories.user_id = ?
-           AND user_memories.status = 'active'
+         WHERE user_memories.status = 'active'
            AND user_memories.deleted_at IS NULL
            AND user_memories_fts MATCH ?
          ORDER BY rank LIMIT ?`
-      ).all(userId, ftsMatch, limit) as Array<{ id: string }>;
+      ).all(ftsMatch, limit) as Array<{ id: string }>;
       return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "fts" }));
     } catch {
       return [];
@@ -1734,10 +1740,10 @@ export class UserMemoryRepository {
     const clauses = normalized.map(() => `lower(content) LIKE ? ESCAPE '\\'`);
     const rows = this.db.prepare(
       `SELECT id FROM user_memories
-       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+       WHERE status = 'active' AND deleted_at IS NULL
          AND (${clauses.join(" OR ")})
        ORDER BY updated_at DESC, id DESC LIMIT ?`
-    ).all(userId, ...normalized.map((term) => `%${escapeLikePattern(term)}%`), limit) as Array<{ id: string }>;
+    ).all(...normalized.map((term) => `%${escapeLikePattern(term)}%`), limit) as Array<{ id: string }>;
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
   }
 
@@ -2054,7 +2060,7 @@ export class RuntimeRepository {
     conversationId: string
   ): boolean {
     const result = this.db.prepare(`UPDATE raw_turns SET conversation_id = @conversationId
-      WHERE id = @id AND session_id = @sessionId AND user_id = @userId AND turn_id = @turnId
+      WHERE id = @id AND session_id = @sessionId AND turn_id = @turnId
         AND (conversation_id IS NULL OR conversation_id = '' OR conversation_id = @conversationId)`)
       .run({ ...scope, conversationId });
     return result.changes === 1;
@@ -2105,15 +2111,14 @@ export class RuntimeRepository {
       .prepare(
         `SELECT *
          FROM sessions
-         WHERE user_id = ?
-           AND source = ?
+         WHERE source = ?
            AND profile_id = ?
            AND host_session_key = ?
            AND status = 'open'
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(input.userId, input.source, input.profileId, input.hostSessionKey) as SqlSessionRow | undefined;
+      .get(input.source, input.profileId, input.hostSessionKey) as SqlSessionRow | undefined;
     return row ? sessionFromSql(row) : undefined;
   }
 
@@ -2995,14 +3000,12 @@ export class RuntimeRepository {
     const row = this.db.prepare(`
       SELECT 1 AS found
       FROM raw_turns
-      WHERE raw_turns.user_id = @userId
-        AND raw_turns.turn_id = @turnId
+      WHERE raw_turns.turn_id = @turnId
         AND json_type(raw_turns.message_payload_json, '$.turn_complete') = 'object'
         AND EXISTS (
           SELECT 1
           FROM sessions
           WHERE sessions.id = raw_turns.session_id
-            AND sessions.user_id = @userId
             AND sessions.source = @source
             AND sessions.profile_id = @profileId
             AND (
@@ -3181,21 +3184,19 @@ export class RuntimeRepository {
           .prepare(
             `SELECT *
              FROM skill_clusters
-             WHERE user_id = ?
-               AND (project_id = ? OR project_id IS NULL)
+             WHERE (project_id = ? OR project_id IS NULL)
              ORDER BY updated_at DESC
              LIMIT ?`
           )
-          .all(input.userId, input.projectId, input.limit ?? 200) as SqlSkillClusterRow[]
+          .all(input.projectId, input.limit ?? 200) as SqlSkillClusterRow[]
       : this.db
           .prepare(
             `SELECT *
              FROM skill_clusters
-             WHERE user_id = ?
              ORDER BY updated_at DESC
              LIMIT ?`
           )
-          .all(input.userId, input.limit ?? 200) as SqlSkillClusterRow[];
+          .all(input.limit ?? 200) as SqlSkillClusterRow[];
     return rows.map(skillClusterFromSql);
   }
 
@@ -4449,8 +4450,8 @@ export class RuntimeRepository {
          m.memory_layer
        FROM evolution_jobs j LEFT JOIN memories m ON m.id = j.target_memory_id
        WHERE j.status != 'succeeded' AND (
-         j.job_type = 'embedding' OR (j.job_type = 'user_memory_embedding' AND j.user_id = ?))`
-    ).all(userId) as Array<Pick<SqlJobRow,
+         j.job_type = 'embedding' OR j.job_type = 'user_memory_embedding')`
+    ).all() as Array<Pick<SqlJobRow,
       "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>;
     const tasks: EmbeddingMaintenanceTask[] = [
       ...retries.map(row => ({
@@ -4979,10 +4980,6 @@ export class RuntimeRepository {
   } = {}): DecisionRepairRecord[] {
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
-    if (input.userId) {
-      clauses.push("user_id = ?");
-      params.push(input.userId);
-    }
     if (input.contextHash) {
       clauses.push("context_hash = ?");
       params.push(input.contextHash);
@@ -5573,6 +5570,7 @@ export class L3WorldModelRepository {
   ) {}
 
   getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
+    userId = DEVICE_MEMORY_OWNER;
     const row = this.db.prepare(
       `SELECT * FROM l3_world_model_scopes
        WHERE user_id = ? AND project_id IS ?`
@@ -5581,6 +5579,7 @@ export class L3WorldModelRepository {
   }
 
   ensureScope(userId: string, projectId?: string | null, at = nowIso()): L3WorldModelScopeRecord {
+    userId = DEVICE_MEMORY_OWNER;
     const scopeKey = l3WorldModelScopeKey(userId, projectId);
     this.db.prepare(
       `INSERT INTO l3_world_model_scopes (
@@ -5779,8 +5778,26 @@ export class L3WorldModelRepository {
     if (!scope?.memoryId) return undefined;
     const memory = this.memories.get(scope.memoryId);
     if (!memory) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
-    validateL3WorldModelMemory(memory, userId, projectId);
+    validateL3WorldModelMemory(memory, scope.userId, projectId);
     return memory;
+  }
+
+  sharedProjectIds(projectId: string | null): Array<string | null> {
+    return sharedProjectIds(this.db, projectId);
+  }
+
+  sharedMemories(projectId: string | null): MemoryRow[] {
+    const projects = sharedProjectIds(this.db, projectId);
+    const rows = this.db.prepare(`
+      SELECT memory_id FROM l3_world_model_scopes
+      WHERE ${projectId === null ? "project_id IS NULL" : `project_id IN (${projects.map(() => "?").join(",")})`}
+      AND memory_id IS NOT NULL ORDER BY scope_key
+    `).all(...(projectId === null ? [] : projects)) as Array<{ memory_id: string }>;
+    return rows.flatMap(row => {
+      const memory = this.memories.get(row.memory_id);
+      return memory && memory.status === "activated" && !memory.deletedAt && isL3WorldModelV2Memory(memory)
+        ? [memory] : [];
+    });
   }
 
   fields(userId: string, projectId?: string | null): L3WorldModelFields {
@@ -6059,7 +6076,7 @@ export class L3WorldModelRepository {
     }
 
     const chunks = splitL3TracesByRawTurn(traces, 20);
-    const scope = this.ensureScope(session.userId, session.projectId, at);
+    const scope = this.ensureScope(DEVICE_MEMORY_OWNER, session.projectId, at);
     const batchIds: string[] = [];
     let targetCount = 0;
     for (const chunk of chunks) {
@@ -6076,7 +6093,7 @@ export class L3WorldModelRepository {
       const payload = {
         scopeKey: scope.scopeKey,
         scopeSeq: claimed.scope_seq,
-        userId: session.userId,
+        userId: DEVICE_MEMORY_OWNER,
         projectId: session.projectId ?? null,
         sessionId: session.id,
         trigger: input.trigger,
@@ -6098,7 +6115,7 @@ export class L3WorldModelRepository {
         batchId,
         scope.scopeKey,
         claimed.scope_seq,
-        session.userId,
+        DEVICE_MEMORY_OWNER,
         session.projectId ?? null,
         session.id,
         input.trigger,
@@ -6126,7 +6143,7 @@ export class L3WorldModelRepository {
           jobType: "l3_world_model_update",
           status: "queued",
           dedupeKey: `l3_world_model:${batchId}:${targetField}`,
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           sessionId: session.id,
           scopeKey: fieldScopeKey,
           scopeSeq: claimed.scope_seq,
@@ -6163,6 +6180,7 @@ export class L3WorldModelRepository {
     at?: string;
     source?: string;
   }): MemoryRow | undefined {
+    input = { ...input, userId: DEVICE_MEMORY_OWNER };
     const projectId = input.projectId ?? null;
     assertL3WorldModelFieldOwnership(projectId, input.targetField);
     const at = input.at ?? nowIso();
@@ -6934,8 +6952,8 @@ function userMemoryPanelFilter(input: {
   query?: string;
   sourceAgent?: string;
 }): { where: string; params: Array<string> } {
-  const clauses = ["user_id = ?"];
-  const params = [input.userId];
+  const clauses = ["1=1"];
+  const params: string[] = [];
   if (input.status) {
     clauses.push("status = ?");
     params.push(input.status);
@@ -7432,11 +7450,11 @@ function layerWeight(layer: MemoryLayer): number {
   }
 }
 
-function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlValue[] } {
+function buildMemoryWhere(filter: MemoryFilter, db: Database.Database): { where: string; params: SqlValue[] } {
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
-  addValueClause("user_id", filter.userId);
+  // userId is legacy provenance, never a local read boundary.
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -7517,14 +7535,16 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   }
 
   function addWorkMemoryScopeClause(userId: string | undefined, projectId: string | null | undefined): void {
-    if (userId === undefined || projectId === undefined) return;
+    if (projectId === undefined) return;
+    void userId;
     const normalizedProjectExpression = "NULLIF(TRIM(CAST(json_extract(info_json, '$.project_id') AS TEXT)), '')";
+    const projects = sharedProjectIds(db, projectId);
     clauses.push(`(
       COALESCE(json_extract(properties_json, '$.internal_info.memory_kind'), 'trace') != 'work_memory'
-      OR (user_id = ? AND ${projectId === null ? `${normalizedProjectExpression} IS NULL` : `${normalizedProjectExpression} = ?`})
+      OR (${projectId === null ? `${normalizedProjectExpression} IS NULL`
+        : `${normalizedProjectExpression} IN (${projects.map(() => "?").join(",")})`})
     )`);
-    params.push(userId);
-    if (projectId !== null) params.push(projectId);
+    if (projectId !== null) params.push(...projects);
   }
 
   function addTagClauses(tags: string[] | undefined): void {
@@ -7555,10 +7575,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
 function buildEpisodeWhere(userId?: string, query?: string, sourceAgent?: string): { where: string; params: SqlValue[] } {
   const clauses = ["1=1"];
   const params: SqlValue[] = [];
-  if (userId) {
-    clauses.push("episodes.user_id = ?");
-    params.push(userId);
-  }
+  void userId;
 
   const normalizedSourceAgent = sourceAgent?.trim();
   if (normalizedSourceAgent) {

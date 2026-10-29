@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { MemoryLanguage } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
@@ -27,14 +28,14 @@ export class ProjectEnvironmentService {
 
   requestSessionScan(session: SessionRecord): { job: EvolutionJobRecord; enqueued: boolean } | null {
     if (!session.projectId) return null;
-    const scope = this.deps.repos.l3WorldModels.getScope(session.userId, session.projectId);
+    const scope = this.deps.repos.l3WorldModels.getScope(DEVICE_MEMORY_OWNER, session.projectId);
     if (!scope?.workspaceUri) return null;
     return this.deps.repos.projectEnvironments.requestScan({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       sessionId: session.id,
       trigger: "session_start",
-      dedupeKey: ["project_environment_profile", session.userId, session.projectId, "session", session.id].join(":")
+      dedupeKey: ["project_environment_profile", DEVICE_MEMORY_OWNER, session.projectId, "session", session.id].join(":")
     });
   }
 
@@ -43,16 +44,16 @@ export class ProjectEnvironmentService {
     throughTraceSeq: number
   ): { job: EvolutionJobRecord; enqueued: boolean } | null {
     if (!session.projectId) return null;
-    const scope = this.deps.repos.l3WorldModels.getScope(session.userId, session.projectId);
+    const scope = this.deps.repos.l3WorldModels.getScope(DEVICE_MEMORY_OWNER, session.projectId);
     if (!scope?.workspaceUri) return null;
     return this.deps.repos.projectEnvironments.requestScan({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       sessionId: session.id,
       trigger: "token_compaction",
       dedupeKey: [
         "project_environment_profile",
-        session.userId,
+        DEVICE_MEMORY_OWNER,
         session.projectId,
         "compaction",
         session.id,
