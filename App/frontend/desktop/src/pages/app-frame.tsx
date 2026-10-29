@@ -11,7 +11,7 @@ import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODU
 import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useGuidanceProgress } from "../app/use-guidance-progress.js";
-import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "../app/campaign-prompt-state.js";
+import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
@@ -321,10 +321,10 @@ export function AppFrame(props: AppFrameProps) {
   const [archiveConfirmSessionKey, setArchiveConfirmSessionKey] = useState<string | null>(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<AgentTaskView | null>(null);
   const { deferredGuidanceStep } = useGuidanceProgress();
-  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isCampaignPromptSurfaceReady({
+  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isWorkspacePromptSurfaceReady({
     startupStatus: state.startup.status,
     currentPath: state.navigation.currentPath,
-  }) && isCampaignPromptSessionReady({
+  }) && isWorkspacePromptSessionReady({
     userMode: state.bootstrap?.app.userMode,
     accountUserId: state.account.userId,
     byokConfigured: Boolean(state.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length),

@@ -1279,6 +1279,30 @@ describe("cloud client", () => {
     ]);
   });
 
+  it("idempotently ensures the launch gift and acknowledges its notice", async () => {
+    const requests: Array<{ path: string; method: string; body: unknown; authorization: string | undefined }> = [];
+    server = createServer(async (request, response) => {
+      requests.push({ path: request.url ?? "", method: request.method ?? "", body: await readJson(request),
+        authorization: request.headers.authorization });
+      sendJson(response, { code: 0, message: "ok", data: request.url?.endsWith("/ack")
+        ? true
+        : { hasGift: true, grantId: "v125_task_token_gift_20m", audience: "existing", tokenAmount: 20_000_000, totalTokens: 22_000_000 } });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind to a port");
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+
+    await expect(client.ensureTaskTokenGift({ uuid: "cloud.login.uuid" })).resolves.toMatchObject({ hasGift: true, tokenAmount: 20_000_000 });
+    await expect(client.ackTaskTokenGift({ uuid: "cloud.login.uuid", grantId: "v125_task_token_gift_20m" }))
+      .resolves.toBeUndefined();
+    expect(requests).toEqual([
+      { path: "/api/agentUser/quota/launchGift/ensure", method: "POST", body: {}, authorization: "Bearer cloud.login.uuid" },
+      { path: "/api/agentUser/quota/launchGift/ack", method: "POST", body: { grantId: "v125_task_token_gift_20m" },
+        authorization: "Bearer cloud.login.uuid" }
+    ]);
+  });
+
 });
 
 function listen(serverToListen: ReturnType<typeof createServer>): Promise<void> {

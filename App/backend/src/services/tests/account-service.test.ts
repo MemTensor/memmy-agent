@@ -109,6 +109,34 @@ describe("AccountService", () => {
     ]);
   });
 
+  it("ensures and acknowledges the automatic one-time task Token gift with the current cloud account", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async ensureTaskTokenGift(input) {
+          calls.push({ ensure: input });
+          return { hasGift: true as const, grantId: "launch-gift-20m", audience: "existing" as const,
+            tokenAmount: 20_000_000, totalTokens: 22_000_000 };
+        },
+        async ackTaskTokenGift(input) { calls.push({ ack: input }); }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() { return "cloud.login.uuid"; }
+      }
+    });
+
+    await expect(service.ensureTaskTokenGift()).resolves.toMatchObject({
+      hasGift: true, audience: "existing", tokenAmount: 20_000_000
+    });
+    await expect(service.ackTaskTokenGift({ grantId: "launch-gift-20m" })).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { ensure: { uuid: "cloud.login.uuid" } },
+      { ack: { uuid: "cloud.login.uuid", grantId: "launch-gift-20m" } }
+    ]);
+  });
+
   it("fails closed when the cloud lottery reward lookup is unavailable", async () => {
     const service = createAccountService({
       cloudClient: {

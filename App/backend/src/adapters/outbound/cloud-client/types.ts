@@ -11,6 +11,7 @@ import type {
   IntegrationToolResult,
   InvitationResult,
   LotteryReward,
+  TaskTokenGiftNotice,
   LotteryStatus,
   OkResponse,
   PromotionFlags,
@@ -141,6 +142,14 @@ export interface GetLotteryRewardInput {
 export interface AckLotteryRewardInput {
   uuid: string;
   drawId?: string;
+}
+
+export interface TaskTokenGiftInput {
+  uuid: string;
+}
+
+export interface AckTaskTokenGiftInput extends TaskTokenGiftInput {
+  grantId: string;
 }
 
 /** Contract for request token quota input. */
@@ -278,4 +287,6 @@ export interface CloudClient {
   getLotteryReward(input: GetLotteryRewardInput): Promise<LotteryReward>;
   /** Marks the latest matching lottery reward as shown. */
   ackLotteryReward(input: AckLotteryRewardInput): Promise<void>;
+  ensureTaskTokenGift(input: TaskTokenGiftInput): Promise<TaskTokenGiftNotice>;
+  ackTaskTokenGift(input: AckTaskTokenGiftInput): Promise<void>;
 }

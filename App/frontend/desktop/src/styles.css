@@ -10449,7 +10449,6 @@ body.memmy-platform-windows :is(
   .memory-plugin-conflict-modal__backdrop,
   .token-exhausted-modal__backdrop,
   .search-palette-backdrop,
-  .campaign-intro-backdrop,
   .history-launch-backdrop,
   .ch-source-dialog__backdrop
 ) {
@@ -10536,7 +10535,6 @@ body.memmy-platform-windows :is(
 
 .memory-plugin-conflict-modal,
 .token-exhausted-modal,
-.campaign-intro-dialog,
 .history-launch-dialog,
 .ch-source-dialog {
   box-sizing: border-box;

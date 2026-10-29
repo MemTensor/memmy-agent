@@ -10,6 +10,7 @@ import {
   IntegrationToolResultSchema,
   InvitationResultSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
   LotteryStatusSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
@@ -56,6 +57,8 @@ import type {
   GetTokenUsageInput,
   GrantTokensInput,
   AckLotteryRewardInput,
+  AckTaskTokenGiftInput,
+  TaskTokenGiftInput,
   ReleaseCheckResult,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
@@ -464,6 +467,18 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         body: input.drawId ? { drawId: input.drawId } : {},
         lang: "zh",
         bearerCredential: input.uuid
+      });
+    },
+    async ensureTaskTokenGift(input: TaskTokenGiftInput) {
+      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/launchGift/ensure", {
+        body: {}, lang: "zh", bearerCredential: input.uuid
+      });
+      return TaskTokenGiftNoticeSchema.parse(data);
+    },
+
+    async ackTaskTokenGift(input: AckTaskTokenGiftInput): Promise<void> {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/launchGift/ack", {
+        body: { grantId: input.grantId }, lang: "zh", bearerCredential: input.uuid
       });
     }
   };

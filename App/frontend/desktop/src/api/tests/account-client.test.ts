@@ -117,6 +117,27 @@ describe("account-client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("通过本地账号 API 自动发放并确认一次性任务 Token", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith("/api/account/task-token-gift/ensure")) {
+        expect(init?.method).toBe("POST");
+        return jsonResponse({ hasGift: true, grantId: "launch-gift-20m", audience: "new",
+          tokenAmount: 20_000_000, totalTokens: 20_000_000 });
+      }
+      if (url.endsWith("/api/account/task-token-gift/ack")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({ grantId: "launch-gift-20m" });
+        return jsonResponse({ ok: true });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpAccountClient(config);
+    await expect(client.ensureTaskTokenGift()).resolves.toMatchObject({ hasGift: true, audience: "new", totalTokens: 20_000_000 });
+    await expect(client.ackTaskTokenGift({ grantId: "launch-gift-20m" })).resolves.toEqual({ ok: true });
+  });
+
   it("通过真实本地 API 完成验证码发送、校验和昵称更新", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();
