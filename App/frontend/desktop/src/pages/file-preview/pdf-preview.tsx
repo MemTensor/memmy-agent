@@ -30,6 +30,7 @@ import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { computePdfDisplayScale, highlightPdfTextLayer, nextPdfMatchIndex } from "./pdf-preview-state.js";
+import { getPdfPreviewResourceOptions } from "./pdf-preview-resources.js";
 import type { FilePreviewViewState } from "./file-preview-types.js";
 
 // Fallback if the dedicated worker fails to boot. The primary path below
@@ -83,6 +84,7 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
     const port = new PdfJsWorker();
     const worker = PDFWorker.create({ port });
     const loadingTask = getDocument({
+      ...getPdfPreviewResourceOptions(window.document.baseURI, import.meta.env.BASE_URL),
       data: new Uint8Array(props.data.slice(0)),
       worker
     });
