@@ -536,6 +536,13 @@ describe("desktop packaged runtime boundaries", () => {
     expect(frontendSource).toContain("!state.bootstrap");
     expect(verificationSource).toContain("rendererReadyWaiters.set");
     expect(verificationSource).not.toContain("did-finish-load");
+    const finishStart = verificationSource.indexOf("const finish = ");
+    const finishEnd = verificationSource.indexOf("const handleFailed", finishStart);
+    const finishSource = verificationSource.slice(finishStart, finishEnd);
+    const destroyedCheck = finishSource.indexOf("if (!targetWindow.isDestroyed())");
+    const webContentsCleanup = finishSource.indexOf("targetWindow.webContents.removeListener");
+    expect(destroyedCheck).toBeGreaterThan(-1);
+    expect(webContentsCleanup).toBeGreaterThan(destroyedCheck);
   });
 
   it("journals each prepared Windows data copy before later migration steps can fail", () => {
