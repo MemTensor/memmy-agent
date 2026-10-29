@@ -1,330 +1,137 @@
 /** Model config tester tests. */
-import type { ModelConfigTestInput, ModelEndpointProtocol, ModelProvider } from "@memmy/local-api-contracts";
+import type { ModelEndpointProtocol } from "@memmy/local-api-contracts";
 import { describe, expect, it, vi } from "vitest";
-import { createHttpModelConfigTester, DEFAULT_PROBE_TIMEOUT_MS } from "../model-config-tester.js";
+import { createHttpModelConfigTester, DEFAULT_PROBE_TIMEOUT_MS, type ResolvedModelConfigTestInput } from "../model-config-tester.js";
 
 const checkedAt = "2026-06-05T10:00:00.000Z";
+const completion = { choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] };
+const message = { type: "message", role: "assistant", content: [{ type: "text", text: "OK" }], stop_reason: "end_turn" };
 
 describe("model config tester", () => {
-  it("keeps a long enough network-only timeout", () => {
-    expect(DEFAULT_PROBE_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+  it("keeps a bounded network timeout", () => expect(DEFAULT_PROBE_TIMEOUT_MS).toBe(60_000));
+
+  it.each(["openai_compatible", "deepseek", "zhipu", "qwen", "kimi", "minimax", "baidu", "custom"] as const)(
+    "tests the selected %s chat model once with a bounded request", async provider => {
+      const fetch = vi.fn(async () => json(completion));
+      const result = await createHttpModelConfigTester({ fetch, now: () => checkedAt }).test(input({ provider }));
+      expect(result).toEqual({ ok: true, message: "连接成功", checkedAt });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, init] = (fetch.mock.calls as unknown as [string, RequestInit][])[0]!;
+      expect(url).toBe("https://endpoint.example/plan/v3/chat/completions");
+      expect(init).toMatchObject({ method: "POST", headers: { Authorization: "Bearer sk-secret", "Content-Type": "application/json" } });
+      expect(JSON.parse(String(init.body))).toEqual({ model: "deepseek/deepseek-flash", messages: [{ role: "user", content: "Reply briefly with OK." }], stream: false, max_tokens: 64 });
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    });
+
+  it.each(["gpt-5", "vendor/gpt-5-mini", "o3", "o4-mini"])("uses the modern token limit for %s", async modelId => {
+    const fetch = vi.fn(async () => json(completion));
+    await createHttpModelConfigTester({ fetch }).test(input({ modelId, provider: "custom" }));
+    const body = JSON.parse(String((fetch.mock.calls as unknown as [string, RequestInit][])[0]![1].body));
+    expect(body.max_completion_tokens).toBe(64);
+    expect(body.max_tokens).toBeUndefined();
+  });
+
+  it.each(["https://endpoint.example/plan/anthropic", "https://endpoint.example/plan/anthropic/v1/"])(
+    "uses Anthropic messages with the selected base %s", async apiBase => {
+      const fetch = vi.fn(async () => json(message));
+      const result = await createHttpModelConfigTester({ fetch }).test(input({ protocol: "anthropic-messages", apiBase }));
+      expect(result.ok).toBe(true);
+      const [url, init] = (fetch.mock.calls as unknown as [string, RequestInit][])[0]!;
+      expect(url).toBe("https://endpoint.example/plan/anthropic/v1/messages");
+      expect(init).toMatchObject({ method: "POST", headers: { "x-api-key": "sk-secret", "anthropic-version": "2023-06-01" } });
+      expect(JSON.parse(String(init.body))).toMatchObject({ model: "deepseek/deepseek-flash", max_tokens: 64, stream: false });
+    });
+
+  it.each([
+    { data: [{ id: "deepseek/deepseek-flash" }] }, {}, { choices: [] },
+    { choices: [{ message: { role: "user", content: "OK" } }] },
+    { choices: [{ message: { role: "assistant", content: null }, finish_reason: "stop" }] }
+  ])("does not accept a list or malformed response as a chat success: %j", async body => {
+    const result = await createHttpModelConfigTester({ fetch: async () => json(body) }).test(input());
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("有效的聊天响应");
+  });
+
+  it("accepts a valid token-limited reasoning response without visible output", async () => {
+    const result = await createHttpModelConfigTester({ fetch: async () => json({ choices: [{ message: { role: "assistant", content: null }, finish_reason: "length" }] }) }).test(input());
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([{ data: [] }, { type: "message", role: "assistant", content: [] }, { type: "error", error: { message: "invalid model" } }])(
+    "rejects invalid Anthropic responses: %j", async body => {
+      expect((await createHttpModelConfigTester({ fetch: async () => json(body) }).test(input({ protocol: "anthropic-messages" }))).ok).toBe(false);
+    });
+
+  it.each([401, 403, 404, 429, 500])("reports HTTP %s without retries, list fallback or secrets", async status => {
+    const fetch = vi.fn(async () => json({ error: { message: "bad sk-secret extra-secret" } }, status));
+    const result = await createHttpModelConfigTester({ fetch }).test(input({ extraHeaders: { "X-Token": "extra-secret" } }));
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`HTTP ${status}`);
+    expect(result.message).not.toContain("sk-secret");
+    expect(result.message).not.toContain("extra-secret");
+    expect(result.message).not.toContain("通常以 /v1");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports plain text 404 without inventing an invalid key", async () => {
+    const result = await createHttpModelConfigTester({ fetch: async () => new Response("404 page not found", { status: 404 }) }).test(input());
+    expect(result.message).toContain("未找到聊天接口或模型");
+    expect(result.message).not.toContain("API Key 无效");
+  });
+
+  it("rejects an HTTP 200 provider error", async () => {
+    expect((await createHttpModelConfigTester({ fetch: async () => json({ error: { message: "invalid model" } }) }).test(input())).ok).toBe(false);
+  });
+
+  it("supports header-only credentials and case-insensitive overrides", async () => {
+    const fetch = vi.fn(async () => json(message));
+    await createHttpModelConfigTester({ fetch }).test(input({ apiKey: "", protocol: "anthropic-messages", extraHeaders: { Authorization: "Bearer custom-token", "Anthropic-Version": "custom-version" } }));
+    const headers = (fetch.mock.calls as unknown as [string, RequestInit][])[0]![1].headers;
+    expect(headers).toEqual({ "Content-Type": "application/json", Authorization: "Bearer custom-token", "Anthropic-Version": "custom-version" });
+  });
+
+  it("normalizes timeout errors and redacts thrown credential values", async () => {
+    const timeout = await createHttpModelConfigTester({ fetch: async () => { throw new DOMException("timeout sk-secret", "TimeoutError"); } }).test(input());
+    expect(timeout).toMatchObject({ ok: false, message: "连接超时，请检查 API 地址或网络" });
+    const thrown = await createHttpModelConfigTester({ fetch: async () => { throw new Error("network sk-secret"); } }).test(input());
+    expect(thrown.message).toBe("network [redacted]");
   });
 
   it.each([
-    ["openai_compatible", "openai-chat-completions"],
-    ["deepseek", "openai-chat-completions"],
-    ["zhipu", "openai-chat-completions"],
-    ["qwen", "openai-chat-completions"],
-    ["kimi", "openai-chat-completions"],
-    ["minimax", "openai-chat-completions"],
-    ["baidu", "openai-chat-completions"],
-    ["doubao", "openai-chat-completions"],
-    ["openai_compatible", "openai-responses"],
-    ["openai_compatible", "openai-embeddings"],
-    ["doubao", "openai-images"]
-  ] as Array<[ModelProvider, ModelEndpointProtocol]>) (
-    "uses only GET /models for %s %s",
-    async (provider, protocol) => {
-      const calls: Array<{ url: string; init: RequestInit }> = [];
-      const tester = createHttpModelConfigTester({
-        now: () => checkedAt,
-        fetch: async (input, init) => {
-          calls.push({ url: input.toString(), init: init ?? {} });
-          return json({ data: [{ id: "model-a" }] });
-        }
-      });
-
-      await expect(tester.test(input({ provider, protocol }))).resolves.toEqual({
-        ok: true,
-        message: "连接成功",
-        checkedAt,
-        modelListed: true
-      });
-      expect(calls).toEqual([{
-        url: "https://endpoint-a.example/v1/models",
-        init: expect.objectContaining({
-          method: "GET",
-          headers: { Authorization: "Bearer sk-secret" }
-        })
-      }]);
-      expect(calls[0]?.init.body).toBeUndefined();
-      expect(calls[0]?.url).not.toMatch(/chat\/completions|messages|generateContent|embeddings|audio|images\/generations/u);
-    }
-  );
-
-  it("uses the exact selected endpoint URL and never another endpoint from the provider", async () => {
-    const calls: string[] = [];
-    const tester = createHttpModelConfigTester({
-      fetch: async (request) => {
-        calls.push(request.toString());
-        return json({ data: [{ id: "model-a" }] });
-      }
-    });
-
-    await tester.test(input({
-      endpointId: "embedding-eu",
-      apiBase: "https://eu-only.example/custom/v9",
-      protocol: "openai-embeddings"
-    }));
-
-    expect(calls).toEqual(["https://eu-only.example/custom/v9/models"]);
+    ["openai-embeddings", "embedding"], ["openai-images", "image"],
+    ["openai-chat-completions", "asr"], ["openai-chat-completions", "image"],
+    ["openai-responses", "chat"]
+  ] as const)("preserves GET model listing for %s / %s", async (protocol, capability) => {
+    const fetch = vi.fn(async () => json({ data: [{ id: "another-model" }] }));
+    const result = await createHttpModelConfigTester({ fetch }).test(input({ protocol, capability }));
+    expect(result).toMatchObject({ ok: true, modelListed: false });
+    const [url, init] = (fetch.mock.calls as unknown as [string, RequestInit][])[0]!;
+    expect(url).toBe("https://endpoint.example/plan/v3/models");
+    expect(init.method).toBe("GET"); expect(init.body).toBeUndefined();
   });
 
-  it("uses Anthropic GET /v1/models headers without a request body", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async (request, init) => {
-        calls.push({ url: request.toString(), init: init ?? {} });
-        return json({ data: [{ id: "model-a" }] });
-      }
-    });
-
-    await tester.test(input({
-      provider: "anthropic",
-      protocol: "anthropic-messages",
-      apiBase: "https://api.anthropic.com"
-    }));
-
-    expect(calls[0]).toMatchObject({
-      url: "https://api.anthropic.com/v1/models",
-      init: {
-        method: "GET",
-        headers: {
-          "x-api-key": "sk-secret",
-          "anthropic-version": "2023-06-01"
-        }
-      }
-    });
-    expect(calls[0]?.init.body).toBeUndefined();
+  it("preserves the Gemini list protocol and model name matching", async () => {
+    const fetch = vi.fn(async () => json({ models: [{ name: "models/gemini-test" }] }));
+    const result = await createHttpModelConfigTester({ fetch }).test(input({ protocol: "gemini-generate-content", apiBase: "https://google.example/v1beta/", modelId: "gemini-test" }));
+    expect(result).toMatchObject({ ok: true, modelListed: true });
+    expect((fetch.mock.calls as unknown as [string, RequestInit][])[0]![0]).toBe("https://google.example/v1beta/models");
   });
 
-  it("uses Google GET /v1beta/models headers without a request body", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async (request, init) => {
-        calls.push({ url: request.toString(), init: init ?? {} });
-        return json({ models: [{ name: "models/model-a" }] });
-      }
-    });
-
-    await tester.test(input({
-      provider: "google",
-      protocol: "gemini-generate-content",
-      apiBase: "https://generativelanguage.googleapis.com/v1beta"
-    }));
-
-    expect(calls[0]).toMatchObject({
-      url: "https://generativelanguage.googleapis.com/v1beta/models",
-      init: {
-        method: "GET",
-        headers: { "x-goog-api-key": "sk-secret" }
-      }
-    });
-    expect(calls[0]?.init.body).toBeUndefined();
+  it("still rejects malformed lists for other capabilities", async () => {
+    expect((await createHttpModelConfigTester({ fetch: async () => json(completion) }).test(input({ protocol: "openai-embeddings", capability: "embedding" }))).ok).toBe(false);
   });
 
-  it("treats a missing configured model as advisory while the list connection succeeds", async () => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => json({ data: [{ id: "another-model" }] })
+  it.each(["dashscope-input-audio-chat", "dashscope-multimodal-generation", "memmy-account", "bedrock-converse"] as ModelEndpointProtocol[])(
+    "keeps unsupported protocol %s free of requests", async protocol => {
+      const fetch = vi.fn();
+      expect((await createHttpModelConfigTester({ fetch }).test(input({ protocol }))).ok).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
     });
-
-    await expect(tester.test(input())).resolves.toEqual({
-      ok: true,
-      message: "连接成功",
-      checkedAt,
-      modelListed: false
-    });
-  });
-
-  it.each([
-    "dashscope-input-audio-chat",
-    "dashscope-multimodal-generation",
-    "memmy-account"
-  ] as ModelEndpointProtocol[])("fails closed for %s without issuing any HTTP request", async (protocol) => {
-    const fetch = vi.fn();
-    const tester = createHttpModelConfigTester({ now: () => checkedAt, fetch });
-
-    await expect(tester.test(input({ protocol }))).resolves.toEqual({
-      ok: false,
-      message: "当前 endpoint 协议不支持模型列表连接测试",
-      checkedAt
-    });
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it("rejects a 2xx body that is not a model list", async () => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => json({ choices: [{ message: { content: "inference response" } }] })
-    });
-
-    const response = await tester.test(input());
-    expect(response.ok).toBe(false);
-    expect(response.message).toContain("模型列表接口");
-  });
-
-  it.each([401, 403])("redacts secrets from HTTP %s failures", async (status) => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => json({ error: { message: "bad sk-secret" } }, status)
-    });
-
-    const response = await tester.test(input());
-    expect(response).toMatchObject({ ok: false, message: "bad [redacted]", checkedAt });
-    expect(JSON.stringify(response)).not.toContain("sk-secret");
-  });
-
-  it.each([
-    ["openai-chat-completions", "https://api.example.test/v1/models", { Authorization: "Bearer sk-secret" }],
-    ["openai-responses", "https://api.example.test/v1/models", { Authorization: "Bearer sk-secret" }]
-  ] as Array<[ModelEndpointProtocol, string, Record<string, string>]>)(
-    "probes custom %s with the OpenAI model list",
-    async (protocol, url, headers) => {
-      const calls: Array<{ url: string; init: RequestInit }> = [];
-      const tester = createHttpModelConfigTester({
-        fetch: async (request, init) => {
-          calls.push({ url: request.toString(), init: init ?? {} });
-          return json({ data: [{ id: "model-a" }] });
-        }
-      });
-
-      await tester.test(input({
-        provider: "custom",
-        protocol,
-        apiBase: "https://api.example.test/v1"
-      }));
-
-      expect(calls[0]).toMatchObject({ url, init: { method: "GET", headers } });
-    }
-  );
-
-  it("probes custom Anthropic Messages with the Anthropic model list", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const tester = createHttpModelConfigTester({
-      fetch: async (request, init) => {
-        calls.push({ url: request.toString(), init: init ?? {} });
-        return json({ data: [{ id: "model-a" }] });
-      }
-    });
-
-    await tester.test(input({
-      provider: "custom",
-      protocol: "anthropic-messages",
-      apiBase: "https://api.anthropic.com"
-    }));
-
-    expect(calls[0]).toMatchObject({
-      url: "https://api.anthropic.com/v1/models",
-      init: {
-        method: "GET",
-        headers: {
-          "x-api-key": "sk-secret",
-          "anthropic-version": "2023-06-01"
-        }
-      }
-    });
-  });
-
-  it("probes custom Gemini with the Gemini model list", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const tester = createHttpModelConfigTester({
-      fetch: async (request, init) => {
-        calls.push({ url: request.toString(), init: init ?? {} });
-        return json({ models: [{ name: "models/model-a" }] });
-      }
-    });
-
-    await tester.test(input({
-      provider: "custom",
-      protocol: "gemini-generate-content",
-      apiBase: "https://generativelanguage.googleapis.com/v1beta"
-    }));
-
-    expect(calls[0]).toMatchObject({
-      url: "https://generativelanguage.googleapis.com/v1beta/models",
-      init: { method: "GET", headers: { "x-goog-api-key": "sk-secret" } }
-    });
-  });
-
-  it("does not probe custom Bedrock Converse", async () => {
-    const fetch = vi.fn();
-    const tester = createHttpModelConfigTester({ now: () => checkedAt, fetch });
-
-    await expect(tester.test(input({
-      provider: "custom",
-      protocol: "bedrock-converse",
-      apiBase: "https://bedrock-runtime.us-west-2.amazonaws.com"
-    }))).resolves.toEqual({
-      ok: false,
-      message: "当前 endpoint 协议不支持模型列表连接测试",
-      checkedAt
-    });
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it("uses the selected protocol for custom failure hints", async () => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => json({ error: { message: "not found" } }, 404)
-    });
-
-    const openai = await tester.test(input({ provider: "custom", protocol: "openai-chat-completions" }));
-    const anthropic = await tester.test(input({
-      provider: "custom",
-      protocol: "anthropic-messages",
-      apiBase: "https://api.anthropic.com"
-    }));
-
-    expect(openai.message).toContain("OpenAI 兼容 API 地址通常以 /v1 结尾");
-    expect(anthropic.message).toContain("Anthropic API 地址通常不包含 /v1");
-  });
-
-  it("keeps actionable Base URL guidance on 404", async () => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => json({ error: { message: "not found" } }, 404)
-    });
-
-    const response = await tester.test(input());
-    expect(response.ok).toBe(false);
-    expect(response.message).toContain("/v1");
-  });
-
-  it("normalizes timeout errors without exposing the key", async () => {
-    const tester = createHttpModelConfigTester({
-      now: () => checkedAt,
-      fetch: async () => {
-        throw new DOMException("The operation timed out: sk-secret", "TimeoutError");
-      }
-    });
-
-    await expect(tester.test(input())).resolves.toEqual({
-      ok: false,
-      message: "连接超时，请检查 API 地址或网络",
-      checkedAt
-    });
-  });
 });
 
-function input(overrides: Partial<ModelConfigTestInput> = {}): ModelConfigTestInput & { apiKey: string } {
-  return {
-    provider: "openai_compatible",
-    endpointId: "chat-a",
-    protocol: "openai-chat-completions",
-    apiBase: "https://endpoint-a.example/v1",
-    modelId: "model-a",
-    apiKey: "sk-secret",
-    capability: "chat",
-    ...overrides
-  };
+function input(overrides: Partial<ResolvedModelConfigTestInput> = {}): ResolvedModelConfigTestInput {
+  return { provider: "openai_compatible", endpointId: "chat-a", protocol: "openai-chat-completions", apiBase: "https://endpoint.example/plan/v3", modelId: "deepseek/deepseek-flash", apiKey: "sk-secret", capability: "chat", ...overrides };
 }
-
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" }
-  });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
