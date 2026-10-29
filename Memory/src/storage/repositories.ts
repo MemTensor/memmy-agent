@@ -450,6 +450,8 @@ export type MemorySearchChannel = EmbeddingRetryVectorField | "fts" | "pattern" 
 export interface MemoryVectorSearchOptions {
   identity?: EmbeddingIdentity;
   anyOfTags?: string[];
+  /** Internal refill metadata, never changes authorization. */
+  onWindow?: (ids: string[], hasMore: boolean) => void;
 }
 
 export interface EmbeddingRetryRecord extends SchedulingMetadata {
@@ -1182,6 +1184,15 @@ export class MemoryRepository {
     return Number(row?.count ?? 0);
   }
 
+  recallSourceCandidates(turnId: string, filter: MemoryFilter, limit = 10_000, stepIndex?: number): MemoryRow[] {
+    const built = buildMemoryWhere(filter);
+    const rows = this.db.prepare(`SELECT memories.* FROM memories WHERE ${built.where}
+      AND COALESCE(json_extract(info_json,'$.turn_id'),json_extract(properties_json,'$.internal_info.trace.turn_id'))=?
+      ${stepIndex === undefined ? "" : "AND json_extract(properties_json,'$.internal_info.trace.step_index')=?"}
+      ORDER BY memories.id LIMIT ?`).all(...built.params, turnId, ...(stepIndex === undefined ? [] : [stepIndex]), limit) as MemorySqlRow[];
+    return rows.map(row => memoryFromSql(row));
+  }
+
   searchVectorIds(
     query: number[],
     vectorField: EmbeddingRetryVectorField,
@@ -1212,12 +1223,13 @@ export class MemoryRepository {
          ORDER BY memory_vector_entries.updated_at DESC, memory_vector_entries.id DESC
          LIMIT ?`
       )
-      .all(...built.params, vectorField, query.length, ...(identity ? [identity.provider, identity.model] : []), ...anyTag.params, candidateWindow) as Array<{
+      .all(...built.params, vectorField, query.length, ...(identity ? [identity.provider, identity.model] : []), ...anyTag.params, candidateWindow + 1) as Array<{
         id: string;
         vector_id: number;
         embedding_dim: number;
       }>;
-    const candidates: VectorSearchCandidate[] = rows.map((row) => ({
+    options.onWindow?.(rows.slice(0, candidateWindow).map(row => row.id), rows.length > candidateWindow);
+    const candidates: VectorSearchCandidate[] = rows.slice(0, candidateWindow).map((row) => ({
       id: row.vector_id,
       memoryId: row.id,
       embeddingDim: row.embedding_dim
@@ -1255,7 +1267,7 @@ export class MemoryRepository {
     return Boolean(row);
   }
 
-  searchFtsIds(ftsMatch: string | null | undefined, filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
+  searchFtsIds(ftsMatch: string | null | undefined, filter: MemoryFilter = {}, limit = 20, strict = false): MemorySearchIdHit[] {
     if (!ftsMatch || limit <= 0) return [];
     const built = buildMemoryWhere({
       ...filter,
@@ -1264,17 +1276,18 @@ export class MemoryRepository {
     try {
       const rows = this.db
         .prepare(
-          `SELECT memories.id AS id
+          `SELECT memories.id AS id, rank AS raw_rank
            FROM memories_fts
            JOIN memories ON memories.id = memories_fts.id
            WHERE ${built.where}
              AND memories_fts MATCH ?
-           ORDER BY rank
+           ORDER BY rank, memories.id
            LIMIT ?`
         )
         .all(...built.params, ftsMatch, limit) as Array<{ id: string }>;
       return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "fts" }));
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       return [];
     }
   }
@@ -7474,6 +7487,10 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addMemoryKindClause(filter.memoryKind);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
+  if (filter.excludedIds?.length) {
+    clauses.push("memories.id NOT IN (SELECT value FROM json_each(?))");
+    params.push(JSON.stringify(filter.excludedIds));
+  }
 
   return {
     where: clauses.join(" AND "),
