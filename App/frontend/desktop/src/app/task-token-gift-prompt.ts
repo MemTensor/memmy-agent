@@ -1,4 +1,5 @@
 import type { TaskTokenGiftNotice } from "@memmy/local-api-contracts";
+import { formatMessage, messageCatalogs } from "../i18n/messages.js";
 
 /** The feature introduction remains visible through November 20, Beijing time. */
 export const TASK_GIFT_FEATURE_PROMO_END = "2026-11-21T00:00:00+08:00";
@@ -42,7 +43,9 @@ export function resolveLaunchGiftPrompt(notice: TaskTokenGiftNotice, featuresSee
 
 export function formatGiftAmount(tokens: number, language: "zh-CN" | "en-US"): string {
   if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) {
-    return language === "zh-CN" ? `${tokens / 10_000} 万` : `${tokens / 1_000_000}M`;
+    return formatMessage(messageCatalogs[language]["launchGift.tokenAmountShort"], {
+      amount: language === "zh-CN" ? tokens / 10_000 : tokens / 1_000_000
+    });
   }
   return tokens.toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US");
 }
