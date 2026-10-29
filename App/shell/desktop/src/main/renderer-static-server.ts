@@ -20,7 +20,8 @@ const MIME_TYPES: Record<string, string> = {
   ".webm": "video/webm",
   ".webp": "image/webp",
   ".woff": "font/woff",
-  ".woff2": "font/woff2"
+  ".woff2": "font/woff2",
+  ".wasm": "application/wasm"
 };
 
 export interface PackagedRendererStaticServer {
