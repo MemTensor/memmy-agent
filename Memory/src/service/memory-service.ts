@@ -1,3 +1,4 @@
+import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
 import {PanelStats} from "./panel/stats.js";
@@ -308,14 +309,16 @@ export class MemoryService {
   private panelReader?: PanelReader;
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
-  private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
+  private sharedPanelStats() {
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db));
+    return this.panelStats;
+  }
   panelStatsSnapshot(input:RequestEnvelope) {
-    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db));
-    return this.panelStats.get(input);
+    return this.sharedPanelStats().get(input);
   }
   panelOverviewStatsSnapshot(input:RequestEnvelope) {
-    this.panelOverviewStats ??= new PanelStats(input=>this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db));
-    return this.panelOverviewStats.get(input);
+    const snapshot=this.sharedPanelStats().get(input);
+    return {...snapshot,data:snapshot.data?.overview};
   }
 
   async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
@@ -888,7 +891,6 @@ export class MemoryService {
     const requestsStopped = this.concurrency.close();
     this.panelBrowse?.clear();
     this.panelStats?.stop();
-    this.panelOverviewStats?.stop();
     const readerStopped = this.panelReader?.stop();
     this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
       this.stopConcurrencyMetrics();

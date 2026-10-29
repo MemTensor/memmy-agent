@@ -12,6 +12,7 @@ interface Entry<TData> {
   data?: TData;
   generatedAt?: string;
   safety: string;
+  revision: string;
   running: boolean;
   error?: string;
   lastAttempt?: number;
@@ -25,7 +26,8 @@ export class PanelStats<TData = PanelStatsData> {
   private stopped = false;
   constructor(
     private readonly read: (input: StatsInput) => Promise<{ safety: string; data: TData }>,
-    private readonly safety: () => string
+    private readonly safety: () => string,
+    private readonly revision: () => string = () => "0"
   ) {}
   get(input: StatsInput) {
     const timeZone = resolveTimeZone(input.timeZone);
@@ -37,6 +39,7 @@ export class PanelStats<TData = PanelStatsData> {
         running: false,
         day: this.day(timeZone),
         safety: this.safety(),
+        revision: this.revision(),
         disposed: false,
         generation: 0
       };
@@ -48,6 +51,7 @@ export class PanelStats<TData = PanelStatsData> {
       }
     }
     this.validate(entry);
+    if (entry.revision !== this.revision()) entry.lastAttempt = undefined;
     if (
       !entry.running &&
       (entry.lastAttempt === undefined || Date.now() - entry.lastAttempt >= (entry.error ? 60_000 : 5 * 60_000))
@@ -67,6 +71,7 @@ export class PanelStats<TData = PanelStatsData> {
   private validate(entry: Entry<TData>) {
     const safety = this.safety();
     const day = this.day(entry.input.timeZone);
+    const revision = this.revision();
     if (entry.safety !== safety || entry.day !== day) {
       entry.generation++;
       entry.data = undefined;
@@ -74,12 +79,14 @@ export class PanelStats<TData = PanelStatsData> {
       entry.error = undefined;
       entry.day = day;
       entry.safety = safety;
+      entry.revision = revision;
       entry.lastAttempt = undefined;
     }
   }
   private generate(entry: Entry<TData>) {
     if (this.stopped || entry.disposed || entry.running) return;
     this.validate(entry);
+    entry.revision = this.revision();
     entry.running = true;
     entry.lastAttempt = Date.now();
     clearTimeout(entry.timer);

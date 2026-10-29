@@ -1,3 +1,4 @@
+import { panelAnalysisLogs, panelMemoryStats } from "../../storage/panel-cache.js";
 import type { MemoryRow } from "../../types.js";
 import { effectiveEpisodeMemoryIds } from "../../storage/memory-relations.js";
 import {externalEvidenceNamespaceForMemory} from "../external-evidence-source.js";
@@ -400,7 +401,7 @@ export class PanelReadModel {
     };
   }
 
-  panelStatistics(input:RequestEnvelope, rows=this.deps.repos.memories.listStats()) {
+  panelStatistics(input:RequestEnvelope, rows=Array.from(panelMemoryStats(this.deps.repos.db))) {
     return {overview:this.panelOverviewSummary(input,rows),analysis:this.panelAnalysis(input,rows)};
   }
 
@@ -409,7 +410,7 @@ export class PanelReadModel {
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    const memories = rows ?? this.deps.repos.memories.listStats();
+    const memories = rows ?? Array.from(panelMemoryStats(this.deps.repos.db));
     const userId = input.userId ?? input.namespace?.userId;
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
@@ -444,9 +445,9 @@ export class PanelReadModel {
   } {
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelLastSevenDateKeys(this.now(), timeZone);
-    const memories = rows ?? this.deps.repos.memories.listStats();
+    const memories = rows ?? Array.from(panelMemoryStats(this.deps.repos.db));
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
-    const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
+    const logs = panelAnalysisLogs(this.deps.repos.db)
       .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
     const recallScores = logs
       .filter((log) => log.toolName === "memory_search")

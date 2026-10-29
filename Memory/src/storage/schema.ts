@@ -1,3 +1,4 @@
+import { installPanelCache } from "./panel-cache.js";
 import { installPanelSafetyTriggers } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import { installQueueSchedulingSchema } from "./queue-scheduling-schema.js";
@@ -807,6 +808,7 @@ export function migrate(db: Database.Database): void {
         db.prepare(statement).run();
       }
       installPanelSafetyTriggers(db);
+      installPanelCache(db);
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
         addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");

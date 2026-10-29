@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import { PanelReader } from "../../../src/service/panel/reader.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -31,6 +31,33 @@ describe("bounded readonly executor", () => {
     } finally {
       await reader.stop();
     }
+  });
+  it("shares one completed statistics read between overview and analysis", async () => {
+    const {db,service}=createTestService();
+    const safety=String(db.db.prepare("SELECT value_json FROM runtime_kv WHERE key='panel_safety_token'").pluck().get());
+    const data={overview:{counts:{memories:12}},analysis:{metrics:{recallEvents:3}}};
+    const read=vi.spyOn(service,"readPanel").mockResolvedValue({safety,data});
+    const input={userId:"owner",timeZone:"+00:00"};
+    service.panelOverviewStatsSnapshot(input);
+    service.panelStatsSnapshot(input);
+    await vi.waitFor(()=>expect(service.panelStatsSnapshot(input).status).toBe("ready"));
+    expect(read).toHaveBeenCalledExactlyOnceWith("stats",[input]);
+    expect(service.panelOverviewStatsSnapshot(input).data).toEqual(data.overview);
+    expect(service.panelStatsSnapshot(input).data).toEqual(data);
+    service.addMemory({content:"incremental write",source:"codex"});
+    expect(service.panelOverviewStatsSnapshot(input)).toMatchObject({status:"ready",data:data.overview});
+    await vi.waitFor(()=>expect(read).toHaveBeenCalledTimes(2));
+  });
+  it("loads an isolated log detail without materializing unrelated logs", async () => {
+    const {db}=createTestService();
+    const repos=new Repositories(db.db);
+    const add=(query:string)=>repos.runtime.insertApiLog({toolName:"memory_search",inputJson:JSON.stringify({query}),outputJson:"{}",durationMs:1,success:true,calledAt:"2026-10-29T00:00:00Z"});
+    const first=add("requested"),second=add("unrelated");
+    const reader=new PanelReader(db.path);
+    try{
+      expect((await reader.run("logDetail",[first.id])).data).toMatchObject({log:{id:first.id,inputJson:'{"query":"requested"}'}});
+      expect(db.db.prepare("SELECT id FROM panel_log_dirty").pluck().all()).toEqual([second.id]);
+    }finally{await reader.stop();}
   });
   it("cancels queued work and preserves other requests, then rejects work after stop", async () => {
     const { db } = createTestService();

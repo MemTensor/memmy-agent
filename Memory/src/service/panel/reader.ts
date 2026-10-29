@@ -11,7 +11,8 @@ interface Pending {
   detach: () => void;
 }
 
-/** One readonly connection. Cancellation and timeout terminate a running worker
+/** Source reads use one readonly connection; derived cache writes use bounded
+ * worker transactions. Cancellation and timeout terminate a running worker
  * before dispatching another read; replies from the old worker are discarded. */
 export class PanelReader {
   private worker?: Worker;
