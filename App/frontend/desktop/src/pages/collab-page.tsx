@@ -1412,7 +1412,8 @@ function LocalProjectSessions(props: {
       {props.tasks.length === 0 ? (
         <p className={styles.localEmpty}>{t("collab.board.noTasks")}</p>
       ) : (
-        <ul className={`${styles.list} ${styles.stream}`}>
+        // 本机项目没有工具条，列表要自己留出与标题的间距，否则悬停行浮起的外环会贴住项目名。
+        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
           {props.tasks.map((task) => (
             <li
               key={task.sessionKey}
