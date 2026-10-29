@@ -80,7 +80,7 @@ describe("feedback experience worker model admission", () => {
     expect(repos.runtime.getJob(queued[0]!.id)).toMatchObject({ status: "succeeded", attempts: 1, failureCount: 0, leaseToken: null });
     expect(operations).toEqual(["feedback.refine.v1"]);
     expect(embedded).toEqual([{ texts: [expect.stringContaining("Read issuer names from filing fields")], role: "query" }]);
-    const policies = db.db.prepare("SELECT id,properties_json FROM memories WHERE user_id='review-user' AND memory_layer='L2'").all() as Array<{ id: string; properties_json: string }>;
+    const policies = db.db.prepare("SELECT id,properties_json FROM memories WHERE user_id IS NOT NULL AND memory_layer='L2'").all() as Array<{ id: string; properties_json: string }>;
     expect(policies).toHaveLength(1);
     const policy = JSON.parse(policies[0]!.properties_json).internal_info.policy;
     expect(policy).toMatchObject({ title: "Success: Validate issuer fields", evidence_polarity: "positive",

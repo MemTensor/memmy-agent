@@ -755,7 +755,7 @@ export class EmbeddingJobProcessor {
       : undefined;
     if (
       decision.userMemoryAction === "correct_existing" &&
-      (!correctionTarget || correctionTarget.userId !== sourceMemory.userId || correctionTarget.status !== "active")
+      (!correctionTarget || correctionTarget.status !== "active")
     ) return undefined;
     const candidate = buildUserMemory({
       id: `user_memory_${stableHash(`${sourceTurnId}:${content}`).slice(0, 20)}`,
@@ -1257,7 +1257,7 @@ function renderTraceMemoryValue(step: { summary: string; rawTurnId?: string; ste
 
 function namespaceIdFromMemory(memory: MemoryRow): string {
   const namespace = namespaceForMemory(memory);
-  return [namespace.tenantId, namespace.userId, namespace.projectId ?? namespace.workspaceId, namespace.source, namespace.profileId].filter(Boolean).join(":");
+  return [namespace.tenantId, namespace.projectId ?? namespace.workspaceId, namespace.source, namespace.profileId].filter(Boolean).join(":");
 }
 function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined { const value = record[key]; return typeof value === "string" ? value : undefined; }
 function numberFromRecord(record: Record<string, unknown>, key: string): number | undefined { const value = record[key]; return typeof value === "number" && Number.isFinite(value) ? value : undefined; }

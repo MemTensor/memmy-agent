@@ -124,10 +124,10 @@ describe("memmy memory discovery", () => {
     expect(defaultConfig.memmyMemory.enabled).toBe(true);
     expect(resolveMemmyMemoryConfig(enabled).enabled).toBe(true);
     expect(resolveMemmyMemoryConfig(defaultConfig).enabled).toBe(true);
-    expect(resolveMemmyMemoryConfig(enabled).userId).toBe("user_config_1");
+    expect(resolveMemmyMemoryConfig(enabled).userId).toBe("__memmy_device_memory__");
     expect(resolveMemmyMemoryConfig(enabled).retrievalLayers).toEqual(["L1", "L3"]);
     expect(resolveMemmyMemoryConfig(disabled).enabled).toBe(false);
-    expect(resolveMemmyMemoryConfig(disabled).userId).toBe("local-user");
+    expect(resolveMemmyMemoryConfig(disabled).userId).toBe("__memmy_device_memory__");
     expect(enabled.toObject().memmyMemory).toEqual({
       enabled: true,
       userId: "user_config_1",

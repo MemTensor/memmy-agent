@@ -789,6 +789,8 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       && current.status === "loaded"
       && current.memoryId === response.memoryId
       && current.memoryVersion === response.memoryVersion
+      && current.renderedContext === response.renderedContext
+      && JSON.stringify(current.sourceMemoryIds) === JSON.stringify(response.sourceMemoryIds)
     ) {
       state.l3Cache = { ...current, loadedAt };
       return;

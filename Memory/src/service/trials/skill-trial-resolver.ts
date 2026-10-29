@@ -456,7 +456,6 @@ function namespaceIdFromMemory(memory: MemoryRow): string {
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId

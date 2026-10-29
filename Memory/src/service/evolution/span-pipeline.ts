@@ -966,7 +966,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
       ? recall.userMemoryCandidateIds
       : injectedIds;
     return this.deps.repos.userMemories.getMany(recalledUserMemoryIds)
-      .filter((memory) => memory.userId === trace.userId && memory.status === "active")
+      .filter((memory) => memory.status === "active")
       .map((memory) => ({
         id: memory.id,
         memoryTypes: memory.memoryTypes,
