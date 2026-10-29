@@ -16,7 +16,7 @@ import type {
   MemoryLayer,
   MemoryRow
 } from "../../types.js";
-import { deduplicateCrossAccountMemoryCandidates, recallSourceKey } from "./cross-account-candidate-dedup.js";
+import { createRecallSourceResolver, deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 
 export function dedupeStrings(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -112,10 +112,11 @@ export class IndexedCandidatePool {
     const work = {deadlineAt: input.budget?.deadlineAt ?? Date.now() + 5_000,
       maxRows: input.budget?.maxRows ?? 10_000, maxMetadataRows: input.budget?.maxMetadataRows ?? 50_000};
     const keyCache = new Map<string, string>();
+    const resolveSourceKey = createRecallSourceResolver(this.deps.repos);
     const groupCache = new Map<string, string[]>();
     const recentGroups = new Set<string>();
     const keyOf = (memory: MemoryRow) => {
-      if (!keyCache.has(memory.id)) keyCache.set(memory.id, recallSourceKey(memory, this.deps.repos) ?? `id:${memory.id}`);
+      if (!keyCache.has(memory.id)) keyCache.set(memory.id, resolveSourceKey(memory) ?? `id:${memory.id}`);
       return keyCache.get(memory.id)!;
     };
     const refill = async (filter: MemoryFilter, limit: number, channel: string,
@@ -283,6 +284,7 @@ export class IndexedCandidatePool {
       memories: readyMemories,
       repos: this.deps.repos,
       preferredUserId: input.userId,
+      resolveSourceKey,
       channelScoresByMemory
     }), diagnostics};
   }

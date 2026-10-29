@@ -537,6 +537,8 @@ const statements = [
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_turn
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_recall_turn
+    ON source_turn_captures (turn_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_conversation
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_sessions_native_conversation
