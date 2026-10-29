@@ -170,7 +170,7 @@ After mechanical ranking, Memmy prefers the evolution model for relevance filter
 | Setting | Default | Effect |
 | --- | ---: | --- |
 | `llmFilterEnabled` | `true` | Enables final semantic filtering |
-| `llmFilterMinCandidates` | `2` | Minimum mechanical candidates required before calling the LLM |
+| `llmFilterMinCandidates` | `1` | Minimum mechanical candidates required before calling the LLM |
 | `llmFilterMaxKeep` | `8` | Maximum kept after a successful LLM call |
 | `llmFilterFallbackMaxKeep` | `6` | Fallback cap when no LLM is configured, the call fails, or output is malformed |
 | `llmFilterCandidateBodyChars` | `500` | Candidate body characters shown to the filter model |
@@ -264,7 +264,7 @@ memmyMemory:
       llmFilterEnabled: true
       llmFilterMaxKeep: 8
       llmFilterFallbackMaxKeep: 6
-      llmFilterMinCandidates: 2
+      llmFilterMinCandidates: 1
       llmFilterCandidateBodyChars: 500
       readOnlyInjectionProfile: all
 ```
@@ -308,5 +308,9 @@ The `/memory` sidebar is organized into three groups by purpose:
 | Work | Overview / Memories / Tasks / Experiences / World models / Skills | View summary statistics and memory details, organized by task, experience, world model, and skill |
 | Insights | Analytics / Logs | Review write and evolution analytics, plus Memory API search and write logs |
 | System | Cross-Agent access | Manage Agent sources, history scanning, and Hook/plugin connection status |
+
+The Analytics page's “skill uses in the last 7 days” counts recall hits and invocation records for currently activated skills. The same skill counts once per recall event; separate recalls or invocations count again. This is a usage total, not a count of distinct skills, and editing a skill alone does not increase it.
+
+The User Memories list shows pagination controls only when it contains items.
 
 The Logs page provides dedicated detail views for `memory.search` and `memory.add` (search candidates, written fields, result status), useful for explaining why a memory was matched or written.

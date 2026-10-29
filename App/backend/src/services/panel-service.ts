@@ -41,7 +41,10 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
     },
 
     async tasks(input, ctx) {
-      return deps.memoryClient.panelTasks(input, context(ctx));
+      // The desktop task list shows the local library, like the Web viewer.
+      // Login must not hide tasks captured by hooks under a different userId.
+      // Keep service-token authentication, but omit the UI account filter.
+      return deps.memoryClient.panelTasks(input, { ...ctx, userId: undefined });
     },
 
     async deleteTask(id, ctx) {

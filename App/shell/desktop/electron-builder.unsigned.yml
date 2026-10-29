@@ -9,6 +9,17 @@ directories:
 files:
   - dist/**/*
   - package.json
+  - "!dist/runtime/memory/**"
+  - "!dist/native/sqlcipher/**"
+  - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
+  - "!dist/runtime/memmy-agent/dist/extra-dependencies/docx-rendering{,/**}"
+  - "!**/node_modules/open-computer-use/**"
+  - "!**/native-computer-use/windows/**"
+  - "!**/native-computer-history/windows/**"
+  - "!**/native-computer-use/linux/**"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
@@ -20,6 +31,13 @@ files:
 
 asar: true
 asarUnpack:
+  - "dist/native/memmy-pip.node"
+  - "dist/native/menu-bar-appearance.node"
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/native/**"
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/wechat/**"
+  - "dist/runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py"
+  - "dist/runtime/memmy-agent/dist/tools/computer-use/mac/native/**"
+  - "**/native-computer-use/**"
   - "**/*.node"
   - "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"
   - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
@@ -29,6 +47,10 @@ asarUnpack:
   - "dist/renderer/**"
 
 extraResources:
+  - from: extensions/memmy-browser
+    to: browser-extension
+    filter:
+      - "**/*"
   - from: dist/runtime/memory
     to: memory-runtime
     filter:
@@ -51,11 +73,20 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
+  - from: dist/native/sqlcipher
+    to: native/sqlcipher
+    filter:
+      - "**/*"
 mac:
+  # Preserve the source-built helper's permission identity.
+  signIgnore:
+    - "/dist/native-computer-use/Memmy Computer Use[.]app(/|$)"
   icon: build/icon.icns
   category: public.app-category.productivity
   extendInfo:
-    NSMicrophoneUsageDescription: "Memmy uses the microphone only when you start voice input."
+    NSMicrophoneUsageDescription: "Memmy uses the microphone for voice input and for website tasks you request."
+    NSCameraUsageDescription: "Memmy uses the camera for website tasks you request."
+    NSAppleEventsUsageDescription: "Memmy controls Microsoft Excel when you enable its connection, and checks whether browser windows are private before recording Computer History."
   target:
     - target: dmg
   identity: null
@@ -63,6 +94,8 @@ mac:
   gatekeeperAssess: false
   forceCodeSigning: false
   notarize: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
 
 dmg:
   title: Memmy Installer

@@ -140,6 +140,9 @@ describe("GUI transcript synchronization", () => {
       client_request_id: clientRequestId,
       source: { kind: "im", channel: "telegram" },
     });
+    const createdAts = transcript.map((record) => record.createdAt);
+    expect(createdAts.every((createdAt) => typeof createdAt === "number")).toBe(true);
+    expect(createdAts).toEqual([...createdAts].sort((left, right) => left - right));
     for (const record of transcript.slice(1, 10)) {
       expect(record.source).toEqual({ kind: "im", channel: "telegram" });
     }
@@ -251,5 +254,72 @@ describe("GUI transcript synchronization", () => {
     releaseFirst();
     await Promise.all([firstScan, drain]);
     expect(records).toEqual(["first", "second"]);
+  });
+
+  it("stamps a monotonically increasing transcript_offset on every mirrored record", () => {
+    const { sessions, workspace, mirror } = fixture();
+    const session = saveProjectedSession(sessions, workspace, "telegram:456");
+    const turn = mirror.turn(session.key, "turn-1", { kind: "im", channel: "telegram" })!;
+    mirror.delta(turn, "a", "stream-1");
+    mirror.delta(turn, "b", "stream-1");
+    mirror.delta(turn, "c", "stream-1");
+
+    const transcript = readTranscriptLines(`websocket:${toGuiChatId(session.key)}`);
+    const offsets = transcript.map((row) => row.transcript_offset);
+    expect(offsets).toHaveLength(3);
+    for (const offset of offsets) {
+      expect(Number.isInteger(offset)).toBe(true);
+      expect(offset).toBeGreaterThanOrEqual(0);
+    }
+    expect(offsets[0]).toBe(0);
+    expect(offsets[1]).toBeGreaterThan(offsets[0]!);
+    expect(offsets[2]).toBeGreaterThan(offsets[1]!);
+  });
+
+  it("lines the stamped offset up with the byte position appendTranscriptObject reports", () => {
+    const { workspace, sessions } = fixture();
+    const session = saveProjectedSession(sessions, workspace, "telegram:789");
+    const key = `websocket:${toGuiChatId(session.key)}`;
+
+    const record: {
+      event: string;
+      chat_id: string;
+      text: string;
+      transcript_offset?: number;
+    } = { event: "message", chat_id: "t-offset", text: "second" };
+    const endOffset = appendTranscriptObject(key, record);
+    const rows = readTranscriptLines(key);
+
+    // The stamped identity is this record's starting byte position, and the
+    // writer's return value is where the next record begins: one coordinate
+    // system, so the stamped value must sit inside [0, endOffset).
+    expect(record.transcript_offset).toBeGreaterThanOrEqual(0);
+    expect(record.transcript_offset).toBeLessThan(endOffset);
+    expect(rows.at(-1)?.transcript_offset).toBe(record.transcript_offset);
+    expect(rows.filter((row) => row.event === "message")).toHaveLength(1);
+  });
+
+  it("carries transcript_offset through the monitor to the broadcast record", async () => {
+    const { root, workspace, sessions } = fixture();
+    void root;
+    const session = saveProjectedSession(sessions, workspace, "telegram:321");
+    const chatId = toGuiChatId(session.key);
+    const guiKey = `websocket:${chatId}`;
+    const records: Record<string, any>[] = [];
+    const projection = new GuiSessionProjection(sessions);
+    const monitor = new GatewayTranscriptMonitor({
+      projection,
+      onRecord: (record) => {
+        records.push(record);
+      },
+      onRefresh: () => undefined,
+    });
+    monitor.start();
+    monitor.stop();
+    appendTranscriptObject(guiKey, { event: "delta", chat_id: chatId, text: "hello" });
+    await monitor.scan();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.transcript_offset).toBe(0);
   });
 });

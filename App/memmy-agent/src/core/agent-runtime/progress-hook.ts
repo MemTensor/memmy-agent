@@ -8,6 +8,7 @@ import {
   onProgressAcceptsToolEvents,
 } from "../../utils/progress-events.js";
 import { formatToolHints } from "../../utils/tool-hints.js";
+import { bindToolExecutionRequestContext, RequestContext } from "./tools/context.js";
 
 type ProgressCallback = (content: string, opts?: Record<string, any>) => Promise<void> | void;
 
@@ -21,7 +22,7 @@ export class AgentProgressHook extends AgentHook {
   private metadata: Record<string, any>;
   private sessionKey?: string | null;
   private toolHintMaxLength: number;
-  private setToolContext?: (...args: any[]) => void;
+  private setToolContext?: (...args: any[]) => RequestContext | void;
   private onIteration?: (iteration: number) => void;
   private streamBuf = "";
   private thinkExtractor = new IncrementalThinkExtractor();
@@ -47,7 +48,7 @@ export class AgentProgressHook extends AgentHook {
       metadata?: Record<string, any>;
       sessionKey?: string | null;
       toolHintMaxLength?: number;
-      setToolContext?: ((...args: any[]) => void) | null;
+      setToolContext?: ((...args: any[]) => RequestContext | void) | null;
       onIteration?: ((iteration: number) => void) | null;
     } = {},
   ) {
@@ -67,6 +68,15 @@ export class AgentProgressHook extends AgentHook {
 
   wantsStreaming(): boolean {
     return Boolean(this.onStreamCb);
+  }
+
+  updateRequestContext(channel: string, chatId: string, messageId: string | null,
+    metadata: Record<string, any>, sessionKey: string | null): void {
+    this.channel = channel;
+    this.chatId = chatId;
+    this.messageId = messageId;
+    this.metadata = metadata;
+    this.sessionKey = sessionKey;
   }
 
   static stripThinkContent(text?: string | null): string | null {
@@ -117,7 +127,8 @@ export class AgentProgressHook extends AgentHook {
       await invokeOnProgress(this.onProgressCb, hint, { toolHint: true, toolEvents });
     }
     if (this.setToolContext) {
-      this.setToolContext(this.channel, this.chatId, this.messageId, this.metadata, this.sessionKey);
+      const request = this.setToolContext(this.channel, this.chatId, this.messageId, this.metadata, this.sessionKey);
+      if (request instanceof RequestContext) bindToolExecutionRequestContext(context, request);
     }
   }
 

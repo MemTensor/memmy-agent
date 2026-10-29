@@ -1,7 +1,9 @@
 node_modules/
 dist/
+App/memmy-agent/npm-packages/
 release/
 App/shell/desktop/release/
+Mac软件打包/
 memmy-memory-*.tgz
 .vite/
 *.log
@@ -21,5 +23,9 @@ sessions/
 .env
 .env.*
 !.env.example
+# Holds the Windows Computer History folder open until it has code: git does
+# not track empty directories, and `.*` above would otherwise drop the marker.
+!App/memmy-agent/src/tools/computer-history/win/.gitkeep
 App/backend/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs
 Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs
+/Mac软件打包/

@@ -1,6 +1,10 @@
 /** Vite config tests. */
 import { fileURLToPath } from "node:url";
-import type { AliasOptions, UserConfig } from "vite";
+import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { build, type AliasOptions, type UserConfig } from "vite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import viteConfig, { PUBLIC_MEMMY_RENDERER_ENV_KEYS } from "../../vite.config.js";
 
@@ -53,6 +57,106 @@ describe("vite workspace resolution", () => {
     expect(JSON.stringify(config.define)).not.toContain("MEMMY_PRIVATE_TOKEN");
     expect(JSON.stringify(config.define)).not.toContain("must-not-be-rendered");
   });
+
+  it("ignores source watcher events during stable Electron demo runs", () => {
+    vi.stubEnv("MEMMY_STABLE_ELECTRON_DEMO", "1");
+
+    const config = resolveConfig("test");
+
+    expect(config.server?.watch).toEqual({ ignored: ["**/*"] });
+    expect(config.server?.hmr).toEqual({
+      host: "127.0.0.1",
+      port: 19001
+    });
+  });
+
+  it("keeps source watching enabled for normal frontend development", () => {
+    vi.stubEnv("MEMMY_STABLE_ELECTRON_DEMO", "0");
+
+    const config = resolveConfig("test");
+
+    expect(config.server?.watch).toBeUndefined();
+    expect(config.server?.hmr).toEqual({
+      host: "127.0.0.1",
+      port: 19001
+    });
+  });
+});
+
+describe("production React workspace identity", () => {
+  it("shares the hook dispatcher when a linked package has its own React copy", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "memmy-react-workspace-"));
+    const require = createRequire(import.meta.url);
+    const reactDirectory = dirname(require.resolve("react/package.json"));
+    const reactDomDirectory = dirname(require.resolve("react-dom/package.json"));
+    const schedulerDirectory = dirname(require.resolve("scheduler/package.json"));
+    const frontendRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const configFile = join(frontendRoot, "vite.config.ts");
+    const entryFile = join(fixture, "entry.js");
+    const linkedPackage = join(fixture, "linked-package");
+
+    try {
+      await cp(reactDirectory, join(linkedPackage, "node_modules/react"), { recursive: true });
+      await cp(reactDomDirectory, join(linkedPackage, "node_modules/react-dom"), { recursive: true });
+      await cp(schedulerDirectory, join(linkedPackage, "node_modules/scheduler"), { recursive: true });
+      await writeFile(join(linkedPackage, "index.js"), [
+        'export { default as linkedReact } from "react";',
+        'export { jsx as linkedJsx } from "react/jsx-runtime";',
+        'export { createRoot as linkedCreateRoot } from "react-dom/client";',
+      ].join("\n"));
+      await writeFile(entryFile, [
+        `import appReact from ${JSON.stringify(join(reactDirectory, "index.js"))};`,
+        `import { jsx as appJsx } from ${JSON.stringify(join(reactDirectory, "jsx-runtime.js"))};`,
+        `import { createRoot as appCreateRoot } from ${JSON.stringify(join(reactDomDirectory, "client.js"))};`,
+        'import { linkedReact, linkedJsx, linkedCreateRoot } from "./linked-package/index.js";',
+        "export const sameInstance = appReact === linkedReact;",
+        "export const sameDispatcher = appReact.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE === linkedReact.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;",
+        "export const sameJsxRuntime = appJsx === linkedJsx;",
+        "export const sameRootFactory = appCreateRoot === linkedCreateRoot;",
+      ].join("\n"));
+
+      const bundleIdentity = async (useDesktopConfig: boolean) => {
+        const output = await build({
+          root: frontendRoot,
+          configFile: useDesktopConfig ? configFile : false,
+          mode: "test",
+          logLevel: "silent",
+          build: {
+            write: false,
+            minify: true,
+            rolldownOptions: { input: entryFile, preserveEntrySignatures: "strict" },
+          },
+        });
+        const builds = Array.isArray(output) ? output : [output];
+        const entry = builds.flatMap((result) => "output" in result ? result.output : [])
+          .find((item) => item.type === "chunk" && item.isEntry);
+        if (!entry || entry.type !== "chunk") throw new Error("Missing production fixture entry");
+        return await import(`data:text/javascript;base64,${Buffer.from(entry.code).toString("base64")}`) as {
+          sameInstance: boolean;
+          sameDispatcher: boolean;
+          sameJsxRuntime: boolean;
+          sameRootFactory: boolean;
+        };
+      };
+
+      // Prove the fixture recreates two physical React copies, then validate the
+      // actual production configuration preserves a single hook dispatcher.
+      expect(await bundleIdentity(false)).toMatchObject({
+        sameInstance: false,
+        sameDispatcher: false,
+        sameJsxRuntime: false,
+        sameRootFactory: false,
+      });
+      expect(await bundleIdentity(true)).toMatchObject({
+        sameInstance: true,
+        sameDispatcher: true,
+        sameJsxRuntime: true,
+        sameRootFactory: true,
+      });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 /** Handles resolve config. */

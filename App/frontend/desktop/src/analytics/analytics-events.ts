@@ -36,7 +36,7 @@ export interface FeatureEvent {
 export interface SignupCompletedEvent {
   name: "signup_completed";
   params: {
-    method: "phone" | "email";
+    method: "phone" | "email" | "google" | "github";
     is_new_user: boolean;
     user_mode: "account";
     invite_code_provided: boolean;

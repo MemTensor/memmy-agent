@@ -1,5 +1,5 @@
 /** Target tests. */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -31,6 +31,10 @@ describe("codex skill target", () => {
     const skillFile = readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8");
     expect(skillFile).toContain("# Memmy");
     expect(skillFile).toContain("Call memmy-memory search when context is needed.");
+    const resumeSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8");
+    expect(resumeSkillFile).toContain("name: memmy-resume");
+    expect(resumeSkillFile).toContain("disable-model-invocation: true");
+    expect(resumeSkillFile).toContain("--source codex");
     await expect(target.isInstalled("codex")).resolves.toBe(true);
   });
 
@@ -78,6 +82,7 @@ describe("codex skill target", () => {
     await target.uninstall("codex");
     expect(readTargetFile(rootDirectory)).toBe(["manual prefix", "manual suffix", ""].join("\n"));
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
   });
 
   it("does not create Codex directory when Codex is not installed", async () => {
@@ -122,6 +127,27 @@ describe("codex skill target", () => {
     }
   });
 
+  it("marks a hook without a stored revision as outdated and refreshes it in place", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
+    const configPath = join(rootDirectory, "hooks", "memmy-memory-config.json");
+
+    await target.installPlugin?.("codex");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as { hook_revision?: string };
+    expect(installed.hook_revision).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+
+    writeFileSync(configPath, `${JSON.stringify({ ...installed, hook_revision: "stale" }, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    writeFileSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"), "old hook\n", "utf8");
+    writeFileSync(configPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(false);
+
+    await target.installPlugin?.("codex");
+    await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
+  });
+
   it("persists trust for the installed user-level hooks before installation completes", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let trustOptions: TrustMemmyCodexHooksOptions | undefined;
@@ -158,6 +184,47 @@ describe("codex skill target", () => {
     });
 
     await expect(target.installPlugin?.("codex")).rejects.toThrow("trust failed");
+    expect(existsSync(join(rootDirectory, "hooks.json"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-memory-config.json"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-workspace-bridge.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+  });
+
+  it("restores existing hook files and links when Codex cannot persist hook trust", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const hookDirectory = join(rootDirectory, "hooks");
+    mkdirSync(hookDirectory);
+    const hooksFilePath = join(rootDirectory, "hooks.json");
+    const hookConfigPath = join(hookDirectory, "memmy-memory-config.json");
+    const hookScriptPath = join(hookDirectory, "memmy-resume-hook.mjs");
+    const bridgePath = join(hookDirectory, "memmy-workspace-bridge.mjs");
+    const bridgeTargetPath = join(rootDirectory, "previous-workspace-bridge.mjs");
+    const originalHooks = '{"hooks":{"Stop":[]}}\n';
+    writeFileSync(hooksFilePath, originalHooks);
+    writeFileSync(hookConfigPath, "previous hook config\n");
+    writeFileSync(hookScriptPath, "previous hook script\n");
+    writeFileSync(bridgeTargetPath, "previous bridge\n");
+    symlinkSync(bridgeTargetPath, bridgePath);
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async () => {
+        throw new Error("trust failed");
+      }
+    });
+
+    await expect(target.installPlugin?.("codex")).rejects.toThrow("trust failed");
+
+    expect(readFileSync(hooksFilePath, "utf8")).toBe(originalHooks);
+    expect(readFileSync(hookConfigPath, "utf8")).toBe("previous hook config\n");
+    expect(readFileSync(hookScriptPath, "utf8")).toBe("previous hook script\n");
+    expect(lstatSync(bridgePath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(bridgePath)).toBe(bridgeTargetPath);
+    expect(readFileSync(bridgePath, "utf8")).toBe("previous bridge\n");
+    expect(existsSync(join(rootDirectory, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
   });
 
   it("installs a UserPromptSubmit hook that blocks resume commands with top L1 candidates", async () => {
@@ -236,6 +303,9 @@ describe("codex skill target", () => {
         source: "codex"
       });
       expect(authorization).toBe("Bearer test-token");
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-resume", "SKILL.md"), "utf8")).toContain(
+        "--source codex"
+      );
 
       const selectionRun = await runNodeHook(
         hookScriptPath,
@@ -268,12 +338,13 @@ describe("codex skill target", () => {
       expect(hooksAfter.hooks?.Stop).toBeUndefined();
       expect(readFileSync(join(rootDirectory, "AGENTS.md"), "utf8")).toBe(existingTargetFile);
       expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-resume"))).toBe(false);
     } finally {
       await close(server);
     }
   });
 
-  it("uses turn.complete as the only write phase for a completed Codex turn", async () => {
+  it("uses native source completion as the only write phase for a completed Codex turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -296,8 +367,8 @@ describe("codex skill target", () => {
         });
         return;
       }
-      if (request.method === "POST" && url.pathname === "/api/v1/turns/turn-stop-1/complete") {
-        writeJsonResponse(response, 200, { turnId: "turn-stop-1", l1MemoryId: "trace_1" });
+      if (request.method === "POST" && url.pathname === "/api/v1/source-turns/complete") {
+        writeJsonResponse(response, 200, { status: "stored", result: { turnId: "turn-stop-1", l1MemoryId: "trace_1" } });
         return;
       }
       writeJsonResponse(response, 404, {});
@@ -331,10 +402,18 @@ describe("codex skill target", () => {
         }
       });
 
+      const transcriptPath = join(rootDirectory, "rollout-stop.jsonl");
+      writeFileSync(transcriptPath, [
+        { type: "session_meta", payload: { id: "codex-session-1", cwd: "/tmp/memmy-project" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn-stop-1" } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ text: "请继续完成数据分析报告" }] } },
+        { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ text: "已经完成数据分析报告" }] } }
+      ].map(record => JSON.stringify({ ...record, timestamp: "2026-09-09T10:00:00.000Z" })).join("\n") + "\n");
       const run = await runNodeHook(
         hookScriptPath,
         JSON.stringify({
           hook_event_name: "Stop",
+          transcript_path: transcriptPath,
           session_id: "codex-session-1",
           turn_id: "turn-stop-1",
           cwd: "/tmp/memmy-project",
@@ -349,9 +428,7 @@ describe("codex skill target", () => {
         "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
-        "/api/v1/health",
-        "/api/v1/sessions/open",
-        "/api/v1/turns/turn-stop-1/complete"
+        "/api/v1/source-turns/complete"
       ]);
       expect(requests[1]?.body).toMatchObject({
         sessionId: "codex-memory-codex-session-1",
@@ -365,9 +442,10 @@ describe("codex skill target", () => {
         turnId: "turn-stop-1",
         query: "请继续完成数据分析报告"
       });
-      expect(requests[5]?.body).toMatchObject({
+      expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-codex-hook",
-        requestId: expect.stringMatching(/^codex-complete:turn-stop-1:/u),
+        channel: "hook",
+        sourceTurn: expect.objectContaining({ conversationId: "codex-session-1", turnId: "turn-stop-1" }),
         sessionId: "memmy-session-1",
         query: "请继续完成数据分析报告",
         answer: "已经完成数据分析报告",
@@ -375,7 +453,7 @@ describe("codex skill target", () => {
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
-      expect(requests[5]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

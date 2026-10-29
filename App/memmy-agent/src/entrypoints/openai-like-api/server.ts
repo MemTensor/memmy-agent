@@ -1,9 +1,12 @@
+import { authenticateAgentRuntime, createManagedExecutionScope, managedExecutionRequired, withManagedExecution } from "../../core/agent-runtime/managed-execution.js";
+import { requestTiming, withRequestTiming } from "../../utils/request-timing.js";
 import fs from "node:fs";
 import path from "node:path";
 import { Config } from "../../config/schema.js";
 import { getMediaDir } from "../../config/paths.js";
 import { InboundMessage } from "../../core/runtime-messages/events.js";
 import { FileSizeExceeded, saveBase64DataUrl } from "../../utils/media-decode.js";
+import { withProgressCapabilities } from "../../utils/progress-events.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
 
 export const API_SESSION_KEY = "api:default";
@@ -22,8 +25,8 @@ export class RequestBodyTooLarge extends Error {
 type ApiContext = {
   agentLoop: any;
   modelName: string;
-  requestTimeout: number;
   sessionLocks: Map<string, Promise<void>>;
+  activeRequests: Map<string, { controller: AbortController; done: Promise<void> }>;
 };
 
 type ChatCompletionUsage = {
@@ -107,6 +110,17 @@ export function sseChunk(delta: string, model: string, chunkId: string, finishRe
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
+export function sseMemmyEvent(type: string, payload: Record<string, any>, model: string, chunkId: string): string {
+  return `data: ${JSON.stringify({
+    id: chunkId,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [],
+    memmy_event: { type, ...payload },
+  })}\n\n`;
+}
+
 export const SSE_DONE = "data: [DONE]\n\n";
 
 function safeFilename(name: string): string {
@@ -175,33 +189,20 @@ async function parseMultipart(request: Request): Promise<[string, string[], stri
   return [text, mediaPaths, sessionId, model];
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutS: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((resolve, reject) => {
-    void resolve;
-    timer = setTimeout(() => reject(new Error(`Request timed out after ${timeoutS}s`)), timeoutS * 1000);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 async function withSessionLock<T>(ctx: ApiContext, sessionKey: string, fn: () => Promise<T>): Promise<T> {
   const previous = ctx.sessionLocks.get(sessionKey) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  ctx.sessionLocks.set(sessionKey, previous.then(() => current, () => current));
+  const queued = previous.then(() => current, () => current);
+  ctx.sessionLocks.set(sessionKey, queued);
   await previous.catch(() => undefined);
   try {
     return await fn();
   } finally {
     release();
-    if (ctx.sessionLocks.get(sessionKey) === current) ctx.sessionLocks.delete(sessionKey);
+    if (ctx.sessionLocks.get(sessionKey) === queued) ctx.sessionLocks.delete(sessionKey);
   }
 }
 
@@ -212,9 +213,11 @@ async function callAgent(ctx: ApiContext, args: Record<string, any>): Promise<an
     sessionKey: args.sessionKey ?? args.session_key,
     channel: args.channel,
     chatId: args.chatId ?? args.chat_id,
+    metadata: args.metadata,
     onProgress: args.onProgress,
     onStream: args.onStream,
     onStreamEnd: args.onStreamEnd,
+    abortSignal: args.abortSignal,
   };
   const isAgentLoopStyle = typeof loop?.processMessageInternal === "function";
   if (typeof loop?.processDirect === "function") {
@@ -228,8 +231,11 @@ async function callAgent(ctx: ApiContext, args: Record<string, any>): Promise<an
         senderId: "api",
         content: args.content,
         media: args.media ?? [],
+        metadata: args.metadata,
         sessionKey: args.session_key ?? args.sessionKey,
       }),
+      args.session_key ?? args.sessionKey,
+      { abortSignal: args.abortSignal },
     );
   }
   if (typeof loop === "function") return loop(args);
@@ -237,21 +243,33 @@ async function callAgent(ctx: ApiContext, args: Record<string, any>): Promise<an
 }
 
 export async function handleChatCompletions(request: Request, ctx?: ApiContext): Promise<Response> {
+  return withRequestTiming(request.headers.get("x-memmy-trace-id"), () => handleTimedChatCompletions(request, ctx));
+}
+
+async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): Promise<Response> {
   const context = ctx ?? {
     agentLoop: null,
     modelName: "memmy",
-    requestTimeout: 120,
     sessionLocks: new Map<string, Promise<void>>(),
+    activeRequests: new Map(),
   };
+  const managed = managedExecutionRequired();
+  if (managed && !authenticateAgentRuntime(request)) return errorJson(401, "Managed runtime authentication required");
+  const controller = new AbortController();
+  const permissionAbort = new AbortController();
+  const permissionSignal = AbortSignal.any([request.signal, permissionAbort.signal, controller.signal]);
+  let permission: ReturnType<typeof createManagedExecutionScope> | undefined;
   const contentType = request.headers.get("content-type") ?? "";
   let text = "";
   let mediaPaths: string[] = [];
   let sessionId: string | null | undefined;
   let requestedModel: string | null | undefined;
   let stream = false;
+  let requestId: string = crypto.randomUUID();
 
   try {
     if (contentType.startsWith("multipart/")) {
+      if (managed) return errorJson(400, "Managed requests require a JSON approval context");
       [text, mediaPaths, sessionId, requestedModel] = await parseMultipart(request);
     } else {
       let body: any;
@@ -260,10 +278,17 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
       } catch {
         return errorJson(400, "Invalid JSON body");
       }
+      if (managed) permission = createManagedExecutionScope(body.managed_execution, permissionSignal);
       stream = Boolean(body.stream);
       requestedModel = body.model;
       [text, mediaPaths] = parseJsonContent(body);
       sessionId = body.session_id;
+      if (body.request_id !== undefined) {
+        if (typeof body.request_id !== "string" || !body.request_id.trim() || body.request_id.length > 4096) {
+          return errorJson(400, "Invalid request_id");
+        }
+        requestId = body.request_id;
+      }
     }
   } catch (err) {
     if (err instanceof FileSizeExceeded) return errorJson(413, err.message);
@@ -275,7 +300,17 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
   }
 
   const sessionKey = sessionId ? `api:${sessionId}` : API_SESSION_KEY;
+  const requestKey = JSON.stringify([sessionKey, requestId]);
+  if (context.activeRequests.has(requestKey)) return errorJson(409, "Request is already running");
+  let finish!: () => void;
+  const done = new Promise<void>((resolve) => { finish = resolve; });
+  context.activeRequests.set(requestKey, { controller, done });
+  const finishRequest = (): void => {
+    context.activeRequests.delete(requestKey);
+    finish();
+  };
   const baseArgs = {
+    abortSignal: controller.signal,
     content: text,
     media: mediaPaths.length ? mediaPaths : null,
     session_key: sessionKey,
@@ -283,28 +318,35 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
     channel: "api",
     chat_id: API_CHAT_ID,
     chatId: API_CHAT_ID,
+    // An explicit API model selects this server's configured default, overriding a stale session binding.
+    ...(requestedModel && typeof context.agentLoop?.modelPreset === "string"
+      ? { metadata: { model_preset: context.agentLoop.modelPreset } } : {}),
   };
+
+  const invoke = (args: Record<string, any>) => withManagedExecution(permission, () => callAgent(context, args));
+  const endPermission = () => { if (permission) permission.active = false; permissionAbort.abort(); };
 
   if (stream) {
     const chunkId = `chatcmpl-${crypto.randomUUID().slice(0, 12)}`;
     const encoder = new TextEncoder();
     let closed = false;
     const body = new ReadableStream<Uint8Array>({
-      start(controller) {
+      start(streamController) {
         let emitted = false;
         const write = (chunk: string): void => {
           if (closed) return;
           try {
-            controller.enqueue(encoder.encode(chunk));
+            streamController.enqueue(encoder.encode(chunk));
           } catch {
             closed = true;
           }
         };
+        if (permission) permission.onEvent = event => write(`data: ${JSON.stringify({ memmy_event: event })}\n\n`);
         const close = (): void => {
           if (closed) return;
           closed = true;
           try {
-            controller.close();
+            streamController.close();
           } catch {
             // The client may have already disconnected.
           }
@@ -312,40 +354,78 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
         void (async () => {
           let failed = false;
           const onStream = async (token: string) => {
+            if (controller.signal.aborted) return;
+            if (token) requestTiming("api.first_content", true);
             if (token) emitted = true;
             write(sseChunk(token, context.modelName, chunkId));
           };
+          const onProgress = withProgressCapabilities(async (content: string, options: Record<string, any> = {}) => {
+            if (controller.signal.aborted) return;
+            if (options.reasoning && content) requestTiming("api.first_reasoning", true);
+            if (options.reasoning && content) write(sseMemmyEvent("thinking_delta", { text: content }, context.modelName, chunkId));
+            if (options.reasoningEnd) write(sseMemmyEvent("thinking_end", {}, context.modelName, chunkId));
+            for (const event of options.toolEvents ?? []) {
+              const phase = String(event?.phase ?? "");
+              if (phase === "start") {
+                if (!permission) write(sseMemmyEvent("tool_call", {
+                  callId: String(event.call_id ?? event.ui_tool_call_id ?? "call"),
+                  name: String(event.name ?? "tool"),
+                  input: event.arguments ?? {},
+                }, context.modelName, chunkId));
+              } else if (phase === "end" || phase === "error") {
+                if (!permission) write(sseMemmyEvent("tool_result", {
+                  callId: String(event.call_id ?? event.ui_tool_call_id ?? "call"),
+                  name: String(event.name ?? "tool"),
+                  output: phase === "error" ? event.error ?? "Tool execution failed" : event.result ?? null,
+                  ok: phase === "end",
+                }, context.modelName, chunkId));
+                for (const media of mediaFromToolEvent(event)) {
+                  write(sseMemmyEvent("media", { media: [media] }, context.modelName, chunkId));
+                }
+              }
+            }
+          }, { reasoning: true, toolEvents: true });
           const onStreamEnd = async () => undefined;
           try {
             await withSessionLock(context, sessionKey, async () => {
-              const response = await withTimeout(
-                Promise.resolve(
-                  callAgent(context, {
-                    ...baseArgs,
-                    onStream,
-                    onStreamEnd,
-                  }),
-                ),
-                context.requestTimeout,
-              );
+              controller.signal.throwIfAborted();
+              requestTiming("api.session_lock_acquired");
+              // Model and tool calls own their deadlines; a whole turn has none.
+              const response = await invoke({
+                ...baseArgs,
+                onProgress,
+                onStream,
+                onStreamEnd,
+              });
+              controller.signal.throwIfAborted();
               if (!emitted) {
                 const finalText = responseText(response);
                 if (finalText.trim()) write(sseChunk(finalText, context.modelName, chunkId));
               }
             });
-          } catch {
+          } catch (error) {
+            requestTiming("api.error");
             failed = true;
+            const selectionUnavailable = error instanceof Error && error.message === "model_selection_unavailable";
+            write(`data: ${JSON.stringify({ error: {
+              code: controller.signal.aborted ? "cancelled" : selectionUnavailable ? "model_selection_unavailable" : "server_error",
+              message: controller.signal.aborted ? "Task cancelled by user." : selectionUnavailable ? "会话绑定的模型已不可用，请重新选择模型。" : "Memmy runtime failed while processing the request.",
+            } })}\n\n`);
           } finally {
+            endPermission();
             if (!failed) {
               write(sseChunk("", context.modelName, chunkId, "stop"));
               write(SSE_DONE);
             }
+            requestTiming("api.finished");
             close();
+            finishRequest();
           }
         })();
       },
       cancel() {
         closed = true;
+        endPermission();
       },
     });
     return new Response(body, {
@@ -360,11 +440,14 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
 
   try {
     const reply = await withSessionLock(context, sessionKey, async () => {
-      const first = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
+      controller.signal.throwIfAborted();
+      const first = await invoke(baseArgs);
+      controller.signal.throwIfAborted();
       let textResponse = responseText(first);
       let usage = responseUsage(first);
       if (!textResponse.trim()) {
-        const retry = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
+        const retry = await invoke(baseArgs);
+        controller.signal.throwIfAborted();
         textResponse = responseText(retry);
         usage = mergeUsageRecords(usage, responseUsage(retry));
         if (!textResponse.trim()) textResponse = EMPTY_FINAL_RESPONSE_MESSAGE;
@@ -372,11 +455,68 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
       return { text: textResponse, usage };
     });
     return Response.json(chatCompletionResponse(reply.text, context.modelName, reply.usage));
-  } catch (err) {
-    const message = (err as Error).message ?? "";
-    if (message.startsWith("Request timed out")) return errorJson(504, message);
+  } catch {
+    if (controller.signal.aborted) return errorJson(409, "Task cancelled by user.", "cancelled");
     return errorJson(500, "Internal server error", "server_error");
+  } finally {
+    endPermission();
+    finishRequest();
   }
+}
+
+async function handleCancel(request: Request, ctx: ApiContext): Promise<Response> {
+  if (managedExecutionRequired() && !authenticateAgentRuntime(request)) return errorJson(401, "Managed runtime authentication required");
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return errorJson(400, "Invalid JSON body");
+  }
+  if (typeof body?.session_id !== "string" || !body.session_id.trim()
+    || typeof body?.request_id !== "string" || !body.request_id.trim()) {
+    return errorJson(400, "session_id and request_id are required");
+  }
+  const key = JSON.stringify([`api:${body.session_id}`, body.request_id]);
+  const active = ctx.activeRequests.get(key);
+  if (!active) return errorJson(404, "Running request not found");
+  active.controller.abort();
+  await active.done;
+  return Response.json({ status: "cancelled" });
+}
+
+function mediaFromToolEvent(event: Record<string, any>): Array<Record<string, string>> {
+  const media: Array<Record<string, string>> = [];
+  const seen = new Set<string>();
+  const push = (item: Record<string, string>): void => {
+    const key = `${item.kind}:${item.url ?? item.path ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    media.push(item);
+  };
+  const add = (value: any): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) add(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (value.type === "resource_link" && typeof value.uri === "string" && value.uri.trim()) {
+      const mime = typeof value.mimeType === "string" ? value.mimeType : "";
+      const kind = mime.startsWith("image/") || /\.(?:png|jpe?g|gif|webp|svg)$/iu.test(value.uri) ? "image" : "file";
+      push({ kind, ...(value.uri.startsWith("http") || value.uri.startsWith("data:") ? { url: value.uri } : { path: value.uri }), ...(typeof value.name === "string" && value.name ? { name: value.name } : {}) });
+      return;
+    }
+    if (value.type === "image_url" && typeof value.image_url?.url === "string" && value.image_url.url.trim()) {
+      push({ kind: "image", url: value.image_url.url });
+      return;
+    }
+    for (const child of [value.files, value.embeds, value.content, value.result]) add(child);
+  };
+  for (const file of event.files ?? []) {
+    if (typeof file === "string" && file.trim()) add({ type: "resource_link", uri: file });
+  }
+  add(event.embeds);
+  add(event.result);
+  return media;
 }
 
 export async function handleModels(request?: Request, ctx?: Pick<ApiContext, "modelName">): Promise<Response> {
@@ -389,20 +529,21 @@ export async function handleModels(request?: Request, ctx?: Pick<ApiContext, "mo
 }
 
 export async function handleHealth(): Promise<Response> {
-  return Response.json({ status: "ok" });
+  return Response.json({ status: "ok", ...(managedExecutionRequired() ? { permissionProtocol: 1, managedExecutionProtocol: 2, managedExecutionRequired: true, macosSandbox: process.env.AGENT_MACOS_SANDBOX === "1" } : {}) });
 }
 
 export function createApp(
   agentLoopOrConfig: any = null,
   modelName = "memmy",
-  requestTimeout = 120,
+  // Accepted for callers built against older runtimes; never limits a turn.
+  _legacyRequestTimeout?: number,
 ): { fetch: (request: Request) => Promise<Response>; context: ApiContext } {
   const agentLoop = agentLoopOrConfig instanceof Config || agentLoopOrConfig == null ? null : agentLoopOrConfig;
   const ctx: ApiContext = {
     agentLoop,
     modelName,
-    requestTimeout,
     sessionLocks: new Map<string, Promise<void>>(),
+    activeRequests: new Map(),
   };
   return {
     context: ctx,
@@ -410,6 +551,7 @@ export function createApp(
       const url = new URL(request.url);
       if (url.pathname === "/health" && request.method === "GET") return handleHealth();
       if (url.pathname === "/v1/models" && request.method === "GET") return handleModels(request, ctx);
+      if (url.pathname === "/v1/chat/cancel" && request.method === "POST") return handleCancel(request, ctx);
       if (url.pathname === "/v1/chat/completions" && request.method === "POST") return handleChatCompletions(request, ctx);
       return errorJson(404, "not found");
     },

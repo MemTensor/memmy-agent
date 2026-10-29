@@ -553,7 +553,7 @@ describe("MatrixChannel memmy parity cases", () => {
     const client = new FakeMatrixClient();
     client.roomSendResponse = new RoomSendResponse({ eventId: "$stream", roomId: "!room:matrix.org" });
     const channel = makeChannel({}, client);
-    let now = 100;
+    const now = 100;
     channel.monotonicTime = () => now;
 
     await channel.sendDelta("!room:matrix.org", "Hello");
@@ -809,7 +809,7 @@ describe("Matrix media", () => {
     expect(mediaPath).toContain(`${path.sep}media${path.sep}matrix${path.sep}`);
     expect(fs.readFileSync(mediaPath, "utf8")).toBe("image");
     expect(handled[0].metadata.attachments[0]).toEqual(expect.objectContaining({ type: "image", mxcUrl: "mxc://example.org/media", path: mediaPath }));
-    expect(handled[0].content).toContain("[attachment: ");
+    expect(handled[0].content).toBe("");
   });
 
   it("passes thread metadata through inbound media events", async () => {

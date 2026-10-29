@@ -89,6 +89,12 @@ function readDatabaseCandidate(databasePath: string): OpenclawDatabaseCandidate 
 
 function classifySchema(tables: readonly string[]): OpenclawSchemaKind {
   const tableSet = new Set(tables);
+  // The live agent database keeps conversations in transcript_events. Older layouts used
+  // a messages table, which is still recognised.
+  if (tableSet.has("transcript_events") && tableSet.has("session_windows")) {
+    return "conversation";
+  }
+
   if (tableSet.has("messages") && (tableSet.has("conversations") || tableSet.has("sessions"))) {
     return "conversation";
   }

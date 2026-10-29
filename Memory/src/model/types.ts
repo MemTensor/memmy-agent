@@ -10,6 +10,8 @@ export interface LlmCompletionOptions {
   thinkingMode?: "inherit" | "enabled" | "disabled";
   temperature?: number;
   maxTokens?: number;
+  /** Keep a length retry within this output cap when input has a fixed budget. */
+  retryTokenCeiling?: number;
   timeoutMs?: number;
   maxRetries?: number;
   jsonMode?: boolean;

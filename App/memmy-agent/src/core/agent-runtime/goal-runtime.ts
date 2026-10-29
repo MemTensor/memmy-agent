@@ -47,6 +47,7 @@ export const WEBUI_QUEUE_STEER_TRANSFERS_KEY = "webui_queue_steer_transfers";
 export type WebuiQueueSteerTransferRecord = {
   clientRequestId: string;
   expectedTurnId: string;
+  consumedAt?: string;
   store: "slot" | "goal";
   descriptor: {
     clientRequestId: string;
@@ -158,6 +159,8 @@ const INBOX_METADATA_KEYS = new Set([
   "mcp_presets",
   "image_generation",
   "message_id",
+  "computerUseInteractive",
+  "computerUseMessageRole",
   "thread_ts",
   "reply_to",
   "topic_id",
@@ -299,6 +302,11 @@ export function sanitizeGoalInboxMetadata(
   const out: Record<string, JsonValue> = {};
   for (const key of INBOX_METADATA_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(metadata, key)) continue;
+    // Persist refusals, never a metadata claim that grants app access.
+    if (key === 'computerUseInteractive' && metadata[key] !== false) continue;
+    if (key === 'computerUseMessageRole'
+      && (typeof metadata[key] !== 'string'
+        || !['user', 'assistant', 'tool', 'system', 'non-user'].includes(metadata[key] as string))) continue;
     const normalized = toJsonValue(metadata[key]);
     if (normalized !== undefined) out[key] = normalized;
   }
@@ -592,6 +600,7 @@ export class GoalRuntime {
   async pauseAndCancel(
     sessionKey: string,
     goalId: string,
+    options: { cancelActiveTasks?: (sessionKey: string) => Promise<number> } = {},
   ): Promise<{ goal: GoalState; warning?: "turn_cancel_failed" }> {
     this.beginLifecycleSettlement(sessionKey);
     try {
@@ -614,7 +623,7 @@ export class GoalRuntime {
       this.callbacks.invalidateGoalWork?.(sessionKey);
       this.invalidateContinuationReservation(sessionKey);
       try {
-        await this.callbacks.cancelActiveTasks?.(sessionKey);
+        await (options.cancelActiveTasks ?? this.callbacks.cancelActiveTasks)?.(sessionKey);
         return { goal };
       } catch (error) {
         console.warn("[goal] turn cancellation failed", { sessionKey, error });
@@ -1040,8 +1049,32 @@ export class GoalRuntime {
         },
         receivedAt: new Date().toISOString(),
       };
-      session.metadata[GOAL_TURN_INBOX_KEY] = [...inbox, entry];
+      session.metadata[GOAL_TURN_INBOX_KEY] = [...inbox, entry].sort((left, right) => (
+        String(left.metadata.queued_at ?? left.receivedAt).localeCompare(String(right.metadata.queued_at ?? right.receivedAt))
+        || left.id.localeCompare(right.id)
+      ));
       return { value: entry };
+    });
+  }
+
+  async markQueueSteerTransferConsumed(
+    sessionKey: string,
+    clientRequestId: string,
+    expectedTurnId: string,
+  ): Promise<void> {
+    await this.mutate(sessionKey, (session) => {
+      const transfers = parseQueueSteerTransfers(
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY],
+      );
+      const transfer = transfers.find((item) => (
+        item.clientRequestId === clientRequestId
+        && item.expectedTurnId === expectedTurnId
+      ));
+      if (transfer && !transfer.consumedAt) {
+        transfer.consumedAt = new Date().toISOString();
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY] = transfers;
+      }
+      return { value: undefined };
     });
   }
 
@@ -1079,9 +1112,16 @@ export class GoalRuntime {
 
   async enqueueUserMessage(sessionKey: string, message: InboundMessage): Promise<GoalTurnInboxEntry> {
     const source = message.turnSource ?? parseTurnSource(message.metadata?.turn_source);
+    const nativeBackground = message.internal || message.role !== 'user'
+      || ['system', 'cron'].includes(message.channel)
+      || ['subagent', 'goal-runtime', 'system', 'cron'].includes(message.senderId.toLowerCase())
+      || (message.channel === 'websocket' && (message.turnSource?.channel !== 'websocket'
+        || !['gui', 'tui'].includes(message.turnSource.kind)));
     const metadata = sanitizeGoalInboxMetadata(message.channel, {
       ...(message.metadata ?? {}),
       ...(source ? { turn_source: source } : {}),
+      computerUseMessageRole: ['user', 'assistant', 'tool', 'system'].includes(message.role) ? message.role : 'non-user',
+      ...(nativeBackground ? { computerUseInteractive: false } : {}),
     });
     const id = typeof metadata.client_request_id === "string" ? metadata.client_request_id : randomUUID();
     return this.mutate(sessionKey, (session) => {

@@ -1,5 +1,8 @@
+import { useComputerHistoryModelSync } from "./app/computer-history-model-sync.js";
+import { isComputerHistorySupported } from "./app/computer-history-platform.js";
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
+import { rememberPublishedMemoryBudget } from "./components/memory-token-budget-banner.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAnalyticsUserId, setAnalyticsUserMode } from "./analytics/analytics-context.js";
 import { trackCloudAnalyticsEvent } from "./analytics/cloud-analytics.js";
@@ -14,8 +17,12 @@ import {
 import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
+import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
+import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
+import { NotificationCenterProvider } from "./components/notification-center.js";
+import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -35,6 +42,8 @@ import { createAppClients } from "./api/client-types.js";
 import { createEventsConnection } from "./api/events.js";
 import { MemmyAgentRequestError, type MemmyAgentClient } from "./api/memmy-agent-client.js";
 import { getRuntimeConfig } from "./api/runtime-config.js";
+import { readHistoryPermissionSetup } from "./pages/memory/computer-history-permission-state.js";
+import { shouldReturnToWeChatSettings } from "./pages/memory/computer-history-wechat-permission-state.js";
 import { clearMemoryPanelCache } from "./pages/memory/memory-panel-cache.js";
 import { readLocalNickname } from "./app/nickname.js";
 import {
@@ -51,6 +60,7 @@ import {
 } from "./state/app-actions.js";
 import type { AgentState } from "./state/agent-chat-slice.js";
 import { useAppState } from "./state/app-state.js";
+import { useComputerHistoryTrayIndicator } from "./app/computer-history-tray-indicator.js";
 
 /** Handles app. */
 export function App() {
@@ -65,14 +75,22 @@ export function App() {
 function RuntimeApp() {
   const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
+  useComputerHistoryTrayIndicator(clients?.memmyAgent ?? null);
+  useComputerHistoryModelSync({
+    client: clients?.memmyAgent ?? null,
+    enabled: Boolean(state.bootstrap && state.modelConfig),
+    revision: JSON.stringify([state.bootstrap?.app.userMode, state.account.userId, state.modelConfig?.configRevision]),
+  });
   const { track } = useAnalytics();
   const { t } = useTranslation();
   const translationRef = useRef(t);
   const agentStateRef = useRef(state.agent);
+  const isScanningRef = useRef(false);
   const rendererReadyReportedRef = useRef(false);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
   agentStateRef.current = state.agent;
+  isScanningRef.current = state.agentSources.isScanning;
   const taskStateCoordinator = useMemo(() => (
     clients?.memmyAgent
       ? createAgentTaskStateCoordinator(
@@ -106,6 +124,31 @@ function RuntimeApp() {
   }, [clients, state.bootstrap]);
 
   useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
+
+  useEffect(() => {
+    if (!clients?.byokTokenUsage) {
+      return undefined;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      void clients.byokTokenUsage.getMemoryBudget().then((budget) => {
+        if (!cancelled) {
+          rememberPublishedMemoryBudget(budget);
+          window.dispatchEvent(new CustomEvent("memmy:memory-token-budget-updated", { detail: budget }));
+        }
+      }).catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("memmy:memory-token-budget-refresh", refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("memmy:memory-token-budget-refresh", refresh);
+    };
+  }, [clients]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.memmy?.onRouteTargetRequest) {
@@ -153,7 +196,7 @@ function RuntimeApp() {
         }
         dispatch(appActions.agentSourceScanCompleted());
       } catch {
-        // The next heartbeat or reconnect will reconcile again.
+        // The next scanning heartbeat or reconnect will reconcile again.
       }
     }
 
@@ -188,10 +231,11 @@ function RuntimeApp() {
           guidanceCompleted,
           modelConfig
         });
+        const returnToWeChatSettings = isComputerHistorySupported() && await shouldReturnToWeChatSettings();
         const initialPath = resolveLaunchInitialView({
           defaultPath: defaultInitialPath,
           currentRoute,
-          launchRouteOverride,
+          launchRouteOverride: launchRouteOverride ?? (isComputerHistorySupported() && (readHistoryPermissionSetup() || returnToWeChatSettings) && launchModeOverride !== "pet" ? "/memory" : null),
           launchModeOverride,
           petIntent
         });
@@ -252,7 +296,12 @@ function RuntimeApp() {
           dispatch(appActions.eventStatusChanged("connected"));
           void reconcileAgentSourceScanStatus(clients.agentSources);
         });
-        events.addEventListener("app.heartbeat", () => dispatch(appActions.eventStatusChanged("heartbeat")));
+        events.addEventListener("app.heartbeat", () => {
+          dispatch(appActions.eventStatusChanged("heartbeat"));
+          if (isScanningRef.current) {
+            void reconcileAgentSourceScanStatus(clients.agentSources);
+          }
+        });
         events.addEventListener("agent_source.scan_progress", (event) => {
           const parsed = parseSseEvent(event);
           if (parsed?.type === "agent_source.scan_progress") {
@@ -311,9 +360,13 @@ function RuntimeApp() {
   return (
     <UpdateCoordinatorProvider>
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
-        <AppRouter onRetry={retry} />
-        <GithubStarPromptHost />
-        {state.invitationToast ? (
+        <NotificationCenterProvider>
+          <AppRouter onRetry={retry} />
+          <HistoryLaunchPromptHost />
+          <CampaignPromptHost />
+          <TokenCreditToastHost />
+          <GithubStarPromptHost />
+          {state.invitationToast ? (
           <InviteResultToast
             key={state.invitationToast.id}
             text={t(
@@ -336,7 +389,8 @@ function RuntimeApp() {
               }
             }}
           />
-        ) : null}
+          ) : null}
+        </NotificationCenterProvider>
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
   );

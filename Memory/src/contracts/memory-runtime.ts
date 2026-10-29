@@ -22,7 +22,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill", "work_memory", "observed_activity"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -42,9 +42,11 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
   "episode_idle_close",
+  "episode_title",
   "trace_summary",
   "user_memory_embedding",
   "import_summary",
+  "observation_extract",
   "reflection",
   "embedding",
   "reward",
@@ -55,7 +57,13 @@ export const JobTypeSchema = z.enum([
   "l3_world_model_update",
   "project_environment_profile",
   "skill_crystallization",
-  "skill_trial_resolve"
+  "skill_cluster_assign",
+  "skill_batch_evolve",
+  "skill_trial_resolve",
+  "decision_repair",
+  "work_memory_extract",
+  "work_memory_idle_flush",
+  "feedback_experience"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -186,6 +194,9 @@ export const MemoryListItemSchema = z.object({
   status: MemoryStatusSchema,
   title: NonEmptyStringSchema,
   summary: z.string(),
+  sourceText: z.string().optional(),
+  generatedTitle: z.string().optional(),
+  experienceDraft: z.boolean().optional(),
   tags: z.array(z.string()),
   processing: MemoryProcessingRecordSchema.optional(),
   metrics: MemoryMetricsSchema.optional(),
@@ -216,7 +227,13 @@ export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
   body: z.string(),
   createdAt: IsoTimeSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
-  metadata: UnknownRecordSchema
+  metadata: UnknownRecordSchema,
+  workMemory: z.object({
+    workTopic: z.string().optional(),
+    requirement: z.string().optional(),
+    reason: z.string().optional(),
+    projectId: z.string().nullable().optional()
+  }).optional()
 });
 export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 
@@ -255,7 +272,9 @@ export const EpisodeRefSchema = z.object({
   skillMemoryIds: z.array(NonEmptyStringSchema).optional(),
   linkedSkillId: NonEmptyStringSchema.optional(),
   skillStatus: z.string().optional(),
-  skillReason: z.string().optional()
+  skillReason: z.string().optional(),
+  titleGenerated: z.boolean().optional(),
+  titlePending: z.boolean().optional()
 });
 export type EpisodeRef = z.infer<typeof EpisodeRefSchema>;
 

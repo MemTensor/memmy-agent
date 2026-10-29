@@ -2,8 +2,7 @@
 import type {
   ModelConfigTestInput,
   ModelConfigTestResult,
-  ModelEndpointProtocol,
-  ModelProvider
+  ModelEndpointProtocol
 } from "@memmy/local-api-contracts";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -56,7 +55,7 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
           return result(
             false,
             response.status === 404
-              ? appendBaseUrlGuidance(errorMessage, input.provider)
+              ? appendBaseUrlGuidance(errorMessage, input.protocol)
               : errorMessage,
             now
           );
@@ -68,7 +67,7 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
           return result(false, redactSecret(providerError, input.apiKey), now);
         }
         if (!probe.isValidBody(body)) {
-          return result(false, appendBaseUrlGuidance(INVALID_SUCCESS_BODY_MESSAGE, input.provider), now);
+          return result(false, appendBaseUrlGuidance(INVALID_SUCCESS_BODY_MESSAGE, input.protocol), now);
         }
 
         const modelListed = probe.listedModels(body).some((model) => model === input.modelId);
@@ -156,16 +155,24 @@ function resourceUrl(apiBase: string, resource: string): string {
   return `${apiBase.replace(/\/+$/u, "")}/${resource}`;
 }
 
-function baseUrlGuidance(provider: ModelProvider): string {
-  if (provider === "anthropic") {
+function baseUrlGuidance(protocol: ModelEndpointProtocol): string {
+  if (protocol === "anthropic-messages") {
     return "Anthropic API 地址通常不包含 /v1，例如 https://api.anthropic.com";
   }
-  if (provider === "google") return "";
-  return "OpenAI 兼容 API 地址通常以 /v1 结尾，例如 https://api.openai.com/v1";
+  if (protocol === "gemini-generate-content") return "";
+  if (
+    protocol === "openai-chat-completions"
+    || protocol === "openai-responses"
+    || protocol === "openai-embeddings"
+    || protocol === "openai-images"
+  ) {
+    return "OpenAI 兼容 API 地址通常以 /v1 结尾，例如 https://api.openai.com/v1";
+  }
+  return "";
 }
 
-function appendBaseUrlGuidance(message: string, provider: ModelProvider): string {
-  const hint = baseUrlGuidance(provider);
+function appendBaseUrlGuidance(message: string, protocol: ModelEndpointProtocol): string {
+  const hint = baseUrlGuidance(protocol);
   if (!hint) return message;
   return `${message.replace(/[。\.\s]+$/u, "")}。${hint}`;
 }

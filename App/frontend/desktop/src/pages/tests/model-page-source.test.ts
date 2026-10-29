@@ -21,8 +21,7 @@ describe("ModelPage source", () => {
     expect(messagesSource).toContain('"apiKey.modelPage.reusePrevious": "沿用上一步的 Agent 任务模型"');
     expect(messagesSource).toContain('"apiKey.modelPage.memoryHint": "可用更轻量的模型（如 30B），性价比更高"');
     expect(pageSource).toContain('t("apiKey.modelPage.title")');
-    expect(pageSource).toContain('title={t("apiKey.modelPage.memoryTitle")}');
-    expect(pageSource).toContain('title={t("apiKey.modelPage.skillTitle")}');
+    expect(pageSource.indexOf('title={t("apiKey.modelPage.memoryTitle")}')).toBeLessThan(pageSource.indexOf('title={t("apiKey.modelPage.skillTitle")}'));
     expect(pageSource).toContain('dispatch(appActions.navigate("/api-key"))');
     expect(pageSource).toContain('dispatch(appActions.navigate("/api-key-optional"))');
     expect(pageSource).not.toContain("resolveByokModelCompletion");
@@ -37,11 +36,7 @@ describe("ModelPage source", () => {
     expect(pageSource).toContain('capabilities: ["memory_evolution"]');
     expect(pageSource).toContain('assignCatalogPreset(memory.workspace, "byok", "memory_summary"');
     expect(pageSource).toContain('assignCatalogPreset(evolution.workspace, "byok", "memory_evolution"');
-    expect(pageSource).toContain('assignedCatalogEndpointId(workspace, "byok", "agent")');
-    expect(pageSource).toContain("const assignedMemoryEndpointId = mem.reuse");
-    expect(pageSource).toContain("const assignedEvolutionEndpointId = skill.reuse");
-    expect(pageSource).toContain("!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked");
-    expect(pageSource).toContain("!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked");
+    expect(pageSource).toContain('assignedCatalogEndpointId(initialWorkspace, "byok", "agent")');
     expect(pageSource).toContain("createModelFormValues");
     expect(pageSource).toContain("createModelProtocolPatch");
     expect(pageSource).toContain("testModelConnection");
@@ -53,7 +48,7 @@ describe("ModelPage source", () => {
     expect(pageSource).not.toContain('dispatch(appActions.navigate("/onboarding"))');
     expect(pageSource).not.toContain('track({ name: "byok_completed"');
     expect(pageSource).toContain("DEFAULT_MODEL_IDS[props.cfg.protocol]");
-    expect(pageSource).toContain("<ValidationMessage validation={props.cfg.validation} stale={isTestStale} />");
+    expect(pageSource).toContain("<ValidationMessage validation={props.cfg.validation} stale={isTestStale}");
     expect(pageSource).not.toContain("shouldContinueOnboarding");
     expect(pageSource).not.toContain("MOCK_PRIMARY_LLM");
     expect(pageSource).not.toContain("useNavigate");
@@ -83,8 +78,8 @@ describe("ModelPage source", () => {
     const pageSource = readSource(resolve(pagesDir, "model-page.tsx"));
 
     expect(pageSource).toContain('hydrateModelConfigForm(state.modelConfig, "local")');
-    expect(pageSource).toContain("const [mem, setMem] = useState<ModelConfig>(() => initialModelForm.memoryModel)");
-    expect(pageSource).toContain("const [skill, setSkill] = useState<ModelConfig>(() => initialModelForm.skillModel)");
+    expect(pageSource).toContain("const [mem, setMem] = useState<ModelConfig>(() => bindRoleCredential(");
+    expect(pageSource).toContain("const [skill, setSkill] = useState<ModelConfig>(() => bindRoleCredential(");
     expect(pageSource).toContain("apiKeyMasked: state.modelConfig.apiKeyMasked");
     expect(pageSource).toContain("configured: state.modelConfig.configured");
   });

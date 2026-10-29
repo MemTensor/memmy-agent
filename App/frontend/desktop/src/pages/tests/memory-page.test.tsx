@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { MemoryPageView, readMemorySubPage, writeMemorySubPage, type MemorySubPageId } from "../memory-page.js";
 
+vi.mock("../../app/computer-history-platform.js", () => ({
+  isComputerHistorySupported: () => true
+}));
+
 describe("MemoryPageView", () => {
   it("默认落在概览并渲染全部子导航", () => {
     const html = renderMemoryPage("overview");
@@ -27,6 +31,14 @@ describe("MemoryPageView", () => {
     expect(html).toContain("技能");
     expect(html).toContain("分析");
     expect(html).toContain("跨Agent接入");
+    const userMemories = html.indexOf("用户记忆");
+    const system = html.indexOf("系统");
+    const computerHistory = html.indexOf("电脑历史记录");
+    const sources = html.indexOf("跨Agent接入");
+    expect(userMemories).toBeGreaterThan(-1);
+    expect(system).toBeGreaterThan(userMemories);
+    expect(computerHistory).toBeGreaterThan(system);
+    expect(sources).toBeGreaterThan(computerHistory);
     expect(html).not.toContain("导入导出");
     expect(html).toContain("记忆总数");
     expect(html).toContain("memory-page-sidebar");

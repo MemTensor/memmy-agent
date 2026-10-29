@@ -31,6 +31,8 @@ export interface SelectProps {
   placement?: "top" | "bottom";
   /** Optional footer rendered below options; receives a close helper. */
   menuFooter?: (api: { close: () => void }) => ReactNode;
+  /** Optional panel shown beside the menu while an option is hovered or focused. */
+  optionAside?: (option: SelectOption) => ReactNode;
 }
 
 /** Handles select. */
@@ -40,15 +42,23 @@ export function Select(props: SelectProps) {
   const listboxId = `${controlId}-listbox`;
   const labelId = `${controlId}-label`;
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [activeValue, setActiveValue] = useState(props.value);
+  const [hoveredValue, setHoveredValue] = useState<string | null>(null);
+  const [hoveredTop, setHoveredTop] = useState(0);
 
   const enabledOptions = useMemo(() => props.options.filter((option) => !option.disabled), [props.options]);
   const selectedOption = props.options.find((option) => option.value === props.value);
   const activeOption = props.options.find((option) => option.value === activeValue && !option.disabled);
+  const hoveredOption = props.options.find((option) => option.value === hoveredValue && !option.disabled);
+  const aside = hoveredOption ? props.optionAside?.(hoveredOption) : null;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setHoveredValue(null);
+      return;
+    }
 
     setActiveValue(props.value || enabledOptions[0]?.value || "");
 
@@ -61,6 +71,12 @@ export function Select(props: SelectProps) {
     document.addEventListener("mousedown", closeOnOutsideClick);
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [enabledOptions, open, props.value]);
+
+  function showOptionAside(option: SelectOption, element: HTMLButtonElement) {
+    const menuTop = menuRef.current?.getBoundingClientRect().top ?? 0;
+    setHoveredTop(element.getBoundingClientRect().top - menuTop);
+    setHoveredValue(option.value);
+  }
 
   function moveActive(step: 1 | -1) {
     if (!enabledOptions.length) return;
@@ -158,38 +174,51 @@ export function Select(props: SelectProps) {
         <ChevronDown size={16} strokeWidth={2.2} className="select-control__icon" aria-hidden="true" />
       </button>
       {open && (
-        <div id={listboxId} className={`select-control__menu ${props.menuClassName ?? ""}`} role="listbox" aria-labelledby={props.label ? labelId : undefined}>
-          {props.options.map((option) => {
-            const showGroupLabel = Boolean(option.groupLabel && option.groupLabel !== previousGroupLabel);
-            previousGroupLabel = option.groupLabel;
+        <div
+          ref={menuRef}
+          className={`select-control__menu ${props.menuClassName ?? ""}`}
+          onMouseLeave={() => setHoveredValue(null)}
+        >
+          <div id={listboxId} className="select-control__options" role="listbox" aria-labelledby={props.label ? labelId : undefined}>
+            {props.options.map((option) => {
+              const showGroupLabel = Boolean(option.groupLabel && option.groupLabel !== previousGroupLabel);
+              previousGroupLabel = option.groupLabel;
 
-            return (
-              <div key={option.value}>
-                {showGroupLabel && <div className="select-control__group-label">{option.groupLabel}</div>}
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={option.value === props.value}
-                  disabled={option.disabled}
-                  className={`select-control__option ${
-                    option.value === props.value ? "select-control__option--selected" : ""
-                  } ${option.value === activeValue ? "select-control__option--active" : ""}`}
-                  onClick={() => selectValue(option.value)}
-                >
-                  <span className="select-control__option-content">
-                    {option.icon && (
-                      <span className="select-control__option-icon" aria-hidden="true">{option.icon}</span>
+              return (
+                <div key={option.value}>
+                  {showGroupLabel && <div className="select-control__group-label">{option.groupLabel}</div>}
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={option.value === props.value}
+                    disabled={option.disabled}
+                    className={`select-control__option ${
+                      option.value === props.value ? "select-control__option--selected" : ""
+                    } ${option.value === activeValue ? "select-control__option--active" : ""}`}
+                    onMouseEnter={(event) => showOptionAside(option, event.currentTarget)}
+                    onFocus={(event) => showOptionAside(option, event.currentTarget)}
+                    onClick={() => selectValue(option.value)}
+                  >
+                    <span className="select-control__option-content">
+                      {option.icon && (
+                        <span className="select-control__option-icon" aria-hidden="true">{option.icon}</span>
+                      )}
+                      <span className="select-control__option-label">{option.label}</span>
+                    </span>
+                    {option.value === props.value && !option.disabled && (
+                      <Check size={14} strokeWidth={2.6} className="select-control__option-check" aria-hidden="true" />
                     )}
-                    <span className="select-control__option-label">{option.label}</span>
-                  </span>
-                  {option.value === props.value && !option.disabled && (
-                    <Check size={14} strokeWidth={2.6} className="select-control__option-check" aria-hidden="true" />
-                  )}
-                </button>
-              </div>
-            );
-          })}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
           {props.menuFooter?.({ close: () => setOpen(false) })}
+          {aside && (
+            <div className="select-control__aside" style={{ top: hoveredTop }}>
+              {aside}
+            </div>
+          )}
         </div>
       )}
     </div>

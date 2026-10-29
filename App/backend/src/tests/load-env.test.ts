@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { resolveCloudClientConfig } from "../config/service-urls.js";
 import { loadCloudServiceEnv } from "../load-env.js";
 
 const roots: string[] = [];
@@ -11,13 +12,18 @@ afterEach(() => {
 });
 
 describe("backend cloud-service env loading", () => {
-  it("keeps an explicit environment origin ahead of the packaged manifest", () => {
+  it("uses the packaged manifest instead of an inherited environment origin", () => {
     const root = fixtureRoot();
     const manifestPath = writeManifest(root, "https://manifest.example.test");
-    const env = { MEMMY_CLOUD_SERVICE: "https://external.example.test" };
+    const env = {
+      MEMMY_CLOUD_SERVICE: "https://external.example.test",
+      MEMMY_CLOUD_URL: "https://stale.example.test"
+    };
 
-    expect(loadCloudServiceEnv({ env, manifestPath })).toBe("environment");
-    expect(env.MEMMY_CLOUD_SERVICE).toBe("https://external.example.test");
+    expect(loadCloudServiceEnv({ env, manifestPath })).toBe(manifestPath);
+    expect(env.MEMMY_CLOUD_SERVICE).toBe("https://manifest.example.test");
+    expect(env.MEMMY_CLOUD_URL).toBeUndefined();
+    expect(resolveCloudClientConfig(env).baseUrl).toBe("https://manifest.example.test");
   });
 
   it("loads only the allowlisted cloud service from a packaged manifest", () => {
@@ -43,13 +49,15 @@ describe("backend cloud-service env loading", () => {
     expect(env.MEMMY_CLOUD_SERVICE).toBe("https://dev.example.test");
   });
 
-  it("fails closed when a requested packaged manifest is missing or malformed", () => {
+  it("fails closed when a requested packaged manifest is missing or uses a non-HTTPS origin", () => {
     const root = fixtureRoot();
     expect(() => loadCloudServiceEnv({ env: {}, manifestPath: join(root, "missing.json") }))
       .toThrow(/manifest is missing/);
-    const manifestPath = join(root, "desktop-edition.json");
-    writeFileSync(manifestPath, JSON.stringify({ cloudService: "http://unsafe.example.test" }));
-    expect(() => loadCloudServiceEnv({ env: {}, manifestPath })).toThrow(/HTTPS/);
+    for (const cloudService of ["http://unsafe.example.test", "ftp://unsafe.example.test"]) {
+      const manifestPath = join(root, `${cloudService.slice(0, 3)}-desktop-edition.json`);
+      writeFileSync(manifestPath, JSON.stringify({ cloudService }));
+      expect(() => loadCloudServiceEnv({ env: {}, manifestPath })).toThrow(/HTTPS/);
+    }
   });
 });
 

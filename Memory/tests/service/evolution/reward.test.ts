@@ -47,6 +47,7 @@ function createEmptyRewardSummaryLlm(calls: Array<{
         const turnSummary = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "completed task turn";
         return {
           l1: {
+            title: "Completed task turn",
             summary: turnSummary,
             evidence: [{ quote: turnSummary, role: "user", kind: "task_outcome" }]
           },
@@ -106,6 +107,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? turnSummary;
         return {
           l1: {
+            title: "Reward scoring turn",
             summary: turnSummary,
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
@@ -145,8 +147,11 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
     isConfigured() {
       return true;
     },
-    async complete() {
-      return "{}";
+    async complete(_messages, options) {
+      // Titling runs for every episode, including one whose only candidate L1 is rejected.
+      return options.operation.startsWith("episode_title")
+        ? JSON.stringify({ title: "被拒绝捕获的对话", summary: "该轮没有产生可留存的任务结果。" })
+        : "{}";
     },
     async completeJson<T extends Record<string, unknown>>(
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
@@ -207,6 +212,7 @@ function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: num
         const accepted = payload.includes("implement the durable migration");
         return {
           l1: accepted ? {
+            title: "Durable migration",
             summary: "Implement the durable migration.",
             evidence: [{ quote: "implement the durable migration", role: "user", kind: "task_request" }]
           } : null,
@@ -242,7 +248,7 @@ describe("MemoryService / evolution / reward", () => {
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
     });
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const rewardBeforeClose = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -291,7 +297,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 2)).toEqual(["trace_summary", "episode_idle_close"]);
+    expect(queuedOrder.slice(0, 3)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);

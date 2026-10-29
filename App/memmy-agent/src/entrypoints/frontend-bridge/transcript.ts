@@ -217,7 +217,18 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   const obj = typeof objOrId === "string" ? maybeObj : objOrId;
   if (!isDict(obj)) throw new Error("webui transcript object must be a JSON object");
 
-  const raw = JSON.stringify(obj);
+  // The pre-write file size is this record's starting byte offset: appends land
+  // at the end, so a file of N bytes puts the new line at byte N. Stamping it
+  // here gives live delivery and transcript replay one shared identity for the
+  // same chunk — a JSONL line cannot be amended after it is written.
+  let startOffset = 0;
+  try {
+    startOffset = fs.statSync(file).size;
+  } catch {
+    // No file yet: this is the first record, starting at byte 0.
+  }
+
+  const raw = JSON.stringify({ ...obj, transcript_offset: startOffset });
   if (Buffer.byteLength(raw, "utf8") > MAX_TRANSCRIPT_FILE_BYTES) {
     throw new Error("webui transcript line too large");
   }
@@ -226,10 +237,17 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   try {
     fs.writeSync(fd, `${raw}\n`, undefined, "utf8");
     fs.fsyncSync(fd);
-    return fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
   }
+  // Only a record that actually reached disk gets an identity. If the write
+  // threw, the caller keeps an offset-free object and its broadcast omits the
+  // field, so the client falls back to applying the chunk. Stamping before the
+  // write would push the watermark to an offset that was never persisted, and
+  // the next real record — whose start offset equals that value — would be
+  // dropped as a duplicate.
+  obj.transcript_offset = startOffset;
+  return fs.statSync(file).size;
 }
 
 export function readTranscriptChunk(
@@ -468,6 +486,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   };
   const replayStates = new Map<string, ReplayState>();
   const closedReplayTurnIds = new Set<string>();
+  const cronDeliveryIds = new Set<string>();
   let activitySegmentCounter = 0;
   const newId = (prefix: string, idx: number): string => `${prefix}-${idx}-${randomUUID().slice(0, 8)}`;
 
@@ -557,6 +576,17 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     sessionCreatedAtIndexByRole[role] = index + 1;
     const createdAt = sessionCreatedAtByRole[role][index];
     return createdAt == null ? {} : { createdAt };
+  }
+
+  function messageCreatedAtPatch(role: "user" | "assistant", rec: Dict): Dict {
+    const eventTime = createdAtPatch(rec);
+    if (Object.keys(eventTime).length > 0) {
+      // Keep the legacy session-message fallback aligned for later records
+      // that still omit an event-level timestamp.
+      sessionCreatedAtIndexByRole[role] += 1;
+      return eventTime;
+    }
+    return roleCreatedAtPatch(role);
   }
 
   function newActivitySegment({ activate = true }: { activate?: boolean } = {}): string {
@@ -654,7 +684,59 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     }
   }
 
+  function attachInterleavedReasoningChunk(prev: Dict[], chunk: string, rec: Dict, idx: number): boolean {
+    if (!bufferMessageId) return false;
+    const answerIndex = prev.findIndex((message) => (
+      message.id === bufferMessageId
+      && messageBelongsToActiveTurn(message)
+    ));
+    if (answerIndex < 0) return false;
+    const answer = prev[answerIndex];
+    if (
+      answer.role !== "assistant"
+      || answer.kind === "trace"
+      || !answer.isStreaming
+      || !String(answer.content ?? "").trim()
+    ) {
+      return false;
+    }
+
+    // Providers may briefly switch back to the reasoning channel between
+    // content deltas. Keep the answer buffer open so the next content delta
+    // continues the same message; otherwise its first token is stranded as a
+    // standalone answer during transcript replay.
+    let previousIndex = -1;
+    for (let index = answerIndex - 1; index >= 0; index -= 1) {
+      if (!messageBelongsToActiveTurn(prev[index])) continue;
+      previousIndex = index;
+      break;
+    }
+    const previous = previousIndex >= 0 ? prev[previousIndex] : null;
+    if (previous?.role === "assistant" && previous.kind !== "trace" && previous.reasoning) {
+      prev[previousIndex] = {
+        ...previous,
+        reasoning: `${previous.reasoning}${chunk}`,
+      };
+      return true;
+    }
+
+    const segment = currentTurnActivitySegment();
+    prev.splice(answerIndex, 0, {
+      id: newId("as", idx),
+      role: "assistant",
+      content: "",
+      isStreaming: false,
+      reasoning: chunk,
+      reasoningStreaming: false,
+      activitySegmentId: segment,
+      ...activeTurnPatch(),
+      ...createdAtPatch(rec),
+    });
+    return true;
+  }
+
   function attachReasoningChunk(prev: Dict[], chunk: string, rec: Dict, idx: number): void {
+    if (attachInterleavedReasoningChunk(prev, chunk, rec, idx)) return;
     detachOpenAnswerBeforeActivity();
     for (let i = prev.length - 1; i >= 0; i -= 1) {
       const candidate = prev[i];
@@ -799,6 +881,16 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     }
   }
 
+  function stampAssistantFinishedAt(finishedAt: number): void {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (!messageBelongsToActiveTurn(messages[i])) continue;
+      if (messages[i].role === "assistant" && messages[i].kind !== "trace" && messages[i].kind !== "narration") {
+        messages[i] = { ...messages[i], createdAt: finishedAt };
+        return;
+      }
+    }
+  }
+
   function absorbComplete(extra: Dict, rec: Dict, idx: number): void {
     const last = messages.at(-1);
     if (last && messageBelongsToActiveTurn(last) && isReasoningOnlyPlaceholder(last)) {
@@ -811,7 +903,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       messages.push({
         id: newId("as", idx),
         role: "assistant",
-        ...roleCreatedAtPatch("assistant"),
+        ...messageCreatedAtPatch("assistant", rec),
         ...extra,
         ...activeTurnPatch(),
       });
@@ -819,7 +911,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       messages.push({
         id: newId("as", idx),
         role: "assistant",
-        ...roleCreatedAtPatch("assistant"),
+        ...messageCreatedAtPatch("assistant", rec),
         ...extra,
         ...activeTurnPatch(),
       });
@@ -1158,7 +1250,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         role: "user",
         content: text,
         ...activeTurnPatch(),
-        ...roleCreatedAtPatch("user"),
+        ...messageCreatedAtPatch("user", rec),
       };
       const clientRequestId = stringValue(rec.client_request_id)
         ?? stringValue(rec.clientRequestId);
@@ -1197,7 +1289,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
           bufferMessageId = adopted;
           const messageIndex = messages.findIndex((message) => message.id === adopted);
           if (messageIndex >= 0 && messages[messageIndex].createdAt == null) {
-            messages[messageIndex] = { ...messages[messageIndex], ...roleCreatedAtPatch("assistant") };
+            messages[messageIndex] = { ...messages[messageIndex], ...messageCreatedAtPatch("assistant", rec) };
           }
         } else {
           bufferMessageId = newId("buf", idx);
@@ -1207,7 +1299,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             content: "",
             isStreaming: true,
             ...activeTurnPatch(),
-            ...roleCreatedAtPatch("assistant"),
+            ...messageCreatedAtPatch("assistant", rec),
           });
         }
       }
@@ -1237,7 +1329,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             content: finalText,
             isStreaming: true,
             ...activeTurnPatch(),
-            ...roleCreatedAtPatch("assistant"),
+            ...messageCreatedAtPatch("assistant", rec),
           });
         } else {
           const messageIndex = messages.findIndex((message) => message.id === bufferMessageId);
@@ -1372,6 +1464,12 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) extra.latencyMs = Math.trunc(rec.latency_ms);
       if (isCronProactiveRecord(rec)) {
         if (!hasAssistantPayload) continue;
+        const deliveryId = stringValue(rec.metadata.deliveryId);
+        if (deliveryId && cronDeliveryIds.has(deliveryId)) continue;
+        if (deliveryId) cronDeliveryIds.add(deliveryId);
+        // Preserve the live identity when hydrating history so reconnecting
+        // clients can deduplicate the delivery without notifying again.
+        extra.metadata = { ...rec.metadata, replayed: true };
         closedAnswerMessageId = null;
         bufferMessageId = null;
         bufferParts = [];
@@ -1425,6 +1523,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       ));
       pruneReasoningOnly();
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) stampLatency(Math.trunc(rec.latency_ms));
+      const finishedAt = transcriptCreatedAt(rec);
+      if (finishedAt != null) stampAssistantFinishedAt(finishedAt);
       closedAnswerMessageId = null;
       bufferMessageId = null;
       bufferParts = [];

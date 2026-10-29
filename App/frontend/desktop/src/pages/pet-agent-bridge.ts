@@ -5,6 +5,7 @@ import type {
   MemmyAgentWebSocketConnection,
   MemmyAgentWsEvent
 } from "../api/memmy-agent-client.js";
+import { isCronProactiveMessage } from "../api/memmy-agent-client.js";
 import { formatMessage, zhCNMessages } from "../i18n/messages.js";
 import type { Task, TaskBusValue } from "../lib/task-bus.js";
 
@@ -479,6 +480,7 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
 
   /** Handles handle task event. */
   function handleTaskEvent(chatId: string, event: MemmyAgentWsEvent): void {
+    if (isCronProactiveMessage(event)) return;
     const run = activeRuns.get(chatId);
     if (!run) {
       return;

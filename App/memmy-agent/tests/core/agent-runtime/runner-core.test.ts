@@ -522,3 +522,13 @@ describe("AgentRunner expanded behavior", () => {
     expect(provider.calls[0].reasoningEffort).toBe("high");
   });
 });
+
+it('ends the model loop after a permission gate without asking the model to retry', async () => {
+  const provider = new FakeProvider([new LLMResponse({ content: null, toolCalls: [new ToolCallRequest({ id: 'one', name: 'computer_use', arguments: {} })], finishReason: 'tool_calls' })]);
+  const result = await new AgentRunner().run(new AgentRunSpec({ provider, model: 'test-model', initialMessages: [{ role: 'user', content: 'Open WeChat' }], tools: {
+    getDefinitions: () => [], get: () => ({ exclusive: true }),
+    execute: async (_name: string, _args: any, ctx: any) => { ctx.stopTurn('Please enable permission, then send a new message.'); return 'Not executed'; },
+  } as any }));
+  expect(provider.calls).toHaveLength(1);
+  expect(result.finalContent).toBe('Please enable permission, then send a new message.');
+});

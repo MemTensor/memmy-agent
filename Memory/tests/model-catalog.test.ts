@@ -76,6 +76,35 @@ describe("Memory model catalog inheritance", () => {
     expect(assignment.memorySummary).toBe(assignment.memoryEvolution);
   });
 
+  it("refreshes a following summary when only evolution changes", () => {
+    const root: Record<string, unknown> = {
+      app: { userMode: "byok" },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: ["agent-chat"], default: "agent-chat" },
+          memorySummary: "old-evolution",
+          memoryEvolution: "old-evolution"
+        }
+      }
+    };
+    const memory = {
+      roleRouting: { summary: "follow", evolution: "fixed" },
+      evolution: {
+        provider: "openai_compatible",
+        endpoint: "https://new-evolution.example/v1",
+        model: "new-evolution",
+        apiKey: "synthetic-key"
+      }
+    };
+
+    syncMemoryModelCatalog(root, memory, { evolution: memory.evolution });
+
+    const assignment = (root.modelAssignments as any).byok;
+    expect(assignment.memoryEvolution).toEqual(expect.any(String));
+    expect(assignment.memoryEvolution).not.toBe("old-evolution");
+    expect(assignment.memorySummary).toBe(assignment.memoryEvolution);
+  });
+
   it("never makes evolution inherit a fixed summary model", () => {
     const root: Record<string, unknown> = {
       app: { userMode: "byok" },

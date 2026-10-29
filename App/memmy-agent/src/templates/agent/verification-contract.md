@@ -8,4 +8,5 @@
   - Warnings remain evidence for the model to assess; a warning alone does not require mechanical correction.
 - If a tool result says its full output was persisted, read the referenced output before deciding whether file validation passed, failed, or was skipped.
 - File-level validation does not replace task-level verification or user acceptance criteria.
+- For tool-mediated actions, inspect the resulting page, application or structured state against the requested outcome. An accepted action or `submitted` status alone proves no final result. If the result is incomplete, inspect fresh state and use supported task-scoped recovery before requesting help; do not replay a write whose effect is uncertain.
 - Only claim checks that were actually run and whose results were observed.

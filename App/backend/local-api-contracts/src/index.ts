@@ -1,7 +1,12 @@
 /** Memmy local API contract. */
 import { z } from "zod";
+import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
+import { normalizeOutputLanguage } from "./output-language.js";
+
+export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
+export * from "./model-thinking-levels.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -10,6 +15,19 @@ export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
+export * from "./computer-use-surface.js";
+export * from "./browser-profile-control.js";
+export * from "./embedded-browser-control.js";
+export * from "./browser-playwright-control.js";
+export * from "./browser-access-approval.js";
+export * from "./native-app-approval.js";
+export * from "./browser-download-approval.js";
+export * from "./browser-capability-approval.js";
+export * from "./browser-global-approval.js";
+export * from "./browser-task-site-permission.js";
+export * from "./browser-use-site-policy.js";
+export * from "./browser-cdp-readonly.js";
+export * from "./browser-cdp-write.js";
 
 export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
 
@@ -80,9 +98,37 @@ export const AppSettingsDtoSchema = z.object({
     // Menu bar icon enabled.
     menuBarIconEnabled: z.boolean().default(true),
     // Stop the standalone Memory daemon when Desktop exits.
-    stopMemoryServiceOnExit: z.boolean().default(false)
+    stopMemoryServiceOnExit: z.boolean().default(false),
+    // Daily custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokDailyLimitM: z.number().int().min(0).max(99_999).default(10),
+    // Lifetime custom-key memory pipeline cap in million tokens. 0 means unlimited.
+    memoryByokTotalLimitM: z.number().int().min(0).max(99_999).default(500)
 });
 export type AppSettingsDto = z.infer<typeof AppSettingsDtoSchema>;
+
+export const MemoryTokenBudgetTriggerSchema = z.enum(["daily", "total"]);
+export type MemoryTokenBudgetTrigger = z.infer<typeof MemoryTokenBudgetTriggerSchema>;
+
+export const MemoryTokenBudgetDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    paused: z.boolean(),
+    trigger: MemoryTokenBudgetTriggerSchema.nullable(),
+    nextLocalMidnightAt: z.string().datetime(),
+    stale: z.boolean().optional()
+});
+export type MemoryTokenBudgetDto = z.infer<typeof MemoryTokenBudgetDtoSchema>;
+
+export const MemoryPipelineUsageDtoSchema = z.object({
+    dailyLimitM: z.number().int().min(0).max(99_999),
+    totalLimitM: z.number().int().min(0).max(99_999),
+    dailyUsed: z.number().int().nonnegative(),
+    lifetimeUsed: z.number().int().nonnegative(),
+    nextLocalMidnightAt: z.string().datetime()
+});
+export type MemoryPipelineUsageDto = z.infer<typeof MemoryPipelineUsageDtoSchema>;
 
 export const FirstEncounterReportStatusSchema = z.enum(["pending", "shown", "skipped"]);
 export type FirstEncounterReportStatus = z.infer<typeof FirstEncounterReportStatusSchema>;
@@ -592,6 +638,35 @@ export const PromotionFlagsSchema = z.object({
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
+export const LotteryStatusSchema = z.object({
+    shouldShow: z.boolean(),
+    startAt: z.number().int().nonnegative(),
+    endAt: z.number().int().nonnegative(),
+    serverNow: z.number().int().nonnegative(),
+    landingUrl: z.string().url()
+}).refine((status) => status.endAt > status.startAt, {
+    message: "Lottery endAt must be later than startAt",
+    path: ["endAt"]
+});
+export type LotteryStatus = z.infer<typeof LotteryStatusSchema>;
+
+export const LotteryRewardSchema = z.discriminatedUnion("hasReward", [
+    z.object({
+        hasReward: z.literal(false)
+    }),
+    z.object({
+        hasReward: z.literal(true),
+        drawId: z.string().min(1).optional(),
+        tokenAmount: z.number().int().positive()
+    })
+]);
+export type LotteryReward = z.infer<typeof LotteryRewardSchema>;
+
+export const LotteryRewardAckInputSchema = z.object({
+    drawId: z.string().min(1).optional()
+});
+export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -611,7 +686,8 @@ export const AppBootstrapResponseSchema = z.object({
     legal: LegalAgreementUrlsSchema.optional(),
     // Src module.
     // Promotions.
-    promotions: PromotionFlagsSchema.optional()
+    promotions: PromotionFlagsSchema.optional(),
+    lotteryStatus: LotteryStatusSchema.optional()
 });
 export type AppBootstrapResponse = z.infer<typeof AppBootstrapResponseSchema>;
 
@@ -626,7 +702,9 @@ export const PatchAppSettingsInputSchema = z
         taskDoneNotificationEnabled: z.boolean(),
         notificationSoundEnabled: z.boolean(),
         menuBarIconEnabled: z.boolean(),
-        stopMemoryServiceOnExit: z.boolean()
+        stopMemoryServiceOnExit: z.boolean(),
+        memoryByokDailyLimitM: z.number().int().min(0).max(99_999),
+        memoryByokTotalLimitM: z.number().int().min(0).max(99_999)
     })
     .partial();
 export type PatchAppSettingsInput = z.infer<typeof PatchAppSettingsInputSchema>;
@@ -663,9 +741,18 @@ export const ModelProviderSchema = z.enum([
     "kimi",
     "minimax",
     "baidu",
-    "doubao"
+    "doubao",
+    "stepfun",
+    "xiaomi"
 ]);
 export type ModelProvider = z.infer<typeof ModelProviderSchema>;
+
+/** Connection tests accept the catalog provider custom. Role model config stays on ModelProviderSchema. */
+export const ModelConfigTestProviderSchema = z.union([
+    ModelProviderSchema,
+    z.literal("custom")
+]);
+export type ModelConfigTestProvider = z.infer<typeof ModelConfigTestProviderSchema>;
 
 export const CatalogProviderIdSchema = z.enum([
     "openai",
@@ -678,7 +765,11 @@ export const CatalogProviderIdSchema = z.enum([
     "minimax",
     "qianfan",
     "volcengine",
-    "memmy_account"
+    "stepfun",
+    "xiaomi_mimo",
+    "memmy_account",
+    "bedrock",
+    "custom"
 ]);
 export type CatalogProviderId = z.infer<typeof CatalogProviderIdSchema>;
 
@@ -688,7 +779,8 @@ const CATALOG_PROVIDER_ALIASES: Readonly<Record<string, CatalogProviderId>> = {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
 };
 
 export function canonicalCatalogProviderId(value: string): CatalogProviderId | null {
@@ -719,7 +811,8 @@ export const ModelEndpointProtocolSchema = z.enum([
     "dashscope-input-audio-chat",
     "openai-images",
     "dashscope-multimodal-generation",
-    "memmy-account"
+    "memmy-account",
+    "bedrock-converse"
 ]);
 export type ModelEndpointProtocol = z.infer<typeof ModelEndpointProtocolSchema>;
 
@@ -840,11 +933,15 @@ export const CatalogEndpointInputSchema = z.object({
     protocol: ModelEndpointProtocolSchema,
     apiKey: z.string().optional(),
     extraHeaders: z.record(z.string(), z.string()).optional(),
-    extraBody: z.record(z.string(), z.unknown()).optional()
+    extraBody: z.record(z.string(), z.unknown()).optional(),
+    region: z.string().trim().min(1).optional()
 });
 export type CatalogEndpointInput = z.infer<typeof CatalogEndpointInputSchema>;
 
 export const MODEL_NAME_MAX_LENGTH = 128;
+
+export const ModelInputModalitySchema = z.enum(["text", "image", "video"]);
+export type ModelInputModality = z.infer<typeof ModelInputModalitySchema>;
 
 export const TextModelItemInputSchema = z.object({
     presetId: z.string().trim().min(1).optional(),
@@ -852,7 +949,10 @@ export const TextModelItemInputSchema = z.object({
     model: z.string().trim().min(1).max(MODEL_NAME_MAX_LENGTH),
     source: ModelSourceSchema,
     ownerAccountId: z.string().trim().min(1).optional(),
-    capabilities: z.array(ModelCapabilitySchema).min(1)
+    capabilities: z.array(ModelCapabilitySchema).min(1),
+    thinking: ModelThinkingConfigSchema.optional(),
+    custom: z.boolean().optional(),
+    inputModalities: z.array(ModelInputModalitySchema).optional()
 });
 export type TextModelItemInput = z.infer<typeof TextModelItemInputSchema>;
 
@@ -900,14 +1000,15 @@ export type ModelConfigInput = z.infer<typeof ModelConfigInputSchema>;
 
 /** Definition for model config test input. */
 export const ModelConfigTestInputSchema = z.object({
-    provider: ModelProviderSchema,
+    provider: ModelConfigTestProviderSchema,
     endpointId: z.string().trim().min(1),
     protocol: ModelEndpointProtocolSchema,
     apiBase: z.string().url(),
     modelId: z.string().min(1),
     apiKey: z.string().min(1).optional(),
     capability: ModelConfigTestCapabilitySchema.optional(),
-    secretTarget: ModelConfigTestSecretTargetSchema.optional()
+    secretTarget: ModelConfigTestSecretTargetSchema.optional(),
+    region: z.string().trim().min(1).optional()
 });
 export type ModelConfigTestInput = z.infer<typeof ModelConfigTestInputSchema>;
 
@@ -1013,7 +1114,8 @@ export const CatalogEndpointViewSchema = z.object({
     protocol: ModelEndpointProtocolSchema,
     hasApiKey: z.boolean(),
     apiKeyMasked: z.string(),
-    apiKey: z.string().default("")
+    apiKey: z.string().default(""),
+    region: z.string().min(1).optional()
 });
 export type CatalogEndpointView = z.infer<typeof CatalogEndpointViewSchema>;
 
@@ -1026,7 +1128,10 @@ export const TextModelItemViewSchema = z.object({
     source: ModelSourceSchema,
     ownerAccountId: z.string().min(1).optional(),
     capabilities: z.array(ModelCapabilitySchema).min(1),
-    available: z.boolean()
+    available: z.boolean(),
+    thinking: ModelThinkingConfigSchema.optional(),
+    custom: z.boolean().optional(),
+    inputModalities: z.array(ModelInputModalitySchema).optional()
 });
 export type TextModelItemView = z.infer<typeof TextModelItemViewSchema>;
 
@@ -1062,6 +1167,8 @@ export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettin
 
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
+    /** Write-response-only aliases, resolved by the server using real credentials. */
+    endpointAliases: z.record(z.string(), z.record(z.string(), z.string())).optional(),
     configRevision: z.string().min(1),
     providers: z.array(TextModelProviderViewSchema),
     modelAssignments: ModelAssignmentsSchema,
@@ -1093,8 +1200,23 @@ export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSc
 export const AccountChannelSchema = z.enum(["email", "phone"]);
 export type AccountChannel = z.infer<typeof AccountChannelSchema>;
 
+/**
+ * Map the desktop language setting onto a language Memory can write in.
+ * `system` follows the package channel: phone/CN defaults to Chinese, email/intl to English.
+ */
+export function resolveMemoryLanguage(
+  language: string | undefined,
+  accountChannel?: AccountChannel | string
+): string {
+  return normalizeOutputLanguage(language) ?? (accountChannel === "email" ? "en-US" : "zh-CN");
+}
+
 export const AccountLocaleSchema = z.enum(["zh", "en"]);
 export type AccountLocale = z.infer<typeof AccountLocaleSchema>;
+
+/** Third-party sign-in providers supported by the international desktop package. */
+export const SocialLoginProviderSchema = z.enum(["google", "github"]);
+export type SocialLoginProvider = z.infer<typeof SocialLoginProviderSchema>;
 
 /** Definition for send code input. */
 export const SendCodeInputSchema = z
@@ -1190,6 +1312,48 @@ export const AccountLoginResultViewSchema = z.object({
     invitationResult: InvitationResultSchema
 });
 export type AccountLoginResultView = z.infer<typeof AccountLoginResultViewSchema>;
+
+/** Starts a browser-based social-login flow. */
+export const StartSocialLoginInputSchema = z.object({
+    provider: SocialLoginProviderSchema,
+    locale: AccountLocaleSchema,
+    loginSource: z.literal("Memmy"),
+    invitationCode: z.string().trim().max(12).optional()
+});
+export type StartSocialLoginInput = z.infer<typeof StartSocialLoginInputSchema>;
+
+/** Opaque credentials used by the desktop client to poll a social-login flow. */
+export const StartSocialLoginResponseSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32),
+    authorizationUrl: z.string().url(),
+    expiresInSec: z.number().int().positive().max(1800),
+    pollIntervalSec: z.number().int().positive().max(30)
+});
+export type StartSocialLoginResponse = z.infer<typeof StartSocialLoginResponseSchema>;
+
+/** Identifies a previously started social-login flow. */
+export const SocialLoginStatusInputSchema = z.object({
+    flowId: z.string().min(16),
+    pollToken: z.string().min(32)
+});
+export type SocialLoginStatusInput = z.infer<typeof SocialLoginStatusInputSchema>;
+
+/** Current state of a browser-based social-login flow. */
+export const SocialLoginStatusResponseSchema = z.discriminatedUnion("status", [
+    z.object({ status: z.literal("pending") }),
+    z.object({
+        status: z.literal("completed"),
+        result: AccountLoginResultViewSchema
+    }),
+    z.object({
+        status: z.literal("failed"),
+        code: z.string().min(1).optional(),
+        message: z.string().min(1)
+    }),
+    z.object({ status: z.literal("expired") })
+]);
+export type SocialLoginStatusResponse = z.infer<typeof SocialLoginStatusResponseSchema>;
 
 /** Current account invitation code and today's reserved-slot summary. */
 export const AccountInvitationViewSchema = z.object({
@@ -1555,3 +1719,5 @@ export const TokenQuotaEligibilitySchema = z.object({
     latestReviewNote: z.string().nullable()
 });
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
+export * from './desktop-screen-capture.js';
+export * from './computer-use-onboarding.js';

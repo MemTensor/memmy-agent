@@ -43,7 +43,7 @@ describe("AppFrame", () => {
     expect(html).not.toContain('title="刷新任务"');
     expect(html).not.toContain('title="切换排序"');
     expect(html).toContain("app-frame-sidebar");
-    expect(html).toContain('class="space-y-1.5"');
+    expect(html).toContain('class="space-y-0.5"');
     expect(html).not.toContain('class="px-2 space-y-1"');
     expect(html).toContain("app-frame-content-topbar");
     expect(html).toContain("relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg");
@@ -57,7 +57,7 @@ describe("AppFrame", () => {
     expect(html).toContain('data-icon="search"');
     expect(html).not.toContain('data-icon="minimize-2"');
     expect(html).not.toContain("桌宠");
-    expect(html).toContain('data-icon="message-circle"');
+    expect(html).not.toContain('data-icon="message-circle"');
     expect(html).toContain('data-icon="user"');
     expect(html).toContain('data-icon="settings-2"');
     expect(html).not.toContain('data-icon="settings"');
@@ -76,6 +76,9 @@ describe("AppFrame", () => {
     );
 
     expect(html).toContain("app-frame-content-topbar");
+    expect(html).toContain("app-frame-content-topbar__start");
+    expect(html).toContain("app-frame-content-topbar__center");
+    expect(html).toContain("app-frame-content-topbar__end");
     expect(html).not.toContain("app-frame-content-topbar--bordered");
   });
 
@@ -102,6 +105,30 @@ describe("AppFrame", () => {
 
     expect(html).toContain("app-frame-content-topbar app-frame-content-topbar--bordered");
     expect(html).toContain("会话标题");
+  });
+
+  it("can overlay a bordered top bar that tracks a full-height side panel", () => {
+    const html = renderToString(
+      <AppProviders>
+        <AppFrame
+          title="测试页面"
+          topBar={<span>会话工具</span>}
+          topBarBorder
+          topBarInset={false}
+          topBarClassName="thread-topbar"
+          topBarStyle={{ right: 360 }}
+          sidePanel={<aside className="qa-side-panel">任务侧栏</aside>}
+        >
+          <div>分栏工作区</div>
+        </AppFrame>
+      </AppProviders>
+    );
+
+    expect(html).toContain('class="app-frame-content-topbar app-frame-content-topbar--bordered thread-topbar"');
+    expect(html).toContain('style="right:360px"');
+    expect(html).toContain('<div>分栏工作区</div></div><aside class="qa-side-panel">任务侧栏</aside></main>');
+    expect(html).not.toContain("padding-top:calc(var(--codex-toolbar-height)");
+    expect(html).not.toContain("app-frame-content-body--sidebar-hidden");
   });
 
   it("groups tasks into pinned, active, and archived sections", () => {
@@ -458,11 +485,10 @@ describe("AppFrame", () => {
     expect(appFrameSource).toContain('if (deferredGuidanceStep !== "armed")');
     expect(appFrameSource).toContain('state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" ? "improvement" : "product_tour"');
     expect(appFrameSource).toContain("writeDeferredGuidanceStep(storage, firstStep)");
-    expect(appFrameSource).toContain("readDeferredGuidanceStep(typeof window === \"undefined\" ? undefined : window.sessionStorage)");
+    expect(appFrameSource).toContain("useGuidanceProgress()");
     expect(appFrameSource).toContain("handleFirstSidebarInteraction();");
     expect(appFrameSource).toContain('deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset"');
     expect(appFrameSource).toContain('writeDeferredGuidanceStep(storage, "product_tour")');
-    expect(appFrameSource).toContain('setDeferredGuidanceStep("product_tour")');
     expect(appFrameSource).toContain("productTourIncludesLogs");
     expect(appFrameSource).toContain("productTourStartRoute(includeLogs)");
     expect(appFrameSource).toContain("<ImprovementProgramModal");
@@ -605,7 +631,7 @@ describe("AppFrame", () => {
     const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
     const profileTextRule = styles.match(/\.app-frame-profile-text\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('className="flex w-full items-center gap-2 px-2 py-1.5"');
+    expect(source).toContain('className="flex w-full items-center gap-2.5 px-2 py-1.5"');
     expect(profileTextRule).toContain("flex: 1 1 auto;");
     expect(profileTextRule).not.toContain("flex: 0 1 146px;");
   });
@@ -815,13 +841,15 @@ describe("AppFrame", () => {
     expect(source).toContain("props.onRename();");
   });
 
-  it("syncs main task running state back to pet TaskBus sessions", () => {
-    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+  it("syncs task running and new scheduled-message unread state globally back to pet TaskBus sessions", () => {
+    const source = readFileSync(resolve(__dirname, "..", "..", "app", "agent-runtime-bridge.tsx"), "utf8");
 
-    expect(source).toContain("const { syncAgentTaskStatuses } = taskBus;");
+    expect(source).toContain("const { syncAgentTaskStatuses } = useTaskBus();");
     expect(source).toContain("syncAgentTaskStatuses({");
     expect(source).toContain("sessionIds: [task.chatId, task.sessionKey]");
     expect(source).toContain("isRunning: task.runStartedAt != null");
+    expect(source).toContain("completedUnseen: task.completedUnseen");
+    expect(source).toContain("proactiveUnseenAt: state.agent.proactiveDeliveredAtByChatId[task.chatId]");
   });
 
   it("uses the shared confirm dialog for deleting archived conversations", () => {
@@ -839,30 +867,12 @@ describe("AppFrame", () => {
     expect(source).not.toContain("window.confirm");
   });
 
-  it("renders the community WeChat QR as a static image instead of a link", () => {
-    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
-    const communityLinksSource = readFileSync(resolve(__dirname, "..", "..", "community", "community-links.ts"), "utf8");
-    const githubIndex = source.indexOf('CommunityLink href={communityLinks.githubUrl}');
-    const discordIndex = source.indexOf('CommunityLink href={communityLinks.discordUrl}');
-
-    expect(source).toContain('className="community-popover-wechat"');
-    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
-    expect(source).toContain('className="community-link flex flex-col rounded-lg');
-    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
-    expect(source).toContain('detail="MemTensor/memmy-agent"');
-    expect(githubIndex).toBeGreaterThan(-1);
-    expect(githubIndex).toBeLessThan(discordIndex);
-    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
-  });
-
-  it("closes the community popover on outside click and disables sidebar resizing while open", () => {
+  it("加入社区入口已移出主侧边栏，改由设置页承接", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain("const communityMenuRef = useRef<HTMLDivElement | null>(null);");
-    expect(source).toContain('document.addEventListener("pointerdown", closeOnOutsidePointerDown);');
-    expect(source).toContain("menu.contains(event.target)");
-    expect(source).toContain("setShowCommunity(false);");
-    expect(source).toContain("isDisabled={sidebarHidden || showCommunity}");
+    expect(source).not.toContain("welcome.joinCommunity");
+    expect(source).not.toContain("community-popover");
+    expect(source).not.toContain("CommunityLink");
   });
 
   it("renders archive as an inline confirmation instead of a modal-style action", () => {
@@ -1024,7 +1034,7 @@ describe("AppFrame", () => {
     const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
 
     expect(appFrameSource).toContain("app-frame-task-section-header");
-    expect(appFrameSource).toContain('className="space-y-1.5"');
+    expect(appFrameSource).toContain('className="space-y-0.5"');
     expect(appFrameSource).toContain('className="app-frame-task-row__main"');
     expect(appFrameSource).toContain("app-frame-task-title");
     expect(appFrameSource).toContain("app-frame-task-preview");
@@ -1080,8 +1090,8 @@ describe("AppFrame", () => {
 
     expect(typographyBlock).toContain(".app-frame-project-title,");
     expect(typographyBlock).toContain(".app-frame-task-title {");
-    expect(typographyBlock).toContain("font-size: 13px;");
-    expect(typographyBlock).toContain("line-height: 18px;");
+    expect(typographyBlock).toContain("font-size: 14px;");
+    expect(typographyBlock).toContain("line-height: 21px;");
     expect(toggleBlock).toContain("opacity: 0;");
     expect(toggleBlock).toContain(".app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon");
     expect(toggleBlock).toContain(".app-frame-task-section-header:focus-within .app-frame-task-section-header__toggle-icon");

@@ -13,6 +13,7 @@ import {
 import type { AppAction } from "../../state/app-actions.js";
 import {
   agentRuntimeConnectRetryDelayMs,
+  acknowledgeProcessedCronDeliveries,
   createAgentTaskStateCoordinator,
   hydrateAgentThreadInBackground,
   isAgentRuntimeBridgeRoute,
@@ -27,6 +28,40 @@ function readBridgeSource(): string {
 }
 
 describe("AgentRuntimeBridge", () => {
+  it("acknowledges consumed visible cron results once despite global/current copies, and again after reconnect", () => {
+    let generation: number | null = 1;
+    const acknowledgeCronDelivery = vi.fn();
+    const connection = { getReadyGeneration: () => generation, acknowledgeCronDelivery };
+    const acknowledged = new Set<string>();
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, { type: "agent/chatViewVisibilityChanged", visible: true });
+    const event = { event: "message", chat_id: "chat-1", text: "暂无微信新消息",
+      metadata: { proactiveDelivery: "cron", deliveryId: "delivery-1" } };
+    state = agentReducer(state, { type: "agent/wsEvent", event });
+    state = agentReducer(state, { type: "agent/wsEvent", event });
+    expect(state.proactiveNotifications).toEqual([]);
+    acknowledgeProcessedCronDeliveries(connection, 1, state.proactiveLiveDeliveryIdsByChatId, acknowledged);
+    acknowledgeProcessedCronDeliveries(connection, 1, state.proactiveLiveDeliveryIdsByChatId, acknowledged);
+    expect(acknowledgeCronDelivery.mock.calls).toEqual([["delivery-1"]]);
+    generation = null;
+    acknowledgeProcessedCronDeliveries(connection, 1, state.proactiveLiveDeliveryIdsByChatId, acknowledged);
+    generation = 2;
+    acknowledgeProcessedCronDeliveries(connection, 2, state.proactiveLiveDeliveryIdsByChatId, acknowledged);
+    acknowledgeProcessedCronDeliveries(connection, 2, state.proactiveLiveDeliveryIdsByChatId, acknowledged);
+    expect(acknowledgeCronDelivery.mock.calls).toEqual([["delivery-1"], ["delivery-1"]]);
+    expect(state.proactiveNotifications).toEqual([]);
+  });
+
+  it("does not acknowledge transcript replay or history identities", () => {
+    const acknowledgeCronDelivery = vi.fn();
+    const state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "message", chat_id: "chat-old",
+      text: "旧消息", metadata: { proactiveDelivery: "cron", deliveryId: "history-1", replayed: true } } });
+    expect(state.proactiveDeliveryIdsByChatId["chat-old"]).toEqual(["history-1"]);
+    acknowledgeProcessedCronDeliveries({ getReadyGeneration: () => 1, acknowledgeCronDelivery }, 1,
+      state.proactiveLiveDeliveryIdsByChatId, new Set());
+    expect(acknowledgeCronDelivery).not.toHaveBeenCalled();
+  });
+
   it("uses bounded retry delays for initial runtime connection failures", () => {
     expect(agentRuntimeConnectRetryDelayMs(0)).toBe(500);
     expect(agentRuntimeConnectRetryDelayMs(1)).toBe(1000);
@@ -58,14 +93,14 @@ describe("AgentRuntimeBridge", () => {
     expect([...requestedKeys]).toEqual(["8\u0000chat-1\u00009"]);
   });
 
-  it("enables websocket runtime only for the main workspace route family", () => {
+  it("enables websocket runtime for the workspace and pet routes", () => {
     expect(isAgentRuntimeBridgeRoute("/main")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/tools")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/settings")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/memory")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/memory-sources")).toBe(true);
 
-    expect(isAgentRuntimeBridgeRoute("/pet")).toBe(false);
+    expect(isAgentRuntimeBridgeRoute("/pet")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/welcome")).toBe(false);
     expect(isAgentRuntimeBridgeRoute("/login")).toBe(false);
     expect(isAgentRuntimeBridgeRoute("/api-key")).toBe(false);
@@ -82,7 +117,7 @@ describe("AgentRuntimeBridge", () => {
     expect(source).toContain("cleanupConnection();");
     expect(source).toContain("connectionRef.current?.close();");
     expect(source).toContain('path === "/memory-sources"');
-    expect(source).not.toContain('path === "/pet"');
+    expect(source).toContain('path === "/pet"');
   });
 
   it("retries initial connection failures without taking over established websocket reconnects", () => {

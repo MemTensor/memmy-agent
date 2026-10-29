@@ -35,6 +35,7 @@ async function sampleFile(root: string): Promise<string> {
 afterEach(() => {
   ReadFileTool.MAX_CHARS = 128_000;
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) {
     fsSync.rmSync(root, { recursive: true, force: true });
   }
@@ -95,6 +96,30 @@ describe("ReadFileTool", () => {
     const result = await new ReadFileTool({ workspace: root }).execute({ path: file, offset: 1, limit: 9999 });
 
     expect(result).toContain("End of file");
+  });
+
+  it("does not show a trailing newline as an extra blank line", async () => {
+    const root = workspace();
+    const file = path.join(root, "memory.md");
+    await fs.writeFile(file, "only one memory line\n");
+
+    const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
+
+    expect(result).toContain("1| only one memory line");
+    expect(result).not.toMatch(/^2\|/m);
+    expect(result).toContain("End of file");
+  });
+
+  it("keeps a real blank line before the final newline", async () => {
+    const root = workspace();
+    const file = path.join(root, "memory.md");
+    await fs.writeFile(file, "first\n\n");
+
+    const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
+
+    expect(result).toContain("1| first");
+    expect(result).toMatch(/^2\| $/m);
+    expect(result).not.toMatch(/^3\|/m);
   });
 
   it("reports empty files", async () => {
@@ -275,6 +300,16 @@ describe("EditFileTool", () => {
 });
 
 describe("filesystem post-write validation", () => {
+  it("does not run implicit validators for managed writes or edits", async () => {
+    vi.stubEnv("AGENT_MANAGED_EXECUTION_REQUIRED", "1");
+    const root = workspace();
+    const target = path.join(root, "managed.json");
+    const written = await new WriteFileTool({ workspace: root }).execute({ path: target, content: "invalid json" });
+    expect(written).toBe(`Successfully wrote ${target}`);
+    const edited = await new EditFileTool({ workspace: root }).execute({ path: target, old_text: "invalid", new_text: "still invalid" });
+    expect(edited).not.toContain("Lint results:");
+    expect(await fs.readFile(target, "utf8")).toBe("still invalid json");
+  });
   it("skips write_file I/O, file state updates, and lint when bytes are identical", async () => {
     const root = workspace();
     const target = path.join(root, "same.json");

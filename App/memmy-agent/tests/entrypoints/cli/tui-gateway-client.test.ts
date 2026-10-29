@@ -915,4 +915,89 @@ describe("TuiGatewayClient", () => {
     await expect(pending).rejects.toThrow("aborted");
     client.close();
   });
+
+  it("applies deltas carrying rising transcript offsets and drops a repeated offset", async () => {
+    const { client, sockets } = await connectClient();
+    const socket = sockets[0]!;
+    const tui = { kind: "tui", channel: "websocket" };
+
+    socket.message({
+      event: "delta", chat_id: client.chatId, text: "hel",
+      stream_id: "s1", turn_id: "turn-1", transcript_offset: 0, source: tui,
+    });
+    socket.message({
+      event: "delta", chat_id: client.chatId, text: "lo",
+      stream_id: "s1", turn_id: "turn-1", transcript_offset: 40, source: tui,
+    });
+    // Same offset as the previous frame: a re-delivery, not new content.
+    socket.message({
+      event: "delta", chat_id: client.chatId, text: "lo",
+      stream_id: "s1", turn_id: "turn-1", transcript_offset: 40, source: tui,
+    });
+    await waitUntil(() => client.snapshot().messages.some(
+      (message) => message.role === "assistant" && message.text === "hello",
+    ));
+
+    const assistant = client.snapshot().messages.filter((message) => message.role === "assistant");
+    expect(assistant.map((message) => message.text)).toEqual(["hello"]);
+    client.close();
+  });
+
+  it("applies every delta when records carry no transcript offset (legacy transcripts)", async () => {
+    const { client, sockets } = await connectClient();
+    const socket = sockets[0]!;
+    const tui = { kind: "tui", channel: "websocket" };
+
+    socket.message({
+      event: "delta", chat_id: client.chatId, text: "hel",
+      stream_id: "s1", turn_id: "turn-1", source: tui,
+    });
+    socket.message({
+      event: "delta", chat_id: client.chatId, text: "lo",
+      stream_id: "s1", turn_id: "turn-1", source: tui,
+    });
+
+    const assistant = client.snapshot().messages.filter((message) => message.role === "assistant");
+    expect(assistant.map((message) => message.text)).toEqual(["hello"]);
+    client.close();
+  });
+
+  it("forgets applied offsets across a reconnect so the reloaded stream is applied", async () => {
+    const { client, sockets } = await connectClient();
+    const tui = { kind: "tui", channel: "websocket" };
+
+    sockets[0]!.message({
+      event: "delta", chat_id: client.chatId, text: "first",
+      stream_id: "s1", turn_id: "turn-1", transcript_offset: 900, source: tui,
+    });
+    expect(client.snapshot().messages.map((message) => message.text)).toContain("first");
+
+    // Offsets restart low after a reconnect; a stale watermark would swallow them.
+    sockets[0]!.disconnect();
+    await waitUntil(() => sockets.length === 2);
+    const reconnected = sockets[1]!;
+    reconnected.open();
+    reconnected.message({ event: "ready", chat_id: "unused" });
+    reconnected.message({
+      event: "attached",
+      chat_id: client.chatId,
+      model_selection: sessionSelection,
+    });
+    reconnected.message({
+      event: "message_queue_snapshot",
+      chat_id: client.chatId,
+      revision: 0,
+      items: [],
+      started_items: [],
+    });
+    await waitUntil(() => client.snapshot().connection === "connected");
+    reconnected.message({
+      event: "delta", chat_id: client.chatId, text: "second",
+      stream_id: "s2", turn_id: "turn-1", transcript_offset: 5, source: tui,
+    });
+
+    const assistant = client.snapshot().messages.filter((message) => message.role === "assistant");
+    expect(assistant.map((message) => message.text).join("")).toContain("second");
+    client.close();
+  });
 });

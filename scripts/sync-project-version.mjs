@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,9 @@ const derivedManifests = [
   "App/memmy-agent/package.json",
   "App/shell/desktop/package.json",
 ];
+const optionalDerivedManifests = [
+  "App/memmy-agent/npm-packages/memmy-agent/package.json",
+];
 
 const staleFiles = [];
 for (const relativePath of derivedManifests) {
@@ -23,10 +26,32 @@ for (const relativePath of derivedManifests) {
     json.version = version;
   });
 }
+for (const relativePath of optionalDerivedManifests) {
+  if (await exists(relativePath)) {
+    await updateJson(relativePath, (json) => {
+      json.version = version;
+    });
+  }
+}
 
 await updateText(
   "App/backend/src/project-version.ts",
   `/** Generated from the root package.json by scripts/sync-project-version.mjs. */\nexport const MEMMY_VERSION = ${JSON.stringify(version)};\n`
+);
+
+await updateText(
+  "App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift",
+  `import Foundation\n\npublic let openComputerUseVersion = ${JSON.stringify(version)}\n\npublic func resolvedOpenComputerUseVersion(bundle: Bundle = .main) -> String {\n    if let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,\n       !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {\n        return version\n    }\n\n    return openComputerUseVersion\n}\n`
+);
+
+await updateText(
+  "App/native-computer-use/apps/OpenComputerUseWindows/version.go",
+  `package main\n\nvar version = ${JSON.stringify(version)}\n`
+);
+
+await updateText(
+  "App/native-computer-use/apps/OpenComputerUseLinux/version.go",
+  `package main\n\nvar version = ${JSON.stringify(version)}\n`
 );
 
 await updateJson("package-lock.json", (json) => {
@@ -73,4 +98,13 @@ async function updateText(relativePath, nextText) {
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+async function exists(relativePath) {
+  try {
+    await access(join(root, relativePath));
+    return true;
+  } catch {
+    return false;
+  }
 }

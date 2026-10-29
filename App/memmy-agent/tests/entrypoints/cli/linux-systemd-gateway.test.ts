@@ -79,6 +79,9 @@ describe("Linux systemd Gateway probing", () => {
     const unauthorizedFetch = vi.fn(
       async () => new Response("Unauthorized", { status: 401 }),
     ) as unknown as typeof fetch;
+    const startingFetch = vi.fn(
+      async () => new Response("Gateway is still starting", { status: 503 }),
+    ) as unknown as typeof fetch;
     const invalidFetch = vi.fn(async () => new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -90,6 +93,10 @@ describe("Linux systemd Gateway probing", () => {
     await expect(probeGateway(configured(), { fetchImpl: unauthorizedFetch })).resolves.toEqual({
       status: "unexpected",
       detail: "bootstrap HTTP 401",
+    });
+    await expect(probeGateway(configured(), { fetchImpl: startingFetch })).resolves.toEqual({
+      status: "unavailable",
+      detail: "bootstrap HTTP 503",
     });
     await expect(probeGateway(configured(), { fetchImpl: invalidFetch })).resolves.toEqual({
       status: "unexpected",
@@ -294,6 +301,38 @@ describe("Linux systemd Gateway root terminal flow", () => {
     ]);
   });
 
+  it("retries a transient bootstrap 503 while the managed service starts", async () => {
+    const config = configured();
+    let serviceRunning = false;
+    const probes: GatewayProbe[] = [
+      { status: "unavailable", detail: "bootstrap HTTP 503" },
+      { status: "unavailable", detail: "bootstrap HTTP 503" },
+      { status: "ready" },
+    ];
+    const enableGatewayService = vi.fn(async () => {
+      serviceRunning = true;
+    });
+    const runInteractive = vi.fn(async () => null);
+
+    await runLinuxRootTerminal({
+      platform: "linux",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      systemdGatewayEnabled: true,
+      loadConfig: () => config,
+      onboardWizard: vi.fn(),
+      prepareGatewayEnvironment: async () => false,
+      enableGatewayService,
+      probeGateway: vi.fn(async (): Promise<GatewayProbe> => probes.shift() ?? { status: "ready" }),
+      gatewayServiceMainPid: vi.fn(async () => serviceRunning ? 789 : null),
+      sleep: async () => undefined,
+      runInteractive,
+    });
+
+    expect(enableGatewayService).toHaveBeenCalledWith({ restart: false });
+    expect(runInteractive).toHaveBeenCalledWith(config);
+  });
+
   it("keeps systemd ownership and restarts when the persisted environment changes", async () => {
     const config = configured();
     const prepareGatewayConfig = vi.fn(async () => config);
@@ -365,6 +404,37 @@ describe("Linux systemd Gateway root terminal flow", () => {
     })).rejects.toThrow("occupied, incompatible, or rejected authentication");
 
     expect(enableGatewayService).not.toHaveBeenCalled();
+  });
+
+  it("retries a transient Gateway 5xx response during service startup", async () => {
+    let serviceRunning = false;
+    const enableGatewayService = vi.fn(async () => {
+      serviceRunning = true;
+    });
+    const probes: GatewayProbe[] = [
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "unexpected", detail: "bootstrap HTTP 503" },
+      { status: "ready" },
+    ];
+
+    await expect(runLinuxRootTerminal({
+      platform: "linux",
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      systemdGatewayEnabled: true,
+      loadConfig: configured,
+      onboardWizard: vi.fn(),
+      prepareGatewayConfig: vi.fn(async () => configured()),
+      prepareGatewayEnvironment: async () => false,
+      enableGatewayService,
+      probeGateway: vi.fn(async (): Promise<GatewayProbe> => probes.shift() ?? { status: "ready" }),
+      gatewayServiceMainPid: vi.fn(async () => serviceRunning ? 123 : null),
+      sleep: async () => undefined,
+      runInteractive: vi.fn(async () => null),
+    })).resolves.toBeNull();
+
+    expect(enableGatewayService).toHaveBeenCalledWith({ restart: false });
   });
 
   it("leaves source-built Linux, non-Linux, and non-TTY invocations unchanged", async () => {

@@ -9,10 +9,13 @@ on:
       - "scripts/install.sh"
       - "scripts/internal/linux/**"
       - "App/memmy-agent/**"
+      - "App/native-computer-use/**"
       - "Memory/**"
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
+      - "tests/linux-computer-use-deps.test.mjs"
+      - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
   push:
@@ -22,10 +25,13 @@ on:
       - "scripts/install.sh"
       - "scripts/internal/linux/**"
       - "App/memmy-agent/**"
+      - "App/native-computer-use/**"
       - "Memory/**"
       - "Migrations/**"
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
+      - "tests/linux-computer-use-deps.test.mjs"
+      - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
   workflow_dispatch:
@@ -55,8 +61,11 @@ jobs:
           ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
       - run: npm ci
       - run: npm ci --prefix App/memmy-agent
       - name: Resolve and verify version
@@ -74,10 +83,15 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Test Linux launcher and installer contracts
+        env:
+          # Release packaging provisions the Office rendering executables; they are
+          # unavailable to pull request and branch builds.
+          MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}
         run: npm run test:linux-cli
       - name: Build Linux CLI release assets
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}
         run: bash scripts/internal/linux/build-cli-archive.sh --version "$VERSION" --output release-assets
       - uses: actions/upload-artifact@v4
         with:
@@ -100,13 +114,17 @@ jobs:
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: memmy-linux-cli-assets
           path: release-assets
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
       - name: Install twice and exercise the CLI
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -125,6 +143,10 @@ jobs:
           export MEMMY_RELEASE_BASE_URL="file://$PWD/release-assets"
           bash release-assets/install.sh
           bash release-assets/install.sh
+          ocu_arch="$EXPECTED_ARCH"
+          [[ "$ocu_arch" != "x64" ]] || ocu_arch="amd64"
+          node scripts/internal/shared/check-open-computer-use.mjs \
+            "$MEMMY_INSTALL_ROOT/current/App/memmy-agent/dist/native-computer-use/linux/$ocu_arch/memmy-computer-use"
           "$MEMMY_BIN_DIR/memmy" --version
           "$MEMMY_BIN_DIR/memmy" --help >/dev/null
           "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null

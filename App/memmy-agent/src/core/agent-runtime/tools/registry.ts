@@ -1,3 +1,4 @@
+import { managedExecutionRequired, managedToolDefinitions } from "../managed-execution.js";
 import { Tool, type ToolExecutionContext } from "./base.js";
 
 const HINT = "\n\n[Analyze the error above and try a different approach.]";
@@ -29,6 +30,7 @@ export class ToolRegistry {
   }
 
   getDefinitions(): Record<string, any>[] {
+    if (managedExecutionRequired()) return managedToolDefinitions();
     if (this.cachedDefinitions) return this.cachedDefinitions;
     const definitions = [...this.tools.values()].map((tool) => tool.toSchema());
     const builtins = definitions.filter((schema) => !ToolRegistry.schemaName(schema).startsWith("mcp_"));

@@ -410,7 +410,6 @@ export class AnthropicProvider extends LLMProvider {
       if (tc) kwargs.tool_choice = tc;
     }
 
-    if (this.extraHeaders) kwargs.extra_headers = this.extraHeaders;
     if (this.extraBody) Object.assign(kwargs, this.extraBody);
     if (omitTemperature) delete kwargs.temperature;
     return kwargs;

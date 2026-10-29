@@ -232,6 +232,18 @@ describe("MemoryService / facade / config and storage", () => {
     db.close();
   });
 
+  it("reports a model failure through the health status", () => {
+    const { db } = createTestService();
+    const service = createTestMemoryService({
+      db,
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+
+    expect(service.health().ok).toBe(false);
+    expect(service.health().models.evolution.lastError).toBe("llm filter unavailable");
+  });
+
   it("restarts retryable terminal processing failures after model config reload", async () => {
     const root = createTestRoot("mindock-memory-reload-failed-processing-");
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });

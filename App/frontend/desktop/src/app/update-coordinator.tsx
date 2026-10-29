@@ -264,6 +264,76 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     }
   }, [commitUpdateState]);
 
+  /** Rechecks the manifest immediately before downloading so a stale update prompt cannot install an intermediate release. */
+  const downloadLatestUpdate = useCallback(async (options: DownloadUpdateOptions = {}): Promise<void> => {
+    commitUpdateState((current) => ({
+      ...current,
+      phase: "checking",
+      dialog: null,
+      downloadProgress: null,
+      feedback: null
+    }));
+
+    try {
+      const result = await requestUpdateResult();
+      if (!mountedRef.current) {
+        return;
+      }
+
+      if (result.status === "not-configured") {
+        commitUpdateState(() => ({
+          phase: "not-configured",
+          result,
+          preparedUpdatePath: null,
+          downloadProgress: null,
+          feedback: { key: "settings.about.updateNotConfigured" },
+          dialog: null
+        }));
+        return;
+      }
+
+      if (result.status === "latest") {
+        commitUpdateState(() => ({
+          phase: "latest",
+          result,
+          preparedUpdatePath: null,
+          downloadProgress: null,
+          feedback: { key: "settings.about.upToDate", values: { version: result.currentVersion } },
+          dialog: null
+        }));
+        return;
+      }
+
+      const version = result.latestVersion ?? result.currentVersion;
+      if (result.preparedUpdatePath) {
+        commitUpdateState(() => ({
+          phase: "prepared",
+          result,
+          preparedUpdatePath: result.preparedUpdatePath ?? null,
+          downloadProgress: null,
+          feedback: { key: "settings.about.silentReady", values: { version } },
+          dialog: options.showInstallDialog === false ? null : "install-confirm"
+        }));
+        return;
+      }
+
+      await downloadUpdate(result, options);
+    } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
+      console.warn("refresh app update before download failed", error);
+      commitUpdateState(() => ({
+        phase: "error",
+        result: null,
+        preparedUpdatePath: null,
+        downloadProgress: null,
+        feedback: { key: "settings.about.updateCheckFailed" },
+        dialog: null
+      }));
+    }
+  }, [commitUpdateState, downloadUpdate, requestUpdateResult]);
+
   const installPreparedUpdate = useCallback(async (): Promise<void> => {
     const current = updateStateRef.current;
     const preparedPath = current.preparedUpdatePath;
@@ -436,12 +506,12 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       return;
     }
     if (current.phase === "available" && current.result?.downloadUrl) {
-      await downloadUpdate(current.result, { showInstallDialog: false });
+      await downloadLatestUpdate({ showInstallDialog: false });
       return;
     }
 
     await checkManually();
-  }, [checkManually, downloadUpdate, installPreparedUpdate]);
+  }, [checkManually, downloadLatestUpdate, installPreparedUpdate]);
 
   const dismissDialog = useCallback(() => {
     commitUpdateState((state) => ({ ...state, dialog: null }));
@@ -454,9 +524,9 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       return;
     }
     if (current.dialog === "download-confirm" && current.result) {
-      await downloadUpdate(current.result);
+      await downloadLatestUpdate();
     }
-  }, [downloadUpdate, installPreparedUpdate]);
+  }, [downloadLatestUpdate, installPreparedUpdate]);
 
   const commitPassiveAvailableUpdate = useCallback((result: DesktopUpdateCheckResult): void => {
     const version = result.latestVersion ?? result.currentVersion;

@@ -12,6 +12,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Invoke-MemmyRuntimeOwnershipGuard([string]$Path) {
+  # Profiles and temporary test layouts are private; only the canonical shared drive root is guarded.
+  if ($Path -notmatch '^[A-BD-Za-bd-z]:[\\/]MemmyData[\\/]\.memmy(?:[\\/]|$)') { return }
+  try {
+    $ownershipScript = Join-Path $PSScriptRoot 'MemmyWindowsRuntimeOwnership.ps1'
+    if (-not (Test-Path -LiteralPath $ownershipScript -PathType Leaf)) { throw 'Packaged Windows ownership helper is missing' }
+    . $ownershipScript -LibraryOnly
+    Assert-MemmySharedRuntimeOwnership $Path | Out-Null
+  } catch {
+    throw ('MEMMY_WINDOWS_DATA_OWNERSHIP: Choose C: for a per-user installation, or use a separate drive. Another folder on this same drive cannot isolate Memmy data. ' + $_.Exception.Message)
+  }
+}
+
 function Get-NormalizedAbsolutePath([string]$Path, [string]$Description) {
   $isDriveAbsolute = $Path -match '^[A-Za-z]:[\\/]'
   $isUncAbsolute = $Path -match '^\\\\(?![?.]\\)[^\\/]+[\\/][^\\/]+'
@@ -80,9 +93,9 @@ function Stop-Installation([string]$Reason) {
 function ConvertTo-ComparableVersion([string]$Version, [bool]$AllowMetadata) {
   if (-not $Version) { throw "installed version metadata is missing" }
   $pattern = if ($AllowMetadata) {
-    '^\s*(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:\s.*)?$'
+    '^\s*(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]+)?(?:\s.*)?$'
   } else {
-    '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$'
+    '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]+)?$'
   }
   $match = [regex]::Match($Version, $pattern)
   if (-not $match.Success) { throw "version metadata is not numeric and compatible: $Version" }
@@ -100,6 +113,7 @@ try {
   $normalizedTargetInstallDir = Get-NormalizedAbsolutePath $TargetInstallDir 'target installDir'
   $normalizedTargetUserDataPath = Get-NormalizedAbsolutePath $TargetUserDataPath 'target userDataPath'
   $normalizedTargetRuntimeHomePath = Get-NormalizedAbsolutePath $TargetRuntimeHomePath 'target runtimeHomePath'
+  Invoke-MemmyRuntimeOwnershipGuard $normalizedTargetRuntimeHomePath
   $normalizedInstalledExePath = Get-NormalizedAbsolutePath $InstalledExePath 'installed executable path'
   $normalizedInstallerPath = Get-NormalizedAbsolutePath $InstallerPath 'installer path'
   $normalizedInstallationRecordPath = Get-NormalizedAbsolutePath $InstallationRecordPath 'installation record path'
@@ -154,8 +168,7 @@ try {
       }
     }
 
-    Write-Output 'relay-required:installation target differs from the installed application'
-    exit 1
+    Stop-Installation "installation target differs from the installed application at $normalizedInstallDir; manually migrate files before choosing a new directory"
   }
   $installedExeExists = Test-Path -LiteralPath $normalizedInstalledExePath -PathType Leaf
   if (-not $installedExeExists -and -not $AllowMissingExecutable) {
@@ -251,6 +264,10 @@ try {
   exit 0
 } catch {
   $message = [string]$_.Exception.Message
+  if ($message -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*') {
+    Write-Output "installation-blocked:$message"
+    exit 2
+  }
   if ($message.StartsWith('installation-blocked:', [System.StringComparison]::Ordinal)) {
     Write-Output $message
     exit 2

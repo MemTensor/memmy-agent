@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SkillManifest } from "../../types.js";
 import { createOpencodeSkillTarget } from "../index.js";
@@ -97,13 +98,14 @@ describe("opencode skill target", () => {
     });
     const bridgePath = join(rootDirectory, "plugins", "memmy-workspace-bridge.mjs");
     expect(existsSync(bridgePath)).toBe(true);
-    expect(pluginSource).toContain('import { tool } from "@opencode-ai/plugin";');
-    expect(pluginSource).toContain("export const MemmyMemoryPlugin");
+    expect(pluginSource).not.toContain('from "@opencode-ai/plugin"');
+    expect(pluginSource).toContain("export default");
     expect(pluginSource).toContain('"chat.message"');
     expect(pluginSource).toContain('"experimental.text.complete"');
     expect(pluginSource).toContain('event: async ({ event }) =>');
     expect(pluginSource).toContain("dispose: async () =>");
     expect(pluginSource).toContain("memmy_memory_search: tool");
+    expect(pluginSource).toContain('"Memmy request to " + url + " failed: " + formatErrorWithCause(error)');
     expect(commandSource).toContain("MEMMY_RESUME_COMMAND_ARGUMENTS:");
     expect(commandSource).toContain("$ARGUMENTS");
     expect(skillSource).toContain("# Memmy Memory");
@@ -149,11 +151,22 @@ describe("opencode skill target", () => {
           injectedContext: { markdown: "User prefers concise answers." }
         });
       }
-      if (targetUrl.pathname === "/api/v1/turns/memmy-turn-1/complete") {
-        return jsonResponse({ ok: true });
+      if (targetUrl.pathname === "/api/v1/source-turns/complete") {
+        return jsonResponse({ status: "stored", result: { l1MemoryIds: ["trace-new"] } });
       }
       return jsonResponse({}, 404);
     }) as typeof fetch;
+    // Capture reads the finished turn back from opencode.db, so the plugin needs a real one.
+    const dataHome = join(rootDirectory, "xdg-data");
+    writeOpencodeTurnFixture(dataHome, {
+      sessionId: "session-1",
+      userMessageId: "message-user-1",
+      query: "请检查 README",
+      answer: "检查完成",
+      directory: rootDirectory
+    });
+    const previousDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dataHome;
 
     try {
       const parts: PluginPart[] = [{
@@ -191,36 +204,60 @@ describe("opencode skill target", () => {
         source: "opencode",
         turnId: "message-user-1"
       });
-      expect(requests.find((request) => request.path.endsWith("/complete"))?.body).toMatchObject({
+      const completion = requests.find((request) => request.path.endsWith("/complete"));
+      expect(completion?.path).toBe("/api/v1/source-turns/complete");
+      expect(completion?.body).toMatchObject({
         adapterId: "memmy-opencode-plugin",
+        channel: "hook",
         sessionId: "memmy-session-1",
         query: "请检查 README",
         answer: "检查完成",
         status: "succeeded",
-        toolCalls: [{ id: "call-1", name: "read", arguments: { filePath: "README.md" } }],
-        toolResults: [{ tool_call_id: "call-1", content: "README contents", output: "README contents" }],
-        sourceMemoryIds: ["trace-1"]
+        toolCalls: [expect.objectContaining({ id: "toolu_read_1", name: "read", output: "README contents" })],
+        sourceMemoryIds: ["trace-1"],
+        sourceTurn: {
+          source: "opencode",
+          conversationId: "session-1",
+          turnId: "message-user-1",
+          completionEvidence: "assistant_completed:message-assistant-1"
+        }
       });
-      expect(requests.find((request) => request.path.endsWith("/complete"))?.body).not.toHaveProperty("episodeId");
+      expect(completion?.body).not.toHaveProperty("episodeId");
     } finally {
       globalThis.fetch = originalFetch;
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousDataHome;
     }
   });
 
   it("handles the OpenCode resume command and injects the selected episode", async () => {
     const { rootDirectory } = createFixture();
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
     const target = createOpencodeSkillTarget({
       rootDirectory,
-      memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+      memmyConfigPath
     });
     await target.installPlugin?.("opencode");
     const hooks = await loadPluginHooks(rootDirectory);
-    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const requests: Array<{ origin: string; path: string; body: Record<string, unknown> }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-      requests.push({ path: targetUrl.pathname, body });
+      requests.push({ origin: targetUrl.origin, path: targetUrl.pathname, body });
       if (targetUrl.pathname === "/api/v1/memory/search") {
         return jsonResponse({ debug: { hits: [{ id: "trace-1", score: 0.95 }] } });
       }
@@ -273,6 +310,9 @@ describe("opencode skill target", () => {
       expect(commandParts[0]?.text).toContain('Memmy resume candidates for "测试 query"');
       expect(commandParts[0]?.text).toContain("1. episode-1");
       expect(requests.find((request) => request.path === "/api/v1/memory/search")?.body.query).toBe("测试 query");
+      expect(requests.find((request) => request.path === "/api/v1/memory/search")?.origin).toBe(
+        "http://127.0.0.1:18960"
+      );
 
       const selectionParts: PluginPart[] = [{
         id: "selection-part",
@@ -328,28 +368,57 @@ interface OpencodePluginHooks {
 
 async function loadPluginHooks(rootDirectory: string): Promise<OpencodePluginHooks> {
   const pluginDirectory = join(rootDirectory, "plugins");
-  const pluginSource = readFileSync(join(pluginDirectory, "memmy-memory.js"), "utf8").replace(
-    'import { tool } from "@opencode-ai/plugin";',
-    [
-      "const schemaValue = () => ({ optional() { return this; } });",
-      "const tool = (definition) => definition;",
-      "tool.schema = { string: schemaValue, enum: schemaValue, array: schemaValue };"
-    ].join("\n")
-  );
+  const pluginSource = readFileSync(join(pluginDirectory, "memmy-memory.js"), "utf8");
   const runtimePath = join(pluginDirectory, `memmy-memory-runtime-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
   writeFileSync(runtimePath, pluginSource, "utf8");
   const module = await import(pathToFileURL(runtimePath).href) as {
-    MemmyMemoryPlugin(input: {
+    default: { server(input: {
       client: { app: { log(input: unknown): Promise<void> } };
       directory: string;
       worktree: string;
-    }): Promise<OpencodePluginHooks>;
+    }): Promise<OpencodePluginHooks> };
   };
-  return module.MemmyMemoryPlugin({
+  return module.default.server({
     client: { app: { async log() { return undefined; } } },
     directory: rootDirectory,
     worktree: rootDirectory
   });
+}
+
+/** Writes the opencode.db rows one finished turn is read back from. */
+function writeOpencodeTurnFixture(dataHome: string, input: {
+  sessionId: string;
+  userMessageId: string;
+  query: string;
+  answer: string;
+  directory: string;
+}): void {
+  const databaseDirectory = join(dataHome, "opencode");
+  mkdirSync(databaseDirectory, { recursive: true });
+  const db = new DatabaseSync(join(databaseDirectory, "opencode.db"));
+  try {
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER)");
+    db.exec("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)");
+    db.exec("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+    db.prepare("INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, 1)")
+      .run(input.sessionId, input.directory);
+    const insertMessage = db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)");
+    const insertPart = db.prepare("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)");
+    insertMessage.run(input.userMessageId, input.sessionId, 10,
+      JSON.stringify({ role: "user", agent: "build", time: { created: 1789540000000 } }));
+    insertPart.run("part-user", input.userMessageId, input.sessionId, 11,
+      JSON.stringify({ type: "text", text: `<memmy_memory_context source="turn_start">recalled</memmy_memory_context>\n<current_user_request>\n${input.query}\n</current_user_request>` }));
+    insertMessage.run("message-assistant-tool", input.sessionId, 12,
+      JSON.stringify({ role: "assistant", agent: "build", parentID: input.userMessageId, time: { created: 1789540001000, completed: 1789540002000 } }));
+    insertPart.run("part-tool", "message-assistant-tool", input.sessionId, 13,
+      JSON.stringify({ type: "tool", callID: "toolu_read_1", tool: "read", state: { status: "completed", input: { filePath: "README.md" }, output: "README contents" } }));
+    insertMessage.run("message-assistant-1", input.sessionId, 14,
+      JSON.stringify({ role: "assistant", agent: "build", parentID: input.userMessageId, finish: "stop", time: { created: 1789540003000, completed: 1789540004000 } }));
+    insertPart.run("part-assistant", "message-assistant-1", input.sessionId, 15,
+      JSON.stringify({ type: "text", text: input.answer }));
+  } finally {
+    db.close();
+  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

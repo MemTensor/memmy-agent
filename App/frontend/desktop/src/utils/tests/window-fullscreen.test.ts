@@ -7,6 +7,7 @@ import {
   WINDOW_FULLSCREEN_BODY_CLASS,
   applyWindowPlatformClass,
   applyWindowFullScreenClass,
+  isWindowsDesktopPlatform,
   subscribeMainWindowFullScreen
 } from "../window-fullscreen.js";
 
@@ -41,9 +42,21 @@ describe("window-fullscreen", () => {
 
     const mainSource = readFileSync(mainSourcePath, "utf8");
     expect(mainSource).toContain("applyWindowPlatformClass(window.memmy?.platform);");
-    expect(mainSource.indexOf("applyWindowPlatformClass(window.memmy?.platform);")).toBeLessThan(
-      mainSource.indexOf("createRoot(root).render(")
-    );
+    const mount = mainSource.indexOf("createRoot(root");
+    expect(mount).toBeGreaterThan(-1);
+    expect(mainSource.indexOf("applyWindowPlatformClass(window.memmy?.platform);")).toBeLessThan(mount);
+  });
+
+  it("reads the Windows chrome flag from the body class set before render", () => {
+    const classList = {
+      contains: vi.fn((name: string) => name === WINDOWS_PLATFORM_BODY_CLASS)
+    };
+    vi.stubGlobal("document", { body: { classList } });
+
+    expect(isWindowsDesktopPlatform()).toBe(true);
+
+    classList.contains.mockReturnValue(false);
+    expect(isWindowsDesktopPlatform()).toBe(false);
   });
 
   it("subscribes to preload fullscreen events and cleans up on dispose", async () => {

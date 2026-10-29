@@ -14,6 +14,9 @@ import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gu
 
 const roots: string[] = [];
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+// These integration fixtures send the real system prompt and tool definitions.
+// Leave room for them as well as the 4,096-token safety margin and output reserve.
+const TEST_CONTEXT_WINDOW_TOKENS = 64_000;
 
 function workspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-loop-"));
@@ -54,9 +57,9 @@ function loop(p = provider(), extra: Record<string, any> = {}): AgentLoop {
     provider: p,
     workspace: root,
     model: "test-model",
-    contextWindowTokens: 4096,
+    contextWindowTokens: TEST_CONTEXT_WINDOW_TOKENS,
     sessionDir: path.join(root, "sessions"),
-    config: new Config({ memmyMemory: { enabled: false } }),
+    config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     ...extra,
   });
 }
@@ -157,10 +160,10 @@ describe("AgentLoop direct processing", () => {
       provider: p,
       workspace: workspaceAlias,
       model: "test-model",
-      contextWindowTokens: 4096,
+      contextWindowTokens: TEST_CONTEXT_WINDOW_TOKENS,
       sessionDir: sessions.root,
       sessionManager: sessions,
-      config: new Config({ memmyMemory: { enabled: false } }),
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     });
     agent.guiTranscriptMirror = new GuiTranscriptMirror(sessions, canonicalWorkspace);
 
@@ -392,7 +395,7 @@ describe("AgentLoop direct processing", () => {
 
   it("passes active goal state and runtime runner options through ordinary turns", async () => {
     const p = provider(["unused"]);
-    const agent = loop(p);
+    const agent = loop(p, { contextWindowTokens: 4096 });
     agent.contextBlockLimit = 1234;
     agent.providerRetryMode = "aggressive";
     agent.toolHintMaxLength = 12;
@@ -588,7 +591,7 @@ describe("AgentLoop direct processing", () => {
     expect(outbound.some((message) => message.metadata?.webuiMessageQueued)).toBe(false);
   });
 
-  it("extracts document media before building prompt and keeps image media for multimodal content", async () => {
+  it("generates attachment manifest for document media and keeps image media for multimodal content", async () => {
     const p = provider(["read it"]);
     const root = workspace();
     const note = path.join(root, "note.txt");
@@ -599,18 +602,21 @@ describe("AgentLoop direct processing", () => {
       provider: p,
       workspace: root,
       model: "gpt-4.1",
-      contextWindowTokens: 4096,
+      contextWindowTokens: TEST_CONTEXT_WINDOW_TOKENS,
       sessionDir: path.join(root, "sessions"),
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     });
 
     await agent.processDirect("summarize", { sessionKey: "cli:test", media: [note, png] });
 
     const sent = p.calls[0].messages.at(-1).content;
-    expect(JSON.stringify(sent)).toContain("Quarterly revenue is $5M");
+    // Document now appears as manifest, not inline text
+    expect(JSON.stringify(sent)).toContain("note.txt");
+    expect(JSON.stringify(sent)).toContain("attachments");
     expect(JSON.stringify(sent)).toContain("data:image/png;base64");
     const session = agent.sessions.getOrCreate("cli:test");
-    expect(session.messages[0].content).toContain("Quarterly revenue is $5M");
-    expect(session.messages[0].media).toEqual([png]);
+    // History stores original content (no text extraction), media stored separately
+    expect(session.messages[0].media).toEqual([note, png]);
   });
 
   it("falls back to the empty-response message and truncates oversized tool outputs when saving turns", async () => {
@@ -637,7 +643,11 @@ describe("AgentLoop direct processing", () => {
   it("can be constructed from config with the existing facade path", async () => {
     const p = provider(["ok"]);
     const root = workspace();
-    const config = new Config({ agents: { defaults: { workspace: root, provider: "custom", model: "test-model" } } });
+    const config = new Config({
+      agents: { defaults: { workspace: root, provider: "custom", model: "test-model" } },
+      tools: { mcpServers: {} },
+      memmyMemory: { enabled: false },
+    });
     const agent = AgentLoop.fromConfig(config, undefined as any, { provider: p, sessionDir: path.join(root, "sessions") });
 
     const outbound = await agent.processMessage({ channel: "cli", chatId: "direct", sessionKey: "cli:direct", content: "hi", media: [], metadata: {}, senderId: "user" } as any);

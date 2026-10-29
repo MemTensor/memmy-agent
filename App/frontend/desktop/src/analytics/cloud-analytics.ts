@@ -145,7 +145,11 @@ function flushNow(): Promise<void> {
 
 function compactParams(params: CloudAnalyticsParams): CloudAnalyticsParams {
   return Object.fromEntries(
-    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+    Object.entries(params).flatMap(([key, value]) => {
+      if (value === undefined || value === null || value === "") return [];
+      // GA4 Measurement Protocol accepts only string and number values.
+      return [[key, typeof value === "boolean" ? (value ? 1 : 0) : value]];
+    })
   ) as CloudAnalyticsParams;
 }
 

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadDotenv } from "dotenv";
@@ -40,6 +41,7 @@ const testEnv = {
   MEMORY_SERVICE_URL: "http://memory.test.invalid",
   MEMMY_MEMORY_TOKEN: "",
   MEMORY_SERVICE_TOKEN: "",
+  MEMMY_AGENT_TASKS_DIR: join(tmpdir(), "memmy-agent-tests", "task-workspaces"),
 };
 
 export default defineConfig({

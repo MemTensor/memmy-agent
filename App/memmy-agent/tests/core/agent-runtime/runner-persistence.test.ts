@@ -287,3 +287,30 @@ describe("AgentRunner tool result persistence", () => {
     expect(result.messages.at(-1)).toMatchObject({ role: "assistant", content: "persist me" });
   });
 });
+
+it('executes supplied browser credentials once but excludes their values from checkpoints and returned traces', async () => {
+  const secret = 'task-provided-code-246810';
+  const checkpoints: Record<string, any>[] = [];
+  let count = 0;
+  let executedValue: string | undefined;
+  const provider = { async chatWithRetry() {
+    return count++ === 0 ? new LLMResponse({ content: '', toolCalls: [new ToolCallRequest({
+      id: 'auth-direct', name: 'browser_auth_request', arguments: {
+        origin: 'https://example.test', fields: [{ id: 'code' }], provided_values: { code: secret },
+      },
+    })] }) : new LLMResponse({ content: 'done' });
+  } };
+  const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+    messages: [{ role: 'user', content: 'Sign in with the code already provided.' }],
+    tools: { getDefinitions: () => [], execute: async (_name: string, args: any) => {
+      executedValue = args.provided_values.code;
+      return '{"status":"submitted"}';
+    } }, model: 'test-model', maxIterations: 2,
+    workspace: tempRoot(), sessionKey: 'test:browser-auth',
+    checkpointCallback: payload => { checkpoints.push(JSON.parse(JSON.stringify(payload))); },
+  }));
+  expect(executedValue).toBe(secret);
+  expect(JSON.stringify(checkpoints)).not.toContain(secret);
+  expect(JSON.stringify(result)).not.toContain(secret);
+  expect(result.toolCalls[0].arguments.provided_values).toEqual({ code: '[REDACTED]' });
+});

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Config } from "../../src/config/schema.js";
-import { discoverMemmyMemoryConnection, memmyMemoryConfigPaths } from "../../src/memmy-memory/discovery.js";
+import { discoverMemmyMemoryConnection, discoverMemmyOutputLanguage, memmyMemoryConfigPaths } from "../../src/memmy-memory/discovery.js";
 import { resolveMemmyMemoryConfig } from "../../src/memmy-memory/config.js";
 
 const roots: string[] = [];
@@ -19,6 +19,38 @@ afterEach(() => {
 });
 
 describe("memmy memory discovery", () => {
+  it("reads the App's resolved language from the same config and notices changes without a restart", () => {
+    const root = tempRoot();
+    const configPath = path.join(root, "config.yaml");
+    const options = { env: { MEMMY_CONFIG: configPath }, homeDir: root };
+    fs.writeFileSync(configPath, "memmyMemory:\n  language: zh-CN\n", "utf8");
+    expect(discoverMemmyOutputLanguage(options)).toBe("zh-CN");
+    fs.writeFileSync(configPath, "memmyMemory:\n  language: en-US\n", "utf8");
+    expect(discoverMemmyOutputLanguage(options)).toBe("en-US");
+  });
+
+  it("uses the default config language while accepting no instruction for standalone or malformed config", () => {
+    const root = tempRoot();
+    const options = { env: {}, homeDir: root };
+    expect(discoverMemmyOutputLanguage(options)).toBeUndefined();
+    const configPath = path.join(root, ".memmy", "config.yaml");
+    fs.mkdirSync(path.dirname(configPath));
+    fs.writeFileSync(configPath, "memmyMemory:\n  language: zh-CN\n", "utf8");
+    expect(discoverMemmyOutputLanguage(options)).toBe("zh-CN");
+    for (const content of ["memmyMemory:\n  language: system\n", "memmyMemory: [broken", "[]"]) {
+      fs.writeFileSync(configPath, content, "utf8");
+      expect(discoverMemmyOutputLanguage(options)).toBeUndefined();
+    }
+  });
+
+  it.each(["ja-JP", "fr-FR", "pt-BR", "zh-Hant"])("preserves a future resolved App locale %s instead of dropping it", (language) => {
+    const root = tempRoot();
+    const configPath = path.join(root, "config.yaml");
+    const options = { env: { MEMMY_CONFIG: configPath }, homeDir: root };
+    fs.writeFileSync(configPath, `memmyMemory:\n  language: ${language.toLowerCase()}\n`, "utf8");
+    expect(discoverMemmyOutputLanguage(options)).toBe(language);
+  });
+
   it("reads Memory config from MEMMY_CONFIG", () => {
     const root = tempRoot();
     const configPath = path.join(root, "config.yaml");

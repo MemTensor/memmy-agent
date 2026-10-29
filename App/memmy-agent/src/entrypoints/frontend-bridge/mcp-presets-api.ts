@@ -5,7 +5,9 @@ import { ToolRegistry } from "../../core/agent-runtime/tools/registry.js";
 import { appManifest, compactDict } from "./app-manifest.js";
 import { loadConfig, resolveConfigEnvVars, saveConfig } from "../../config/loader.js";
 import { getRuntimeSubdir } from "../../config/paths.js";
+import { MEMMY_COMPUTER_USE_MCP_SERVER } from "../../config/computer-use-server.js";
 import { MCPServerConfig } from "../../config/schema.js";
+import { resolveOpenComputerUseCommand } from "../../tools/computer-use/open-computer-use-binary.js";
 
 type QueryParams = Record<string, string[]>;
 type TargetKind = "env" | "url_param" | "arg" | "header";
@@ -64,6 +66,20 @@ function favicon(domain: string): string {
 }
 
 export const MCP_PRESETS = [
+  new McpPreset(
+    MEMMY_COMPUTER_USE_MCP_SERVER,
+    "Memmy Computer Use",
+    "computer",
+    "Control permitted desktop applications through Memmy Computer Use.",
+    "",
+    "stdio",
+    true,
+    "memmy.app",
+    "#3B82F6",
+    { type: "stdio", command: "open-computer-use", args: ["mcp"] },
+    [],
+    "Memmy Computer Use and operating-system permissions",
+  ),
   new McpPreset(
     "browserbase",
     "Browserbase",
@@ -271,7 +287,7 @@ function knownMcpNames(): Set<string> {
   const names = knownPresetNames();
   try {
     for (const name of Object.keys(loadConfig().tools.mcpServers)) names.add(name);
-  } catch {}
+  } catch { /* ignore malformed optional input */ }
   return names;
 }
 
@@ -387,7 +403,9 @@ function materializeServer(preset: McpPreset, query: QueryParams, existing?: MCP
     else if (kind === "url_param") cfg.url = urlWithParam(cfg.url ?? "", key, value);
     else if (kind === "arg") cfg.args = withArgValue(cfg.args ?? [], key, value);
   }
-  return withManagedCwd(preset.name, cfg);
+  // The bundled helper is an application service, not an npm-style MCP
+  // installation. Keep its portable config identical to the default config.
+  return preset.name === MEMMY_COMPUTER_USE_MCP_SERVER ? cfg : withManagedCwd(preset.name, cfg);
 }
 
 function scrub(value: any): any {
@@ -577,6 +595,7 @@ function presetPayload(preset: McpPreset, configuredServers: Record<string, MCPS
     installed,
     configured: installed && status !== "missing_credentials",
     available: installed && configAvailable(cfg),
+    binary_available: preset.name === MEMMY_COMPUTER_USE_MCP_SERVER ? commandAvailable("open-computer-use") : undefined,
     status,
     logo_url: logoUrl,
     brand_color: preset.brandColor,
@@ -831,6 +850,8 @@ export async function mcpPresetsTestAction(query: QueryParams): Promise<Record<s
 }
 
 function commandAvailable(command: string): boolean {
+  try { command = resolveOpenComputerUseCommand(command); }
+  catch { return false; }
   if (command.includes(path.sep)) return fs.existsSync(command);
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (dir && fs.existsSync(path.join(dir, command))) return true;
@@ -985,7 +1006,7 @@ function closeMcpStacks(stacks: Record<string, any>): Promise<void> {
     try {
       if (typeof stack?.aclose === "function") await stack.aclose();
       else if (typeof stack?.close === "function") await stack.close();
-    } catch {}
+    } catch { /* ignore malformed optional input */ }
   })).then(() => undefined);
 }
 

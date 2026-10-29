@@ -21,6 +21,23 @@ describe("UserMemoriesSubPage interaction", () => {
     container.remove();
   });
 
+  it("does not render pagination when there are no user memories", async () => {
+    const client = createMemoryRuntimeClientStub({
+      listPanelItems: vi.fn(async () => panelItemsOutput([]))
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UserMemoriesSubPage client={client} />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.textContent).toContain("暂无用户记忆");
+    expect(container.querySelector(".memory-pagination")).toBeNull();
+  });
+
   it("loads the UserMemory layer and deletes the selected record", async () => {
     const item = {
       id: "user_memory_1",
@@ -113,5 +130,39 @@ describe("UserMemoriesSubPage interaction", () => {
     expect(drawer?.textContent).toContain("表达次数2");
     act(() => container.querySelector<HTMLButtonElement>(".memory-drawer-backdrop__close")?.click());
     expect(container.querySelector(".memory-drawer")).toBeNull();
+  });
+
+  it("contains long unbroken content in the list row and detail drawer", async () => {
+    const longContent = `https://example.com/${"unbroken".repeat(80)}`;
+    const item = {
+      id: "user_memory_long_content",
+      kind: "user_memory" as const,
+      memoryLayer: "UserMemory" as const,
+      status: "activated" as const,
+      title: longContent,
+      summary: longContent,
+      tags: ["User Fact"],
+      metadata: { memoryTypes: ["User Fact"], sourceTurnRefs: ["turn-long"] },
+      createdAt: "2026-08-17T00:00:00.000Z",
+      updatedAt: "2026-08-17T00:00:00.000Z",
+      version: 1
+    };
+    const client = createMemoryRuntimeClientStub({
+      listPanelItems: vi.fn(async () => panelItemsOutput([item]))
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UserMemoriesSubPage client={client} />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.querySelector(".memory-card__body")?.tagName).toBe("DIV");
+    expect(container.querySelector(".memory-card__title")?.tagName).toBe("DIV");
+    act(() => container.querySelector<HTMLButtonElement>(".memory-card")?.click());
+    const detail = container.querySelector(".memory-detail-text");
+    expect(detail?.textContent).toBe(longContent);
   });
 });

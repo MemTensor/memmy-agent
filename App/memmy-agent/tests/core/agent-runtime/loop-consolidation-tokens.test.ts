@@ -187,13 +187,13 @@ describe("AgentLoop replay token budget", () => {
 
   it("runs preflight consolidation before the LLM call", async () => {
     const order: string[] = [];
-    const loop = makeLoop({ estimatedTokens: 0, contextWindowTokens: 200 });
+    const loop = makeLoop({ estimatedTokens: 100, contextWindowTokens: 10_000 });
     loop.consolidator.archive = vi.fn(async () => {
       order.push("consolidate");
       return "summary";
     });
     const session = addMessages(loop, "cli:test", ["u1", "a1", "u2"]);
-    const estimates = [1000, 80];
+    const estimates = [20_000, 80];
     loop.consolidator.estimateSessionPromptTokens = vi.fn((): [number, string] => [estimates.shift() ?? 80, "test"]);
     (loop.provider as any).chatWithRetry = vi.fn(async () => {
       order.push("llm");
@@ -257,6 +257,40 @@ describe("AgentLoop replay token budget", () => {
     expect(estimatedRequests.some((call: any[]) => (
       (call[0] as Record<string, any>[]).some((message) => message.tool_call_id === "goal-1")
     ))).toBe(true);
+  });
+
+  it("skips mid-turn DAG compaction and blocks a follow-up whose protected content cannot fit", async () => {
+    const loop = makeLoop({ estimatedTokens: 100, contextWindowTokens: 10_000 });
+    const session = addMessages(loop, "cli:test", ["old user", "old answer"]);
+    (loop.provider as any).estimatePromptTokens = vi.fn((messages: Record<string, any>[]) => [
+      messages.some((message) => message.tool_call_id === "goal-1") ? 20_000 : 100,
+      "test-counter",
+    ]);
+    let modelCalls = 0;
+    (loop.provider as any).chatWithRetry = vi.fn(async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return new LLMResponse({
+          content: "checking",
+          toolCalls: [new ToolCallRequest({ id: "goal-1", name: "get_goal", arguments: {} })],
+        });
+      }
+      return new LLMResponse({ content: "done" });
+    });
+    loop.consolidator.maybeConsolidateByTokens = vi.fn(async () => ({
+      kind: "token" as const,
+      replayMaxMessages: loop.maxMessages,
+      changed: false,
+      summary: null,
+      error: null,
+      started: false,
+    }));
+
+    const result = await loop.processDirect("current user", { sessionKey: session.key });
+
+    expect(result?.content).toContain("too large to send safely");
+    expect(modelCalls).toBe(1);
+    expect(loop.consolidator.maybeConsolidateByTokens).toHaveBeenCalledTimes(1);
   });
 
   it("continues the active turn when mid-turn compaction fails", async () => {

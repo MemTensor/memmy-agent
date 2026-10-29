@@ -170,7 +170,7 @@ relevance   = max(channelScore) + 层级 bonus + RRF bonus
 | 配置 | 默认值 | 作用 |
 | --- | ---: | --- |
 | `llmFilterEnabled` | `true` | 是否启用最终语义过滤 |
-| `llmFilterMinCandidates` | `2` | 至少有多少条机械候选才调用 LLM |
+| `llmFilterMinCandidates` | `1` | 至少有多少条机械候选才调用 LLM |
 | `llmFilterMaxKeep` | `8` | LLM 成功时最多保留数量 |
 | `llmFilterFallbackMaxKeep` | `6` | 未配置 LLM、超时或返回异常时的保底上限 |
 | `llmFilterCandidateBodyChars` | `500` | 每条候选提供给过滤模型的正文字符数 |
@@ -264,7 +264,7 @@ memmyMemory:
       llmFilterEnabled: true
       llmFilterMaxKeep: 8
       llmFilterFallbackMaxKeep: 6
-      llmFilterMinCandidates: 2
+      llmFilterMinCandidates: 1
       llmFilterCandidateBodyChars: 500
       readOnlyInjectionProfile: all
 ```
@@ -308,5 +308,9 @@ memmy-memory search "你的查询" --verbose
 | 工作 | 概览 / 记忆 / 任务 / 经验 / 场域认知 / 技能 | 查看总体统计和记忆详情，按任务、经验、场域认知与技能组织沉淀结果 |
 | 洞察 | 分析 / 日志 | 查看写入与演化分析图表，以及 Memory API 的搜索和写入日志 |
 | 系统 | 跨Agent接入 | 管理 Agent 来源、历史扫描以及 Hook/插件接入状态 |
+
+分析页的“近 7 天使用技能…次”统计当前已激活技能的召回命中与调用记录。同一次召回中的相同技能只计一次，不同召回或调用分别计数。这是使用总次数，不是不同技能的数量；仅编辑技能不会增加使用次数。
+
+用户记忆列表有条目时才显示分页控件。
 
 日志页对 `memory.search` 和 `memory.add` 提供专门详情（搜索候选、写入字段、结果状态），可用来解释某条记忆为何被命中或写入。

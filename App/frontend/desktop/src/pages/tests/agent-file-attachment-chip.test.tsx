@@ -26,7 +26,7 @@ describe("Agent attachment cards", () => {
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
     expect(html).toContain("agent-attachment-card__name");
     expect(html).toContain("agent-attachment-card__meta");
-    expect(compactHtml).toContain(">very-long-contract-final<");
+    expect(compactHtml).toContain(">very-long-contract-final.pdf<");
     expect(compactHtml).toContain(">PDF · 4.0 KB<");
     expect(html).toContain('aria-label="移除: /Users/yuan/reports/very-long-contract-final.pdf"');
     expect(html).not.toContain("rounded-[16px]");
@@ -92,7 +92,8 @@ describe("Agent attachment cards", () => {
 
       expect(html).toContain(`data-testid="agent-file-icon-${item.kind}"`);
       expect(html).toContain(item.className);
-      expect(html).toContain(`>${item.label}</span>`);
+      expect(html).toContain("<svg");
+      expect(html).not.toContain(`>${item.label}</span>`);
       expect(html).not.toContain("rounded-[12px]");
       expect(html).not.toContain("bg-rose-50");
     }

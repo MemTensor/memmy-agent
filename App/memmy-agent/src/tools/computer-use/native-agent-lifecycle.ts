@@ -1,0 +1,77 @@
+import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+
+const MEMMY_COMPUTER_USE_BUNDLE_IDS = new Set([
+  'cn.memtensor.memmy',
+  // Accept an already-running pre-unification helper during upgrade so it
+  // can be shut down before the main-identity helper starts.
+  'cn.memtensor.memmy.computeruse',
+  'cn.memtensor.memmy.computeruse.dev',
+]);
+
+/** The Memmy native app agent exposes agentInfo/terminate.
+ * Never use a bundle-ID launch/kill: another installed copy can have that ID.
+ */
+export function nativeAgentSocketPath(namespace: string, directory = os.tmpdir()): string {
+  const hash = createHash('sha256').update(namespace).digest('hex').slice(0, 16);
+  return path.join(directory, `memmy-computer-use-agent-${hash}.sock`);
+}
+
+export async function stopOwnedNativeAgent(binary: string, namespace: string, directory = os.tmpdir()): Promise<void> {
+  const executable = realpathSync(binary);
+  const bundle = path.dirname(path.dirname(path.dirname(executable)));
+  const base = `memmy:${bundle}`;
+  const taskOwner = namespace.startsWith(`${base}:task:`) ? namespace.slice(`${base}:task:`.length) : '';
+  if (!executable.endsWith('/Memmy Computer Use.app/Contents/MacOS/MemmyComputerUse')
+    || (namespace !== base && !/^[a-f0-9]{32}$/.test(taskOwner))) {
+    throw new Error('Cannot stop an unowned Computer Use agent');
+  }
+  await new Promise<void>((resolve, reject) => {
+    let connected = false, verified = false, accepted = false, finished = false;
+    let buffered = '';
+    const socket = net.createConnection(nativeAgentSocketPath(namespace, directory));
+    const finish = (error?: Error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error); else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error('Computer Use did not stop before authorization')), 3000);
+    socket.setEncoding('utf8');
+    socket.on('connect', () => {
+      connected = true;
+      socket.write(JSON.stringify({ kind: 'agentInfo' }) + '\n');
+    });
+    socket.on('data', chunk => {
+      buffered += chunk;
+      if (buffered.length > 8192) { finish(new Error('Unexpected Computer Use lifecycle response')); return; }
+      let end: number;
+      while (!finished && (end = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, end); buffered = buffered.slice(end + 1);
+        try {
+          const reply = JSON.parse(line);
+          if (!verified) {
+            if (!MEMMY_COMPUTER_USE_BUNDLE_IDS.has(reply.bundleIdentifier)
+              || realpathSync(reply.bundleURL) !== bundle || realpathSync(reply.executableURL) !== executable) {
+              throw new Error('Computer Use agent identity does not match this installation');
+            }
+            verified = true;
+            socket.write(JSON.stringify({ kind: 'terminate' }) + '\n');
+          } else if (reply.ok === true) accepted = true;
+          else throw new Error('Computer Use refused to stop');
+        } catch (error) { finish(error instanceof Error ? error : new Error('Invalid Computer Use agent identity')); }
+      }
+    });
+    socket.on('error', error => {
+      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
+      else finish(error);
+    });
+    // Acknowledgement alone is insufficient: wait until the native process has
+    // closed its connection, before giving the user a route to change permissions.
+    socket.on('close', () => finish(accepted ? undefined : new Error('Computer Use exited without a verified shutdown')));
+  });
+}

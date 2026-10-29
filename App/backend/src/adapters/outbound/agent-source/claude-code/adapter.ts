@@ -104,7 +104,8 @@ function toConversationMessage(
     createdAt: rawMessage.createdAt,
     workspacePath: rawMessage.workspacePath ?? discoveredWorkspacePath,
     gitRoot: rawMessage.gitRoot ?? discoveredGitRoot,
-    rawMeta: Object.freeze({})
+    ordinal: rawMessage.ordinal,
+    rawMeta: rawMessage.rawMeta
   };
 }
 

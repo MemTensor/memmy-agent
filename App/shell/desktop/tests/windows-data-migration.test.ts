@@ -185,6 +185,69 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
     await expect(readFile(standalonePath, "utf8")).resolves.toBe(standaloneContents);
   });
 
+  it.each(["desktop", "standalone"] as const)("rebases a copied newer Memory runtime and preserves its identity (%s executable)", async (executableOwner) => {
+    const fixture = await createFixture();
+    fixture.sourceDataPath = join(fixture.root, "旧 安装", "data");
+    fixture.targetRuntimeHomePath = join(fixture.root, "新 数据盘", "MemmyData", ".memmy");
+    const sourceHome = join(fixture.sourceDataPath, ".memmy");
+    const relativeRuntimeDirectory = join("memory-service", "runtime", "2.1.7", "windows-x64", "a".repeat(64));
+    const runtimeDirectory = join(sourceHome, relativeRuntimeDirectory);
+    const runtimeEntry = join(runtimeDirectory, "dist", "src", "server", "index.js");
+    const executable = executableOwner === "desktop"
+      ? join(dirname(fixture.sourceDataPath), "Memmy.exe")
+      : join(fixture.root, "independent-node", "node.exe");
+    const pointer = { version: "2.1.7", target: "windows-x64", protocolVersion: 1,
+      buildId: "a".repeat(64), schemaVersion: 9, runtimeDir: runtimeDirectory,
+      entrypoint: runtimeEntry, runtimeExecutable: executable, activatedAt: "2026-10-09T00:00:00.000Z" };
+    const sourcePointer = join(sourceHome, "memory-service", "current.json");
+    const pointerContents = JSON.stringify(pointer);
+    await Promise.all([
+      mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(dirname(runtimeEntry), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.sourceDataPath, "Memmy", "app.sqlite"), "account-state", "utf8"),
+      writeFile(join(sourceHome, "config.yaml"), "runtime-state", "utf8"),
+      writeFile(runtimeEntry, "// copied newer runtime", "utf8"),
+      writeFile(sourcePointer, pointerContents, "utf8"),
+    ]);
+    const prepared = runMigration("Prepare", fixture, false, "", "current-install-authority", "1.2.2");
+    expect(prepared.status, prepared.stderr || prepared.stdout).toBe(0);
+    const targetRuntimeDirectory = join(fixture.targetRuntimeHomePath, relativeRuntimeDirectory);
+    const targetEntry = join(targetRuntimeDirectory, "dist", "src", "server", "index.js");
+    const copiedPointer = JSON.parse(await readFile(join(fixture.targetRuntimeHomePath, "memory-service", "current.json"), "utf8"));
+    expect(copiedPointer).toEqual({ ...pointer, runtimeDir: targetRuntimeDirectory, entrypoint: targetEntry,
+      runtimeExecutable: executableOwner === "desktop" ? join(fixture.root, "new-install", "Memmy.exe") : executable });
+    await expect(readFile(targetEntry, "utf8")).resolves.toBe("// copied newer runtime");
+    await expect(readFile(sourcePointer, "utf8")).resolves.toBe(pointerContents);
+    const rolledBack = runMigration("Rollback", fixture);
+    expect(rolledBack.status, rolledBack.stderr || rolledBack.stdout).toBe(0);
+    expect(existsSync(join(fixture.targetRuntimeHomePath, "memory-service", "current.json"))).toBe(false);
+    await expect(readFile(sourcePointer, "utf8")).resolves.toBe(pointerContents);
+  });
+
+  it("retains a Memory runtime pointer owned outside the copied home", async () => {
+    const fixture = await createFixture();
+    const sourceHome = join(fixture.sourceDataPath, ".memmy");
+    const independentDirectory = join(fixture.root, "independent-runtime", "2.1.7");
+    const pointerContents = JSON.stringify({ version: "2.1.7", protocolVersion: 1, target: "windows-x64",
+      runtimeDir: independentDirectory, entrypoint: join(independentDirectory, "dist", "src", "server", "index.js"),
+      runtimeExecutable: join(fixture.root, "independent-node", "node.exe") });
+    await Promise.all([
+      mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(join(sourceHome, "memory-service"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.sourceDataPath, "Memmy", "app.sqlite"), "account-state", "utf8"),
+      writeFile(join(sourceHome, "config.yaml"), "runtime-state", "utf8"),
+      writeFile(join(sourceHome, "memory-service", "current.json"), pointerContents, "utf8"),
+    ]);
+    const prepared = runMigration("Prepare", fixture, false, "", "current-install-authority", "1.2.2");
+    expect(prepared.status, prepared.stderr || prepared.stdout).toBe(0);
+    await expect(readFile(join(fixture.targetRuntimeHomePath, "memory-service", "current.json"), "utf8"))
+      .resolves.toBe(pointerContents);
+  });
+
   it("uses the remembered runtime root before legacy-home data without merging", async () => {
     const fixture = await createFixture();
     const rememberedRuntimeHomePath = join(fixture.root, "previous-drive", "MemmyData", ".memmy");

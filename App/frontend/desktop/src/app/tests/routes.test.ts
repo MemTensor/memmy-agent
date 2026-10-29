@@ -98,6 +98,7 @@ describe("desktop route table", () => {
       "/pet",
       "/tools",
       "/memory",
+      "/knowledge",
       "/memory-sources",
       "/settings"
     ]);

@@ -104,7 +104,7 @@ describe("UpdateCoordinatorProvider", () => {
     });
 
     expect(getButtonByText("重启安装")).not.toBeNull();
-    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
     expect(downloadUpdate).toHaveBeenCalledTimes(1);
   });
 
@@ -169,6 +169,75 @@ describe("UpdateCoordinatorProvider", () => {
     });
     expect(readOutput("phase")).toBe("prepared");
     expect(container.textContent).not.toContain("安装包已准备好，是否重启并安装更新？");
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the manifest before download and skips an intermediate release", async () => {
+    const checkForUpdates = vi.fn()
+      .mockResolvedValueOnce({
+        status: "available" as const,
+        currentVersion: "1.1.2",
+        latestVersion: "1.1.3",
+        downloadUrl: "https://updates.example.com/Memmy-1.1.3.dmg"
+      })
+      .mockResolvedValueOnce({
+        status: "available" as const,
+        currentVersion: "1.1.2",
+        latestVersion: "1.1.4",
+        downloadUrl: "https://updates.example.com/Memmy-1.1.4.dmg"
+      });
+    const downloadUpdate = vi.fn(async () => ({
+      filePath: "/tmp/Memmy-1.1.4.dmg",
+      opened: false
+    }));
+    setDesktopBridge({
+      platform: "darwin",
+      getAppInfo: vi.fn(async () => ({
+        name: "Memmy",
+        version: "1.1.2",
+        platform: "darwin",
+        arch: "arm64",
+        isPackaged: true,
+        isWindowsStore: false
+      })),
+      checkForUpdates,
+      downloadUpdate
+    });
+
+    await act(async () => {
+      root.render(
+        <AppStateProvider>
+          <I18nProvider language="zh-CN">
+            <UpdateCoordinatorProvider>
+              <UpdateHarness />
+            </UpdateCoordinatorProvider>
+          </I18nProvider>
+        </AppStateProvider>
+      );
+    });
+
+    await act(async () => {
+      getButtonByLabel("update-action").click();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("1.1.3");
+
+    await act(async () => {
+      getButtonByText("下载更新").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(downloadUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        latestVersion: "1.1.4",
+        downloadUrl: "https://updates.example.com/Memmy-1.1.4.dmg"
+      }),
+      { openInstaller: false }
+    );
+    expect(readOutput("prepared-path")).toBe("/tmp/Memmy-1.1.4.dmg");
   });
 
   it("keeps the prepared installer path when launching the installer fails", async () => {

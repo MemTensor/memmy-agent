@@ -1,3 +1,4 @@
+import { BookOpen } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -7,7 +8,9 @@ import {
 } from "../app/product-tour.js";
 import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
 import type { AppRoutePath } from "../app/routes.js";
-import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
+import { clearFocusedAgentTarget, clearProductTourStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
+import { useGuidanceProgress } from "../app/use-guidance-progress.js";
+import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "../app/campaign-prompt-state.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
@@ -17,8 +20,8 @@ import {
 } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
-import { communityLinks } from "../community/community-links.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
+import { MemoryTokenBudgetBanner } from "../components/memory-token-budget-banner.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -33,11 +36,13 @@ import { agentChatScopeKey } from "../state/agent-composer-state.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
+import { WindowsTitlebar } from "../components/windows-titlebar.js";
 import { openExternalUrl } from "../utils/open-url.js";
+import { isWindowsDesktopPlatform } from "../utils/window-fullscreen.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
-import { writeMemorySubPage } from "./memory-page.js";
+import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import {
@@ -50,7 +55,6 @@ import {
   ListChecks,
   Link2,
   Loader2,
-  MessageCircle,
   MessageSquarePlus,
   PanelLeft,
   PanelLeftCollapsed,
@@ -62,8 +66,9 @@ import {
   User,
   Wand2
 } from "./memory/memory-prototype-icons.js";
-import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+import { AppContentTopbar } from "./app-content-topbar.js";
+import { SETTINGS_BROWSER_EXTENSION_EVENT, SETTINGS_EXCEL_CONNECTION_EVENT, SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, MousePointer2, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -74,7 +79,14 @@ export interface AppFrameProps {
   title: string;
   reserveTopBar?: boolean;
   topBar?: ReactNode;
+  topBarEnd?: ReactNode;
   topBarBorder?: boolean;
+  topBarInset?: boolean;
+  topBarClassName?: string;
+  topBarStyle?: CSSProperties;
+  /** Full-height panel docked to the right edge of the main area, stacked above the top bar. */
+  sidePanel?: ReactNode;
+  windowsTitlebarSafe?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -83,7 +95,7 @@ export interface AppFrameProps {
 interface NavItem {
   path?: AppRoutePath;
   icon: ReactNode;
-  action?: "search" | "community";
+  action?: "search";
   labelKey?: string;
 }
 
@@ -196,7 +208,7 @@ const navItems: NavItem[] = [
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
-  { action: "community", icon: <MessageCircle size={16} />, labelKey: "welcome.joinCommunity" }
+  { path: "/knowledge", icon: <BookOpen size={16} /> }
 ];
 
 const taskSortOptions = [
@@ -278,9 +290,7 @@ export function AppFrame(props: AppFrameProps) {
   const taskStateCoordinator = useOptionalAgentRuntimeBridge()?.taskStateCoordinator
     ?? standaloneRenderTaskStateCoordinator;
   const taskBus = useTaskBus();
-  const { syncAgentTaskStatuses } = taskBus;
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -293,14 +303,21 @@ export function AppFrame(props: AppFrameProps) {
   const [projectMutationId, setProjectMutationId] = useState<string | null>(null);
   const [archiveConfirmSessionKey, setArchiveConfirmSessionKey] = useState<string | null>(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<AgentTaskView | null>(null);
-  const [deferredGuidanceStep, setDeferredGuidanceStep] = useState(() =>
-    readDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage)
-  );
+  const { deferredGuidanceStep } = useGuidanceProgress();
+  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isCampaignPromptSurfaceReady({
+    startupStatus: state.startup.status,
+    currentPath: state.navigation.currentPath,
+  }) && isCampaignPromptSessionReady({
+    userMode: state.bootstrap?.app.userMode,
+    accountUserId: state.account.userId,
+    byokConfigured: Boolean(state.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length),
+    guidanceDone: true,
+  });
   const [sidebarHidden, setSidebarHidden] = useState(false);
-  const communityMenuRef = useRef<HTMLDivElement | null>(null);
+  const windowsChrome = isWindowsDesktopPlatform();
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const [taskScrollFade, setTaskScrollFade] = useState(false);
-  const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
+  const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v3");
   const hasRequestedAgentData = useRef(false);
   const lastNotifiedCompletionAt = useRef<number | null>(null);
   const previousCanonicalSessionKeysRef = useRef<Set<string> | null>(null);
@@ -377,14 +394,14 @@ export function AppFrame(props: AppFrameProps) {
   }, []);
 
   useEffect(() => {
-    syncAgentTaskStatuses({
-      tasks: state.agent.tasks.map((task) => ({
-        sessionIds: [task.chatId, task.sessionKey],
-        isRunning: task.runStartedAt != null
-          || state.agent.goalStatesByChatId[task.chatId]?.status === "active"
-      }))
-    });
-  }, [state.agent.goalStatesByChatId, state.agent.tasks, syncAgentTaskStatuses]);
+    const openConnectionSettings = () => dispatch(appActions.navigate("/settings"));
+    window.addEventListener(SETTINGS_BROWSER_EXTENSION_EVENT, openConnectionSettings);
+    window.addEventListener(SETTINGS_EXCEL_CONNECTION_EVENT, openConnectionSettings);
+    return () => {
+      window.removeEventListener(SETTINGS_BROWSER_EXTENSION_EVENT, openConnectionSettings);
+      window.removeEventListener(SETTINGS_EXCEL_CONNECTION_EVENT, openConnectionSettings);
+    };
+  }, [dispatch]);
 
   useEffect(() => {
     const current = new Set(state.agent.sessions.map((session) => session.key));
@@ -490,33 +507,6 @@ export function AppFrame(props: AppFrameProps) {
     };
   }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
 
-  useEffect(() => {
-    if (!showCommunity || typeof document === "undefined") {
-      return;
-    }
-
-    const closeOnOutsidePointerDown = (event: PointerEvent) => {
-      const menu = communityMenuRef.current;
-      if (menu && event.target instanceof Node && menu.contains(event.target)) {
-        return;
-      }
-
-      setShowCommunity(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setShowCommunity(false);
-      }
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [showCommunity]);
-
   function refreshAgentTasks(): void {
     taskStateCoordinator.refreshTaskState({ reason: "manual" });
   }
@@ -562,7 +552,7 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function handleFirstSidebarInteraction() {
-    if (readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage)) {
+    if (!guidanceWorkspaceReady || readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage)) {
       return;
     }
     if (deferredGuidanceStep !== "armed") {
@@ -577,7 +567,6 @@ export function AppFrame(props: AppFrameProps) {
       dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     }
     writeDeferredGuidanceStep(storage, firstStep);
-    setDeferredGuidanceStep(firstStep);
   }
 
   function chooseDeferredImprovementProgram(accepted: boolean) {
@@ -589,7 +578,6 @@ export function AppFrame(props: AppFrameProps) {
     clearProductTourStep(storage);
     writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
     writeDeferredGuidanceStep(storage, "product_tour");
-    setDeferredGuidanceStep("product_tour");
     dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     dispatch(appActions.onboardingUpdated(onboardingPatch));
     dispatch(appActions.privacyUpdated(privacyPatch));
@@ -1056,14 +1044,24 @@ export function AppFrame(props: AppFrameProps) {
     ? { ...sidebarResize.sidebarStyle, width: 0, minWidth: 0, maxWidth: 0, flexBasis: 0 }
     : sidebarResize.sidebarStyle;
 
+  const topBarInset = props.topBarInset ?? props.topBarBorder;
+
   return (
-    <div className={`sidebar-shell flex h-screen bg-canvas-oat${sidebarHidden ? " sidebar-shell--hidden" : ""}`}>
+    <div className={`sidebar-shell flex h-screen bg-canvas-oat${sidebarHidden ? " sidebar-shell--hidden" : ""}${windowsChrome ? " sidebar-shell--windows-titlebar" : ""}`}>
+      {windowsChrome ? (
+        <WindowsTitlebar
+          sidebarHidden={sidebarHidden}
+          onToggleSidebar={() => setSidebarHidden((hidden) => !hidden)}
+        />
+      ) : null}
+      <div className={windowsChrome ? "sidebar-shell__body" : "sidebar-shell__passthrough"}>
       <aside
         aria-hidden={sidebarHidden ? true : undefined}
         inert={sidebarHidden ? true : undefined}
         className="app-frame-sidebar flex flex-col"
         style={sidebarStyle}
       >
+        {!windowsChrome && (
         <div className="sidebar-window-toolbar">
           <button
             type="button"
@@ -1075,6 +1073,7 @@ export function AppFrame(props: AppFrameProps) {
             <PanelLeft size={20} />
           </button>
         </div>
+        )}
 
         {props.settingsNav ? (
           <>
@@ -1102,6 +1101,8 @@ export function AppFrame(props: AppFrameProps) {
                         ? <BarChart3 size={16} />
                         : item.id === "preferences"
                           ? <Wand2 size={16} />
+                          : item.id === "computer-use"
+                            ? <MousePointer2 size={16} />
                           : <Info size={16} />;
                   return (
                     <div key={item.id}>
@@ -1126,12 +1127,12 @@ export function AppFrame(props: AppFrameProps) {
             </div>
           </>
         ) : (
-        <nav className="space-y-1.5">
+        <nav className="space-y-0.5">
           {navItems.map((item) => {
             const key = item.path ?? item.action ?? "unknown";
             const active = item.path
               ? state.navigation.currentPath === item.path && (item.path !== "/main" || !state.agent.currentSessionKey)
-              : item.action === "community" && showCommunity;
+              : false;
 
             const label = item.path
               ? t(routeTable[item.path].navKey as Parameters<typeof t>[0])
@@ -1141,8 +1142,6 @@ export function AppFrame(props: AppFrameProps) {
               handleFirstSidebarInteraction();
               if (item.action === "search") {
                 setSearchPaletteOpen(true);
-              } else if (item.action === "community") {
-                setShowCommunity((v) => !v);
               } else if (item.path) {
                 openSidebarRoute(item.path);
               }
@@ -1163,33 +1162,6 @@ export function AppFrame(props: AppFrameProps) {
                 <span className="flex-1 text-left">{label}</span>
               </button>
             );
-
-            if (item.action === "community") {
-              return (
-                <div key={key} ref={communityMenuRef} className="relative">
-                  {navButton}
-                  {showCommunity && (
-                    <div className="community-popover absolute top-full mt-2 bg-background-paper rounded-card-lg border-content-panel p-3 z-50">
-                      <div className="community-popover-grid grid gap-2.5">
-                        <div className="community-popover-wechat">
-                          <div className="community-popover-wechat-title">
-                            <span>{t("welcome.wechatGroup")}</span>
-                          </div>
-                          <img src={communityLinks.wechatGroupUrl} alt={t("welcome.wechatGroup")} className="community-popover-qr rounded bg-white" />
-                          <span className="community-popover-wechat-hint">{t("appFrame.scanToJoin")}</span>
-                        </div>
-                        <div className="community-popover-links">
-                          <CommunityLink href={communityLinks.githubUrl} title={t("welcome.github")} detail="MemTensor/memmy-agent" />
-                          <CommunityLink href={communityLinks.discordUrl} title={t("welcome.discord")} detail="discord.gg/zfhKKn52wP" />
-                          <CommunityLink href={communityLinks.twitterUrl} title={t("welcome.twitter")} detail="@Memmy_ai" />
-                          <CommunityLink href={communityLinks.emailUrl} title={t("welcome.email")} detail={communityLinks.email} external={false} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            }
 
             return (
               <div key={key}>
@@ -1259,7 +1231,7 @@ export function AppFrame(props: AppFrameProps) {
                 ) : null}
               </div>
             </div>
-            <div className="app-frame-task-list__body space-y-3">
+            <div className="app-frame-task-list__body space-y-4">
             {visibleProjectTree.pinnedTasks.length > 0 || visibleProjectTree.pinnedProjects.length > 0 ? (
               <ProjectTreeSection
                 title={t("common.pin")}
@@ -1460,8 +1432,8 @@ export function AppFrame(props: AppFrameProps) {
               aria-label={t("settings.title")}
               className="app-frame-sidebar-footer--button app-frame-sidebar-footer-account"
             >
-              <span className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5">
-                <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
+              <span className="flex w-full min-w-0 items-center gap-2.5 px-2 py-1.5">
+                <span className="app-frame-profile-avatar rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
                   <User size={13} className="text-action-sky" />
                 </span>
                 <span className="app-frame-profile-text flex-1 min-w-0">
@@ -1515,8 +1487,8 @@ export function AppFrame(props: AppFrameProps) {
             aria-label={t("settings.title")}
             className="app-frame-sidebar-footer app-frame-sidebar-footer--button"
           >
-            <span className="flex w-full items-center gap-2 px-2 py-1.5">
-              <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
+            <span className="flex w-full items-center gap-2.5 px-2 py-1.5">
+              <span className="app-frame-profile-avatar rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
                 <User size={13} className="text-action-sky" />
               </span>
               <span className="app-frame-profile-text flex-1 min-w-0">
@@ -1546,7 +1518,7 @@ export function AppFrame(props: AppFrameProps) {
         )}
       </aside>
 
-      {sidebarHidden && (
+      {sidebarHidden && !windowsChrome && (
         <button
           type="button"
           className="sidebar-restore-button"
@@ -1564,27 +1536,51 @@ export function AppFrame(props: AppFrameProps) {
         minWidth={sidebarResize.minWidth}
         maxWidth={sidebarResize.maxWidth}
         isResizing={sidebarResize.isResizing}
-        isDisabled={sidebarHidden || showCommunity}
+        isDisabled={sidebarHidden}
         onResizeStart={sidebarResize.beginResize}
         onResizeBy={sidebarResize.resizeBy}
       />
 
-      <main className={`relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}`} aria-label={props.title}>
+      <main className={`app-frame-main relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}${props.windowsTitlebarSafe ? " app-frame-main--windows-titlebar-safe" : ""}`} aria-label={props.title}>
         {props.reserveTopBar !== false && (
-          <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
-            {props.topBar}
-          </header>
+          props.topBarClassName || props.topBarStyle ? (
+            <header
+              className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}${props.topBarClassName ? ` ${props.topBarClassName}` : ""}`}
+              style={props.topBarStyle}
+            >
+              <div className="app-frame-content-topbar__start">{props.topBar}</div>
+              <div className="app-frame-content-topbar__center">
+                <MemoryTokenBudgetBanner onOpenSettings={() => {
+                  writeSettingsMemoryBudgetFocus();
+                  dispatch(appActions.navigate("/settings"));
+                }} />
+              </div>
+              <div className="app-frame-content-topbar__end">{props.topBarEnd}</div>
+            </header>
+          ) : (
+            <AppContentTopbar
+              bordered={props.topBarBorder}
+              start={props.topBar}
+              end={props.topBarEnd}
+              onOpenMemoryBudgetSettings={() => {
+                writeSettingsMemoryBudgetFocus();
+                dispatch(appActions.navigate("/settings"));
+              }}
+            />
+          )
         )}
         <div
           data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}
           className={`min-h-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
-          style={props.topBarBorder ? { paddingTop: "var(--codex-toolbar-height)" } : undefined}
+          style={topBarInset ? { paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))" } : undefined}
         >
           {props.children}
         </div>
+        {props.sidePanel}
       </main>
+      </div>
       <ConfirmDialog
         open={removeProject != null}
         title={t("appFrame.project.remove")}
@@ -1630,7 +1626,7 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
-      {deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" && (
+      {deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" && guidanceWorkspaceReady && (
         <ImprovementProgramModal
           onChoice={chooseDeferredImprovementProgram}
           onLearnMore={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
@@ -1675,21 +1671,6 @@ function nextAgentHistoryRequestId(chatId: string): string {
 function nextAgentSidebarMutationId(): string {
   agentSidebarMutationCounter += 1;
   return `sidebar-${Date.now()}-${agentSidebarMutationCounter}`;
-}
-
-function CommunityLink(props: { href: string; title: string; detail: string; external?: boolean }) {
-  const external = props.external ?? true;
-  return (
-    <a
-      href={props.href}
-      target={external ? "_blank" : undefined}
-      rel={external ? "noreferrer" : undefined}
-      className="community-link flex flex-col rounded-lg text-xs text-text-ink/60 transition-colors"
-    >
-      <span className="community-link-title font-medium text-text-ink/70">{props.title}</span>
-      <span className="community-link-detail text-text-ink/45">{props.detail}</span>
-    </a>
-  );
 }
 
 /**

@@ -1,8 +1,3 @@
-import {
-  classifyFeedbackText,
-  traceMetaFromMemory,
-  type FeedbackTextShape
-} from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import type {
   DecisionRepairRecord,
@@ -12,6 +7,7 @@ import type {
   Repositories
 } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
+import type { LlmClient } from "../../model/types.js";
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
@@ -20,6 +16,7 @@ import {
   projectIdFromMemory
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { synthesizeFailureExperienceSink } from "../feedback/feedback-experience.js";
 
 export type NegativeExperienceSource =
   | "episode_reward"
@@ -41,14 +38,18 @@ interface NegativeExperienceDraft {
   sourceMemory?: MemoryRow;
   feedback?: FeedbackRecord;
   repair?: DecisionRepairRecord;
+  title: string;
+  experienceType: "failure_avoidance" | "repair_instruction";
   trigger: string;
   antiPattern: string;
   preference: string;
+  procedure: string;
   verification: string;
+  boundary: string;
+  sourceTraceIds: string[];
   confidence: number;
   salience: number;
   evidenceStrength: number;
-  feedbackShape?: FeedbackTextShape;
 }
 
 export interface NegativeExperiencePipelineDeps {
@@ -62,21 +63,23 @@ export interface NegativeExperiencePipelineDeps {
   };
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   namespaceIdFromMemory(memory: MemoryRow): string;
+  skillLlm: LlmClient;
 }
 
 export class NegativeExperiencePipeline {
   constructor(private readonly deps: NegativeExperiencePipelineDeps) {}
 
-  materialize(job: EvolutionJobRecord): void {
+  async materialize(job: EvolutionJobRecord): Promise<void> {
     if (!this.deps.config.algorithm.negativeExperience.enabled) return;
-    const draft = this.buildDraft(job);
+    if (
+      job.payload.source === "value_distribution"
+      && !this.deps.config.algorithm.feedback.valueDistributionRepairEnabled
+    ) return;
+    const draft = await this.buildDraft(job);
     if (!draft || !isActionableNegativeExperience(draft)) return;
 
     const config = this.deps.config.algorithm.negativeExperience;
-    const sourceTraceIds = (draft.sourceMemory
-      ? [draft.sourceMemory.id]
-      : draft.episode.l1MemoryIds.slice(0, 1))
-      .slice(0, config.maxSourceIds);
+    const sourceTraceIds = draft.sourceTraceIds.slice(0, config.maxSourceIds);
     const signature = negativeExperienceSignature(draft);
     const scopeIdentity = [
       (draft.sourceMemory ? projectIdFromMemory(draft.sourceMemory) : undefined) ?? draft.episode.projectId ?? "",
@@ -125,9 +128,9 @@ export class NegativeExperiencePipeline {
       config.maxPreferences
     );
     const support = Math.max(1, mergedEpisodeIds.length);
-    const title = `Avoid: ${firstLine(antiPatterns[antiPatterns.length - 1] ?? draft.antiPattern)}`;
+    const title = draft.title;
     const trigger = draft.trigger;
-    const procedure = preferences.join("\n");
+    const procedure = draft.procedure;
     const antiPattern = antiPatterns.join("\n");
     const body = renderNegativeExperienceBody({
       title,
@@ -135,6 +138,7 @@ export class NegativeExperiencePipeline {
       antiPattern,
       procedure,
       verification: draft.verification,
+      boundary: draft.boundary,
       support,
       confidence: draft.confidence
     });
@@ -144,7 +148,7 @@ export class NegativeExperiencePipeline {
       trigger,
       procedure,
       verification: draft.verification,
-      boundary: trigger,
+      boundary: draft.boundary,
       support,
       gain: 0,
       raw_gain: 0,
@@ -152,7 +156,7 @@ export class NegativeExperiencePipeline {
       evidence_strength: draft.evidenceStrength,
       salience: draft.salience,
       status: "candidate",
-      experience_type: "failure_avoidance",
+      experience_type: draft.experienceType,
       evidence_polarity: "negative",
       source_cohort: "neg_episode",
       source_basis: draft.sourceBasis,
@@ -196,7 +200,7 @@ export class NegativeExperiencePipeline {
         source_episode_ids: mergedEpisodeIds,
         source_trace_ids: mergedTraceIds,
         source_feedback_ids: mergedFeedbackIds,
-        experience_type: "failure_avoidance",
+        experience_type: draft.experienceType,
         evidence_polarity: "negative",
         source_basis: draft.sourceBasis,
         is_caveat: true
@@ -253,7 +257,7 @@ export class NegativeExperiencePipeline {
     }
   }
 
-  private buildDraft(job: EvolutionJobRecord): NegativeExperienceDraft | undefined {
+  private async buildDraft(job: EvolutionJobRecord): Promise<NegativeExperienceDraft | undefined> {
     const source = negativeExperienceSource(job.payload.source);
     const sourceEventId = text(job.payload.sourceEventId) ?? job.id;
     const episode = job.episodeId
@@ -270,41 +274,40 @@ export class NegativeExperiencePipeline {
       : [...episode.l1MemoryIds].reverse()
           .map((id) => this.deps.repos.memories.get(id))
           .find((memory): memory is MemoryRow => Boolean(memory));
-    const sourceTrace = sourceMemory ? traceMetaFromMemory(sourceMemory) : null;
     const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id);
-    const trigger = text(job.payload.triggerCondition)
-      ?? text(sourceTrace?.userText)
-      ?? rawTurns.find((turn) => text(turn.userText))?.userText?.trim()
-      ?? text(episode.title)
-      ?? text(episode.summary)
-      ?? "";
     const rewardReason = text(job.payload.rewardReason)
       ?? text(episode.rewardDetail.reason)
       ?? text(isRecord(episode.meta.reward) ? episode.meta.reward.reason : undefined);
     const issue = text(job.payload.issue) ?? repair?.issue;
-    const feedbackText = feedback?.rationale ?? issue ?? "";
-    const feedbackClassification = classifyFeedbackText(feedbackText);
-    const antiPattern = stripGuidanceLabel(text(job.payload.antiPattern)
-      ?? text(sourceTrace?.agentText)
-      ?? repair?.antiPattern
-      ?? issue
-      ?? rewardReason
-      ?? "");
-    const preference = stripGuidanceLabel(text(job.payload.preference)
-      ?? repair?.preference
-      ?? repair?.suggestion
-      ?? feedback?.rationale
-      ?? (rewardReason ? `Address and verify this failure before continuing: ${rewardReason}` : ""));
+    const feedbackText = [
+      feedback?.rationale,
+      issue,
+      rewardReason,
+      repair?.preference,
+      repair?.antiPattern
+    ].map(text).filter(Boolean).join("\n");
+    const episodeTraceIds = episode.l1MemoryIds
+      .map((id) => this.deps.repos.memories.get(id))
+      .filter((memory): memory is MemoryRow => Boolean(memory))
+      .map((memory) => memory.id);
+    const episodeContext = rawTurns
+      .map((turn, index) => [
+        `TURN ${index + 1}`,
+        turn.userText ? `User: ${clip(turn.userText, 700)}` : "",
+        turn.assistantText ? `Agent: ${clip(turn.assistantText, 900)}` : ""
+      ].filter(Boolean).join("\n"))
+      .join("\n\n");
+    const sink = await synthesizeFailureExperienceSink({
+      feedbackText,
+      userRequest: rawTurns.find((turn) => Boolean(text(turn.userText)))?.userText?.trim() ?? "",
+      agentResponse: rawTurns.at(-1)?.assistantText?.trim() ?? "",
+      episodeContext,
+      allowedTraceIds: episodeTraceIds
+    }, { llm: this.deps.skillLlm });
+    if (!sink) return undefined;
+    const antiPattern = sink.avoid.join("\n");
+    const preference = sink.prefer.join("\n");
     const sourceBasis = sourceBasisFor(source, feedback);
-    const feedbackConfidence = feedback?.polarity === "negative" && isOperationalSaferBehavior(feedbackText)
-      ? Math.max(0.65, feedbackClassification.confidence)
-      : feedbackClassification.confidence;
-    const repairConfidence = number(repair?.meta.confidence);
-    const rawConfidence = number(job.payload.confidence)
-      ?? (source === "negative_feedback" && feedback
-        ? Math.max(repairConfidence ?? 0, feedbackConfidence)
-        : repairConfidence)
-      ?? (typeof episode.rTask === "number" ? Math.abs(episode.rTask) : 0);
     const confidenceCap = sourceBasis === "implicit_failure_analysis"
       ? this.deps.config.algorithm.negativeExperience.implicitConfidenceCap
       : 1;
@@ -316,19 +319,22 @@ export class NegativeExperiencePipeline {
       sourceMemory,
       feedback,
       repair,
-      trigger: clip(trigger, 240),
-      antiPattern: clip(antiPattern, 360),
-      preference: clip(preference, 360),
-      verification: text(job.payload.verification)
-        ?? "Check that the plan avoids the historical failure mode before acting.",
-      confidence: clamp(rawConfidence, 0, confidenceCap),
+      title: sink.title,
+      experienceType: sink.experienceType,
+      trigger: sink.trigger,
+      antiPattern,
+      preference,
+      procedure: sink.procedure,
+      verification: sink.verification,
+      boundary: sink.boundary,
+      sourceTraceIds: sink.supportTraceIds,
+      confidence: clamp(sink.confidence, 0, confidenceCap),
       salience: clamp(Math.max(
         typeof episode.rTask === "number" ? Math.abs(episode.rTask) : 0,
         feedback?.magnitude ?? 0,
         number(repair?.meta.confidence) ?? 0
       ), 0, 1),
-      evidenceStrength: clamp(feedback?.magnitude ?? Math.abs(episode.rTask ?? 0), 0, 1),
-      ...(feedback ? { feedbackShape: feedbackClassification.shape } : {})
+      evidenceStrength: clamp(feedback?.magnitude ?? Math.abs(episode.rTask ?? 0), 0, 1)
     };
   }
 
@@ -364,21 +370,10 @@ function isActionableNegativeExperience(draft: NegativeExperienceDraft): boolean
   const minConfidence = draft.sourceBasis === "tool_failure_burst" ? 0.4 : 0.6;
   if (draft.confidence < minConfidence) return false;
   if (normalizeSignatureText(draft.antiPattern) === normalizeSignatureText(draft.preference)) return false;
-  if (draft.sourceBasis === "user_corrective_feedback") {
-    if (!draft.feedbackShape || draft.feedbackShape === "confusion") {
-      return false;
-    }
-    if (!isOperationalSaferBehavior(draft.preference)) return false;
-  }
   return !(
     isGenericNegativeGuidance(draft.antiPattern)
     && isGenericNegativeGuidance(draft.preference)
   );
-}
-
-function isOperationalSaferBehavior(value: string): boolean {
-  return /\b(use|avoid|verify|check|confirm|must|should|instead|report|explain|cite|link)\b/i.test(value) ||
-    /(使用|改用|避免|不要|验证|检查|确认|必须|应该|说明|注明|引用|链接|先)/.test(value);
 }
 
 function isGenericNegativeGuidance(value: string): boolean {
@@ -415,6 +410,7 @@ function renderNegativeExperienceBody(input: {
   antiPattern: string;
   procedure: string;
   verification: string;
+  boundary: string;
   support: number;
   confidence: number;
 }): string {
@@ -424,6 +420,7 @@ function renderNegativeExperienceBody(input: {
     `Avoid: ${input.antiPattern}`,
     `Safer behavior: ${input.procedure}`,
     `Verification: ${input.verification}`,
+    `Boundary: ${input.boundary}`,
     `Support: ${input.support}`,
     "Gain: 0",
     "Raw gain: 0",
@@ -438,10 +435,6 @@ function decisionGuidance(policy: Record<string, unknown>, key: "preference" | "
 
 function normalizeSignatureText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function stripGuidanceLabel(value: string): string {
-  return value.replace(/^(?:avoid|prefer|safer behavior)\s*:\s*/i, "").trim();
 }
 
 function cappedDistinct(values: string[], limit: number): string[] {
@@ -465,8 +458,4 @@ function number(value: unknown): number | undefined {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function firstLine(value: string): string {
-  return value.split(/\r?\n/, 1)[0]?.trim() ?? value.trim();
 }

@@ -261,6 +261,7 @@ export class ExecTool extends Tool {
     return (
       "Execute a shell command and return its output. " +
       "Use this for tests, builds, package commands, git commands, and other process execution. " +
+      "This also supports authorized native application automation, including AppleScript/JXA on macOS and PowerShell/COM on Windows. " +
       "Prefer read_file/find_files/grep for inspection and apply_patch/write_file/edit_file for file changes instead of cat, shell find/grep, echo, or sed. " +
       "Use -y or --yes flags to avoid interactive prompts. " +
       "For long-running or interactive commands, pass yield_time_ms; if the command keeps running, exec returns a session_id that can be polled or written to with write_stdin. " +

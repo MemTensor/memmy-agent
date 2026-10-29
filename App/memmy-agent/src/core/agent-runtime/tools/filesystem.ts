@@ -1,3 +1,4 @@
+import { AuthorizedReadBatch, managedExecutionRequired } from "../managed-execution.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -30,6 +31,14 @@ const BLOCKED_DEVICE_PATHS = new Set([
 
 function normalizeNewlines(text: string): string {
   return text.replace(/\r\n/g, "\n");
+}
+
+/** Same line split as apply_patch: a final newline does not create an extra blank line. */
+function splitFileLines(text: string): string[] {
+  if (!text) return [];
+  const lines = normalizeNewlines(text).split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
 }
 
 function lineNumbered(lines: string[], start: number): string {
@@ -83,37 +92,48 @@ function filterExtractedPages(text: string, pages?: string | null): string {
     .join("\n\n");
 }
 
-async function formatDocumentRead(target: string, pages?: string | null, maxChars = 128_000): Promise<string> {
+interface DocumentReadOptions {
+  char_offset?: number;
+  char_limit?: number;
+}
+
+function paginateDocument(text: string, options: DocumentReadOptions, maxChars: number): string {
+  const offset = options.char_offset ?? 0;
+  const limit = options.char_limit ?? 32_000;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) {
+    return `Error reading document: char_offset must be between 0 and ${text.length}.`;
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    return "Error reading document: char_limit must be a positive integer.";
+  }
+  // Reserve space for the continuation marker inside the runtime's result budget.
+  const budget = Math.max(2, maxChars - 512);
+  let end = Math.min(text.length, offset + Math.min(limit, budget));
+  if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) {
+    // A one-unit request must still make progress over a surrogate pair.
+    end += end - offset === 1 ? 1 : -1;
+  }
+  const status = end < text.length
+    ? `More content remains. Continue with char_offset=${end}. Keep the same path and pages; do not treat this excerpt as the full document.`
+    : "End of document (selected pages, if any).";
+  return `${text.slice(offset, end)}\n\n[Document read: chars ${offset}-${end} of ${text.length} (UTF-16, end exclusive). ${status}]`;
+}
+
+async function formatDocumentRead(
+  target: string,
+  pages?: string | null,
+  maxChars = 128_000,
+  options: DocumentReadOptions = {},
+): Promise<string> {
   const ext = path.extname(target).toLowerCase();
-  const extracted = await extractText(target);
+  // Page filtering and continuation must operate on the complete extraction, not its preview.
+  const extracted = await extractText(target, { maxChars: null });
   if (extracted == null) return `Error: Unsupported file format: ${ext}`;
   if (extracted.startsWith("[error:")) return `Error reading ${ext.toUpperCase()} file: ${extracted}`;
   const paged = ext === ".pdf" ? filterExtractedPages(extracted, pages) : extracted;
   if (paged.startsWith("Error:")) return paged;
   if (!paged) return `(${ext.toUpperCase().replace(".", "")} has no extractable text: ${target})`;
-  if (paged.length > maxChars) return `${paged.slice(0, maxChars)}\n\n(Document text truncated at ~128K chars)`;
-  return paged;
-}
-
-async function readPdf(target: string, pages?: string | null, maxChars = 128_000): Promise<string> {
-  const extracted = await extractText(target);
-  if (extracted == null) return "Error: PDF reading requires PDF text extraction support.";
-  if (extracted.startsWith("[error:")) return `Error reading PDF: ${extracted}`;
-  const paged = filterExtractedPages(extracted, pages);
-  if (paged.startsWith("Error:")) return paged;
-  if (!paged) return `(PDF has no extractable text: ${target})`;
-  if (paged.length > maxChars) return `${paged.slice(0, maxChars)}\n\n(PDF text truncated at ~128K chars)`;
-  return paged;
-}
-
-async function readOfficeDoc(target: string, maxChars = 128_000): Promise<string> {
-  const ext = path.extname(target).toLowerCase();
-  const extracted = await extractText(target);
-  if (extracted == null) return `Error: Unsupported file format: ${ext}`;
-  if (extracted.startsWith("[error:")) return `Error reading ${ext.toUpperCase()} file: ${extracted}`;
-  if (!extracted) return `(${ext.toUpperCase().replace(".", "")} has no extractable text: ${target})`;
-  if (extracted.length > maxChars) return `${extracted.slice(0, maxChars)}\n\n(Document text truncated at ~128K chars)`;
-  return extracted;
+  return paginateDocument(paged, options, maxChars);
 }
 
 function splitLinesKeepEnds(text: string): string[] {
@@ -575,7 +595,10 @@ export class ReadFileTool extends Tool {
       "Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. " +
       "Use find_files/list_dir first when the path is uncertain. " +
       "Read the relevant range before editing so replacements or patches are based on current content. " +
-      "Use offset and limit for large text files. Use force=true to re-read content even if unchanged."
+      "Use offset and limit for text file lines. For documents use pages for PDF page ranges, " +
+      "and char_offset/char_limit to read extracted text in chunks (also within a large PDF page). " +
+      "Follow the returned char_offset with the same path/pages until the required content is read; " +
+      "an excerpt is not the full document. Use force=true to re-read text even if unchanged."
     );
   }
 
@@ -586,7 +609,9 @@ export class ReadFileTool extends Tool {
         path: { type: "string" },
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
-        pages: { type: "string" },
+        pages: { type: "string", description: "PDF page or inclusive page range, e.g. 15 or 15-20." },
+        char_offset: { type: "integer", minimum: 0, description: "Documents only: zero-based UTF-16 offset in extracted text after PDF page selection. Use the returned continuation offset." },
+        char_limit: { type: "integer", minimum: 1, description: "Documents only: requested chunk size in UTF-16 units (default 32000; capped to the output budget)." },
         force: { type: "boolean" },
       },
       required: ["path"],
@@ -605,7 +630,7 @@ export class ReadFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } = {}): Promise<any> {
+  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}): Promise<any> {
     const requested = params.path;
     if (!requested) return "Error reading file: Unknown path";
     if (isBlockedDevicePath(requested)) {
@@ -622,9 +647,8 @@ export class ReadFileTool extends Tool {
       const stat = await fs.stat(target);
       if (!stat.isFile()) return `Error reading file: not a file: ${requested}`;
       const ext = path.extname(target).toLowerCase();
-      if (ext === ".pdf") return this.readPdfFile(target, params.pages ?? null);
-      if ([".docx", ".xlsx", ".pptx"].includes(ext)) return this.readOfficeDocument(target);
-      if (DOCUMENT_EXTS.has(ext)) return await formatDocumentRead(target, params.pages, ReadFileTool.MAX_CHARS);
+      if (ext === ".pdf") return await this.readPdfFile(target, params.pages ?? null, params);
+      if (DOCUMENT_EXTS.has(ext)) return await this.readOfficeDocument(target, params);
       if (IMAGE_EXTS.has(ext)) {
         const data = await fs.readFile(target);
         const mime = lookup(target) || "image/png";
@@ -638,7 +662,7 @@ export class ReadFileTool extends Tool {
       }
       const content = await fs.readFile(target, "utf8");
       if (!content) return "Empty file";
-      const lines = normalizeNewlines(content).split("\n");
+      const lines = splitFileLines(content);
       const offset = params.offset ?? 1;
       if (offset > lines.length) return `Error reading file: offset ${offset} beyond end (${lines.length} lines)`;
       const limit = params.limit ?? null;
@@ -665,12 +689,12 @@ export class ReadFileTool extends Tool {
     }
   }
 
-  readPdfFile(target: string, pages?: string | null): Promise<string> {
-    return readPdf(target, pages, ReadFileTool.MAX_CHARS);
+  readPdfFile(target: string, pages?: string | null, options: DocumentReadOptions = {}): Promise<string> {
+    return formatDocumentRead(target, pages, ReadFileTool.MAX_CHARS, options);
   }
 
-  readOfficeDocument(target: string): Promise<string> {
-    return readOfficeDoc(target, ReadFileTool.MAX_CHARS);
+  readOfficeDocument(target: string, options: DocumentReadOptions = {}): Promise<string> {
+    return formatDocumentRead(target, null, ReadFileTool.MAX_CHARS, options);
   }
 }
 
@@ -761,7 +785,8 @@ export class WriteFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, params.content, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
-      if (!this.postWriteValidation) return `Successfully wrote ${target}`;
+      // Managed writes must not launch unapproved validators as hidden subprocesses.
+      if (!this.postWriteValidation || managedExecutionRequired()) return `Successfully wrote ${target}`;
       const content = await readBackWrittenFile(target, params.content, signal);
       const lint = await lintFile({ path: target, content }, { abortSignal: signal });
       return appendFileLintResults(`Successfully wrote ${target}`, [lint]);
@@ -773,6 +798,55 @@ export class WriteFileTool extends Tool {
       throw error;
     }
   }
+}
+
+interface EditFileParams {
+  path?: string;
+  old_text?: string;
+  oldText?: string;
+  new_text?: string;
+  newText?: string;
+  replace_all?: boolean;
+  replaceAll?: boolean;
+  occurrence?: number | null;
+  line_hint?: number | null;
+  lineHint?: number | null;
+  expected_replacements?: number | null;
+  expectedReplacements?: number | null;
+}
+
+function resolveEditParams(params: EditFileParams) {
+  return {
+    oldText: params.old_text ?? params.oldText,
+    newText: params.new_text ?? params.newText,
+    replaceAll: params.replace_all ?? params.replaceAll ?? false,
+    occurrence: params.occurrence ?? null,
+    lineHint: params.line_hint ?? params.lineHint ?? null,
+    expectedReplacements: params.expected_replacements ?? params.expectedReplacements ?? null,
+  };
+}
+
+/** Pure validation shared by registry preparation and direct execution, before any file access. */
+function editOptionsError(options: ReturnType<typeof resolveEditParams>): string | null {
+  const { oldText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
+  for (const [name, value] of [
+    ["occurrence", occurrence], ["line_hint", lineHint], ["expected_replacements", expectedReplacements],
+  ] as const) {
+    if (value != null && value < 1) return `${name} must be >= 1.`;
+    if (value != null && !Number.isInteger(value)) return `${name} must be a positive integer.`;
+  }
+  if (replaceAll && occurrence != null) return "occurrence cannot be used with replace_all=true.";
+  if (replaceAll && lineHint != null) return "line_hint cannot be used with replace_all=true.";
+  if (occurrence != null && lineHint != null) return "line_hint cannot be used with occurrence.";
+  if (oldText === "") {
+    if (replaceAll || occurrence != null || lineHint != null) {
+      return "old_text is empty (create mode); omit occurrence and line_hint, and leave replace_all false.";
+    }
+    if (expectedReplacements != null && expectedReplacements !== 1) {
+      return `expected ${expectedReplacements} replacements but would make 1 (create mode).`;
+    }
+  }
+  return null;
 }
 
 export class EditFileTool extends Tool {
@@ -815,6 +889,9 @@ export class EditFileTool extends Tool {
     return (
       "Perform a small, exact replacement in one file by replacing old_text with new_text. " +
       "Use this for narrow text substitutions with old_text copied from read_file. " +
+      "Choose at most one selector: occurrence, line_hint, or replace_all=true; they are mutually exclusive. " +
+      "With no selector, old_text must match exactly once. expected_replacements is an independent count assertion. " +
+      "Empty old_text creates a missing file or fills an empty/whitespace-only file; omit selectors in this mode. " +
       "For multi-file, structural, or generated code edits, prefer apply_patch."
     );
   }
@@ -823,21 +900,28 @@ export class EditFileTool extends Tool {
     return {
       type: "object",
       properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        oldText: { type: "string" },
-        new_text: { type: "string" },
-        newText: { type: "string" },
-        replace_all: { type: "boolean" },
-        replaceAll: { type: "boolean" },
-        occurrence: { type: ["integer", "null"], minimum: 1 },
-        line_hint: { type: ["integer", "null"], minimum: 1 },
-        lineHint: { type: ["integer", "null"], minimum: 1 },
-        expected_replacements: { type: ["integer", "null"], minimum: 1 },
-        expectedReplacements: { type: ["integer", "null"], minimum: 1 },
+        path: { type: "string", description: "File path, absolute or relative to the workspace." },
+        old_text: { type: "string", description: "Required text to replace, copied from read_file. Empty string selects create mode: create a missing file or fill an empty/whitespace-only file, without selectors." },
+        oldText: { type: "string", description: "Alias of old_text; prefer old_text. The snake_case value takes precedence when both are supplied." },
+        new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
+        newText: { type: "string", description: "Alias of new_text; prefer new_text. The snake_case value takes precedence when both are supplied." },
+        replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. When true, cannot be combined with non-null occurrence or line_hint, or used in create mode. When false, may be combined with occurrence or line_hint, or used in create mode." },
+        replaceAll: { type: "boolean", description: "Alias of replace_all, with the same restrictions; prefer replace_all. The snake_case value takes precedence when both are supplied." },
+        occurrence: { type: ["integer", "null"], minimum: 1, description: "Select the 1-based occurrence of old_text in file order. Omit or use null when unused. Cannot be combined with line_hint or replace_all=true, or used in create mode." },
+        line_hint: { type: ["integer", "null"], minimum: 1, description: "Select the match whose start is nearest this 1-based line number; equal-distance ties fail. Omit or use null when unused. Cannot be combined with occurrence or replace_all=true, or used in create mode." },
+        lineHint: { type: ["integer", "null"], minimum: 1, description: "Alias of line_hint, with the same restrictions; prefer line_hint. A non-null line_hint takes precedence when both are supplied." },
+        expected_replacements: { type: ["integer", "null"], minimum: 1, description: "Independent assertion of the number of selected replacements, checked before writing. Works with every selection mode; does not select a match. Omit or use null to skip; create mode accepts only 1 when supplied, including a no-op." },
+        expectedReplacements: { type: ["integer", "null"], minimum: 1, description: "Alias of expected_replacements, with the same restrictions; prefer expected_replacements. A non-null snake_case value takes precedence when both are supplied." },
       },
       required: ["path"],
     };
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    const errors = super.validateParams(params);
+    if (errors.length) return errors;
+    const error = editOptionsError(resolveEditParams(params));
+    return error ? [error] : [];
   }
 
   setContext(ctx: any): void {
@@ -848,32 +932,14 @@ export class EditFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: {
-    path?: string;
-    old_text?: string;
-    oldText?: string;
-    new_text?: string;
-    newText?: string;
-    replace_all?: boolean;
-    replaceAll?: boolean;
-    occurrence?: number | null;
-    line_hint?: number | null;
-    lineHint?: number | null;
-    expected_replacements?: number | null;
-    expectedReplacements?: number | null;
-  } = {}, context?: ToolExecutionContext): Promise<string> {
+  async execute(params: EditFileParams = {}, context?: ToolExecutionContext): Promise<string> {
     if (!params.path) return "Error editing file: Unknown path";
-    const oldText = params.old_text ?? params.oldText;
-    const newText = params.new_text ?? params.newText;
+    const options = resolveEditParams(params);
+    const { oldText, newText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
     if (oldText == null) return "Error editing file: Unknown old_text";
     if (newText == null) return "Error editing file: Unknown new_text";
-    const replaceAll = params.replace_all ?? params.replaceAll ?? false;
-    const occurrence = params.occurrence ?? null;
-    const lineHint = params.line_hint ?? params.lineHint ?? null;
-    const expectedReplacements = params.expected_replacements ?? params.expectedReplacements ?? null;
-    if (occurrence != null && occurrence < 1) return "Error: occurrence must be >= 1.";
-    if (lineHint != null && lineHint < 1) return "Error: line_hint must be >= 1.";
-    if (expectedReplacements != null && expectedReplacements < 1) return "Error: expected_replacements must be >= 1.";
+    const parameterError = editOptionsError(options);
+    if (parameterError) return `Error: ${parameterError}`;
     const target = resolveWorkspacePath(this.workspace, params.path);
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error editing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;
@@ -901,7 +967,7 @@ export class EditFileTool extends Tool {
         await fs.writeFile(target, newText, { encoding: "utf8", signal: signal ?? undefined });
         this.fileStates().recordWrite(target);
         const success = exists ? "Successfully edited file" : `Successfully created ${target}`;
-        if (!this.postWriteValidation) return success;
+        if (!this.postWriteValidation || managedExecutionRequired()) return success;
         const content = await readBackWrittenFile(target, newText, signal);
         const lint = await lintFile({ path: target, content }, { abortSignal: signal });
         return appendFileLintResults(success, [lint]);
@@ -921,9 +987,6 @@ export class EditFileTool extends Tool {
       throwIfAborted(signal);
       if (!matches.length) return notFoundMessage(normalizedOld, normalized, params.path);
       const count = matches.length;
-      if (replaceAll && occurrence != null) return "Error: occurrence cannot be used with replace_all=true.";
-      if (replaceAll && lineHint != null) return "Error: line_hint cannot be used with replace_all=true.";
-      if (occurrence != null && lineHint != null) return "Error: line_hint cannot be used with occurrence.";
       if (count > 1 && !replaceAll) {
         if (occurrence != null) {
           if (occurrence > count) return `Error: occurrence ${occurrence} is out of range; old_text appears ${count} times.`;
@@ -972,7 +1035,7 @@ export class EditFileTool extends Tool {
       await fs.writeFile(target, updated, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
       const success = warning ? `${warning}\nSuccessfully edited file` : "Successfully edited file";
-      if (!this.postWriteValidation) return success;
+      if (!this.postWriteValidation || managedExecutionRequired()) return success;
       const content = await readBackWrittenFile(target, updated, signal);
       const lint = await lintFile({
         path: target,
@@ -1042,22 +1105,28 @@ export class ListDirTool extends Tool {
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error: path outside workspace: ${params.path}`;
     const maxEntries = params.max_entries ?? params.maxEntries ?? 200;
     const rows: string[] = [];
+    const batch = new AuthorizedReadBatch(target);
     const walk = async (dir: string) => {
-      const entries = (await fs.readdir(dir, { withFileTypes: true }))
-        .filter((entry) => !IGNORED_DIRS.has(entry.name))
+      const authorizedEntries = await batch.read(dir, () => fs.readdir(dir, { withFileTypes: true }));
+      if (!authorizedEntries) return;
+      if (dir !== target) rows.push(workspaceRelative(this.workspace, dir).replaceAll(path.sep, "/") + "/");
+      const entries = authorizedEntries.filter((entry) => !IGNORED_DIRS.has(entry.name))
         .sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         const full = path.join(dir, entry.name);
         const rel = workspaceRelative(this.workspace, full).replaceAll(path.sep, "/") + (entry.isDirectory() ? "/" : "");
-        rows.push(rel);
-        if (params.recursive && entry.isDirectory()) await walk(full);
+        if (params.recursive && entry.isDirectory()) {
+          await walk(full);
+        } else {
+          await batch.read(full, async () => { rows.push(rel); });
+        }
       }
     };
     if (!fsSync.existsSync(target)) return `Error: path not found: ${params.path}`;
     await walk(target);
-    if (!rows.length) return "(empty directory)";
+    if (!rows.length) return batch.format(batch.deniedPaths ? "(no authorized entries returned)" : "(empty directory)");
     const selected = rows.slice(0, maxEntries);
     if (rows.length > maxEntries) selected.push(`... truncated (${maxEntries} of ${rows.length} entries)`);
-    return selected.join("\n");
+    return batch.format(selected.join("\n"));
   }
 }

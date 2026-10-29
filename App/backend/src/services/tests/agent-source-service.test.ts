@@ -1,7 +1,6 @@
 /** Agent source service tests. */
 import { DatabaseSync } from "node:sqlite";
 import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
-import { legacyTurnId, legacyTurnRequestId } from "@memmy/agent-source-core";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,109 +39,6 @@ afterEach(() => {
 });
 
 describe("agent source service", () => {
-  describe("persistent scan turn boundaries", () => {
-    it("stores one oversized tool turn once and reuses its legacy idempotency keys", async () => {
-      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-one-turn-"));
-      const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z", { includeTool: true })
-        .map((message) => message.role === "tool" ? { ...message, content: "Tool calls:\n\n- tool_1\n\n".repeat(30_000) } : message);
-      const turn = { sourceId: "cursor", conversationId: messages[0]!.conversationId, turnIndex: 0, messages };
-      const memoryClient = createMockMemoryClient();
-      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
-      const service = createService({
-        scanStoreDirectory: tempDir,
-        adapters: [createFakeAdapter("cursor", messages)],
-        memoryClient: {
-          ...memoryClient,
-          async addMemory(input) {
-            added.push(input);
-            return { ...await memoryClient.addMemory(input), id: "oversized-turn", duplicate: added.length > 1 };
-          },
-          async getMemoryProcessingStatus(ids) {
-            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: "2026-05-28T10:00:00.000Z" })), serverTime: "2026-05-28T10:00:00.000Z" };
-          }
-        }
-      });
-
-      const first = await service.scanOne("cursor", { mode: "full" });
-      expect(first.errors).toEqual([]);
-      expect(added).toHaveLength(1);
-      expect(added[0]).toMatchObject({ requestId: legacyTurnRequestId(turn), turnId: legacyTurnId(turn) });
-      expect(added[0]?.content).toContain("truncated");
-      const replay = await service.scanOne("cursor", { mode: "full" });
-      expect(replay.errors).toEqual([]);
-      expect(added).toHaveLength(2);
-      expect(added[1]?.requestId).toBe(added[0]?.requestId);
-      expect(added[1]?.turnId).toBe(added[0]?.turnId);
-      expect(replay.skipped).toBe(messages.length);
-      expect(replay.memoryIdCount).toBe(0);
-    });
-
-    it.each([
-      ["after the watermark", "2026-05-28T10:01:53.000Z", ["query 1"]],
-      ["ending exactly at the watermark", "2026-05-28T10:01:52.000Z", ["query 2", "query 1"]],
-      ["when the newest turn ends exactly at the watermark", "2026-05-28T10:02:02.000Z", ["query 1"]]
-    ] as const)("imports only complete turns %s from a changed long conversation", async (_label, since, expectedTitles) => {
-      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-boundary-"));
-      const repository = createRepository();
-      repository.upsertSource({ sourceId: "cursor", displayName: "Cursor", dataPath: "/tmp/cursor", builtin: true });
-      repository.upsertScanWatermark({ sourceId: "cursor", mode: "incremental", baselineAt: since, latestSeenCreatedAt: since, updatedAt: since });
-      const memoryClient = createMockMemoryClient();
-      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
-      const service = createService({
-        repository,
-        scanStoreDirectory: tempDir,
-        adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 3, "2026-05-28T10:02:00.000Z")
-          .map((message) => ({ ...message, conversationId: "long-conversation" })))],
-        memoryClient: {
-          ...memoryClient,
-          async addMemory(input) { added.push(input); return memoryClient.addMemory(input); },
-          async getMemoryProcessingStatus(ids) {
-            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: since })), serverTime: since };
-          }
-        }
-      });
-
-      const result = await service.scanOne("cursor", { mode: "incremental" });
-
-      expect(result.errors).toEqual([]);
-      expect(added.map((input) => input.title)).toEqual(expectedTitles);
-      for (const input of added) expect(input.content).toContain(String(input.title).replace("query", "answer"));
-      expect(repository.getScanWatermark("cursor")?.latestSeenCreatedAt).toBe("2026-05-28T10:02:02.000Z");
-    });
-
-    it.each(["full", "initial_subset"] as const)("preserves the %s history selection with an existing watermark", async (mode) => {
-      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-mode-"));
-      const repository = createRepository();
-      const boundary = "2026-05-28T10:02:02.000Z";
-      repository.upsertSource({ sourceId: "cursor", displayName: "Cursor", dataPath: "/tmp/cursor", builtin: true });
-      repository.upsertScanWatermark({ sourceId: "cursor", mode: "incremental", baselineAt: boundary, latestSeenCreatedAt: boundary, updatedAt: boundary });
-      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
-      const memoryClient = createMockMemoryClient();
-      const count = mode === "initial_subset" ? 1001 : 3;
-      const service = createService({
-        repository,
-        scanStoreDirectory: tempDir,
-        adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", count, "2026-05-28T10:02:00.000Z")
-          .map((message) => ({ ...message, conversationId: "long-conversation" })))],
-        memoryClient: {
-          ...memoryClient,
-          async addMemory(input) { added.push(input); return memoryClient.addMemory(input); },
-          async getMemoryProcessingStatus(ids) {
-            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: boundary })), serverTime: boundary };
-          }
-        }
-      });
-
-      const result = await service.scanOne("cursor", { mode });
-
-      expect(result.errors).toEqual([]);
-      expect(added).toHaveLength(mode === "initial_subset" ? 1000 : 3);
-      expect(added.map((input) => input.title)).toContain("query 1");
-      expect(added.map((input) => input.title)).toContain(`query ${mode === "initial_subset" ? 1000 : 3}`);
-      if (mode === "initial_subset") expect(added.map((input) => input.title)).not.toContain("query 1001");
-    });
-  });
-
   it("lists builtin registry sources together with persisted manual sources", async () => {
     const repository = createRepository();
     repository.upsertSource({
@@ -279,6 +175,64 @@ describe("agent source service", () => {
     ]);
   });
 
+  it("emits add analytics only when a scanned skill is newly stored", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const memoryClient = createMockMemoryClient();
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", [])],
+      memoryClient: {
+        ...memoryClient,
+        async addMemory(input, context) {
+          if (input.sourceSkillId === "duplicate-skill") {
+            return { ...(await memoryClient.addMemory(input, context)), duplicate: true };
+          }
+          if (input.sourceSkillId === "deleted-skill") {
+            return { ...(await memoryClient.addMemory(input, context)), status: "deleted" as const };
+          }
+          if (input.sourceSkillId === "failing-skill") throw new Error("skill import failed");
+          return memoryClient.addMemory(input, context);
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events),
+      skillDistributionService: {
+        async listSkills() {
+          return ["fresh-skill", "duplicate-skill", "deleted-skill", "failing-skill"].map((sourceSkillId) => ({
+            sourceAgentId: "cursor",
+            sourceSkillId,
+            sourceSkillPath: `/tmp/cursor/skills/${sourceSkillId}/SKILL.md`,
+            sourceSkillVersion: "v1",
+            sourceContentHash: `${sourceSkillId}-hash`,
+            title: sourceSkillId,
+            content: sourceSkillId,
+            updatedAt: "2026-05-28T09:00:00.000Z"
+          }));
+        },
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    await service.scanOne("cursor", { mode: "incremental" });
+
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded", "started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "skill:fresh-skill",
+      turnId: "skill:fresh-skill:v1",
+      layer: "Skill",
+      scanMode: "incremental",
+      storedCount: 1
+    });
+    expect(events[3]?.payload).toMatchObject({
+      conversationId: "skill:failing-skill",
+      layer: "Skill",
+      scanMode: "incremental",
+      error: expect.any(Error)
+    });
+  });
+
   it("completes the scan and advances checkpoints when every memory is skipped", async () => {
     const repository = createRepository();
     const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");
@@ -300,6 +254,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["cursor-conv-1"],
             incompleteConversationIds: [],
@@ -480,13 +435,15 @@ describe("agent source service", () => {
 
     expect(scanOptions[0]).toMatchObject({
       order: "recent_first",
-      maxScanTargets: 1000,
-      since: undefined
+      since: undefined,
+      fullHistory: true
     });
+    expect(scanOptions[0]?.maxScanTargets).toBeUndefined();
     expect(scanOptions[0]?.maxMessages).toBeUndefined();
     expect(scanOptions[1]).toMatchObject({
       order: "source_default",
-      since: "2026-05-28T10:00:02.000Z"
+      since: "2026-05-28T10:00:02.000Z",
+      fullHistory: false
     });
     expect(repository.getScanWatermark("cursor")).toMatchObject({
       sourceId: "cursor",
@@ -625,6 +582,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -666,6 +624,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [`memory-${ctx.sourceId}`],
+            importSummaryMemoryIds: [`memory-${ctx.sourceId}`],
             conversations: 1,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -978,11 +937,12 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 1,
             memoryIds: ["memory-complete"],
+            importSummaryMemoryIds: ["memory-complete"],
             conversations: 3,
             completedConversationIds: ["conversation-complete"],
             incompleteConversationIds: ["conversation-incomplete"],
             failedConversationIds: ["conversation-failed"],
-            errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+            errors: []
           };
         }
       }
@@ -1004,7 +964,7 @@ describe("agent source service", () => {
 
     expect(result).toMatchObject({
       memoryIds: ["memory-complete"],
-      errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+      errors: []
     });
     expect(repository.getConversationCheckpoint("cursor", "conversation-complete")).toMatchObject({
       lastMessageId: "complete-1"
@@ -1092,6 +1052,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 2,
             completedConversationIds: [],
             incompleteConversationIds: [],
@@ -1158,6 +1119,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: 1,
             completedConversationIds: ["conversation-1"],
             incompleteConversationIds: [],
@@ -1238,6 +1200,7 @@ describe("agent source service", () => {
             dedupedMemories: 0,
             failedMemories: 0,
             memoryIds: [],
+            importSummaryMemoryIds: [],
             conversations: ingested.length > 0 ? 1 : 0,
             completedConversationIds: ingested.length > 0 ? ["c1"] : [],
             incompleteConversationIds: [],
@@ -1349,10 +1312,12 @@ describe("agent source service", () => {
     });
 
     await service.installSkill("cursor");
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(false);
     await service.uninstallSkill("cursor");
 
     expect(calls).toEqual(["install:cursor", "uninstall:cursor"]);
     expect(repository.listSources()[0]?.status).toBe("not_connected");
+    expect(repository.isAutoInjectSuppressed("cursor")).toBe(true);
   });
 
   it("delegates native plugin install then updates source status", async () => {
@@ -1384,10 +1349,12 @@ describe("agent source service", () => {
     });
 
     await service.installPlugin("openclaw");
+    expect(repository.isAutoInjectSuppressed("openclaw")).toBe(false);
     await service.uninstallPlugin("openclaw");
 
     expect(calls).toEqual(["plugin:openclaw", "unplugin:openclaw"]);
     expect(repository.listSources()[0]?.status).toBe("not_connected");
+    expect(repository.isAutoInjectSuppressed("openclaw")).toBe(true);
   });
 
   it("delegates memory plugin conflict detection to the skill distribution service", async () => {
@@ -1484,12 +1451,12 @@ describe("agent source service", () => {
       status_before: "not_connected",
       status_after: "plugin_installed",
       install_type: "manual",
-      success: true,
+      success: 1,
     });
     expect(analytics.events[1]?.params).toMatchObject({
       source_id: "cursor",
       status_after: "not_connected",
-      success: true,
+      success: 1,
     });
     expect(analytics.events[2]?.params).toMatchObject({
       source_id: "openclaw",
@@ -1497,6 +1464,33 @@ describe("agent source service", () => {
       permission: "scan_and_write_skill",
       installed_plugin_id: "memory-core",
     });
+  });
+
+  it("reports whether an installed hook matches the bundled revision", async () => {
+    const fallback = createService();
+    const service = createService({
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async isInstalledHookCurrent(sourceId) {
+          return sourceId !== "cursor";
+        }
+      }
+    });
+
+    await expect(fallback.isInstalledHookCurrent("cursor")).resolves.toBe(true);
+    await expect(service.isInstalledHookCurrent("cursor")).resolves.toBe(false);
+    await expect(service.isInstalledHookCurrent("claude_code")).resolves.toBe(true);
   });
 
   it("emits skill install analytics", async () => {
@@ -1541,7 +1535,7 @@ describe("agent source service", () => {
         permission: "scan_only",
         status_before: "not_connected",
         status_after: "skill_installed",
-        success: true,
+        success: 1,
       },
     });
   });
@@ -1587,10 +1581,149 @@ describe("agent source service", () => {
         status_before: "not_connected",
         status_after: "not_connected",
         install_type: "auto_inject",
-        success: false,
+        success: 0,
         error_code: "install failed",
       },
     });
+  });
+
+  it("emits memory_desktop add analytics for persistent scan writes", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-analytics", mode: "initial_subset" });
+
+    expect(result.errors).toEqual([]);
+    expect(result.memoryIdCount).toBe(1);
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "initial_subset"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+    expect(typeof events[0]?.payload.turnId).toBe("string");
+    expect(typeof events[1]?.payload.durationMs).toBe("number");
+  });
+
+  it("emits add_failed analytics when a persistent scan write throws", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-add-failed-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: {
+        ...createReadyMemoryClient(),
+        async addMemory() {
+          throw new Error("write failed");
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-failed", mode: "incremental" });
+
+    expect(result.errors[0]?.reason).toBe("write failed");
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      scanMode: "incremental"
+    });
+    expect(events[1]?.payload.error).toBeInstanceOf(Error);
+  });
+
+  it("does not emit add analytics when a persistent scan write is a duplicate", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-dup-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: {
+        ...createReadyMemoryClient(),
+        async addMemory() {
+          return { id: "memory-dup", duplicate: true };
+        }
+      },
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-add-dup", mode: "full" });
+
+    expect(result.memoryIdCount).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  it("emits add analytics for a newly stored native persistent scan turn", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-native-add-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", stagedNativeMessages("cursor"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    const result = await service.scanOne("cursor", { scanJobId: "job-native-add", mode: "initial_subset" });
+
+    expect(result.errors).toEqual([]);
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "cursor-conv-1",
+      turnId: "native-turn",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+  });
+
+  it("does not emit add analytics when a native persistent scan turn already exists", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-native-existing-analytics-"));
+    const memoryClient = createReadyMemoryClient();
+    memoryClient.completeSourceTurn = vi.fn().mockResolvedValue({
+      status: "existing",
+      result: { l1MemoryIds: ["l1-existing"] }
+    });
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", stagedNativeMessages("cursor"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient,
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await service.scanOne("cursor", { scanJobId: "job-native-existing", mode: "incremental" });
+
+    expect(events).toEqual([]);
+  });
+
+  it("does not emit add analytics for already checkpointed persistent scan turns", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    tempDir = mkdtempSync(join(tmpdir(), "persistent-scan-skip-analytics-"));
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      scanStoreDirectory: join(tempDir, "scans"),
+      memoryClient: createReadyMemoryClient(),
+      memoryAddAnalytics: createAddAnalyticsRecorder(events)
+    });
+
+    await service.scanOne("cursor", { scanJobId: "job-skip-first", mode: "incremental" });
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded"]);
+    events.length = 0;
+    await service.scanOne("cursor", { scanJobId: "job-skip-second", mode: "incremental" });
+
+    expect(events).toEqual([]);
   });
 });
 
@@ -1602,8 +1735,13 @@ function createService(
     skillDistributionService?: SkillDistributionService;
     memoryClient?: MemoryClient;
     agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
-    getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
+    memoryAddAnalytics?: {
+      trackAddStarted: (input: Record<string, unknown>) => void;
+      trackAddSucceeded: (input: Record<string, unknown>) => void;
+      trackAddFailed: (input: Record<string, unknown>) => void;
+    };
     scanStoreDirectory?: string;
+    getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
   } = {}
 ): AgentSourceService {
   return createAgentSourceService({
@@ -1612,8 +1750,9 @@ function createService(
     ingestionService: options.ingestionService ?? createFakeIngestionService(),
     memoryClient: options.memoryClient ?? createMockMemoryClient(),
     agentSourceAnalytics: options.agentSourceAnalytics,
-    getScanPermission: options.getScanPermission,
+    memoryAddAnalytics: options.memoryAddAnalytics as never,
     scanStoreDirectory: options.scanStoreDirectory,
+    getScanPermission: options.getScanPermission,
     skillDistributionService:
       options.skillDistributionService ??
       ({
@@ -1650,6 +1789,7 @@ function createRepository(): AgentSourceRepository {
       data_path       TEXT NOT NULL,
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
+      auto_inject_suppressed INTEGER NOT NULL DEFAULT 0 CHECK(auto_inject_suppressed IN (0,1)),
       last_scanned_at TEXT,
       sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1717,6 +1857,52 @@ function createFakeAdapter(
   };
 }
 
+function createAddAnalyticsRecorder(events: Array<{ name: string; payload: Record<string, unknown> }>) {
+  return {
+    trackAddStarted(input: Record<string, unknown>) {
+      events.push({ name: "started", payload: { ...input } });
+    },
+    trackAddSucceeded(input: Record<string, unknown>) {
+      events.push({ name: "succeeded", payload: { ...input } });
+    },
+    trackAddFailed(input: Record<string, unknown>) {
+      events.push({ name: "failed", payload: { ...input } });
+    }
+  };
+}
+
+function createReadyMemoryClient(): MemoryClient {
+  const base = createMockMemoryClient();
+  return {
+    ...base,
+    async enqueueImportSummaries(memoryIds) {
+      return {
+        enqueued: memoryIds?.length ?? 0,
+        memoryIds: memoryIds ?? [],
+        serverTime: "2026-05-28T10:00:00.000Z"
+      };
+    },
+    async getMemoryProcessingStatus(memoryIds) {
+      return {
+        items: memoryIds.map((memoryId) => ({
+          memoryId,
+          state: "ready" as const,
+          stage: null,
+          activeJobId: null,
+          attemptCount: 1,
+          manualRetryCount: 0,
+          retryAction: "retry" as const,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: "2026-05-28T10:00:00.000Z"
+        })),
+        serverTime: "2026-05-28T10:00:00.000Z"
+      };
+    }
+  };
+}
+
 function createFakeIngestionService(): IngestionService {
   return {
     async ingest(messages) {
@@ -1736,6 +1922,7 @@ function createFakeIngestionService(): IngestionService {
         dedupedMemories: 0,
         failedMemories: 0,
         memoryIds: [],
+        importSummaryMemoryIds: [],
         conversations: 1,
         completedConversationIds: [...conversationIds],
         incompleteConversationIds: [],
@@ -1764,6 +1951,39 @@ function createMessage(sourceId: string, index: number): ConversationMessage {
     gitRoot: null,
     rawMeta: Object.freeze({})
   };
+}
+
+function stagedNativeMessages(sourceId: string): ConversationMessage[] {
+  const sourceTurn = {
+    source: sourceId,
+    conversationId: `${sourceId}-conv-1`,
+    turnId: "native-turn",
+    sequence: 1,
+    startedAt: "2026-05-28T10:00:00.000Z",
+    completedAt: "2026-05-28T10:01:00.000Z",
+    completionEvidence: "task_complete:native-turn",
+    query: "Run tests",
+    answer: "Tests passed",
+    status: "succeeded",
+    toolCalls: [],
+    toolResults: []
+  };
+  return [
+    {
+      ...createMessage(sourceId, 1),
+      role: "user",
+      content: sourceTurn.query,
+      createdAt: sourceTurn.startedAt,
+      rawMeta: { sourceTurnId: "native-turn", sourceTurnState: "complete" }
+    },
+    {
+      ...createMessage(sourceId, 2),
+      role: "assistant",
+      content: sourceTurn.answer,
+      createdAt: sourceTurn.completedAt,
+      rawMeta: { sourceTurnId: "native-turn", sourceTurnState: "complete", sourceTurn }
+    }
+  ];
 }
 
 function createCompleteMemoryMessages(

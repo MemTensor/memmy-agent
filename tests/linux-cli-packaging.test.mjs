@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -61,6 +62,8 @@ function makeInstallerFixture(root) {
     "Xenova",
     "all-MiniLM-L6-v2",
   );
+  mkdirSync(path.join(payload, "scripts/internal/linux"), { recursive: true });
+  copyFileSync(path.join(repoRoot, "scripts/internal/linux/install-computer-use-deps.sh"), path.join(payload, "scripts/internal/linux/install-computer-use-deps.sh"));
   const archive = path.join(release, "memmy-agent-linux-cli.tar.gz");
   mkdirSync(path.join(agent, "dist"), { recursive: true });
   mkdirSync(path.join(backend, "dist", "src", "services"), { recursive: true });
@@ -155,6 +158,10 @@ function makeInstallerFixture(root) {
   writeFileSync(path.join(model, "tokenizer.json"), "{}\n");
   writeFileSync(path.join(model, "tokenizer_config.json"), "{}\n");
   writeFileSync(path.join(model, "onnx", "model_quantized.onnx"), "fixture\n");
+  const ocu = path.join(agent, "dist", "native-computer-use", "linux", "amd64", "memmy-computer-use");
+  mkdirSync(path.dirname(ocu), { recursive: true });
+  writeFileSync(ocu, `#!/bin/sh\necho ${JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version}\n`);
+  chmodSync(ocu, 0o755);
   const tar = spawnSync("tar", ["-czf", archive, "-C", payload, "."], { encoding: "utf8" });
   expect(tar.status, tar.stderr).toBe(0);
   writeFileSync(`${archive}.sha256`, `${sha256(archive)}  ${path.basename(archive)}\n`);
@@ -164,6 +171,17 @@ function makeInstallerFixture(root) {
 function fakeLinuxTools(root) {
   const tools = path.join(root, "tools");
   mkdirSync(tools, { recursive: true });
+  const realNode = process.execPath.replaceAll("'", "'\\''");
+  const node = path.join(tools, "node");
+  writeFileSync(node, [
+    "#!/usr/bin/env bash",
+    "if [ \"${1:-}\" = \"-e\" ] && [ -n \"${MEMMY_FIXTURE_NODE_VERSION:-}\" ]; then",
+    `  exec '${realNode}' -e \"Object.defineProperty(process.versions, 'node', { value: '$MEMMY_FIXTURE_NODE_VERSION' }); $2\"`,
+    "fi",
+    `exec '${realNode}' \"$@\"`,
+    "",
+  ].join("\n"));
+  chmodSync(node, 0o755);
   const uname = path.join(tools, "uname");
   writeFileSync(uname, [
     "#!/usr/bin/env bash",
@@ -215,8 +233,10 @@ function runInstaller(home, release, tools, overrides = {}) {
     env: cleanNpmLifecycleEnv({
       HOME: home,
       MEMMY_VERSION: "9.9.9",
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "0",
       MEMMY_RELEASE_BASE_URL: pathToFileURL(release).href.replace(/\/$/, ""),
       MEMMY_FIXTURE_MAIN_PID: String(process.pid),
+      MEMMY_FIXTURE_NODE_VERSION: "22.23.4",
       PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
       ...overrides,
     }),
@@ -259,8 +279,14 @@ describe("Linux CLI package boundary", () => {
     expect(installer).toContain("gateway --config %s --workspace %s");
     expect(installer).toContain("x86_64|amd64");
     expect(installer).toContain("aarch64|arm64");
-    expect(installer).toContain("Node.js 22 or newer is required");
+    expect(installer).toContain("Node.js 22.23.4, 24.22.1 or 26.12.1 or newer is required");
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
+  });
+
+  it("omits the Office rendering payload from the candidate archive", () => {
+    const builder = readFileSync(builderPath, "utf8");
+    expect(builder).not.toContain("office-rendering");
+    expect(builder).not.toContain("ALLOW_MISSING_OFFICE_PAYLOAD");
   });
 
   it("installs standalone Agent dependencies before Linux archive contract tests", () => {
@@ -285,14 +311,19 @@ describe("Linux CLI package boundary", () => {
     const result = spawnSync("bash", [builderPath, "--output", output], {
       cwd: repoRoot,
       encoding: "utf8",
-      env: cleanNpmLifecycleEnv({ MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)) }),
+      env: cleanNpmLifecycleEnv({
+        MEMMY_EMBEDDING_MODEL_SOURCE_DIR: path.dirname(path.dirname(modelSource)),
+      }),
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const archive = path.join(output, "memmy-agent-linux-cli.tar.gz");
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("scripts/internal/linux/install-computer-use-deps.sh");
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/amd64/memmy-computer-use");
+    expect(listing.stdout).toContain("App/memmy-agent/dist/native-computer-use/linux/arm64/memmy-computer-use");
     expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
@@ -302,6 +333,7 @@ describe("Linux CLI package boundary", () => {
     expect(listing.stdout).toContain("App/backend/dist/src/adapters/outbound/skill-writer/templates/memmy-opencode-plugin.js");
     expect(listing.stdout).toContain("resources/embedding-models/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx");
     expect(listing.stdout).toContain("Migrations/dist/index.js");
+    expect(listing.stdout).toContain("Knowledge/dist/index.js");
     expect(listing.stdout).toContain("App/backend/local-api-contracts/dist/index.js");
     expect(listing.stdout).not.toMatch(/electron|\.dmg|\.exe|App\/frontend|App\/shell/i);
     expect(listing.stdout).not.toMatch(/node_modules|App\/memmy-agent\/src\/|Memory\/src\/(?!server|cli)/);
@@ -423,6 +455,72 @@ describe("Linux CLI package boundary", () => {
 });
 
 describe("Linux one-line installer transaction", () => {
+  it("rejects a host Node release without the fixed root store", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-gate-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    const home = path.join(root, "home");
+    mkdirSync(release);
+    mkdirSync(home);
+
+    const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: "22.23.3" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("earlier releases still trust the compromised eMudhra roots");
+  });
+
+  it("rejects unverified future Node major lines", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-future-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    mkdirSync(release);
+    for (const version of ["27.0.0", "28.0.0"]) {
+      const home = path.join(root, `home-${version}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: version });
+      expect(result.status, version).not.toBe(0);
+      expect(result.stderr, version).toContain("earlier releases still trust the compromised eMudhra roots");
+    }
+  });
+
+  it("accepts stable and rc release versions while rejecting unsafe or malformed versions", () => {
+    const root = temporaryRoot("memmy-linux-installer-version-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    mkdirSync(release);
+    writeFileSync(path.join(release, "memmy-agent-linux-cli.tar.gz"), "fixture\n");
+    writeFileSync(
+      path.join(release, "memmy-agent-linux-cli.tar.gz.sha256"),
+      `${"0".repeat(64)}  memmy-agent-linux-cli.tar.gz\n`,
+    );
+
+    for (const version of ["1.2.3", "v1.2.3", "1.2.3-rc.7", "v1.2.3-rc.7"]) {
+      const home = path.join(root, `accepted-${version}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_VERSION: version });
+      expect(result.status, `${version}: ${result.stderr}`).not.toBe(0);
+      expect(result.stderr, version).toContain("SHA-256 verification failed");
+      expect(result.stderr, version).not.toContain("invalid release version");
+    }
+
+    for (const version of [
+      "1.2.3-rc.",
+      "1.2.3-rc.07",
+      "1.2.3-rc.7/../../tmp",
+      "1.2.3-rc.7+meta",
+      "1.2.3-rc.7-extra",
+      "1.2.3-rc.7.1",
+      "01.2.3",
+    ]) {
+      const home = path.join(root, `rejected-${version.replaceAll("/", "_")}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_VERSION: version });
+      expect(result.status, version).not.toBe(0);
+      expect(result.stderr, version).toContain(`invalid release version: ${version}`);
+      expect(result.stderr, version).not.toContain("SHA-256 verification failed");
+    }
+  });
+
   it("installs, repeats PATH setup idempotently, and preserves the prior version on checksum failure", () => {
     const root = temporaryRoot("memmy-linux-installer-");
     const home = path.join(root, "home");
@@ -486,6 +584,15 @@ describe("Linux one-line installer transaction", () => {
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");
+    const configBeforeDependencies = readFileSync(configPath, "utf8");
+    const dependenciesFailed = runInstaller(home, release, tools, {
+      MEMMY_INSTALL_COMPUTER_USE_DEPS: "invalid",
+    });
+    expect(dependenciesFailed.status).not.toBe(0);
+    expect(dependenciesFailed.stderr).toContain("Computer Use dependency setup failed");
+    expect(readlinkSync(current)).toBe(beforeFailure);
+    expect(readFileSync(configPath, "utf8")).toBe(configBeforeDependencies);
+
     const configBeforeSystemdFailure = "sentinel: preserve-on-rollback\n";
     writeFileSync(configPath, configBeforeSystemdFailure);
     const systemdFailed = runInstaller(home, release, tools, {

@@ -15,7 +15,7 @@ bash scripts/dev-start.sh    # 装依赖 → 构建 → 起全套服务
 
 `scripts/dev-start.sh` 一条命令完成全部：自动安装依赖、构建 Memory 与 memmy-agent、把 `memmy` / `memmy-memory` CLI 安装到 `~/.local/bin`，并同时拉起 Memory、Agent API、Gateway、前端和桌面后端。启动后在弹出的桌面应用里完成账号登录或 BYOK 配置，脚本会在模型配置写好后自动启动 agent 服务。
 
-> `.env` 中 `MEMMY_CLOUD_SERVICE` 默认指向 `https://memmy-api.memtensor.cn`，复制即连官方云服务——无需自建后端、无需自备 API Key。Windows 请在 Git Bash 中运行；脚本会把 `~/.local/bin` 加入 PATH。
+> `.env` 中 `MEMMY_CLOUD_SERVICE` 默认指向 `https://api.memmy.cn`（只填写域名，不要追加 `/api`，客户端会自动拼接接口路径），复制即连官方云服务——无需自建后端、无需自备 API Key。Windows 请在 Git Bash 中运行；脚本会把 `~/.local/bin` 加入 PATH。
 
 ## 环境要求
 

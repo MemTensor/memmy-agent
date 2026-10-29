@@ -1,3 +1,5 @@
+import { useModelConnectionTest } from "./use-model-connection-test.js";
+import { bindSavedValidation, endpointCredentialSignature, resolveModelCredentials, type SavedEndpointIdentity } from "./model-credentials.js";
 import { useRef, useState } from "react";
 import { ChevronLeft, Image as ImageIcon, Mic } from "lucide-react";
 import { useAnalytics } from "../analytics/use-analytics.js";
@@ -33,8 +35,7 @@ import {
 } from "./optional-model-missing-warning-modal.js";
 import {
   canSaveModelConfig,
-  createModelConfigValidationKey,
-  type ModelConfigValidationState
+  createModelConfigValidationKey
 } from "./model-config-validation.js";
 import {
   ASR_DEFAULT_ENDPOINT,
@@ -46,46 +47,70 @@ import {
   createImageGenModelFormValues,
   createTestModelConnectionMessages,
   hydrateModelConfigForm,
-  testModelConnection,
   type ImageProtocol
 } from "./model-config.js";
 
-interface SavedEndpointIdentity {
-  endpointId: string;
-  credentialSignature: string;
-}
 
 export function ApiKeyOptionalPage() {
   const { state, dispatch } = useAppState();
   const { clients } = useApiClients();
   const { t } = useTranslation();
   const { track } = useAnalytics();
-  const initialModelForm = hydrateModelConfigForm(state.modelConfig, "local");
+  const [initialModelForm] = useState(() => hydrateModelConfigForm(state.modelConfig, "local"));
+  const [initialWorkspace] = useState(() => createModelWorkspace(state.modelConfig));
+  const initialAsrEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "asr");
+  const initialImageEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "image_generation");
+  const savedEndpointIdentitiesRef = useRef<Partial<Record<"asr" | "imageGeneration", SavedEndpointIdentity>>>({
+    ...(initialAsrEndpointId
+      ? { asr: { endpointId: initialAsrEndpointId, credentialSignature: endpointCredentialSignature("qwen", "dashscope-input-audio-chat", initialModelForm.asrEndpoint, initialModelForm.asrApiKey, initialModelForm.asrApiKeyMasked) } }
+      : {}),
+    ...(initialImageEndpointId
+      ? { imageGeneration: { endpointId: initialImageEndpointId, credentialSignature: endpointCredentialSignature(initialModelForm.imageGenProtocol, initialModelForm.imageGenProtocol === "qwen" ? "dashscope-multimodal-generation" : "openai-images", initialModelForm.imageGenEndpoint, initialModelForm.imageGenApiKey, initialModelForm.imageGenApiKeyMasked) } }
+      : {})
+  });
   const initialAsrModel = initialModelForm.asrModelId;
   const initialAsrEndpoint = initialModelForm.asrEndpoint || ASR_DEFAULT_ENDPOINT;
   const [asrModel, setAsrModel] = useState(initialAsrModel);
   const [asrEndpoint, setAsrEndpoint] = useState(initialAsrEndpoint);
   const [asrApiKey, setAsrApiKey] = useState(initialModelForm.asrApiKey);
   const [showAsrApiKey, setShowAsrApiKey] = useState(false);
-  const [asrValidation, setAsrValidation] = useState<ModelConfigValidationState>(initialModelForm.asrValidation);
   const [asrWarningAcknowledged, setAsrWarningAcknowledged] = useState(false);
   const [asrApiKeyMasked] = useState(initialModelForm.asrApiKeyMasked);
-  const asrFormValues = createAsrModelFormValues(asrModel, asrEndpoint, asrApiKey, asrApiKeyMasked);
+  const asrFormValues = resolveModelCredentials({
+    ...createAsrModelFormValues(asrModel, asrEndpoint, asrApiKey, asrApiKeyMasked),
+    protocol: "dashscope-input-audio-chat"
+  }, savedEndpointIdentitiesRef.current.asr);
+  const { validation: asrValidation, isStale: isAsrTestStale, testConnection: testAsrConnection } = useModelConnectionTest({
+    configClient: clients?.config,
+    values: asrFormValues,
+    initialValidation: () => bindSavedValidation(initialModelForm.asrValidation, asrFormValues),
+    secretTarget: "asr",
+    capability: "asr",
+    messages: createTestModelConnectionMessages(t)
+  });
   const isAsrUsable = canSaveModelConfig(asrFormValues, asrValidation);
   const asrTestKey = createModelConfigValidationKey(asrFormValues);
-  const isAsrTestStale = Boolean(asrValidation.testedKey && asrValidation.testedKey !== asrTestKey);
   const [imageGenProtocol, setImageGenProtocol] = useState<ImageProtocol>(initialModelForm.imageGenProtocol);
   const [imageGenModel, setImageGenModel] = useState(initialModelForm.imageGenModelId);
   const [imageGenEndpoint, setImageGenEndpoint] = useState(initialModelForm.imageGenEndpoint);
   const [imageGenApiKey, setImageGenApiKey] = useState(initialModelForm.imageGenApiKey);
   const [showImageGenApiKey, setShowImageGenApiKey] = useState(false);
-  const [imageGenValidation, setImageGenValidation] = useState<ModelConfigValidationState>(initialModelForm.imageGenValidation);
   const [imageGenWarningAcknowledged, setImageGenWarningAcknowledged] = useState(false);
   const [imageGenApiKeyMasked] = useState(initialModelForm.imageGenApiKeyMasked);
-  const imageGenFormValues = createImageGenModelFormValues(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked);
+  const imageGenFormValues = resolveModelCredentials({
+    ...createImageGenModelFormValues(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked),
+    protocol: imageGenProtocol === "qwen" ? "dashscope-multimodal-generation" : "openai-images"
+  }, savedEndpointIdentitiesRef.current.imageGeneration);
+  const { validation: imageGenValidation, isStale: isImageGenTestStale, testConnection: testImageGenConnection } = useModelConnectionTest({
+    configClient: clients?.config,
+    values: imageGenFormValues,
+    initialValidation: () => bindSavedValidation(initialModelForm.imageGenValidation, imageGenFormValues),
+    secretTarget: "image",
+    capability: "image",
+    messages: createTestModelConnectionMessages(t)
+  });
   const isImageGenUsable = canSaveModelConfig(imageGenFormValues, imageGenValidation);
   const imageGenTestKey = createModelConfigValidationKey(imageGenFormValues);
-  const isImageGenTestStale = Boolean(imageGenValidation.testedKey && imageGenValidation.testedKey !== imageGenTestKey);
   const imageGenEndpointProtocol = imageGenProtocol === "qwen"
     ? "dashscope-multimodal-generation"
     : "openai-images";
@@ -108,17 +133,7 @@ export function ApiKeyOptionalPage() {
     imageGeneration: isImageGenUsable ? imageGenTestKey : null
   });
   const savedCatalogSignatureRef = useRef<string | null>(null);
-  const initialWorkspace = createModelWorkspace(state.modelConfig);
-  const initialAsrEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "asr");
-  const initialImageEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "image_generation");
-  const savedEndpointIdentitiesRef = useRef<Partial<Record<"asr" | "imageGeneration", SavedEndpointIdentity>>>({
-    ...(initialAsrEndpointId
-      ? { asr: { endpointId: initialAsrEndpointId, credentialSignature: asrCredentialSignature } }
-      : {}),
-    ...(initialImageEndpointId
-      ? { imageGeneration: { endpointId: initialImageEndpointId, credentialSignature: imageGenCredentialSignature } }
-      : {})
-  });
+
   const [optionalModelMissingWarning, setOptionalModelMissingWarning] = useState<OptionalModelMissingWarningKind | null>(null);
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [nextValidationError, setNextValidationError] = useState<"noInput" | "testRequired" | null>(null);
@@ -131,28 +146,6 @@ export function ApiKeyOptionalPage() {
     setImageGenModel("");
     setImageGenApiKey("");
     setImageGenWarningAcknowledged(false);
-  }
-
-  function testAsrConnection() {
-    testModelConnection({
-      configClient: clients?.config,
-      values: asrFormValues,
-      setValidation: setAsrValidation,
-      capability: "asr",
-      secretTarget: "asr",
-      messages: createTestModelConnectionMessages(t)
-    });
-  }
-
-  function testImageGenConnection() {
-    testModelConnection({
-      configClient: clients?.config,
-      values: imageGenFormValues,
-      setValidation: setImageGenValidation,
-      capability: "image",
-      secretTarget: "image",
-      messages: createTestModelConnectionMessages(t)
-    });
   }
 
   function closeOptionalModelMissingWarning() {
@@ -180,34 +173,26 @@ export function ApiKeyOptionalPage() {
         const latest = await clients.config.getModelConfig();
         let workspace = createModelWorkspace(latest);
         if (isAsrUsable) {
-          const savedAsrIdentity = savedEndpointIdentitiesRef.current.asr;
-          const asrEndpointId = savedAsrIdentity?.credentialSignature === asrCredentialSignature
-            ? savedAsrIdentity.endpointId
-            : undefined;
           const asr = upsertByokPreset(workspace, {
             provider: "qwen",
-            ...(asrEndpointId ? { endpointId: asrEndpointId } : {}),
+            ...(asrFormValues.endpointId ? { endpointId: asrFormValues.endpointId } : {}),
             endpoint: asrEndpoint,
             protocol: "dashscope-input-audio-chat",
             ...(asrApiKey.trim() ? { apiKey: asrApiKey.trim() } : {}),
-            ...(asrApiKeyMasked ? { apiKeyMasked: asrApiKeyMasked } : {}),
+            ...(asrFormValues.apiKeyMasked ? { apiKeyMasked: asrFormValues.apiKeyMasked } : {}),
             model: asrModel || ASR_MODEL_ID,
             capabilities: ["asr"]
           });
           workspace = assignCatalogPreset(asr.workspace, "byok", "asr", asr.presetId);
         }
         if (isImageGenUsable) {
-          const savedImageIdentity = savedEndpointIdentitiesRef.current.imageGeneration;
-          const imageEndpointId = savedImageIdentity?.credentialSignature === imageGenCredentialSignature
-            ? savedImageIdentity.endpointId
-            : undefined;
           const image = upsertByokPreset(workspace, {
             provider: imageGenProtocol,
-            ...(imageEndpointId ? { endpointId: imageEndpointId } : {}),
+            ...(imageGenFormValues.endpointId ? { endpointId: imageGenFormValues.endpointId } : {}),
             endpoint: imageGenEndpoint,
             protocol: imageGenEndpointProtocol,
             ...(imageGenApiKey.trim() ? { apiKey: imageGenApiKey.trim() } : {}),
-            ...(imageGenApiKeyMasked ? { apiKeyMasked: imageGenApiKeyMasked } : {}),
+            ...(imageGenFormValues.apiKeyMasked ? { apiKeyMasked: imageGenFormValues.apiKeyMasked } : {}),
             model: imageGenModel,
             capabilities: ["image_generation"]
           });
@@ -279,8 +264,8 @@ export function ApiKeyOptionalPage() {
     setSaveError(null);
     setNextValidationError(null);
 
-    const asrHasInput = Boolean(asrApiKey.trim());
-    const imageGenHasInput = Boolean(imageGenApiKey.trim());
+    const asrHasInput = Boolean(asrApiKey.trim() || asrApiKeyMasked);
+    const imageGenHasInput = Boolean(imageGenApiKey.trim() || imageGenApiKeyMasked);
 
     if (!asrHasInput && !imageGenHasInput) {
       setNextValidationError("noInput");
@@ -347,12 +332,12 @@ export function ApiKeyOptionalPage() {
                 setAsrWarningAcknowledged(false);
               }}
               showPassword={showAsrApiKey}
-              maskedValue={asrApiKeyMasked}
+              maskedValue={asrFormValues.apiKeyMasked}
               onTogglePassword={() => setShowAsrApiKey((value) => !value)}
             />
             <div className="flex min-h-9 items-center justify-end gap-3">
-              <ValidationMessage validation={asrValidation} stale={isAsrTestStale} />
-              <TestButton status={asrValidation.status} onClick={testAsrConnection} label={t("apiKey.test")} />
+              <ValidationMessage validation={asrValidation} stale={isAsrTestStale} credentialRequired={asrFormValues.requiresApiKey} />
+              <TestButton status={isAsrTestStale || asrFormValues.requiresApiKey ? "idle" : asrValidation.status} onClick={testAsrConnection} label={t("apiKey.test")} />
             </div>
           </div>
         </div>
@@ -398,12 +383,12 @@ export function ApiKeyOptionalPage() {
                 setImageGenWarningAcknowledged(false);
               }}
               showPassword={showImageGenApiKey}
-              maskedValue={imageGenApiKeyMasked}
+              maskedValue={imageGenFormValues.apiKeyMasked}
               onTogglePassword={() => setShowImageGenApiKey((value) => !value)}
             />
             <div className="flex min-h-9 items-center justify-end gap-3">
-              <ValidationMessage validation={imageGenValidation} stale={isImageGenTestStale} />
-              <TestButton status={imageGenValidation.status} onClick={testImageGenConnection} label={t("apiKey.test")} />
+              <ValidationMessage validation={imageGenValidation} stale={isImageGenTestStale} credentialRequired={imageGenFormValues.requiresApiKey} />
+              <TestButton status={isImageGenTestStale || imageGenFormValues.requiresApiKey ? "idle" : imageGenValidation.status} onClick={testImageGenConnection} label={t("apiKey.test")} />
             </div>
           </div>
         </div>
@@ -453,22 +438,6 @@ export function ApiKeyOptionalPage() {
   );
 }
 
-function endpointCredentialSignature(
-  provider: string,
-  protocol: string,
-  endpoint: string,
-  apiKey: string,
-  apiKeyMasked: string
-): string {
-  const normalizedApiKey = apiKey.trim();
-  const normalizedMaskedApiKey = apiKeyMasked.trim();
-  return JSON.stringify({
-    provider: provider.trim().toLowerCase(),
-    protocol,
-    endpoint: endpoint.trim().replace(/\/+$/, ""),
-    credential: normalizedMaskedApiKey ? `masked:${normalizedMaskedApiKey}` : `raw:${normalizedApiKey}`
-  });
-}
 
 function optionalStepSaveErrorText(
   error: unknown,

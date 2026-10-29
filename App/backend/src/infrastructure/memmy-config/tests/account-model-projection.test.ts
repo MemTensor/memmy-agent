@@ -86,6 +86,30 @@ function currentByokCatalog(): Record<string, unknown> {
 }
 
 describe("account model projection current catalog", () => {
+  it.each([
+    [undefined, "account"],
+    ["", "account"],
+    ["unset", "account"],
+    ["account", "account"],
+    ["byok", "byok"]
+  ])("preserves an explicit user mode when repairing the projection (%s -> %s)", async (userMode, expectedMode) => {
+    const initial = currentByokCatalog();
+    const file = await configFile({ ...initial, app: { userMode } });
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "cloud-token", userId: "owner-a" }, file);
+
+    const saved = await readConfig(file);
+    expect(saved.app.userMode).toBe(expectedMode);
+    expect(saved.providers.openai).toEqual((initial.providers as any).openai);
+    expect(saved.modelAssignments.byok).toEqual((initial.modelAssignments as any).byok);
+    expect(saved.providers.memmy_account.ownerAccountId).toBe("owner-a");
+    expect(saved.modelAssignments.account.agent.candidates).toContain(accountId("owner-a", "agent"));
+    const snapshot = await readFile(file, "utf8");
+    await expect(writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "cloud-token", userId: "owner-a"
+    }, file)).resolves.toMatchObject({ changed: false });
+    expect(await readFile(file, "utf8")).toBe(snapshot);
+  });
+
   it("creates an owner-scoped Provider, endpoint, six presets, and isolated assignment", async () => {
     const file = await configFile(currentByokCatalog());
     const beforeByok = (await readConfig(file)).modelAssignments.byok;
@@ -97,6 +121,7 @@ describe("account model projection current catalog", () => {
 
     expect(result).toEqual({ changed: true, memoryConfigAffected: true });
     const saved = await readConfig(file);
+    expect(saved.app.userMode).toBe("account");
     expect(saved.providers.memmy_account).toMatchObject({
       ownerAccountId: "owner-a",
       apiKey: "cloud-token",
@@ -195,6 +220,36 @@ describe("account model projection current catalog", () => {
     expect(afterSecondLogin.modelAssignments.byok.agent).toEqual({
       candidates: ["byokUnchecked"],
       default: "byokUnchecked"
+    });
+  });
+
+  it("preserves account-only BYOK candidates when refreshing an existing startup projection", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a"
+    }, file);
+    const running = await readConfig(file);
+    running.modelAssignments.account.agent = {
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    };
+    await writeFile(file, YAML.stringify(running), "utf8");
+
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "token-a",
+      userId: "owner-a",
+      preserveAccountByokSelection: true
+    }, file);
+
+    const restarted = await readConfig(file);
+    expect(restarted.modelAssignments.account.agent).toEqual({
+      candidates: [accountId("owner-a", "agent"), "byokAgent2"],
+      default: "byokAgent2"
+    });
+    expect(restarted.modelAssignments.byok.agent).toEqual({
+      candidates: ["byokAgent"],
+      default: "byokAgent"
     });
   });
 

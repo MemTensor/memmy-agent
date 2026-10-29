@@ -53,6 +53,60 @@ describe("agent source auto inject service", () => {
     ]);
   });
 
+  it("does not reinstall manually uninstalled sources", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("cursor", "not_connected", true)];
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences,
+      isAutoInjectSuppressed: (sourceId) => sourceId === "cursor"
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      ok: true,
+      skipped: false,
+      installed: [],
+      failed: []
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("removes an auto-injected hook when manual uninstallation races with installation", async () => {
+    const calls: string[] = [];
+    let suppressed = false;
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("cursor", "not_connected", true)];
+        },
+        async installPlugin(sourceId) {
+          calls.push(`plugin:${sourceId}:auto_inject`);
+          suppressed = true;
+        },
+        async uninstallPlugin(sourceId, action) {
+          calls.push(`uninstall:${sourceId}:${action?.installType ?? "manual"}`);
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences,
+      isAutoInjectSuppressed: () => suppressed
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      ok: true,
+      skipped: false,
+      installed: [],
+      failed: []
+    });
+    expect(calls).toEqual(["plugin:cursor:auto_inject", "uninstall:cursor:auto_inject"]);
+  });
+
   it("skips unavailable builtin agents", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({
@@ -108,6 +162,157 @@ describe("agent source auto inject service", () => {
     releaseInstall();
     await running;
   });
+
+  it("refreshes an outdated installed hook while auto inject is disabled", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("cursor", "plugin_installed", true)];
+        },
+        async isInstalledHookCurrent() {
+          return false;
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => ({ ...enabledPreferences, autoInjectSkill: false })
+    });
+
+    await expect(service.runOnce()).resolves.toEqual({
+      ok: true,
+      skipped: true,
+      reason: "auto_inject_disabled",
+      installed: ["cursor"],
+      failed: []
+    });
+    expect(calls).toEqual(["plugin:cursor:auto_inject"]);
+  });
+
+  it("leaves a current hook in place and still installs a newly found agent", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [
+            source("cursor", "plugin_installed", true),
+            source("claude_code", "plugin_installed", true),
+            source("codex", "plugin_installed", true),
+            source("workbuddy", "not_connected", true)
+          ];
+        },
+        async isInstalledHookCurrent(sourceId) {
+          return sourceId !== "codex";
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences
+    });
+
+    await expect(service.runOnce()).resolves.toEqual({
+      ok: true,
+      skipped: false,
+      installed: ["codex", "workbuddy"],
+      failed: []
+    });
+    expect(calls).toEqual([
+      "plugin:codex:auto_inject",
+      "skill:workbuddy"
+    ]);
+  });
+
+  it("refreshes outdated OpenCode plugins without refreshing unrelated plugins", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [
+            source("hermes", "plugin_installed", true),
+            source("opencode", "plugin_installed", true)
+          ];
+        },
+        async isInstalledHookCurrent() {
+          return false;
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences
+    });
+
+    await expect(service.runOnce()).resolves.toEqual({
+      ok: true,
+      skipped: false,
+      installed: ["opencode"],
+      failed: []
+    });
+    expect(calls).toEqual(["plugin:opencode:auto_inject"]);
+  });
+
+  it("skips an outdated hook when the agent is unavailable or not writable", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [
+            { ...source("cursor", "plugin_installed", true), available: false },
+            source("claude_code", "plugin_installed", true)
+          ];
+        },
+        async isInstalledHookCurrent() {
+          return false;
+        }
+      },
+      permissionManager: {
+        async canWriteAgentSkill(input: { agentSourceId: string }) {
+          return input.agentSourceId !== "claude_code";
+        }
+      },
+      getScanPreferences: () => ({ ...enabledPreferences, autoInjectSkill: false })
+    });
+
+    await expect(service.runOnce()).resolves.toEqual({
+      ok: true,
+      skipped: true,
+      reason: "auto_inject_disabled",
+      installed: [],
+      failed: []
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("records a hook refresh failure and continues with other agents", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [
+            source("cursor", "plugin_installed", true),
+            source("pi", "not_connected", true)
+          ];
+        },
+        async isInstalledHookCurrent() {
+          return false;
+        },
+        async installPlugin() {
+          throw new Error("install failed");
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences
+    });
+
+    await expect(service.runOnce()).resolves.toEqual({
+      ok: true,
+      skipped: false,
+      installed: ["pi"],
+      failed: [{ sourceId: "cursor", reason: "install failed" }]
+    });
+    expect(calls).toEqual(["skill:pi"]);
+  });
 });
 
 function createAgentSources(calls: string[]) {
@@ -130,6 +335,9 @@ function createAgentSources(calls: string[]) {
     },
     async installPlugin(sourceId: string, action?: { installType?: string }) {
       calls.push(`plugin:${sourceId}:${action?.installType ?? "manual"}`);
+    },
+    async isInstalledHookCurrent() {
+      return true;
     }
   };
 }

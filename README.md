@@ -87,7 +87,7 @@ Download Memmy from the [official website](https://memmy.bot/) or [GitHub Releas
 
 ![Memmy TUI](docs/assets/tui.png)
 
-On Linux x64 or arm64 with Node.js 22 or newer and an available systemd user session:
+On Linux x64 or arm64 with an available systemd user session, use Node.js 22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x). Other major versions are not accepted by the installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
@@ -95,6 +95,8 @@ memmy
 ```
 
 The installer enables the local Memory Service immediately as `memmy-memory.service`. The first bare `memmy` invocation opens the model setup wizard when needed, then enables `memmy-gateway.service`, waits for it to become ready, and enters the TUI. Both are `systemd --user` services bound to localhost and remain available after the TUI or terminal exits. They start again on later logins; the installer does not enable linger. Only the installer launcher activates this service management, so source-built Linux CLIs keep their existing behavior.
+
+During Gateway startup, temporary HTTP 503 responses from the bootstrap endpoint are retried until the Gateway becomes ready or the startup wait times out.
 
 Before starting or reconnecting to the Gateway, `memmy` refreshes a private `~/.memmy/systemd/gateway.env` file (mode `0600`) with configuration-referenced environment variables, common Provider credentials, and the terminal `PATH`. If those values change, the next bare `memmy` invocation restarts the user service with the new environment.
 
@@ -140,6 +142,20 @@ memmy-memory get <id>
 ```
 
 It connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the service and namespace.
+
+To run the memory service alone, without the Agent Runtime, build the CLI from source:
+
+```bash
+git clone https://github.com/MemTensor/memmy-agent.git
+cd memmy-agent
+npm install
+npm run memory:build
+mkdir -p ~/.local/bin
+ln -sf "$PWD/Memory/dist/src/cli/index.js" ~/.local/bin/memmy-memory
+memmy-memory install --service-only
+```
+
+`install --service-only` downloads the pinned Memory runtime, registers the user-level service, starts it, and verifies `/api/v1/health`, all without installing a Skill or adapter into any agent. Node.js `>=20` is required; use `Git Bash` on Windows. `npm run memory:binary` packages the same CLI as a portable archive under `Memory/src/cli/dist/binaries/` for the current platform, and `MEMMY_MEMORY_TARGET` selects another supported platform.
 
 #### 4. Start from the Source Code
 

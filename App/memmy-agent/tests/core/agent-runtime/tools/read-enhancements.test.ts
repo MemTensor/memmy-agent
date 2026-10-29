@@ -45,7 +45,7 @@ function zipTree(tree: Record<string, string>, filename: string): string {
   return out;
 }
 
-function makePdf(root: string, name: string, parts: string[]): string {
+function makePdf(root: string, name: string, parts: string[], fontSize = 24): string {
   const file = path.join(root, name);
   const escapePdfText = (text: string) => text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
   const objects: string[] = [];
@@ -55,7 +55,7 @@ function makePdf(root: string, name: string, parts: string[]): string {
   parts.forEach((part, index) => {
     const pageObj = 3 + index * 2;
     const contentObj = 4 + index * 2;
-    const stream = `BT /F1 24 Tf 72 720 Td (${escapePdfText(part)}) Tj ET`;
+    const stream = `BT /F1 ${fontSize} Tf 72 720 Td (${escapePdfText(part)}) Tj ET`;
     objects[pageObj] =
       `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
       `/Resources << /Font << /F1 ${fontObj} 0 R >> >> /Contents ${contentObj} 0 R >>`;
@@ -351,14 +351,107 @@ describe("ReadFileTool enhanced behavior", () => {
     expect(await new ReadFileTool({ workspace: root }).execute({ path: file })).toContain("no extractable text");
   });
 
-  it("truncates large extracted documents", async () => {
-    documentMocks.extractText.mockReturnValueOnce("x".repeat(200_000));
+  it.each(["docx", "xlsx", "pptx", "pdf"])("reads every character of a long %s through continuation offsets", async (ext) => {
     const root = tmpRoot();
-    const file = path.join(root, "large.docx");
-    fs.writeFileSync(file, "PK", "utf8");
-    const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
-    expect(result.length).toBeLessThanOrEqual(ReadFileTool.MAX_CHARS + 100);
-    expect(result).toContain("truncated at ~128K chars");
+    const file = path.join(root, `large.${ext}`);
+    fs.writeFileSync(file, "fixture");
+    const source = "前文🙂".repeat(60_000) + "TAIL: verified figure 38.95";
+    const tool = new ReadFileTool({ workspace: root });
+    let offset = 0;
+    let combined = "";
+    for (let count = 0; count < 30; count += 1) {
+      documentMocks.extractText.mockResolvedValueOnce(source);
+      const result = await tool.execute({ path: file, char_offset: offset });
+      expect(result.length).toBeLessThanOrEqual(ReadFileTool.MAX_CHARS);
+      const separator = result.lastIndexOf("\n\n[Document read:");
+      expect(separator).toBeGreaterThanOrEqual(0);
+      const body = result.slice(0, separator);
+      expect(body).not.toMatch(/[\uD800-\uDBFF]$/);
+      combined += body;
+      const next = /Continue with char_offset=(\d+)/.exec(result);
+      if (!next) {
+        expect(result).toContain("End of document");
+        break;
+      }
+      expect(Number(next[1])).toBeGreaterThan(offset);
+      offset = Number(next[1]);
+    }
+    expect(combined).toBe(source);
+    expect(documentMocks.extractText).toHaveBeenLastCalledWith(file, { maxChars: null });
+  });
+
+  it("reads a real DOCX tail beyond both former truncation limits", async () => {
+    const text = "正文段落 ".repeat(50_000) + "FINAL_VERIFIED_NUMBER_38.95";
+    const file = zipTree(
+      { "word/document.xml": `<w:document><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>` },
+      "long.docx",
+    );
+    const tool = new ReadFileTool({ workspace: path.dirname(file) });
+    let offset = 0;
+    let combined = "";
+    for (let count = 0; count < 10; count += 1) {
+      const result = await tool.execute({ path: file, char_offset: offset, char_limit: 1_000_000 });
+      expect(result.length).toBeLessThanOrEqual(ReadFileTool.MAX_CHARS);
+      combined += result.slice(0, result.lastIndexOf("\n\n[Document read:"));
+      const next = /Continue with char_offset=(\d+)/.exec(result);
+      if (!next) {
+        expect(result).toContain("End of document");
+        break;
+      }
+      offset = Number(next[1]);
+    }
+    expect(combined === text).toBe(true);
+  });
+
+  it("reads a real PDF page after more than 200K extracted characters", async () => {
+    const root = tmpRoot();
+    // Keep every glyph inside the page bounds; PDF.js omits off-page text.
+    const file = makePdf(root, "long.pdf", [...Array.from({ length: 14 }, () => "a".repeat(16_000)), "PAGE_15_VERIFIED_NUMBER"], 0.02);
+    const extracted = await documentMocks.extractText(file, { maxChars: null });
+    expect(extracted.length).toBeGreaterThan(200_000);
+    const tool = new ReadFileTool({ workspace: root });
+    const result = await tool.execute({ path: file, pages: "15" });
+    expect(result).toContain("--- Page 15 ---");
+    expect(result).toContain("PAGE_15_VERIFIED_NUMBER");
+    expect(result).toContain("End of document");
+  });
+
+  it("makes progress when a one-unit chunk encounters an emoji", async () => {
+    const root = tmpRoot();
+    const file = path.join(root, "emoji.docx");
+    fs.writeFileSync(file, "fixture");
+    documentMocks.extractText.mockResolvedValueOnce("🙂tail");
+    const result = await new ReadFileTool({ workspace: root }).execute({ path: file, char_limit: 1 });
+    expect(result).toMatch(/^🙂\n\n/);
+    expect(result).toContain("Continue with char_offset=2");
+  });
+
+  it("keeps PDF page selection when continuing within a long page", async () => {
+    const root = tmpRoot();
+    const file = path.join(root, "pages.pdf");
+    fs.writeFileSync(file, "fixture");
+    const source = "--- Page 1 ---\n" + "a".repeat(210_000) + "\n\n--- Page 2 ---\n" + "b".repeat(70_000) + "LATE_FIGURE";
+    const tool = new ReadFileTool({ workspace: root });
+    documentMocks.extractText.mockResolvedValueOnce(source);
+    const first = await tool.execute({ path: file, pages: "2", char_limit: 1000 });
+    expect(first).toContain("--- Page 2 ---");
+    expect(first).toContain("Continue with char_offset=1000");
+    expect(first).toContain("Keep the same path and pages");
+    documentMocks.extractText.mockResolvedValueOnce(source);
+    const last = await tool.execute({ path: file, pages: "2", char_offset: 70_000 });
+    expect(last).toContain("LATE_FIGURE");
+    expect(last).toContain("End of document");
+  });
+
+  it("rejects invalid or out-of-range document cursors", async () => {
+    const root = tmpRoot();
+    const file = path.join(root, "small.docx");
+    fs.writeFileSync(file, "fixture");
+    const tool = new ReadFileTool({ workspace: root });
+    for (const options of [{ char_offset: -1 }, { char_offset: 0.5 }, { char_offset: 20 }, { char_limit: 0 }]) {
+      documentMocks.extractText.mockResolvedValueOnce("short");
+      expect(await tool.execute({ path: file, ...options })).toContain("Error");
+    }
   });
 
   it("does not truncate small extracted documents", async () => {

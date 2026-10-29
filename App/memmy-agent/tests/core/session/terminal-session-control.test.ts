@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  terminalControlLockfilePath,
   TerminalRunControl,
   TerminalSessionTurnLock,
 } from "../../../src/core/session/terminal-session-control.js";
@@ -81,7 +82,8 @@ describe("terminal session control", () => {
     const target = lock.targetPath("cli:stale");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.closeSync(fs.openSync(target, "a"));
-    const lockDirectory = `${target}.lock`;
+    const lockDirectory = terminalControlLockfilePath(target);
+    fs.mkdirSync(path.dirname(lockDirectory), { recursive: true });
     fs.mkdirSync(lockDirectory);
     const staleAt = new Date(Date.now() - 180_000);
     fs.utimesSync(lockDirectory, staleAt, staleAt);
@@ -95,6 +97,19 @@ describe("terminal session control", () => {
     expect(fs.existsSync(lockDirectory)).toBe(false);
   });
 
+  it("keeps lock directories outside synced workspaces", async () => {
+    const root = temporaryRoot();
+    const lock = new TerminalSessionTurnLock(root);
+    const target = lock.targetPath("cli:local-lock");
+    const lockDirectory = terminalControlLockfilePath(target);
+
+    expect(lockDirectory.startsWith(root)).toBe(false);
+    await lock.runExclusive("cli:local-lock", async () => {
+      expect(fs.existsSync(lockDirectory)).toBe(true);
+    });
+    expect(fs.existsSync(lockDirectory)).toBe(false);
+  });
+
   it("keeps GUI cancellation monotonic across heartbeat updates", async () => {
     const root = temporaryRoot();
     const control = new TerminalRunControl(root);
@@ -105,6 +120,26 @@ describe("terminal session control", () => {
     expect(control.read("cli:shared")?.cancelRequested).toBe(true);
     await control.remove("cli:shared", "turn-1");
     expect(control.read("cli:shared")).toBeNull();
+  });
+
+  it("cancels a matching terminal turn", async () => {
+    const control = new TerminalRunControl(temporaryRoot());
+    await control.create("cli:shared", "turn-current");
+
+    expect(await control.requestCancel("cli:shared", "turn-current")).toBe(true);
+    expect(control.read("cli:shared")).toMatchObject({ turnId: "turn-current", cancelRequested: true });
+  });
+
+  it("does not cancel a newer terminal owner after the caller reads the old turn", async () => {
+    const root = temporaryRoot();
+    const caller = new TerminalRunControl(root);
+    const owner = new TerminalRunControl(root);
+    await owner.create("cli:shared", "turn-old");
+    const expectedTurnId = caller.read("cli:shared")!.turnId;
+    await owner.create("cli:shared", "turn-next");
+
+    expect(await caller.requestCancel("cli:shared", expectedTurnId)).toBe(false);
+    expect(owner.read("cli:shared")).toMatchObject({ turnId: "turn-next", cancelRequested: false });
   });
 
   it("removes stale run state under the short run-control lock", async () => {

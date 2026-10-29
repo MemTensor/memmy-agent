@@ -12,10 +12,20 @@ import { closeMemoryHttpServer, listenMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
+import { SCHEMA_VERSION } from "../storage/schema.js";
+import { MEMORY_RUNTIME_BUILD_ID } from "../runtime-build.js";
 
 const logger = createMemoryLogger("server");
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
+    if (argv.includes("--version")) {
+        process.stdout.write(`${MEMORY_SERVICE_VERSION}\n`);
+        return;
+    }
+    if (argv.includes("--help") || argv.includes("-h")) {
+        process.stdout.write(SERVER_USAGE);
+        return;
+    }
     loadCloudServiceEnv();
     let shuttingDown = false;
     let stopService: (() => void) | undefined;
@@ -57,6 +67,9 @@ async function runMemoryService(argv: string[], lifecycle: {
     const sqlitePath = options.dbPath ?? config.storage.sqlitePath;
     const serviceHome = resolve(dirname(configPath), "memory-service");
     logger.info("service.starting", {
+        serviceVersion: MEMORY_SERVICE_VERSION,
+        supportedSchemaVersion: SCHEMA_VERSION,
+        buildId: MEMORY_RUNTIME_BUILD_ID,
         host,
         port,
         mode: config.storage.mode,
@@ -67,6 +80,7 @@ async function runMemoryService(argv: string[], lifecycle: {
     const serviceLock = acquireUserServiceLock({ serviceHome, host, port });
     let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
+    let service: MemoryService | undefined;
     let server: Server | undefined;
     let requestShutdown!: () => void;
     let restartRequested = false;
@@ -86,7 +100,7 @@ async function runMemoryService(argv: string[], lifecycle: {
             endpoint: config.storage.endpoint,
             token: config.storage.token
         });
-        const service = new MemoryService({
+        service = new MemoryService({
             backend,
             mode: config.storage.mode,
             configPath,
@@ -112,6 +126,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         });
         server = listening.server;
         const { url } = listening;
+        service.setViewerEndpoint(url);
         if (configPath) {
             await writeCurrentEndpoint(configPath, url);
         }
@@ -119,6 +134,8 @@ async function runMemoryService(argv: string[], lifecycle: {
             pid: process.pid,
             endpoint: url,
             serviceVersion: MEMORY_SERVICE_VERSION,
+            buildId: MEMORY_RUNTIME_BUILD_ID,
+            supportedSchemaVersion: SCHEMA_VERSION,
             protocolVersion: MEMORY_PROTOCOL_VERSION,
             configPath,
             sqlitePath,
@@ -135,6 +152,9 @@ async function runMemoryService(argv: string[], lifecycle: {
         if (server) {
             await closeMemoryHttpServer(server);
         }
+        if (service) {
+            await service.stop();
+        }
         backend?.close();
         removeRuntimeState(serviceHome);
         sqliteLock?.release();
@@ -142,6 +162,20 @@ async function runMemoryService(argv: string[], lifecycle: {
     }
     return restartRequested;
 }
+
+const SERVER_USAGE = `Usage: memmy-memory [options]
+
+Start the local Memory HTTP service.
+
+Options:
+  --config <path>       Configuration file (default: ~/.memmy/config.yaml)
+  --db <path>           SQLite database path
+  --sqlite-path <path>  Alias for --db
+  --host <host>         Loopback listen address (default: 127.0.0.1)
+  --port <port>         Listen port (default: 18960)
+  -h, --help            Show this help message
+  --version             Show the service version
+`;
 
 export interface SqliteServerLock {
     path: string;

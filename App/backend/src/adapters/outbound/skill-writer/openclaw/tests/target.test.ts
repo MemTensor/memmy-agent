@@ -191,26 +191,21 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("renderMemmyContextPacket(markdown, \"turn_start\", query)");
     expect(pluginIndex).toContain("sanitizeMemmyProtocolText(normalizeText(params && params.content))");
     expect(pluginIndex).toContain("Treat <memmy_memory_context> as historical memory only.");
-    expect(pluginIndex).toContain("const turnText = latestTurnText(messages);");
-    expect(pluginIndex).toContain("const toolTrace = extractTurnToolTrace(messages, turnText.userIndex);");
+    // Capture reads the agent database instead of the in-memory message list, so the
+    // plugin and the offline scan agree on the run's identity, text and tools.
+    expect(pluginIndex).toContain("bridge.readOpenclawHookSourceTurn(");
+    expect(pluginIndex).toContain("bridge.completeSourceTurn(");
+    expect(pluginIndex).toContain("adapterId: 'memmy-openclaw-plugin'");
+    expect(pluginIndex).not.toContain("const turnText = latestTurnText(messages);");
+    expect(pluginIndex).not.toContain("/api/v1/turns/' + encodeURIComponent(turnId) + '/complete'");
     expect(pluginIndex).toContain("function stripOpenclawUserMetadata");
     expect(pluginIndex).toContain("Sender (untrusted metadata):");
     expect(pluginIndex).toContain("resolveRunId(ctx, event)");
     expect(pluginIndex).toContain("const text = cleanOpenclawUserText(message.content);");
-    expect(pluginIndex).toContain("query: resolvedQuery");
-    expect(pluginIndex).toContain("toolCalls: toolTrace.toolCalls.length ? toolTrace.toolCalls : undefined");
-    expect(pluginIndex).toContain("toolResults: toolTrace.toolResults.length ? toolTrace.toolResults : undefined");
     expect(pluginIndex).toContain("contextHints: resolveContextHints(ctx)");
     expect(pluginIndex).toContain("episodeId: turn.episodeId");
-    expect(pluginIndex).toContain("pending.episodeId");
     expect(pluginIndex).toContain("sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds)");
     expect(pluginIndex).toContain('profileId: normalizeOptionalText(ctx && ctx.agentId) || "main"');
-    expect(pluginIndex).toContain("function latestTurnText");
-    expect(pluginIndex).toContain("function extractTurnToolTrace");
-    expect(pluginIndex).toContain('type === "toolCall"');
-    expect(pluginIndex).toContain('type === "tool_call"');
-    expect(pluginIndex).toContain('type === "tool_use"');
-    expect(pluginIndex).toContain('type !== "tool_result" && type !== "toolResult"');
     expect(pluginIndex).toContain("function isToolResultMessage");
     expect(pluginIndex).toContain('message.role === "tool" || message.role === "toolResult"');
     expect(pluginIndex).not.toContain("function resolveNamespace");
@@ -223,26 +218,21 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("const SYNC_COMPLETE_SCRIPT = [");
     expect(pluginIndex).toContain('].join("\\n");');
     expect(pluginIndex).not.toContain('].join("\\\\n");');
-    expect(pluginIndex).toContain("function fallbackTurnId");
-    expect(pluginIndex).toContain("openclaw-fallback-");
-    expect(pluginIndex).toContain("hashText([sessionId, query, answer]");
     expect(pluginIndex).toContain("const MEMMY_FETCH_TIMEOUT_MS = 45000;");
     expect(pluginIndex).toContain("const MEMMY_RECALL_TIMEOUT_MS = 45000;");
     expect(pluginIndex).toContain("timeout: 60000,");
     expect(pluginIndex).toContain("}, MEMMY_RECALL_TIMEOUT_MS);");
     expect(pluginIndex).toContain("async function fetchWithTimeout");
     expect(pluginIndex).toContain("new AbortController()");
-    expect(pluginIndex).toContain("toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined");
-    expect(pluginIndex).toContain("toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined");
-    expect(pluginIndex).toContain("episodeId: payload.episodeId || undefined");
-    expect(pluginIndex).toContain("mode: 'turn_complete'");
+    expect(pluginIndex).toContain('"Memmy request to " + url + " failed: " + formatErrorWithCause(error)');
+    expect(pluginIndex).toContain("mode: 'source_turn_complete'");
     expect(pluginIndex).not.toContain("mode: 'memory_add'");
     expect(pluginIndex).not.toContain("contentParts.push('User: '");
     expect(pluginIndex).not.toContain("contentParts.push('Assistant: '");
     expect(pluginIndex).toContain('name: "memmy_memory_get"');
     expect(pluginIndex).toContain('client.get("/api/v1/memory/" + encodeURIComponent(id))');
     expect(pluginIndex).toContain('source: normalizeOptionalText(body && body.source) || "openclaw"');
-    expect(pluginIndex).toContain("source: 'openclaw'");
+    expect(pluginIndex).toContain('source: "openclaw"');
     expect(pluginIndex).toContain("function resolveExternalSessionId");
     expect(pluginIndex).toContain('return "openclaw-memory-" +');
     expect(pluginIndex).toContain("const resolved = await readMemmyConfig(cfg.memmyConfigPath).catch(() => ({}));");
@@ -339,7 +329,21 @@ describe("openclaw skill target", () => {
 
   it("uses only the resume query for the OpenClaw slash command search", async () => {
     const { rootDirectory } = createFixture();
-    const target = createOpenclawSkillTarget({ rootDirectory });
+    const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
+    writeFileSync(
+      memmyConfigPath,
+      [
+        "memosMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18799",
+        "memmyMemory:",
+        "  storage:",
+        "    endpoint: http://127.0.0.1:18960",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const target = createOpenclawSkillTarget({ rootDirectory, memmyConfigPath });
     await target.installPlugin?.("openclaw");
 
     const pluginPath = join(rootDirectory, "extensions", "memmy-memory", "index.mjs");
@@ -358,9 +362,11 @@ describe("openclaw skill target", () => {
     let commandHandler: CommandHandler | undefined;
     const handlers = new Map<string, HookHandler>();
     const requestBodies: Record<string, unknown>[] = [];
+    const requestOrigins: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
+      requestOrigins.push(targetUrl.origin);
       if (typeof init?.body === "string") {
         requestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
       }
@@ -375,7 +381,7 @@ describe("openclaw skill target", () => {
       pluginModule.default.register({
         pluginConfig: {
           endpoint: "http://memmy.test",
-          memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+          memmyConfigPath
         },
         logger: { warn: vi.fn(), info: vi.fn() },
         registerTool: vi.fn(),
@@ -404,6 +410,7 @@ describe("openclaw skill target", () => {
       expect(requestBodies[0]?.layers).toEqual(["L1"]);
       expect(requestBodies[0]?.limit).toBe(20);
       expect(requestBodies[0]?.verbose).toBe(true);
+      expect(requestOrigins[0]).toBe("http://127.0.0.1:18960");
 
       const beforePromptBuild = handlers.get("before_prompt_build");
       expect(beforePromptBuild).toBeDefined();
@@ -489,7 +496,7 @@ describe("openclaw skill target", () => {
     }
   });
 
-  it("captures OpenClaw tool traces through the turn complete hook", async () => {
+  it("hands the finished run id to the child process instead of the in-memory messages", async () => {
     const { rootDirectory } = createFixture();
     const target = createOpenclawSkillTarget({ rootDirectory });
     await target.installPlugin?.("openclaw");
@@ -507,6 +514,10 @@ describe("openclaw skill target", () => {
       .replace(
         'const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);',
         'const CONFIG_URL = new URL("file:///tmp/memmy-memory-config.json");'
+      )
+      .replace(
+        'const BRIDGE_URL = new URL("./memmy-workspace-bridge.mjs", import.meta.url);',
+        'const BRIDGE_URL = new URL("file:///tmp/memmy-workspace-bridge.mjs");'
       );
     const spawnInputs: Record<string, unknown>[] = [];
     const fakeSpawnSync = vi.fn((_command: unknown, _args: unknown, options: { input?: string }) => {
@@ -564,58 +575,29 @@ describe("openclaw skill target", () => {
           success: true,
           messages: [
             { role: "user", content: "请读取 README 并搜索 TODO" },
-            {
-              role: "assistant",
-              content: [
-                { type: "toolCall", id: "call_1", name: "read", arguments: { path: "README.md" } },
-                { type: "tool_call", id: "call_2", name: "grep", arguments: { pattern: "TODO" } },
-                { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "pwd" } }
-              ]
-            },
-            {
-              role: "toolResult",
-              toolCallId: "call_1",
-              toolName: "read",
-              content: [{ type: "text", text: "read ok" }],
-              details: { text: "read ok detail" },
-              isError: false
-            },
-            {
-              role: "toolResult",
-              toolCallId: "call_2",
-              toolName: "grep",
-              content: "grep ok",
-              details: { matches: 1 },
-              isError: false
-            },
-            {
-              role: "user",
-              content: [
-                { type: "tool_result", tool_use_id: "toolu_1", content: "pwd ok" }
-              ]
-            },
             { role: "assistant", content: "完成" }
           ]
         },
-        { runId: "run-tools", sessionKey: "agent:main", agentId: "main" }
+        { runId: "run-tools", sessionId: "window-1", sessionKey: "agent:main", agentId: "main", workspaceDir: "/tmp/openclaw-project" }
       );
 
+      // Content comes from the agent database, so the child receives locators only.
       expect(fakeSpawnSync).toHaveBeenCalledTimes(1);
       expect(spawnInputs[0]).toMatchObject({
-        turnId: "run-tools",
-        query: "请读取 README 并搜索 TODO",
-        answer: "完成",
-        toolCalls: [
-          { id: "call_1", name: "read", arguments: { path: "README.md" } },
-          { id: "call_2", name: "grep", arguments: { pattern: "TODO" } },
-          { id: "toolu_1", name: "Bash", arguments: { command: "pwd" } }
-        ],
-        toolResults: [
-          { tool_call_id: "call_1", content: "read ok", output: { text: "read ok detail" } },
-          { tool_call_id: "call_2", content: "grep ok", output: { matches: 1 } },
-          { tool_call_id: "toolu_1", content: "pwd ok", output: "pwd ok" }
-        ]
+        runId: "run-tools",
+        windowId: "window-1",
+        sessionKey: "agent:main",
+        agentId: "main",
+        profileId: "main",
+        workspacePath: "/tmp/openclaw-project"
       });
+      expect(spawnInputs[0]).not.toHaveProperty("query");
+      expect(spawnInputs[0]).not.toHaveProperty("answer");
+      expect(spawnInputs[0]).not.toHaveProperty("toolCalls");
+
+      // A run without an id is left for the scan rather than written under a guessed one.
+      agentEnd?.({ success: true, messages: [] }, { sessionKey: "agent:main", agentId: "main" });
+      expect(fakeSpawnSync).toHaveBeenCalledTimes(1);
     } finally {
       delete globals.__memmySpawnSync;
       delete globals.__memmyRuntime;

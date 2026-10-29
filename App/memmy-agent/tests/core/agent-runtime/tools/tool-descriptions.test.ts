@@ -4,15 +4,33 @@ import { EditFileTool, ReadFileTool, WriteFileTool } from "../../../../src/core/
 import { FindFilesTool, GrepTool } from "../../../../src/core/agent-runtime/tools/search.js";
 import { ExecTool } from "../../../../src/core/agent-runtime/tools/shell.js";
 import { ListExecSessionsTool, WriteStdinTool } from "../../../../src/core/agent-runtime/tools/exec-session.js";
+import { ToolRegistry } from "../../../../src/core/agent-runtime/tools/registry.js";
 
 describe("coding tool descriptions", () => {
+  it("documents replace_all restrictions only for true, consistent with parameter validation", () => {
+    const registry = new ToolRegistry();
+    registry.register(new EditFileTool());
+    const description = registry.getDefinitions()[0].function.parameters.properties.replace_all.description;
+
+    expect(description).toContain("When true, cannot be combined with non-null occurrence or line_hint, or used in create mode.");
+    expect(description).toContain("When false, may be combined with occurrence or line_hint, or used in create mode.");
+
+    for (const options of [{ old_text: "same", occurrence: 1 }, { old_text: "same", line_hint: 1 }, { old_text: "" }]) {
+      const params = { path: "sample.txt", new_text: "changed", ...options };
+      expect(registry.prepareCall("edit_file", { ...params, replace_all: false })[2]).toBeNull();
+      expect(registry.prepareCall("edit_file", { ...params, replace_all: true })[2]).toContain(
+        options.old_text === "" ? "create mode" : "cannot be used with replace_all=true",
+      );
+    }
+  });
+
   it("steers editing priority", () => {
     const applyPatch = new ApplyPatchTool().description.toLowerCase();
     const editFile = new EditFileTool().description.toLowerCase();
     const writeFile = new WriteFileTool().description.toLowerCase();
 
     expect(applyPatch).toBe(
-      "apply a patch to add, update, delete, or move one or more workspace-relative files.",
+      "apply a patch to add, update, delete, or move one or more files inside the workspace.",
     );
 
     expect(editFile).toContain("small, exact replacement");

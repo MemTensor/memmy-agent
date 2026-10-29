@@ -43,6 +43,8 @@ export type MemoryDesktopScanAddBaseInput = {
   adapterId: string;
   /** Present for agent-source scan/import paths; omitted when unavailable. */
   scanMode?: MemoryDesktopAddScanMode;
+  /** Defaults to L1. Skill imports pass Skill so they are not counted as conversation memory. */
+  layer?: "L1" | "Skill";
   conversationId?: string | null;
   turnId?: string | null;
 };
@@ -60,7 +62,7 @@ export function buildMemoryDesktopScanAddParams(input: MemoryDesktopScanAddBaseI
     adapter_id: input.adapterId,
     storage_backend: MEMORY_DESKTOP_ADD_STORAGE_BACKEND,
     mode: MEMORY_DESKTOP_ADD_MODE_AGENT_SOURCE_SCAN,
-    layer: MEMORY_DESKTOP_ADD_LAYER_L1,
+    layer: input.layer ?? MEMORY_DESKTOP_ADD_LAYER_L1,
     ...(input.scanMode ? { scan_mode: input.scanMode } : {}),
     ...(sessionIdHash ? { session_id_hash: sessionIdHash } : {}),
     ...(turnIdHash ? { turn_id_hash: turnIdHash } : {}),

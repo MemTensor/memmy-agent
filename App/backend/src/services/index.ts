@@ -145,15 +145,16 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     const session = accountSessionRepository.get();
     return session.authenticated ? session.profile.userId : "local-user";
   };
+  const memoryAddAnalytics = createMemoryDesktopAddAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
   const ingestionService =
     options.ingestionService ??
     createIngestionService({
       memoryClient: options.memoryClient,
       agentSourceRepository: options.appStateStore.repositories.agentSources,
-      memoryAddAnalytics: createMemoryDesktopAddAnalytics({
-        getUserId: resolveAnalyticsUserId,
-        getUserMode: resolveAnalyticsUserMode,
-      }),
+      memoryAddAnalytics,
     });
   const agentSources = createAgentSourceService({
     sourceRegistry,
@@ -166,6 +167,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
+    memoryAddAnalytics,
     scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
@@ -214,6 +216,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
       permissionManager: options.permissionManager,
+      isAutoInjectSuppressed: (sourceId) => options.appStateStore.repositories.agentSources.isAutoInjectSuppressed(sourceId),
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
         ?? options.appStateStore.repositories.bootstrap.getScanPreferences()
     }),
@@ -245,7 +248,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveMemoryUserId
     }),
     byokTokenUsage: createByokTokenUsageService({
-      repository: options.appStateStore.repositories.byokTokenUsage
+      repository: options.appStateStore.repositories.byokTokenUsage,
+      bootstrapRepository: options.appStateStore.repositories.bootstrap,
+      memoryClient: options.memoryClient
     }),
     asr: createAsrService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,

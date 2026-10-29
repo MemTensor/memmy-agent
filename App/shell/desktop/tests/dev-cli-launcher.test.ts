@@ -3,15 +3,45 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
+import viteConfig from "../../../frontend/desktop/vite.config.js";
 
 const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 const memoryCliPath = fileURLToPath(new URL("../../../../Memory/src/cli/index.ts", import.meta.url));
 const agentConfigLoaderPath = fileURLToPath(new URL("../../../memmy-agent/src/config/loader.ts", import.meta.url));
+const selfTestPath = fileURLToPath(new URL("../../../../scripts/dev-self-test.mjs", import.meta.url));
 
 describe("development CLI launchers", () => {
+  it.each([
+    { name: "default acceptance", environment: undefined, args: [], mode: "stable" },
+    { name: "explicit stable environment", environment: "1", args: [], mode: "stable" },
+    { name: "explicit watch environment", environment: "0", args: [], mode: "watch" },
+    { name: "watch option over stable environment", environment: "1", args: ["--watch"], mode: "watch" },
+    { name: "watch option without environment", environment: undefined, args: ["--watch"], mode: "watch" },
+  ])("selects self-test renderer watching for $name", async ({ environment, args, mode }) => {
+    const env = { ...process.env };
+    delete env.MEMMY_STABLE_ELECTRON_DEMO;
+    if (environment !== undefined) env.MEMMY_STABLE_ELECTRON_DEMO = environment;
+    // Execute the real option parser without preparing a user profile or launching services.
+    const result = spawnSync(process.execPath, [selfTestPath, "--help", ...args], {
+      cwd: repoRoot, encoding: "utf8", env,
+    });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    const selected = result.stdout.match(/^Renderer mode: (stable|watch)$/m)?.[1];
+    expect(selected).toBe(mode);
+    expect(result.stdout).toContain("current browser tab connections; use stable mode for acceptance");
+    // Check that the selected mode has the intended effect in the actual renderer config.
+    vi.stubEnv("MEMMY_STABLE_ELECTRON_DEMO", selected === "stable" ? "1" : "0");
+    try {
+      const config = typeof viteConfig === "function"
+        ? await viteConfig({ command: "serve", mode: "test", isSsrBuild: false, isPreview: false })
+        : viteConfig;
+      expect(config.server?.watch).toEqual(mode === "stable" ? { ignored: ["**/*"] } : undefined);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("defaults development startup to the international edition", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh
@@ -151,7 +181,7 @@ fi`;
       );
       expect(init.status, init.stderr || init.stdout).toBe(0);
       const config = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(config.memmyMemory.embedding).toEqual({ mode: "local", provider: "local" });
+      expect(config.memmyMemory.embedding).toBeUndefined();
 
       const validate = spawnSync(
         "node",

@@ -7,10 +7,12 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
-import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
+import { MEMORY_SUMMARY_MAX_TOKENS, normalizeMemoryLanguage, type MemoryLanguage } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
+import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
 import { formatZonedTime } from "../utils/time.js";
+import { isObservationMemory, isObservationMemoryProcessed } from "../service/observation-memory-state.js";
 import {
   renderL3WorldModelFields,
   type L3WorldModelFields
@@ -612,6 +614,15 @@ function matchIntentHeuristic(text: string): {
       return { kind: "chitchat", confidence: 0.9, reason: "greeting", signal: "chitchat.greeting" };
     }
   }
+  // Only complete requests about the assistant itself belong here. A mixed
+  // request or a question about a past nickname must retain normal retrieval.
+  const assistantQuestion = text.replace(/[.!?。！？]+$/u, "").trim();
+  if (
+    /^(?:你好[，,\s]*)?(?:请|麻烦)?(?:介绍(?:一下|下)?(?:你|您)自己|(?:你|您)是谁|(?:你|您)(?:能|可以)(?:做什么|帮我做什么)|(?:你|您)有什么(?:功能|能力))(?:吧|吗|呢)?$/.test(assistantQuestion) ||
+    /^(?:please\s+)?(?:introduce yourself|tell me about yourself|who are you|what can you do|what can you help me with|what are your (?:capabilities|features))$/i.test(assistantQuestion)
+  ) {
+    return { kind: "meta", confidence: 0.98, reason: "assistant identity or capabilities", signal: "meta.assistant_introduction" };
+  }
   if (
     /\b(what did (i|we) (say|discuss|talk|mention)|do you remember|last time|earlier we|previously we|we talked about)\b/i.test(text) ||
     /(我们(刚刚|之前|刚才)?(聊|说|讨论)过|你还记得|上次(?:我们)?|之前(?:我|我们|咱们)?(提|说|聊|讨论))/.test(text) ||
@@ -954,7 +965,8 @@ async function relationWithTimeout<T>(promise: Promise<T>, timeoutMs: number): P
   }
 }
 
-export type PromptLanguage = "auto" | "zh" | "en";
+type DetectedPromptLanguage = "auto" | "zh" | "en";
+export type PromptLanguage = DetectedPromptLanguage | MemoryLanguage;
 
 export const L2_INDUCTION_PROMPT = {
   id: "l2.induction",
@@ -974,6 +986,7 @@ Produce ONE policy describing the action pattern. The policy must:
 - Name a TRIGGER recognizable from the agent's STATE — a condition the
   agent can detect at the moment of decision (an error code, a missing
   file, a request shape). NOT a fact about the environment in general.
+  Do not copy the title into the trigger.
 - Prescribe an ACTION template — a parameterized step or short step
   sequence. Templates over single exact commands. NOT a single example.
 - Note at least one CAVEAT or failure mode observed in the traces — a
@@ -1045,8 +1058,8 @@ libs by default":
 Return JSON:
 {
   "should_generate": true | false,
-  "title": "short imperative title",
-  "trigger": "state-level condition the agent can detect",
+  "title": "short imperative name, at most 30 characters; not the trigger",
+  "trigger": "state-level condition the agent can detect; not the title",
   "action": "templated step or step sequence",
   "expected_outcome": "observable result expected after the action",
   "verification": "how to verify that result",
@@ -1258,33 +1271,57 @@ If nothing is truly relevant, return {"ranked": [], "sufficient": false}.`,
 
 export const RETRIEVAL_QUERY_EXTRACT_PROMPT = {
   id: "retrieval.query.extract",
-  version: 2,
+  version: 3,
   description:
     "Extract semantic, lexical, and optional time-range constraints for memory retrieval.",
   system: `You prepare memory retrieval input for an AI agent.
 
-Given the complete current user input, return JSON with:
+Given CURRENT USER INPUT and, when present, RECENT CONVERSATION, return JSON with:
 - queryVecText: a compact semantic query for embedding search and later relevance filtering.
 - keywords: up to 5 short keyword strings for lexical FTS / pattern search.
 - timeFilter: an absolute time range only when the user is constraining which
   personal history or past activity memories should be searched; otherwise null.
 
 Rules:
-1. Use the complete input as evidence. Do not assume a fixed prompt template.
-2. Remove wrapper/protocol noise only when it is clearly not part of the user's real task.
-3. Preserve task-specific nouns, entities, technologies, filenames, error names, and requested deliverables when they are useful for retrieval.
-4. keywords must contain at most 5 items, ordered by retrieval usefulness.
-5. Do not invent keywords not grounded in the input.
-6. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
-7. Set timeFilter only when a time expression limits the user's own remembered
+1. Use CURRENT USER INPUT as the primary evidence. Do not assume a fixed prompt template.
+2. RECENT CONVERSATION, when present, is context only. Use it solely to resolve references (it, that, the script, the previous one, 那个, 上次, 它) and to restore entities the current input omits. Never turn a past topic into the query when the current input is self-contained.
+3. queryVecText must describe the task in CURRENT USER INPUT. Entities taken from RECENT CONVERSATION may be added only when the current input refers to them.
+4. keywords come from CURRENT USER INPUT; add a keyword from RECENT CONVERSATION only when it names the entity the current input refers to.
+5. Remove wrapper/protocol noise only when it is clearly not part of the user's real task.
+6. Preserve task-specific nouns, entities, technologies, filenames, error names, and requested deliverables when they are useful for retrieval.
+7. keywords must contain at most 5 items, ordered by retrieval usefulness.
+8. Do not invent keywords not grounded in the input.
+9. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
+10. Set timeFilter only when a time expression limits the user's own remembered
    conversations, actions, work, or prior events. Questions merely about dates,
    date parsing, historical facts, schedules, or current external information do
-   not request a memory time filter.
-8. Resolve relative expressions such as today, yesterday, this week, recently,
+   not request a memory time filter. Derive timeFilter from CURRENT USER INPUT only;
+   time expressions inside RECENT CONVERSATION never create a filter.
+11. Resolve relative expressions such as today, yesterday, this week, recently,
    今天, 昨天, 本周, and 最近 using CURRENT_TIME and TIME_ZONE supplied with the
    request. Approximate expressions may use a reasonable bounded range.
-9. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
+12. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
    an explicit UTC offset. endAt must be later than startAt.
+
+──── Example A (reference resolved from context) ────
+RECENT CONVERSATION (context only, oldest first):
+user: 帮我看看 scripts/migrate_sqlite.py 跑 pytest 为什么挂
+assistant: 失败在 test_migrate_schema，原因是 sqlite 版本低于 3.35 不支持 DROP COLUMN...
+
+CURRENT USER INPUT:
+那个脚本还是挂
+
+{"queryVecText": "scripts/migrate_sqlite.py pytest failure test_migrate_schema sqlite DROP COLUMN", "keywords": ["migrate_sqlite.py", "pytest", "test_migrate_schema", "sqlite"], "timeFilter": null}
+
+──── Example B (self-contained input, context ignored) ────
+RECENT CONVERSATION (context only, oldest first):
+user: 帮我看看 scripts/migrate_sqlite.py 跑 pytest 为什么挂
+assistant: 失败在 test_migrate_schema...
+
+CURRENT USER INPUT:
+把这个 React 组件改成支持暗黑模式
+
+{"queryVecText": "React component dark mode support", "keywords": ["React", "dark mode", "component"], "timeFilter": null}
 
 Return JSON only:
 {
@@ -1437,7 +1474,7 @@ Input:
 - Each evidence item includes episode_outcome ("success"|"failure"|"unknown") and episode_r_task.
 - REPAIR_HINTS (optional): prefer / avoid seeds for \`decision_guidance\`.
 - NAMING_SPACE: existing skill names to avoid.
-- OUTPUT_LANGUAGE: "zh" | "en". All natural-language fields must use this language.
+- OUTPUT_LANGUAGE: a concrete BCP 47 locale (or legacy "zh" / "en"). All natural-language fields must use that language, script, and regional conventions. Preserve JSON keys and machine identifiers.
 
 Return JSON:
 {
@@ -1494,7 +1531,7 @@ Input adds:
   - L2: may rewrite steps when policy or new evidence materially changes the workflow.
 
 Also includes POLICY, EVIDENCE (full top traces), EVIDENCE_TOOLS, COUNTER_EXAMPLES, REPAIR_HINTS.
-Also includes OUTPUT_LANGUAGE ("zh" | "en") and REPAIR_RENAME_ALLOWED (boolean).
+Also includes OUTPUT_LANGUAGE (a concrete BCP 47 locale, or legacy "zh" / "en") and REPAIR_RENAME_ALLOWED (boolean). Preserve JSON keys and machine identifiers.
 
 Return the same JSON schema as crystallize, plus:
   "changed_sections": ["retrieval_blurb", "summary", ...]
@@ -1606,6 +1643,7 @@ export interface RetrievalTuningConfig {
   multiChannelBypass?: boolean;
   skillInjectionMode?: "summary" | "full";
   skillSummaryChars?: number;
+  skillFullMaxChars?: number;
   decayHalfLifeDays?: number;
   domain?: "" | "research";
   readOnlyInjectionProfile?: ReadOnlyInjectionProfile;
@@ -3148,6 +3186,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   multiChannelBypass: true,
   skillInjectionMode: "summary",
   skillSummaryChars: 200,
+  skillFullMaxChars: 16_384,
   decayHalfLifeDays: 30,
   domain: "",
   readOnlyInjectionProfile: "all"
@@ -3685,7 +3724,26 @@ export function buildPolicyDraft(args: {
   };
 }
 
-export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): PromptLanguage {
+export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): DetectedPromptLanguage {
+  return detectPromptLanguage(samples, 0.7, "en", false);
+}
+
+/** Share of CJK among letters that selects Chinese when no interface language is pinned. */
+const STEERED_CHINESE_LETTER_SHARE = 0.2;
+
+export function pinnedPromptLanguage(language: MemoryLanguage | undefined): PromptLanguage | undefined {
+  const locale = normalizeMemoryLanguage(language);
+  if (locale === "zh-CN") return "zh";
+  if (locale === "en-US") return "en";
+  return locale;
+}
+
+export function detectPromptLanguage(
+  samples: ReadonlyArray<string | null | undefined>,
+  chineseShare = STEERED_CHINESE_LETTER_SHARE,
+  empty: DetectedPromptLanguage = "auto",
+  inclusive = true
+): DetectedPromptLanguage {
   let zh = 0;
   let en = 0;
   for (const sample of samples) {
@@ -3700,8 +3758,22 @@ export function detectDominantLanguage(samples: ReadonlyArray<string | null | un
     }
   }
   const total = zh + en;
-  if (total === 0) return "en";
-  return zh / total > 0.7 ? "zh" : "en";
+  if (total === 0) return empty;
+  const share = zh / total;
+  return (inclusive ? share >= chineseShare : share > chineseShare) ? "zh" : "en";
+}
+
+export function steeredPromptLanguage(
+  language: MemoryLanguage | undefined,
+  samples: ReadonlyArray<string | null | undefined>
+): PromptLanguage {
+  return pinnedPromptLanguage(language) ?? detectPromptLanguage(samples);
+}
+
+/** Use the same explicit override and default locale policy for every Skill producer. */
+export function skillOutputLanguageFor(mode: "follow_policy" | "zh" | "en", steered: PromptLanguage): PromptLanguage {
+  if (mode === "zh" || mode === "en") return mode;
+  return steered === "auto" ? "en" : steered;
 }
 
 export function languageSteeringLine(language: PromptLanguage): string {
@@ -3711,8 +3783,13 @@ export function languageSteeringLine(language: PromptLanguage): string {
     case "en":
       return "All natural-language answers MUST be in English.";
     case "auto":
-    default:
       return "Answer in the same natural language the user used. Do not mix languages.";
+    default: {
+      const locale = normalizeMemoryLanguage(language);
+      return locale
+        ? `All natural-language answers MUST use the language, script, and regional conventions of BCP 47 locale ${locale}. Preserve JSON keys and machine identifiers.`
+        : "Answer in the same natural language the user used. Do not mix languages.";
+    }
   }
 }
 
@@ -4468,14 +4545,37 @@ export function tracePolicySimilarity(
 }
 
 function normalizeToolCalls(toolCalls: ToolCallPayload[], toolResults: unknown[]): ToolCallPayload[] {
+  const resultIndices = matchToolResultIndices(toolCalls, toolResults);
   return toolCalls.map((call, index) => {
-    const result = toolResults[index];
-    const output = call.output ?? result;
+    const resultIndex = resultIndices[index];
+    const pairedResult = resultIndex === undefined ? undefined : toolResults[resultIndex];
+    const result = pairedResult && typeof pairedResult === "object" && !Array.isArray(pairedResult)
+      ? pairedResult as Record<string, unknown>
+      : {};
+    const output = call.output ?? result.output ?? result.result ?? result.content ?? pairedResult;
+    const resultError = typeof result.error === "string" ? result.error : errorMessageFromUnknown(result.error);
+    const error = call.error ?? resultError ??
+      (result.success === false ? errorMessageFromUnknown(result) : undefined);
+    let success: boolean | undefined;
+    if (typeof call.success === "boolean") {
+      success = call.success;
+    } else if (typeof result.success === "boolean") {
+      success = result.success;
+    } else if (error) {
+      success = false;
+    } else if (output !== undefined) {
+      success = true;
+    } else {
+      success = undefined;
+    }
+    const resultErrorCode = result.errorCode ?? result.error_code;
     return {
       ...call,
       output,
-      error: call.error,
-      success: call.success ?? !call.error
+      status: call.status ?? (typeof result.status === "string" ? result.status : undefined),
+      error,
+      errorCode: call.errorCode ?? (typeof resultErrorCode === "string" ? resultErrorCode : undefined),
+      success
     };
   });
 }
@@ -5011,6 +5111,9 @@ interface RankedMemoryCandidate {
 
 export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (memory.status === "deleted" || memory.status === "archived") return false;
+  if (isObservationMemory(memory) && !isObservationMemoryProcessed(memory)) return false;
+  if (memory.memoryLayer === "Skill" && memory.status !== "activated"
+    && memory.properties.internal_info.external_evidence_candidate) return false;
   const evidenceStatus = memory.properties.internal_info.evidence_status;
   if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
   const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;
@@ -5143,11 +5246,12 @@ function candidateFromMemory(
     return null;
   }
   const kind = memory.properties.internal_info.memory_kind ?? kindFromLayer(memory.memoryLayer);
+  const traceLike = kind === "trace" || kind === "span";
   const tier = memory.memoryLayer === "Skill" ? "tier1" : memory.memoryLayer === "L3" ? "tier3" : "tier2";
   const text = memoryTextForRetrieval(memory);
   const vectorChannels = vectorChannelsForMemory(memory, queryVec, options.config, {
     suppressTraceVector:
-      memory.memoryLayer === "L1" &&
+      traceLike &&
       options.traceVectorTagsRequired &&
       !memoryHasAnyTag(memory, options.traceVectorTags),
     seededChannelScores: options.seededChannelScores,
@@ -5536,6 +5640,7 @@ function retrievalTuning(input: RetrievalTuningConfig | undefined): Required<Ret
     multiChannelBypass: input?.multiChannelBypass ?? DEFAULT_RETRIEVAL_TUNING.multiChannelBypass,
     skillInjectionMode: input?.skillInjectionMode ?? DEFAULT_RETRIEVAL_TUNING.skillInjectionMode,
     skillSummaryChars: Math.max(80, Math.floor(finiteOr(input?.skillSummaryChars, DEFAULT_RETRIEVAL_TUNING.skillSummaryChars))),
+    skillFullMaxChars: Math.max(1000, Math.floor(finiteOr(input?.skillFullMaxChars, DEFAULT_RETRIEVAL_TUNING.skillFullMaxChars))),
     decayHalfLifeDays: Math.max(1, finiteOr(input?.decayHalfLifeDays, DEFAULT_RETRIEVAL_TUNING.decayHalfLifeDays)),
     domain: input?.domain === "research" ? "research" : "",
     readOnlyInjectionProfile: readOnlyInjectionProfileOrDefault(input?.readOnlyInjectionProfile)

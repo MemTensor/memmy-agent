@@ -11,6 +11,9 @@ import { getRuntimeConfig } from "../api/runtime-config.js";
 import { enUSMessages, zhCNMessages, type ResolvedLanguage } from "../i18n/messages.js";
 import { buildFirstEncounterRelayPrompt } from "./first-encounter-relay-prompt.js";
 
+// Covers the backend's 3-second sampling budget and 90-second model budget.
+const FIRST_REPORT_TIMEOUT_MS = 100_000;
+
 export interface DiscoveredAgent {
   sourceId: string;
   name: string;
@@ -66,9 +69,13 @@ export async function streamFirstEncounterReport(
   request: FirstEncounterReportRequest,
   handlers: FirstEncounterReportStreamHandlers
 ): Promise<void> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => {
+    controller.abort(new DOMException("first encounter report timed out", "TimeoutError"));
+  }, FIRST_REPORT_TIMEOUT_MS);
   try {
-    const config = await getRuntimeConfig();
-    const response = await fetch(new URL("/api/onboarding/insight-report/stream", config.baseUrl), {
+    const config = await waitForReportOperation(() => getRuntimeConfig(), controller.signal);
+    const response = await waitForReportOperation(() => fetch(new URL("/api/onboarding/insight-report/stream", config.baseUrl), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -78,8 +85,9 @@ export async function streamFirstEncounterReport(
         locale: request.language,
         stream: true,
         detectedAgents: toDetectedAgents(request.agents)
-      }))
-    });
+      })),
+      signal: controller.signal
+    }), controller.signal);
 
     if (!response.ok || !response.body) {
       throw new Error(`first encounter report stream failed: ${response.status}`);
@@ -88,7 +96,7 @@ export async function streamFirstEncounterReport(
     let streamed = false;
     let streamedBody = "";
     let latestDiagnostics: OnboardingInsightDiagnostics | null = null;
-    for await (const event of readInsightReportStreamEvents(response.body)) {
+    for await (const event of readInsightReportStreamEvents(response.body, controller.signal)) {
       if (event.type === "sampled") {
         latestDiagnostics = event.diagnostics;
         handlers.onAgents?.(toDiscoveredAgents(event.diagnostics));
@@ -121,6 +129,22 @@ export async function streamFirstEncounterReport(
   } catch (error) {
     console.warn("stream first encounter report failed", error);
     throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
+async function waitForReportOperation<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let abortHandler: () => void = () => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortHandler = () => reject(signal.reason);
+    signal.addEventListener("abort", abortHandler, { once: true });
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", abortHandler);
   }
 }
 
@@ -132,15 +156,20 @@ function toDetectedAgents(agents: readonly DiscoveredAgent[]) {
   }));
 }
 
-async function* readInsightReportStreamEvents(body: ReadableStream<Uint8Array>): AsyncIterable<OnboardingInsightReportStreamEvent> {
+async function* readInsightReportStreamEvents(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal
+): AsyncIterable<OnboardingInsightReportStreamEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let reachedEnd = false;
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await waitForReportOperation(() => reader.read(), signal);
       if (done) {
+        reachedEnd = true;
         break;
       }
       buffer += decoder.decode(value, { stream: true });
@@ -154,6 +183,10 @@ async function* readInsightReportStreamEvents(body: ReadableStream<Uint8Array>):
       buffer = nextBuffer;
     });
   } finally {
+    if (!reachedEnd) {
+      // Do not let a stalled source's cancellation promise keep onboarding open.
+      void reader.cancel(signal.aborted ? signal.reason : undefined).catch(() => undefined);
+    }
     reader.releaseLock();
   }
 }

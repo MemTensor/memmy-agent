@@ -276,9 +276,22 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
     const anchorIds = [...new Set([current.highlight.anchorId, ...extraIds, current.bubblePlacement.anchorId])];
     let frame = 0;
     let resizeObserver: ResizeObserver | undefined;
+    let scrolledHighlight: HTMLElement | null = null;
 
     /** Definition for measure layout. */
     const measureLayout = () => {
+      const highlightElement = document.querySelector<HTMLElement>(`[data-tour-anchor="${current.highlight.anchorId}"]`);
+      if (highlightElement && highlightElement !== scrolledHighlight) {
+        // A lazy route may mount after this effect. Scroll once when its anchor actually appears,
+        // then measure the final position. Repeated DOM/scroll observations must not reset it.
+        scrolledHighlight = highlightElement;
+        const scrollMode = current.tab === "agentsScan"
+          ? "page-end"
+          : current.tab === "tools"
+            ? "nearest"
+            : "page-start";
+        scrollProductTourHighlightIntoView(highlightElement, scrollMode);
+      }
       setLayout(resolveProductTourStepLayout(current.highlight, current.bubblePlacement, lookup, current.extraHighlights));
       if (typeof ResizeObserver === "undefined") {
         return;
@@ -307,20 +320,6 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
       childList: true,
       subtree: true
     });
-
-    const highlightElement = document.querySelector<HTMLElement>(`[data-tour-anchor="${current.highlight.anchorId}"]`);
-    if (highlightElement) {
-      // Tall page-top anchors (agents list / overview cards / logs) must not be
-      // centered — that hides the section title. Scan prefs sit near the page
-      // bottom: scroll the pane to its end so Auto sync is fully on-screen before
-      // spotlight/bubble measurement. Tools only needs nearest.
-      const scrollMode = current.tab === "agentsScan"
-        ? "page-end"
-        : current.tab === "tools"
-          ? "nearest"
-          : "page-start";
-      scrollProductTourHighlightIntoView(highlightElement, scrollMode);
-    }
 
     setLayout(null);
     // Measure after the (instant) scroll so highlight/bubble use final geometry.

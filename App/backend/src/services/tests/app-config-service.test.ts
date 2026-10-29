@@ -1,9 +1,9 @@
 /** App config service tests. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAppConfigService } from "../app-config-service.js";
 import { createAppStateStore } from "../../infrastructure/app-state-store/index.js";
 import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
@@ -16,6 +16,77 @@ import type {
 } from "@memmy/local-api-contracts";
 
 describe("AppConfigService", () => {
+  it.each(["byok", "account"] as const)("reloads Memory after persisting %s mode to YAML and SQLite", async (userMode) => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-mode-reload-"));
+    const configPath = join(root, "config.yaml");
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    try {
+      const observations: unknown[] = [];
+      const reloadConfig = vi.fn(async (input) => {
+        observations.push({
+          input,
+          yamlMode: YAML.parse(readFileSync(configPath, "utf8")).app.userMode,
+          databaseMode: store.repositories.bootstrap.getAppSettings().userMode
+        });
+      });
+      const service = createAppConfigService({
+        bootstrapRepository: store.repositories.bootstrap,
+        memmyConfigWriter: createMemmyConfigWriter({ configPath }),
+        memoryClient: { reloadConfig }
+      });
+      await expect(service.updateSettings({ userMode })).resolves.toMatchObject({ userMode });
+      expect(observations).toEqual([{
+        input: { reason: "user_mode_saved" }, yamlMode: userMode, databaseMode: userMode
+      }]);
+
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        reloadConfig.mockRejectedValueOnce(new Error("Memory unavailable"));
+        await expect(service.updateSettings({ userMode })).resolves.toMatchObject({ userMode });
+        expect(warning).toHaveBeenCalledWith("Memory config reload failed after user mode was saved");
+        expect(YAML.parse(readFileSync(configPath, "utf8")).app.userMode).toBe(userMode);
+        expect(store.repositories.bootstrap.getAppSettings().userMode).toBe(userMode);
+        // Saving the same mode again must retry the failed reload.
+        await service.updateSettings({ userMode });
+        expect(reloadConfig).toHaveBeenCalledTimes(3);
+        expect(observations).toHaveLength(2);
+      } finally {
+        warning.mockRestore();
+      }
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reload Memory when only appearance settings change", async () => {
+    const reloadConfig = vi.fn();
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings: (patch) => appSettings(patch)
+      },
+      memoryClient: { reloadConfig }
+    });
+    await service.updateSettings({ theme: "dark" });
+    expect(reloadConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not update the database or reload Memory if saving the runtime mode fails", async () => {
+    const updateAppSettings = vi.fn();
+    const reloadConfig = vi.fn();
+    const writer = createMemmyConfigWriter();
+    vi.spyOn(writer, "writeUserMode").mockRejectedValueOnce(new Error("Config not writable"));
+    const service = createAppConfigService({
+      bootstrapRepository: { ...createBootstrapRepositoryStub(), updateAppSettings },
+      memmyConfigWriter: writer,
+      memoryClient: { reloadConfig }
+    });
+    await expect(service.updateSettings({ userMode: "account" })).rejects.toThrow("Config not writable");
+    expect(updateAppSettings).not.toHaveBeenCalled();
+    expect(reloadConfig).not.toHaveBeenCalled();
+  });
+
   it("updates app settings through the bootstrap repository", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
@@ -38,6 +109,91 @@ describe("AppConfigService", () => {
       theme: "dark",
       defaultLaunchMode: "pet"
     });
+  });
+
+  it("reloads Memory after publishing the interface language", async () => {
+    const calls: unknown[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings(patch) {
+          calls.push({ settings: patch });
+          return appSettings(patch);
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return { changed: false, memoryConfigAffected: false };
+        },
+        async writeMemoryLanguage(language) {
+          calls.push({ language });
+        },
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
+        }
+      },
+      memoryClient: {
+        async reloadConfig(input) {
+          calls.push({ reload: input });
+        }
+      }
+    });
+
+    await expect(service.updateSettings({ language: "system" })).resolves.toMatchObject({ language: "system" });
+    expect(calls).toEqual([
+      { language: "system" },
+      { reload: { reason: "app_language_saved" } },
+      { settings: { language: "system" } }
+    ]);
+  });
+
+  it("writes memory token budget and reloads Memory", async () => {
+    const calls: unknown[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateAppSettings(patch) {
+          calls.push({ settings: patch });
+          return appSettings({
+            memoryByokDailyLimitM: 0,
+            memoryByokTotalLimitM: 500,
+            ...patch
+          });
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return { changed: false, memoryConfigAffected: false };
+        },
+        async writeMemoryTokenBudget(budget) {
+          calls.push({ budget });
+        },
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
+        }
+      },
+      memoryClient: {
+        async reloadConfig(input) {
+          calls.push({ reload: input });
+        }
+      }
+    });
+
+    await expect(service.updateSettings({ memoryByokDailyLimitM: 0 })).resolves.toMatchObject({
+      memoryByokDailyLimitM: 0,
+      memoryByokTotalLimitM: 500
+    });
+    expect(calls).toEqual([
+      { settings: { memoryByokDailyLimitM: 0 } },
+      { budget: { dailyLimitM: 0, totalLimitM: 500 } },
+      { reload: { reason: "memory_token_budget_saved" } }
+    ]);
   });
 
   it("updates scan preferences through the bootstrap repository", async () => {

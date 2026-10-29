@@ -14,6 +14,7 @@ import { normalizeAgentSource, sourceAgentInitials } from "./agent-source";
 const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   memmy: memmyRiceLogoUrl,
   memmy_agent: memmyRiceLogoUrl,
+  computer_history: memmyRiceLogoUrl,
   cursor: cursorLogoUrl,
   claude_code: claudeCodeLogoUrl,
   codex: codexLogoUrl,

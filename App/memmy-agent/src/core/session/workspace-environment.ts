@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -92,7 +93,49 @@ type GoalWorkspaceBaseline = {
   files: Record<string, string | null>;
 };
 
-type GitCommandResult = { ok: true; stdout: string } | { ok: false; stderr: string };
+type GitCommandResult = { ok: true; stdout: string } | { ok: false; stderr: string; code?: string };
+
+let cachedGitBinary: string | null = null;
+
+export function normalizeGitRelativePath(value: string): string {
+  return value.replace(/\r/g, "").replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+export function gitRelativePathsMatch(
+  left: string,
+  right: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const normalize = (value: string) => normalizeGitRelativePath(value).replace(/\/+$/u, "");
+  const a = normalize(left);
+  const b = normalize(right);
+  if (!a || !b || a.split("/").includes("..") || b.split("/").includes("..")) return false;
+  return platform === "win32" ? a.toLocaleLowerCase() === b.toLocaleLowerCase() : a === b;
+}
+
+function gitRecords(raw: string): string[] {
+  const withoutCarriageReturn = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const separator = withoutCarriageReturn.includes("\0") ? "\0" : "\n";
+  return withoutCarriageReturn.split(separator).map((record) => record.replace(/^\uFEFF/, "").replace(/\n/g, ""));
+}
+
+function windowsGitCandidates(): string[] {
+  const programRoots = [process.env.ProgramW6432, process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
+    .filter((value): value is string => Boolean(value));
+  const userRoots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs") : "",
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, "scoop", "apps", "git", "current") : "",
+  ].filter(Boolean);
+  return [...programRoots, ...userRoots].flatMap((root) => [
+    path.join(root, "Git", "cmd", "git.exe"),
+    path.join(root, "Git", "bin", "git.exe"),
+    path.join(root, "cmd", "git.exe"),
+  ]);
+}
+
+function ownershipBlocked(stderr: string): boolean {
+  return /dubious ownership|safe\.directory|可疑的所有权/i.test(stderr);
+}
 
 export class WorkspaceEnvironmentError extends Error {
   constructor(
@@ -107,22 +150,61 @@ const GIT_TIMEOUT_MS = 5_000;
 const GIT_OUTPUT_LIMIT = 8 * 1024 * 1024;
 const DIFF_OUTPUT_LIMIT = 512 * 1024;
 
-function runGit(cwd: string, args: string[], maxBuffer = GIT_OUTPUT_LIMIT): Promise<GitCommandResult> {
+function gitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "Never",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    LANG: process.env.LANG || "C.UTF-8",
+  };
+}
+
+function execGit(binary: string, cwd: string, args: string[], maxBuffer: number): Promise<GitCommandResult> {
   return new Promise((resolve) => {
-    execFile("git", args, {
+    execFile(binary, args, {
       cwd,
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
       maxBuffer,
       windowsHide: true,
+      env: gitEnv(),
     }, (error, stdout, stderr) => {
       if (error) {
-        resolve({ ok: false, stderr: String(stderr || error.message || "git command failed").trim() });
+        const code = typeof error === "object" && error && "code" in error ? String(error.code) : undefined;
+        resolve({ ok: false, stderr: String(stderr || error.message || "git command failed").trim(), code });
         return;
       }
       resolve({ ok: true, stdout: String(stdout ?? "") });
     });
   });
+}
+
+async function execGitFindingBinary(cwd: string, args: string[], maxBuffer: number): Promise<GitCommandResult> {
+  const binary = cachedGitBinary ?? "git";
+  const result = await execGit(binary, cwd, args, maxBuffer);
+  if (result.ok) {
+    cachedGitBinary = binary;
+    return result;
+  }
+  if (process.platform !== "win32" || result.code !== "ENOENT" || cachedGitBinary) return result;
+  for (const candidate of windowsGitCandidates()) {
+    if (!existsSync(candidate)) continue;
+    const retry = await execGit(candidate, cwd, args, maxBuffer);
+    if (!retry.ok && retry.code === "ENOENT") continue;
+    cachedGitBinary = candidate;
+    return retry;
+  }
+  return result;
+}
+
+async function runGit(cwd: string, args: string[], maxBuffer = GIT_OUTPUT_LIMIT): Promise<GitCommandResult> {
+  const result = await execGitFindingBinary(cwd, args, maxBuffer);
+  if (result.ok || !ownershipBlocked(result.stderr)) return result;
+  // A Windows VM shared folder is owned by the host, so Git refuses to read it.
+  // The user already opened this workspace; the refusal only hides the file diff.
+  const trusted = await execGit(cachedGitBinary ?? "git", cwd, ["-c", `safe.directory=${cwd}`, ...args], maxBuffer);
+  return trusted.ok ? trusted : result;
 }
 
 function parseBranchHeader(record: string, state: Pick<GitState, "head" | "branch" | "upstream" | "ahead" | "behind">): void {
@@ -142,14 +224,15 @@ function parseBranchHeader(record: string, state: Pick<GitState, "head" | "branc
 
 function parseNumstat(raw: string): Map<string, { additions: number | null; deletions: number | null }> {
   const stats = new Map<string, { additions: number | null; deletions: number | null }>();
-  for (const record of raw.split("\0")) {
+  for (const record of gitRecords(raw)) {
     if (!record) continue;
     const firstTab = record.indexOf("\t");
     const secondTab = firstTab < 0 ? -1 : record.indexOf("\t", firstTab + 1);
     if (firstTab < 0 || secondTab < 0) continue;
     const additionsRaw = record.slice(0, firstTab);
     const deletionsRaw = record.slice(firstTab + 1, secondTab);
-    const filePath = record.slice(secondTab + 1);
+    const filePath = normalizeGitRelativePath(record.slice(secondTab + 1));
+    if (!filePath) continue;
     stats.set(filePath, {
       additions: /^\d+$/.test(additionsRaw) ? Number(additionsRaw) : null,
       deletions: /^\d+$/.test(deletionsRaw) ? Number(deletionsRaw) : null,
@@ -169,7 +252,7 @@ function parseStatus(cwd: string, raw: string): GitState {
     branches: [],
     files: [],
   };
-  const records = raw.split("\0");
+  const records = gitRecords(raw);
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record) continue;
@@ -190,7 +273,8 @@ function parseStatus(cwd: string, raw: string): GitState {
       filePath = fields.slice(fixedFields).join(" ");
       if (kind === "2") index += 1;
     }
-    if (!filePath) continue;
+    filePath = normalizeGitRelativePath(filePath);
+    if (!filePath || filePath.split("/").includes("..")) continue;
     const untracked = kind === "?";
     const conflict = kind === "u" || xy.includes("U") || xy === "AA" || xy === "DD";
     state.files.push({
@@ -458,13 +542,13 @@ export async function readWorkspaceFileDiff(environment: {
   unavailable_reason: string | null;
 } | null> {
   if (environment.snapshot.status !== "ready" || !environment.snapshot.repository) return null;
-  const file = environment.files.find((entry) => entry.path === relativePath);
+  const file = environment.files.find((entry) => gitRelativePathsMatch(entry.path, relativePath));
   if (!file) return null;
   if (file.untracked) {
     return { path: relativePath, diff: "", truncated: false, unavailable_reason: "untracked_diff_unavailable" };
   }
   const result = await runGit(environment.snapshot.repository.root, [
-    "diff", "--no-ext-diff", "--no-color", "HEAD", "--", relativePath,
+    "diff", "--no-ext-diff", "--no-color", "HEAD", "--", file.path,
   ], DIFF_OUTPUT_LIMIT);
   if (!result.ok) return { path: relativePath, diff: "", truncated: false, unavailable_reason: "diff_unavailable" };
   const truncated = Buffer.byteLength(result.stdout, "utf8") >= DIFF_OUTPUT_LIMIT;

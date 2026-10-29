@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import createIgnore from "ignore";
+import ignore, { type Ignore } from "ignore";
 import {
   canonicalJson,
   isLocalWorkspaceUri,
@@ -29,6 +29,7 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const createIgnore: () => Ignore = ignore;
 
 const FIXED_EXCLUDES = new Set([
   ".git", "node_modules", "vendor", ".venv", "venv", "env", "dist", "build", "out",

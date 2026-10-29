@@ -53,6 +53,7 @@ $installerProcess = $null
 $dataMoved = $false
 $dataRestored = $false
 $lockAcquired = $false
+$ownershipDenied = $false
 $migrationPrepared = $false
 $migrationCompleted = $false
 $migrationRolledBack = $false
@@ -64,12 +65,40 @@ $resolvedReopenAfterInstall = $ReopenAfterInstall
 $relayStartedAtUtc = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().ToString('O')
 $verifiedInstalledVersion = ''
 
+function Invoke-MemmyRuntimeOwnershipGuard([string]$Path) {
+  # Profiles and temporary test layouts are private; only the canonical shared drive root is guarded.
+  if ($Path -notmatch '^[A-BD-Za-bd-z]:[\\/]MemmyData[\\/]\.memmy(?:[\\/]|$)') { return }
+  try {
+    $ownershipScript = Join-Path $PSScriptRoot 'MemmyWindowsRuntimeOwnership.ps1'
+    if (-not (Test-Path -LiteralPath $ownershipScript -PathType Leaf)) { throw 'Packaged Windows ownership helper is missing' }
+    . $ownershipScript -LibraryOnly
+    Assert-MemmySharedRuntimeOwnership $Path | Out-Null
+  } catch {
+    throw ('MEMMY_WINDOWS_DATA_OWNERSHIP: Choose C: for a per-user installation, or use a separate drive. Another folder on this same drive cannot isolate Memmy data. ' + $_.Exception.Message)
+  }
+}
+
 function Write-MemmyUpgradeLog([string]$Message) {
   $logDirectory = Split-Path -Parent $LogPath
   if ($logDirectory) {
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
   }
   Add-Content -LiteralPath $LogPath -Value ('[{0:O}] {1}' -f (Get-Date), $Message)
+}
+
+function Normalize-MemmyRelayInstalledVersion([string]$Value) {
+  $value = $Value.Trim()
+  if ($value -match '^(\d+\.\d+\.\d+)\.0$') { $value = $Matches[1] }
+  # Preserve nonzero Windows file-version revisions exactly; they cannot
+  # satisfy an expected three-component release through a prefix match.
+  if ($value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') { return $null }
+  return ($value -split '\+', 2)[0]
+}
+
+function Test-MemmyRelayInstalledVersion([string]$Actual, [string]$Expected) {
+  $actualVersion = Normalize-MemmyRelayInstalledVersion $Actual
+  $expectedVersion = Normalize-MemmyRelayInstalledVersion $Expected
+  return ($null -ne $actualVersion -and $null -ne $expectedVersion -and $actualVersion -ceq $expectedVersion)
 }
 
 function Test-MemmySamePath([string]$Left, [string]$Right) {
@@ -237,6 +266,7 @@ function Invoke-MemmyDataMigration([ValidateSet('Prepare', 'Complete', 'Rollback
     if ($migrationDetail) {
       Write-MemmyUpgradeLog "data migration $Mode output: $migrationDetail"
     }
+    if ($migrationDetail -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw $migrationDetail }
     throw "data migration $Mode failed with exit code $migrationExitCode"
   }
   Write-MemmyUpgradeLog "data migration $Mode completed targetRuntimeHome=$targetRuntimeHomePath"
@@ -418,7 +448,8 @@ function Get-MemmyInstalledVersion {
     return ''
   }
   $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($appExe)
-  foreach ($value in @($versionInfo.ProductVersion, $versionInfo.FileVersion)) {
+  # electron-builder keeps the full prerelease in FileVersion; ProductVersion is numeric.
+  foreach ($value in @($versionInfo.FileVersion, $versionInfo.ProductVersion)) {
     if ($value) {
       return $value
     }
@@ -482,6 +513,7 @@ function Schedule-MemmyStagingCleanup {
 }
 
 try {
+  Invoke-MemmyRuntimeOwnershipGuard $targetRuntimeHomePath
   New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
   Write-MemmyUpgradeLog "relay starting installer=$InstallerPath sourceInstallDir=$SourceInstallDir targetInstallDir=$TargetInstallDir mode=$InstallerMode expected=$ExpectedVersion reopenFallback=$ReopenAfterInstall"
   Assert-MemmyRelaySourceIsSafe
@@ -520,11 +552,11 @@ try {
     $relayPhase = 'migration-prepared'
     Write-MemmyRelayState
   } catch {
-    $migrationSkipped = $true
     $migrationFailure = $_.Exception.Message
     $relayPhase = 'migration-skipped'
     Write-MemmyRelayState
-    Write-MemmyUpgradeLog "data migration Prepare failed safely; continuing installation without migration: $migrationFailure"
+    Write-MemmyUpgradeLog "data migration Prepare failed; aborting before installation so the original data can be restored: $migrationFailure"
+    throw "data migration Prepare failed; installation was not started: $migrationFailure"
   }
 
   # Both visible and silent relay children are upgrades. Keeping --updated for the visible child
@@ -552,7 +584,7 @@ try {
   $installerExit = if ($null -eq $installerProcess.ExitCode) { 1 } else { $installerProcess.ExitCode }
   Write-MemmyUpgradeLog "installer exit $installerExit"
   $verifiedInstalledVersion = Get-MemmyInstalledVersion
-  $upgradeVerified = $installerExit -eq 0 -and $verifiedInstalledVersion.StartsWith($ExpectedVersion, [System.StringComparison]::OrdinalIgnoreCase)
+  $upgradeVerified = $installerExit -eq 0 -and (Test-MemmyRelayInstalledVersion $verifiedInstalledVersion $ExpectedVersion)
   if (-not $upgradeVerified) {
     throw "upgrade verification failed installedVersion=$verifiedInstalledVersion installerExit=$installerExit"
   }
@@ -565,6 +597,7 @@ try {
       Write-MemmyRelayState
     } catch {
       $migrationFailure = $_.Exception.Message
+      if ($migrationFailure -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*') { throw }
       Write-MemmyUpgradeLog "data migration Complete failed; rolling back migration while retaining the installed app: $migrationFailure"
       for ($rollbackAttempt = 1; $rollbackAttempt -le 2 -and -not $migrationRolledBack; $rollbackAttempt++) {
         try {
@@ -596,12 +629,17 @@ try {
     }
   }
 } catch {
+  $ownershipDenied = $_.Exception.Message -like '*MEMMY_WINDOWS_DATA_OWNERSHIP:*'
+  if ($ownershipDenied) {
+    Write-MemmyUpgradeLog 'data ownership denied; retaining lock and refusing recovery or app reopening'
+    exit 5
+  }
   Write-MemmyUpgradeLog ('relay error: ' + ($_ | Out-String))
   if ($installerExit -eq 0) {
     $installerExit = 1
   }
 } finally {
-  if (-not $upgradeVerified) {
+  if (-not $ownershipDenied -and -not $upgradeVerified) {
     if ($migrationPrepared -and -not $migrationCompleted) {
       try {
         Invoke-MemmyDataMigration -Mode Rollback
@@ -619,7 +657,7 @@ try {
     }
   }
   $migrationSafe = (-not $migrationPrepared) -or $migrationCompleted -or $migrationRolledBack
-  if ($lockAcquired -and (($upgradeVerified -and ($migrationCompleted -or $migrationSkipped)) -or ($dataRestored -and $migrationSafe))) {
+  if (-not $ownershipDenied -and $lockAcquired -and (($upgradeVerified -and ($migrationCompleted -or $migrationSkipped)) -or ($dataRestored -and $migrationSafe))) {
     Remove-Item -LiteralPath $lockPath -Recurse -Force -ErrorAction SilentlyContinue
   } elseif ($lockAcquired) {
     Write-MemmyUpgradeLog "active lock retained for automatic recovery $lockPath"

@@ -43,6 +43,12 @@ describe("package version guard", () => {
     expect(readJson(join(root, "App/shell/desktop/package.json")).version).toBe("1.1.2");
     expect(readFileSync(join(root, "App/backend/src/project-version.ts"), "utf8"))
       .toContain('MEMMY_VERSION = "1.1.2"');
+    expect(readFileSync(join(root, "App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift"), "utf8"))
+      .toContain('openComputerUseVersion = "1.1.2"');
+    expect(readFileSync(join(root, "App/native-computer-use/apps/OpenComputerUseWindows/version.go"), "utf8"))
+      .toContain('version = "1.1.2"');
+    expect(readFileSync(join(root, "App/native-computer-use/apps/OpenComputerUseLinux/version.go"), "utf8"))
+      .toContain('version = "1.1.2"');
     expect(readJson(join(root, "Memory/package.json")).version).toBe("2.1.0");
     expect(readJson(join(root, "Memory/src/cli/npm/package.json")).version).toBe("2.1.0");
     const rootLock = readJson(join(root, "package-lock.json"));
@@ -153,6 +159,18 @@ function fixtureRepo(version, memoryVersion = version) {
   writeText(
     join(root, "App/backend/src/project-version.ts"),
     `export const MEMMY_VERSION = ${JSON.stringify(version)};\n`,
+  );
+  writeText(
+    join(root, "App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift"),
+    `public let openComputerUseVersion = ${JSON.stringify(version)};\n`,
+  );
+  writeText(
+    join(root, "App/native-computer-use/apps/OpenComputerUseWindows/version.go"),
+    `package main\nvar version = ${JSON.stringify(version)}\n`,
+  );
+  writeText(
+    join(root, "App/native-computer-use/apps/OpenComputerUseLinux/version.go"),
+    `package main\nvar version = ${JSON.stringify(version)}\n`,
   );
   return root;
 }

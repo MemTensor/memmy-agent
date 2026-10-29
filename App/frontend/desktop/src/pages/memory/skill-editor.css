@@ -1,0 +1,37 @@
+.memory-skill-editor__body {
+  width: 100%;
+  min-height: 20rem;
+  resize: vertical;
+  border: 1px solid var(--border-content-panel);
+  border-radius: var(--radius-input);
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  padding: 12px;
+  font: inherit;
+  line-height: 1.6;
+}
+
+.memory-skill-editor__actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.memory-skill-editor__button {
+  margin-top: 8px;
+  border: 1px solid var(--border-content-panel);
+  border-radius: var(--radius-input);
+  padding: 6px 12px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.memory-skill-editor__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

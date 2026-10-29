@@ -16,7 +16,8 @@ export type ModelEndpointProtocol =
   | "dashscope-input-audio-chat"
   | "openai-images"
   | "dashscope-multimodal-generation"
-  | "memmy-account";
+  | "memmy-account"
+  | "bedrock-converse";
 
 export * from "./memory-canonical-json.js";
 export * from "./memory-workspace-identity.js";

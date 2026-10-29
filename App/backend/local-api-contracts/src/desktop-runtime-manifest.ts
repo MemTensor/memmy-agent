@@ -11,18 +11,18 @@ export interface DesktopRuntimeManifest {
  */
 export function normalizePublicCloudService(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error("MEMMY_CLOUD_SERVICE must be a non-empty HTTPS origin");
+    throw new Error("MEMMY_CLOUD_SERVICE must be a non-empty HTTP(S) origin");
   }
 
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
-    throw new Error("MEMMY_CLOUD_SERVICE must be a valid HTTPS origin");
+    throw new Error("MEMMY_CLOUD_SERVICE must be a valid HTTP(S) origin");
   }
 
-  if (url.protocol !== "https:") {
-    throw new Error("MEMMY_CLOUD_SERVICE must use HTTPS");
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("MEMMY_CLOUD_SERVICE must use HTTP or HTTPS");
   }
   if (url.username || url.password) {
     throw new Error("MEMMY_CLOUD_SERVICE must not contain credentials");

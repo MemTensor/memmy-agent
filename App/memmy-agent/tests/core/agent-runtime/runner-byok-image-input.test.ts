@@ -118,4 +118,34 @@ describe("BYOK custom model image input", () => {
     expect(provider.calls).toHaveLength(0);
     expect(result.finalContent).toBe("Current model does not support image input.");
   });
+
+  it("blocks images when a Custom model declares text-only input", async () => {
+    const provider = new ByokProvider();
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "Qwen3-27B",
+      actualModelContext: { ...byokContext("Qwen3-27B"), inputModalities: ["text"] },
+    }));
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.finalContent).toBe("Current model does not support image input.");
+    expect(result.response.errorCategory).toBe("image_input_unsupported");
+  });
+
+  it("allows images when a Custom declaration includes image even if the catalog is text-only", async () => {
+    const provider = new ByokProvider();
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "deepseek-v4-pro",
+      actualModelContext: { ...byokContext("deepseek-v4-pro"), inputModalities: ["text", "image"] },
+    }));
+
+    expect(result.finalContent).toBe("described the image");
+    expect(provider.calls).toHaveLength(1);
+    expect(JSON.stringify(provider.calls[0].messages)).toContain('"type":"image_url"');
+  });
 });

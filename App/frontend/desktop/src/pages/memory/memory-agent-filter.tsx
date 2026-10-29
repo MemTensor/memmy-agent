@@ -9,7 +9,8 @@ import {
 } from "../agent-source-logos.js";
 
 export const OTHER_MEMORY_SOURCE_AGENT = "__other__";
-export const MEMORY_SOURCE_AGENT_EXCLUSIONS = [...MEMORY_AGENT_SOURCE_VALUES];
+// History is shown under Memmy, but its stored source must also stay out of "Other".
+export const MEMORY_SOURCE_AGENT_EXCLUSIONS = [...MEMORY_AGENT_SOURCE_VALUES, "computer_history"];
 const ALL_AGENT_ICON_SOURCES = ["memmy-agent", "codex", "claude_code"] as const;
 
 export interface MemoryAgentFilterProps {

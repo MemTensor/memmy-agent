@@ -9,7 +9,9 @@ import type {
   EvolutionJobRecord,
   L3WorldModelScopeRecord,
   RawTurnRecord,
-  Repositories
+  RecallEventRecord,
+  Repositories,
+  SkillTrialRecord
 } from "../../storage/repositories.js";
 import { detailSummaryForMemory } from "./memory.js";
 import type {
@@ -39,6 +41,11 @@ import {
   panelToolLatency
 } from "./model-costs.js";
 import {
+  evidenceMemoryIds,
+  storedGeneratedTitle,
+  waitingSourceText
+} from "./display-fields.js";
+import {
   panelCountByDate,
   panelListItemFromMemory,
   panelSourceDistribution
@@ -46,6 +53,7 @@ import {
 
 const PANEL_ITEMS_PAGE_SIZE = 20;
 const PANEL_DAILY_ACTIVITY_DAYS = 371;
+const PANEL_USAGE_EVENT_LIMIT = 10_000;
 
 type PanelChange = {
   seq: number;
@@ -76,7 +84,7 @@ export interface PanelReadModelDependencies {
   };
   encodeChangeCursor: (seq: number, namespace?: RuntimeNamespace) => string;
   decodeChangeCursor: (cursor: string | undefined, namespace?: RuntimeNamespace) => number;
-  episodeRef: (episode: EpisodeRecord) => Record<string, unknown>;
+  episodeRef: (episode: EpisodeRecord, titleJobPending?: boolean) => Record<string, unknown>;
   rawTurnSummary: (rawTurn: RawTurnRecord) => RawTurnSummary;
   now?: () => string;
 }
@@ -394,8 +402,18 @@ export class PanelReadModel {
     const dates = panelLastSevenDateKeys(this.now(), timeZone);
     const memories = this.deps.repos.memories.listStats();
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
+    const activeSkillIds = new Set(
+      skillMemories.filter((memory) => memory.status === "activated").map((memory) => memory.id)
+    );
     const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
       .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
+    const recentlyUsedSkills = panelActivatedSkillUseCount({
+      activeSkillIds,
+      recallEvents: this.deps.repos.runtime.listRecallEvents({ limit: PANEL_USAGE_EVENT_LIMIT }),
+      skillTrials: this.deps.repos.runtime.listSkillTrials({ limit: PANEL_USAGE_EVENT_LIMIT }),
+      dates,
+      timeZone
+    });
     const recallScores = logs
       .filter((log) => log.toolName === "memory_search")
       .map((log) => panelRecallScore(log.outputJson))
@@ -405,8 +423,8 @@ export class PanelReadModel {
       metrics: {
         avgRecallScore: panelRoundDecimal(panelAverage(recallScores), 2),
         recallEvents: logs.filter((log) => log.toolName === "memory_search").length,
-        activeSkills: skillMemories.filter((memory) => memory.status === "activated").length,
-        recentlyUsedSkills: skillMemories.filter((memory) => dates.includes(panelDateKey(memory.updatedAt, timeZone))).length,
+        activeSkills: activeSkillIds.size,
+        recentlyUsedSkills,
         avgToolLatencyMs: panelRoundInt(panelAverage(durations)),
         p95ToolLatencyMs: panelPercentile95(durations)
       },
@@ -509,13 +527,27 @@ export class PanelReadModel {
     const scopesByMemoryId = new Map(
       scopes.flatMap((scope) => scope.memoryId ? [[scope.memoryId, scope] as const] : [])
     );
+    const evidenceIds = [...new Set(memories.flatMap((memory) =>
+      memory.memoryLayer === "L2" && !storedGeneratedTitle(memory) ? evidenceMemoryIds(memory) : []
+    ))];
+    const evidenceById = new Map(
+      (evidenceIds.length > 0 ? this.deps.repos.memories.getMany(evidenceIds) : [])
+        .map((memory) => [memory.id, memory] as const)
+    );
     return {
       items: memories.map((memory) => {
-        const item = panelListItemFromMemory(
+        const listed = panelListItemFromMemory(
           this.deps.repos.memories.toListItem(memory),
           memory,
           this.deps.repos.processing.get(memory.id)
         );
+        const sourceText = memory.memoryLayer === "L2" && !listed.generatedTitle
+          ? waitingSourceText(memory, evidenceMemoryIds(memory).flatMap((id) => {
+            const source = evidenceById.get(id);
+            return source ? [source] : [];
+          }))
+          : undefined;
+        const item = sourceText ? { ...listed, sourceText } : listed;
         const scope = scopesByMemoryId.get(memory.id);
         const worldModelScope = memory.memoryLayer === "L3" && scope &&
           scope.memoryId === memory.id && scope.userId === memory.userId
@@ -567,7 +599,10 @@ export class PanelReadModel {
     return {
       tasks: episodes.map((episode) => ({
         id: episode.id,
-        episode: this.deps.episodeRef(episode),
+        episode: this.deps.episodeRef(
+          episode,
+          this.deps.repos.runtime.hasEpisodeJob(episode.id, "episode_title", ["queued", "leased"])
+        ),
         memoryIds: episode.l1MemoryIds.filter((memoryId) => Boolean(this.deps.repos.memories.get(memoryId))),
         turns: this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000).map(this.deps.rawTurnSummary),
         updatedAt: episode.updatedAt
@@ -652,6 +687,29 @@ export class PanelReadModel {
     return counts;
   }
 
+}
+
+export function panelActivatedSkillUseCount(input: {
+  activeSkillIds: ReadonlySet<string>;
+  recallEvents: RecallEventRecord[];
+  skillTrials: SkillTrialRecord[];
+  dates: string[];
+  timeZone: string;
+}): number {
+  if (input.activeSkillIds.size === 0) return 0;
+  const dates = new Set(input.dates);
+  const invoked = input.skillTrials.filter((trial) =>
+    input.activeSkillIds.has(trial.skillMemoryId) &&
+    dates.has(panelDateKey(trial.createdAt, input.timeZone))
+  ).length;
+  const recalled = input.recallEvents.reduce((count, event) => {
+    if (!dates.has(panelDateKey(event.createdAt, input.timeZone))) return count;
+    const recalledActiveSkills = new Set(
+      event.hitMemoryIds.filter((memoryId) => input.activeSkillIds.has(memoryId))
+    );
+    return count + recalledActiveSkills.size;
+  }, 0);
+  return invoked + recalled;
 }
 
 function panelWorldModelScope(scope: L3WorldModelScopeRecord): WorldModelScope {
@@ -782,7 +840,7 @@ function normalizeChangeOp(value: string | undefined): PanelChange["op"] | undef
 }
 
 function normalizeChangeKind(value: string | undefined): PanelChange["kind"] | undefined {
-  return value === "trace" || value === "span" || value === "policy" || value === "world_model" || value === "skill" ||
+  return value === "trace" || value === "span" || value === "policy" || value === "world_model" || value === "skill" || value === "work_memory" || value === "observed_activity" ||
     value === "session" || value === "episode" || value === "job" || value === "feedback" ||
     value === "raw_turn" || value === "repair" || value === "skill_trial" || value === "recall" ||
     value === "artifact"

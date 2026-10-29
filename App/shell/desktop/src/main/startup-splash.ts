@@ -3,6 +3,21 @@ import { DatabaseSync } from "node:sqlite";
 
 export type StartupSplashLanguage = "zh-CN" | "en-US";
 
+/**
+ * Returns whether closing the last window should terminate the desktop app.
+ *
+ * During boot the splash can be the only visible window. Treating its native
+ * close as a normal post-boot window close would terminate a slow startup
+ * before the runtime has finished initializing. macOS keeps the app resident
+ * after its windows close, so it follows the platform convention there.
+ */
+export function shouldQuitWhenAllWindowsClosed(
+  platform: NodeJS.Platform,
+  isBootReady: boolean,
+): boolean {
+  return isBootReady && platform !== "darwin";
+}
+
 export function resolveStartupSplashLanguage(
   databasePath: string,
   fallback: StartupSplashLanguage
@@ -25,14 +40,16 @@ export function resolveStartupSplashLanguage(
   }
 }
 
-export function resolveStartupSplashHtml(language: StartupSplashLanguage): string {
-  const hint = language === "en-US" ? "Starting…" : "正在启动…";
+export function resolveStartupSplashHtml(language: StartupSplashLanguage, slow = false): string {
+  const hint = slow
+    ? language === "en-US" ? "Taking longer than usual. Please wait…" : "启动时间较长，请稍候…"
+    : language === "en-US" ? "Starting…" : "正在启动…";
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{margin:0;height:100%;overflow:hidden;font-family:-apple-system,"Segoe UI",sans-serif;}
 body{display:flex;align-items:center;justify-content:center;background:#1f2937;color:#f9fafb;-webkit-user-select:none;cursor:default;}
 .box{display:flex;flex-direction:column;align-items:center;gap:16px;}
 .title{font-size:22px;font-weight:600;letter-spacing:1px;}
-.hint{font-size:13px;color:#9ca3af;}
+.hint{font-size:13px;color:#9ca3af;text-align:center;padding:0 16px;}
 .spinner{width:28px;height:28px;border:3px solid rgba(255,255,255,.2);border-top-color:#34d399;border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 </style></head><body><div class="box"><div class="spinner"></div><div class="title">Memmy</div><div class="hint">${hint}</div></div></body></html>`;

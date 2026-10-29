@@ -45,7 +45,12 @@ export function getWebuiDir(): string {
 }
 
 export function getWorkspacePath(workspace?: string | null): string {
-  return ensureDir(expandHome(workspace || process.env.MEMMY_AGENT_WORKSPACE || "~/.memmy/workspace"));
+  const target = expandHome(workspace || process.env.MEMMY_AGENT_WORKSPACE || "~/.memmy/workspace");
+  return process.env.AGENT_MANAGED_EXECUTION_REQUIRED === "1" ? target : ensureDir(target);
+}
+
+export function getStandaloneTaskWorkspacesDir(): string {
+  return path.resolve(expandHome(process.env.MEMMY_AGENT_TASKS_DIR || "~/Memmy"));
 }
 
 export function isDefaultWorkspace(workspace?: string | null): boolean {
@@ -59,4 +64,11 @@ export function getCliHistoryPath(): string {
 
 export function getBridgeInstallDir(): string {
   return path.join(os.homedir(), ".memmy", "bridge");
+}
+
+/** Host-owned state must never be created or loaded from an unapproved project directory. */
+export function getWorkspaceStatePath(workspace: string): string {
+  if (process.env.AGENT_MANAGED_EXECUTION_REQUIRED !== "1") return workspace;
+  if (!path.isAbsolute(process.env.MEMMY_AGENT_DATA_DIR ?? "")) throw new Error("Managed runtime data directory is required");
+  return getRuntimeSubdir("workspace");
 }

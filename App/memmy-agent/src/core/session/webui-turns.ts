@@ -8,7 +8,7 @@ import {
   WEBUI_PROJECT_ID_METADATA_KEY,
   WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "./manager.js";
-import { truncateText } from "../../utils/helpers.js";
+import { stripThink, truncateText } from "../../utils/helpers.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 
 export const WEBUI_SESSION_METADATA_KEY = "webui";
@@ -32,7 +32,11 @@ export function markWebuiSession(session: any, metadata: Record<string, any>): b
 }
 
 export function cleanGeneratedTitle(raw?: string | null): string {
-  let text = (raw ?? "").trim();
+  // Reasoning models can answer the title prompt with their own chain of
+  // thought (<think>…</think> / <reasoning>…), which would otherwise be stored
+  // verbatim as the session title (#432). reasoningEffort is "none" here, but
+  // inherently-reasoning models ignore it, so strip defensively.
+  let text = stripThink(raw ?? "").trim();
   if (!text) return "";
   text = text.replace(/^\s*(title|标题)\s*[:：]\s*/i, "");
   text = text.trim().replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "");

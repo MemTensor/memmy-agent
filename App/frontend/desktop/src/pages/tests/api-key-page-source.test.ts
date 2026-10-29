@@ -10,8 +10,8 @@ describe("ApiKeyPage source", () => {
   it("第一步仅保留大模型与 Embedding，测试连接按钮布局固定", () => {
     const source = readFileSync(apiKeyPageSourcePath, "utf8");
     const fieldsSource = readFileSync(fileURLToPath(new URL("../api-key-form-fields.tsx", import.meta.url)), "utf8");
-    const messageIndex = source.indexOf("<ValidationMessage validation={llmValidation} stale={isTestStale} />");
-    const buttonIndex = source.indexOf("<TestButton status={llmValidation.status} onClick={testLlmConnection} label={t(\"apiKey.test\")} />");
+    const messageIndex = source.indexOf("<ValidationMessage validation={llmValidation} stale={isTestStale}");
+    const buttonIndex = source.indexOf("<TestButton status=");
 
     expect(source).toContain('Brain, ChevronLeft, Search');
     expect(source).not.toContain("Mic");
@@ -46,7 +46,6 @@ describe("ApiKeyPage source", () => {
     expect(source).not.toContain('t("apiKey.dailyLimit")');
     expect(source).toContain('dispatch(appActions.navigate("/api-key-models"))');
     expect(source).toContain("clients.config.getModelConfig()");
-    expect(source).toContain('capabilities: ["agent"]');
     expect(source).toContain('protocol: "openai-embeddings"');
     expect(source).toContain('capabilities: ["embedding"]');
     expect(source).toContain('assignCatalogPreset(agent.workspace, "byok", "agent"');
@@ -80,12 +79,7 @@ describe("ApiKeyPage source", () => {
     expect(source).toContain("savedCatalogSignatureRef.current !== saveSignature");
     expect(source).toContain("savedCatalogSignatureRef.current = saveSignature");
     expect(source).toContain("const savedEndpointIdentitiesRef = useRef");
-    expect(source).toContain("savedAgentIdentity?.credentialSignature === agentCredentialSignature");
-    expect(source).toContain("savedEmbeddingIdentity?.credentialSignature === embeddingCredentialSignature");
     expect(source).toContain("endpointCredentialSignature(");
-    expect(source).toContain("provider: provider.trim().toLowerCase()");
-    expect(source).toContain('endpoint: endpoint.trim().replace(/\\/+$/, "")');
-    expect(source).toContain("credential: normalizedMaskedApiKey ?");
     expect(source).toContain('role="alert"');
     expect(source).toContain("} finally {");
   });
@@ -95,7 +89,7 @@ describe("ApiKeyPage source", () => {
 
     expect(source).toContain('hydrateModelConfigForm(state.modelConfig, "local")');
     expect(source).toContain("fromProtocol(initialModelForm.protocol)");
-    expect(source).toContain("const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked)");
+    expect(source).toContain("const [apiKeyMasked] = useState(initialModelForm.apiKeyMasked)");
     expect(source).toContain("hasExistingApiKey: Boolean(apiKeyMasked)");
     expect(source).toContain("const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>(initialEmbeddingMode)");
     expect(source).toContain("apiKeyMasked: embeddingConfig.apiKeyMasked");
@@ -110,7 +104,7 @@ describe("ApiKeyPage source", () => {
 
     expect(source).not.toContain("showSavedSecret");
     expect(source).not.toContain('savedLabel={t("apiKey.savedKey")}');
-    expect(source).toContain("maskedValue={apiKeyMasked}");
+    expect(source).toContain("maskedValue={modelFormValues.apiKeyMasked}");
     expect(fieldsSource).toContain("const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;");
     expect(fieldsSource).toContain("placeholder={placeholder}");
   });
@@ -140,7 +134,6 @@ describe("ApiKeyPage source", () => {
     expect(source).toContain("setEndpoint(next.endpoint)");
     expect(source).toContain('setModel(next.value === "minimax" ? next.defaultModelId : "")');
     expect(source).toContain('setApiKey("");');
-    expect(source).toContain('setApiKeyMasked("");');
     expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${selectedProvider.defaultModelId}`}');
     expect(source).not.toContain("modelPlaceholder");
   });

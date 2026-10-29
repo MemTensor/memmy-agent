@@ -70,12 +70,9 @@ describe("memmy-memory CLI setup commands", () => {
           enableMemorySearch: true,
           enableQueryRewrite: false
         },
-        embedding: {
-          mode: "local",
-          provider: "local"
-        }
       }
     });
+    expect(saved.memmyMemory.embedding).toBeUndefined();
     expect(existsSync(dbPath)).toBe(false);
   });
 
@@ -429,11 +426,8 @@ describe("memmy-memory CLI setup commands", () => {
         enableMemorySearch: true,
         enableQueryRewrite: false
       },
-      embedding: {
-        mode: "local",
-        provider: "local"
-      }
     });
+    expect(saved.memmyMemory.embedding).toBeUndefined();
     expect(existsSync(dbPath)).toBe(false);
   });
 
@@ -473,7 +467,7 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved.memmyMemory.summary.model).toBe("memmy-model");
   });
 
-  it("preserves embedding modes during setup", async () => {
+  it("removes legacy embedding modes during setup", async () => {
     for (const mode of ["cloud", "local", "custom"]) {
       const root = tempRoot();
       const configPath = join(root, "config.yaml");
@@ -495,21 +489,23 @@ describe("memmy-memory CLI setup commands", () => {
       });
 
       const saved = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(saved.memmyMemory.embedding).toEqual({ mode });
+      expect(saved.memmyMemory.embedding).toBeUndefined();
     }
   });
 
-  it("preserves embedding connections during setup", async () => {
+  it("moves embedding connections into the model catalog during setup", async () => {
     for (const embedding of [
       {
         provider: "openai_compatible",
-        endpoint: "https://example.com/v1"
+        endpoint: "https://example.com/v1",
+        model: "text-embedding-3-small"
       },
       {
         mode: "custom",
         custom: {
           provider: "openai_compatible",
-          endpoint: "https://example.com/v1"
+          endpoint: "https://example.com/v1",
+          model: "text-embedding-3-small"
         }
       }
     ]) {
@@ -528,7 +524,8 @@ describe("memmy-memory CLI setup commands", () => {
         ]
       });
       const saved = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(saved.memmyMemory.embedding).toEqual(embedding);
+      expect(saved.memmyMemory.embedding).toBeUndefined();
+      expect(saved.modelAssignments.byok.embedding).toEqual(expect.any(String));
     }
   });
 

@@ -35,6 +35,33 @@ function sent(ws: { send: ReturnType<typeof vi.fn> }, index = 0): any {
   return JSON.parse(ws.send.mock.calls[index][0]);
 }
 
+function withoutCreatedAt<T extends Record<string, any>>(row: T): T {
+  const copy = { ...row };
+  delete copy.createdAt;
+  return copy;
+}
+
+function withoutOffset(value: any): any {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const { transcript_offset: _offset, ...rest } = value as Record<string, unknown>;
+  void _offset;
+  return rest;
+}
+
+/**
+ * Persisted transcript rows stripped of the fields the writers add on the way
+ * to disk — the CreatedAt synthesis and the transcript_offset identity stamp —
+ * for cases that assert record content. Both have their own coverage.
+ */
+function transcriptRows(sessionKey: string): any[] {
+  return fs.readFileSync(webuiTranscriptPath(sessionKey), "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line))
+    .map(withoutOffset)
+    .map(withoutCreatedAt);
+}
+
 function modelSelection(preset: string, provider: string, model: string): any {
   const endpointId = provider === "anthropic" ? "messages" : "chat";
   const protocol = provider === "anthropic" ? "anthropic-messages" : "openai-chat-completions";
@@ -512,6 +539,75 @@ describe("WebSocket channel", () => {
     });
   });
 
+  it("delivers scheduled results to GUI windows without a target-chat subscription", async () => {
+    const channel = webuiChannel(new MessageBus());
+    const first = connection();
+    const second = connection();
+    const tui = connection();
+    channel.attachConnection(first, "other-chat-1");
+    channel.attachConnection(second, "other-chat-2");
+    channel.connectionSurface.set(tui, "tui");
+    channel.attachConnection(tui, "scheduled-chat");
+    const metadata = { proactiveDelivery: "cron", deliveryId: "cron:job:1000:1" };
+    await channel.send(new OutboundMessage({ channel: "websocket", chatId: "scheduled-chat",
+      content: "暂无微信新消息", metadata }));
+    for (const gui of [first, second]) {
+      expect(sent(gui)).toMatchObject({ event: "message", chat_id: "scheduled-chat",
+        text: "暂无微信新消息", metadata });
+    }
+    expect(tui.send).not.toHaveBeenCalled();
+    // A newly consumed transcript record from another agent process is live,
+    // and must reach the same windows without changing its delivery identity.
+    await channel.consumeTranscriptRecord({ event: "message", chat_id: "scheduled-chat",
+      text: "later result", metadata: { ...metadata, deliveryId: "cron:job:121000:1" } });
+    expect(sent(first, 1)).toMatchObject({ text: "later result",
+      metadata: { deliveryId: "cron:job:121000:1" } });
+    expect(tui.send).not.toHaveBeenCalled();
+  });
+
+  it("persists results produced before GUI startup and clears them only after GUI acknowledgement", async () => {
+    const root = tempDataDir();
+    const channel = webuiChannel(new MessageBus(), root);
+    const metadata = { proactiveDelivery: "cron", deliveryId: "cron:job:1000:1" };
+    await channel.send(new OutboundMessage({ channel: "websocket", chatId: "late-chat",
+      content: "暂无微信新消息", metadata }));
+    const file = path.join(root, "webui", "pending-cron-notifications.json");
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toHaveLength(1);
+    const restarted = webuiChannel(new MessageBus(), root);
+    const tui = connection();
+    restarted.connectionSurface.set(tui, "tui");
+    restarted.attachConnection(tui, "other-chat");
+    await restarted.flushPendingCronNotifications();
+    expect(tui.send).not.toHaveBeenCalled();
+    await restarted.dispatchEnvelope(tui, "tui", { type: "cron_delivery_ack", delivery_id: metadata.deliveryId });
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toHaveLength(1);
+    const gui = connection();
+    restarted.attachConnection(gui, "other-chat");
+    await restarted.flushPendingCronNotifications();
+    expect(sent(gui)).toMatchObject({ event: "message", chat_id: "late-chat",
+      text: "暂无微信新消息", metadata: { ...metadata, replayed: false } });
+    // Writing to the socket alone does not prove the renderer consumed it.
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toHaveLength(1);
+    await restarted.dispatchEnvelope(gui, "gui", { type: "cron_delivery_ack", delivery_id: metadata.deliveryId });
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).entries).toEqual([]);
+    await restarted.flushPendingCronNotifications();
+    expect(gui.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a pending reminder when a connected GUI socket fails", async () => {
+    const root = tempDataDir();
+    const channel = webuiChannel(new MessageBus(), root);
+    const closed = connection();
+    closed.send.mockRejectedValueOnce(new Error("synthetic disconnected socket"));
+    channel.attachConnection(closed, "other-chat");
+    await channel.send(new OutboundMessage({ channel: "websocket", chatId: "late-chat", content: "result",
+      metadata: { proactiveDelivery: "cron", deliveryId: "cron:job:1000:1" } }));
+    const gui = connection();
+    channel.attachConnection(gui, "other-chat");
+    await channel.flushPendingCronNotifications();
+    expect(sent(gui)).toMatchObject({ text: "result", metadata: { deliveryId: "cron:job:1000:1" } });
+  });
+
   it("projects all Turn content to GUI and only TUI-owned Turn content to TUI", async () => {
     const channel = webuiChannel(new MessageBus());
     const gui = connection();
@@ -587,7 +683,8 @@ describe("WebSocket channel", () => {
 
   it("keeps a TUI connection attached to one Session and targets Stop only there", async () => {
     const stopExpectedTurn = vi.fn(async () => "stopped" as const);
-    const channel = new WebSocketChannel({}, new MessageBus(), { stopExpectedTurn });
+    const stopCurrentTurn = vi.fn(async () => 1);
+    const channel = new WebSocketChannel({}, new MessageBus(), { stopExpectedTurn, stopCurrentTurn });
     const tui = connection();
     channel.connectionSurface.set(tui, "tui");
     channel.attachConnection(tui, "chat-old");
@@ -614,6 +711,7 @@ describe("WebSocket channel", () => {
       expected_turn_id: "turn-current",
     });
     expect(stopExpectedTurn).toHaveBeenCalledWith("websocket:chat-current", "turn-current");
+    expect(stopCurrentTurn).not.toHaveBeenCalled();
     expect(sent(tui)).toEqual({
       event: "stop_result",
       chat_id: "chat-current",
@@ -1167,6 +1265,18 @@ describe("WebSocket channel", () => {
     expect(sent(ws, 3).model_error).toEqual({ category: "image_input_unsupported" });
   });
 
+  it("persists an event timestamp for WebUI transcript rows", () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    channel.tryAppendWebuiTranscript("chat-timestamp", { event: "message", text: "hello" });
+    channel.tryAppendWebuiTranscript("chat-timestamp", { event: "turn_end" });
+    const rows = fs.readFileSync(webuiTranscriptPath("websocket:chat-timestamp"), "utf8")
+      .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(2);
+    expect(rows[0].createdAt).toEqual(expect.any(Number));
+    expect(rows[1].createdAt).toBeGreaterThan(rows[0].createdAt);
+  });
+
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {
     tempDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());
@@ -1185,7 +1295,7 @@ describe("WebSocket channel", () => {
       },
     }));
 
-    expect(sent(ws)).toEqual({
+    expect(withoutOffset(sent(ws))).toEqual({
       event: "context_compaction",
       chat_id: "chat-1",
       compaction_id: "context-compaction:turn-1",
@@ -1193,11 +1303,7 @@ describe("WebSocket channel", () => {
       text: "压缩已完成",
       content: "压缩已完成",
     });
-    const transcript = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\n/u)
-      .map((line) => JSON.parse(line));
-    expect(transcript).toEqual([sent(ws)]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([withoutOffset(sent(ws))]);
   });
 
   it("sends retry wait as a live-only event without transcript content", async () => {
@@ -1574,17 +1680,63 @@ describe("WebSocket channel", () => {
 
     await channel.dispatchEnvelope(ws, "client-1", { type: "stop", chat_id: "chat-1" });
     expect(cancelActiveTasks).toHaveBeenCalledWith("websocket:chat-1");
-    expect(sent(ws)).toEqual({
+    expect(withoutOffset(sent(ws))).toEqual({
       event: "stop_result",
       chat_id: "chat-1",
       stopped: 1,
     });
     expect(bus.inbound.getNowait()).toBeUndefined();
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines).toEqual([{ event: "stop_result", chat_id: "chat-1", stopped: 1 }]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([
+      { event: "stop_result", chat_id: "chat-1", stopped: 1 },
+    ]);
+  });
+
+  it("routes GUI Stop to the current turn without cancelling queued messages", async () => {
+    tempDataDir();
+    const bus = new MessageBus();
+    const stopCurrentTurn = vi.fn(async () => 1);
+    const cancelActiveTasks = vi.fn(async () => 3);
+    const activeGoalStopHandler = vi.fn(async () => true);
+    const channel = new WebSocketChannel({}, bus, { stopCurrentTurn, cancelActiveTasks, activeGoalStopHandler });
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123, turnId: "turn-current", source: { kind: "gui", channel: "websocket" } });
+    ws.send.mockClear();
+
+    await channel.dispatchEnvelope(ws, "client-1", { type: "stop", chat_id: "chat-1" });
+
+    expect(stopCurrentTurn).toHaveBeenCalledWith("websocket:chat-1", "turn-current");
+    expect(cancelActiveTasks).not.toHaveBeenCalled();
+    expect(activeGoalStopHandler).not.toHaveBeenCalled();
+    expect(channel.activeTurnIdByChatId.has("chat-1")).toBe(false);
+    expect(channel.activeTurnSourceByChatId.has("chat-1")).toBe(false);
+    expect(withoutOffset(sent(ws))).toEqual({ event: "stop_result", chat_id: "chat-1", turn_id: "turn-current", stopped: 1 });
+    expect(bus.inbound.getNowait()).toBeUndefined();
+  });
+
+  it("keeps the next active turn when it starts before the previous Stop finishes", async () => {
+    tempDataDir();
+    const stopping = deferred<number>();
+    const stopCurrentTurn = vi.fn(async () => stopping.promise);
+    const channel = new WebSocketChannel({}, new MessageBus(), { stopCurrentTurn });
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+    const source = { kind: "gui", channel: "websocket" } as const;
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123, turnId: "turn-old", source });
+
+    const stop = channel.dispatchEnvelope(ws, "client-1", { type: "stop", chat_id: "chat-1" });
+    await vi.waitFor(() => expect(stopCurrentTurn).toHaveBeenCalledWith("websocket:chat-1", "turn-old"));
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 124, turnId: "turn-next", source });
+    stopping.resolve(1);
+    await stop;
+
+    expect(channel.activeTurnIdByChatId.get("chat-1")).toBe("turn-next");
+    expect(channel.activeTurnSourceByChatId.get("chat-1")).toEqual(source);
+    expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+      event: "stop_result", turn_id: "turn-old", stopped: 1,
+    }));
+    await channel.dispatchEnvelope(ws, "client-1", { type: "stop", chat_id: "chat-1" });
+    expect(stopCurrentTurn).toHaveBeenLastCalledWith("websocket:chat-1", "turn-next");
   });
 
   it("emits stream and goal control events to subscribers", async () => {
@@ -1986,7 +2138,7 @@ describe("WebSocket channel", () => {
       }),
     );
 
-    expect(sent(ws)).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
+    expect(withoutOffset(sent(ws))).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
   });
 
   it("drops live payloads for inactive turn ids but keeps cancellation terminal file edits", async () => {
@@ -2046,11 +2198,7 @@ describe("WebSocket channel", () => {
       }],
     });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines).toEqual([sent(ws, 1)]);
+    expect(transcriptRows("websocket:chat-1")).toEqual([withoutOffset(sent(ws, 1))]);
   });
 
   it("sends agent UI blobs on progress messages", async () => {
@@ -2093,6 +2241,52 @@ describe("WebSocket channel", () => {
     expect(sent(ws, 1)).not.toHaveProperty("resuming");
   });
 
+  it("stamps transcript_offset on broadcast delta frames, increasing across the stream", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
+    await channel.sendDelta("chat-1", "lo", { streamId: "s1", streamEnd: true });
+
+    const first = sent(ws, 0);
+    const last = sent(ws, 1);
+    expect(typeof first.transcript_offset).toBe("number");
+    expect(typeof last.transcript_offset).toBe("number");
+    expect(first.transcript_offset).toBeLessThan(last.transcript_offset);
+
+    // The broadcast identity is the record's starting byte position in the file,
+    // so the two frames match the two persisted rows.
+    const persisted = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    expect(persisted.map((row: any) => row.event)).toEqual(["delta", "stream_end"]);
+    expect(persisted.map((row: any) => row.transcript_offset)).toEqual([
+      first.transcript_offset,
+      last.transcript_offset,
+    ]);
+  });
+
+  it("broadcasts delta frames without transcript_offset when the transcript write fails", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    // Make the transcript path unwritable so appendTranscriptObject throws.
+    const transcriptPath = webuiTranscriptPath("websocket:chat-1");
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    fs.mkdirSync(transcriptPath, { recursive: true });
+
+    await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
+
+    const payload = sent(ws, 0);
+    expect(payload).toMatchObject({ event: "delta", text: "hel" });
+    expect(payload).not.toHaveProperty("transcript_offset");
+  });
+
   it("emits resuming stream_end frames only when requested", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
@@ -2132,11 +2326,7 @@ describe("WebSocket channel", () => {
       goalOutcome: "active",
     });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines).toEqual([
+    expect(transcriptRows("websocket:chat-1")).toEqual([
       { event: "reasoning_delta", chat_id: "chat-1", text: "thinking", stream_id: "r1" },
       { event: "reasoning_end", chat_id: "chat-1", stream_id: "r1" },
       {
@@ -2591,11 +2781,7 @@ describe("WebSocket channel", () => {
     await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
     await channel.sendDelta("chat-1", "lo", { streamId: "s1", streamEnd: true, resuming: true });
 
-    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => JSON.parse(line));
-    expect(lines).toEqual([
+    expect(transcriptRows("websocket:chat-1")).toEqual([
       { event: "delta", chat_id: "chat-1", text: "hel", stream_id: "s1" },
       { event: "stream_end", chat_id: "chat-1", resuming: true, text: "hello", stream_id: "s1" },
     ]);
@@ -2754,7 +2940,7 @@ describe("WebSocketChannel memmy parity cases", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
     await channel.send(new OutboundMessage({ channel: "websocket", chatId: "chat-1", metadata: { fileEditEvents: [{ path: "a.ts", action: "write" }] } }));
-    expect(sent(ws)).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
+    expect(withoutOffset(sent(ws))).toEqual({ event: "file_edit", chat_id: "chat-1", edits: [{ path: "a.ts", action: "write" }] });
   });
 
   it("includes agent UI payloads in progress messages", async () => {

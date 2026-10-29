@@ -152,6 +152,10 @@ function unavailableNetworkError(error: unknown): boolean {
   ]).has(errorCode(error) ?? "");
 }
 
+function transientGatewayProbe(result: GatewayProbe): boolean {
+  return result.status === "unexpected" && /^bootstrap HTTP 5\d\d$/.test(result.detail);
+}
+
 function gatewayEndpoint(config: Config): GatewayEndpoint {
   const options = tuiGatewayOptionsFromConfig(config, "cli:systemd-probe");
   return {
@@ -216,6 +220,12 @@ export async function probeGateway(
         : undefined,
       signal: controller.signal,
     });
+    if (response.status === 503) {
+      return {
+        status: "unavailable",
+        detail: "bootstrap HTTP 503",
+      };
+    }
     if (!response.ok) {
       return {
         status: "unexpected",
@@ -518,7 +528,7 @@ async function waitForGatewayReady(
       continue;
     }
     lastDetail = result.detail;
-    if (result.status === "unexpected") {
+    if (result.status === "unexpected" && !transientGatewayProbe(result)) {
       throw new LinuxSystemdGatewayError(
         `Gateway endpoint is occupied, incompatible, or rejected authentication (${result.detail}).`,
       );
@@ -570,7 +580,7 @@ export async function runLinuxRootTerminal(
       + "Stop that Gateway before starting the installed Memmy CLI.",
     );
   }
-  if (result.status === "unexpected" && servicePid === null) {
+  if (result.status === "unexpected" && servicePid === null && !transientGatewayProbe(result)) {
     throw new LinuxSystemdGatewayError(
       `Gateway endpoint is occupied, incompatible, or rejected authentication (${result.detail}).`,
     );
@@ -589,7 +599,7 @@ export async function runLinuxRootTerminal(
         + "Stop that Gateway before starting the installed Memmy CLI.",
       );
     }
-    if (result.status === "unexpected" && servicePid === null) {
+    if (result.status === "unexpected" && servicePid === null && !transientGatewayProbe(result)) {
       throw new LinuxSystemdGatewayError(
         `Gateway endpoint is occupied, incompatible, or rejected authentication (${result.detail}).`,
       );
@@ -603,7 +613,8 @@ export async function runLinuxRootTerminal(
   const environmentChanged = dependencies.prepareGatewayEnvironment
     ? await dependencies.prepareGatewayEnvironment()
     : await prepareSystemdGatewayEnvironment();
-  restart ||= environmentChanged || result.status === "unexpected";
+  restart ||= environmentChanged
+    || (result.status === "unexpected" && !transientGatewayProbe(result));
   await (dependencies.enableGatewayService ?? enableSystemdGatewayService)({ restart });
   await waitForGatewayReady(config, dependencies);
 

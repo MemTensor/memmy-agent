@@ -898,7 +898,7 @@ const en = {
     "Configure an embedding provider before repairing or rebuilding vectors.",
   "settings.embedding.maxInputTokens.label": "Maximum input tokens",
   "settings.embedding.maxInputTokens.hint":
-    "OpenAI-compatible embedding models use a conservative 7,500-token budget automatically. Set a lower budget for providers with shorter context windows; rebuild vectors after changing it.",
+    "Known OpenAI embedding models use a 7,500-token chunk budget; opaque OpenAI-compatible models use a conservative 4,000-token budget. Set a lower budget for shorter context windows; rebuild vectors after changing it.",
   "settings.embedding.providerBatchSize.label": "Embedding API batch size",
   "settings.embedding.providerBatchSize.hint":
     "Maximum texts per provider request. Rejected oversized batches are split automatically.",
@@ -1032,6 +1032,7 @@ const en = {
   "settings.agents.skillInstalled": "Skill installed",
   "settings.agents.hookInstalled": "Hook installed",
   "settings.agents.pluginInstalled": "Plugin installed",
+  "settings.agents.opencodeReloadHint": "After installing or updating the Memmy plugin, save your work and fully quit and reopen OpenCode. Restart any separate OpenCode server as well.",
   "settings.agents.skillNotInstalled": "Skill not installed",
   "settings.agents.hookNotInstalled": "Hook not installed",
   "settings.agents.pluginNotInstalled": "Plugin not installed",
@@ -1854,7 +1855,7 @@ const zh: Record<TranslationKey, string> = {
     "可用 {ready}/{total}；缺失 {missing}；维度不匹配 {mismatch}；当前维度 {dim}。",
   "settings.embedding.maintenance.unavailable": "请先配置嵌入模型，再修复或重建向量。",
   "settings.embedding.maxInputTokens.label": "单条输入最大 Token 数",
-  "settings.embedding.maxInputTokens.hint": "OpenAI 兼容 Embedding 模型会自动使用保守的 7500 Token 预算；上下文窗口更短时可设置更低预算，修改后请重建向量。",
+  "settings.embedding.maxInputTokens.hint": "已知 OpenAI Embedding 模型使用 7500 Token 分块预算；模型信息不透明的 OpenAI 兼容服务使用保守的 4000 Token 预算。上下文窗口更短时可设置更低预算，修改后请重建向量。",
   "settings.embedding.providerBatchSize.label": "Embedding API 批量大小",
   "settings.embedding.providerBatchSize.hint": "单次模型请求最多发送的文本数；超限失败时会自动拆批。",
   "settings.embedding.repair": "修复缺失/错维",
@@ -1984,6 +1985,7 @@ const zh: Record<TranslationKey, string> = {
   "settings.agents.skillInstalled": "已写入 Skill",
   "settings.agents.hookInstalled": "已安装 Hook",
   "settings.agents.pluginInstalled": "已安装插件",
+  "settings.agents.opencodeReloadHint": "安装或更新 Memmy 插件后，请保存工作并完全退出、重新打开 OpenCode。若使用独立 OpenCode 服务，也需重启该服务。",
   "settings.agents.skillNotInstalled": "未安装 Skill",
   "settings.agents.hookNotInstalled": "未安装 Hook",
   "settings.agents.pluginNotInstalled": "未安装插件",

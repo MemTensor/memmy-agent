@@ -1,0 +1,3 @@
+.section { color: inherit; }
+.error { margin: 0; padding: 8px 0; color: #c62828; font: inherit; }
+.dialogBody { max-height: min(640px, calc(100dvh - 160px)); overflow-y: auto; }

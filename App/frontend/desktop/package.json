@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
-    "typecheck": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build -w @memmy/desktop-interface && vitest run"
+    "build": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
+    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && vitest run --reporter=dot --silent=true"
   },
   "dependencies": {
     "@memmy/desktop-interface": "0.0.0",
+    "@memmy/knowledge": "0.0.0",
     "@memmy/local-api-contracts": "0.0.0",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^6.0.2",
@@ -18,6 +19,7 @@
     "electron-log": "^5.4.4",
     "katex": "^0.16.47",
     "lucide-react": "^1.16.0",
+    "monaco-editor": "^0.57.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",

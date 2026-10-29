@@ -2,8 +2,20 @@ export {
   RuntimeConfigSchema as DesktopRuntimeConfigSchema,
   type RuntimeConfig as DesktopRuntimeConfig
 } from "@memmy/local-api-contracts";
+export type { BrowserAllowAllState } from "@memmy/local-api-contracts";
+
+export interface DesktopBrowserAllowAllApi {
+  getBrowserAllowAll(): Promise<import("@memmy/local-api-contracts").BrowserAllowAllState>;
+  setBrowserAllowAll(enabled: boolean): Promise<import("@memmy/local-api-contracts").BrowserAllowAllState>;
+  onBrowserAllowAllChanged(listener: (state: import("@memmy/local-api-contracts").BrowserAllowAllState) => void): () => void;
+}
 
 export type MicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "restricted" | "unsupported";
+
+export interface DesktopBrowserExtensionDragApi {
+  /** Call during dragstart; true means the bundled extension folder began a native drag. */
+  dragBrowserExtension(): boolean;
+}
 
 export interface DesktopMenuBarIconResult {
   enabled: boolean;
@@ -74,3 +86,17 @@ export type DesktopImageSaveResult =
 export type DesktopProjectDirectorySelection =
   | { canceled: true }
   | { canceled: false; path: string };
+
+export interface DesktopWorkspaceDirectoryEntry {
+  name: string;
+  path: string;
+  relativePath: string;
+  kind: "file" | "directory";
+}
+
+export interface DesktopWorkspaceDirectoryResult {
+  rootPath: string;
+  relativePath: string;
+  entries: DesktopWorkspaceDirectoryEntry[];
+  truncated: boolean;
+}

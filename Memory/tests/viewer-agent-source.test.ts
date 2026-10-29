@@ -11,6 +11,7 @@ describe("Viewer Agent source labels", () => {
     expect(sourceAgentLabel("hermes")).toBe("Hermes");
     expect(sourceAgentLabel("OPENCLAW")).toBe("OpenClaw");
     expect(sourceAgentLabel("memmy-agent")).toBe("Memmy");
+    expect(sourceAgentLabel("computer_history")).toBe("Memmy");
   });
 
   it("normalizes source ids and creates initials for custom Agents", () => {
@@ -21,7 +22,7 @@ describe("Viewer Agent source labels", () => {
 
   it("includes discovered custom Agents in search options", () => {
     const options = mergeAgentSourceOptions(
-      [{ source: "hermes", count: 3 }],
+      [{ source: "hermes", count: 3 }, { source: "memmy", count: 2 }, { source: "computer_history", count: 1 }],
       [
         { sourceId: "hermes", displayName: "Hermes", builtin: true, available: true },
         { sourceId: "manual-kimi", displayName: "Kimi Code", builtin: false, available: true },
@@ -31,9 +32,11 @@ describe("Viewer Agent source labels", () => {
     expect(options).toEqual(expect.arrayContaining([
       { source: "hermes", count: 3, label: "Hermes" },
       { source: "manual_kimi", count: 0, label: "Kimi Code" },
-      { source: "memmy_agent", count: 0, label: "Memmy" },
+      { source: "memmy_agent", count: 3, label: "Memmy" },
       { source: "cursor", count: 0, label: "Cursor" },
       { source: "opencode", count: 0, label: "OpenCode" },
     ]));
+    expect(options.filter((option) => option.label === "Memmy")).toHaveLength(1);
+    expect(options.some((option) => option.source === "computer_history")).toBe(false);
   });
 });

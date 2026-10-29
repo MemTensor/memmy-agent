@@ -3,6 +3,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  activityPreviewFileFromEdit,
+  activityPreviewFileFromToolEvent,
   extractApplyPatchSummaryPaths,
   formatToolCallTrace,
   mergeFileEdits,
@@ -201,6 +203,12 @@ describe("agent tool trace helpers", () => {
       line: "Listed proj",
       category: "list"
     });
+    expect(summarizeToolCall({ phase: "end", name: "list_dir", arguments: { path: "." } })).toMatchObject({
+      line: "Listed current directory",
+      detail: "current directory",
+      category: "list"
+    });
+    expect(summarizeToolCall({ phase: "end", name: "ls", arguments: { path: "./" } })?.detail).toBe("current directory");
     expect(summarizeToolCall({ phase: "end", name: "edit_file", arguments: { file_path: "/Users/lv/proj/app.tsx" } })).toMatchObject({
       line: "Edited app.tsx",
       category: "edit"
@@ -320,5 +328,90 @@ describe("agent tool trace helpers", () => {
     for (const name of ["applypatch", "patch", "mcp_server_apply_patch"]) {
       expect(formatToolCallTrace({ name, arguments: { path: "src/legacy.ts" } })).toBe("Edited legacy.ts");
     }
+  });
+});
+
+describe("activity preview files", () => {
+  const singlePatch = [
+    "*** Begin Patch",
+    "*** Update File: tmp/analyze_tpl.py",
+    "@@",
+    "-old",
+    "+new",
+    "*** End Patch",
+  ].join("\n");
+
+  it("opens one local file from a path field without caring which tool produced it", () => {
+    expect(activityPreviewFileFromEdit({
+      tool: "edit_file",
+      path: "tmp/analyze_tpl.py",
+      absolute_path: "/work/tmp/analyze_tpl.py",
+    })).toEqual({ path: "/work/tmp/analyze_tpl.py", name: "analyze_tpl.py" });
+    expect(activityPreviewFileFromToolEvent({
+      name: "read_file",
+      arguments: { filePath: "tmp/analyze_tpl.py" },
+    })).toEqual({ path: "tmp/analyze_tpl.py", name: "analyze_tpl.py" });
+    expect(activityPreviewFileFromToolEvent({
+      name: "office_export",
+      arguments: { file_path: "out/report.docx" },
+    })).toEqual({ path: "out/report.docx", name: "report.docx" });
+    expect(activityPreviewFileFromToolEvent({
+      name: "apply_patch",
+      arguments: { input: singlePatch },
+    })).toEqual({ path: "tmp/analyze_tpl.py", name: "analyze_tpl.py" });
+    expect(activityPreviewFileFromToolEvent({
+      name: "write_file",
+      arguments: { path: "C:\\work\\app.py" },
+    })).toEqual({ path: "C:\\work\\app.py", name: "app.py" });
+  });
+
+  it("treats the same path repeated in two fields as one file", () => {
+    expect(activityPreviewFileFromToolEvent({
+      name: "write_file",
+      arguments: { path: "src/a.ts", file_path: "src\\a.ts" },
+    })).toEqual({ path: "src/a.ts", name: "a.ts" });
+  });
+
+  it("leaves directories, deletes, urls, commands, and ambiguous rows alone", () => {
+    expect(activityPreviewFileFromEdit({ tool: "delete_file", path: "tmp/a.py" })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "delete_file",
+      arguments: { path: "tmp/a.py" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "list_dir",
+      arguments: { path: "tmp/analyze_tpl.py" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "read_file",
+      arguments: { path: "src/" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "read_file",
+      arguments: { path: "release/v1.2" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "read_file",
+      arguments: { path: ["src/a.ts", "src/b.ts"] },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "exec",
+      arguments: { command: "python tmp/analyze_tpl.py" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "web_fetch",
+      arguments: { url: "https://example.com/a.py" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "read_file",
+      arguments: { path: "My Notes.md" },
+    })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({ name: "read_file" })).toBeNull();
+    expect(activityPreviewFileFromToolEvent({
+      name: "apply_patch",
+      arguments: {
+        input: ["*** Begin Patch", "*** Delete File: tmp/a.py", "*** End Patch"].join("\n"),
+      },
+    })).toBeNull();
   });
 });

@@ -557,6 +557,9 @@ describe("MemoryService / evolution / orchestration", () => {
     });
 
     service.closeSession(session.sessionId);
+    db.db.prepare(
+      `UPDATE evolution_jobs SET status = 'succeeded' WHERE episode_id = ?`
+    ).run(first.episodeId);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);

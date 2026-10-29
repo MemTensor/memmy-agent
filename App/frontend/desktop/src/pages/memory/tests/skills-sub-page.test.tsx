@@ -2,11 +2,78 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
-import { loadSkillDetail, loadSkillsData, loadSkillTimeline, SkillsSubPageView, skillStatusTone } from "../skills-sub-page.js";
+import { isHistoryDerivedSkill, loadSkillDetail, loadSkillsData, loadSkillTimeline, SkillsSubPageView, skillStatusTone } from "../skills-sub-page.js";
 import { demoSkillDetail, demoSkillPanelItems, demoSkillTimeline, isSkillsDemoEnabled } from "../skill-demo-data.js";
 import { createMemoryRuntimeClientStub, panelItemsOutput, skillPanelDetailFixture, skillPanelItemsFixture } from "./fixtures.js";
 
 describe("SkillsSubPage", () => {
+  it("preserves approval for other external Skill candidates", () => {
+    const detail = { ...skillPanelDetailFixture, item: {
+      ...skillPanelDetailFixture.item, status: "resolving" as const,
+      sourceMemoryIds: ["history-memory-1", "history-memory-2"],
+      metadata: { properties: { internal_info: { external_evidence_candidate: { source: "other_observer" } } } }
+    } };
+    const html = renderToString(<I18nProvider language="zh-CN"><SkillsSubPageView
+      state={{ status: "ready", data: skillPanelItemsFixture, detail: { status: "ready", data: { detail, timeline: [] } } }}
+      query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()}
+      onRefresh={vi.fn()} onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)}
+      onApproveObservedSkill={vi.fn(async () => undefined)} onCloseSkill={vi.fn()}
+      onOpenMemoryReference={vi.fn()} /></I18nProvider>);
+    expect(html).toContain("确认并启用这个 Skill");
+    expect(html).toContain("history-memory-1");
+  });
+
+  it.each(["activated", "resolving"] as const)("offers post-editing without routine approval for History %s Skills", (status) => {
+    const detail = { ...skillPanelDetailFixture, item: { ...skillPanelDetailFixture.item, status,
+      metadata: { properties: { internal_info: { read_only: false,
+        external_evidence_candidate: { source: "computer_history", activation_mode: "automatic_history" } } } } } };
+    const html = renderToString(<I18nProvider language="zh-CN"><SkillsSubPageView
+      state={{ status: "ready", data: skillPanelItemsFixture, detail: { status: "ready", data: { detail, timeline: [] } } }}
+      query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()}
+      onRefresh={vi.fn()} onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)}
+      onApproveObservedSkill={vi.fn(async () => undefined)} onUpdateObservedSkill={vi.fn(async () => undefined)}
+      onCloseSkill={vi.fn()} onOpenMemoryReference={vi.fn()} /></I18nProvider>);
+    expect(html).not.toContain("确认并启用这个 Skill");
+    expect(html).toContain(status === "activated" ? "根据电脑历史中观察到的操作自动整理并启用" : "尚未自动启用");
+    if (status === "activated") {
+      expect(html).toContain("摘要中的事实尚未逐条对照原始记录核验");
+      expect(html).toContain("执行结果尚未核实");
+    }
+    expect(html).toContain(">修改</button>");
+  });
+
+  it("recognizes legacy History sources without classifying ordinary Memmy candidates as automatic", () => {
+    expect(isHistoryDerivedSkill({ source: "memmy", sourceRecordIds: [
+      "2026-10-09T04-10-00Z-10min-summary", "2026-10-09T04-20-00Z-10min-summary"
+    ] })).toBe(true);
+    expect(isHistoryDerivedSkill({ source: "memmy", sourceRecordIds: ["other-1", "other-2"] })).toBe(false);
+    expect(isHistoryDerivedSkill({ source: "memmy", sourceRecordIds: ["2026-10-09T04-10-00Z-10min-summary"] })).toBe(false);
+  });
+
+  it("keeps a human draft readable and editable after its History sources change", () => {
+    const render = (changedHumanDraft: boolean) => {
+      const detail = { ...skillPanelDetailFixture, item: { ...skillPanelDetailFixture.item,
+        status: "archived" as const, body: "# 人工修订\n\n已经保存的修订内容。",
+        metadata: { properties: { internal_info: { read_only: false,
+          external_evidence_candidate: { source: "computer_history",
+            ...(changedHumanDraft ? { human_modified: true, source_status: "changed" } : {}) } } } } } };
+      return renderToString(<I18nProvider language="zh-CN"><SkillsSubPageView
+        state={{ status: "ready", data: skillPanelItemsFixture, detail: { status: "ready", data: { detail, timeline: [] } } }}
+        query="" onQueryChange={vi.fn()} onSearch={vi.fn()} onPageChange={vi.fn()}
+        onRefresh={vi.fn()} onOpenSkill={vi.fn()} onDeleteSkill={vi.fn(async () => undefined)}
+        onApproveObservedSkill={vi.fn(async () => undefined)} onUpdateObservedSkill={vi.fn(async () => undefined)}
+        onCloseSkill={vi.fn()} onOpenMemoryReference={vi.fn()} /></I18nProvider>);
+    };
+    const html = render(true);
+    expect(html).toContain("来源已更新，你的修订内容已保留");
+    expect(html).toContain("已经保存的修订内容");
+    expect(html).toContain(">修改</button>");
+    expect(html).not.toContain("确认并启用这个 Skill");
+    expect(html).not.toContain("电脑历史已自动整理为这个 Skill，并已启用");
+    const ordinaryArchived = render(false);
+    expect(ordinaryArchived).not.toContain(">修改</button>");
+    expect(ordinaryArchived).not.toContain("来源已更新");
+  });
   it("从 panel items/detail 读取技能数据", async () => {
     const client = createMemoryRuntimeClientStub({
       listPanelItems: vi.fn(async () => skillPanelItemsFixture),

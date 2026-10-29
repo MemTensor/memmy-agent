@@ -8,6 +8,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --config ./vitest.config.ts src"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
   }
 }

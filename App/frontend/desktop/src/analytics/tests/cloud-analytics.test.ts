@@ -85,6 +85,17 @@ describe("cloud-analytics", () => {
     });
   });
 
+  it("encodes boolean event parameters as GA4 numeric values", async () => {
+    setDesktopAnalyticsClientId("cid-boolean");
+    trackCloudAnalyticsEvent("feature_flag_seen", { enabled: true, dismissed: false });
+    await flushDesktopCloudAnalytics();
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      events: Array<{ params: Record<string, unknown> }>;
+    };
+    expect(body.events[0]?.params).toMatchObject({ enabled: 1, dismissed: 0 });
+  });
+
   it("always supplies the required byok mode for a signed-out event", async () => {
     setDesktopAnalyticsClientId("cid-1");
     trackCloudAnalyticsEvent("welcome_viewed");

@@ -4,6 +4,17 @@ import { useEffect } from "react";
 export const WINDOW_FULLSCREEN_BODY_CLASS = "memmy-window-fullscreen";
 export const WINDOWS_PLATFORM_BODY_CLASS = "memmy-platform-windows";
 
+/** True on the Windows shell, or on a local dev page opened with ?windowsChrome=1. */
+export function isWindowsDesktopPlatform(): boolean {
+  if (typeof document !== "undefined" && document.body?.classList.contains(WINDOWS_PLATFORM_BODY_CLASS)) {
+    return true;
+  }
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+  return new URLSearchParams(window.location.search).get("windowsChrome") === "1";
+}
+
 /** Applies the desktop platform class used by native window chrome layout. */
 export function applyWindowPlatformClass(platform: string | null | undefined): void {
   if (typeof document === "undefined") {

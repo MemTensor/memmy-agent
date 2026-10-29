@@ -125,6 +125,36 @@ describe("model HTTP responses", () => {
     });
   });
 
+  it("rejects a message-only HTTP 200 memory_evolution quota error", async () => {
+    const detail = "memory_evolution token 用量不足，请申请更多额度后再试。";
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ message: detail }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    )));
+
+    await expect(postJsonWithRetry({
+      provider: "openai_compatible",
+      url: "https://api.example/v1/chat/completions",
+      body: {},
+      timeoutMs: 1_000,
+      maxRetries: 2
+    })).rejects.toMatchObject({
+      name: "ModelHttpError",
+      provider: "openai_compatible",
+      httpStatus: 200,
+      errorCode: "40309",
+      detail
+    });
+
+    expect(classifyProcessingError(new ModelHttpError(
+      `openai_compatible HTTP 200: ${detail}`,
+      "openai_compatible",
+      200,
+      "40309",
+      detail
+    ))).toEqual({ code: "40309", retryAction: "open_settings" });
+  });
+
   it("does not reject an HTTP 200 response with a non-error business code", async () => {
     const body = { code: "success", data: { value: 1 }, message: "ok" };
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response(

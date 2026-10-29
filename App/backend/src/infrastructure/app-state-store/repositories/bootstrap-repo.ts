@@ -38,6 +38,8 @@ interface AppSettingsRow {
   notification_sound_enabled: number;
   menu_bar_icon_enabled: number;
   stop_memory_service_on_exit: number;
+  memory_byok_daily_limit_m: number;
+  memory_byok_total_limit_m: number;
   auto_scan_known_agents: number;
   watch_file_changes: number;
   auto_inject_skill: number;
@@ -120,6 +122,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           notification_sound_enabled,
           menu_bar_icon_enabled,
           stop_memory_service_on_exit,
+          memory_byok_daily_limit_m,
+          memory_byok_total_limit_m,
           auto_scan_known_agents,
           watch_file_changes,
           auto_inject_skill
@@ -139,7 +143,9 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         taskDoneNotificationEnabled: toBoolean(row.task_done_notification_enabled),
         notificationSoundEnabled: toBoolean(row.notification_sound_enabled),
         menuBarIconEnabled: toBoolean(row.menu_bar_icon_enabled),
-        stopMemoryServiceOnExit: toBoolean(row.stop_memory_service_on_exit)
+        stopMemoryServiceOnExit: toBoolean(row.stop_memory_service_on_exit),
+        memoryByokDailyLimitM: row.memory_byok_daily_limit_m,
+        memoryByokTotalLimitM: row.memory_byok_total_limit_m
       });
     },
 
@@ -168,7 +174,9 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           taskDoneNotificationEnabled: { column: "task_done_notification_enabled", serialize: toInteger },
           notificationSoundEnabled: { column: "notification_sound_enabled", serialize: toInteger },
           menuBarIconEnabled: { column: "menu_bar_icon_enabled", serialize: toInteger },
-          stopMemoryServiceOnExit: { column: "stop_memory_service_on_exit", serialize: toInteger }
+          stopMemoryServiceOnExit: { column: "stop_memory_service_on_exit", serialize: toInteger },
+          memoryByokDailyLimitM: { column: "memory_byok_daily_limit_m" },
+          memoryByokTotalLimitM: { column: "memory_byok_total_limit_m" }
         },
         patch
       );

@@ -1,3 +1,5 @@
+import { managedExecutionRequired } from "../managed-execution.js";
+import { DesktopScreenCaptureTool } from '../../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -7,6 +9,12 @@ import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
 import { AgentSourceTool } from "./agent-source.js";
 import { CronTool } from "./cron.js";
+import { ComputerHistoryTool } from "../../../tools/computer-history/mac/computer-history.js";
+import {
+  ComputerHistoryGetSettingsTool,
+  ComputerHistoryStatusTool,
+  ComputerHistoryUpdateSettingsTool,
+} from "../../../tools/computer-history/mac/computer-history-settings.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
 import { ImageGenerationTool } from "./image-generation.js";
@@ -17,6 +25,7 @@ import { ExecTool } from "./shell.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
 import { BROWSER_TOOL_CLASSES } from "./browser.js";
+import { ExcelLiveTool } from "./excel-live.js";
 
 export const SKIP_MODULES = new Set([
   "base",
@@ -39,8 +48,14 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 };
 
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
+  DesktopScreenCaptureTool,
+  ExcelLiveTool,
   AgentSourceTool,
   ApplyPatchTool,
+  ComputerHistoryTool,
+  ComputerHistoryStatusTool,
+  ComputerHistoryGetSettingsTool,
+  ComputerHistoryUpdateSettingsTool,
   CreateGoalTool,
   CronTool,
   EditFileTool,
@@ -208,6 +223,8 @@ export class ToolLoader {
   }
 
   discoverPlugins(): ToolClass[] {
+    // Workspace code cannot run before its file/process permissions have been checked.
+    if (managedExecutionRequired()) return [];
     const out: ToolClass[] = [];
     const seenPackages = new Set<string>();
     for (const nodeModules of nearestNodeModulesRoots(this.workspace)) {

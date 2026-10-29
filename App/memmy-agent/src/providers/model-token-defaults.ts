@@ -11,7 +11,7 @@ export type ModelTokenDefaultGroup = Readonly<{
   maxTokens: number;
 }>;
 
-export const MODEL_TOKEN_DEFAULTS_REVIEWED_AT = "2026-08-24";
+export const MODEL_TOKEN_DEFAULTS_REVIEWED_AT = "2026-10-14";
 
 function assertPositiveSafeInteger(field: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -54,8 +54,13 @@ export function defineModelTokenDefaults(
 }
 
 export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
-  // OpenAI. Reviewed 2026-08-19.
+  // OpenAI. Reviewed 2026-10-14.
   // Source: https://developers.openai.com/api/docs/models
+  {
+    models: ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"],
+    contextWindowTokens: 1_050_000,
+    maxTokens: 128_000,
+  },
   {
     models: ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
     contextWindowTokens: 1_050_000,
@@ -85,9 +90,23 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   { models: ["gpt-4.1", "gpt-4.1-mini"], contextWindowTokens: 1_047_576, maxTokens: 32_768 },
   { models: ["gpt-4o", "gpt-4o-mini"], contextWindowTokens: 128_000, maxTokens: 16_384 },
 
-  // Anthropic and official AWS transport IDs. Reviewed 2026-08-19.
+  // Anthropic and official AWS transport IDs. Reviewed 2026-10-14.
   // Sources: https://platform.claude.com/docs/en/about-claude/models/overview
   //          https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
+  {
+    models: [
+      "claude-fable-5-1",
+      "anthropic.claude-fable-5-1",
+      "claude-opus-5-5",
+      "anthropic.claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "anthropic.claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "anthropic.claude-haiku-5-5",
+    ],
+    contextWindowTokens: 1_000_000,
+    maxTokens: 128_000,
+  },
   {
     models: [
       "claude-fable-5",
@@ -166,10 +185,12 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
     maxTokens: 64_000,
   },
 
-  // Google Gemini. Reviewed 2026-08-19.
+  // Google Gemini. Reviewed 2026-10-14.
   // Source: https://ai.google.dev/gemini-api/docs/models
   {
     models: [
+      "gemini-4-argon",
+      "gemini-3.8-flash",
       "gemini-3.7-flash",
       "gemini-3.6-flash",
       "gemini-3.5-flash",
@@ -201,8 +222,13 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
     maxTokens: 64_000,
   },
 
-  // Mistral. Reviewed 2026-08-19. Output is undisclosed; use the system safe default.
+  // Mistral. Reviewed 2026-10-14. Output is undisclosed; use the system safe default.
   // Source: https://docs.mistral.ai/models
+  {
+    models: ["mistral-large-4"],
+    contextWindowTokens: 1_000_000,
+    maxTokens: 65_536,
+  },
   {
     models: [
       "mistral-medium-3-5",
@@ -219,11 +245,11 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
     maxTokens: 65_536,
   },
 
-  // xAI. Reviewed 2026-08-19. Output is undisclosed; use the system safe default.
+  // xAI. Reviewed 2026-10-14. Output is undisclosed; use the system safe default.
   // Source: https://docs.x.ai/developers/models
   { models: ["grok-build-0.1"], contextWindowTokens: 256_000, maxTokens: 65_536 },
   {
-    models: ["grok-4.5", "grok-4.5-latest", "grok-build-latest"],
+    models: ["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.5-latest", "grok-build-latest"],
     contextWindowTokens: 500_000,
     maxTokens: 65_536,
   },
@@ -269,14 +295,20 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   },
   { models: ["qwen/qwen3.6-27b"], contextWindowTokens: 131_072, maxTokens: 16_384 },
 
-  // DeepSeek. Reviewed 2026-08-24.
-  // Source: https://api-docs.deepseek.com/updates
+  // DeepSeek. Reviewed 2026-10-19.
+  // Source: https://api-docs.deepseek.com/quick_start/pricing
+  // Official API ID remains deepseek-flash, now served by DeepSeek-V4.1-Flash-1017.
+  // Official Flash/Pro limits are 1M context and 384K max output.
+  // deepseek-v4.1-flash and deepseek-v4.1-flash-1017 are Hugging Face / informal IDs.
   {
     models: [
+      "deepseek-flash",
+      "deepseek-v4.1-flash",
+      "deepseek-v4.1-flash-1017",
       "deepseek-v4-pro",
       "deepseek-v4-flash",
       "deepseek-v4-flash-0731",
-      // The experimental vision route inherits the V4 Flash limits.
+      // Retired experimental route; DeepSeek still accepts the name and serves V4.1-Flash.
       "deepseek-v4-flash-vision-exp",
     ],
     contextWindowTokens: 1_000_000,
@@ -284,9 +316,21 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   },
   { models: ["deepseek-v3.2"], contextWindowTokens: 131_072, maxTokens: 65_536 },
 
-  // Qwen / Model Studio. Reviewed 2026-08-19.
+  // Qwen / Model Studio. Reviewed 2026-10-14.
   // Sources: https://help.aliyun.com/zh/model-studio/text-generation-model
   //          https://help.aliyun.com/zh/model-studio/vision-model
+  //          https://help.aliyun.com/zh/model-studio/qwen-plus
+  // qwen-plus accepts max_tokens in [1, 32768]. Older dated snapshots differ and are not listed.
+  {
+    models: ["qwen-plus", "qwen-plus-latest"],
+    contextWindowTokens: 1_000_000,
+    maxTokens: 32_768,
+  },
+  {
+    models: ["qwen3.8-flash", "qwen3.8-max-0902", "qwen3.8-max-2026-09-02"],
+    contextWindowTokens: 1_000_000,
+    maxTokens: 131_072,
+  },
   {
     models: ["qwen3.8-max", "qwen3.8-max-preview"],
     contextWindowTokens: 1_000_000,
@@ -365,8 +409,14 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   },
   { models: ["kimi-k2.6", "kimi-k2.5"], contextWindowTokens: 262_144, maxTokens: 65_536 },
 
-  // Zhipu GLM. Reviewed 2026-08-19.
+  // Zhipu GLM. Reviewed 2026-10-14.
   // Source: https://docs.bigmodel.cn/cn/guide/start/model-overview
+  //         https://docs.bigmodel.cn/cn/guide/start/concept-param
+  {
+    models: ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"],
+    contextWindowTokens: 1_000_000,
+    maxTokens: 131_072,
+  },
   { models: ["glm-5.2"], contextWindowTokens: 1_000_000, maxTokens: 128_000 },
   {
     models: ["glm-5.1", "glm-5", "glm-5-turbo", "glm-4.7", "glm-4.7-flashx", "glm-4.7-flash"],
@@ -387,8 +437,15 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   { models: ["MiniMax-M3.1-Flash"], contextWindowTokens: 1_000_000, maxTokens: 524_288 },
   { models: ["MiniMax-M3"], contextWindowTokens: 1_000_000, maxTokens: 131_072 },
 
-  // Doubao / Volcengine. Reviewed 2026-08-19.
-  // Source: https://console.volcengine.com/ark/experience
+  // Doubao / Volcengine. Reviewed 2026-10-14.
+  // Source: https://docs.volcengine.com/docs/ark/model-list
+  {
+    models: ["doubao-seed-2-1-pro-260915", "doubao-seed-2-1-lite-260915"],
+    contextWindowTokens: 1_024_000,
+    maxTokens: 256_000,
+  },
+  // Official max answer equals the 256k window. Keep maxTokens below the window and the safety buffer.
+  { models: ["doubao-seed-2-1-turbo-260628"], contextWindowTokens: 256_000, maxTokens: 251_903 },
   { models: ["doubao-seed-evolving"], contextWindowTokens: 1_000_000, maxTokens: 65_536 },
   {
     models: ["doubao-seed-2-1-pro", "doubao-seed-2-1-turbo"],
@@ -426,10 +483,17 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   // Model Lab does not disclose limits; retain the generic system defaults explicitly.
   { models: ["step-gui"], contextWindowTokens: 200_000, maxTokens: 65_536 },
 
-  // Xiaomi MiMo. Reviewed 2026-08-19.
+  // Xiaomi MiMo. Reviewed 2026-10-14.
   // Source: https://mimo.mi.com/docs/zh-CN/quick-start/summary/model
   {
-    models: ["mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2.5"],
+    models: [
+      "mimo-v2.6-pro",
+      "mimo-v2.6-flash",
+      "mimo-v2.6-pro-ultraspeed",
+      "mimo-v2.5-pro",
+      "mimo-v2.5-pro-ultraspeed",
+      "mimo-v2.5",
+    ],
     contextWindowTokens: 1_048_576,
     maxTokens: 131_072,
   },
@@ -465,8 +529,9 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
   { models: ["ernie-4.5-turbo-vl"], contextWindowTokens: 131_072, maxTokens: 16_384 },
   { models: ["ernie-4.5-turbo-vl-32k"], contextWindowTokens: 32_768, maxTokens: 12_288 },
 
-  // Tencent Hunyuan. Reviewed 2026-08-19.
-  // Source: https://github.com/Tencent-Hunyuan/Hy3
+  // Tencent Hunyuan. Reviewed 2026-10-14.
+  // Source: https://cloud.tencent.com/document/product/1823/130051
+  { models: ["hy4-preview"], contextWindowTokens: 1_048_576, maxTokens: 65_536 },
   { models: ["hy3", "hy3-preview"], contextWindowTokens: 262_144, maxTokens: 65_536 },
 
   // iFlytek Spark and official aliases. Reviewed 2026-08-19.

@@ -15,7 +15,7 @@ function workspace(): string {
   return dir;
 }
 
-function loopWithResponse(response: LLMResponse): AgentLoop {
+function loopWithResponse(response: LLMResponse, options: { contextWindowTokens?: number } = {}): AgentLoop {
   const root = workspace();
   const provider = {
     generation: { maxTokens: 100 },
@@ -27,9 +27,12 @@ function loopWithResponse(response: LLMResponse): AgentLoop {
     provider,
     workspace: root,
     model: "test-model",
-    contextWindowTokens: 4096,
+    contextWindowTokens: options.contextWindowTokens ?? 200_000,
     sessionDir: path.join(root, "sessions"),
-    config: new Config({ memmyMemory: { enabled: false } }),
+    config: new Config({
+      agents: { defaults: { contextWindowTokens: 200_000 } },
+      memmyMemory: { enabled: false },
+    }),
   });
 }
 
@@ -157,7 +160,7 @@ describe("AgentLoop WebUI API error localization", () => {
   });
 
   it("keeps the raw provider error outside WebUI", async () => {
-    const agent = loopWithResponse(apiErrorResponse());
+    const agent = loopWithResponse(apiErrorResponse(), { contextWindowTokens: 200_000 });
 
     const outbound = await agent.processDirect("hello", { sessionKey: "cli:api-error" });
 
@@ -217,7 +220,7 @@ describe("AgentLoop WebUI API error localization", () => {
   });
 
   it("defaults image errors to English outside WebUI", async () => {
-    const agent = loopWithResponse(imageErrorResponse("image_input_unsupported"));
+    const agent = loopWithResponse(imageErrorResponse("image_input_unsupported"), { contextWindowTokens: 200_000 });
 
     const outbound = await agent.processDirect("describe it", { sessionKey: "cli:image-unsupported" });
 

@@ -20,9 +20,13 @@ describe("packaged memmy-memory cloud-service loading", () => {
     writeFileSync(manifestPath, JSON.stringify({ cloudService: "https://manifest.example.test" }));
     writeFileSync(join(root, ".env"), "MEMMY_CLOUD_SERVICE=https://dev.example.test\n");
 
-    const externalEnv = { MEMMY_CLOUD_SERVICE: "https://external.example.test" };
-    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: externalEnv })).toBe("environment");
-    expect(externalEnv.MEMMY_CLOUD_SERVICE).toBe("https://external.example.test");
+    const externalEnv = {
+      MEMMY_CLOUD_SERVICE: "https://external.example.test",
+      MEMMY_CLOUD_URL: "https://stale.example.test"
+    };
+    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: externalEnv })).toBe(manifestPath);
+    expect(externalEnv.MEMMY_CLOUD_SERVICE).toBe("https://manifest.example.test");
+    expect(externalEnv.MEMMY_CLOUD_URL).toBeUndefined();
 
     const packagedEnv: NodeJS.ProcessEnv = {};
     expect(loadCloudServiceEnv({ cwd: root, moduleDir, env: packagedEnv })).toBe(manifestPath);

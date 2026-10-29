@@ -5,7 +5,10 @@ import {
   MemoryDb
 } from "../../../src/index.js";
 import { captureTurnSteps } from "../../../src/algorithm/plugin-algorithms.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import {
+  createBatchReflectionLlm,
+  createMemoryServiceFixture
+} from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup,
@@ -17,6 +20,28 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
+  it.each([false, undefined])("stores a completed degraded turn and respects recallApplied=%s", async (recallApplied) => {
+    const { db, service } = createTestService();
+    const session = service.openSession({ namespace: { source: "memmy-agent", profileId: "deadline", userId: "deadline-user" } });
+    const seed = service.completeTurn("seed", { sessionId: session.sessionId, query: "Inspect the SQLite schema", answer: "The schema has a sessions table." });
+    const started = await service.startTurn({ sessionId: session.sessionId, turnId: "degraded", query: "Implement the SQLite deadline fix" });
+    db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?")
+      .run(JSON.stringify([seed.l1MemoryId]), started.searchEventId);
+    const request = { adapterId: "memmy-agent", requestId: "deadline-complete", sessionId: session.sessionId,
+      query: "Implement the SQLite deadline fix", answer: "Implemented and verified the deadline.", sourceMemoryIds: [],
+      ...(recallApplied === false ? { recallApplied } : {}) };
+    const completed = service.completeTurn("degraded", request);
+    if (recallApplied === false) expect(completed.l1MemoryIds).toHaveLength(1);
+    const row = db.db.prepare("SELECT source_memory_ids_json, user_text, assistant_text FROM raw_turns WHERE id = ?")
+      .get(completed.rawTurnId) as { source_memory_ids_json: string; user_text: string; assistant_text: string };
+    expect(JSON.parse(row.source_memory_ids_json)).toEqual(recallApplied === false ? [] : [seed.l1MemoryId]);
+    expect(row.user_text).toBe(request.query);
+    expect(row.assistant_text).toBe(request.answer);
+    expect(service.completeTurn("degraded", request)).toMatchObject({ duplicate: true, rawTurnId: completed.rawTurnId });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE session_id = ? AND turn_id = ?").get(session.sessionId, "degraded")).toEqual({ count: 1 });
+    db.close();
+  });
+
   it("preserves an explicit empty turn-start layer selection for evaluation ablations", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
@@ -444,7 +469,7 @@ describe("MemoryService / session / turn capture", () => {
       };
     };
     expect(properties.internal_info.summary).toBe("");
-    expect(properties.internal_info.trace.tool_calls[0]?.output).toBeUndefined();
+    expect(properties.internal_info.trace.tool_calls[0]?.output).toBe(expectedTrace.toolCalls[0]?.output);
     expect(defaultTrace.errorSignatures).toContain("SENTINEL_ERROR_CODE");
     expect(expectedTrace.errorSignatures).not.toContain("SENTINEL_ERROR_CODE");
     expect(properties.internal_info.trace.error_signatures).toEqual(expectedTrace.errorSignatures);
@@ -761,6 +786,64 @@ describe("MemoryService / session / turn capture", () => {
     expect(detail.item.body).toContain("Agent:\nDone with the current task.");
     expect(detail.item.body).not.toContain("Historical User");
     expect(detail.item.body).not.toContain("memmy_memory_context");
+
+    db.close();
+  });
+
+  it("keeps raw attachment turns but sends normalized input to capture summary", async () => {
+    const calls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
+    }> = [];
+    const llm = createBatchReflectionLlm(calls, "<attachments>", "attachment-summary");
+    const { db, service } = createTestService({ llm });
+    const session = service.openSession({
+      namespace: {
+        source: "memmy-agent",
+        profileId: "default",
+        userId: "attachment-summary-user"
+      }
+    });
+    const query = [
+      "<attachments>",
+      "- hypre.txt  (application/octet-stream, 15.4MB)  /Users/test/.memmy/media/hypre.txt",
+      "",
+      "请用 read_file 工具按需读取上述附件；PDF 可用 pages 参数分页读取。",
+      "</attachments>",
+      "",
+      "这个文件的内容是什么？"
+    ].join("\n");
+    const complete = service.completeTurn("turn-attachment-summary", {
+      sessionId: session.sessionId,
+      query,
+      answer: "这个附件是一个 **HYPRE 2.31.0 源码集合**，包含并行求解器实现。",
+      toolCalls: [{
+        name: "read_file",
+        input: { path: "/Users/test/.memmy/media/hypre.txt" },
+        output: "set(HYPRE_VERSION 2.31.0)",
+        success: true
+      }]
+    });
+
+    await service.runWorkerOnce(20);
+
+    const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
+    const payload = summaryCall?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(payload).toContain("USER: 这个文件的内容是什么？");
+    expect(payload).not.toContain("USER: <attachments>");
+    expect(payload).not.toContain("请用 read_file 工具按需读取上述附件");
+    expect(payload).toContain(
+      "ATTACHMENT METADATA (internal context; do not quote as summary/evidence): - hypre.txt (application/octet-stream, 15.4MB)"
+    );
+    expect(payload.split("ATTACHMENT METADATA")[1]).not.toContain("/Users/test");
+
+    const rawTurn = db.db.prepare(
+      "SELECT user_text FROM raw_turns WHERE id = ?"
+    ).get(complete.rawTurnId) as { user_text: string };
+    expect(rawTurn.user_text).toBe(query);
+    expect(service.getMemory(complete.l1MemoryId).item.summary).toBe(
+      "这个附件是一个 HYPRE 2.31.0 源码集合，包含并行求解器实现。"
+    );
 
     db.close();
   });

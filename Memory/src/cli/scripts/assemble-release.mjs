@@ -4,6 +4,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const scriptDirectory = fileURLToPath(new URL(".", import.meta.url));
 const memoryRoot = resolve(scriptDirectory, "../../..");
@@ -27,7 +28,16 @@ for (const source of discovered) {
   const match = name.match(new RegExp(`^memmy-memory-runtime-${escapeRegExp(version)}-(darwin|linux|windows)-(arm64|x64)\\.tar\\.gz$`));
   if (match) {
     const target = `${match[1]}-${match[2]}`;
-    assets[target] = { name, sha256, size: (await stat(destination)).size };
+    const result = spawnSync("tar", ["-xOf", destination, "./memory-runtime.json"], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`Cannot read runtime metadata for ${target}: ${result.stderr}`);
+    const metadata = JSON.parse(result.stdout);
+    if (metadata.version !== version || metadata.target !== target || metadata.protocolVersion !== 1
+      || !/^[a-f0-9]{64}$/.test(metadata.buildId ?? "")
+      || !Number.isSafeInteger(metadata.schemaVersion) || metadata.schemaVersion < 1) {
+      throw new Error(`Runtime build identity is invalid for ${target}`);
+    }
+    const buildIdentity = { buildId: metadata.buildId, schemaVersion: metadata.schemaVersion };
+    assets[target] = { ...buildIdentity, name, sha256, size: (await stat(destination)).size };
   }
 }
 for (const target of targets) {

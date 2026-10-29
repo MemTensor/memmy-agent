@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "./runtime-loader.js";
+import type { SourceTurn } from "@memmy/agent-source-core";
 import {
+  completeSourceTurn,
   notifyRuntimeBoundary,
   openRuntimeSession,
   readRuntimeConfig,
@@ -46,6 +48,47 @@ describe("Memory lifecycle runtime", () => {
       userId: "installed-owner",
       workspaceHostId: "a".repeat(64),
     });
+  });
+
+  it.each([undefined, "pending-session"])("submits the pinned owner with pending Session %s across account changes", async (sessionId) => {
+    const fixture = createFixture();
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const server = createServer(async (request, response) => {
+      requests.push({ path: request.url ?? "", body: await requestBody(request) });
+      return json(response, 200, { status: "stored" });
+    });
+    const endpoint = await listen(server);
+    const configUrl = runtimeConfig(fixture, endpoint);
+    const turn: SourceTurn = {
+      source: "codex", conversationId: "native-conversation", turnId: "native-turn",
+      startedAt: "2026-09-09T10:00:00.000Z", completedAt: "2026-09-09T10:00:01.000Z",
+      sequence: 1, completionEvidence: "final_answer:native-turn", query: "Fix parser", answer: "Fixed",
+      status: "succeeded", toolCalls: [], toolResults: [], workspacePath: fixture,
+    };
+    try {
+      await completeSourceTurn({ configUrl, turn, sessionId, profileId: "work", sourceMemoryIds: ["recalled-1"] });
+      writeFileSync(join(fixture, "missing.yaml"), [
+        "app:", "  userId: switched-app-owner", "memmyMemory:", "  userId: switched-memory-owner", "",
+      ].join("\n"));
+      await completeSourceTurn({ configUrl, turn, sessionId, profileId: "work", sourceMemoryIds: ["recalled-1"] });
+
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      for (const request of requests) {
+        expect(request.path).toBe("/api/v1/source-turns/complete");
+        expect(request.body.namespace).toEqual({
+          source: "codex", profileId: "work", userId: "installed-owner", sessionKey: "native-conversation",
+        });
+        expect(request.body).toMatchObject({
+          sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },
+          sourceMemoryIds: ["recalled-1"], workspacePath: fixture,
+        });
+        if (sessionId) expect(request.body.sessionId).toBe(sessionId);
+        else expect(request.body).not.toHaveProperty("sessionId");
+      }
+    } finally {
+      await close(server);
+    }
   });
 
   it("opens a v2 project Session with only canonical workspace identity", async () => {

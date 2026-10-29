@@ -8,13 +8,15 @@ import {
   MemoryDb,
   MemoryRestClient,
   API_ROUTES,
-  createMemoryHttpServer
+  createMemoryHttpServer,
+  type LlmClient
 } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
   addAgentSourceImport,
   createCapturingEmbedder,
+  createBatchReflectionLlm,
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
@@ -46,7 +48,177 @@ async function withServerClosed(
   }
 }
 
+function createDeterministicSummaryLlm(summary: string): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/summary",
+      model: "summary-test"
+    },
+    isConfigured: () => true,
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>() {
+      return { title: "Beach trip", summary } as unknown as T;
+    },
+    status: () => ({
+      provider: "host",
+      model: "summary-test",
+      configured: true,
+      remote: true
+    })
+  };
+}
+
+async function runUntilQueuedEmbedding(
+  service: ReturnType<typeof createTestService>["service"],
+  repos: Repositories,
+  memoryId: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const pending = repos.runtime.getPendingJob(memoryId, "embedding");
+    if (pending?.status === "queued" && !repos.memories.hasVector(memoryId, "vec_summary")) {
+      return;
+    }
+    if (repos.memories.hasVector(memoryId, "vec_summary")) {
+      throw new Error(`import ${memoryId} embedded before its embedding job could be interrupted`);
+    }
+    await service.runWorkerOnce(1);
+  }
+  throw new Error(`import ${memoryId} did not queue an embedding job`);
+}
+
+async function runUntilSummaryIndexed(
+  service: ReturnType<typeof createTestService>["service"],
+  repos: Repositories,
+  memoryId: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const state = repos.processing.get(memoryId)?.state;
+    if (
+      repos.memories.hasVector(memoryId, "vec_summary")
+      && state !== "summary_pending"
+      && state !== "summarizing"
+    ) {
+      return;
+    }
+    await service.runWorkerOnce(10);
+  }
+  throw new Error(`import ${memoryId} did not finish summary indexing`);
+}
+
 describe("MemoryService / REST contract", () => {
+
+  it("deduplicates Agent source Skills by stable identity and content hash", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const endpoint = `http://127.0.0.1:${address.port}/api/v1/memory/add`;
+      const post = async (body: Record<string, unknown>) => {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        return {
+          response,
+          body: await response.json() as { id?: string; duplicate?: boolean; error?: { code?: string } }
+        };
+      };
+      const firstRequest = {
+        adapterId: "agent-source:codex",
+        requestId: "agent-source-skill:codex:.system/imagegen:content-hash-v1",
+        namespace: { source: "codex", profileId: "default" },
+        content: "Generate images from a prompt.",
+        layer: "Skill" as const,
+        title: "imagegen",
+        tags: ["agent-source", "cross-agent-skill", "codex"],
+        source: "codex",
+        turnId: "skill:.system/imagegen:version-1",
+        createdAt: "2026-09-04T02:13:03.091Z",
+        deferProcessing: true,
+        sourceAgentId: "codex",
+        sourceSkillId: ".system/imagegen",
+        sourceSkillPath: "/old-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "version-1",
+        sourceContentHash: "content-hash-v1"
+      };
+
+      const legacy = await service.idempotent(
+        "memory.add",
+        firstRequest,
+        { path: "/api/v1/memory/add", request: firstRequest },
+        () => service.addMemory(firstRequest)
+      );
+      const replayed = await post({
+        ...firstRequest,
+        title: "Image generation",
+        tags: ["agent-source", "codex", "new-metadata"],
+        turnId: "skill:.system/imagegen:parser-version-2",
+        createdAt: "2026-09-17T03:24:19.000Z",
+        deferProcessing: false,
+        sourceSkillPath: "/new-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "parser-version-2",
+        timeZone: "Asia/Shanghai"
+      });
+      expect(replayed.response.status).toBe(200);
+      expect(replayed.body.id).toBe(legacy.id);
+      expect(replayed.body.duplicate).toBeUndefined();
+
+      const duplicate = await post({
+        ...firstRequest,
+        title: "Generate an image",
+        tags: ["agent-source", "codex", "latest-metadata"],
+        turnId: "skill:.system/imagegen:parser-version-3",
+        createdAt: "2026-09-18T03:24:19.000Z",
+        sourceSkillPath: "/another-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillVersion: "parser-version-3",
+        timeZone: "UTC"
+      });
+      expect(duplicate.response.status).toBe(200);
+      expect(duplicate.body).toMatchObject({ id: legacy.id, duplicate: true });
+      expect(db.db.prepare(
+        `SELECT COUNT(*) AS count FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = ?`
+      ).get(".system/imagegen")).toEqual({ count: 1 });
+
+      const nextVersion = await post({
+        ...firstRequest,
+        content: "Generate and edit images from a prompt.",
+        sourceContentHash: "content-hash-v2",
+        sourceSkillVersion: "version-1"
+      });
+      expect(nextVersion.response.status).toBe(200);
+      expect(nextVersion.body.id).toBeTypeOf("string");
+      expect(nextVersion.body.id).not.toBe(legacy.id);
+      expect(db.db.prepare("SELECT status FROM memories WHERE id = ?").get(legacy.id))
+        .toEqual({ status: "archived" });
+
+      const ordinaryFirst = await post({
+        adapterId: "rest-test",
+        requestId: "ordinary-skill",
+        content: "Ordinary Skill content.",
+        layer: "Skill",
+        title: "ordinary"
+      });
+      expect(ordinaryFirst.response.status).toBe(200);
+      const ordinaryChanged = await post({
+        adapterId: "rest-test",
+        requestId: "ordinary-skill",
+        content: "Ordinary Skill content.",
+        layer: "Skill",
+        title: "ordinary renamed"
+      });
+      expect(ordinaryChanged.response.status).toBe(409);
+      expect(ordinaryChanged.body.error?.code).toBe("conflict");
+    });
+    db.close();
+  });
 
   it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
     const { db, service } = createTestService();
@@ -266,6 +438,30 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("forwards recallApplied=false through HTTP without attributing undelivered recall", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({ namespace: { source: "memmy-agent", profileId: "default" } });
+    const started = await service.startTurn({ sessionId: opened.sessionId, turnId: "late-recall", query: "Implement the memory timeout repair" });
+    db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?").run('["undelivered-memory"]', started.searchEventId);
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/turns/late-recall/complete`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: opened.sessionId, query: "Implement the memory timeout repair",
+          answer: "The model answered after memory timed out.", sourceMemoryIds: [], recallApplied: false }),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { rawTurnId: string; l1MemoryIds: string[] };
+      expect(result.l1MemoryIds).toHaveLength(1);
+      const row = db.db.prepare("SELECT source_memory_ids_json FROM raw_turns WHERE id = ?").get(result.rawTurnId) as { source_memory_ids_json: string };
+      expect(JSON.parse(row.source_memory_ids_json)).toEqual([]);
+    });
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];
@@ -445,6 +641,7 @@ describe("MemoryService / REST contract", () => {
   it("auto-drains REST turn.complete embedding jobs", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "remember auto worker embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
     const server = createMemoryHttpServer({ service });
@@ -510,6 +707,72 @@ describe("MemoryService / REST contract", () => {
       return row?.embedding_dim === 3;
     });
     expect(embeddingTexts.length).toBeGreaterThan(0);
+
+    });
+    db.close();
+  });
+
+  it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
+    const { db, service } = createTestService();
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "auto-worker-l3-close-session",
+        userId: "auto-worker-l3-close-user"
+      }
+    });
+    const first = service.completeTurn("turn-auto-worker-l3-close", {
+      sessionId: opened.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+    const ended = service.completeTurn("turn-auto-worker-l3-close-end", {
+      sessionId: opened.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题到这里结束。"
+    });
+    expect(ended.closedEpisodeIds).toEqual([first.episodeId]);
+    await service.runWorkerOnce(20);
+    const l3Jobs = () => db.db.prepare(
+      `SELECT status, attempts
+       FROM evolution_jobs
+       WHERE job_type = 'l3_world_model_update'`
+    ).all() as Array<{ status: string; attempts: number }>;
+    expect(l3Jobs()).toEqual([]);
+
+    // Keep the startup fallback out of the wait window so only session.close can wake the worker.
+    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    await withServerClosed(server, async () => {
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected TCP address");
+    }
+    const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+
+    const closeResponse = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(opened.sessionId)}/close`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }
+    );
+    expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: opened.sessionId,
+      status: "closed",
+      closedEpisodeIds: []
+    });
+    expect(l3Jobs()).toHaveLength(1);
+
+    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
 
     });
     db.close();
@@ -672,6 +935,7 @@ describe("MemoryService / REST contract", () => {
   it("auto-drains queued jobs when the REST server starts", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "remember queued startup embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
     const namespace = {
@@ -758,7 +1022,8 @@ describe("MemoryService / REST contract", () => {
   it("reconciles interrupted, missing, and terminally failed processing jobs on startup", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
-      embedder: createCapturingEmbedder(embeddingTexts)
+      embedder: createCapturingEmbedder(embeddingTexts),
+      llm: createDeterministicSummaryLlm("resumed import summary")
     });
     const repos = new Repositories(db.db);
     const namespace = {
@@ -773,8 +1038,9 @@ describe("MemoryService / REST contract", () => {
       "resume an interrupted evolution embedding job",
       "startup-interrupted"
     );
-    await service.runWorkerOnce(1);
-    const [interruptedJob] = repos.runtime.leaseQueuedJobs(1, 600);
+    await runUntilQueuedEmbedding(service, repos, interruptedMemory.id);
+    expect(repos.runtime.getPendingJob(interruptedMemory.id, "embedding")?.jobType).toBe("embedding");
+    const [interruptedJob] = repos.runtime.leaseQueuedJobs(1, 600, [interruptedMemory.id]);
     expect(interruptedJob?.jobType).toBe("embedding");
 
     const failedMemory = addAgentSourceImport(
@@ -783,7 +1049,7 @@ describe("MemoryService / REST contract", () => {
       "retry a terminal embedding failure on startup",
       "startup-failed"
     );
-    await service.runWorkerOnce(1);
+    await runUntilQueuedEmbedding(service, repos, failedMemory.id);
     const failedMemoryJob = repos.runtime.getPendingJob(failedMemory.id, "embedding");
     expect(failedMemoryJob).toBeDefined();
     repos.runtime.completeJob(failedMemoryJob!.id);
@@ -813,7 +1079,7 @@ describe("MemoryService / REST contract", () => {
       "repair an indexing memory whose embedding task disappeared",
       "startup-orphan"
     );
-    await service.runWorkerOnce(1);
+    await runUntilQueuedEmbedding(service, repos, orphanMemory.id);
     const orphanMemoryJob = repos.runtime.getPendingJob(orphanMemory.id, "embedding");
     expect(orphanMemoryJob).toBeDefined();
     repos.runtime.completeJob(orphanMemoryJob!.id);
@@ -1062,34 +1328,43 @@ describe("MemoryService / REST contract", () => {
   });
 
   it("passes REST search tags and limit through to recall", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      llm: createDeterministicSummaryLlm("shared beach trip detail")
+    });
+    const repos = new Repositories(db.db);
     const namespace = {
       source: "locomo-eval",
       profileId: "preloaded-direct",
       userId: "local-user"
     };
-    service.addMemory({
-      namespace,
-      layer: "L1",
-      title: "conv-26 beach memory one",
-      tags: ["locomo", "conv-26"],
-      content: "Melanie and Caroline discussed a shared beach trip detail for LoCoMo filtering."
-    });
-    service.addMemory({
-      namespace,
-      layer: "L1",
-      title: "conv-26 beach memory two",
-      tags: ["locomo", "conv-26"],
-      content: "Melanie and Caroline discussed another shared beach trip detail for LoCoMo filtering."
-    });
-    service.addMemory({
-      namespace,
-      layer: "L1",
-      title: "conv-30 beach memory",
-      tags: ["locomo", "conv-30"],
-      content: "Jon and Gina discussed a shared beach trip detail for LoCoMo filtering."
-    });
-    await runWorkerRounds(service, 2, 20);
+    const memories = [
+      service.addMemory({
+        namespace,
+        layer: "L1",
+        title: "conv-26 beach memory one",
+        tags: ["locomo", "conv-26"],
+        content: "Melanie and Caroline discussed a shared beach trip detail for LoCoMo filtering."
+      }),
+      service.addMemory({
+        namespace,
+        layer: "L1",
+        title: "conv-26 beach memory two",
+        tags: ["locomo", "conv-26"],
+        content: "Melanie and Caroline discussed another shared beach trip detail for LoCoMo filtering."
+      }),
+      service.addMemory({
+        namespace,
+        layer: "L1",
+        title: "conv-30 beach memory",
+        tags: ["locomo", "conv-30"],
+        content: "Jon and Gina discussed a shared beach trip detail for LoCoMo filtering."
+      })
+    ];
+    for (const memory of memories) {
+      await runUntilSummaryIndexed(service, repos, memory.id);
+    }
+    expect(memories.every((memory) => repos.memories.hasVector(memory.id, "vec_summary"))).toBe(true);
+    expect(memories.map((memory) => repos.processing.get(memory.id)?.state)).toEqual(["ready", "ready", "ready"]);
     const server = createMemoryHttpServer({ service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {

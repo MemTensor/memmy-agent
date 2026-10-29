@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ENDPOINTS,
   DEFAULT_MODEL_IDS,
+  PROTOCOL_OPTIONS,
   IMAGE_DEFAULT_ENDPOINTS,
   IMAGE_DEFAULT_MODEL_IDS,
   IMAGE_PROTOCOL_OPTIONS,
@@ -26,9 +27,10 @@ import {
   textProviderDisplayName,
   toProtocol
 } from "../model-config.js";
-import type { TextModelProviderConfig } from "../../api/config-client.js";
+import type { ModelProviderConfig, TextModelProviderConfig } from "../../api/config-client.js";
+import { modelProviderLogoUrl } from "../../components/model-provider-logo.js";
 import { canSaveModelConfig, createModelConfigValidationKey, type ModelConfigValidationState } from "../model-config-validation.js";
-import { zhCNMessages } from "../../i18n/messages.js";
+import { zhCNMessages, enUSMessages } from "../../i18n/messages.js";
 
 describe("model config helpers", () => {
   it("defaults new MiniMax configurations to Flash without rewriting saved IDs", () => {
@@ -348,7 +350,7 @@ describe("model config helpers", () => {
         apiKeyMasked: "sk-m••••mory"
       },
       skillModel: {
-        reuse: true,
+        reuse: false,
         apiKeyMasked: "sk-m••••main"
       }
     });
@@ -363,6 +365,84 @@ describe("model config helpers", () => {
       apiKeyMasked: "sk-m••••main",
       hasExistingApiKey: true
     }, hydrated.llmValidation)).toBe(true);
+  });
+
+  it("未单独保存记忆模型时默认不勾选继承", () => {
+    const hydrated = hydrateModelConfigForm({
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: "sk-primary",
+      apiKeyMasked: "",
+      configured: true,
+      memmyMemory: {
+        summary: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "sk-primary",
+          apiKeyMasked: "",
+          configured: true
+        },
+        evolution: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "sk-primary",
+          apiKeyMasked: "",
+          configured: true
+        }
+      },
+      catalog: {
+        modelAssignments: {
+          byok: { memorySummary: null, memoryEvolution: null }
+        }
+      }
+    } as ModelProviderConfig, "local");
+
+    expect(hydrated.skillModel.reuse).toBe(false);
+    expect(hydrated.memoryModel.reuse).toBe(false);
+  });
+
+  it("已保存继承关系时重新进入仍勾选", () => {
+    const hydrated = hydrateModelConfigForm({
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: "sk-primary",
+      apiKeyMasked: "",
+      configured: true,
+      memmyMemory: {
+        summary: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "",
+          apiKeyMasked: "sk-p••••mary",
+          configured: true
+        },
+        evolution: {
+          mode: "follow",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o",
+          apiKey: "",
+          apiKeyMasked: "sk-p••••mary",
+          configured: true
+        }
+      },
+      catalog: {
+        modelAssignments: {
+          byok: { memorySummary: "preset-summary", memoryEvolution: "preset-evolution" }
+        }
+      }
+    } as ModelProviderConfig, "local");
+
+    expect(hydrated.skillModel.reuse).toBe(true);
+    expect(hydrated.memoryModel.reuse).toBe(true);
   });
 
   it("真实连接测试调用配置客户端并写回成功签名", async () => {
@@ -518,5 +598,71 @@ describe("model config helpers", () => {
     expect(toProtocol("kimi")).toBe("moonshot");
     expect(toProtocol("google")).toBe("gemini");
     expect(fromProtocol("moonshot")).toBe("kimi");
+  });
+
+  it("阶跃星辰和小米 MiMo 作为文本 Provider 可选且默认值完整", () => {
+    const options = PROTOCOL_OPTIONS.map((option) => option.value);
+    expect(options).toContain("stepfun");
+    expect(options).toContain("xiaomi");
+
+    expect(DEFAULT_ENDPOINTS.stepfun).toBe("https://api.stepfun.com/v1");
+    expect(DEFAULT_ENDPOINTS.xiaomi).toBe("https://api.xiaomimimo.com/v1");
+    expect(DEFAULT_MODEL_IDS.stepfun).toBe("step-3.5-flash");
+    expect(DEFAULT_MODEL_IDS.xiaomi).toBe("mimo-v2.5-pro");
+
+    // 两家在前后端同名，protocol 与 provider id 必须原样往返。
+    for (const protocol of ["stepfun", "xiaomi"] as const) {
+      expect(fromProtocol(protocol)).toBe(protocol);
+      expect(toProtocol(protocol)).toBe(protocol);
+    }
+
+    expect(zhCNMessages["apiKey.provider.stepfun"]).toBe("阶跃星辰");
+    expect(zhCNMessages["apiKey.provider.xiaomi"]).toBe("小米 MiMo");
+  });
+
+  it("OpenAI Completions/Responses 与 Custom 作为文本 Provider 可选且默认值完整", () => {
+    const options = PROTOCOL_OPTIONS.map((option) => option.value);
+    expect(options).toContain("openai");
+    expect(options).toContain("openai_responses");
+    expect(options).toContain("custom");
+    expect(PROTOCOL_OPTIONS.find((option) => option.value === "openai")?.labelKey)
+      .toBe("apiKey.provider.openaiCompletions");
+    expect(IMAGE_PROTOCOL_OPTIONS.find((option) => option.value === "openai")?.labelKey)
+      .toBe("apiKey.provider.openai");
+
+    expect(DEFAULT_ENDPOINTS.openai_responses).toBe("https://api.openai.com/v1");
+    expect(DEFAULT_ENDPOINTS.custom).toBe("");
+    expect(DEFAULT_MODEL_IDS.openai_responses).toBe("gpt-4o");
+    expect(DEFAULT_MODEL_IDS.custom).toBe("");
+    expect(toProtocol("openai_responses")).toBe("openai_responses");
+    expect(fromProtocol("openai_responses")).toBe("openai_responses");
+    expect(toProtocol("custom")).toBe("custom");
+    expect(fromProtocol("custom")).toBe("custom");
+    expect(zhCNMessages["apiKey.provider.openaiCompletions"]).toBe("OpenAI Completions");
+    expect(zhCNMessages["apiKey.provider.openaiResponses"]).toBe("OpenAI Responses");
+    expect(zhCNMessages["apiKey.provider.custom"]).toBe("自定义");
+    expect(enUSMessages["apiKey.provider.custom"]).toBe("Custom");
+  });
+
+  it("中英文字典键集合一致", () => {
+    expect(Object.keys(enUSMessages).sort()).toEqual(Object.keys(zhCNMessages).sort());
+  });
+
+  it("自定义供应商使用独立的拼图图标", () => {
+    expect(modelProviderLogoUrl("custom")).toMatch(/^data:image\/svg\+xml/);
+    expect(modelProviderLogoUrl("custom")).not.toBe(modelProviderLogoUrl("openai"));
+    expect(modelProviderLogoUrl("openai_responses")).toBe(modelProviderLogoUrl("openai"));
+  });
+
+  it("为阶跃星辰和小米 MiMo 解析出品牌 logo", () => {
+    expect(modelProviderLogoUrl("stepfun")).toMatch(/^data:image\/svg\+xml/);
+    expect(modelProviderLogoUrl("xiaomi")).toMatch(/^data:image\/svg\+xml/);
+    expect(modelProviderLogoUrl("xiaomi_mimo")).toBe(modelProviderLogoUrl("xiaomi"));
+    expect(modelProviderLogoUrl("mimo-v2.5-pro")).toBe(modelProviderLogoUrl("xiaomi"));
+    expect(modelProviderLogoUrl("step-3.5-flash")).toBe(modelProviderLogoUrl("stepfun"));
+    expect(modelProviderLogoUrl("阶跃星辰")).toBe(modelProviderLogoUrl("stepfun"));
+    expect(modelProviderLogoUrl("小米 MiMo")).toBe(modelProviderLogoUrl("xiaomi"));
+    // minimax 不能被 mimo 规则误伤。
+    expect(modelProviderLogoUrl("minimax")).not.toBe(modelProviderLogoUrl("xiaomi"));
   });
 });

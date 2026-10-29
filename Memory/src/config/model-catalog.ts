@@ -19,10 +19,14 @@ export function syncMemoryModelCatalog(
   }
   const touchedRouting = Object.prototype.hasOwnProperty.call(patch, "roleRouting");
 
-  if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "evolution")) {
+  const touchedEvolution = Object.prototype.hasOwnProperty.call(patch, "evolution");
+  if (touchedRouting || touchedEvolution) {
     syncMemoryRole("evolution", "memoryEvolution", "memory_evolution");
   }
-  if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "summary")) {
+  // A following summary inherits evolution. Refresh its catalog assignment
+  // when only the evolution connection changes through the legacy API.
+  if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "summary")
+    || (touchedEvolution && routing.summary !== "fixed")) {
     syncMemoryRole("summary", "memorySummary", "memory_summary");
   }
   if (Object.prototype.hasOwnProperty.call(patch, "embedding")) {
@@ -144,12 +148,14 @@ function catalogProviderId(connection: Record<string, unknown>): string {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
   };
   const provider = aliases[source] ?? source;
   return [
     "openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope",
-    "moonshot", "minimax", "qianfan", "volcengine"
+    "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo",
+    "custom"
   ].includes(provider) ? provider : "openai";
 }
 

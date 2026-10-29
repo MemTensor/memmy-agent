@@ -1,6 +1,7 @@
 /** Settings page tests. */
 import { renderToString } from "react-dom/server";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ModelConfigView } from "@memmy/local-api-contracts";
@@ -19,16 +20,19 @@ import {
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
   resolveSettingsTabFromHash,
+  shouldFocusMemoryBudgetFromHash,
   readLogLevel,
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
 } from "../settings-page.js";
-import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
+import { enUSMessages, formatMessage, zhCNMessages } from "../../i18n/messages.js";
 import {
   availableConnectionProtocols,
+  catalogProviderForEditor,
   editorProtocolForCapabilities,
   modelCapabilitiesForKind,
-  normalizeEditorCapabilities
+  normalizeEditorCapabilities,
+  protocolFromConnection
 } from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
@@ -72,6 +76,7 @@ describe("多 BYOK endpoint 入口", () => {
         endpointId: "openai-chat",
         endpoint: "https://api.openai.com/v1",
         protocol: "openai-chat-completions",
+        region: "",
         apiKeyMasked: "••••1234",
         models: ["gpt-4o"],
         modelEntries: [{ presetId: "preset-openai", model: "gpt-4o", capability: "chat", capabilities: ["agent"] }],
@@ -86,6 +91,7 @@ describe("多 BYOK endpoint 入口", () => {
         endpointId: "anthropic-chat",
         endpoint: "https://api.anthropic.com",
         protocol: "anthropic-messages",
+        region: "",
         apiKeyMasked: "••••5678",
         models: ["claude-sonnet-4"],
         modelEntries: [{ presetId: "preset-anthropic", model: "claude-sonnet-4", capability: "chat", capabilities: ["agent"] }],
@@ -97,8 +103,21 @@ describe("多 BYOK endpoint 入口", () => {
     ]);
 
     expect(available).toContain("openai");
+    expect(available).toContain("openai_responses");
+    expect(available).toContain("custom");
     expect(available).toContain("anthropic");
     expect(available[0]).toBe("openai");
+  });
+});
+
+describe("Custom 与 OpenAI Responses 的 catalog provider 推导", () => {
+  it("Custom 按供应商 custom 保存，协议留在端点上", () => {
+    expect(catalogProviderForEditor("custom", "openai-chat-completions")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "openai-responses")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "anthropic-messages")).toBe("custom");
+    expect(catalogProviderForEditor("custom", "bedrock-converse")).toBe("custom");
+    expect(catalogProviderForEditor("openai_responses", null)).toBe("openai");
+    expect(catalogProviderForEditor("moonshot", null)).toBe("moonshot");
   });
 });
 
@@ -185,6 +204,7 @@ describe("自定义模型能力选择", () => {
 
   it("模型能力沿用标准 Select 四选一，不再拆分文本用途", () => {
     const source = readFileSync(modelWorkspaceSourcePath, "utf8");
+    const styles = readFileSync(fileURLToPath(new URL("../../styles.css", import.meta.url)), "utf8");
 
     expect(source).toContain('const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;');
     expect(source).toContain("value={kind}");
@@ -193,9 +213,23 @@ describe("自定义模型能力选择", () => {
     expect(source).toContain('className="select-control--subtle model-capability-select"');
     expect(source.match(/t\("settings\.modelWorkspace\.modelCapability"\)/g)).toHaveLength(1);
     expect(source).toContain("normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))");
-    expect(source).not.toContain('type="checkbox"');
+    expect(source).toContain("checked={thinkingConfigured}");
+    expect(source).toContain('t("settings.modelWorkspace.allowThinkingOff")');
+    expect(source).toContain('t("settings.modelWorkspace.customThinkingDefaultEnabledHint")');
+    expect(source).toContain('t("settings.modelWorkspace.customImageInputHint")');
+    expect(source).toContain('className="custom-thinking-config__checkbox check-sky"');
+    expect(source).toContain('className="check-sky"');
+    expect(styles).toContain(".custom-thinking-config__checkbox");
+    expect(styles).toContain('.custom-thinking-config input[type="checkbox"].check-sky:checked');
     expect(source).not.toContain('t("settings.modelWorkspace.textRoles")');
     expect(source).not.toContain('t("settings.modelWorkspace.capability.agent")');
+  });
+
+  it("思考模式说明区分接口默认行为与允许关闭", () => {
+    expect(zhCNMessages["settings.modelWorkspace.thinkingModeToggleHint"]).toContain("模型接口按默认行为处理");
+    expect(zhCNMessages["settings.modelWorkspace.allowThinkingOffHint"]).toContain("不勾选则思考始终开启");
+    expect(enUSMessages["settings.modelWorkspace.thinkingModeToggleHint"]).toContain("endpoint's default behavior");
+    expect(enUSMessages["settings.modelWorkspace.allowThinkingOffHint"]).toContain("thinking stays on");
   });
 });
 
@@ -248,8 +282,18 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
+    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#computer-use-browser-extension")).toBe("computer-use");
+    expect(resolveSettingsTabFromHash("#computer-use-excel")).toBe("computer-use");
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
+  });
+});
+
+describe("shouldFocusMemoryBudgetFromHash", () => {
+  it("只把记忆限额深链当作需要定位的 Token 卡片", () => {
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage-memory-budget")).toBe(true);
+    expect(shouldFocusMemoryBudgetFromHash("#token-usage")).toBe(false);
   });
 });
 
@@ -291,6 +335,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).toContain("自定义 API Key 消耗");
+    expect(html).toContain("记忆进化 Token 限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
@@ -373,6 +418,28 @@ describe("SettingsPageView", () => {
     expect(source).toContain('openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))');
     expect(source).not.toContain('appActions.navigate("/terms")');
     expect(source).not.toContain('<LinkButton label={t("settings.about.terms")} href="#" />');
+  });
+
+  it("关于区承接加入社区入口，微信群二维码为静态图片且外链顺序不变", () => {
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    const communityLinksSource = readFileSync(resolve(settingsPageSourcePath, "..", "..", "community", "community-links.ts"), "utf8");
+    const githubIndex = source.indexOf('SettingsCommunityLink href={communityLinks.githubUrl}');
+    const discordIndex = source.indexOf('SettingsCommunityLink href={communityLinks.discordUrl}');
+
+    expect(source).toContain('t("settings.about.community")');
+    expect(source).toContain('className="community-popover-wechat"');
+    expect(source).toContain('<img src={communityLinks.wechatGroupUrl}');
+    expect(source).toContain('className="community-link flex flex-col rounded-lg');
+    expect(communityLinksSource).toContain('githubUrl: "https://github.com/MemTensor/memmy-agent"');
+    expect(source).toContain('detail="MemTensor/memmy-agent"');
+    expect(githubIndex).toBeGreaterThan(-1);
+    expect(githubIndex).toBeLessThan(discordIndex);
+    expect(source).not.toContain('<a href={communityLinks.wechatGroupUrl}');
+
+    const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
+    expect(html).toContain('id="settings-panel-about"');
+    expect(html).toContain("community-popover-wechat");
+    expect(html).toContain("community-link");
   });
 
   it("关于区只消费应用级更新状态，下载和弹窗不随页面卸载", () => {
@@ -647,6 +714,26 @@ describe("SettingsPageView", () => {
     expect(compactStyles).toContain("grid-column: 2");
     expect(compactStyles).toContain("flex-wrap: wrap");
     expect(source).toContain("byokTokenUsageClient.getSummary");
+    expect(source).toContain("byokTokenUsageClient.getMemoryBudget");
+    expect(source).toContain("function MemoryTokenBudgetCard");
+    const budgetCardSource = source.slice(
+      source.indexOf("function MemoryTokenBudgetCard"),
+      source.indexOf("export type MemoryBudgetUsageTone")
+    );
+    expect(budgetCardSource).toContain("<Gauge");
+    expect(budgetCardSource).toContain("usageStyles.sectionHead");
+    expect(budgetCardSource).toContain("usageStyles.budgetSection");
+    expect(budgetCardSource).toContain("usageStyles.budgetPanel");
+    expect(budgetCardSource).toContain("usageStyles.platformQuotaList");
+    const budgetRowSource = source.slice(
+      source.indexOf("export function MemoryTokenBudgetRow"),
+      source.indexOf("export interface UsageDetailsProps")
+    );
+    expect(budgetRowSource).toContain("usageStyles.platformQuotaRow");
+    expect(budgetRowSource).toContain("usageStyles.budgetMeter");
+    expect(budgetCardSource.indexOf('t("settings.token.memoryBudgetHint")')).toBeLessThan(
+      budgetCardSource.indexOf('t("settings.token.memoryBudgetDaily")')
+    );
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
     expect(source).toContain("function UsageDetails");
@@ -700,6 +787,16 @@ describe("SettingsPageView", () => {
     expect(workspaceSource).toContain("testEditorConnection");
   });
 
+  it("把 catalog 侧的 provider id 还原回工作区协议", () => {
+    expect(protocolFromConnection("volcengine")).toBe("doubao");
+    expect(protocolFromConnection("qianfan")).toBe("baidu");
+    expect(protocolFromConnection("dashscope")).toBe("qwen");
+    expect(protocolFromConnection("xiaomi_mimo")).toBe("xiaomi");
+    expect(protocolFromConnection("xiaomi")).toBe("xiaomi");
+    expect(protocolFromConnection("stepfun")).toBe("stepfun");
+    expect(protocolFromConnection("unknown-provider")).toBe("openai");
+  });
+
   it("模型工作区协议默认地址与模型配置常量保持一致", () => {
     const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const modelSource = readFileSync(modelConfigSourcePath, "utf8");
@@ -714,7 +811,9 @@ describe("SettingsPageView", () => {
       ["moonshot", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
       ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
-      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"]
+      ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"],
+      ["stepfun", "https://api.stepfun.com/v1", "step-3.5-flash"],
+      ["xiaomi", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"]
     ];
 
     for (const [protocol, endpoint, placeholder] of defaults) {
@@ -838,12 +937,10 @@ describe("SettingsPageView", () => {
   });
 
   it("模型工作区连接编辑展示已保存脱敏 key，且保存不回传脱敏值", () => {
-    const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const fieldsSource = readFileSync(fileURLToPath(new URL("../api-key-form-fields.tsx", import.meta.url)), "utf8");
 
-    expect(workspaceSource).toContain("maskedValue={editor.connectionId && !editorProviderChanged");
-    expect(workspaceSource).toContain("apiKey: editor.apiKey || undefined");
-    expect(workspaceSource).toContain("apiKeyMasked:");
+    // Credential display/test/save behavior is covered with the real catalog
+    // writer in byok-credential-consistency.interaction.test.tsx.
     expect(fieldsSource).toContain("const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;");
     expect(fieldsSource).toContain("placeholder={placeholder}");
     expect(fieldsSource).not.toContain("const showSavedSecret = !props.value.trim() && Boolean(props.maskedValue)");
@@ -1019,6 +1116,7 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
     expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
     expect(source).toContain('window.addEventListener("focus"');
+    expect(source).toContain("Pending requests refresh on window focus instead of fixed-interval polling.");
     expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
   });

@@ -53,6 +53,22 @@ describe("estimatePromptTokensChain", () => {
     expect(estimatePromptTokens([message], [{ name: "search", parameters: {} }])).toBeGreaterThan(estimatePromptTokens([message]));
   });
 
+  it("budgets image input without counting base64 transport bytes as text", () => {
+    const imageMessage = (payload: string) => ({
+      role: "tool",
+      content: [
+        { type: "text", text: "TextEdit screenshot" },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${payload}` } },
+      ],
+    });
+    const small = estimateMessageTokens(imageMessage("AAAA"));
+    const large = estimateMessageTokens(imageMessage("A".repeat(200_000)));
+
+    expect(large).toBe(small);
+    expect(large).toBeGreaterThan(4_000);
+    expect(large).toBeLessThan(5_000);
+  });
+
   it("builds assistant messages and native image content blocks", () => {
     expect(buildAssistantMessage("answer", [{ id: "call-1" }], "reason", [{ type: "thinking", thinking: "t" }])).toMatchObject({
       role: "assistant",

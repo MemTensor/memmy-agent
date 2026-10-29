@@ -86,7 +86,7 @@
 #### 2. 使用 memmy CLI /TUI
 ![tui.png](docs/assets/tui.png)
 
-Linux x64 或 arm64（需 Node.js 22 或更高版本，并且 systemd 用户会话可用）可一行安装：
+Linux x64 或 arm64 需有可用的 systemd 用户会话，并使用 Node.js 22.23.4+（22.x）、24.22.1+（24.x）或 26.12.1+（26.x）。安装器不接受其他主版本：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
@@ -94,6 +94,8 @@ memmy
 ```
 
 安装器会立即启用本地 Memory Service（`memmy-memory.service`）。首次裸执行 `memmy` 时，如尚未配置模型，会在当前终端进入配置向导；保存后启用 `memmy-gateway.service`，等待就绪并进入 TUI。二者均为只绑定本机地址的 `systemd --user` 服务，退出 TUI 或关闭终端不会停止；以后登录时会自动启动。安装器不会启用 linger。只有安装器生成的 launcher 会启用这套服务管理，源码构建的 Linux CLI 保持原有行为。
+
+Gateway 启动期间，bootstrap 接口临时返回 HTTP 503 时会继续重试，直到 Gateway 就绪或启动等待超时。
 
 启动或重新连接 Gateway 前，`memmy` 会把配置引用的环境变量、常用 Provider 凭据和终端 `PATH` 刷新到权限为 `0600` 的私有文件 `~/.memmy/systemd/gateway.env`。这些值发生变化后，下次裸执行 `memmy` 会使用新环境重启用户服务。
 
@@ -141,6 +143,20 @@ memmy-memory get <id>
 ```
 
 默认连接 `http://127.0.0.1:18960`；可用 `--url`、`--token`、`--config`、`--source` 和 `--user-id` 指定服务与命名空间。
+
+只想单独运行记忆服务、不需要 Agent Runtime 时，从源码编译这个 CLI：
+
+```bash
+git clone https://github.com/MemTensor/memmy-agent.git
+cd memmy-agent
+npm install
+npm run memory:build
+mkdir -p ~/.local/bin
+ln -sf "$PWD/Memory/dist/src/cli/index.js" ~/.local/bin/memmy-memory
+memmy-memory install --service-only
+```
+
+`install --service-only` 会下载锁定版本的 Memory 运行时、注册并启动用户级服务，并验证 `/api/v1/health`，全程不向任何 Agent 安装 Skill 或适配器。需要 Node.js `>=20`；Windows 请在 `Git Bash` 中执行。`npm run memory:binary` 则把同一个 CLI 打包成可分发归档，输出到 `Memory/src/cli/dist/binaries/`，默认按当前平台构建，可用 `MEMMY_MEMORY_TARGET` 指定其他受支持平台。
 
 
 #### 4. 源码启动

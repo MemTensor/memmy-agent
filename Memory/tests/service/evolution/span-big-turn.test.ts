@@ -81,6 +81,7 @@ function createSpanBigTurnLlm(
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           l1: {
+            title: "定位并修复构建失败",
             summary: "定位构建失败、修改依赖配置并验证修复结果",
             evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
           },
@@ -116,7 +117,7 @@ function createSpanBigTurnLlm(
 }
 
 describe("MemoryService / evolution / span big turn", () => {
-  it("stores and recalls subtask spans for a positively rewarded complex turn", async () => {
+  it("stores, recalls, and deletes subtask spans with their task", async () => {
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const embeddedTexts: string[] = [];
     const embeddedRoles: Array<"query" | "document" | undefined> = [];
@@ -212,7 +213,12 @@ describe("MemoryService / evolution / span big turn", () => {
     });
     expect(spanCall?.messages[0]?.content).toContain("Spans must not overlap");
     expect(spanCall?.messages[0]?.content).toContain("may remain outside all spans");
-    const spanPayload = JSON.parse(spanCall?.messages[1]?.content ?? "{}") as {
+    expect(spanCall?.messages[0]?.content).toContain("Use that one language for both fields");
+    expect(spanCall?.messages[0]?.content).not.toContain("same language as the user's request");
+    expect(spanCall?.messages[1]?.content).toContain("Simplified Chinese");
+    const spanPayload = JSON.parse(
+      spanCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
+    ) as {
       userRequest?: string;
       assistantFinalAnswer?: string;
       traceSummary?: string;
@@ -237,7 +243,8 @@ describe("MemoryService / evolution / span big turn", () => {
     expect(spanPayload.toolCalls?.[5]?.raw).toHaveLength(100);
     expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/^"invalid-/);
     expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/\.\.\.$/);
-    const serializedSpanPrompt = spanCall?.messages[1]?.content ?? "";
+    const serializedSpanPrompt =
+      spanCall?.messages.find((message) => message.role === "user")?.content ?? "";
     expect(serializedSpanPrompt).toContain("[redacted]");
     expect(serializedSpanPrompt).not.toContain("sk-supersecret123456");
     expect(serializedSpanPrompt).not.toContain("private-token-value");
@@ -314,6 +321,134 @@ describe("MemoryService / evolution / span big turn", () => {
       toolCalls: toolCalls.slice(0, 4).map(({ id, name, input }) => ({ id, name, input }))
     });
     expect(completed.l1MemoryIds).toHaveLength(1);
+
+    const deleted = service.deletePanelTask(completed.episodeId, { namespace });
+    expect(new Set(deleted.deletedMemoryIds)).toEqual(new Set([
+      completed.l1MemoryId,
+      ...storedSpanIds
+    ]));
+    expect(service.panelTasks({ namespace, page: 1 }).tasks).toHaveLength(0);
+    expect(service.panelItems({ namespace, layer: "L1" }).items).toHaveLength(0);
+    expect(() => service.getMemory(firstSpanId!, { namespace })).toThrow(/not found/i);
+    db.close();
+  });
+
+  it.each([
+    { name: "after the parent trace was deleted", deleteParent: true, splitAgain: false },
+    { name: "after a second successful split with different ranges", deleteParent: false, splitAgain: true },
+    { name: "after both re-splitting and deleting the parent", deleteParent: true, splitAgain: true }
+  ])("deletes all task spans $name", async ({ deleteParent, splitAgain }) => {
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
+    const firstSplit = {
+      spans: [
+        { start: 0, end: 3, spanGoal: "分析构建问题", summary: "检查构建日志" },
+        { start: 4, end: 7, spanGoal: "修改构建配置", summary: "修复依赖冲突" },
+        { start: 8, end: 10, spanGoal: "验证构建结果", summary: "执行测试验证" }
+      ]
+    };
+    const secondSplit = {
+      spans: [
+        { start: 0, end: 6, spanGoal: "分析并修改构建配置", summary: "定位并修复问题" },
+        { start: 7, end: 10, spanGoal: "重新验证构建结果", summary: "完成测试验证" }
+      ]
+    };
+    const llm = createSpanBigTurnLlm(calls, [firstSplit, secondSplit, firstSplit]);
+    const config = {
+      ...DEFAULT_MEMMY_CONFIG,
+      algorithm: {
+        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        retrieval: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+          relativeThresholdFloor: 0,
+          smartSeed: false,
+          llmFilterEnabled: false
+        }
+      }
+    };
+    const { db, service } = createTestService({ config, llm, skillLlm: llm });
+    const namespace = { source: "codex", profileId: "cascade", userId: "cascade-review" };
+    function createTask(requestId: string) {
+      const session = service.openSession({ namespace });
+      const toolCalls = Array.from({ length: 11 }, (_, index) => ({
+        id: `${requestId}-${index}`, name: "task_step", input: { index }
+      }));
+      const completed = service.completeTurn(requestId, {
+        namespace, sessionId: session.sessionId,
+        query: "分析构建问题、修改配置并验证结果",
+        answer: "已完成分析、修复和验证。",
+        toolCalls,
+        toolResults: toolCalls.map((call) => ({
+          toolCallId: call.id, name: call.name, output: { ok: true }
+        }))
+      });
+      service.closeSession(session.sessionId);
+      return { ...completed, sessionId: session.sessionId };
+    }
+    async function reward(task: ReturnType<typeof createTask>) {
+      await service.feedback({
+        namespace, sessionId: task.sessionId, episodeId: task.episodeId,
+        l1MemoryId: task.l1MemoryId, channel: "explicit", polarity: "positive",
+        magnitude: 1, rationale: "构建修复正确"
+      });
+      await runWorkerRounds(service, 8);
+    }
+    function spanIds(episodeId: string): string[] {
+      return (db.db.prepare(`SELECT id FROM memories
+        WHERE json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
+          AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
+          AND deleted_at IS NULL`).all(episodeId) as Array<{ id: string }>).map((row) => row.id);
+    }
+    const task = createTask("cascade-target");
+    await reward(task);
+    const originalSpans = spanIds(task.episodeId);
+    expect(originalSpans).toHaveLength(3);
+    if (splitAgain) {
+      await reward(task);
+      expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(2);
+      const parent = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?")
+        .get(task.l1MemoryId) as { properties_json: string };
+      const latestIds = JSON.parse(parent.properties_json).internal_info.trace.span_ids as string[];
+      expect(latestIds).toHaveLength(2);
+      expect(latestIds.every((id) => !originalSpans.includes(id))).toBe(true);
+    }
+    const targetIds = spanIds(task.episodeId);
+    expect(targetIds).toHaveLength(splitAgain ? 5 : 3);
+    const control = createTask("cascade-control");
+    await reward(control);
+    const controlIds = spanIds(control.episodeId);
+    expect(controlIds.length).toBeGreaterThan(0);
+    const controlBefore = db.db.prepare("SELECT * FROM memories WHERE id IN (SELECT value FROM json_each(?))")
+      .all(JSON.stringify(controlIds));
+    const countVectors = (ids: string[]) => (db.db.prepare(
+      "SELECT count(*) AS count FROM memory_vector_entries WHERE memory_id IN (SELECT value FROM json_each(?))"
+    ).get(JSON.stringify(ids)) as { count: number }).count;
+    expect(countVectors(targetIds)).toBeGreaterThan(0);
+    const controlVectorCount = countVectors(controlIds);
+    if (deleteParent) service.deleteMemory(task.l1MemoryId!, { namespace });
+
+    const deleted = service.deletePanelTask(task.episodeId, { namespace });
+    expect(new Set(deleted.deletedMemoryIds)).toEqual(new Set([
+      ...targetIds, ...(deleteParent ? [] : [task.l1MemoryId])
+    ]));
+    expect(db.db.prepare("SELECT id FROM episodes WHERE id = ?").get(task.episodeId)).toBeUndefined();
+    expect(db.db.prepare("SELECT id FROM raw_turns WHERE id = ?").get(task.rawTurnId)).toBeUndefined();
+    for (const id of [...targetIds, task.l1MemoryId!]) {
+      expect(db.db.prepare("SELECT status, deleted_at FROM memories WHERE id = ?").get(id))
+        .toEqual({ status: "deleted", deleted_at: expect.any(String) });
+      expect(() => service.getMemory(id, { namespace })).toThrow(/not found/i);
+      expect(db.db.prepare("SELECT count(*) AS count FROM audit_logs WHERE action = 'delete' AND target_id = ?").get(id))
+        .toEqual({ count: 1 });
+    }
+    expect(countVectors(targetIds)).toBe(0);
+    const remaining = service.panelItems({ namespace, layer: "L1" }).items.map((item) => item.id);
+    expect(targetIds.every((id) => !remaining.includes(id))).toBe(true);
+    const recalled = await service.search({ namespace, query: "分析构建问题 修改配置 验证结果", layers: ["L1"] });
+    expect(recalled.hits.some((hit) => targetIds.includes(hit.id) || hit.id === task.l1MemoryId)).toBe(false);
+    expect(db.db.prepare("SELECT * FROM memories WHERE id IN (SELECT value FROM json_each(?))")
+      .all(JSON.stringify(controlIds))).toEqual(controlBefore);
+    expect(countVectors(controlIds)).toBe(controlVectorCount);
+    for (const id of controlIds) expect(() => service.getMemory(id, { namespace })).not.toThrow();
+    expect(service.panelTasks({ namespace, page: 1 }).tasks.map((item) => item.id)).toContain(control.episodeId);
     db.close();
   });
 

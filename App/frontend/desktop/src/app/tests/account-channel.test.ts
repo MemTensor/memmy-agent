@@ -21,4 +21,9 @@ describe("resolveDesktopAccountChannel", () => {
     expect(resolveDesktopDisplayLanguage("zh-CN", "email")).toBe("zh-CN");
     expect(resolveDesktopDisplayLanguage("en-US", "phone")).toBe("en-US");
   });
+
+  it("没有界面译文的语言不作为当前显示语言", () => {
+    expect(resolveDesktopDisplayLanguage("ja-JP", "phone")).toBe("zh-CN");
+    expect(resolveDesktopDisplayLanguage("fr-FR", "email")).toBe("en-US");
+  });
 });

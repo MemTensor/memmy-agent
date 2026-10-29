@@ -206,8 +206,8 @@ describe("QQ inbound media", () => {
 
     const msg = await channel.bus.consumeInbound();
     expect(msg.content).toContain("look at this");
-    expect(msg.content).toContain("screenshot.png");
-    expect(msg.content).toContain("Received files:");
+    // successful download no longer adds filename/path to content — that goes in the manifest via buildUserContent
+    expect(msg.content).not.toContain("[download failed]");
     expect(msg.media).toEqual([savedPath]);
   });
 });

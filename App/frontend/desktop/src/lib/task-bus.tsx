@@ -19,8 +19,14 @@ export interface Task {
   streamingChunks?: string[];
   source: TaskSource;
   goalId?: string;
+  /** Stable user-message timestamp once a local task has been matched to an agent turn. */
+  agentUserCreatedAt?: number;
   dismissed?: boolean;
   readAt?: number;
+  /** Explicit unread completion. Historical tasks without this flag are not unread. */
+  unseen?: boolean;
+  /** Last live scheduled delivery applied to this session's badge. */
+  proactiveUnseenAt?: number;
 }
 
 export interface TaskBusSnapshot {
@@ -46,6 +52,9 @@ export interface SyncAgentConversationInput {
   sessionIds: string[];
   messages: TaskBusAgentMessage[];
   isRunning: boolean;
+  /** Applies the main window's unread state together with its conversation snapshot. */
+  completedUnseen?: boolean;
+  proactiveUnseenAt?: number;
   preserveFocus?: boolean;
   now?: number;
   makeId?: () => string;
@@ -54,6 +63,9 @@ export interface SyncAgentConversationInput {
 export interface TaskBusAgentTaskStatus {
   sessionIds: string[];
   isRunning: boolean;
+  /** Sidebar unread dot. When present, it is the source of truth for that session's pet badge. */
+  completedUnseen?: boolean;
+  proactiveUnseenAt?: number;
 }
 
 export interface SyncAgentTaskStatusesInput {
@@ -127,6 +139,9 @@ export function appendChunkToSnapshot(snapshot: TaskBusSnapshot, taskId: string,
 }
 
 export function completeTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, finalText: string, now = Date.now()): TaskBusSnapshot {
+  if (snapshot.tasks.some((task) => task.id === taskId && task.status === "done" && task.lastAgentMessage === finalText)) {
+    return snapshot;
+  }
   return {
     ...snapshot,
     tasks: snapshot.tasks.map((task) =>
@@ -138,7 +153,8 @@ export function completeTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string
             finishedAt: now,
             updatedAt: now,
             streamingChunks: [finalText],
-            readAt: undefined
+            readAt: undefined,
+            unseen: true
           }
         : task
     )
@@ -146,6 +162,9 @@ export function completeTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string
 }
 
 export function errorTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, message: string, now = Date.now()): TaskBusSnapshot {
+  if (snapshot.tasks.some((task) => task.id === taskId && task.status === "error" && task.lastAgentMessage === message)) {
+    return snapshot;
+  }
   return {
     ...snapshot,
     tasks: snapshot.tasks.map((task) =>
@@ -156,7 +175,8 @@ export function errorTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, m
             lastAgentMessage: message,
             finishedAt: now,
             updatedAt: now,
-            readAt: undefined
+            readAt: undefined,
+            unseen: true
           }
         : task
     )
@@ -172,7 +192,8 @@ export function cancelTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, 
             ...task,
             status: "cancelled",
             finishedAt: now,
-            updatedAt: now
+            updatedAt: now,
+            unseen: false
           }
         : task
     )
@@ -209,17 +230,27 @@ export function startNewSessionInSnapshot(snapshot: TaskBusSnapshot): TaskBusSna
 }
 
 export function dismissTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, now = Date.now()): TaskBusSnapshot {
+  const readSnapshot = markTaskReadInSnapshot(snapshot, taskId, now);
   return {
-    ...snapshot,
+    ...readSnapshot,
     focusedTaskId: snapshot.focusedTaskId === taskId ? null : snapshot.focusedTaskId,
-    tasks: snapshot.tasks.map((task) => (task.id === taskId ? markTaskDismissed(task, now) : task))
+    tasks: readSnapshot.tasks.map((task) => (task.id === taskId ? markTaskDismissed(task, now) : task))
   };
 }
 
 export function markTaskReadInSnapshot(snapshot: TaskBusSnapshot, taskId: string, now = Date.now()): TaskBusSnapshot {
+  const selectedTask = snapshot.tasks.find((task) => task.id === taskId);
+  if (!selectedTask || !isTaskTerminalStatus(selectedTask.status)) {
+    return snapshot;
+  }
+  const sessionId = canonicalTaskSessionId(selectedTask.sessionId);
   return {
     ...snapshot,
-    tasks: snapshot.tasks.map((task) => (task.id === taskId && isTaskTerminalStatus(task.status) ? { ...task, readAt: now } : task))
+    tasks: snapshot.tasks.map((task) => (
+      canonicalTaskSessionId(task.sessionId) === sessionId && task.startedAt <= selectedTask.startedAt && isTaskTerminalStatus(task.status)
+        ? { ...task, readAt: Math.max(task.readAt ?? 0, now), unseen: false }
+        : task
+    ))
   };
 }
 
@@ -301,6 +332,14 @@ export function syncAgentConversationToSnapshot(snapshot: TaskBusSnapshot, input
     }
   }
 
+  const unreadTasks = applyCompletedUnseenToTasks(tasks, [{
+    sessionIds: input.sessionIds,
+    isRunning: input.isRunning,
+    completedUnseen: input.completedUnseen,
+    proactiveUnseenAt: input.proactiveUnseenAt
+  }], now);
+  changed = changed || unreadTasks !== tasks;
+  tasks = unreadTasks;
   const focusedTaskId = input.preserveFocus ? snapshot.focusedTaskId : latestSyncedTaskId ?? snapshot.focusedTaskId;
   return changed || focusedTaskId !== snapshot.focusedTaskId ? { ...snapshot, tasks, focusedTaskId } : snapshot;
 }
@@ -314,7 +353,7 @@ export function syncAgentTaskStatusesToSnapshot(snapshot: TaskBusSnapshot, input
   const now = input.now ?? Date.now();
   const runningRepresentativeTaskIds = findRunningRepresentativeTaskIds(snapshot.tasks, statusBySessionId);
   let changed = false;
-  const tasks = snapshot.tasks.map((task) => {
+  const statusTasks = snapshot.tasks.map((task) => {
     const isRunning = statusBySessionId.get(task.sessionId);
     if (isRunning == null) {
       return task;
@@ -334,6 +373,8 @@ export function syncAgentTaskStatusesToSnapshot(snapshot: TaskBusSnapshot, input
     changed = changed || nextTask !== task;
     return nextTask;
   });
+  const tasks = applyCompletedUnseenToTasks(statusTasks, input.tasks, now);
+  changed = changed || tasks !== statusTasks;
 
   return changed ? { ...snapshot, tasks } : snapshot;
 }
@@ -580,6 +621,7 @@ function applyTaskAnswerSnapshot(task: Task, text: string, status: TaskStatus, n
   const taskWithoutFinishedAt = { ...task };
   delete taskWithoutFinishedAt.finishedAt;
   delete taskWithoutFinishedAt.readAt;
+  delete taskWithoutFinishedAt.unseen;
   const nextTask: Task = status === "done"
     ? {
         ...task,
@@ -588,7 +630,8 @@ function applyTaskAnswerSnapshot(task: Task, text: string, status: TaskStatus, n
         updatedAt: now,
         streamingChunks,
         finishedAt: task.finishedAt ?? now,
-        readAt: undefined
+        readAt: undefined,
+        unseen: true
       }
     : {
         ...taskWithoutFinishedAt,
@@ -622,6 +665,7 @@ function markTaskRunningFromAgentStatus(task: Task, now: number): Task {
   const taskWithoutFinishedAt = { ...task };
   delete taskWithoutFinishedAt.finishedAt;
   delete taskWithoutFinishedAt.readAt;
+  delete taskWithoutFinishedAt.unseen;
   return {
     ...taskWithoutFinishedAt,
     status: "processing",
@@ -645,7 +689,8 @@ function finishTaskFromAgentStatus(task: Task, now: number): Task {
     ...(text ? { lastAgentMessage: text, streamingChunks: [text] } : {}),
     updatedAt: now,
     finishedAt: task.finishedAt ?? now,
-    readAt: undefined
+    readAt: undefined,
+    unseen: true
   };
 }
 
@@ -695,10 +740,13 @@ function createTaskFromAgentTurn(input: {
   makeId?: () => string;
 }): Task {
   const startedAt = input.userCreatedAt ?? input.now;
-  const task = createTaskRecord(
-    { input: input.userText, source: "main", sessionId: input.sessionId },
-    { now: startedAt, makeId: input.makeId }
-  );
+  const task: Task = {
+    ...createTaskRecord(
+      { input: input.userText, source: "main", sessionId: input.sessionId },
+      { now: startedAt, makeId: input.makeId }
+    ),
+    ...(input.userCreatedAt == null ? {} : { agentUserCreatedAt: input.userCreatedAt })
+  };
   if (input.status === "processing" || !input.answerText.trim()) {
     return {
       ...task,
@@ -722,6 +770,10 @@ function findTaskIndexForAgentTurn(tasks: Task[], targetSessionIds: Set<string>,
     if (!targetSessionIds.has(task.sessionId) || normalizeMessageText(task.lastUserMessage) !== normalizedUserText) {
       continue;
     }
+    if (typeof userCreatedAt === "number" && task.agentUserCreatedAt != null) {
+      if (task.agentUserCreatedAt === userCreatedAt) return index;
+      continue;
+    }
     if (task.source === "main") {
       if (typeof userCreatedAt === "number" && task.startedAt === userCreatedAt) {
         return index;
@@ -732,6 +784,9 @@ function findTaskIndexForAgentTurn(tasks: Task[], targetSessionIds: Set<string>,
       continue;
     }
     if (typeof userCreatedAt === "number" && Math.abs(task.startedAt - userCreatedAt) > 60_000) {
+      continue;
+    }
+    if (typeof userCreatedAt === "number" && !isTaskInFlightStatus(task.status) && userCreatedAt > (task.finishedAt ?? task.updatedAt)) {
       continue;
     }
     if (fallbackIndex < 0) {
@@ -753,9 +808,12 @@ function findAssistantAnswerForTask(messages: TaskBusAgentMessage[], task: Task)
     if (message?.role !== "user" || normalizeMessageText(message.content) !== userText) {
       continue;
     }
-    if (typeof message.createdAt === "number" && message.createdAt === task.startedAt) {
+    if (typeof message.createdAt === "number" && message.createdAt === (task.agentUserCreatedAt ?? task.startedAt)) {
       userIndex = index;
       break;
+    }
+    if (task.agentUserCreatedAt != null) {
+      continue;
     }
     if (task.source !== "main" && typeof message.createdAt === "number" && Math.abs(message.createdAt - task.startedAt) <= 60_000) {
       userIndex = index;
@@ -766,7 +824,7 @@ function findAssistantAnswerForTask(messages: TaskBusAgentMessage[], task: Task)
     }
   }
 
-  if (userIndex < 0 && task.source !== "main") {
+  if (userIndex < 0 && task.source !== "main" && task.agentUserCreatedAt == null) {
     userIndex = fallbackIndex;
   }
 
@@ -806,6 +864,7 @@ function normalizeMessageText(value: string): string {
  * Merges the latest full-mode turn back into an existing TaskBus task.
  */
 function mergeAgentTurnIntoTask(currentTask: Task, agentTask: Task): Task {
+  const sameCompletedTurn = isTaskTerminalStatus(currentTask.status) && isTaskTerminalStatus(agentTask.status);
   const nextTask: Task = {
     ...currentTask,
     title: agentTask.title,
@@ -814,10 +873,11 @@ function mergeAgentTurnIntoTask(currentTask: Task, agentTask: Task): Task {
     updatedAt: Math.max(currentTask.updatedAt, agentTask.updatedAt),
     lastUserMessage: agentTask.lastUserMessage,
     source: currentTask.source === "pet" ? currentTask.source : agentTask.source,
-    dismissed: false,
+    dismissed: sameCompletedTurn ? currentTask.dismissed : false,
+    ...(agentTask.agentUserCreatedAt == null ? {} : { agentUserCreatedAt: agentTask.agentUserCreatedAt }),
     ...(agentTask.lastAgentMessage == null ? {} : { lastAgentMessage: agentTask.lastAgentMessage }),
     ...(agentTask.streamingChunks == null ? {} : { streamingChunks: agentTask.streamingChunks }),
-    ...(agentTask.finishedAt == null ? {} : { finishedAt: agentTask.finishedAt })
+    ...(agentTask.finishedAt == null ? {} : { finishedAt: sameCompletedTurn ? currentTask.finishedAt ?? agentTask.finishedAt : agentTask.finishedAt })
   };
   if (agentTask.finishedAt == null) {
     delete nextTask.finishedAt;
@@ -831,6 +891,7 @@ function mergeAgentTurnIntoTask(currentTask: Task, agentTask: Task): Task {
     currentTask.lastUserMessage === nextTask.lastUserMessage &&
     currentTask.lastAgentMessage === nextTask.lastAgentMessage &&
     currentTask.finishedAt === nextTask.finishedAt &&
+    currentTask.agentUserCreatedAt === nextTask.agentUserCreatedAt &&
     currentTask.dismissed === nextTask.dismissed &&
     currentTask.readAt === nextTask.readAt &&
     (currentTask.streamingChunks ?? []).join("") === (nextTask.streamingChunks ?? []).join("")
@@ -853,7 +914,9 @@ function isTaskTerminalStatus(status: TaskStatus): boolean {
 }
 
 function markTaskDismissed(task: Task, now: number): Task {
-  return isTaskTerminalStatus(task.status) ? { ...task, dismissed: true, readAt: task.readAt ?? now } : { ...task, dismissed: true };
+  return isTaskTerminalStatus(task.status)
+    ? { ...task, dismissed: true, readAt: task.readAt ?? now, unseen: false }
+    : { ...task, dismissed: true, unseen: false };
 }
 
 /**
@@ -916,6 +979,67 @@ function expandSessionIds(sessionIds: string[]): Set<string> {
 /**
  * Builds a map of full-mode session running states, compatible with the websocket: prefix.
  */
+/**
+ * Applies the main window's per-session unread dots onto terminal pet tasks.
+ *
+ * Sessions the user has already opened are marked read. Sessions with a completion
+ * they have not opened become one unread session, regardless of how many tasks they contain.
+ */
+function applyCompletedUnseenToTasks(tasks: Task[], statuses: TaskBusAgentTaskStatus[], now: number): Task[] {
+  const unseenBySession = new Map<string, boolean>();
+  const proactiveAtBySession = new Map<string, number>();
+  for (const status of statuses) {
+    if (typeof status.completedUnseen !== "boolean") {
+      continue;
+    }
+
+    for (const sessionId of status.sessionIds) {
+      const canonical = canonicalTaskSessionId(sessionId);
+      if (!canonical) {
+        continue;
+      }
+      unseenBySession.set(canonical, unseenBySession.get(canonical) === true || status.completedUnseen);
+      if (typeof status.proactiveUnseenAt === "number" && Number.isFinite(status.proactiveUnseenAt)) {
+        proactiveAtBySession.set(canonical, Math.max(proactiveAtBySession.get(canonical) ?? 0, status.proactiveUnseenAt));
+      }
+    }
+  }
+  if (unseenBySession.size === 0) {
+    return tasks;
+  }
+
+  let changed = false;
+  const nextTasks = tasks.map((task) => {
+    const unseen = unseenBySession.get(canonicalTaskSessionId(task.sessionId));
+    const proactiveAt = proactiveAtBySession.get(canonicalTaskSessionId(task.sessionId));
+    if (unseen == null || !isTaskTerminalStatus(task.status)) {
+      return task;
+    }
+
+    if (unseen) {
+      if (proactiveAt != null && proactiveAt > (task.proactiveUnseenAt ?? 0) && proactiveAt > (task.readAt ?? 0)) {
+        changed = true;
+        return { ...task, proactiveUnseenAt: proactiveAt, unseen: true, readAt: undefined, dismissed: false };
+      }
+      // Only tasks that have never been classified get the sidebar dot.
+      // An explicit pet read (unseen false / readAt) stays read.
+      if (task.readAt != null || task.unseen != null) {
+        return task;
+      }
+      changed = true;
+      return { ...task, unseen: true };
+    }
+
+    if (task.unseen === false && task.readAt != null && (proactiveAt == null || task.readAt >= proactiveAt)) {
+      return task;
+    }
+    changed = true;
+    return { ...task, unseen: false, readAt: Math.max(task.readAt ?? 0, proactiveAt ?? 0, now) };
+  });
+
+  return changed ? nextTasks : tasks;
+}
+
 function createAgentTaskStatusMap(tasks: TaskBusAgentTaskStatus[]): Map<string, boolean> {
   const statusBySessionId = new Map<string, boolean>();
   for (const task of tasks) {
@@ -938,7 +1062,7 @@ function findRunningRepresentativeTaskIds(tasks: Task[], statusBySessionId: Map<
 
     const sessionId = canonicalTaskSessionId(task.sessionId);
     const current = representativeBySessionId.get(sessionId);
-    if (!current || taskActivityAt(task) > taskActivityAt(current)) {
+    if (!current || task.startedAt > current.startedAt || (task.startedAt === current.startedAt && taskActivityAt(task) > taskActivityAt(current))) {
       representativeBySessionId.set(sessionId, task);
     }
   }
@@ -998,6 +1122,7 @@ function isTaskLike(value: unknown): value is Task {
     typeof task.startedAt === "number" &&
     typeof task.updatedAt === "number" &&
     typeof task.lastUserMessage === "string" &&
+    (task.agentUserCreatedAt === undefined || (typeof task.agentUserCreatedAt === "number" && Number.isFinite(task.agentUserCreatedAt))) &&
     (task.goalId === undefined || (typeof task.goalId === "string" && Boolean(task.goalId.trim()))) &&
     isTaskSource(task.source)
   );

@@ -235,6 +235,40 @@ describe("WebSocket media route", () => {
     expect(channel.handleMediaFetch(sig, payload).status).toBe(200);
   });
 
+  it("stages one media copy per file version instead of one per request", () => {
+    const data = tmpDataDir("ws-media-artifact-dedupe");
+    const workspace = path.join(data, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    const report = path.join(workspace, "年报审阅.md");
+    fs.writeFileSync(report, "# v1", "utf8");
+    const { channel, sessionKey } = artifactChannel(data, workspace);
+    (channel as any).apiTokens.set("api-token", Date.now() / 1000 + 60);
+    const resolve = () => JSON.parse(String(channel.handleArtifactResolve({
+      path: "/api/webui/artifacts/resolve",
+      method: "POST",
+      headers: { authorization: "Bearer api-token" },
+      body: JSON.stringify({ path: report, sessionKey }),
+    }).body));
+    const stagedCopies = () => fs.readdirSync(path.join(data, "media", "websocket"))
+      .filter((name) => name.endsWith("-年报审阅.md"));
+
+    const first = resolve();
+    const second = resolve();
+    const attachment = channel.webuiMediaAttachmentForPath(report, sessionKey);
+
+    expect(second.media_url).toBe(first.media_url);
+    expect(attachment?.url).toBe(first.media_url);
+    expect(stagedCopies()).toHaveLength(1);
+
+    fs.writeFileSync(report, "# v2 with more content", "utf8");
+    const updated = resolve();
+
+    expect(updated.media_url).not.toBe(first.media_url);
+    expect(stagedCopies()).toHaveLength(2);
+    const [sig, payload] = String(updated.media_url).slice("/api/media/".length).split("/");
+    expect(String(channel.handleMediaFetch(sig, payload).body)).toBe("# v2 with more content");
+  });
+
   it("rejects signed media requests with bad signatures", () => {
     const data = tmpDataDir("ws-media-bad-signature");
     const media = path.join(data, "media");

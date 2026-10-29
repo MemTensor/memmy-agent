@@ -21,6 +21,11 @@ afterEach(async () => {
 
 async function fixture(options: {
   version?: string;
+  buildId?: string;
+  bundledBuildId?: string;
+  schemaVersion?: number;
+  bundledSchemaVersion?: number;
+  bundledVersion?: string;
   delay?: number;
   independent?: boolean;
   identity?: boolean;
@@ -37,6 +42,7 @@ async function fixture(options: {
   const root = await mkdtemp(join(tmpdir(), "memmy-runtime-upgrade-"));
   roots.push(root);
   const home = join(root, "home");
+  const bundledVersion = options.bundledVersion ?? "2.1.1";
   const bundled = join(root, "bundled");
   const serviceHome = join(home, "memory-service");
   const runtimeDir = join(serviceHome, "runtime", "2.1.0", "fixture");
@@ -63,10 +69,15 @@ async function fixture(options: {
     "const args = process.argv.slice(2); const arg = key => args[args.indexOf(key) + 1];",
     "const db = arg('--db'); const config = arg('--config'); const port = Number(arg('--port'));",
     "const serviceHome = path.join(path.dirname(config), 'memory-service');",
-    "const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || '2.1.1';",
+    `const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || ${JSON.stringify(bundledVersion)};`,
     "fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, sqlitePath: db, host: '127.0.0.1', port }));",
     "const server = http.createServer((request, response) => {",
-    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')), protocolVersion: 1, serviceVersion: version })); return; }",
+    "  if (request.url === '/api/v1/health') {",
+    "    const hasMemoryIdentity = process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service'));",
+    // A non-Memory endpoint lacks the health contract; `ok: false` is valid for a degraded Memory service.
+    "    const health = hasMemoryIdentity ? { ok: true, protocolVersion: 1, serviceVersion: version } : { serviceVersion: version };",
+    "    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(health)); return;",
+    "  }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
     "});",
@@ -78,9 +89,10 @@ async function fixture(options: {
   ].join("\n");
   await writeFile(entry, source);
   await writeFile(join(bundled, "server.cjs"), source);
-  await writeFile(join(bundled, "memory-runtime.json"), JSON.stringify({ version: "2.1.1", protocolVersion: 1 }));
+  await writeFile(join(bundled, "memory-runtime.json"), JSON.stringify({ version: bundledVersion, protocolVersion: 1, buildId: options.bundledBuildId, schemaVersion: options.bundledSchemaVersion }));
   await writeFile(join(serviceHome, "current.json"), JSON.stringify({
     version: options.version ?? "2.1.0", protocolVersion: 1, runtimeDir, entrypoint: entry,
+    buildId: options.buildId, schemaVersion: options.schemaVersion,
     runtimeExecutable: options.independent ? join(root, "independent-node") : process.execPath,
   }));
   await writeFile(cli, [
@@ -104,10 +116,11 @@ async function fixture(options: {
     "if (args[0] !== 'install' || !args.includes('--skip-service-registration')) process.exit(17);",
     "const home = arg('--home'); const bundled = arg('--runtime-directory');",
     "if (fs.existsSync(arg('--db') + '.server.lock')) { console.error('install raced existing database owner'); process.exit(18); }",
-    "const runtimeDir = path.join(home, 'memory-service', 'runtime', '2.1.1', 'fixture');",
+    "const version = JSON.parse(fs.readFileSync(path.join(bundled, 'memory-runtime.json'), 'utf8')).version;",
+    "const runtimeDir = path.join(home, 'memory-service', 'runtime', version, 'fixture');",
     "const entrypoint = path.join(runtimeDir, 'dist', 'src', 'server', 'index.js');",
     "fs.mkdirSync(path.dirname(entrypoint), { recursive: true }); fs.copyFileSync(path.join(bundled, 'server.cjs'), entrypoint);",
-    "fs.writeFileSync(path.join(home, 'memory-service', 'current.json'), JSON.stringify({ version: '2.1.1', protocolVersion: 1, runtimeDir, entrypoint, runtimeExecutable: process.execPath }));",
+    "fs.writeFileSync(path.join(home, 'memory-service', 'current.json'), JSON.stringify({ version, protocolVersion: 1, runtimeDir, entrypoint, runtimeExecutable: process.execPath }));",
   ].join("\n"));
   const old = spawnNodeService("memory", entry, ["--config", config.configPath, "--db", config.memoryDatabasePath, "--port", String(port)], {
     FIXTURE_VERSION: options.version ?? "2.1.0", FIXTURE_DELAY: String(options.delay ?? 0),
@@ -163,7 +176,7 @@ describe("bundled Memory upgrades", () => {
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
     expect(await running.version()).toBe("2.1.1");
-  });
+  }, 15_000);
 
   it("waits for a migrating Windows database owner before repairing its launcher", async () => {
     const running = await fixture({ version: "2.1.1", platform: "win32", delay: 400 });
@@ -238,6 +251,68 @@ describe("bundled Memory upgrades", () => {
     expect(await running.version()).toBe("2.1.1");
     expect(running.children).toHaveLength(1);
     expect(running.children[0]?.process.pid).not.toBe(running.old.process.pid);
+  });
+
+  it.each([undefined, "a".repeat(64)])("replaces an old same-version Desktop build (%s) after releasing its database", async (buildId) => {
+    const running = await fixture({ version: "2.1.1", buildId, bundledBuildId: "b".repeat(64), shutdownDelay: 100 });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBe(0);
+    expect(running.children).toHaveLength(1);
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it("reuses an identical Desktop build", async () => {
+    const running = await fixture({ version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "a".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("keeps a newer compatible independently installed build", async () => {
+    const running = await fixture({ version: "2.2.0", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("does not replace a separately owned same-version build", async () => {
+    const running = await fixture({ independent: true, version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64) });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it("does not replace a same-version build with a lower schema", async () => {
+    const running = await fixture({ version: "2.1.1", buildId: "a".repeat(64), bundledBuildId: "b".repeat(64), schemaVersion: 9, bundledSchemaVersion: 8 });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
+  it.each([
+    ["1.2.401", "1.2.5"],
+    ["2.1.1-rc.10", "2.1.1-rc.2"],
+    ["2.1.1", "2.1.1-rc.10"],
+    ["2.1.1", "2.1.2-rc.1"],
+  ])("upgrades the owned Memory runtime from %s to %s", async (version, bundledVersion) => {
+    const running = await fixture({ version, bundledVersion });
+    await running.ensure();
+    expect(await running.version()).toBe(bundledVersion);
+    expect(running.old.process.exitCode).toBe(0);
+    expect(running.children).toHaveLength(1);
+  });
+
+  it.each([
+    ["1.2.5", "1.2.401"],
+    ["2.1.1-rc.2", "2.1.1-rc.10"],
+    ["2.1.1-rc.10", "2.1.1"],
+    ["2.1.2-rc.1", "2.1.1"],
+  ])("keeps the newer owned Memory runtime %s when Desktop bundles %s", async (version, bundledVersion) => {
+    const running = await fixture({ version, bundledVersion });
+    await running.ensure();
+    expect(await running.version()).toBe(version);
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
   });
 
   it("waits for an older migrating runtime before upgrading and releasing its database lock", async () => {

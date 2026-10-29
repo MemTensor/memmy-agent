@@ -65,7 +65,10 @@ function usePrompt(responses: any[]): void {
   };
   const resolveChoice = (raw: any, choices: string[]) => {
     if (raw === "first") return choices[0];
-    if (raw === "done") return "[Done]";
+    if (raw === "done") {
+      const done = choices.find((choice) => choice === "[Done]" || choice === "[Continue]");
+      return done ?? "[Done]";
+    }
     if (raw === "back") return "<- Back";
     if (raw instanceof RegExp) return choices.find((choice) => raw.test(choice)) ?? choices[0];
     return raw;

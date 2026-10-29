@@ -29,14 +29,15 @@ describeOnWindows("Windows standard upgrade safety check", { timeout: 60_000 }, 
     expect(result.stdout).toContain("standard-upgrade-safe");
   });
 
-  it("routes an existing installation to relay when the final install directory changes", () => {
+  it("blocks an existing installation when the final install directory changes", () => {
     const fixture = createFixture();
     fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
 
     const result = runCheck(fixture);
 
-    expect(result.status).toBe(1);
-    expect(result.stdout).toContain("relay-required:installation target differs from the installed application");
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("installation-blocked:installation target differs from the installed application at");
+    expect(result.stdout).toContain("manually migrate files before choosing a new directory");
   });
 
   it("blocks relocation when the selected target already contains another Memmy executable", () => {

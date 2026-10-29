@@ -1,13 +1,14 @@
 // @vitest-environment happy-dom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import type { ByokTokenUsageSummary, ModelConfigView, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { ByokTokenUsageSummary, MemoryTokenBudgetDto, ModelConfigView, TokenUsageDto } from "@memmy/local-api-contracts";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
-import { SettingsPageView, UsageDetails } from "../settings-page.js";
+import { commitMemoryByokLimitDraft, memoryBudgetUsageFill, MemoryTokenBudgetRow, SettingsPageView, UsageDetails } from "../settings-page.js";
+import { scrollSettingsSectionIntoView, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "../settings-nav.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -252,7 +253,10 @@ describe("SettingsPage platform scene quota details", () => {
             state={createInitialAppState()}
             dispatch={vi.fn()}
             activeTab="tokens"
-            byokTokenUsageClient={{ getSummary: vi.fn(async () => byokUsage) }}
+            byokTokenUsageClient={{
+              getSummary: vi.fn(async () => byokUsage),
+              getMemoryBudget: vi.fn(async () => memoryBudgetFixture())
+            }}
             update={{
               appVersion: "1.0.4",
               phase: "idle",
@@ -287,7 +291,7 @@ describe("SettingsPage platform scene quota details", () => {
       byProvider: [],
       byModel: []
     } satisfies ByokTokenUsageSummary));
-    const byokTokenUsageClient = { getSummary };
+    const byokTokenUsageClient = { getSummary, getMemoryBudget: vi.fn(async () => memoryBudgetFixture()) };
     const update = {
       appVersion: "1.0.4",
       phase: "idle" as const,
@@ -397,6 +401,465 @@ function duplicateModelCatalog(): ModelConfigView {
       ]
     }]
   } as ModelConfigView;
+}
+
+describe("memory token budget limit inputs", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: createMemoryStorage()
+    });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+  });
+
+  it("treats empty drafts as revert and only an explicit 0 as unlimited", () => {
+    expect(commitMemoryByokLimitDraft("", 10)).toEqual({ draft: "10" });
+    expect(commitMemoryByokLimitDraft("   ", 10)).toEqual({ draft: "10" });
+    expect(commitMemoryByokLimitDraft("-1", 10)).toEqual({ draft: "10" });
+    expect(commitMemoryByokLimitDraft("1.5", 10)).toEqual({ draft: "10" });
+    expect(commitMemoryByokLimitDraft("100000", 10)).toEqual({ draft: "10" });
+    expect(commitMemoryByokLimitDraft("0", 10)).toEqual({ draft: "0", value: 0 });
+    expect(commitMemoryByokLimitDraft("12", 10)).toEqual({ draft: "12", value: 12 });
+  });
+
+  it("colors the usage fill green, yellow, then red by percent", () => {
+    expect(memoryBudgetUsageFill(0, 10)).toEqual({ percent: 0, tone: "green" });
+    expect(memoryBudgetUsageFill(6_000_000, 10)).toEqual({ percent: 60, tone: "green" });
+    expect(memoryBudgetUsageFill(6_100_000, 10)).toEqual({ percent: 61, tone: "yellow" });
+    expect(memoryBudgetUsageFill(8_000_000, 10)).toEqual({ percent: 80, tone: "yellow" });
+    expect(memoryBudgetUsageFill(8_100_000, 10)).toEqual({ percent: 81, tone: "red" });
+    expect(memoryBudgetUsageFill(12_000_000, 10)).toEqual({ percent: 100, tone: "red" });
+    expect(memoryBudgetUsageFill(1_000_000, 0)).toBeNull();
+  });
+
+  it("does not persist an emptied input and does persist an explicit 0", async () => {
+    const onCommit = vi.fn();
+    function Harness() {
+      const [draft, setDraft] = useState("10");
+      return (
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="每日限额"
+            note="已用"
+            draft={draft}
+            savedValue={10}
+            onDraftChange={setDraft}
+            onCommit={onCommit}
+          />
+        </I18nProvider>
+      );
+    }
+
+    await act(async () => {
+      root.render(<Harness />);
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(input).toBeTruthy();
+
+    typeAndBlur("");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    typeAndBlur("-1");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    typeAndBlur("1.5");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    typeAndBlur("100000");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    typeAndBlur("0");
+    expect(onCommit).toHaveBeenCalledWith(0);
+
+    typeAndBlur("12");
+    expect(onCommit).toHaveBeenCalledWith(12);
+
+    onCommit.mockClear();
+    act(() => {
+      input!.focus();
+      setReactInputValue(input!, "20");
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith(20);
+
+    act(() => {
+      input!.focus();
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onCommit).toHaveBeenCalledTimes(2);
+    expect(onCommit).toHaveBeenNthCalledWith(2, 20);
+  });
+
+  it("shows a save error and still retries the same limit", async () => {
+    const updateSettings = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const getSummary = vi.fn(async () => ({
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-09-18T02:00:00.000Z",
+      byKind: [],
+      byProvider: [],
+      byModel: []
+    } satisfies ByokTokenUsageSummary));
+    const getMemoryBudget = vi.fn(async () => memoryBudgetFixture());
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <SettingsPageView
+            state={createInitialAppState()}
+            dispatch={vi.fn()}
+            activeTab="tokens"
+            configClient={{
+              updateSettings,
+              getModelConfig: vi.fn(async () => ({ providers: [] }))
+            } as never}
+            byokTokenUsageClient={{ getSummary, getMemoryBudget }}
+            update={{
+              appVersion: "1.0.4",
+              phase: "idle",
+              preparedUpdatePath: null,
+              downloadProgress: null,
+              feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
+              requestPrimaryAction: vi.fn(async () => undefined)
+            }}
+          />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    const dailyInput = container.querySelectorAll<HTMLInputElement>('input[type="number"]')[0];
+    expect(dailyInput).toBeTruthy();
+    act(() => {
+      dailyInput!.focus();
+      setReactInputValue(dailyInput!, "20");
+      dailyInput!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("disk full");
+
+    act(() => {
+      dailyInput!.focus();
+      dailyInput!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+    expect(updateSettings).toHaveBeenNthCalledWith(2, { memoryByokDailyLimitM: 20 });
+  });
+
+  it("refreshes the open Token tab budget without wiping an in-progress draft", async () => {
+    const getSummary = vi.fn(async () => ({
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-09-18T02:00:00.000Z",
+      byKind: [],
+      byProvider: [],
+      byModel: []
+    } satisfies ByokTokenUsageSummary));
+    const getMemoryBudget = vi.fn(async () => ({
+      ...memoryBudgetFixture(),
+      dailyUsed: 1_000_000,
+      lifetimeUsed: 1_000_000
+    }));
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <SettingsPageView
+            state={createInitialAppState()}
+            dispatch={vi.fn()}
+            activeTab="tokens"
+            byokTokenUsageClient={{ getSummary, getMemoryBudget }}
+            update={{
+              appVersion: "1.0.4",
+              phase: "idle",
+              preparedUpdatePath: null,
+              downloadProgress: null,
+              feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
+              requestPrimaryAction: vi.fn(async () => undefined)
+            }}
+          />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("今日已用 1.0M / 10M");
+    const dailyInput = container.querySelectorAll<HTMLInputElement>('input[type="number"]')[0];
+    expect(dailyInput).toBeTruthy();
+    act(() => {
+      setReactInputValue(dailyInput!, "12");
+    });
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("memmy:memory-token-budget-updated", {
+        detail: {
+          ...memoryBudgetFixture(),
+          dailyUsed: 10_000_000,
+          lifetimeUsed: 10_000_000,
+          paused: true,
+          trigger: "daily"
+        }
+      }));
+    });
+
+    expect(container.textContent).toContain("今日已用 10.0M");
+    expect(dailyInput!.value).toBe("12");
+  });
+
+  it("renders a usage bar under the limit note and hides it when unlimited", async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="累计限额"
+            noteLabel="累计已用"
+            note="8.1M/10M"
+            draft="10"
+            savedValue={10}
+            usedTokens={8_100_000}
+            limitM={10}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+
+    const bar = container.querySelector<HTMLElement>('[role="progressbar"]');
+    expect(container.querySelector("strong")?.textContent).toBe("8.1M/10M");
+    expect([...container.querySelectorAll("strong")].some((node) => node.textContent === "M")).toBe(true);
+    expect([...container.querySelectorAll("em")].some((node) => node.textContent === "Token")).toBe(true);
+    expect(bar?.getAttribute("data-tone")).toBe("red");
+    expect(bar?.getAttribute("aria-valuenow")).toBe("81");
+    expect(bar?.querySelector("span")?.getAttribute("style")).toContain("width: 81%");
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="每日限额"
+            noteLabel="今日已用"
+            note="1.4M/2M"
+            draft="2"
+            savedValue={2}
+            usedTokens={1_400_000}
+            limitM={2}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+    const dailyBar = container.querySelector<HTMLElement>('[role="progressbar"]');
+    expect(dailyBar?.getAttribute("data-tone")).toBe("yellow");
+    expect(dailyBar?.getAttribute("aria-valuenow")).toBe("70");
+    expect(dailyBar?.querySelector("span")?.getAttribute("style")).toContain("width: 70%");
+    expect(container.querySelector('[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]')).toBeNull();
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="每日限额"
+            noteLabel="今日已用"
+            note="1.5M/1M"
+            draft="1"
+            savedValue={1}
+            usedTokens={1_500_000}
+            limitM={1}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+    const pausedMark = container.querySelector<HTMLElement>(
+      '[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]'
+    );
+    expect(pausedMark).toBeTruthy();
+    expect(pausedMark?.tagName).toBe("BUTTON");
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <MemoryTokenBudgetRow
+            label="累计限额"
+            note="不限制"
+            draft="0"
+            savedValue={0}
+            usedTokens={8_100_000}
+            limitM={0}
+            onDraftChange={() => undefined}
+            onCommit={() => undefined}
+          />
+        </I18nProvider>
+      );
+    });
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it("opens Token usage from any tab and briefly highlights the memory budget card", async () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+
+    function Harness() {
+      const [tab, setTab] = useState<SettingsTabId>("account");
+      return (
+        <SettingsPageView
+          state={createInitialAppState()}
+          dispatch={vi.fn()}
+          activeTab={tab}
+          onActiveTabChange={setTab}
+          byokTokenUsageClient={{
+            getSummary: vi.fn(async () => ({
+              inputTokens: 1,
+              outputTokens: 1,
+              totalTokens: 2,
+              cachedInputTokens: 0,
+              cacheCreationInputTokens: 0,
+              updatedAt: "2026-08-11T12:00:00.000Z",
+              byKind: [],
+              byProvider: [],
+              byModel: []
+            })),
+            getMemoryBudget: vi.fn(async () => memoryBudgetFixture())
+          }}
+          update={{
+            appVersion: "1.0.4",
+            phase: "idle",
+            preparedUpdatePath: null,
+            downloadProgress: null,
+            feedback: null,
+            requestInlineAction: vi.fn(async () => undefined),
+            requestPrimaryAction: vi.fn(async () => undefined)
+          }}
+        />
+      );
+    }
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <Harness />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(true);
+
+    await act(async () => {
+      writeSettingsMemoryBudgetFocus();
+      await Promise.resolve();
+    });
+
+    const section = container.querySelector("#memory-token-budget");
+    const card = section?.querySelector("[class*='budgetPanel']");
+    expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(false);
+    expect(section).not.toBeNull();
+    expect(section?.className).not.toMatch(/budgetCardFlash/);
+    expect(card?.className).toMatch(/budgetCardFlash/);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+  });
+
+  it("keeps settings section scroll inside the settings pane below the titlebar", () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    document.documentElement.style.setProperty("--codex-toolbar-height", "46px");
+
+    const outer = document.createElement("div");
+    outer.style.overflowY = "hidden";
+    Object.defineProperty(outer, "scrollTop", { writable: true, value: 120 });
+
+    const scroller = document.createElement("div");
+    scroller.className = "settings-page";
+    scroller.style.overflowY = "auto";
+    Object.defineProperty(scroller, "clientHeight", { value: 400 });
+    Object.defineProperty(scroller, "scrollHeight", { value: 1200 });
+    Object.defineProperty(scroller, "scrollTop", { writable: true, value: 0 });
+    const scrollTo = vi.fn<[ScrollToOptions | number], void>();
+    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
+
+    const card = document.createElement("section");
+    card.id = "memory-token-budget";
+    scroller.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, left: 0, right: 720, bottom: 400, width: 720, height: 400, toJSON() { return {}; }
+    });
+    card.getBoundingClientRect = () => ({
+      x: 0, y: 520, top: 520, left: 0, right: 720, bottom: 760, width: 720, height: 240, toJSON() { return {}; }
+    });
+
+    outer.append(scroller);
+    scroller.append(card);
+    document.body.append(outer);
+
+    scrollSettingsSectionIntoView(card);
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(outer.scrollTop).toBe(0);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 462, behavior: "auto" });
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    outer.remove();
+  });
+});
+
+function setReactInputValue(input: HTMLInputElement, value: string): void {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function typeAndBlur(value: string): void {
+  const input = document.querySelector<HTMLInputElement>('input[type="number"]');
+  expect(input).toBeTruthy();
+  act(() => {
+    setReactInputValue(input!, value);
+  });
+  act(() => {
+    input!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+}
+
+function memoryBudgetFixture(): MemoryTokenBudgetDto {
+  return {
+    dailyLimitM: 10,
+    totalLimitM: 500,
+    dailyUsed: 0,
+    lifetimeUsed: 0,
+    paused: false,
+    trigger: null,
+    nextLocalMidnightAt: "2026-09-19T16:00:00.000Z"
+  };
 }
 
 function emptyPlatformUsage(): TokenUsageDto {

@@ -1,6 +1,7 @@
 /** Pure view-model helpers for the canonical model catalog returned by the local API. */
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  getModelThinkingConfig,
   type CatalogEndpointInput,
   type CatalogProviderId,
   type ModelAssignment,
@@ -8,6 +9,9 @@ import {
   type ModelConfigInput,
   type ModelConfigView,
   type ModelEndpointProtocol,
+  type ModelInputModality,
+  type ModelThinkingConfig,
+  type ModelThinkingConfigDto,
   type TextModelItemView
 } from "@memmy/local-api-contracts";
 import { CLIENT_PRESET_ID_PREFIX, type ModelProviderConfig } from "../api/config-client.js";
@@ -31,6 +35,7 @@ export interface ModelConnection {
   endpointId: string;
   endpoint: string;
   protocol: ModelEndpointProtocol;
+  region: string;
   apiKeyMasked: string;
   models: string[];
   modelEntries: ModelConnectionModel[];
@@ -45,6 +50,9 @@ export interface ModelConnectionModel {
   model: string;
   capability: ModelCapability;
   capabilities: CatalogCapability[];
+  thinking?: ModelThinkingConfigDto;
+  custom?: boolean;
+  inputModalities?: ModelInputModality[];
 }
 
 export interface ModelWorkspaceSpace {
@@ -78,6 +86,7 @@ export interface ModelConnectionInput {
   endpointId?: string;
   endpoint: string;
   protocol?: ModelEndpointProtocol;
+  region?: string;
   apiKey?: string;
   apiKeyMasked?: string;
   models: string[];
@@ -86,6 +95,9 @@ export interface ModelConnectionInput {
     model: string;
     capability: ModelCapability;
     capabilities?: ModelCapability[];
+    thinking?: ModelThinkingConfigDto | null;
+    custom?: boolean;
+    inputModalities?: ModelInputModality[];
   }>;
   modelCapabilities?: Record<string, ModelCapability>;
 }
@@ -111,7 +123,7 @@ export interface ResolvedModelSelection {
   candidate: ModelCandidate | null;
   candidateId: string | null;
   unavailable: boolean;
-  reason: "saved" | "initial" | "unavailable" | "empty";
+  reason: "saved" | "committed" | "initial" | "unavailable" | "empty";
   previousModel?: string | null;
   previousProvider?: string | null;
 }
@@ -183,7 +195,10 @@ export function modelConfigInputFromView(view: ModelConfigView): ModelConfigInpu
         model: model.model,
         source: model.source,
         ...(model.ownerAccountId ? { ownerAccountId: model.ownerAccountId } : {}),
-        capabilities: [...model.capabilities]
+        capabilities: [...model.capabilities],
+        ...(model.thinking ? { thinking: model.thinking } : {}),
+        ...(model.custom ? { custom: true } : {}),
+        ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {})
       }))
     })),
     modelAssignments: cloneAssignments(view.modelAssignments)
@@ -342,22 +357,34 @@ export function getTaskModelCandidates(workspace: ModelWorkspace, mode: ModelWor
 export function resolveModelSelection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  selectedPresetId?: string | null
+  selectedPresetId?: string | null,
+  options: { allowUnassignedSelected?: boolean } = {}
 ): ResolvedModelSelection {
   const candidates = getTaskModelCandidates(workspace, mode);
   if (!candidates.length) {
-    return selectedPresetId
-      ? { candidate: null, candidateId: selectedPresetId, unavailable: true, reason: "unavailable" }
-      : { candidate: null, candidateId: null, unavailable: false, reason: "empty" };
+    if (!selectedPresetId) {
+      return { candidate: null, candidateId: null, unavailable: false, reason: "empty" };
+    }
+    const committed = options.allowUnassignedSelected
+      ? getModelCandidates(workspace, mode, "chat").find((item) => item.id === selectedPresetId) ?? null
+      : null;
+    return committed
+      ? { candidate: committed, candidateId: selectedPresetId, unavailable: !committed.available, reason: "committed" }
+      : { candidate: null, candidateId: selectedPresetId, unavailable: true, reason: "unavailable" };
   }
   const candidateId = selectedPresetId ?? workspace.catalog.modelAssignments[mode].agent.default;
   if (!candidateId) {
     return { candidate: candidates[0]!, candidateId: candidates[0]!.id, unavailable: false, reason: "initial" };
   }
   const candidate = candidates.find((item) => item.id === candidateId) ?? null;
+  const committed = !candidate && options.allowUnassignedSelected
+    ? getModelCandidates(workspace, mode, "chat").find((item) => item.id === candidateId) ?? null
+    : null;
   return candidate
     ? { candidate, candidateId, unavailable: !candidate.available, reason: "saved" }
-    : { candidate: null, candidateId, unavailable: true, reason: "unavailable" };
+    : committed
+      ? { candidate: committed, candidateId, unavailable: !committed.available, reason: "committed" }
+      : { candidate: null, candidateId, unavailable: true, reason: "unavailable" };
 }
 
 export function upsertModelConnection(
@@ -367,12 +394,23 @@ export function upsertModelConnection(
 ): ModelWorkspaceMutationResult {
   const providerId = normalizeProvider(input.provider);
   const endpoint = input.endpoint.trim().replace(/\/+$/, "");
-  const entries: Array<{ presetId?: string; model: string; capabilities: ModelCapability[]; capabilitiesExplicit: boolean }> = input.modelEntries?.length
+  const entries: Array<{
+    presetId?: string;
+    model: string;
+    capabilities: ModelCapability[];
+    capabilitiesExplicit: boolean;
+    thinking?: ModelThinkingConfigDto | null;
+    custom?: boolean;
+    inputModalities?: ModelInputModality[];
+  }> = input.modelEntries?.length
     ? input.modelEntries.map((entry) => ({
         ...(entry.presetId ? { presetId: entry.presetId } : {}),
         model: entry.model.trim(),
         capabilities: unique(entry.capabilities?.length ? entry.capabilities : [entry.capability]),
         capabilitiesExplicit: Boolean(entry.capabilities?.length),
+        ...(entry.thinking !== undefined ? { thinking: entry.thinking } : {}),
+        ...(entry.custom ? { custom: true } : {}),
+        ...(entry.inputModalities ? { inputModalities: entry.inputModalities } : {})
       })).filter((entry) => Boolean(entry.model))
     : input.models.map((model) => ({
         model: model.trim(),
@@ -441,7 +479,8 @@ export function upsertModelConnection(
     protocol,
     hasApiKey: Boolean(input.apiKey || input.apiKeyMasked),
     apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
-    apiKey: input.apiKey ?? ""
+    apiKey: input.apiKey ?? "",
+    ...(input.region ? { region: input.region } : {})
   });
   provider.models.push(...entries.map((entry, index) => {
     const model = entry.model;
@@ -464,7 +503,10 @@ export function upsertModelConnection(
       model,
       source: "byok" as const,
       capabilities,
-      available: true
+      available: true,
+      ...(entry.thinking ? { thinking: entry.thinking } : {}),
+      ...(entry.custom ? { custom: true } : {}),
+      ...(entry.inputModalities ? { inputModalities: [...entry.inputModalities] } : {})
     };
   }));
 
@@ -481,6 +523,21 @@ export function upsertModelConnection(
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
+  // BYOK presets are the source of truth: the backend re-derives account.agent.candidates
+  // from byok.agent.candidates on every account-mode startup, dropping any BYOK preset that
+  // is absent there. So a custom (source: "byok") model added while in account mode must also
+  // be enrolled in the byok candidate list, otherwise it survives the session but vanishes on
+  // the next restart.
+  if (mode !== "byok") {
+    const byokAgent = next.modelAssignments.byok.agent;
+    byokAgent.candidates = replaceIds(byokAgent.candidates, previousPresetIds, nextAgentPresetIds);
+    if (!byokAgent.default || previousPresetIds.includes(byokAgent.default)) {
+      byokAgent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? byokAgent.default;
+    }
+  }
+  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
+  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
+  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
@@ -550,6 +607,22 @@ export function setDefaultTaskModel(
   return createModelWorkspace(next);
 }
 
+/**
+ * Builds the persistence payload that makes `candidateId` the `mode` default, or null when there
+ * is nothing to persist (the id is not a candidate for this mode, or it is already the default).
+ * Used to remember the model picked in the chat selector as the default for new chats across
+ * restart, without redundant config writes.
+ */
+export function defaultModelSelectionInput(
+  workspace: ModelWorkspace,
+  mode: ModelWorkspaceMode,
+  candidateId: string
+): ModelConfigInput | null {
+  const agent = workspace.catalog.modelAssignments[mode].agent;
+  if (!agent.candidates.includes(candidateId) || agent.default === candidateId) return null;
+  return modelConfigInput(setDefaultTaskModel(workspace, mode, candidateId));
+}
+
 export function setModelAssignment(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
@@ -615,13 +688,17 @@ function createSpace(catalog: ModelConfigView, mode: ModelWorkspaceMode): ModelW
       endpointId: endpoint.endpointId,
       endpoint: endpoint.apiBase,
       protocol: endpoint.protocol,
+      region: endpoint.region ?? "",
       apiKeyMasked: endpoint.apiKeyMasked || provider.apiKeyMasked,
       models: models.map((model) => model.model),
       modelEntries: models.map((model) => ({
         presetId: model.presetId,
         model: model.model,
         capability: fromCapabilities(model.capabilities),
-        capabilities: [...model.capabilities]
+        capabilities: [...model.capabilities],
+        ...(model.thinking ? { thinking: model.thinking } : {}),
+        ...(model.custom ? { custom: true } : {}),
+        ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {})
       })),
       modelCapabilities: Object.fromEntries(models.map((model) => [model.model, fromCapabilities(model.capabilities)])),
       presetIds: Object.fromEntries(models.map((model) => [model.model, model.presetId])),
@@ -665,7 +742,8 @@ function endpointInput(endpoint: ModelConfigView["providers"][number]["endpoints
     endpointId: endpoint.endpointId,
     apiBase: endpoint.apiBase,
     protocol: endpoint.protocol,
-    ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {})
+    ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+    ...(endpoint.region ? { region: endpoint.region } : {})
   };
 }
 
@@ -698,9 +776,16 @@ function cloneAssignment<T extends Omit<ModelAssignment, "ownerAccountId"> | Mod
 
 function normalizeProvider(provider: string): CatalogProviderId | null {
   const normalized = provider.trim().toLowerCase();
-  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine" };
+  const aliases: Record<string, CatalogProviderId> = {
+    qwen: "dashscope",
+    kimi: "moonshot",
+    baidu: "qianfan",
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo",
+    openai_responses: "openai"
+  };
   const candidate = aliases[normalized] ?? normalized;
-  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "memmy_account"].includes(candidate)
+  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo", "memmy_account", "bedrock", "custom"].includes(candidate)
     ? candidate as CatalogProviderId
     : null;
 }
@@ -712,6 +797,7 @@ function protocolFor(provider: CatalogProviderId, capability: ModelCapability): 
   if (provider === "anthropic") return "anthropic-messages";
   if (provider === "gemini") return "gemini-generate-content";
   if (provider === "memmy_account") return "memmy-account";
+  if (provider === "bedrock") return "bedrock-converse";
   return "openai-chat-completions";
 }
 
@@ -862,4 +948,64 @@ function endpointAuthMatches(
 function newClientPresetId(): string {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${CLIENT_PRESET_ID_PREFIX}${suffix}`;
+}
+
+function modelEntryFor(
+  workspace: ModelWorkspace,
+  candidate: ModelCandidate | null | undefined
+) {
+  if (!candidate || candidate.source !== "byok") return undefined;
+  const connection = workspace.spaces.byok.connections
+    .find((item) => item.id === candidate.connectionId);
+  return connection?.modelEntries.find((item) => item.model === candidate.model);
+}
+
+export function isCustomModelEntry(
+  workspace: ModelWorkspace,
+  candidate: ModelCandidate | null | undefined
+): boolean {
+  return modelEntryFor(workspace, candidate)?.custom === true;
+}
+
+export function customThinkingConfigFor(
+  workspace: ModelWorkspace,
+  candidate: ModelCandidate | null | undefined
+): ModelThinkingConfig | null {
+  return modelEntryFor(workspace, candidate)?.thinking ?? null;
+}
+
+const CHAT_COMPLETIONS_O_SERIES_MARKERS = ["o1", "o3", "o4"] as const;
+
+function endpointProtocolFor(
+  workspace: ModelWorkspace,
+  candidate: ModelCandidate
+): ModelEndpointProtocol | undefined {
+  for (const space of Object.values(workspace.spaces)) {
+    const connection = space.connections.find((item) => item.id === candidate.connectionId);
+    if (connection) return connection.protocol;
+  }
+  return undefined;
+}
+
+function chatCompletionsHidesCatalogThinking(modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  return name.includes("gpt-")
+    || CHAT_COMPLETIONS_O_SERIES_MARKERS.some((marker) => name.includes(marker));
+}
+
+export function resolveThinkingConfigForModel(
+  workspace: ModelWorkspace,
+  candidate: ModelCandidate | null | undefined
+): ModelThinkingConfig | null {
+  if (isCustomModelEntry(workspace, candidate)) {
+    return customThinkingConfigFor(workspace, candidate);
+  }
+  if (
+    candidate
+    && endpointProtocolFor(workspace, candidate) === "openai-chat-completions"
+    && chatCompletionsHidesCatalogThinking(candidate.model)
+  ) {
+    return null;
+  }
+  return getModelThinkingConfig(candidate?.model);
 }

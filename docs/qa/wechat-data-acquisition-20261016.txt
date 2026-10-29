@@ -1,0 +1,60 @@
+微信数据获取修复交接（2026-10-16）
+
+范围
+只修微信数据获取、完整分库验证和现有 History 读取接口；没有引入 TraceMemo 的聊天管理、导出或其他功能。
+本任务最后一次调整后，整合、兼容性检查、发布和打包均由另一位 Agent 负责。本文件不是安装包验收报告。
+
+来源工作区
+/Users/lvbubu/.codex/worktrees/wechat-data-123-20261015/Memmy业务代码
+分支：codex/wechat-data-123-20261015
+基线：855bbd15e4e8994153d28b4ba3fef4194a63b612
+原主工作区中的三个 Cursor 未提交文件未被覆盖，不应将这些未完成文件作为修复来源。
+
+按顺序的微信修复提交
+c843c25b122454fccf851f6e0aa576252740ed75 Windows 目录发现、多账号选择和完整消息分库验证；共享 reader 只要求编号消息库。
+e008e678b8d54ae5218ebdd609d688798fd42dc7 Mac 捕获逐库验证、已确认账号 password 扩展、部分捕获拒绝成功及错误提示。
+dc5a84c67c5c62c3da0d8275b2058d970692ea97 Windows 跳过不可用历史候选；显式指定目录保持严格失败。
+579fa3fac00a50840c57aed5932ca7f55e1d783d 原生捕获 helper 构建优化。
+e2881a58ff4cbbd0179504ff7396d1dfeaca5788 Mac locale 递归崩溃修复、安全结构扫描、CommonCrypto 捕获及 native 回归。
+b57d668b0d09183b61c6165a985aafde91263a51 Mac 多账号以原进程打开文件和目录身份识别，支持 firmlink 路径别名。
+7d8dde947a0b42d54f3f24f9fad5d7b89c701301 将四个独立结构分支及多进程 sink 回归永久保留在仓库。
+4f4d9dba0914fb27379077d39b41bd24dfc5c18e 补查修复 Windows 明文 reader 在构造/写入/初始化失败和关闭异常时的临时文件清理；补五项故障回归。
+
+已有整合工作区的映射
+/Users/lvbubu/.codex/worktrees/wechat-release-123-20261015/Memmy业务代码 在 8f9f1cf8bd89f15d3ff0b3d0052f500bbaec0d92 时已纳入前六个修复。
+对应提交依次为 029fed624、3539a0dc3、a981d15f0、f931de2aa、386d41942、8f9f1cf8b。
+整合者需检查自己的 HEAD 与 patch 等价关系，避免重复 cherry-pick；本轮补查提交在原修复分支继续追加。
+
+实现和证据边界
+Mac：仅在授权连接的临时微信副本内捕获；保留 CommonCrypto，并支持经本机微信 4.1.15 arm64 静态核实的 WCDB 结构和固定 XOR 常量。
+所有候选密钥必须逐页通过 HMAC；全部编号消息分库验证后还必须通过正式 reader baseline，才能报告连接成功。
+已验证的账号 password 才会尝试其他分库的独立 salt。raw key 不被当成账号 password。
+Mac 多账号不按修改时间猜选；多个原账号都有打开数据库证据时继续报歧义。
+Windows：保留已有配置和 raw literal 扫描方式；使用 Known Folders、配置中的自定义路径及进程密钥证据选择账号。
+Windows reader 继续使用现有系统 bcrypt 页解密和内嵌 Python SQLite，不引入第三方 wx_key.dll。
+Windows reader 的解密副本和 SQLite sidecar 统一放在该次读取的私有临时目录，初始化失败、Python SystemExit 或关闭失败均执行清理；重复关闭不再持有旧路径。
+History 写入后确认游标的接口未改变；重新连接保留已经确认的游标。
+普通用户走随包 Python 和预编译 helper。源码测试所用 Xcode/SQLCipher fixture 不属于新增用户依赖。
+
+TraceMemo 参考
+https://github.com/Wxw-Gu/TraceMemo
+研究版本：c366dd11871d75d5f511e843605b689731759622。
+参考的是平台密钥捕获、目录发现和连接校验经验；没有复制它的产品功能或分发其 native 二进制。
+TraceMemo 的 Mac 条件不能直接视为本产品条件；本修复不关闭 SIP、不附加用户正在运行的原微信进程。
+
+可复现测试命令（仓库根目录）
+PYTHONDONTWRITEBYTECODE=1 MEMMY_SQLCIPHER_TEST_LIBRARY=/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib MEMMY_SQLCIPHER_CONTEXT_TEST_LIBRARY=/Users/lvbubu/.codex/references/sqlcipher-fixture-4.5.6/sqlcipher-4.5.6/.libs/libsqlcipher-fixture.dylib python3 -m unittest discover -s App/memmy-agent/tests/tools/computer-history/mac -p '*_test.py' -q
+PYTHONDONTWRITEBYTECODE=1 MEMMY_SQLCIPHER_TEST_LIBRARY=/opt/homebrew/opt/sqlcipher/lib/libsqlcipher.dylib python3 -m unittest discover -s App/memmy-agent/tests/tools/computer-history/win -p '*_test.py' -q
+两个 SQLCipher 环境变量仅指定开发者机器上的合成测试库：4.5.6 用于验证预先打开数据库的内存结构捕获；reader fixture 使用独立的本机 SQLCipher。
+测试没有运行真实微信或读取用户聊天、密钥。真实 SQLCipher fixture 是合成数据库，不代表真实微信已连接成功。
+
+最终源码验证（2026-10-16，包含 7d8dde947 与 4f4d9dba0）
+Mac Python 整套：214 项全部通过，包含 8 项原生捕获测试、4 个独立结构分支、16 进程并发 8000 条完整记录、33 项共享 reader 测试。
+Windows Python 整套：50 项通过，1 项 NTFS 原生 ACL 检查因当前为 Mac 主机跳过。
+git diff --check 通过。Excel 专属实现与 Memory 运行时在本微信修复分支无改动。
+追加的产品代码仅修 reader 临时副本生命周期；未更改既有 Windows 解密、WAL 合并或查询语义。
+
+待用户实机验收
+由打包 Agent 从最终整合提交构建后，用户测试真实微信授权、临时登录、全部消息分库及 History 持续入库；重连后确认无遗漏和重复。
+Mac 4.1.15 派生后会清除默认存储的 password；未打开分库的获取仍取决于捕获到可验证账号 password 或该分库实际打开。
+不能把结构扫描、HMAC 合成测试或签名结果宣称为真实微信登录已成功。新微信版本若改变结构或采用不同随机保护，需要重新核实。

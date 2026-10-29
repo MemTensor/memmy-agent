@@ -4,7 +4,7 @@ const TEXT = Object.freeze(["text"] as const);
 const TEXT_IMAGE = Object.freeze(["text", "image"] as const);
 const TEXT_IMAGE_VIDEO = Object.freeze(["text", "image", "video"] as const);
 
-export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-24";
+export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-10-14";
 
 export function defineModelInputCapabilities(
   entries: ReadonlyArray<readonly [string, readonly ModelInputModality[]]>,
@@ -20,12 +20,17 @@ export function defineModelInputCapabilities(
 }
 
 export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
-  // Memmy. Reviewed 2026-08-13.
+  // Memmy. Reviewed 2026-09-17.
   // Source: App/backend/src/infrastructure/memmy-config/index.ts
-  ["agent_chat", TEXT],
+  // The default account route accepts images, including Computer Use screenshots.
+  ["agent_chat", TEXT_IMAGE],
 
-  // OpenAI / Codex. Reviewed 2026-08-13.
+  // OpenAI / Codex. Reviewed 2026-10-14.
   // Source: https://developers.openai.com/api/docs/models
+  ["gpt-6-astra", TEXT_IMAGE],
+  ["gpt-6-sol", TEXT_IMAGE],
+  ["gpt-6.1-sol", TEXT_IMAGE],
+  ["gpt-6-luna", TEXT_IMAGE],
   ["gpt-5.6", TEXT_IMAGE],
   ["gpt-5.6-sol", TEXT_IMAGE],
   ["gpt-5.6-terra", TEXT_IMAGE],
@@ -52,8 +57,12 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["gpt-4o", TEXT_IMAGE],
   ["gpt-4o-mini", TEXT_IMAGE],
 
-  // Anthropic Claude API IDs. Reviewed 2026-08-13.
+  // Anthropic Claude API IDs. Reviewed 2026-10-14.
   // Source: https://platform.claude.com/docs/en/about-claude/models/overview
+  ["claude-fable-5-1", TEXT_IMAGE],
+  ["claude-opus-5-5", TEXT_IMAGE],
+  ["claude-sonnet-5-5", TEXT_IMAGE],
+  ["claude-haiku-5-5", TEXT_IMAGE],
   ["claude-fable-5", TEXT_IMAGE],
   ["claude-opus-5", TEXT_IMAGE],
   ["claude-sonnet-5", TEXT_IMAGE],
@@ -66,8 +75,12 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["claude-haiku-4-5", TEXT_IMAGE],
   ["claude-haiku-4-5-20251001", TEXT_IMAGE],
 
-  // AWS 公布的 Claude model IDs. Reviewed 2026-08-13.
-  // Source: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5.html
+  // AWS 公布的 Claude model IDs. Reviewed 2026-10-14.
+  // Source: https://platform.claude.com/docs/en/about-claude/models/overview
+  ["anthropic.claude-fable-5-1", TEXT_IMAGE],
+  ["anthropic.claude-opus-5-5", TEXT_IMAGE],
+  ["anthropic.claude-sonnet-5-5", TEXT_IMAGE],
+  ["anthropic.claude-haiku-5-5", TEXT_IMAGE],
   ["anthropic.claude-fable-5", TEXT_IMAGE],
   ["us.anthropic.claude-fable-5", TEXT_IMAGE],
   ["global.anthropic.claude-fable-5", TEXT_IMAGE],
@@ -103,8 +116,10 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["jp.anthropic.claude-haiku-4-5-20251001-v1:0", TEXT_IMAGE],
   ["global.anthropic.claude-haiku-4-5-20251001-v1:0", TEXT_IMAGE],
 
-  // Google Gemini. Reviewed 2026-08-19.
+  // Google Gemini. Reviewed 2026-10-14.
   // Source: https://ai.google.dev/gemini-api/docs/models
+  ["gemini-4-argon", TEXT_IMAGE_VIDEO],
+  ["gemini-3.8-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.7-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.6-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.5-flash", TEXT_IMAGE_VIDEO],
@@ -126,8 +141,9 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["global.amazon.nova-2-lite-v1:0", TEXT_IMAGE_VIDEO],
   ["us.amazon.nova-2-lite-v1:0", TEXT_IMAGE_VIDEO],
 
-  // Mistral. Reviewed 2026-08-13.
-  // Source: https://docs.mistral.ai/models/overview
+  // Mistral. Reviewed 2026-10-14.
+  // Source: https://docs.mistral.ai/models/mistral-large-4
+  ["mistral-large-4", TEXT_IMAGE],
   ["mistral-medium-3-5", TEXT_IMAGE],
   ["mistral-medium-latest", TEXT_IMAGE],
   ["mistral-small-2603", TEXT_IMAGE],
@@ -138,9 +154,11 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["ministral-8b-2512", TEXT_IMAGE],
   ["ministral-3b-2512", TEXT_IMAGE],
 
-  // xAI Grok. Reviewed 2026-08-13.
+  // xAI Grok. Reviewed 2026-10-14.
   // Source: https://docs.x.ai/developers/models
   ["grok-build-0.1", TEXT],
+  ["grok-4.7", TEXT_IMAGE],
+  ["grok-4.6", TEXT_IMAGE],
   ["grok-4.5", TEXT_IMAGE],
   ["grok-4.5-latest", TEXT_IMAGE],
   ["grok-build-latest", TEXT_IMAGE],
@@ -167,23 +185,35 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["groq/compound-mini", TEXT],
   ["qwen/qwen3.6-27b", TEXT_IMAGE],
 
-  // DeepSeek. Reviewed 2026-08-24.
-  // Source: https://api-docs.deepseek.com/updates/
+  // DeepSeek. Reviewed 2026-10-19.
+  // Source: https://api-docs.deepseek.com/quick_start/pricing
+  // Source: https://api-docs.deepseek.com/guides/vision/
+  // Official API ID remains deepseek-flash, now served by DeepSeek-V4.1-Flash-1017, with native vision.
+  // deepseek-v4.1-flash and deepseek-v4.1-flash-1017 are Hugging Face / informal IDs; lookup is exact.
+  ["deepseek-flash", TEXT_IMAGE],
+  ["deepseek-v4.1-flash", TEXT_IMAGE],
+  ["deepseek-v4.1-flash-1017", TEXT_IMAGE],
   ["deepseek-v4-pro", TEXT],
   ["deepseek-v4-flash", TEXT],
   ["deepseek-v4-flash-0731", TEXT],
-  // Internal experimental route; it is not part of the public DeepSeek model list.
+  // Retired experimental route; DeepSeek still accepts the name and serves V4.1-Flash.
   ["deepseek-v4-flash-vision-exp", TEXT_IMAGE],
   ["deepseek-v3.2", TEXT],
 
-  // Qwen / 百炼. Reviewed 2026-08-19.
+  // Qwen / 百炼. Reviewed 2026-10-14.
   // Source: https://help.aliyun.com/zh/model-studio/token-plan-team-overview
   // Source: https://help.aliyun.com/zh/model-studio/vision-model/
+  // Source: https://help.aliyun.com/zh/model-studio/qwen-plus
+  ["qwen-plus", TEXT],
+  ["qwen-plus-latest", TEXT],
   ["qwen3.7-max", TEXT],
   ["qwen3.7-max-preview", TEXT],
   ["qwen3.7-max-2026-05-20", TEXT],
   ["qwen3.7-max-2026-05-17", TEXT],
   ["qwen3.6-max-preview", TEXT],
+  ["qwen3.8-flash", TEXT_IMAGE_VIDEO],
+  ["qwen3.8-max-0902", TEXT_IMAGE_VIDEO],
+  ["qwen3.8-max-2026-09-02", TEXT_IMAGE_VIDEO],
   ["qwen3.8-max", TEXT_IMAGE],
   ["qwen3-coder-next", TEXT],
   ["qwen3-coder-plus", TEXT],
@@ -229,8 +259,12 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["kimi-k2.6", TEXT_IMAGE_VIDEO],
   ["kimi-k2.5", TEXT_IMAGE_VIDEO],
 
-  // 智谱 GLM. Reviewed 2026-08-13.
-  // Source: https://docs.bigmodel.cn/cn/guide/start/model-overview
+  // 智谱 GLM. Reviewed 2026-10-14.
+  // Source: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
+  //         https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash
+  ["glm-5.3", TEXT],
+  ["glm-5.3-flash", TEXT_IMAGE_VIDEO],
+  ["glm-5.3-flashx", TEXT_IMAGE_VIDEO],
   ["glm-5.2", TEXT],
   ["glm-5.1", TEXT],
   ["glm-5", TEXT],
@@ -253,8 +287,11 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   // Source: https://platform.minimax.io/docs/guides/models-intro.md
   ["MiniMax-M3.1-Flash", TEXT_IMAGE_VIDEO],
 
-  // 豆包 / 火山方舟. Reviewed 2026-08-13.
-  // Source: https://www.volcengine.com/product/doubao
+  // 豆包 / 火山方舟. Reviewed 2026-10-14.
+  // Source: https://docs.volcengine.com/docs/ark/model-list
+  ["doubao-seed-2-1-pro-260915", TEXT_IMAGE],
+  ["doubao-seed-2-1-lite-260915", TEXT_IMAGE],
+  ["doubao-seed-2-1-turbo-260628", TEXT_IMAGE],
   ["doubao-seed-evolving", TEXT_IMAGE],
   ["doubao-seed-2-1-pro", TEXT_IMAGE],
   ["doubao-seed-2-1-turbo", TEXT_IMAGE],
@@ -276,8 +313,11 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["step-gui", TEXT_IMAGE],
   ["step-1o-turbo-vision", TEXT_IMAGE_VIDEO],
 
-  // 小米 MiMo. Reviewed 2026-08-13.
-  // Source: https://mimo.mi.com/docs
+  // 小米 MiMo. Reviewed 2026-10-14.
+  // Source: https://mimo.mi.com/docs/zh-CN/quick-start/summary/model
+  ["mimo-v2.6-pro", TEXT_IMAGE_VIDEO],
+  ["mimo-v2.6-flash", TEXT_IMAGE_VIDEO],
+  ["mimo-v2.6-pro-ultraspeed", TEXT_IMAGE_VIDEO],
   ["mimo-v2.5-pro", TEXT],
   ["mimo-v2.5-pro-ultraspeed", TEXT],
   ["mimo-v2.5", TEXT_IMAGE_VIDEO],
@@ -311,8 +351,9 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["ernie-4.5-turbo-vl", TEXT_IMAGE_VIDEO],
   ["ernie-4.5-turbo-vl-32k", TEXT_IMAGE_VIDEO],
 
-  // 腾讯混元. Reviewed 2026-08-13.
+  // 腾讯混元. Reviewed 2026-10-14.
   // Source: https://cloud.tencent.com/document/product/1823/130051
+  ["hy4-preview", TEXT],
   ["hy3", TEXT],
   ["hy3-preview", TEXT],
 
@@ -361,6 +402,14 @@ export function getModelInputModalities(
 export function hasDeclaredInputModalities(model: string | null | undefined): boolean {
   return typeof model === "string"
     && Object.prototype.hasOwnProperty.call(MODEL_INPUT_CAPABILITIES, model);
+}
+
+/** 声明优先于静态表：有声明用声明，无声明查表。 */
+export function resolveModelInputModalities(
+  model: string | null | undefined,
+  declared: readonly ModelInputModality[] | null | undefined,
+): readonly ModelInputModality[] {
+  return declared ?? getModelInputModalities(model);
 }
 
 export function requiredInputModalities(

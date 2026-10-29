@@ -8,6 +8,7 @@ import {
   type ScanPreferences
 } from "@memmy/local-api-contracts";
 import { ApiRequestError } from "../api/http.js";
+import type { AppClients } from "../api/client-types.js";
 import {
   PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR,
   PRODUCT_TOUR_MEMORY_SCAN_PREFERENCES_ANCHOR
@@ -55,6 +56,23 @@ import {
 } from "./memory/memory-prototype-icons.js";
 
 type MemoryServiceStatus = "checking" | "ok" | "unavailable";
+const MEMORY_SERVICE_HEALTH_INTERVAL_MS = 5_000;
+const MEMORY_SERVICE_HEALTH_TIMEOUT_MS = 10_000;
+
+interface MemoryServiceHealthResult {
+  ready: boolean;
+  error?: string;
+}
+
+interface MemoryServiceMonitor {
+  clients: AppClients;
+  active: boolean;
+  restarting: boolean;
+  requestId: number;
+  pendingHealth: Promise<MemoryServiceHealthResult> | null;
+  healthController: AbortController | null;
+  refresh(): Promise<MemoryServiceHealthResult>;
+}
 
 const MEMORY_DOCS_URLS = {
   cn: "https://memmy.cn/docs/memory/overview/",
@@ -88,6 +106,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [memoryServiceBusy, setMemoryServiceBusy] = useState(false);
   const [memoryServiceMessage, setMemoryServiceMessage] = useState("");
   const [memoryServiceError, setMemoryServiceError] = useState("");
+  const memoryServiceMonitor = useRef<MemoryServiceMonitor | null>(null);
+  const memoryServiceTranslate = useRef(t);
+  memoryServiceTranslate.current = t;
   const [cliInstallBusy, setCliInstallBusy] = useState(false);
   const [cliInstallMessage, setCliInstallMessage] = useState("");
   const [cliInstallError, setCliInstallError] = useState("");
@@ -103,7 +124,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const scanTargetSourceId = scanProgress?.sourceId ?? state.agentSources.activeScanSourceId;
   const recentlyCompletedSourceIds = new Set(state.agentSources.recentScanCompletions.map((item) => item.sourceId));
   const scanStopped = scanProgress?.phase === "stopped";
-  const showScanProgress = isScanning || scanStopped;
+  const scanCancelling = Boolean(state.agentSources.cancellingScanJobId);
+  const showScanProgress = isScanning || scanStopped || scanCancelling;
   const hasDeterminateScanProgress = Boolean(scanProgress && scanProgress.phase !== "scan" && scanProgress.phase !== "stopped" && scanProgress.total > 0);
   const memoryUnavailable = memoryServiceStatus === "unavailable";
   const visibleSources = visibleAgentSources(state.agentSources.items);
@@ -135,15 +157,86 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }, []);
 
   useEffect(() => {
-    setMemoryServiceStatus((current) => current === "checking" ? memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory) : current);
-  }, [state.bootstrap?.health.memory]);
-
-  useEffect(() => {
+    setMemoryServiceStatus("checking");
+    setMemoryServiceBusy(false);
+    setMemoryServiceMessage("");
+    setMemoryServiceError("");
     if (!clients) {
       return;
     }
 
-    void refreshMemoryServiceHealth();
+    const monitor: MemoryServiceMonitor = {
+      clients,
+      active: true,
+      restarting: false,
+      requestId: 0,
+      pendingHealth: null,
+      healthController: null,
+      refresh: async () => {
+        if (!monitor.active || monitor.restarting) return { ready: false };
+        if (monitor.pendingHealth) return monitor.pendingHealth;
+        const requestId = ++monitor.requestId;
+        const controller = new AbortController();
+        monitor.healthController = controller;
+        const isCurrent = () => monitor.active
+          && memoryServiceMonitor.current === monitor
+          && monitor.requestId === requestId
+          && !monitor.restarting;
+        const pending = (async (): Promise<MemoryServiceHealthResult> => {
+          const timeout = window.setTimeout(() => {
+            controller.abort(new Error(memoryServiceTranslate.current("memory.healthCheckTimeout")));
+          }, MEMORY_SERVICE_HEALTH_TIMEOUT_MS);
+          let onAbort: (() => void) | undefined;
+          try {
+            const cancelled = new Promise<never>((_resolve, reject) => {
+              onAbort = () => reject(controller.signal.reason);
+              controller.signal.addEventListener("abort", onAbort, { once: true });
+            });
+            // Fetch receives the same signal; the race also bounds custom clients
+            // that do not settle their promise when cancellation is requested.
+            const health = await Promise.race([clients.memoryRuntime.health(controller.signal), cancelled]);
+            const ready = health.ok && health.storage.ready;
+            if (isCurrent()) {
+              setMemoryServiceStatus(ready ? "ok" : "unavailable");
+              setMemoryServiceError("");
+            }
+            return { ready };
+          } catch (error) {
+            const message = formatErrorMessage(error);
+            if (isCurrent()) {
+              setMemoryServiceStatus("unavailable");
+              setMemoryServiceError(message);
+            }
+            return { ready: false, error: message };
+          } finally {
+            window.clearTimeout(timeout);
+            if (onAbort) controller.signal.removeEventListener("abort", onAbort);
+          }
+        })();
+        monitor.pendingHealth = pending;
+        try {
+          return await pending;
+        } finally {
+          if (monitor.pendingHealth === pending) monitor.pendingHealth = null;
+          if (monitor.healthController === controller) monitor.healthController = null;
+        }
+      }
+    };
+    memoryServiceMonitor.current = monitor;
+    void monitor.refresh();
+    const timer = window.setInterval(() => {
+      if (!monitor.restarting && !monitor.pendingHealth) void monitor.refresh();
+    }, MEMORY_SERVICE_HEALTH_INTERVAL_MS);
+
+    return () => {
+      monitor.active = false;
+      monitor.requestId += 1;
+      monitor.healthController?.abort();
+      monitor.healthController = null;
+      monitor.pendingHealth = null;
+      window.clearInterval(timer);
+      if (memoryServiceMonitor.current === monitor) memoryServiceMonitor.current = null;
+    };
   }, [clients]);
 
   useEffect(() => {
@@ -240,24 +333,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     return () => window.clearTimeout(timeoutId);
   }, [managedSyncCompletedSourceId]);
 
-  async function refreshMemoryServiceHealth() {
-    if (!clients) {
-      return;
-    }
-
-    setMemoryServiceStatus("checking");
-    setMemoryServiceError("");
-    try {
-      const health = await clients.memoryRuntime.health();
-      setMemoryServiceStatus(health.ok && health.storage.ready ? "ok" : "unavailable");
-    } catch (error) {
-      setMemoryServiceStatus("unavailable");
-      setMemoryServiceError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   function restartMemoryService() {
-    if (!clients || memoryServiceBusy) {
+    const monitor = memoryServiceMonitor.current;
+    if (!clients || !monitor?.active || monitor.clients !== clients || monitor.restarting || memoryServiceBusy) {
       return;
     }
 
@@ -268,6 +346,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       return;
     }
 
+    const isCurrent = () => monitor.active && memoryServiceMonitor.current === monitor;
+    monitor.restarting = true;
+    // A health request that began before restart must not replace its status.
+    monitor.requestId += 1;
+    monitor.healthController?.abort();
+    monitor.healthController = null;
+    monitor.pendingHealth = null;
     setMemoryServiceBusy(true);
     setMemoryServiceStatus("checking");
     setMemoryServiceMessage("");
@@ -275,27 +360,25 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     void (async () => {
       try {
         await restart();
+        if (!isCurrent()) return;
         clearMemoryPanelCache();
-
-        try {
-          const health = await clients.memoryRuntime.health();
-          if (health.ok && health.storage.ready) {
-            setMemoryServiceStatus("ok");
-            setMemoryServiceMessage(t("memory.restartServiceDone"));
-            return;
-          }
-
-          setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.restartServiceStillUnavailable"));
-        } catch (error) {
-          setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.restartServiceStillUnavailableWithReason", { reason: formatErrorMessage(error) }));
+        monitor.restarting = false;
+        const health = await monitor.refresh();
+        if (!isCurrent()) return;
+        if (health.ready) {
+          setMemoryServiceMessage(t("memory.restartServiceDone"));
+        } else {
+          setMemoryServiceError(health.error
+            ? t("memory.restartServiceStillUnavailableWithReason", { reason: health.error })
+            : t("memory.restartServiceStillUnavailable"));
         }
       } catch (error) {
+        if (!isCurrent()) return;
         setMemoryServiceStatus("unavailable");
         setMemoryServiceError(t("memory.restartServiceFailed", { reason: formatErrorMessage(error) }));
       } finally {
-        setMemoryServiceBusy(false);
+        monitor.restarting = false;
+        if (isCurrent()) setMemoryServiceBusy(false);
       }
     })();
   }
@@ -348,7 +431,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
    * Triggers an automatic scan.
    */
   function scanSources(sourceId = "all", mode?: AgentSourceScanMode) {
-    if (!clients || isScanning || recentlyCompletedSourceIds.has(sourceId)) {
+    if (!clients || isScanning || scanCancelling || recentlyCompletedSourceIds.has(sourceId)) {
       return;
     }
 
@@ -409,7 +492,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   function stopScan() {
-    if (!clients || !isScanning) {
+    if (!clients || !isScanning || scanCancelling) {
       return;
     }
 
@@ -428,17 +511,21 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   function cancelScan() {
-    if (!clients || !showScanProgress) {
+    if (!clients || !showScanProgress || scanCancelling) {
       return;
     }
 
+    const jobId = scanProgress?.jobId;
+    if (jobId) {
+      dispatch(appActions.agentSourceScanCancelRequested(jobId));
+    }
     void clients.agentSources
       .cancelScan()
       .then(() => {
         dispatch(appActions.agentSourceScanCompleted());
         reloadSources();
       })
-      .catch((error) => dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error))));
+      .catch((error) => dispatch(appActions.agentSourceScanCancelFailed(error instanceof Error ? error.message : String(error))));
   }
 
   /**
@@ -708,7 +795,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             )}
             status={memoryServiceStatus}
             okLabel={t("memory.daemonRunning")}
-            errLabel={t("memory.daemonStopped")}
+            errLabel={t("memory.daemonUnavailable")}
             checkingLabel={t("common.loading")}
             value={memoryServiceAddress ?? t("memory.daemonAddressUnavailable")}
             actionLabel={t(memoryServiceBusy ? "memory.restartServiceBusy" : "memory.restartService")}
@@ -748,12 +835,12 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       </div>
 
       {showScanProgress && (
-        <div className="mb-5 bg-background-paper border border-action-sky/20 rounded-card-lg p-5 animate-in fade-in" aria-busy="true">
+        <div className="mb-5 bg-background-paper border border-action-sky/20 rounded-card-lg p-5 animate-in fade-in" aria-busy={isScanning && !scanCancelling}>
           <div className="flex items-start justify-between gap-3 mb-4">
             <div className="flex items-center gap-3 min-w-0">
               <div className="relative">
-                <Radar size={20} className={isScanning ? "text-action-sky animate-spin" : "text-text-ink/45"} />
-                {isScanning && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-action-sky rounded-full animate-ping" />}
+                <Radar size={20} className={isScanning && !scanCancelling ? "text-action-sky animate-spin" : "text-text-ink/45"} />
+                {isScanning && !scanCancelling && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-action-sky rounded-full animate-ping" />}
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-medium text-text-ink">{t(formatScanProgressTitleKey(scanProgress?.phase ?? "scan"))}</div>
@@ -777,7 +864,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={isScanning ? stopScan : continueScan}
-              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/12 hover:border-action-sky/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all"
+              disabled={scanCancelling}
+              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/12 hover:border-action-sky/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-action-sky/8 disabled:hover:border-action-sky/30 disabled:active:scale-100"
               title={t(isScanning ? "memory.scanPause" : "memory.scanContinue")}
               aria-label={t(isScanning ? "memory.scanPause" : "memory.scanContinue")}
             >
@@ -787,12 +875,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={cancelScan}
-              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-status-error/30 text-status-error bg-status-error-soft/50 hover:bg-status-error-soft hover:border-status-error/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all"
-              title={t("memory.scanStop")}
-              aria-label={t("memory.scanStop")}
+              disabled={scanCancelling}
+              className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-btn border border-status-error/30 text-status-error bg-status-error-soft/50 hover:bg-status-error-soft hover:border-status-error/40 active:scale-[0.98] text-xs font-normal cursor-pointer transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-status-error-soft/50 disabled:hover:border-status-error/30 disabled:active:scale-100"
+              title={t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
+              aria-label={t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
             >
               <X size={14} />
-              {t("memory.scanStop")}
+              {t(scanCancelling ? "memory.scanCancelling" : "memory.scanStop")}
             </button>
           </div>
           <div className="flex justify-between mt-2">
@@ -814,7 +903,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <button
             type="button"
             onClick={scanStopped ? continueScan : () => scanSources()}
-            disabled={isScanning || recentlyCompletedSourceIds.has("all")}
+            disabled={isScanning || scanCancelling || recentlyCompletedSourceIds.has("all")}
             className={`inline-flex h-8 items-center gap-2 rounded-btn px-3.5 text-xs font-normal text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed ${
               recentlyCompletedSourceIds.has("all")
                 ? "bg-status-success"
@@ -843,7 +932,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           );
           const connectionAction = resolveAgentSourceConnectionAction(source);
           const connectionActionDisabled = isAgentSourceConnectionActionDisabled(source, connectionAction);
-          const sourceScanDisabled = isScanning || sourceScanButtonState === "completed" || !source.available;
+          const sourceScanDisabled = isScanning || scanCancelling || sourceScanButtonState === "completed" || !source.available;
           const managedSyncReady = !source.builtin && source.syncReady === true;
           const managedSyncButtonState = resolveManagedAgentSourceSyncButtonState(
             source.sourceId,
@@ -856,6 +945,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
               <AgentSourceLogo source={source} />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-normal text-text-ink/80">{source.displayName}</div>
+                {source.sourceId === "opencode" && source.status === "plugin_installed" && (
+                  <p className="mt-1 text-xs text-text-ink/60">{t("memory.opencodeReloadHint")}</p>
+                )}
                 <div className="flex items-center gap-2 mt-1">
                   <SourceStatusBadge source={source} />
                   {source.messageCount > 0 && <span className="text-xs text-text-ink/50 shrink-0 whitespace-nowrap">{formatSourceMemoryCount(source.messageCount, t)}</span>}
@@ -899,7 +991,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                       onClick={() => managedSyncReady
                         ? syncManagedSource(source)
                         : launchManagedAgentTask(source, "connect")}
-                      disabled={isScanning || Boolean(managedSyncingSourceId) || managedSyncButtonState === "completed"}
+                      disabled={isScanning || scanCancelling || Boolean(managedSyncingSourceId) || managedSyncButtonState === "completed"}
                       busy={managedSyncButtonState === "running"}
                       completed={managedSyncButtonState === "completed"}
                     />
@@ -935,7 +1027,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             <button
               type="button"
               onClick={openFullScanConfirm}
-              disabled={isScanning}
+              disabled={isScanning || scanCancelling}
               className="flex items-start gap-3 rounded-card border-content-panel bg-background-paper/70 p-3 text-left transition-all hover:bg-background-paper disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
             >
               <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-btn bg-background-paper/80 text-status-error">
@@ -1155,7 +1247,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                 <button
                   type="button"
                   onClick={startFullScan}
-                  disabled={!fullScanTargetSourceId || isScanning}
+                  disabled={!fullScanTargetSourceId || isScanning || scanCancelling}
                   className="px-4 py-2 text-sm text-white bg-status-error rounded-btn hover:bg-status-error/85 transition-all cursor-pointer shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   <Radar size={14} />

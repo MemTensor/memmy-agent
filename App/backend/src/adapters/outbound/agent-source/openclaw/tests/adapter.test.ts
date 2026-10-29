@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { sourceTurnFailureReason, sourceTurnFromMessages } from "@memmy/agent-source-core";
 import { createOpenclawSourceAdapter } from "../index.js";
 import { discoverOpenclawDatabases } from "../db-discovery.js";
 import { readOpenclawDatabase } from "../db-reader.js";
@@ -18,8 +19,8 @@ afterEach(() => {
 });
 
 describe("openclaw source adapter", () => {
-  it("discovers SQLite databases and classifies conversation schema", async () => {
-    const fixture = createFixture();
+  it("discovers the agent transcript database as a conversation store", async () => {
+    const fixture = createTranscriptFixture();
 
     await expect(discoverOpenclawDatabases({ root: fixture.rootDirectory })).resolves.toEqual([
       expect.objectContaining({
@@ -40,64 +41,57 @@ describe("openclaw source adapter", () => {
     ]);
   });
 
-  it("reads raw OpenClaw conversation messages from SQLite", async () => {
-    const fixture = createFixture();
+  it("stages one native turn per run with tools paired by tool call id", async () => {
+    const fixture = createTranscriptFixture();
+
+    const messages = await collect(readOpenclawDatabase(fixture.databasePath));
+    const turn = sourceTurnFromMessages(messages.filter((message) => message.rawMeta.sourceTurnId === "run-1"));
+
+    expect(turn).toMatchObject({
+      source: "openclaw",
+      conversationId: "agent:main:main",
+      turnId: "run-1",
+      completionEvidence: "run_terminal:event-final",
+      startedAt: "2026-09-08T06:44:31.000Z",
+      completedAt: "2026-09-08T06:45:57.000Z",
+      answer: "Checked the gateway and the config.",
+      status: "succeeded"
+    });
+    expect(turn?.query).toBe("Please remember OPENAI_API_KEY=[REDACTED:openai_api_key]");
+    expect(turn?.toolCalls).toEqual([
+      expect.objectContaining({ id: "exec-1", name: "bash", output: "config body" })
+    ]);
+  });
+
+  it("does not write internal wake runs such as a heartbeat poll", async () => {
+    const fixture = createTranscriptFixture({ userText: "[OpenClaw heartbeat poll]" });
+
+    await expect(collect(readOpenclawDatabase(fixture.databasePath))).resolves.toEqual([]);
+  });
+
+  it("keeps a run without a terminal answer unsubmitted so the scan can retry it", async () => {
+    const fixture = createTranscriptFixture({ runTerminal: false, finalStopReason: "error" });
 
     const messages = await collect(readOpenclawDatabase(fixture.databasePath));
 
-    expect(messages).toEqual([
-      expect.objectContaining({
-        messageId: "openclaw-message-1",
-        conversationId: "openclaw-conversation-1",
-        role: "user",
-        content: "Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
-        workspacePath: fixture.workspacePath
-      }),
-      expect.objectContaining({
-        messageId: "openclaw-message-2",
-        role: "assistant",
-        content: "Done from OpenClaw"
-      })
-    ]);
+    expect(sourceTurnFromMessages(messages)).toBeNull();
+    expect(sourceTurnFailureReason(messages)).toBe("turn_incomplete");
+  });
+
+  it("does not read a dreaming session as a conversation", async () => {
+    const fixture = createTranscriptFixture({ sessionKey: "agent:main:dreaming-narrative-1" });
+
+    await expect(collect(readOpenclawDatabase(fixture.databasePath))).resolves.toEqual([]);
   });
 
   it("reads captured OpenClaw memory chunks from MemOS Local Memory SQLite", async () => {
     const fixture = createMemoryFixture();
 
-    const messages = await collect(readOpenclawDatabase(fixture.databasePath));
-
-    expect(messages).toEqual([
-      expect.objectContaining({
-        messageId: "chunk-user-1",
-        conversationId: "openclaw-session-1",
-        role: "user",
-        content: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN from OpenClaw",
-        createdAt: "2026-06-02T10:10:01.000Z",
-        rawMeta: expect.objectContaining({
-          schemaKind: "memory",
-          turnId: "turn-1",
-          seq: 0,
-          summary: "User asked OpenClaw to remember a secret",
-          taskId: "task-1",
-          owner: "agent:main",
-          dedupStatus: "active"
-        })
-      }),
-      expect.objectContaining({
-        messageId: "chunk-assistant-1",
-        role: "assistant",
-        content: "Stored from OpenClaw memory plugin"
-      }),
-      expect.objectContaining({
-        messageId: "chunk-tool-1",
-        role: "tool",
-        content: "External tool output captured by OpenClaw"
-      })
-    ]);
+    await expect(collect(readOpenclawDatabase(fixture.databasePath))).resolves.toEqual([]);
   });
 
-  it("streams redacted ConversationMessage values and reports progress", async () => {
-    const fixture = createFixture();
+  it("streams staged ConversationMessage values and reports progress", async () => {
+    const fixture = createTranscriptFixture();
     const progressPhases: string[] = [];
     const adapter = createOpenclawSourceAdapter({ rootDirectory: fixture.rootDirectory });
 
@@ -110,29 +104,16 @@ describe("openclaw source adapter", () => {
     expect(messages).toEqual([
       expect.objectContaining({
         sourceId: "openclaw",
-        content: "Please remember OPENAI_API_KEY=[REDACTED:openai_api_key]",
-        workspacePath: fixture.workspacePath
+        role: "user",
+        conversationId: "agent:main:main",
+        content: "Please remember OPENAI_API_KEY=[REDACTED:openai_api_key]"
       }),
+      expect.objectContaining({ sourceId: "openclaw", role: "tool" }),
+      expect.objectContaining({ sourceId: "openclaw", role: "tool" }),
       expect.objectContaining({ sourceId: "openclaw", role: "assistant" })
     ]);
+    expect(messages.every((message) => message.rawMeta.sourceTurnState === "complete")).toBe(true);
     expect(progressPhases).toEqual(expect.arrayContaining(["discover", "read", "redact", "emit", "done"]));
-  });
-
-  it("streams redacted captured memory chunks without synthetic data", async () => {
-    const fixture = createMemoryFixture();
-    const adapter = createOpenclawSourceAdapter({ rootDirectory: fixture.rootDirectory });
-
-    const messages = await collect(adapter.scan({}));
-
-    expect(messages).toEqual([
-      expect.objectContaining({
-        sourceId: "openclaw",
-        content: "Remember OPENAI_API_KEY=[REDACTED:openai_api_key] from OpenClaw",
-        rawMeta: expect.objectContaining({ schemaKind: "memory", turnId: "turn-1" })
-      }),
-      expect.objectContaining({ sourceId: "openclaw", role: "assistant" }),
-      expect.objectContaining({ sourceId: "openclaw", role: "tool" })
-    ]);
   });
 
   it("detects an initialized OpenClaw home even before a memory database is created", async () => {
@@ -150,7 +131,7 @@ describe("openclaw source adapter", () => {
   });
 
   it("throws AbortError when scan is aborted before discovery", async () => {
-    const fixture = createFixture();
+    const fixture = createTranscriptFixture();
     const controller = new AbortController();
     controller.abort();
 
@@ -169,22 +150,82 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   return values;
 }
 
-function createFixture(): { rootDirectory: string; workspacePath: string; databasePath: string } {
+/** Mirrors the live agent database: session_windows plus transcript_events for one run. */
+function createTranscriptFixture(options: {
+  sessionKey?: string;
+  userText?: string;
+  runTerminal?: boolean;
+  finalStopReason?: string;
+} = {}): { rootDirectory: string; databasePath: string } {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-openclaw-source-"));
   const rootDirectory = join(tempDir, ".openclaw");
-  const workspacePath = join(tempDir, "project");
-  const databasePath = join(rootDirectory, "openclaw.sqlite");
+  const agentDirectory = join(rootDirectory, "agents", "main", "agent");
+  const databasePath = join(agentDirectory, "openclaw-agent.sqlite");
+  const sessionKey = options.sessionKey ?? "agent:main:main";
+  const windowId = "window-1";
 
-  mkdirSync(join(workspacePath, ".git"), { recursive: true });
-  mkdirSync(rootDirectory, { recursive: true });
+  mkdirSync(agentDirectory, { recursive: true });
+  const events: Array<{ seq: number; event: unknown }> = [
+    { seq: 0, event: { type: "session", id: "event-session", timestamp: "2026-09-08T06:44:30.000Z" } },
+    {
+      seq: 1,
+      event: {
+        type: "message", id: "event-user", timestamp: "2026-09-08T06:44:31.000Z",
+        message: {
+          role: "user",
+          content: options.userText ?? "Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+          __openclaw: { runId: "run-1" }
+        }
+      }
+    },
+    {
+      seq: 2,
+      event: {
+        type: "message", id: "event-call", timestamp: "2026-09-08T06:45:00.000Z",
+        message: {
+          role: "assistant", stopReason: "toolUse", __openclaw: { runId: "run-1" },
+          content: [{ type: "toolCall", id: "exec-1", name: "bash", arguments: "{\"command\":\"cat config\"}" }]
+        }
+      }
+    },
+    {
+      seq: 3,
+      event: {
+        type: "message", id: "event-result", timestamp: "2026-09-08T06:45:01.000Z",
+        message: {
+          role: "toolResult", toolCallId: "exec-1", toolName: "bash", __openclaw: { runId: "run-1" },
+          content: [{ type: "toolResult", id: "exec-1", toolCallId: "exec-1", content: "config body" }]
+        }
+      }
+    },
+    {
+      seq: 4,
+      event: {
+        type: "message", id: "event-final", timestamp: "2026-09-08T06:45:57.000Z",
+        message: {
+          role: "assistant",
+          stopReason: options.finalStopReason ?? "stop",
+          __openclaw: { runId: "run-1", runTerminal: options.runTerminal !== false },
+          content: options.finalStopReason === "error" ? [] : [{ type: "text", text: "Checked the gateway and the config." }]
+        }
+      }
+    }
+  ];
+
   const db = new DatabaseSync(databasePath);
   try {
-    db.exec(readFileSync(join(import.meta.dirname, "__fixtures__", "openclaw", "conversation.sql"), "utf8").replaceAll("$WORKSPACE_PATH", workspacePath));
+    db.exec("CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT)");
+    db.exec("CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL, created_at TEXT)");
+    db.prepare("INSERT INTO session_windows (session_id, session_key) VALUES (?, ?)").run(windowId, sessionKey);
+    for (const row of events) {
+      db.prepare("INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES (?, ?, ?, ?)")
+        .run(windowId, row.seq, JSON.stringify(row.event), "2026-09-08T06:45:57.000Z");
+    }
   } finally {
     db.close();
   }
 
-  return { rootDirectory, workspacePath, databasePath };
+  return { rootDirectory, databasePath };
 }
 
 function createMemoryFixture(): { rootDirectory: string; databasePath: string } {

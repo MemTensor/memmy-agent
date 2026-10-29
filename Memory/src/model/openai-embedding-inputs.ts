@@ -1,6 +1,14 @@
 import { get_encoding } from "tiktoken";
 
 const OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET = 7_500;
+const OPAQUE_EMBEDDING_INPUT_TOKEN_BUDGET = 4_000;
+// An alias may use a different tokenizer. Bound bytes independently of our
+// token estimate; this is a conservative default, not a provider context limit.
+const OPAQUE_EMBEDDING_INPUT_BYTE_BUDGET = 12_000;
+
+export class EmbeddingInputLimitError extends Error {
+  override readonly name = "EmbeddingInputLimitError";
+}
 const OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET = 290_000;
 
 export interface OpenAiEmbeddingChunk {
@@ -15,47 +23,69 @@ export interface OpenAiEmbeddingPlan {
   originalCount: number;
 }
 
-let encoder: ReturnType<typeof get_encoding> | undefined;
+let openAiEncoder: ReturnType<typeof get_encoding> | undefined;
+let opaqueModelEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export function planOpenAiEmbeddingInputs(
   texts: string[],
   model?: string,
-  configuredMaxInputTokens?: number
+  configuredMaxInputTokens?: number,
+  configuredMaxInputBytes?: number
 ): OpenAiEmbeddingPlan | null {
+  const knownOpenAiModel = isKnownOpenAiEmbeddingModel(model);
   const inputTokenBudget = resolveInputTokenBudget(model, configuredMaxInputTokens);
-  // Explicit budgets retain the historical token-id request shape for
-  // deployments that opt into it; opaque aliases use text chunks so their
-  // model-specific tokenizer is still applied by the provider.
-  const useTokenIds = isKnownOpenAiEmbeddingModel(model) || configuredMaxInputTokens !== undefined;
-  encoder ??= get_encoding("cl100k_base");
-  const encoded = texts.map((text) => Array.from(encoder!.encode(text, [], [])));
-  const totalTokens = encoded.reduce((sum, tokens) => sum + tokens.length, 0);
-  if (totalTokens <= OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET &&
-    encoded.every((tokens) => tokens.length <= inputTokenBudget)) return null;
+  // Only known OpenAI embedding models receive token IDs. Opaque aliases may
+  // use a different tokenizer (for example BGE-M3), so keep their chunks as
+  // text and let the provider apply its native tokenizer.
+  const useTokenIds = knownOpenAiModel;
+  const inputByteBudget = knownOpenAiModel ? Infinity :
+    Math.min(positiveBudget(configuredMaxInputBytes) ?? OPAQUE_EMBEDDING_INPUT_BYTE_BUDGET,
+      OPAQUE_EMBEDDING_INPUT_BYTE_BUDGET);
+  const encoder = knownOpenAiModel
+    ? (openAiEncoder ??= get_encoding("cl100k_base"))
+    : (opaqueModelEncoder ??= get_encoding("o200k_base"));
+  const inputs = texts.flatMap((text, originalIndex) =>
+    (useTokenIds ? [text] : splitUtf8Input(text, inputByteBudget))
+      .map((part) => ({ originalIndex, tokens: Array.from(encoder.encode(part, [], [])) }))
+  );
+  const totalTokens = inputs.reduce((sum, item) => sum + item.tokens.length, 0);
+  if (inputs.length === texts.length && totalTokens <= OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET &&
+    inputs.every((item) => item.tokens.length > 0 && item.tokens.length <= inputTokenBudget)) return null;
 
-  const chunks = encoded.flatMap((tokens, originalIndex) => {
-    if (tokens.length === 0) return [{ originalIndex, tokens, input: useTokenIds ? tokens : "" }];
+  const chunkTokensForInput = (tokens: number[], originalIndex: number): OpenAiEmbeddingChunk[] => {
     const tokenBytes = useTokenIds
       ? undefined
-      : tokens.map((token) => encoder!.decode_single_token_bytes(token));
+      : tokens.map((token) => encoder.decode_single_token_bytes(token));
     const items: OpenAiEmbeddingChunk[] = [];
     for (let offset = 0; offset < tokens.length;) {
       let end = Math.min(tokens.length, offset + inputTokenBudget);
-      if (!useTokenIds && end < tokens.length) {
-        while (end > offset && startsWithContinuationByte(tokenBytes?.[end])) {
-          end -= 1;
+      if (!useTokenIds) {
+        // Never cut through a UTF-8 character, including when one character
+        // occupies several tokens. If it cannot fit, fail without sending it.
+        while (end > offset && end < tokens.length && startsWithContinuationByte(tokenBytes![end])) end -= 1;
+        if (end === offset) {
+          throw new EmbeddingInputLimitError("Embedding token budget is too small for one complete character; increase maxInputTokens.");
         }
-        if (end === offset) end = Math.min(tokens.length, offset + inputTokenBudget);
       }
       const chunkTokens = tokens.slice(offset, end);
-      items.push({
-        originalIndex,
-        tokens: chunkTokens,
-        input: useTokenIds ? chunkTokens : decodeTokenBytes(tokenBytes!.slice(offset, end))
-      });
+      const input = useTokenIds ? chunkTokens : decodeTokenBytes(tokenBytes!.slice(offset, end));
+      // A standalone BOM can decode to an empty string. Filter in the plan,
+      // so the request and vector aggregation retain the same chunk order.
+      if (input.length > 0) items.push({ originalIndex, tokens: chunkTokens, input });
       offset = end;
     }
     return items;
+  };
+  const chunksByOriginal: OpenAiEmbeddingChunk[][] = texts.map(() => []);
+  for (const { tokens, originalIndex } of inputs) {
+    chunksByOriginal[originalIndex]!.push(...chunkTokensForInput(tokens, originalIndex));
+  }
+  const chunks = chunksByOriginal.flatMap((items, originalIndex) => {
+    if (items.length > 0) return items;
+    // Keep one output vector per original, respecting even a small configured
+    // budget when the placeholder itself needs multiple chunks.
+    const parts = useTokenIds ? ["(empty)"] : splitUtf8Input("(empty)", inputByteBudget);
+    return parts.flatMap(part => chunkTokensForInput(Array.from(encoder.encode(part, [], [])), originalIndex));
   });
   return {
     batches: batchChunks(chunks),
@@ -91,16 +121,16 @@ function isKnownOpenAiEmbeddingModel(model?: string): boolean {
   return /(?:^|[/.:])text-embedding-(?:3-(?:small|large)|ada-002)(?:$|[/.:])/i.test(model?.trim() ?? "");
 }
 
-function resolveInputTokenBudget(_model?: string, configured?: number): number {
-  const explicit = typeof configured === "number" && Number.isFinite(configured) && configured > 0
-    ? Math.floor(configured)
-    : undefined;
-  // OpenAI-compatible deployments frequently expose an opaque deployment
-  // alias instead of the upstream model id.  We cannot safely assume that
-  // alias has a larger context window, so apply the same conservative budget
-  // used for known OpenAI embedding models unless the caller opts into a
-  // smaller budget explicitly.
-  return Math.min(explicit ?? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET, OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET);
+function positiveBudget(value?: number): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined;
+}
+
+function resolveInputTokenBudget(model?: string, configured?: number): number {
+  const explicit = positiveBudget(configured);
+  const defaultBudget = isKnownOpenAiEmbeddingModel(model)
+    ? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET
+    : OPAQUE_EMBEDDING_INPUT_TOKEN_BUDGET;
+  return Math.min(explicit ?? defaultBudget, defaultBudget);
 }
 
 function decodeTokenBytes(tokenBytes: Uint8Array[]): string {
@@ -128,4 +158,27 @@ function batchChunks(chunks: OpenAiEmbeddingChunk[]): OpenAiEmbeddingChunk[][] {
   }
   if (current.length > 0) batches.push(current);
   return batches;
+}
+
+function splitUtf8Input(text: string, budget: number): string[] {
+  if (Buffer.byteLength(text, "utf8") <= budget) return [text];
+  const parts: string[] = [];
+  let offset = 0;
+  let start = 0;
+  let bytes = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (size > budget) {
+      throw new EmbeddingInputLimitError("Embedding byte budget is too small for one complete character; increase maxInputBytes.");
+    }
+    if (bytes + size > budget) {
+      parts.push(text.slice(start, offset));
+      start = offset;
+      bytes = 0;
+    }
+    offset += character.length;
+    bytes += size;
+  }
+  parts.push(text.slice(start));
+  return parts;
 }

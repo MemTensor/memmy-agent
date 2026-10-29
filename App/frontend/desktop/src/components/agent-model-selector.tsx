@@ -4,14 +4,16 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import {
-  getTaskModelCandidates,
   createModelWorkspace,
+  getTaskModelCandidates,
   resolveModelSelection,
+  resolveThinkingConfigForModel,
   type ModelWorkspaceMode
 } from "../state/model-workspace.js";
 import {
   settingsTabHash
 } from "../pages/settings-nav.js";
+import { AgentThinkingControl } from "./agent-thinking-control.js";
 import { ModelProviderLogo } from "./model-provider-logo.js";
 import { Select, type SelectOption } from "./Select.js";
 
@@ -20,6 +22,12 @@ export interface AgentModelSelectorProps {
   scopeKey: string;
   disabled: boolean;
   seedConfig?: ModelProviderConfig | null;
+  /**
+   * Called when the user explicitly picks a model, so the caller can persist it as the
+   * mode default (remembered for new chats after restart). The per-chat selection is
+   * still tracked separately in Agent state.
+   */
+  onDefaultModelSelected?: (candidateId: string) => void;
 }
 
 /** Per-chat catalog preset picker. Selection lives in Agent state, never browser storage. */
@@ -29,13 +37,16 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
   const workspace = createModelWorkspace(props.seedConfig ?? state.modelConfig);
   const candidates = getTaskModelCandidates(workspace, props.mode);
   const committedSelection = state.agent.committedModelSelectionByScope[props.scopeKey];
-  const selectedPreset = state.agent.pendingPresetByScope[props.scopeKey]
+  const pendingPreset = state.agent.pendingPresetByScope[props.scopeKey];
+  const selectedPreset = pendingPreset
     ?? committedSelection?.presetId
     ?? null;
-  const resolved = resolveModelSelection(workspace, props.mode, selectedPreset);
-  const hasNoModels = candidates.length === 0;
+  const resolved = resolveModelSelection(workspace, props.mode, selectedPreset, {
+    allowUnassignedSelected: pendingPreset == null && Boolean(committedSelection)
+  });
+  const hasNoModels = candidates.length === 0 && !resolved.candidate;
 
-  const options: SelectOption[] = candidates.map((candidate) => ({
+  const optionForCandidate = (candidate: (typeof candidates)[number]): SelectOption => ({
         value: candidate.id,
         label: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
         selectedLabel: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
@@ -43,7 +54,12 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
           ? t("home.modelSelector.platformGroup")
           : t("home.modelSelector.byokGroup"),
         icon: <ModelProviderIcon source={candidate.source} provider={candidate.provider} />
-      }));
+  });
+  const options: SelectOption[] = candidates.map(optionForCandidate);
+  const resolvedCandidate = resolved.candidate;
+  if (resolvedCandidate && !candidates.some((candidate) => candidate.id === resolvedCandidate.id)) {
+    options.push(optionForCandidate(resolvedCandidate));
+  }
   if (resolved.unavailable && resolved.candidateId) {
     const unavailableModel = committedSelection?.model ?? resolved.previousModel ?? t("home.modelSelector.unavailableOption");
     const unavailableOption: SelectOption = {
@@ -72,6 +88,7 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
 
   function selectModel(candidateId: string) {
     dispatch(agentActions.pendingModelPresetUpdated(props.scopeKey, candidateId));
+    props.onDefaultModelSelected?.(candidateId);
   }
 
   function openCustomModelSettings() {
@@ -81,6 +98,8 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
     }
     dispatch(appActions.navigate("/settings"));
   }
+
+  const thinkingConfig = resolveThinkingConfigForModel(workspace, resolved.candidate);
 
   return (
     <div className="agent-model-selector" data-model-selector-scope={props.scopeKey}>
@@ -97,6 +116,15 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
         className="select-control--compact select-control--subtle agent-model-selector__control"
         buttonClassName="agent-model-selector__button"
         menuClassName="agent-model-selector__menu"
+        optionAside={(option) => (
+          option.value === resolved.candidateId && thinkingConfig
+            ? <AgentThinkingControl
+                scopeKey={props.scopeKey}
+                thinkingConfig={thinkingConfig}
+                disabled={props.disabled}
+              />
+            : null
+        )}
         menuFooter={({ close }) => (
           <div className="agent-model-selector__footer">
             <button

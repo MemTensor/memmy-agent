@@ -10,19 +10,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
   bundledMemoryInstallArguments,
+  createAgentGatewayStarter,
   ensureMemoryService,
+  hasMemoryOwnerProgressed,
+  matchesMemoryServiceCommandLine,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
   readLiveMemoryServerLock,
   resolveDevelopmentRuntimeExecutable,
   resolveDevelopmentRuntimeEntryPaths,
+  resolveAgentGatewayStartupTimeout,
   resolvePackagedRuntimeMigrationTargets,
   resolveRuntimeEntryPaths,
   runPackagedMigrationCommand,
   restartExternalMemoryService,
+  sampleMemoryOwnerProgress,
   spawnNodeService,
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
+  waitForExternalAgentMcpConfig,
   stopManagedChild,
   stopManagedChildrenForDesktopExit,
   syncBundledAgentSkills,
@@ -425,6 +431,15 @@ describe("packaged desktop runtime config", () => {
       agentGatewayBootstrapSecret: "stable-secret"
     });
     expect(config).toMatchObject({
+      tools: {
+        mcpServers: {
+          memmy_computer_use: {
+            type: "stdio",
+            command: "open-computer-use",
+            args: ["mcp"]
+          }
+        }
+      },
       agents: {
         defaults: { workspace: join(memmyHome, "workspace") }
       },
@@ -542,6 +557,52 @@ describe("packaged desktop runtime config", () => {
     expect(children).toHaveLength(0);
   });
 
+  it("reuses a compatible degraded Memory service started by dev-start", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        ok: false,
+        protocolVersion: 1,
+        serviceVersion: "2.1.3",
+        models: { summary: { lastError: "model unavailable" } }
+      }));
+    });
+    testServers.push(server);
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    const children: ManagedChild[] = [];
+
+    await ensureMemoryService(
+      { memoryEntry: join(root, "missing-memory.js"), agentEntry: join(root, "missing-agent.js") },
+      {
+        configPath: join(root, "config.yaml"),
+        agentWorkspace: join(root, "workspace"),
+        memoryDatabasePath: databasePath,
+        memoryBaseUrl: `http://127.0.0.1:${address.port}`,
+        memoryToken: "",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: address.port,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "secret"
+      },
+      children,
+      {
+        appPath: root,
+        appDatabaseFile: join(root, "app.sqlite"),
+        resourcesPath: root,
+        logDirectory: root,
+        logLevel: "info"
+      }
+    );
+
+    expect(children).toHaveLength(0);
+  });
+
   it("rereads the migrated workspace instead of pinning the pre-migration legacy value", async () => {
     const memmyHome = await makeTempRoot();
     const configPath = join(memmyHome, "config.yaml");
@@ -564,6 +625,21 @@ describe("packaged desktop runtime config", () => {
     });
 
     expect(runtime.agentWorkspace).toBe(legacyWorkspace);
+  });
+
+  it.each([
+    {},
+    { custom: { command: "custom-mcp", args: [] } },
+    { open_computer_use: { command: "/custom/ocu", args: ["mcp"], enabledTools: [] } }
+  ])("preserves existing MCP maps on desktop startup: %j", async (mcpServers) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ tools: { mcpServers } }));
+    await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    });
+    expect(recordValue(recordValue(await readYaml(configPath), "tools"), "mcpServers")).toEqual(mcpServers);
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {
@@ -945,10 +1021,231 @@ describe("packaged desktop runtime config", () => {
   });
 });
 
+describe("external Agent MCP startup", () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("retries a timeout and a busy result before accepting a usable bridge", async () => {
+    vi.useFakeTimers();
+    const reload = vi.fn().mockRejectedValueOnce(new Error("request timeout"))
+      .mockResolvedValueOnce({ ok: false, message: "busy", requires_restart: false })
+      .mockResolvedValueOnce({ ok: true, message: "ready", requires_restart: false });
+    const pending = waitForExternalAgentMcpConfig({ reload, isCanceled: () => false });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(pending).resolves.toBe(true);
+    expect(reload).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a restart-required result even when the reload reports ok", async () => {
+    vi.useFakeTimers();
+    const reload = vi.fn(async () => ({ ok: true, message: "restart required", requires_restart: true }));
+    const pending = waitForExternalAgentMcpConfig({ reload, isCanceled: () => false });
+    const assertion = expect(pending).rejects.toThrow("after 3 attempts: restart required");
+    await vi.advanceTimersByTimeAsync(3_000);
+    await assertion;
+    expect(reload).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops during backoff when quit wins and consumes a late canceled request failure", async () => {
+    vi.useFakeTimers();
+    let canceled = false;
+    const reload = vi.fn(async () => ({ ok: false, message: "busy", requires_restart: false }));
+    const pending = waitForExternalAgentMcpConfig({ reload, isCanceled: () => canceled });
+    await vi.advanceTimersByTimeAsync(0);
+    canceled = true;
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    let rejectLate!: (error: Error) => void;
+    canceled = false;
+    const late = waitForExternalAgentMcpConfig({
+      reload: () => new Promise((_resolve, reject) => { rejectLate = reject; }), isCanceled: () => canceled
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    canceled = true;
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(late).resolves.toBe(false);
+    rejectLate(new Error("late request timeout"));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
 describe("AgentGatewaySupervisor", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("defers Agent startup until requested and shares one in-flight attempt", async () => {
+    let resolveProbe!: (result: "ready") => void;
+    const probe = vi.fn(() => new Promise<"ready">((resolve) => {
+      resolveProbe = resolve;
+    }));
+    const harness = createSupervisorHarness({ probe });
+    const agentGateway: { startupIssue?: "model_config_invalid" } = {};
+    const onStart = vi.fn();
+    const onSettled = vi.fn();
+    const start = createAgentGatewayStarter(harness.supervisor, agentGateway, {
+      isClosing: () => false, onStart, onSettled
+    });
+
+    expect(probe).not.toHaveBeenCalled();
+    const first = start();
+    const second = start();
+    expect(second).toBe(first);
+    expect(probe).toHaveBeenCalledTimes(1);
+    resolveProbe("ready");
+    await expect(first).resolves.toBeNull();
+    await expect(start()).resolves.toBeNull();
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(harness.spawn).not.toHaveBeenCalled();
+  });
+
+  it("preserves the model-config hint and recovery after a deferred failure", async () => {
+    const supervisor = {
+      ensureStarted: vi.fn(async () => {
+        throw new Error("Failed to load config: providers current contract rejected legacy field");
+      }),
+      startRecovery: vi.fn(),
+      waitForReady: vi.fn()
+    };
+    const agentGateway: { startupIssue?: "model_config_invalid" } = {};
+    const start = createAgentGatewayStarter(supervisor, agentGateway, {
+      isClosing: () => false
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(start()).resolves.toBe("model_config_invalid");
+    expect(agentGateway.startupIssue).toBe("model_config_invalid");
+    expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
+    await expect(start()).resolves.toBe("model_config_invalid");
+    expect(supervisor.ensureStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not spawn or publish an issue when shutdown wins deferred startup", async () => {
+    let resolveProbe!: (result: "unreachable") => void;
+    const probe = vi.fn(() => new Promise<"unreachable">((resolve) => {
+      resolveProbe = resolve;
+    }));
+    const harness = createSupervisorHarness({ probe });
+    const agentGateway: { startupIssue?: "model_config_invalid" } = {};
+    let closing = false;
+    const start = createAgentGatewayStarter(harness.supervisor, agentGateway, {
+      isClosing: () => closing
+    });
+
+    const pending = start();
+    closing = true;
+    await harness.supervisor.close();
+    resolveProbe("unreachable");
+    await expect(pending).resolves.toBeNull();
+    await expect(start()).resolves.toBeNull();
+    expect(harness.spawn).not.toHaveBeenCalled();
+    expect(agentGateway.startupIssue).toBeUndefined();
+  });
+
+  it('binds a surface action to the live child that produced its frame', async () => {
+    const harness = createSupervisorHarness();
+    const received = vi.fn();
+    (harness.supervisor as any).options.onComputerUseSurface = received;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const frame = { type: 'memmy:computer-use-surface:update', surface: 'browser',
+      sessionKey: 's', channel: 'gui', chatId: 'c', targetId: 'active-tab', title: 'Page' };
+    child.process.emit('message', frame);
+    expect(received).toHaveBeenCalledOnce();
+    const action = { type: 'memmy:computer-use-surface:action', surface: 'browser',
+      sessionKey: 's', channel: 'gui', chatId: 'c', targetId: 'active-tab',
+      action: 'click', x: 0.5, y: 0.5 };
+    received.mock.calls[0][1](action);
+    expect(send).toHaveBeenCalledWith(action, expect.any(Function));
+    await harness.supervisor.close();
+  });
+
+  it('relays embedded browser commands only for the live Agent child', async () => {
+    const harness = createSupervisorHarness();
+    const handle = vi.fn(async () => ({ tabId: 27, url: 'https://example.com/' }));
+    (harness.supervisor as any).options.handleEmbeddedBrowserRequest = handle;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const request = { type: 'memmy:embedded-browser:request',
+      requestId: '98df6655-c97f-4907-8488-01fd87ccce62', command: 'probe', args: {} };
+    child.process.emit('message', request);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({
+      type: 'memmy:embedded-browser:result', requestId: request.requestId,
+      ok: true, result: { tabId: 27, url: 'https://example.com/' },
+    }, expect.any(Function)));
+    child.process.emit('message', { ...request, command: 'not-a-browser-command' });
+    expect(handle).toHaveBeenCalledTimes(1);
+    await harness.supervisor.close();
+  });
+
+  it('invalidates an embedded upload when the Agent cancels its request', async () => {
+    const harness = createSupervisorHarness();
+    let finish!: (value: unknown) => void;
+    let current!: () => boolean;
+    (harness.supervisor as any).options.handleEmbeddedBrowserRequest = vi.fn((_request, isCurrentChild) => {
+      current = isCurrentChild;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const requestId = '98df6655-c97f-4907-8488-01fd87ccce62';
+    child.process.emit('message', { type: 'memmy:embedded-browser:request', requestId,
+      command: 'upload', tabId: 27, args: { paths: ['/workspace/report.txt'], target: 'ax-7' } });
+    expect(current()).toBe(true);
+    child.process.emit('message', { type: 'memmy:embedded-browser:cancel', requestId });
+    expect(current()).toBe(false);
+    finish({ uploaded: 1 });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(send).not.toHaveBeenCalled();
+    await harness.supervisor.close();
+  });
+
+  it('relays a validated native app approval only to the live Agent child', async () => {
+    const harness = createSupervisorHarness();
+    const approve = vi.fn().mockResolvedValue('allow-once');
+    (harness.supervisor as any).options.approveNativeAppAccess = approve;
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn();
+    Object.assign(child.process, { connected: true, send });
+    const request = { type: 'memmy:native-app-access:request',
+      requestId: 'fe6181d5-3d95-4a11-b3fa-4586c5c5bdad', platform: 'darwin',
+      appId: 'com.apple.calculator', displayName: 'Calculator' };
+    child.process.emit('message', request);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({
+      type: 'memmy:native-app-access:result', requestId: request.requestId, decision: 'allow-once',
+    }, expect.any(Function)));
+    expect(approve).toHaveBeenCalledWith(request);
+    child.process.emit('message', { ...request, requestId: 'bad', appId: 'com.apple.Terminal' });
+    expect(approve).toHaveBeenCalledTimes(1);
+    await harness.supervisor.close();
+    child.process.emit('message', { ...request, requestId: 'f664df4b-68b7-4390-b3f3-9e68106b0988' });
+    expect(approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the Agent to finish clearing browser data', async () => {
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    const child = harness.spawned[0];
+    const send = vi.fn((request: any, callback: (error?: Error) => void) => {
+      callback();
+      queueMicrotask(() => child.process.emit('message', {
+        type: 'memmy:browser-profile:clear-result', requestId: request.requestId, ok: true,
+      }));
+    });
+    Object.assign(child.process, { connected: true, send });
+    await expect(harness.supervisor.clearBrowserData()).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'memmy:browser-profile:clear' }), expect.any(Function));
+    await harness.supervisor.close();
   });
 
   it("uses one in-flight startup and leaves an already-running external gateway alone", async () => {
@@ -1040,17 +1337,26 @@ describe("AgentGatewaySupervisor", () => {
     expect(harness.supervisor.restartTimer).toBeNull();
   });
 
-  it("contains the initial Agent failure and enables background recovery", async () => {
+  it("keeps startup pending until recovery makes the Agent ready", async () => {
     const failure = new Error("invalid runtime config");
+    let recovered!: (issue: null) => void;
     const supervisor = {
       ensureStarted: vi.fn(async () => {
         throw failure;
       }),
-      startRecovery: vi.fn()
+      startRecovery: vi.fn(),
+      waitForReady: vi.fn(() => new Promise<null>(resolve => { recovered = resolve; }))
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await expect(startAgentGatewayWithRecovery(supervisor)).resolves.toBeNull();
+    const settled = vi.fn();
+    const startup = startAgentGatewayWithRecovery(supervisor).then(settled);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).not.toHaveBeenCalled();
+    expect(supervisor.waitForReady).toHaveBeenCalledTimes(1);
+    recovered(null);
+    await startup;
+    expect(settled).toHaveBeenCalledWith(null);
 
     expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(
@@ -1065,12 +1371,153 @@ describe("AgentGatewaySupervisor", () => {
           "agent-gateway exited before it became ready (code 1). stderr: memmy: Failed to load config from C:/Memmy/config.yaml: providers current contract does not accept legacy field 'apiBase'"
         );
       }),
-      startRecovery: vi.fn()
+      startRecovery: vi.fn(),
+      waitForReady: vi.fn()
     };
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(startAgentGatewayWithRecovery(supervisor)).resolves.toBe("model_config_invalid");
     expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
+    expect(supervisor.waitForReady).not.toHaveBeenCalled();
+  });
+
+  it("releases startup only after a replacement child reaches readiness", async () => {
+    vi.useFakeTimers();
+    let makeReady!: () => void;
+    const wait = vi.fn()
+      .mockRejectedValueOnce(new Error("initial import failed"))
+      .mockImplementationOnce(() => new Promise<void>(resolve => { makeReady = resolve; }));
+    const harness = createSupervisorHarness({ waitForHttpService: wait,
+      stopManagedChild: vi.fn(async child => { emitChildClose(child, 1); }) });
+    const settled = vi.fn();
+    const startup = startAgentGatewayWithRecovery(harness.supervisor).then(settled);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    expect(settled).not.toHaveBeenCalled();
+    makeReady();
+    await startup;
+    expect(settled).toHaveBeenCalledWith(null);
+    await harness.supervisor.close();
+  });
+
+  it("releases startup when a usable external gateway appears during recovery", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      probe: vi.fn().mockResolvedValueOnce("unreachable").mockResolvedValueOnce("ready"),
+      waitForHttpService: vi.fn().mockRejectedValueOnce(new Error("initial import failed")),
+      stopManagedChild: vi.fn(async child => { emitChildClose(child, 1); })
+    });
+    const startup = startAgentGatewayWithRecovery(harness.supervisor);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(startup).resolves.toBeNull();
+    expect(harness.supervisor.hasReachedReady).toBe(true);
+    expect(harness.supervisor.ownership).toBe("external");
+    await harness.supervisor.close();
+  });
+
+  it("waits for a gateway already initializing without spawning a competing child", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({ probe: vi.fn()
+      .mockResolvedValueOnce("starting").mockResolvedValueOnce("starting").mockResolvedValueOnce("ready") });
+    const settled = vi.fn();
+    const startup = startAgentGatewayWithRecovery(harness.supervisor).then(settled);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await startup;
+    expect(settled).toHaveBeenCalledWith(null);
+    expect(harness.spawn).not.toHaveBeenCalled();
+    await harness.supervisor.close();
+  });
+
+  it("recognizes the real bootstrap 503 response while waiting for Agent initialization", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("agent_runtime_initializing", { status: 503 }))
+      .mockResolvedValueOnce(new Response("agent_runtime_initializing", { status: 503 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    const harness = createSupervisorHarness({ useRealProbe: true });
+    const settled = vi.fn();
+    const startup = startAgentGatewayWithRecovery(harness.supervisor).then(settled);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await startup;
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(settled).toHaveBeenCalledWith(null);
+    expect(harness.spawn).not.toHaveBeenCalled();
+    await harness.supervisor.close();
+  });
+
+  it("continues replacement backoff when exit settles before the child's close event", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      waitForHttpService: vi.fn().mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("replacement startup failed")).mockResolvedValueOnce(undefined),
+      stopManagedChild: vi.fn(async child => { child.process.emit("exit", 1, null); })
+    });
+    await harness.supervisor.ensureStarted();
+    emitChildClose(harness.spawned[0]!, 1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    emitChildClose(harness.spawned[1]!, 1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+    await harness.supervisor.close();
+  });
+
+  it("cancels the readiness wait and recovery when the splash is closed", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      waitForHttpService: vi.fn().mockRejectedValueOnce(new Error("initial import failed")),
+      stopManagedChild: vi.fn(async child => { emitChildClose(child, 1); })
+    });
+    const startup = startAgentGatewayWithRecovery(harness.supervisor);
+    await vi.advanceTimersByTimeAsync(0);
+    await harness.supervisor.close();
+    await expect(startup).resolves.toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.supervisor.hasReachedReady).toBe(false);
+  });
+
+  it("opens the configuration repair entrypoint if a recovery attempt identifies model rejection", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      waitForHttpService: vi.fn().mockRejectedValueOnce(new Error("initial import failed"))
+        .mockRejectedValueOnce(new Error("Failed to load config: modelAssignments legacy format rejected")),
+      stopManagedChild: vi.fn(async child => { emitChildClose(child, 1); })
+    });
+    const startup = startAgentGatewayWithRecovery(harness.supervisor);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(startup).resolves.toBe("model_config_invalid");
+    expect(harness.supervisor.hasReachedReady).toBe(false);
+    await harness.supervisor.close();
+  });
+
+  it("gives serial MCP discovery its configured budget instead of restarting at 30 seconds", async () => {
+    const root = await makeTempRoot();
+    const configPath = join(root, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ tools: { mcpServers: {
+      legacy: { command: "legacy-mcp" }, http: { url: "${MCP_URL}", type: "${MCP_TYPE}" }
+    } } }));
+    const wait = vi.fn(async () => undefined);
+    const harness = createSupervisorHarness({ waitForHttpService: wait, configPath });
+    await harness.supervisor.ensureStarted();
+    expect(wait).toHaveBeenCalledWith("agent-gateway", expect.any(String), expect.any(Object),
+      { "x-memmy-agent-auth": "gateway-secret" }, 70_000, expect.any(Function));
+    await harness.supervisor.close();
+  });
+
+  it("handles empty and old MCP configuration without inventing work or truncating many servers", () => {
+    expect(resolveAgentGatewayStartupTimeout(null)).toBe(30_000);
+    expect(resolveAgentGatewayStartupTimeout({})).toBe(30_000);
+    expect(resolveAgentGatewayStartupTimeout({ tools: { mcpServers: {} } })).toBe(30_000);
+    const mcpServers = Object.fromEntries(Array.from({ length: 20 }, (_, index) =>
+      [`server${index}`, { command: "old-command", enabledTools: [] }]));
+    expect(resolveAgentGatewayStartupTimeout({ tools: { mcpServers } })).toBe(430_000);
   });
 
   it("restarts an owned gateway with bounded escalating delays and ignores old child callbacks", async () => {
@@ -1405,7 +1852,83 @@ describe("spawnNodeService 落盘与 env 注入", () => {
   });
 });
 
+describe("Memory lock owner progress", () => {
+  it("accounts for the database and its journal companions", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    await writeFile(`${databasePath}-wal`, "bb");
+
+    const sample = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    expect(sample.databaseBytes).toBe(3);
+    expect(sample.databaseMtimeMs).toBeGreaterThan(0);
+    expect(sample.cpuMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("treats a database write as progress", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    const previous = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    await writeFile(`${databasePath}-wal`, "growing");
+
+    expect(hasMemoryOwnerProgressed(previous, sampleMemoryOwnerProgress(process.pid, databasePath))).toBe(true);
+  });
+
+  it("treats accumulated cpu time alone as progress", () => {
+    const idle = { cpuMs: 5_000, databaseBytes: 10, databaseMtimeMs: 100 };
+    expect(hasMemoryOwnerProgressed(idle, { ...idle, cpuMs: 6_200 })).toBe(true);
+    expect(hasMemoryOwnerProgressed(idle, { ...idle, cpuMs: 5_100 })).toBe(false);
+  });
+
+  it("reports no progress once the process and the database go quiet", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(databasePath, "a");
+    const previous = sampleMemoryOwnerProgress(process.pid, databasePath);
+
+    expect(hasMemoryOwnerProgressed(previous, { ...previous })).toBe(false);
+  });
+});
+
+describe("Memory lock owner identification", () => {
+  const home = resolve("/memmy-home");
+  const serviceHome = join(home, "memory-service");
+  const activeEntry = join(serviceHome, "runtime", "2.1.2", "win32-x64", "dist", "src", "server", "index.js");
+  const previousEntry = join(serviceHome, "runtime", "2.1.1", "win32-x64", "dist", "src", "server", "index.js");
+
+  it("accepts a service left behind by the previous version", () => {
+    expect(matchesMemoryServiceCommandLine(`"C:/node.exe" "${previousEntry}" --config x`, activeEntry, serviceHome))
+      .toBe(true);
+  });
+
+  it("accepts the active pointer and the bundled runtime entry", () => {
+    expect(matchesMemoryServiceCommandLine(`node "${activeEntry}"`, activeEntry, serviceHome)).toBe(true);
+    expect(matchesMemoryServiceCommandLine(
+      "node /Applications/Memmy.app/Contents/Resources/memory-runtime/dist/src/server/index.js",
+      activeEntry,
+      serviceHome
+    )).toBe(true);
+  });
+
+  it("matches only the active pointer during a runtime takeover", () => {
+    expect(matchesMemoryServiceCommandLine(`node "${previousEntry}"`, activeEntry, serviceHome, true)).toBe(false);
+    expect(matchesMemoryServiceCommandLine(`node "${activeEntry}"`, activeEntry, serviceHome, true)).toBe(true);
+  });
+
+  it("rejects a service from another home and unrelated processes", () => {
+    const foreignEntry = join(resolve("/other-home"), "memory-service", "runtime", "2.1.1", "win32-x64", "dist", "src", "server", "index.js");
+    expect(matchesMemoryServiceCommandLine(`node "${foreignEntry}"`, activeEntry, serviceHome)).toBe(false);
+    expect(matchesMemoryServiceCommandLine("C:/Windows/explorer.exe", activeEntry, serviceHome)).toBe(false);
+    expect(matchesMemoryServiceCommandLine("", activeEntry, serviceHome)).toBe(false);
+  });
+});
+
 function createSupervisorHarness(overrides: {
+  configPath?: string;
+  useRealProbe?: boolean;
   probe?: ReturnType<typeof vi.fn>;
   waitForHttpService?: ReturnType<typeof vi.fn>;
   stopManagedChild?: ReturnType<typeof vi.fn>;
@@ -1415,7 +1938,7 @@ function createSupervisorHarness(overrides: {
     agentEntry: "/runtime/agent.js"
   };
   const runtimeConfig: PackagedRuntimeConfig = {
-    configPath: "/memmy/config.yaml",
+    configPath: overrides.configPath ?? "/memmy/config.yaml",
     appDatabaseFile: "/memmy/app.sqlite",
     agentWorkspace: "/memmy/workspace",
     memoryDatabasePath: "/memmy/memory.sqlite",
@@ -1443,7 +1966,7 @@ function createSupervisorHarness(overrides: {
     return child;
   });
   const supervisor = new AgentGatewaySupervisor(entries, runtimeConfig, children, options, {
-    probeHttpService: overrides.probe ?? vi.fn(async () => "unreachable" as const),
+    probeHttpService: overrides.probe ?? (overrides.useRealProbe ? undefined : vi.fn(async () => "unreachable" as const)),
     spawnNodeService: spawn,
     waitForHttpService: overrides.waitForHttpService ?? vi.fn(async () => undefined),
     stopManagedChild: overrides.stopManagedChild ?? vi.fn(async () => undefined)

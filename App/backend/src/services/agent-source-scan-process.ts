@@ -105,13 +105,14 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
     const mode = appStateStore.repositories.bootstrap.getAppSettings().userMode;
     return mode === "account" || mode === "byok" ? mode : null;
   };
+  const memoryAddAnalytics = createMemoryDesktopAddAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
   const ingestionService = createIngestionService({
     memoryClient,
     agentSourceRepository: appStateStore.repositories.agentSources,
-    memoryAddAnalytics: createMemoryDesktopAddAnalytics({
-      getUserId: resolveAnalyticsUserId,
-      getUserMode: resolveAnalyticsUserMode,
-    }),
+    memoryAddAnalytics,
   });
 
   return createAgentSourceService({
@@ -127,6 +128,7 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
+    memoryAddAnalytics,
   });
 }
 

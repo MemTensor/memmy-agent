@@ -60,6 +60,8 @@ describe("SourcesSubPage", () => {
       expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set([sourceId]))).toBe("completed");
       expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set())).toBe("idle");
     }
+    expect(zhCNMessages["memory.scanCancelling"]).toBe("取消中");
+    expect(enUSMessages["memory.scanCancelling"]).toBe("Canceling");
     expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
     expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
     expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);

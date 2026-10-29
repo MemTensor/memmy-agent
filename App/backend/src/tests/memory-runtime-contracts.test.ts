@@ -114,6 +114,17 @@ describe("memory runtime contracts", () => {
     })).toThrow();
   });
 
+  it("keeps waiting source text and generated titles on list items", () => {
+    const parsed = MemoryListItemSchema.parse({
+      ...memoryListItem(),
+      sourceText: "请修复自动扫描卡顿",
+      generatedTitle: "扫描卡顿修复"
+    });
+    expect(parsed.sourceText).toBe("请修复自动扫描卡顿");
+    expect(parsed.generatedTitle).toBe("扫描卡顿修复");
+    expect(MemoryListItemSchema.parse(memoryListItem()).sourceText).toBeUndefined();
+  });
+
   it("parses Span memories and Span processing jobs", () => {
     expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
     expect(() => PanelItemsOutputSchema.parse({

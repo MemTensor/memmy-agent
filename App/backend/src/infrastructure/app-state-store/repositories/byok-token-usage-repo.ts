@@ -36,9 +36,15 @@ interface ByModelRow extends SummaryRow {
   event_count: number | null;
 }
 
+export interface MemoryPipelineTokenUsage {
+  dailyUsed: number;
+  lifetimeUsed: number;
+}
+
 export interface ByokTokenUsageRepository {
   recordEvent(event: ByokTokenUsageEvent): void;
   getSummary(): ByokTokenUsageSummary;
+  getMemoryPipelineUsage(sinceIso: string): MemoryPipelineTokenUsage;
 }
 
 export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsageRepository {
@@ -179,8 +185,45 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
         byModel: modelRows.map(toByModel).sort(byModelOrder),
       };
     },
+
+    getMemoryPipelineUsage(sinceIso) {
+      const lifetime = db
+        .prepare(
+          `SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens
+           FROM byok_token_usage_events
+           WHERE ${MEMORY_PIPELINE_USAGE_SQL}`
+        )
+        .get() as { total_tokens: number | null };
+      const daily = db
+        .prepare(
+          `SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens
+           FROM byok_token_usage_events
+           WHERE ${MEMORY_PIPELINE_USAGE_SQL}
+             AND created_at >= ?`
+        )
+        .get(sinceIso) as { total_tokens: number | null };
+      return {
+        dailyUsed: numberValue(daily.total_tokens),
+        lifetimeUsed: numberValue(lifetime.total_tokens)
+      };
+    },
   };
 }
+
+const MEMORY_PIPELINE_USAGE_SQL = `
+  (
+    kind IN ('memory_summary', 'memory_evolution')
+    OR (
+      kind = 'embedding'
+      AND (
+        json_extract(metadata_json, '$.operation') = 'embedding.document'
+        OR CAST(json_extract(metadata_json, '$.operation') AS TEXT) LIKE 'embedding.document.%'
+      )
+    )
+  )
+  AND COALESCE(CAST(json_extract(metadata_json, '$.operation') AS TEXT), '') NOT LIKE 'retrieval.%'
+  AND COALESCE(CAST(json_extract(metadata_json, '$.operation') AS TEXT), '') != 'embedding.query'
+`;
 
 function toByModel(row: ByModelRow): ByokTokenUsageByModel {
   return {

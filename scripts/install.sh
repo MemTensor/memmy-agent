@@ -47,11 +47,19 @@ if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1
   fail "required SHA-256 tool not found (install sha256sum or shasum)"
 fi
 
-NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')" \
-  || fail "could not determine Node.js version"
-if [ "$NODE_MAJOR" -lt 22 ]; then
-  fail "Node.js 22 or newer is required (found $(node --version))"
-fi
+# The CLI runs on the host's Node, so the host decides whether the compromised eMudhra
+# roots are still trusted. Require a release that carries the fixed root store.
+node -e '
+const fixed = { 22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1] };
+const current = process.versions.node.split(".").map(Number);
+const minimum = fixed[current[0]];
+// Unknown major lines must be explicitly verified before they are accepted.
+if (!minimum) process.exit(1);
+for (let i = 0; i < 3; i += 1) {
+  if (current[i] !== minimum[i]) process.exit(current[i] > minimum[i] ? 0 : 1);
+}
+process.exit(0);
+' || fail "Node.js 22.23.4, 24.22.1 or 26.12.1 or newer is required (found $(node --version)); earlier releases still trust the compromised eMudhra roots"
 NODE_BIN="$(command -v node)"
 case "$NODE_BIN" in
   /*) ;;
@@ -71,7 +79,7 @@ if [ -z "$VERSION" ]; then
   VERSION="${LATEST_URL##*/}"
 fi
 VERSION="${VERSION#v}"
-if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; then
   fail "invalid release version: $VERSION"
 fi
 
@@ -159,6 +167,18 @@ printf 'Installing Memory runtime production dependencies for this Linux machine
 printf 'Installing Agent production dependencies for this Linux machine...\n'
 (cd "$AGENT_DIR" && npm ci --omit=dev --no-audit --no-fund) \
   || fail "Agent dependency installation failed; the previous Memmy installation is unchanged"
+
+# Memmy Computer Use is source-built and included in the release payload.
+OCU_ARCH="$PLATFORM_ARCH"
+[ "$OCU_ARCH" != "x64" ] || OCU_ARCH="amd64"
+OCU_BINARY="$AGENT_DIR/dist/native-computer-use/linux/$OCU_ARCH/memmy-computer-use"
+[ -x "$OCU_BINARY" ] || fail "archive installation is missing the bundled Computer Use executable for $PLATFORM_ARCH"
+"$OCU_BINARY" --version >/dev/null || fail "bundled Computer Use executable cannot run on this machine"
+
+# Run the dependency helper from the checksum-verified release payload. Keep
+# privilege elevation limited to system package installation, before activation.
+bash "$PAYLOAD_DIR/scripts/internal/linux/install-computer-use-deps.sh" \
+  || fail "Computer Use dependency setup failed; the previous Memmy installation is unchanged"
 
 mkdir -p "$MEMMY_HOME_DIR" "$(dirname "$CONFIG_PATH")" "$(dirname "$MEMORY_DB_PATH")" "$WORKSPACE_DIR"
 chmod 0700 "$MEMMY_HOME_DIR" "$(dirname "$MEMORY_DB_PATH")" "$WORKSPACE_DIR"

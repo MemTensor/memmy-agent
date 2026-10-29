@@ -1,7 +1,8 @@
 /** Connect integration modal module. */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticError } from "../api/integration-errors.js";
+import { ApiRequestError } from "../api/http.js";
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import { deriveIntegrationState, type IntegrationConnection } from "../integrations/connection-state.js";
 import { IntegrationLogoBadge, type IntegrationMeta } from "../integrations/integration-meta.js";
@@ -44,6 +45,7 @@ export interface IntegrationConnectFlowResult {
   phase: ConnectIntegrationPhase;
   connection?: IntegrationConnection;
   error?: unknown;
+  errorCode?: "service_unavailable";
   cancelled?: boolean;
 }
 
@@ -59,6 +61,12 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
   const mountedRef = useRef(false);
   const flowIdRef = useRef(0);
   const flowAbortRef = useRef<AbortController | null>(null);
+  const phaseRef = useRef(phase);
+  const syncedIntegrationRef = useRef(props.integration?.identity);
+  phaseRef.current = phase;
+  const localErrorRef = useRef(false);
+  const integrationIdentityRef = useRef(props.integration?.identity ?? props.integration?.slug ?? null);
+  const integrationIdentity = props.integration?.identity ?? props.integration?.slug ?? null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -72,11 +80,26 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
   }, []);
 
   useEffect(() => {
+    const integrationChanged = integrationIdentityRef.current !== integrationIdentity;
+    integrationIdentityRef.current = integrationIdentity;
+    const identityChanged = syncedIntegrationRef.current !== props.integration?.identity;
+    syncedIntegrationRef.current = props.integration?.identity;
+
+    if (!props.open || integrationChanged || identityChanged) {
+      localErrorRef.current = false;
+    }
+
+    // The connection list is refreshed in the background. Keep a local service
+    // error visible until the user dismisses it or retries the connection flow.
+    if (localErrorRef.current || (!integrationChanged && !identityChanged && isLocalConnectPhase(phaseRef.current))) {
+      return;
+    }
+
     setPhase(initialPhase);
     setActiveConnection(props.connection);
     setErrorMessage(props.errorMessage ?? "");
     setQrWarning(Boolean(props.qrWarning));
-  }, [initialPhase, props.connection, props.errorMessage, props.qrWarning]);
+  }, [initialPhase, integrationIdentity, props.connection, props.errorMessage, props.open, props.qrWarning, props.integration?.identity]);
 
   useEffect(() => {
     if (!props.open) {
@@ -104,6 +127,8 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
     }
 
     flowAbortRef.current?.abort();
+    localErrorRef.current = false;
+    setErrorMessage("");
     const abortController = new AbortController();
     const flowId = flowIdRef.current + 1;
     flowIdRef.current = flowId;
@@ -119,6 +144,9 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
       signal: abortController.signal,
       onPhase: (nextPhase) => {
         if (isCurrentFlow()) {
+          if (nextPhase === "error") {
+            localErrorRef.current = true;
+          }
           setPhase(nextPhase);
         }
       },
@@ -147,7 +175,10 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
     }
 
     if (result.phase === "error") {
-      setErrorMessage(toErrorMessage(result.error) || t("tools.modal.oauthTimeout"));
+      localErrorRef.current = true;
+      setErrorMessage(result.errorCode === "service_unavailable"
+        ? t("tools.modal.serviceUnavailableRetry")
+        : connectFlowErrorMessage(result.error, t));
     }
   }, [props, t]);
 
@@ -176,6 +207,7 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
       setPhase("idle");
       props.onChanged();
     } catch (error) {
+      localErrorRef.current = true;
       setErrorMessage(toErrorMessage(error));
       setPhase("error");
     }
@@ -199,8 +231,9 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
         style={{
           animationDuration: "200ms",
           animationTimingFunction: "cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-          animationFillMode: "both"
-        }}
+          animationFillMode: "both",
+          WebkitAppRegion: "no-drag"
+        } as CSSProperties}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="p-4 border-b border-stone-200">
@@ -256,6 +289,24 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
   return createPortal(body, document.body);
 }
 
+function isLocalConnectPhase(phase: ConnectIntegrationPhase): boolean {
+  return phase === "authorizing" || phase === "waiting" || phase === "error" || phase === "disconnecting";
+}
+
+function connectFlowErrorMessage(error: unknown, t: ReturnType<typeof useTranslation>["t"]): string {
+  if (error instanceof Error && error.message === INTEGRATION_SETUP_UNAVAILABLE) {
+    return t("tools.modal.serviceUnavailable");
+  }
+
+  return toErrorMessage(error) || t("tools.modal.oauthTimeout");
+}
+
+function integrationSetupUnavailableResult(input: IntegrationConnectFlowInput, error: unknown): IntegrationConnectFlowResult {
+  logHiddenIntegrationSetupDiagnosticError(error);
+  input.onPhase?.("error");
+  return { phase: "error", error: new Error(INTEGRATION_SETUP_UNAVAILABLE), errorCode: "service_unavailable" };
+}
+
 /**
  * Derives the modal's initial phase from the external connection record.
  *
@@ -283,6 +334,9 @@ function deriveInitialModalPhase(connection: IntegrationConnection | undefined, 
 
 /** error_code when the user closes / aborts during QR or OAuth. */
 export const TOOL_CONNECTION_CANCELLED_ERROR_CODE = "cancelled";
+
+/** Stable message for a hidden Composio setup failure. The raw API text stays out of the UI. */
+const INTEGRATION_SETUP_UNAVAILABLE = "integration_setup_unavailable";
 
 /**
  * Best-effort analytics report for OAuth connect outcomes.
@@ -322,7 +376,7 @@ export async function reportIntegrationConnectOutcome(
         surface: "integration",
         toolkit,
         event: "failed",
-        errorCode: toAnalyticsErrorCode(result.error)
+        errorCode: result.errorCode ?? toAnalyticsErrorCode(result.error)
       });
     }
   } catch (error) {
@@ -380,9 +434,13 @@ export async function runIntegrationConnectFlow(input: IntegrationConnectFlowInp
         response = await input.client.listConnections();
       } catch (error) {
         if (isIntegrationSetupDiagnosticError(error)) {
-          logHiddenIntegrationSetupDiagnosticError(error);
-          input.onPhase?.("idle");
-          return { phase: "idle" };
+          return integrationSetupUnavailableResult(input, error);
+        }
+
+        if (isCloudServiceUnavailableError(error)) {
+          console.warn("[tools] Integration connection service unavailable while polling:", error);
+          input.onPhase?.("error");
+          return { phase: "error", errorCode: "service_unavailable" };
         }
 
         console.warn("[tools] Failed to poll connection state; retrying on the next tick:", error);
@@ -404,7 +462,7 @@ export async function runIntegrationConnectFlow(input: IntegrationConnectFlowInp
 
       if (state === "error") {
         input.onPhase?.("error");
-        return { phase: "error", connection, error: new Error("Connection failed") };
+        return { phase: "error", connection, errorCode: "service_unavailable", error: new Error("Connection failed") };
       }
 
       await wait(input.pollIntervalMs, input.signal);
@@ -422,13 +480,12 @@ export async function runIntegrationConnectFlow(input: IntegrationConnectFlowInp
     }
 
     if (isIntegrationSetupDiagnosticError(error)) {
-      logHiddenIntegrationSetupDiagnosticError(error);
-      input.onPhase?.("idle");
-      return { phase: "idle" };
+      return integrationSetupUnavailableResult(input, error);
     }
 
+    console.warn("[tools] Integration connection service unavailable:", error);
     input.onPhase?.("error");
-    return { phase: "error", error };
+    return { phase: "error", errorCode: "service_unavailable" };
   }
 }
 
@@ -641,4 +698,13 @@ function cancelledResult(): IntegrationConnectFlowResult {
  */
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Identifies errors that mean the cloud integration service cannot complete the
+ * connection flow. Ordinary errors remain retryable polling failures because a
+ * single transient response should not terminate an OAuth flow.
+ */
+function isCloudServiceUnavailableError(error: unknown): boolean {
+  return error instanceof ApiRequestError || error instanceof TypeError;
 }

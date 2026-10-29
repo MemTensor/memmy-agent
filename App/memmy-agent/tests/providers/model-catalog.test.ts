@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { FallbackProvider } from "../../src/providers/fallback-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   committedSelectionFromMetadata,
@@ -212,6 +213,27 @@ describe("model catalog", () => {
       protocol: "openai-images",
       capability: "image_generation",
     });
+  });
+
+  it("uses the summary assignment without Agent fallbacks or persisted configuration changes", () => {
+    const data = catalogConfig();
+    data.providers.openai.endpoints.summary = { apiBase: "https://summary.example/v1", protocol: "openai-chat-completions" };
+    data.modelPresets.summary = { provider: "openai", endpoint: "summary", model: "small-summary",
+      source: "byok", capabilities: ["memory_summary"] };
+    data.modelAssignments.byok.memorySummary = "summary";
+    data.agents.defaults.fallbackModels = ["work-claude"];
+    const configPath = writeConfig(data);
+    const before = fs.readFileSync(configPath, "utf8");
+    expect(resolveModelSelection({ configPath, capability: "agent" })?.snapshot.provider).toBeInstanceOf(FallbackProvider);
+    const selected = resolveModelSelection({ configPath, capability: "memory_summary" });
+    expect(selected).toMatchObject({ presetId: "summary", model: "small-summary", capability: "memory_summary" });
+    expect(selected?.snapshot.provider).not.toBeInstanceOf(FallbackProvider);
+    expect(selected?.snapshot.signature.at(-1)).toEqual([]);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    data.modelAssignments.byok.memorySummary = null;
+    fs.writeFileSync(configPath, YAML.stringify(data));
+    expect(resolveModelSelection({ configPath, capability: "memory_summary" })).toBeNull();
+    expect(resolveModelSelection({ configPath, capability: "agent" })).not.toBeNull();
   });
 });
 

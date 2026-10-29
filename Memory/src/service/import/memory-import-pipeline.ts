@@ -3,7 +3,7 @@ import { captureTurnSteps, signatureFromTraceParts } from "../../algorithm/plugi
 import { MemoryServiceError } from "../../utils/error.js";
 import { isoTimeToUtc } from "../../utils/time.js";
 import { stableHash } from "../../utils/id.js";
-import { clip, firstLine } from "../../utils/text.js";
+import { clip, firstLine, firstSemanticUserLine } from "../../utils/text.js";
 
 export const IMPORT_SUMMARY_QUEUED_TAG = "摘要排队中";
 export const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
@@ -28,7 +28,7 @@ export function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, titl
     return `skill.import:${stableHash([
       request.sourceAgentId,
       request.sourceSkillId ?? request.sourceSkillPath,
-      request.sourceSkillVersion ?? request.sourceContentHash ?? stableHash(request.content)
+      request.sourceContentHash ?? request.sourceSkillVersion ?? stableHash(request.content)
     ]).slice(0, 20)}`;
   }
   if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) return `memory.add:${request.adapterId}:turn:${request.turnId}`;
@@ -114,7 +114,7 @@ export function memoryAddQaPair(request: MemoryAddRequest): { query: string; ans
 
 export function titleFromImportTrace(trace: Record<string, unknown>): string | undefined {
   const userText = stringFromRecord(trace, "user_text");
-  const title = userText ? firstLine(userText) : "";
+  const title = userText ? firstSemanticUserLine(userText) : "";
   return title ? clip(title, 120) : undefined;
 }
 

@@ -63,7 +63,7 @@ describe("hermes source adapter", () => {
         content: expect.stringContaining("Output:\nignored tool output")
       }),
       expect.objectContaining({
-        messageId: "hermes-platform-message-2",
+        messageId: "hermes-db-session:3",
         role: "assistant",
         content: "Done from Hermes state.db"
       })
@@ -187,6 +187,7 @@ function createStateDbFixture(options: { includePlatformMessageId?: boolean } = 
         role TEXT NOT NULL,
         content TEXT,
         timestamp REAL NOT NULL,
+        finish_reason TEXT,
         ${includePlatformMessageId ? "platform_message_id TEXT," : ""}
         active INTEGER NOT NULL DEFAULT 1
       );
@@ -194,21 +195,21 @@ function createStateDbFixture(options: { includePlatformMessageId?: boolean } = 
     `);
     if (includePlatformMessageId) {
       db.exec(`
-        INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)
-          VALUES ('hermes-db-session', 'user', 'Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN', 1780404001.0, NULL);
-        INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)
-          VALUES ('hermes-db-session', 'tool', 'ignored tool output', 1780404002.0, NULL);
-        INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)
-          VALUES ('hermes-db-session', 'assistant', 'Done from Hermes state.db', 1780404003.0, 'hermes-platform-message-2');
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason, platform_message_id)
+          VALUES ('hermes-db-session', 'user', 'Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN', 1780404001.0, NULL, NULL);
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason, platform_message_id)
+          VALUES ('hermes-db-session', 'tool', 'ignored tool output', 1780404002.0, NULL, NULL);
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason, platform_message_id)
+          VALUES ('hermes-db-session', 'assistant', 'Done from Hermes state.db', 1780404003.0, 'stop', 'hermes-platform-message-2');
       `);
     } else {
       db.exec(`
-        INSERT INTO messages (session_id, role, content, timestamp)
-          VALUES ('hermes-db-session', 'user', 'Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN', 1780404001.0);
-        INSERT INTO messages (session_id, role, content, timestamp)
-          VALUES ('hermes-db-session', 'tool', 'ignored tool output', 1780404002.0);
-        INSERT INTO messages (session_id, role, content, timestamp)
-          VALUES ('hermes-db-session', 'assistant', 'Done from Hermes state.db', 1780404003.0);
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason)
+          VALUES ('hermes-db-session', 'user', 'Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN', 1780404001.0, NULL);
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason)
+          VALUES ('hermes-db-session', 'tool', 'ignored tool output', 1780404002.0, NULL);
+        INSERT INTO messages (session_id, role, content, timestamp, finish_reason)
+          VALUES ('hermes-db-session', 'assistant', 'Done from Hermes state.db', 1780404003.0, 'stop');
       `);
     }
   } finally {

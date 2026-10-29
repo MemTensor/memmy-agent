@@ -25,6 +25,7 @@ describe("AnalyticsSubPage", () => {
     expect(html).toContain('data-icon="bar-chart-3"');
     expect(html).toContain("平均召回得分");
     expect(html).toContain("活跃技能数量");
+    expect(html).toContain("近 7 天使用技能 18 次");
     expect(html).toContain("工具平均耗时");
     expect(html).toContain("工具 P95 耗时");
     expect(html).toContain("repeat(auto-fit, minmax(min(100%, 144px), 1fr))");

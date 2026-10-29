@@ -17,6 +17,13 @@ EMBEDDING_MODEL_ID="${MEMMY_EMBEDDING_MODEL:-Xenova/all-MiniLM-L6-v2}"
 PACKAGE_ARCH="x64"
 WINDOWS_SIGNING_BUILDER_ARGS=()
 
+# A macOS/Linux host can create the installer but cannot run Windows smoke
+# checks. Also prevent the desktop build from staging macOS native addons.
+PACKAGE_HOST_PLATFORM="$(node -p 'process.platform')"
+if [ "$PACKAGE_HOST_PLATFORM" != "win32" ]; then
+  export MEMMY_WINDOWS_CROSS_BUILD=1
+fi
+
 to_node_readable_path() {
   local input_path="$1"
 
@@ -69,13 +76,42 @@ npm_with_configured_script_shell() {
 resolve_electron_dist() {
   local electron_dist="${MEMMY_ELECTRON_DIST:-}"
 
-  if [ -z "$electron_dist" ] && [ -f "$DESKTOP_DIR/node_modules/electron/dist/electron.exe" ]; then
-    electron_dist="$DESKTOP_DIR/node_modules/electron/dist"
+  if [ -z "$electron_dist" ]; then
+    for candidate in \
+      "$DESKTOP_DIR/node_modules/electron/dist" \
+      "$ROOT_DIR/node_modules/electron/dist"; do
+      if [ -f "$candidate/electron.exe" ]; then
+        electron_dist="$candidate"
+        break
+      fi
+    done
   fi
 
   if [ -n "$electron_dist" ]; then
     to_node_readable_path "$electron_dist"
   fi
+}
+
+restore_electron_dist() {
+  if [ -f "$DESKTOP_DIR/node_modules/electron/dist/electron.exe" ] || \
+     [ -f "$ROOT_DIR/node_modules/electron/dist/electron.exe" ]; then
+    return
+  fi
+
+  local install_script=""
+  for candidate in \
+    "$ROOT_DIR/node_modules/electron/install.js" \
+    "$DESKTOP_DIR/node_modules/electron/install.js"; do
+    if [ -f "$candidate" ]; then
+      install_script="$candidate"
+      break
+    fi
+  done
+  if [ -z "$install_script" ]; then
+    echo "Electron install.js is missing; cannot materialize the Windows Electron runtime." >&2
+    exit 1
+  fi
+  node "$install_script"
 }
 
 if [ -n "${MEMMY_DESKTOP_VERSION:-}" ]; then
@@ -123,9 +159,13 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
     ;;
 esac
 
-FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
+RELEASE_DIR="$DESKTOP_DIR/release"
+BUILD_OUTPUT_DIR="$(dirname "$ROOT_DIR")/.memmy-win-build-$PACKAGE_EDITION-$PACKAGE_SIGNING-$$"
+UNPACKED_DIR="$BUILD_OUTPUT_DIR/win-unpacked"
+FINAL_EXE="$RELEASE_DIR/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
+BUILDER_FINAL_EXE="$BUILD_OUTPUT_DIR/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
 ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\${ext}"
-package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING" "$DESKTOP_DIR/release/logs"
+package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING" "$RELEASE_DIR/logs"
 package_install_error_trap
 package_log "Windows package context: version=$DESKTOP_VERSION arch=$PACKAGE_ARCH edition=$PACKAGE_EDITION signing=$PACKAGE_SIGNING installer=$FINAL_EXE"
 
@@ -245,6 +285,54 @@ writeFileSync(templatePath, source.replace(original, replacement));
 NODE
 }
 
+patch_electron_builder_nsis_uninstaller_extraction() {
+  local target_path="$ROOT_DIR/node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js"
+  local windows_target_path
+  windows_target_path="$(to_node_readable_path "$target_path")"
+
+  node - "$windows_target_path" <<'NODE'
+const { readFileSync, writeFileSync } = require("node:fs");
+
+const [targetPath] = process.argv.slice(2);
+const source = readFileSync(targetPath, "utf8");
+const eol = source.includes("\r\n") ? "\r\n" : "\n";
+const marker = "Memmy: extract the NSIS uninstaller before executing the unsigned installer";
+
+if (source.includes(marker)) {
+  process.exit(0);
+}
+
+const original = [
+  "        else {",
+  "            const wineVm = new WineVm_1.WineVmManager((_a = packager.config.toolsets) === null || _a === void 0 ? void 0 : _a.wine);",
+  "            await wineVm.exec(installerPath, [], { env: { __COMPAT_LAYER: \"RunAsInvoker\" } });",
+  "        }",
+].join(eol);
+const replacement = [
+  "        else if (isWin) {",
+  `            // ${marker}.`,
+  "            try {",
+  "                await nsisUtil_1.UninstallerReader.exec(installerPath, uninstallerPath);",
+  "            } catch (error) {",
+  "                builder_util_1.log.warn(`Unable to extract NSIS uninstaller without execution: ${error.message}`);",
+  "                const wineVm = new WineVm_1.WineVmManager((_a = packager.config.toolsets) === null || _a === void 0 ? void 0 : _a.wine);",
+  "                await wineVm.exec(installerPath, [], { env: { __COMPAT_LAYER: \"RunAsInvoker\" } });",
+  "            }",
+  "        }",
+  "        else {",
+  "            const wineVm = new WineVm_1.WineVmManager((_a = packager.config.toolsets) === null || _a === void 0 ? void 0 : _a.wine);",
+  "            await wineVm.exec(installerPath, [], { env: { __COMPAT_LAYER: \"RunAsInvoker\" } });",
+  "        }",
+].join(eol);
+
+if (!source.includes(original)) {
+  throw new Error(`Unable to find electron-builder NSIS uninstaller execution block in ${targetPath}`);
+}
+
+writeFileSync(targetPath, source.replace(original, replacement));
+NODE
+}
+
 download_url_to_file() {
   local url="$1"
   local output_path="$2"
@@ -268,38 +356,6 @@ download_url_to_file() {
 
   echo "Unable to download $url: neither powershell.exe nor curl is available." >&2
   return 1
-}
-
-install_better_sqlite3_prebuild_with_download_fallback() {
-  local electron_version="$1"
-  local install_output
-  local install_status
-  local prebuild_url
-  local prebuild_file
-
-  log "Trying direct better-sqlite3 prebuild download fallback"
-  set +e
-  install_output="$(../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" --verbose 2>&1)"
-  install_status=$?
-  set -e
-  printf '%s\n' "$install_output"
-
-  if [ "$install_status" -eq 0 ]; then
-    return
-  fi
-
-  prebuild_url="$(printf '%s\n' "$install_output" | sed -nE 's/.*(https:\/\/[^[:space:]]+\.tar\.gz).*/\1/p' | tail -n 1)"
-  if [ -z "$prebuild_url" ]; then
-    echo "Unable to locate better-sqlite3 prebuild URL in prebuild-install output." >&2
-    return "$install_status"
-  fi
-
-  mkdir -p prebuilds
-  prebuild_file="prebuilds/$(basename "$prebuild_url")"
-  log "Downloading better-sqlite3 prebuild with fallback downloader: $prebuild_url"
-  download_url_to_file "$prebuild_url" "$prebuild_file"
-
-  ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version"
 }
 
 create_memory_runtime_manifest() {
@@ -341,7 +397,7 @@ create_memory_runtime_lock() {
 
 create_windows_cli_launcher() {
   local output_path="$1"
-  local asar_entry="$2"
+  local resources_entry="$2"
 
   cat > "$output_path" <<EOF
 @echo off
@@ -351,7 +407,7 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "RESOURCES_DIR=%%~fI"
 for %%I in ("%RESOURCES_DIR%\..") do set "APP_DIR=%%~fI"
 set "APP_EXEC=%APP_DIR%\Memmy.exe"
-set "ENTRY=%RESOURCES_DIR%\app.asar\\$asar_entry"
+set "ENTRY=%RESOURCES_DIR%\\$resources_entry"
 
 if not exist "%APP_EXEC%" (
   echo Cannot find Memmy executable: "%APP_EXEC%" 1>&2
@@ -424,6 +480,95 @@ EOF
   exit 1
 }
 
+resolve_windows_signtool() {
+  local local_app_data="${LOCALAPPDATA:-}"
+  if [ -z "$local_app_data" ]; then
+    return 1
+  fi
+  if command -v cygpath >/dev/null 2>&1; then
+    local_app_data="$(cygpath -u "$local_app_data")"
+  fi
+  find "$local_app_data/electron-builder/Cache" \
+    -type f \
+    -path '*/windows-10/x64/signtool.exe' \
+    -print -quit 2>/dev/null
+}
+
+sign_builder_final_installer() {
+  local signtool_path
+  local csc_link="${WIN_CSC_LINK:-${CSC_LINK:-}}"
+  local csc_password="${WIN_CSC_KEY_PASSWORD:-${CSC_KEY_PASSWORD:-}}"
+  local csc_sha1="${WIN_CSC_SHA1:-${CSC_SHA1:-}}"
+  local csc_subject="${WIN_CSC_SUBJECT_NAME:-${CSC_SUBJECT_NAME:-}}"
+  local timestamp_server="${WIN_CSC_TIMESTAMP_SERVER:-${CSC_TIMESTAMP_SERVER:-http://timestamp.digicert.com}}"
+
+  signtool_path="$(resolve_windows_signtool || true)"
+  if [ -z "$signtool_path" ] || [ ! -f "$BUILDER_FINAL_EXE" ]; then
+    return 1
+  fi
+
+  if [ -n "$csc_link" ] && [ -n "$csc_password" ]; then
+    "$signtool_path" sign \
+      /tr "$timestamp_server" \
+      /f "$csc_link" \
+      /p "$csc_password" \
+      /fd sha256 \
+      /td sha256 \
+      /d Memmy \
+      "$BUILDER_FINAL_EXE"
+    return
+  fi
+
+  if [ -n "$csc_sha1" ]; then
+    "$signtool_path" sign \
+      /tr "$timestamp_server" \
+      /sha1 "$csc_sha1" \
+      /s My \
+      /fd sha256 \
+      /td sha256 \
+      /d Memmy \
+      "$BUILDER_FINAL_EXE"
+    return
+  fi
+
+  if [ -n "$csc_subject" ]; then
+    "$signtool_path" sign \
+      /tr "$timestamp_server" \
+      /n "$csc_subject" \
+      /s My \
+      /fd sha256 \
+      /td sha256 \
+      /d Memmy \
+      "$BUILDER_FINAL_EXE"
+    return
+  fi
+
+  return 1
+}
+
+run_electron_builder_with_signing_recovery() {
+  local attempt_log="$BUILD_OUTPUT_DIR/.electron-builder-attempt.log"
+  local builder_exit_code
+
+  if npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME" 2>&1 | tee "$attempt_log"; then
+    return 0
+  fi
+  builder_exit_code="${PIPESTATUS[0]}"
+
+  if [ "$PACKAGE_SIGNING" != "signed" ] ||
+    [ ! -f "$BUILDER_FINAL_EXE" ] ||
+    ! grep -Eiq '0x80090020|SignerSign\(\) failed|SignTool Error:.*unexpected internal|No certificates were found' "$attempt_log"; then
+    return "$builder_exit_code"
+  fi
+
+  log "electron-builder 在最终安装器签名阶段返回临时错误，准备直接重试最终安装器签名。"
+  if run_with_retries 3 sign_builder_final_installer; then
+    log "最终安装器已通过 signtool 重试签名，继续执行安装包验证。"
+    return 0
+  fi
+  return "$builder_exit_code"
+}
+
 verify_windows_x64_native_module() {
   local native_file="$1"
   local description="$2"
@@ -443,11 +588,46 @@ verify_windows_x64_native_module() {
   esac
 }
 
+verify_windows_ocu_binary() {
+  local binary="$1"
+  node "$ROOT_DIR/scripts/internal/win/verify-computer-use-runtime.mjs" \
+    "$(to_node_readable_path "$binary")" x64 \
+    "$(to_node_readable_path "$ROOT_DIR/App/native-computer-use/apps/OpenComputerUseWindows/runtime.ps1")"
+  if [ "${MEMMY_WINDOWS_CROSS_BUILD:-0}" = "1" ] && [ "$(node -p 'process.platform')" != "win32" ]; then
+    verify_windows_x64_native_module "$binary" "Memmy Computer Use executable"
+    echo "Cross-build: Memmy Computer Use MCP smoke test requires a Windows guest."
+    return
+  fi
+  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" "$binary"
+}
+
+verify_windows_computer_use_surface() {
+  require_packaged_runtime_file "$DESKTOP_DIR/dist/main/computer-use-surface-window.js"
+  require_packaged_runtime_file "$DESKTOP_DIR/dist/main/computer-use-surface.html"
+  require_packaged_runtime_file "$DESKTOP_DIR/dist/preload/computer-use-surface-preload.cjs"
+  require_packaged_runtime_file "$DESKTOP_DIR/dist/main/computer-use-window-capture.js"
+  require_packaged_runtime_absent "$DESKTOP_DIR/dist/native/memmy-pip.node"
+  require_packaged_runtime_absent "$DESKTOP_DIR/dist/native/menu-bar-appearance.node"
+  for preview_asset in "$DESKTOP_DIR/dist/main/computer-use-surface.html" "$DESKTOP_DIR/dist/preload/computer-use-surface-preload.cjs"; do
+    if [ ! -s "$preview_asset" ]; then
+      echo "Windows Computer Use preview asset is empty: $preview_asset" >&2
+      exit 1
+    fi
+  done
+}
+
 verify_windows_better_sqlite3_runtime() {
   local runtime_dir="$1"
-  local electron_executable="$DESKTOP_DIR/node_modules/electron/dist/electron.exe"
+  local electron_dist
+  electron_dist="$(resolve_electron_dist)"
+  local electron_executable="$electron_dist/electron.exe"
   local node_runtime_dir
   node_runtime_dir="$(to_node_readable_path "$runtime_dir")"
+
+  if [ "${MEMMY_WINDOWS_CROSS_BUILD:-0}" = "1" ] && [ "$(node -p 'process.platform')" != "win32" ]; then
+    echo "Cross-build: Windows Electron SQLite smoke test requires a Windows guest; native PE files are verified separately."
+    return
+  fi
 
   require_packaged_runtime_file "$electron_executable"
   MEMMY_BETTER_SQLITE_RUNTIME_DIR="$node_runtime_dir" \
@@ -483,7 +663,7 @@ verify_packaged_file_matches_runtime() {
 
 verify_windows_native_module() {
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3"
 }
 
@@ -534,12 +714,29 @@ verify_windows_agent_native_artifacts() {
   local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64"
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-profile.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-downloads.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-site-permissions.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-access-approval.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/core/agent-runtime/tools/browser-window-visibility.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe"
+  node "$ROOT_DIR/scripts/internal/win/verify-computer-history-runtime.mjs" \
+    "$(to_node_readable_path "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe")" x64 \
+    "$(to_node_readable_path "$ROOT_DIR/App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1")"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  verify_windows_ocu_binary \
+    "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  node "$ROOT_DIR/scripts/internal/win/stage-wechat-python.mjs" verify \
+    "$(to_node_readable_path "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/python")"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/wechat_identity.py"
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/private_files.py"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3"
   require_packaged_runtime_file "$node_pty_dir/conpty.node"
   require_packaged_runtime_file "$node_pty_dir/conpty/conpty.dll"
@@ -588,39 +785,98 @@ verify_pruned_windows_runtime() {
 }
 
 verify_packaged_windows_unpacked_artifacts() {
-  local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
-  local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
+  local unpacked_runtime="$UNPACKED_DIR/resources/app.asar.unpacked/dist/runtime"
+  local packaged_memory_runtime="$UNPACKED_DIR/resources/memory-runtime"
   local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
-  local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
+  local packaged_embedding_model="$UNPACKED_DIR/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
-  verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
+  require_packaged_runtime_file "$UNPACKED_DIR/resources/app.asar"
+  node "$ROOT_DIR/scripts/internal/shared/verify-browser-extension.mjs" \
+    "$(to_node_readable_path "$DESKTOP_DIR/extensions/memmy-browser")" \
+    "$(to_node_readable_path "$UNPACKED_DIR/resources/browser-extension")"
+  require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"
+  require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy.cmd"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  if ! grep -Fq 'set "ENTRY=%RESOURCES_DIR%\memory-runtime\dist\src\cli\index.js"' \
+    "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"; then
+    echo "Packaged Memory CLI launcher points outside the external Memory runtime." >&2
+    exit 1
+  fi
+  verify_packaged_runtime_config_boundary "$UNPACKED_DIR/resources"
   require_packaged_runtime_file "$packaged_agent_source_core/package.json"
   require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  for manifest in package.json package-lock.json memory-runtime.json; do
+    verify_packaged_file_matches_runtime \
+      "$RUNTIME_DIR/memory/$manifest" \
+      "$packaged_memory_runtime/$manifest" \
+      "Memory $manifest"
+  done
   if [ -L "$packaged_agent_source_core" ]; then
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
-    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
+    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/prebuilds/win32-x64.node" \
     "memmy-agent better-sqlite3 module"
-  require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  verify_windows_ocu_binary \
+    "$unpacked_runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe"
+  if [ "$PACKAGE_SIGNING" = "unsigned" ]; then
+    verify_packaged_file_matches_runtime \
+      "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" \
+      "$unpacked_runtime/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" \
+      "Windows Computer Use executable"
+  fi
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe"
+  node "$ROOT_DIR/scripts/internal/win/verify-computer-history-runtime.mjs" \
+    "$(to_node_readable_path "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe")" x64 \
+    "$(to_node_readable_path "$ROOT_DIR/App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1")"
+  if [ "$PACKAGE_SIGNING" = "unsigned" ]; then
+    verify_packaged_file_matches_runtime \
+      "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
+      "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \
+      "Windows 11 native History recorder"
+  else
+    log "Signed package: skipping byte-for-byte comparison for the Authenticode-signed Windows 11 History recorder."
+  fi
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1" \
+    "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1" \
+    "Windows 11 Computer History observer"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/app-icon.ps1"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/app-icon.ps1" \
+    "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/app-icon.ps1" \
+    "Windows Computer History application icons"
+  node "$ROOT_DIR/scripts/internal/win/stage-wechat-python.mjs" verify \
+    "$(to_node_readable_path "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/python")"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py" \
+    "$unpacked_runtime/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py" \
+    "Windows WeChat message reader"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/dist/tools/computer-history/win/private_files.py"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/wechat_identity.py" \
+    "$unpacked_runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py" \
+    "Windows WeChat chat identity helper"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
     "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
@@ -649,8 +905,11 @@ verify_packaged_runtime_config_boundary() {
     --asar "$(to_node_readable_path "$asar_file")" \
     --expected "$DESKTOP_VERSION" \
     --expected-memory "$MEMORY_VERSION" \
+    --memory-root "$(to_node_readable_path "$resources_root/memory-runtime")" \
     --platform win32 \
     --arch "$PACKAGE_ARCH"
+  node "$ROOT_DIR/scripts/internal/shared/verify-renderer-bootstrap.mjs" \
+    --asar "$(to_node_readable_path "$asar_file")" --platform win32
 }
 
 npm_ci_win_x64() {
@@ -659,16 +918,21 @@ npm_ci_win_x64() {
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
-install_better_sqlite3_win_x64() {
-  local runtime_dir="$1"
-  local electron_version
-  electron_version="${MEMMY_ELECTRON_VERSION:-$(read_package_version "$DESKTOP_DIR/node_modules/electron/package.json")}"
+prune_better_sqlite3_win_artifacts() {
+  local module_dir="$1"
 
-  (
-    cd "$runtime_dir/node_modules/better-sqlite3"
-    run_with_retries 3 ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" ||
-      install_better_sqlite3_prebuild_with_download_fallback "$electron_version"
-  )
+  rm -rf "$module_dir/build" "$module_dir/deps" "$module_dir/src"
+  if [ -d "$module_dir/prebuilds" ]; then
+    find "$module_dir/prebuilds" \
+      -mindepth 1 -maxdepth 1 ! -name "win32-x64.node" \
+      -exec rm -rf {} +
+  fi
+}
+
+prune_windows_better_sqlite3_artifacts() {
+  while IFS= read -r module_dir; do
+    prune_better_sqlite3_win_artifacts "$module_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
 }
 
 package_step_start "Validate Windows signing configuration"
@@ -681,12 +945,13 @@ fi
 package_step_start "Install root workspace dependencies if needed"
 if [ ! -d "$ROOT_DIR/node_modules" ]; then
   log "Installing root workspace dependencies"
-  npm_with_configured_script_shell install
+  npm_with_configured_script_shell install --ignore-scripts --package-lock=false --no-audit --no-fund
 else
   log "Root workspace dependencies already available"
 fi
+restore_electron_dist
 package_step_start "Install migrations workspace dev dependencies"
-npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
+npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev --ignore-scripts --package-lock=false --no-audit --no-fund
 
 package_step_start "Build migrations package"
 npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
@@ -695,7 +960,7 @@ package_step_start "Build local API contracts package"
 npm_with_configured_script_shell run build -w @memmy/local-api-contracts
 
 package_step_start "Install memmy-agent workspace dependencies"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR" --ignore-scripts --no-audit --no-fund --os=win32 --cpu=x64
 
 package_step_start "Build Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
@@ -705,6 +970,11 @@ npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
 
 package_step_start "Build Electron desktop shell"
 npm_with_configured_script_shell run build -w @memmy/desktop
+package_step_start "Verify production renderer initialization without GUI"
+node "$ROOT_DIR/scripts/internal/shared/verify-renderer-bootstrap.mjs" \
+  --renderer-dir "$(to_node_readable_path "$DESKTOP_DIR/dist/renderer")" --platform win32
+package_step_start "Verify Windows Computer Use preview assets"
+verify_windows_computer_use_surface
 package_step_start "Write desktop edition manifest"
 write_desktop_edition_manifest
 
@@ -726,7 +996,6 @@ create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
 package_step_start "Stage Windows Memory workspace runtime packages"
 RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
 rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
@@ -739,15 +1008,35 @@ verify_windows_native_module
 verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memory"
 verify_windows_onnxruntime_module
 verify_windows_sharp_module
+package_step_start "Verify Windows desktop SQLite vector dependency"
+node "$ROOT_DIR/scripts/internal/win/verify-desktop-sqlite-vec.mjs" staged \
+  "$(to_node_readable_path "$ROOT_DIR/App/backend/package.json")" \
+  "$(to_node_readable_path "$ROOT_DIR/node_modules/sqlite-vec/package.json")" \
+  "$(to_node_readable_path "$RUNTIME_DIR/memory/node_modules/sqlite-vec-windows-x64")"
 
 package_step_start "Stage Windows memmy-agent runtime files"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
+package_step_start "Bundle isolated Windows WeChat Python runtime"
+WINDOWS_PYTHON_STAGE_ARGS=(stage "$(to_node_readable_path "$RUNTIME_DIR/memmy-agent/dist/tools/computer-history/win/python")")
+if [ -n "${MEMMY_WECHAT_PYTHON_ARCHIVE:-}" ]; then
+  WINDOWS_PYTHON_STAGE_ARGS+=("$(to_node_readable_path "$MEMMY_WECHAT_PYTHON_ARCHIVE")")
+fi
+node "$ROOT_DIR/scripts/internal/win/stage-wechat-python.mjs" "${WINDOWS_PYTHON_STAGE_ARGS[@]}"
+
+node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_DIR/memmy-agent"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
-install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
+package_step_start "Prune Windows better-sqlite3 native artifacts"
+prune_windows_better_sqlite3_artifacts
+package_step_start "Build Memmy Computer Use for Windows from source"
+bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-use.sh" \
+  "$RUNTIME_DIR/memmy-agent/dist/native-computer-use/windows/amd64/memmy-computer-use.exe" amd64
+package_step_start "Build native Windows History recorder from source"
+bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-history.sh" \
+  "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" amd64
 package_step_start "Stage Windows memmy-agent workspace runtime packages"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -762,6 +1051,11 @@ if [ ! -f "$RUNTIME_LOCAL_API_CONTRACTS_DIR/dist/index.js" ]; then
   echo "Packaged local API contracts entrypoint is missing." >&2
   exit 1
 fi
+RUNTIME_KNOWLEDGE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/knowledge"
+rm -rf "$RUNTIME_KNOWLEDGE_DIR"
+mkdir -p "$RUNTIME_KNOWLEDGE_DIR"
+cp "$ROOT_DIR/Knowledge/package.json" "$RUNTIME_KNOWLEDGE_DIR/package.json"
+cp -R "$ROOT_DIR/Knowledge/dist" "$RUNTIME_KNOWLEDGE_DIR/dist"
 RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
 rm -rf "$RUNTIME_MIGRATIONS_DIR"
 mkdir -p "$RUNTIME_MIGRATIONS_DIR"
@@ -822,6 +1116,10 @@ package_step_start "Smoke test packaged HTML lint before optional-peer pruning"
 verify_windows_agent_html_lint_runtime
 
 package_step_start "Prune platform-incompatible and packaging-only Windows runtime files"
+node "$ROOT_DIR/scripts/internal/shared/prune-native-platforms.mjs" \
+  --platform win32 \
+  --arch "$PACKAGE_ARCH" \
+  --runtime-root "$(to_node_readable_path "$RUNTIME_DIR")"
 node "$ROOT_DIR/scripts/internal/shared/prune-packaged-runtime.mjs" \
   --platform win32 \
   --arch "$PACKAGE_ARCH" \
@@ -839,19 +1137,23 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
 package_step_start "Create Windows CLI launchers and embedding model"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
 package_step_start "Patch electron-builder NSIS template"
 patch_electron_builder_nsis_refresh
+patch_electron_builder_nsis_uninstaller_extraction
 
 package_step_start "Run electron-builder Windows NSIS packaging"
 cd "$DESKTOP_DIR"
+mkdir -p "$BUILD_OUTPUT_DIR"
+log "Using isolated electron-builder output: $BUILD_OUTPUT_DIR"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
 BUILDER_ARGS+=(--config.extraMetadata.version="$DESKTOP_VERSION")
+BUILDER_ARGS+=(--config.directories.output="$(to_node_readable_path "$BUILD_OUTPUT_DIR")")
 ELECTRON_DIST="$(resolve_electron_dist)"
 if [ -n "$ELECTRON_DIST" ]; then
   log "Using Electron dist: $ELECTRON_DIST"
@@ -861,9 +1163,20 @@ if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
   BUILDER_ARGS+=("${WINDOWS_SIGNING_BUILDER_ARGS[@]}")
 fi
 
-npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+run_electron_builder_with_signing_recovery "$@"
 package_step_start "Verify packaged Windows app artifacts"
 verify_packaged_windows_unpacked_artifacts
+node "$ROOT_DIR/scripts/internal/win/verify-desktop-sqlite-vec.mjs" packaged \
+  "$(to_node_readable_path "$ROOT_DIR/App/backend/package.json")" \
+  "$(to_node_readable_path "$UNPACKED_DIR/resources/app.asar")" \
+  "$(to_node_readable_path "$UNPACKED_DIR/resources")"
+
+package_step_start "Copy verified Windows installer to release output"
+if [ ! -f "$BUILDER_FINAL_EXE" ]; then
+  echo "Packaging completed without the isolated installer: $BUILDER_FINAL_EXE" >&2
+  exit 1
+fi
+run_with_retries 5 cp -f "$BUILDER_FINAL_EXE" "$FINAL_EXE"
 
 if [ ! -f "$FINAL_EXE" ]; then
   echo "Packaging completed without the expected installer: $FINAL_EXE" >&2

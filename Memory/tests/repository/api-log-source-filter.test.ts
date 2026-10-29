@@ -17,6 +17,9 @@ describe("api log source Agent filter", () => {
       repos.runtime.insertApiLog(apiLog("memory_add", "memmy-agent", {
         details: [{ summary: "queued" }, { sourceAgent: "memmy-agent", summary: "stored by Memmy" }]
       }, "2026-07-12T10:03:00.000Z"));
+      repos.runtime.insertApiLog(apiLog("memory_add", "computer_history", {
+        details: [{ sourceAgent: "computer_history", summary: "stored from History" }]
+      }, "2026-07-12T10:02:30.000Z"));
       repos.runtime.insertApiLog(apiLog("memory_add", "openclaw", {
         details: [{ sourceAgent: "openclaw", summary: "stored by OpenClaw" }]
       }, "2026-07-12T10:02:00.000Z"));
@@ -39,9 +42,9 @@ describe("api log source Agent filter", () => {
         limit: 20,
         offset: 0
       });
-      expect(memmy.total).toBe(2);
-      expect(memmy.logs.map((log) => log.toolName)).toEqual(["memory_add", "memory_search"]);
-      expect(memmy.logs.map((log) => log.sourceAgent)).toEqual(["memmy-agent", "memmy-agent"]);
+      expect(memmy.total).toBe(3);
+      expect(memmy.logs.map((log) => log.toolName)).toEqual(["memory_add", "memory_add", "memory_search"]);
+      expect(memmy.logs.map((log) => log.sourceAgent)).toEqual(["memmy-agent", "computer_history", "memmy-agent"]);
       expect(memmy.logs[0]?.outputJson).toContain("stored by Memmy");
 
       const other = repos.runtime.listApiLogs({

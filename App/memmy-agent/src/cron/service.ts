@@ -53,16 +53,29 @@ function validateScheduleForAdd(schedule: CronSchedule): void {
 function computeNextRun(schedule: CronSchedule, baseMs = nowMs()): number | null {
   if (schedule.kind === "at") {
     const at = schedule.atMs ?? (schedule.at ? Date.parse(schedule.at) : null);
-    return at != null && !Number.isNaN(at) && at > baseMs ? at : null;
+    // Keep an overdue deadline so a one-time task can run once after a restart.
+    return at != null && Number.isFinite(at) ? at : null;
   }
   if (schedule.kind === "every") {
-    if (!schedule.everyMs || schedule.everyMs <= 0) return null;
-    return baseMs + schedule.everyMs;
+    if (!schedule.everyMs || !Number.isFinite(schedule.everyMs) || schedule.everyMs <= 0) return null;
+    const next = baseMs + schedule.everyMs;
+    return Number.isFinite(next) && next > baseMs ? next : null;
   }
   if (schedule.kind === "cron" && schedule.expr) {
     return computeCronNextRun(schedule.expr, baseMs, schedule.tz);
   }
   return null;
+}
+
+function advanceInterval(schedule: CronSchedule, scheduledForMs: number | null, endedAtMs: number): number | null {
+  const interval = schedule.everyMs;
+  if (!interval || !Number.isFinite(interval) || interval <= 0) return null;
+  if (scheduledForMs == null || !Number.isFinite(scheduledForMs)) return computeNextRun(schedule, endedAtMs);
+  // A manual early run does not consume the next scheduled occurrence.
+  if (scheduledForMs > endedAtMs) return scheduledForMs;
+  const skipped = Math.floor((endedAtMs - scheduledForMs) / interval) + 1;
+  const next = scheduledForMs + skipped * interval;
+  return Number.isFinite(next) && next > endedAtMs ? next : null;
 }
 
 function closeQuietly(fd: number | null): void {
@@ -169,6 +182,16 @@ export class CronService {
             if (jobId) jobs.delete(jobId);
           } else if (action === "add" || action === "update") {
             const job = CronJob.fromObject(params);
+            const current = jobs.get(job.id);
+            if (action === "update" && current &&
+              (current.state.lastRunAtMs ?? -Infinity) > (job.state.lastRunAtMs ?? -Infinity)) {
+              // An external edit can have been based on the snapshot before the
+              // current execution. Keep its edit, but do not erase the new result.
+              job.state.lastRunAtMs = current.state.lastRunAtMs;
+              job.state.lastStatus = current.state.lastStatus;
+              job.state.lastError = current.state.lastError;
+              job.state.runHistory = [...current.state.runHistory];
+            }
             jobs.set(job.id, job);
           } else {
             continue;
@@ -188,7 +211,7 @@ export class CronService {
   }
 
   loadStore(): CronStore | null {
-    if (this.timerActive && this.store) return this.store;
+    if ((this.timerActive || this.activeJobRuns.size > 0) && this.store) return this.store;
     const loaded = this.loadJobs();
     if (loaded === null) return this.store ?? null;
     const [jobs, version] = loaded;
@@ -281,7 +304,12 @@ export class CronService {
     if (!this.store) return;
     const now = nowMs();
     for (const job of this.store.jobs) {
-      if (job.enabled) job.state.nextRunAtMs = computeNextRun(job.schedule, now);
+      if (!job.enabled) continue;
+      const computed = computeNextRun(job.schedule, now);
+      if (job.schedule.kind === "at" || computed == null ||
+        job.state.nextRunAtMs == null || !Number.isFinite(job.state.nextRunAtMs)) {
+        job.state.nextRunAtMs = computed;
+      }
     }
   }
 
@@ -296,7 +324,7 @@ export class CronService {
   armTimer(): void {
     if (this.timerTask) clearTimeout(this.timerTask);
     this.timerTask = null;
-    if (!this.running) return;
+    if (!this.running || this.timerActive || this.activeJobRuns.size > 0) return;
 
     const nextWake = this.getNextWakeMs();
     const delayMs = nextWake == null ? this.maxSleepMs : Math.min(this.maxSleepMs, Math.max(0, nextWake - nowMs()));
@@ -307,6 +335,7 @@ export class CronService {
   }
 
   async onTimer(): Promise<void> {
+    if (!this.running || this.timerActive || this.activeJobRuns.size > 0) return;
     this.loadStore();
     if (!this.store) {
       this.armTimer();
@@ -315,20 +344,31 @@ export class CronService {
 
     this.timerActive = true;
     try {
-      const now = nowMs();
-      const dueJobs = this.store.jobs.filter(
-        (job) => job.enabled && job.state.nextRunAtMs != null && now >= job.state.nextRunAtMs,
-      );
-      for (const job of dueJobs) await this.executeJob(job);
+      const executed = new Set<string>();
+      while (this.running) {
+        this.mergeAction();
+        const now = nowMs();
+        const job = this.store.jobs
+          .filter((row) => row.enabled && !executed.has(row.id) &&
+            row.state.nextRunAtMs != null && Number.isFinite(row.state.nextRunAtMs) && now >= row.state.nextRunAtMs)
+          // A due one-time stop/cleanup must run before an overdue monitor.
+          .toSorted((a, b) => Number(b.schedule.kind === "at") - Number(a.schedule.kind === "at") ||
+            a.state.nextRunAtMs! - b.state.nextRunAtMs!)[0];
+        if (!job) break;
+        executed.add(job.id);
+        await this.executeJob(job);
+      }
       this.saveStore();
     } finally {
       this.timerActive = false;
+      this.armTimer();
     }
-    this.armTimer();
   }
 
   async executeJob(job: CronJob): Promise<void> {
     const started = nowMs();
+    const schedule = job.schedule;
+    const scheduledForMs = job.state.nextRunAtMs;
     let finishRun!: () => void;
     const activeRun = {
       sessionKey: job.payload.sessionKey ?? null,
@@ -363,6 +403,10 @@ export class CronService {
     );
     job.state.runHistory = job.state.runHistory.slice(-CronService.maxRunHistory);
 
+    // A callback can delete, disable, or reschedule this task. Completion must
+    // not resurrect it or replace the deadline selected by that edit.
+    if ((this.store && this.store.jobs.find((row) => row.id === job.id) !== job) ||
+      !job.enabled || job.schedule !== schedule || job.state.nextRunAtMs !== scheduledForMs) return;
     if (job.schedule.kind === "at") {
       if (job.deleteAfterRun && this.store) {
         this.store.jobs = this.store.jobs.filter((row) => row.id !== job.id);
@@ -371,7 +415,9 @@ export class CronService {
         job.state.nextRunAtMs = null;
       }
     } else {
-      job.state.nextRunAtMs = computeNextRun(job.schedule, nowMs());
+      job.state.nextRunAtMs = job.schedule.kind === "every"
+        ? advanceInterval(job.schedule, scheduledForMs, ended)
+        : computeNextRun(job.schedule, ended);
     }
   }
 
@@ -624,7 +670,7 @@ export class CronService {
     }
 
     job.updatedAtMs = nowMs();
-    if (job.enabled) job.state.nextRunAtMs = computeNextRun(job.schedule, nowMs());
+    if (job.enabled && schedule != null) job.state.nextRunAtMs = computeNextRun(job.schedule, nowMs());
     if (this.running) {
       this.saveStore();
       this.armTimer();

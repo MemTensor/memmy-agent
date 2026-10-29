@@ -55,6 +55,95 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(dialog?.textContent).toContain("删除配置？");
   });
 
+  it("shows the saved API Key as a masked hint when a connection is reopened", () => {
+    renderWorkspace(createSeedConfig(1));
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="编辑 openai 配置"]')!;
+    act(() => editButton.click());
+    const firstInput = container.querySelector<HTMLInputElement>('[role="dialog"] input[type="password"]')!;
+    expect(firstInput.placeholder).toBe("••••test");
+    expect(firstInput.value).toBe("");
+
+    act(() => container.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-label="保存"]')!.click());
+    act(() => editButton.click());
+    const reopenedInput = container.querySelector<HTMLInputElement>('[role="dialog"] input[type="password"]')!;
+    expect(reopenedInput.placeholder).toBe("••••test");
+    expect(reopenedInput.value).toBe("");
+  });
+
+  it("edits Custom thinking and image declarations for each model independently", () => {
+    renderWorkspace(createCustomSeedConfig());
+
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="编辑 custom 配置"]')!.click());
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.querySelector(".custom-thinking-config")).toBeNull();
+    const modelRows = dialog.querySelectorAll(".provider-model-list__row");
+    expect(modelRows).toHaveLength(2);
+    expect(modelRows[0]?.textContent).toContain("model-a");
+    expect(modelRows[1]?.textContent).toContain("model-b");
+    expect(modelRows[0]?.textContent).not.toContain("思考");
+    expect(modelRows[1]?.textContent).not.toContain("思考");
+
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-a"]')!.click());
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[0]?.checked).toBe(true);
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]?.checked).toBe(true);
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]?.checked).toBe(true);
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[3]?.checked).toBe(true);
+    expect(dialog.querySelectorAll(".custom-thinking-level-option")).toHaveLength(5);
+    act(() => dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]!.click());
+    expect(dialog.querySelectorAll('.custom-thinking-config__checkbox')).toHaveLength(3);
+    expect(dialog.textContent).not.toContain("默认开启思考");
+    act(() => dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]!.click());
+    expect(dialog.querySelectorAll('.custom-thinking-config__checkbox')).toHaveLength(4);
+    act(() => dialog.querySelector<HTMLButtonElement>(".model-editor-actions button")!.click());
+
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-b"]')!.click());
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[0]?.checked).toBe(false);
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]?.checked).toBe(false);
+    expect(dialog.querySelectorAll('.custom-thinking-config__checkbox')).toHaveLength(2);
+    expect(dialog.querySelector(".custom-thinking-level-options")).toBeNull();
+    act(() => dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]!.click());
+    expect(dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]?.checked).toBe(false);
+    expect(dialog.textContent).not.toContain("默认开启思考");
+    act(() => dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[0]!.click());
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="保存模型"]')!.click());
+
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="编辑 custom 配置"]')!.click());
+    const reopened = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    act(() => reopened.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-a"]')!.click());
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[0]?.checked).toBe(true);
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]?.checked).toBe(true);
+    act(() => reopened.querySelector<HTMLButtonElement>(".model-editor-actions button")!.click());
+    act(() => reopened.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-b"]')!.click());
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[0]?.checked).toBe(true);
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]?.checked).toBe(true);
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[2]?.checked).toBe(false);
+    expect(reopened.textContent).not.toContain("默认开启思考");
+  });
+
+  it("hides thinking choices when the model's thinking mode is unchecked", () => {
+    renderWorkspace(createCustomSeedConfig());
+
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="编辑 custom 配置"]')!.click());
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-a"]')!.click());
+    const thinkingToggle = dialog.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]!;
+    expect(thinkingToggle.checked).toBe(true);
+
+    act(() => thinkingToggle.click());
+    expect(dialog.querySelectorAll('.custom-thinking-config__checkbox')).toHaveLength(2);
+    expect(dialog.querySelector(".custom-thinking-level-options")).toBeNull();
+    expect(dialog.textContent).not.toContain("新会话默认强度");
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="保存模型"]')!.click());
+    act(() => dialog.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="编辑 custom 配置"]')!.click());
+    const reopened = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    act(() => reopened.querySelector<HTMLButtonElement>('button[aria-label="编辑模型 model-a"]')!.click());
+    expect(reopened.querySelectorAll<HTMLInputElement>('.custom-thinking-config__checkbox')[1]?.checked).toBe(false);
+    expect(reopened.querySelector(".custom-thinking-level-options")).toBeNull();
+  });
+
   it("shows an actionable save error above the model assignment title", async () => {
     const seedConfig = createSeedConfig(1);
     const configClient = {
@@ -121,6 +210,10 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(container.querySelector(".model-capability-select")?.textContent).toContain("Embedding");
 
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="添加模型"]')!.click());
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.disabled).toBe(true);
+    await act(async () => {
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "测试")!.click();
+    });
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
 
     await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));
@@ -157,7 +250,7 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
       .toEqual([
         "Memmy Platform 本地 Embedding",
         "Memmy Platform 云端 Embedding",
-        "OpenAI 兼容 · text-embedding-3-small"
+        "OpenAI Completions · text-embedding-3-small"
       ]);
   });
 
@@ -264,6 +357,44 @@ function createEmbeddingSeedConfig(): ModelProviderConfig {
   seed.catalog.modelAssignments.byok.embedding = model.presetId;
   seed.catalog.effectiveCandidates.byok = [model];
   seed.model = model.model;
+  return seed;
+}
+
+function createCustomSeedConfig(): ModelProviderConfig {
+  const seed = createSeedConfig(1);
+  const provider = seed.catalog.providers[0]!;
+  const endpoint = provider.endpoints[0]!;
+  provider.provider = "custom";
+  endpoint.protocol = "openai-responses";
+  const first = {
+    ...provider.models[0]!,
+    provider: "custom" as const,
+    protocol: "openai-responses" as const,
+    model: "model-a",
+    custom: true,
+    thinking: {
+      switchable: true,
+      defaultEnabled: true,
+      levels: ["low", "medium", "high"] as Array<"low" | "medium" | "high">,
+      defaultLevel: "medium" as const
+    },
+    inputModalities: ["text", "image"] as Array<"text" | "image">
+  };
+  const second = {
+    ...first,
+    presetId: "preset-2",
+    model: "model-b",
+    thinking: undefined,
+    inputModalities: ["text"] as Array<"text" | "image">
+  };
+  provider.models = [first, second];
+  seed.catalog.modelAssignments.byok.agent = {
+    candidates: [first.presetId, second.presetId],
+    default: first.presetId
+  };
+  seed.catalog.effectiveCandidates.byok = [first, second];
+  seed.provider = "custom";
+  seed.model = first.model;
   return seed;
 }
 

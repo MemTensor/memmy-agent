@@ -1,14 +1,24 @@
+import { bindScreenCaptureIpc, type ScreenCaptureHandler } from './desktop-screen-capture.js';
+import { bindComputerUseWindowCaptureIpc } from './computer-use-window-capture.js';
+import { bindComputerUseOnboardingIpc, type ComputerUseOnboarding } from './computer-use-onboarding.js';
 import { mutateRuntimeConfig } from "@memmy/migrations";
-import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import type { EmbeddedExecutorEventSink } from './embedded-browser-driver.js';
+import { BROWSER_PROFILE_CLEAR_REQUEST, BROWSER_ACCESS_RESULT, BROWSER_DOWNLOAD_RESULT, BROWSER_CAPABILITY_RESULT, EMBEDDED_BROWSER_EVENT, EMBEDDED_BROWSER_RESULT, NATIVE_APP_ACCESS_RESULT,
+  isBrowserAccessRequest, isBrowserDownloadRequest, isBrowserCapabilityRequest, isBrowserProfileClearResult, isComputerUseSurfaceAction, isComputerUseSurfaceMessage, isNativeAppAccessRequest, type AgentGatewayStartupIssue,
+  type BrowserCapabilityRequest,
+  type NativeAppAccessRequest, type NativeAppAccessDecision,
+  isEmbeddedBrowserRequest, isEmbeddedBrowserCancel, type EmbeddedBrowserRequest,
+  type ComputerUseSurfaceAction, type ComputerUseSurfaceMessage } from "@memmy/local-api-contracts";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import YAML from "yaml";
 import { createRotatingWriter, type RotatingWriter } from "./rotating-log-file.js";
 import type { LogLevel } from "./log-level.js";
+import { compareVersionSegments } from "./version-compare.js";
 
 const LOCAL_HOST = "127.0.0.1";
 const DEFAULT_MEMORY_URL = "http://127.0.0.1:18960";
@@ -16,12 +26,21 @@ const SUPPORTED_MEMORY_PROTOCOL_VERSION = 1;
 const DEFAULT_AGENT_GATEWAY_HEALTH_PORT = 18970;
 const DEFAULT_AGENT_WEBSOCKET_PORT = 18980;
 const STARTUP_TIMEOUT_MS = 30_000;
+// MCP discovery is serial: HTTP probe (3s), discovery (15s), failed cleanup (2s).
+// Keep the bootstrap deadline outside that work instead of killing a healthy child at 30s.
+const MCP_SERVER_STARTUP_BUDGET_MS = 20_000;
 const MEMORY_STARTUP_TIMEOUT_MS = 120_000;
 const POLL_INTERVAL_MS = 250;
 const HTTP_TIMEOUT_MS = 1_000;
 const STOP_MANAGED_CHILD_GRACE_MS = 1_000;
 const MEMORY_STOP_COMMAND_TIMEOUT_MS = 10_000;
 const MEMORY_RESTART_STOP_TIMEOUT_MS = 10_000;
+const PROCESS_QUERY_TIMEOUT_MS = 10_000;
+const MEMORY_OWNER_PROGRESS_WINDOWS = 5;
+const MEMORY_OWNER_CPU_PROGRESS_MS = 1_000;
+const MEMORY_SERVER_ENTRY_SUFFIX = "/dist/src/server/index.js";
+// Elapsed-time columns and lock timestamps are second-granular on some systems.
+const STALE_LOCK_TOLERANCE_MS = 5_000;
 
 type RuntimeEnv = Record<string, string | undefined>;
 type ConfigRecord = Record<string, unknown>;
@@ -41,7 +60,15 @@ export interface ManagedRuntimeServices {
     workspace: string;
     startupIssue?: AgentGatewayStartupIssue;
   };
+  /** Waits for a usable Agent gateway, or a repairable configuration issue. */
+  startAgentGateway(): Promise<AgentGatewayStartupIssue | null>;
+  /** Read live ownership after startup/recovery; never exposed in renderer bootstrap. */
+  isAgentGatewayExternal(): boolean;
+  /** Starts browser preparation once, independently of the first window. */
+  startBrowserPreparation(): PackagedBrowserPreparation | null;
   restartMemory(): Promise<void>;
+  sendComputerUseSurfaceAction(action: ComputerUseSurfaceAction): boolean;
+  clearBrowserData(): Promise<void>;
   close(options?: { stopMemory?: boolean }): Promise<void>;
   terminateSync(options?: { stopMemory?: boolean }): void;
 }
@@ -55,6 +82,23 @@ export interface StartPackagedRuntimeServicesOptions {
 }
 
 export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntimeServicesOptions {
+  /** Privacy-safe progress for startup diagnostics; never contains runtime paths or config values. */
+  onStartupStage?: (stage: "migration-start" | "migration-ready" | "config-ready" | "data-ready" | "skills-ready" | "gateway-start" | "gateway-recovery" | "gateway-settled", elapsedMs: number) => void;
+  /** Publish lifecycle handles before the caller starts/waits for the Agent. Defaults to false. */
+  deferAgentGatewayStartup?: boolean;
+  /** Let the first window load before preparing Playwright's browser. Defaults to false. */
+  deferBrowserPreparation?: boolean;
+  captureScreen?: ScreenCaptureHandler;
+  captureComputerUseWindow?: (target: string, width: number, height: number, options: { pid?: number }) => Promise<string | null>;
+  computerUseOnboarding?: ComputerUseOnboarding;
+  onComputerUseSurface?: (message: ComputerUseSurfaceMessage, sendAction: (action: ComputerUseSurfaceAction) => void) => void;
+  onComputerUseSurfaceStop?: () => void;
+  handleEmbeddedBrowserRequest?: (request: EmbeddedBrowserRequest,
+    isCurrentChild: () => boolean, emitEvent: EmbeddedExecutorEventSink) => Promise<unknown>;
+  approveBrowserAccess?: (origin: string, url: string) => Promise<'allow-once' | 'allow-always' | 'deny'>;
+  approveBrowserCapability?: (request: BrowserCapabilityRequest) => Promise<boolean>;
+  approveNativeAppAccess?: (request: NativeAppAccessRequest) => Promise<NativeAppAccessDecision>;
+  chooseBrowserDownload?: (name: string, url: string) => Promise<string | null>;
   runtimeEntries?: RuntimeEntryPaths;
   runtimeExecutable?: string;
   platform?: NodeJS.Platform;
@@ -153,7 +197,7 @@ interface DesktopManagedRestartNotice {
   metadata: Record<string, unknown>;
 }
 
-type HttpProbeResult = "ready" | "unreachable" | "unexpected";
+type HttpProbeResult = "ready" | "starting" | "unreachable" | "unexpected";
 
 export interface MemoryServerLock {
   pid: number;
@@ -165,9 +209,15 @@ export interface MemoryServerLock {
 export async function startManagedRuntimeServices(
   options: StartManagedRuntimeServicesOptions
 ): Promise<ManagedRuntimeServices> {
+  const startupStartedAt = Date.now();
+  const reportStartupStage = (stage: Parameters<NonNullable<StartManagedRuntimeServicesOptions["onStartupStage"]>>[0]): void => {
+    try { options.onStartupStage?.(stage, Date.now() - startupStartedAt); }
+    catch { /* Diagnostics cannot interrupt startup. */ }
+  };
   const entries = resolveRuntimeEntryPaths(options);
   const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
   const memmyConfigPreexisting = existsSync(migrationTargets.configPath);
+  reportStartupStage("migration-start");
   await runPackagedMigrationCommand({
     agentEntry: entries.agentEntry,
     configPath: migrationTargets.configPath,
@@ -177,12 +227,15 @@ export async function startManagedRuntimeServices(
     logLevel: options.logLevel,
     runtimeExecutable: options.runtimeExecutable
   });
+  reportStartupStage("migration-ready");
   const runtimeConfig = await preparePackagedRuntimeConfig();
+  reportStartupStage("config-ready");
   runtimeConfig.appDatabaseFile = options.appDatabaseFile;
   await options.beforeStartServices?.({
     databasePath: options.appDatabaseFile,
     configPath: runtimeConfig.configPath
   });
+  reportStartupStage("data-ready");
   const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
   const gatewaySupervisor = new AgentGatewaySupervisor(
@@ -198,10 +251,39 @@ export async function startManagedRuntimeServices(
   let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
   let stopMemoryOnClose = false;
+  const agentGateway: ManagedRuntimeServices["agentGateway"] = {
+    baseUrl: runtimeConfig.agentGatewayBaseUrl,
+    bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
+    configPath: runtimeConfig.configPath,
+    workspace: runtimeConfig.agentWorkspace
+  };
+
+  function startBrowserPreparation(): PackagedBrowserPreparation | null {
+    if (closing) return null;
+    browserPreparation ??= startPackagedBrowserPreparation(
+      entries,
+      runtimeConfig,
+      options,
+      spawn,
+      browserPreparationAttemptId
+    );
+    return browserPreparation;
+  }
+
+  function stopBrowserPreparation(): void {
+    browserPreparation?.stop();
+  }
+
+  const startAgentGateway = createAgentGatewayStarter(gatewaySupervisor, agentGateway, {
+    isClosing: () => closing,
+    onStart: () => reportStartupStage("gateway-start"),
+    onRecovery: () => reportStartupStage("gateway-recovery"),
+    onSettled: () => reportStartupStage("gateway-settled")
+  });
 
   async function restartMemoryRuntime(): Promise<void> {
     if (closing) throw new Error("Memmy is shutting down");
-    await memoryStartup;
+    await waitForMemoryStartupBeforeRestart(memoryStartup);
     if (closing) throw new Error("Memmy is shutting down");
     if (!memoryRestart) {
       memoryRestart = restartManagedMemoryService(
@@ -227,13 +309,8 @@ export async function startManagedRuntimeServices(
       agentEntry: entries.agentEntry,
       agentWorkspace: runtimeConfig.agentWorkspace
     });
-    browserPreparation = startPackagedBrowserPreparation(
-      entries,
-      runtimeConfig,
-      options,
-      spawn,
-      browserPreparationAttemptId
-    );
+    reportStartupStage("skills-ready");
+    if (!options.deferBrowserPreparation) startBrowserPreparation();
     const memoryReady = ensureMemoryService(
       entries,
       runtimeConfig,
@@ -257,7 +334,7 @@ export async function startManagedRuntimeServices(
           });
         }
       });
-    const agentGatewayStartupIssue = await startAgentGatewayWithRecovery(gatewaySupervisor);
+    if (!options.deferAgentGatewayStartup) await startAgentGateway();
 
     return {
       memory: {
@@ -267,20 +344,23 @@ export async function startManagedRuntimeServices(
         configPath: runtimeConfig.configPath,
         ready: memoryReady
       },
-      agentGateway: {
-        baseUrl: runtimeConfig.agentGatewayBaseUrl,
-        bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
-        configPath: runtimeConfig.configPath,
-        workspace: runtimeConfig.agentWorkspace,
-        ...(agentGatewayStartupIssue ? { startupIssue: agentGatewayStartupIssue } : {})
-      },
+      agentGateway,
+      startAgentGateway,
+      isAgentGatewayExternal: () => gatewaySupervisor.ownership === "external",
+      startBrowserPreparation,
       async restartMemory() {
         await restartMemoryRuntime();
+      },
+      sendComputerUseSurfaceAction(action) {
+        return gatewaySupervisor.sendSurfaceAction(action);
+      },
+      async clearBrowserData() {
+        await gatewaySupervisor.clearBrowserData();
       },
       async close(closeOptions = {}) {
         closing = true;
         stopMemoryOnClose = closeOptions.stopMemory === true;
-        browserPreparation?.stop();
+        stopBrowserPreparation();
         await memoryRestart?.catch(() => undefined);
         await gatewaySupervisor.close();
         if (closeOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
@@ -304,7 +384,7 @@ export async function startManagedRuntimeServices(
       terminateSync(terminateOptions = {}) {
         closing = true;
         stopMemoryOnClose = terminateOptions.stopMemory === true;
-        browserPreparation?.stop();
+        stopBrowserPreparation();
         if (terminateOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
           runBundledMemoryCliSync(
             options.offlineMemoryRuntimeDirectory,
@@ -320,7 +400,7 @@ export async function startManagedRuntimeServices(
   } catch (error) {
     closing = true;
     stopMemoryOnClose = true;
-    browserPreparation?.stop();
+    stopBrowserPreparation();
     await gatewaySupervisor.close();
     await stopManagedChildren(children);
     throw error;
@@ -337,6 +417,10 @@ export async function preparePackagedRuntimeConfig(
   options: PreparePackagedRuntimeConfigOptions = {}
 ): Promise<PackagedRuntimeConfig> {
   const env = options.env ?? process.env;
+  const testPortBase = env.MEMMY_TEST_PROFILE_ROOT ? Number(env.MEMMY_TEST_PORT_BASE) : null;
+  if (testPortBase !== null && (!Number.isInteger(testPortBase) || testPortBase < 30000 || testPortBase > 59997)) {
+    throw new Error('Invalid isolated test profile port base');
+  }
   const shouldWriteConfig = options.writeConfig ?? true;
   const shouldEnsureDirectories = options.ensureDirectories ?? true;
   const shouldFillMissingAgentSecret = options.fillMissingAgentSecret ?? true;
@@ -345,6 +429,18 @@ export async function preparePackagedRuntimeConfig(
   const secretFactory = options.secretFactory ?? createPersistentSecret;
   const defaultWorkspace = join(memmyHome, "workspace");
   const applyRuntimeDefaults = (config: ConfigRecord): ConfigRecord => {
+    // Existing configs are handled once by the runtime-config migration.
+    if (!existsSync(configPath)) {
+      config.tools = {
+        mcpServers: {
+          memmy_computer_use: {
+            type: "stdio",
+            command: "open-computer-use",
+            args: ["mcp"]
+          }
+        }
+      };
+    }
     const memmyMemory = ensureRecord(config, "memmyMemory");
     const storage = ensureRecord(memmyMemory, "storage");
     const channels = ensureRecord(config, "channels");
@@ -387,6 +483,16 @@ export async function preparePackagedRuntimeConfig(
     setMissing(gateway, "port", DEFAULT_AGENT_GATEWAY_HEALTH_PORT);
     setMissing(heartbeat, "enabled", false);
     setMissing(defaults, "workspace", agentWorkspace);
+    if (testPortBase !== null) {
+      // A test instance must never discover or join the user's local services.
+      storage.sqlitePath = memoryDatabasePath;
+      storage.endpoint = `http://${LOCAL_HOST}:${testPortBase}`;
+      websocket.host = LOCAL_HOST;
+      websocket.port = testPortBase + 2;
+      gateway.host = LOCAL_HOST;
+      gateway.port = testPortBase + 1;
+      defaults.workspace = agentWorkspace;
+    }
     return config;
   };
   const config = shouldWriteConfig
@@ -695,6 +801,7 @@ export function startPackagedBrowserPreparation(
         env: {
           ...process.env,
           MEMMY_CONFIG: runtimeConfig.configPath,
+          MEMMY_AGENT_DATA_DIR: dirname(runtimeConfig.configPath),
           MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
           [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: attemptId,
           ELECTRON_RUN_AS_NODE: "1",
@@ -789,11 +896,13 @@ export async function ensureMemoryService(
     if (lock) {
       // A legacy scheduled service may still be migrating its database. Wait
       // before repairing the launcher, because repair ends that scheduled task.
-      try {
-        await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
-      } catch (error) {
-        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-      }
+      await adoptOrRecoverMemoryOwner(
+        runtimeConfig,
+        await memoryVerificationEntry(runtimeConfig, entries),
+        healthUrl,
+        healthHeaders,
+        lock
+      );
       const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
       if (remainingLock && remainingLock.pid !== lock.pid) {
         throw new Error("Memory database ownership changed before launcher repair");
@@ -835,13 +944,13 @@ export async function ensureMemoryService(
       // Never switch the stable pointer while an older service still owns
       // the database. It may be in migrations before its HTTP endpoint is
       // available; let that owner finish before activating a new runtime.
-      let existingReady = false;
-      try {
-        await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-        existingReady = true;
-      } catch (error) {
-        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-      }
+      const existingReady = await adoptOrRecoverMemoryOwner(
+        runtimeConfig,
+        await memoryVerificationEntry(runtimeConfig, entries),
+        healthUrl,
+        healthHeaders,
+        existingLock
+      );
       if (existingReady && !(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
     }
     if (shouldStop?.()) return;
@@ -880,7 +989,7 @@ export async function ensureMemoryService(
   );
 }
 
-/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+/** Replace a Desktop-owned runtime when its version or build changes, after migrations finish. */
 async function stopOlderBundledMemoryRuntime(
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
@@ -901,11 +1010,17 @@ async function stopOlderBundledMemoryRuntime(
     return false;
   }
   if (!isRecord(bundled) || !isRecord(installed) || !isRecord(running)) return false;
-  const bundledVersion = parseStableMemoryVersion(bundled.version);
-  const installedVersion = parseStableMemoryVersion(installed.version);
+  const bundledVersion = parseMemoryVersion(bundled.version);
+  const installedVersion = parseMemoryVersion(installed.version);
   if (!bundledVersion || !installedVersion) return false;
-  const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
-  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+  // Match the installer's character ordering; identical versions require a changed build.
+  const difference = compareVersionSegments(bundledVersion, installedVersion);
+  const changedBuild = typeof bundled.buildId === "string" && /^[a-f0-9]{64}$/.test(bundled.buildId)
+    && bundled.buildId !== installed.buildId;
+  if (difference < 0 || (difference === 0 && !changedBuild)
+    || (typeof bundled.schemaVersion === "number" && typeof installed.schemaVersion === "number"
+      && bundled.schemaVersion < installed.schemaVersion)
+    || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
     || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
 
   // The standalone CLI records its own Node executable. Sharing a home or a
@@ -923,7 +1038,7 @@ async function stopOlderBundledMemoryRuntime(
     || running.endpoint !== runtimeConfig.memoryBaseUrl
     || running.serviceVersion !== installed.version
     || running.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
-    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, true)) return false;
+    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, serviceHome, true)) return false;
 
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
@@ -958,10 +1073,12 @@ async function stopOlderBundledMemoryRuntime(
   return true;
 }
 
-function parseStableMemoryVersion(value: unknown): number[] | undefined {
-  if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) return undefined;
-  const parts = value.split(".").map(Number);
-  return parts.every(Number.isSafeInteger) ? parts : undefined;
+function parseMemoryVersion(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = value.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
+  if (!match) return undefined;
+  const numericIdentifiers = [...match.slice(1, 4), ...(match[4]?.split(".").filter((part) => /^\d+$/.test(part)) ?? [])];
+  return numericIdentifiers.every((part) => Number.isSafeInteger(Number(part))) ? value : undefined;
 }
 
 function hasPreviousMemoryRuntimeMarker(configPath: string): boolean {
@@ -1091,17 +1208,11 @@ async function startManagedMemoryService(
   if (shouldStop?.()) return;
   const healthUrl = runtimeConfig.memoryBaseUrl + "/api/v1/health";
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  // A service can release its lock, or stop responding altogether, while the
+  // health waiter runs. Either way this Desktop instance then takes over.
   const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
-  if (existingLock) {
-    try {
-      await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-      return;
-    } catch (error) {
-      // A service can release its lock while the health waiter is still
-      // running. In that case this Desktop instance may safely take over;
-      // preserve the original error while the lock owner is still alive.
-      if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-    }
+  if (existingLock && await adoptOrRecoverMemoryOwner(runtimeConfig, entry, healthUrl, healthHeaders, existingLock)) {
+    return;
   }
   if (shouldStop?.()) return;
 
@@ -1129,7 +1240,7 @@ async function startManagedMemoryService(
     logLevel: options.logLevel,
     ipc: Boolean(onRestartRequested),
     executablePath: runtimeExecutable ?? options.runtimeExecutable,
-    persistOnDesktopExit: true
+    persistOnDesktopExit: !process.env.MEMMY_TEST_PROFILE_ROOT
   });
   if (onRestartRequested) {
     memoryChild.process.on("message", (message) => {
@@ -1304,7 +1415,7 @@ async function restartManagedMemoryService(
         // bounded compatibility wait. If it exited, continue with install.
         if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1338,7 +1449,7 @@ async function restartManagedMemoryService(
         const lockAfterFailure = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
         if (lockAfterFailure) {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1354,7 +1465,7 @@ async function restartManagedMemoryService(
           });
         } catch {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1378,6 +1489,24 @@ async function restartManagedMemoryService(
     }
   }
   await ensureMemoryService(entries, runtimeConfig, children, options, true, onRestartRequested);
+}
+
+/** Bound a user-requested restart without racing the ongoing installer or migrations. */
+export async function waitForMemoryStartupBeforeRestart(startup: Promise<void> | null): Promise<void> {
+  if (!startup) return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      startup,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(
+          "Memory startup is still in progress; restart was not started. Try again after the service becomes ready."
+        )), MEMORY_STARTUP_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function restartExternalMemoryService(input: {
@@ -1426,8 +1555,35 @@ export interface AgentGatewaySupervisorDependencies {
   clearTimer?: typeof clearTimeout;
 }
 
+/** Shares one explicitly requested startup, including while the first attempt is in flight. */
+export function createAgentGatewayStarter(
+  supervisor: Pick<AgentGatewaySupervisor, "ensureStarted" | "startRecovery" | "waitForReady">,
+  agentGateway: { startupIssue?: AgentGatewayStartupIssue },
+  lifecycle: {
+    isClosing: () => boolean;
+    onStart?: () => void;
+    onRecovery?: () => void;
+    onSettled?: () => void;
+  }
+): () => Promise<AgentGatewayStartupIssue | null> {
+  let startup: Promise<AgentGatewayStartupIssue | null> | null = null;
+  return () => {
+    if (lifecycle.isClosing()) return Promise.resolve(null);
+    if (startup) return startup;
+    lifecycle.onStart?.();
+    startup = startAgentGatewayWithRecovery(supervisor, lifecycle.onRecovery).then((issue) => {
+      lifecycle.onSettled?.();
+      if (lifecycle.isClosing()) return null;
+      if (issue) agentGateway.startupIssue = issue;
+      return issue;
+    });
+    return startup;
+  };
+}
+
 export async function startAgentGatewayWithRecovery(
-  supervisor: Pick<AgentGatewaySupervisor, "ensureStarted" | "startRecovery">
+  supervisor: Pick<AgentGatewaySupervisor, "ensureStarted" | "startRecovery" | "waitForReady">,
+  onRecovery?: () => void
 ): Promise<AgentGatewayStartupIssue | null> {
   try {
     await supervisor.ensureStarted();
@@ -1435,7 +1591,76 @@ export async function startAgentGatewayWithRecovery(
   } catch (error) {
     console.warn(`Agent gateway unavailable during desktop startup: ${errorMessage(error)}`);
     supervisor.startRecovery();
-    return classifyAgentGatewayStartupIssue(error);
+    const issue = classifyAgentGatewayStartupIssue(error);
+    if (issue) return issue;
+    onRecovery?.();
+    return supervisor.waitForReady();
+  }
+}
+
+/** A reused gateway must load the bridge URL/token written by this Desktop instance. */
+export async function waitForExternalAgentMcpConfig(options: {
+  reload: () => Promise<{ ok: boolean; message: string; requires_restart: boolean }>;
+  isCanceled: () => boolean;
+}): Promise<boolean> {
+  let failure = "MCP configuration was not accepted";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (options.isCanceled()) return false;
+    try {
+      const outcome = await waitForStartupWorkWhileActive(Promise.resolve().then(options.reload), options.isCanceled);
+      if (!outcome) return false;
+      const result = outcome.value;
+      if (result.ok && !result.requires_restart) return true;
+      failure = result.message || (result.requires_restart ? "Agent gateway requires a restart" : failure);
+    } catch (error) {
+      if (options.isCanceled()) return false;
+      failure = errorMessage(error);
+    }
+    if (attempt < 3) {
+      if (!await waitForStartupWorkWhileActive(sleep(attempt * 1_000), options.isCanceled)) return false;
+    }
+  }
+  throw new Error(`Existing Agent gateway could not load the current local MCP bridge after 3 attempts: ${failure}. Stop the external gateway and reopen Memmy to start a new managed gateway.`);
+}
+
+function waitForStartupWorkWhileActive<T>(work: Promise<T>, isCanceled: () => boolean): Promise<{ value: T } | null> {
+  return new Promise((resolveWork, rejectWork) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (value: { value: T } | null, failed = false, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (failed) rejectWork(error);
+      else resolveWork(value);
+    };
+    const checkCancellation = () => {
+      if (settled) return;
+      if (isCanceled()) { finish(null); return; }
+      timer = setTimeout(checkCancellation, 100);
+      timer.unref?.();
+    };
+    // Keep handlers attached after cancellation so a late timeout/rejection is consumed.
+    work.then(value => finish(isCanceled() ? null : { value }), error => {
+      if (isCanceled()) finish(null);
+      else finish(null, true, error);
+    });
+    checkCancellation();
+  });
+}
+
+export function resolveAgentGatewayStartupTimeout(config: unknown): number {
+  const tools = isRecord(config) && isRecord(config.tools) ? config.tools : {};
+  const servers = isRecord(tools.mcpServers) ? tools.mcpServers : {};
+  return STARTUP_TIMEOUT_MS + Object.keys(servers).length * MCP_SERVER_STARTUP_BUDGET_MS;
+}
+
+function readAgentGatewayStartupTimeout(configPath: string): number {
+  try {
+    return resolveAgentGatewayStartupTimeout(YAML.parse(readFileSync(configPath, "utf8")));
+  } catch {
+    // Config rejection is reported by the Agent and exposes the repair entrypoint.
+    return STARTUP_TIMEOUT_MS;
   }
 }
 
@@ -1459,6 +1684,8 @@ export class AgentGatewaySupervisor {
   hasReachedReady = false;
 
   private replacementNotice: DesktopManagedRestartNotice | null = null;
+  private readonly readyWaiters = new Set<(issue: AgentGatewayStartupIssue | null) => void>();
+  private repairableStartupIssue: AgentGatewayStartupIssue | null = null;
   private readonly bootstrapUrl: string;
   private readonly bootstrapHeaders: Record<string, string>;
   private readonly dependencies: Required<AgentGatewaySupervisorDependencies>;
@@ -1494,6 +1721,71 @@ export class AgentGatewaySupervisor {
     return this.startPromise;
   }
 
+  /** Initial failures keep startup pending across replacement attempts; quit releases waiters. */
+  waitForReady(): Promise<AgentGatewayStartupIssue | null> {
+    if (this.stopping || this.hasReachedReady) return Promise.resolve(null);
+    if (this.repairableStartupIssue) return Promise.resolve(this.repairableStartupIssue);
+    return new Promise((resolveReady) => { this.readyWaiters.add(resolveReady); });
+  }
+
+  private resolveReadyWaiters(issue: AgentGatewayStartupIssue | null = null): void {
+    for (const resolveReady of this.readyWaiters) resolveReady(issue);
+    this.readyWaiters.clear();
+  }
+
+  private markReady(): void {
+    if (this.stopping) return;
+    this.hasReachedReady = true;
+    this.repairableStartupIssue = null;
+    this.resolveReadyWaiters();
+  }
+
+  sendSurfaceAction(action: ComputerUseSurfaceAction): boolean {
+    if (this.stopping || !isComputerUseSurfaceAction(action)) return false;
+    const child = this.ownedChild;
+    if (!child?.process.connected) return false;
+    try {
+      child.process.send(action, () => undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clearBrowserData(): Promise<void> {
+    const child = this.ownedChild;
+    if (this.stopping || !child?.process.connected) {
+      return Promise.reject(new Error('Managed browser service is unavailable'));
+    }
+    const requestId = randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        child.process.removeListener('message', onMessage);
+        child.process.removeListener('exit', onExit);
+      };
+      const onMessage = (message: unknown) => {
+        if (!isBrowserProfileClearResult(message) || message.requestId !== requestId) return;
+        cleanup();
+        if (message.ok) resolve();
+        else reject(new Error(message.error || 'Browser data could not be cleared'));
+      };
+      const onExit = () => { cleanup(); reject(new Error('Managed browser service stopped')); };
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Browser data clearing timed out'));
+      }, 60_000);
+      timeout.unref?.();
+      child.process.on('message', onMessage);
+      child.process.once('exit', onExit);
+      try {
+        child.process.send({ type: BROWSER_PROFILE_CLEAR_REQUEST, requestId }, error => {
+          if (error) { cleanup(); reject(error); }
+        });
+      } catch (error) { cleanup(); reject(error); }
+    });
+  }
+
   startRecovery(): void {
     if (this.stopping || this.hasReachedReady) return;
     this.scheduleReplacement();
@@ -1501,6 +1793,7 @@ export class AgentGatewaySupervisor {
 
   async close(): Promise<void> {
     this.stopping = true;
+    this.resolveReadyWaiters();
     this.clearTimers();
     const child = this.ownedChild;
     this.ownedChild = null;
@@ -1513,6 +1806,7 @@ export class AgentGatewaySupervisor {
 
   terminateSync(): void {
     this.stopping = true;
+    this.resolveReadyWaiters();
     this.clearTimers();
     const child = this.ownedChild;
     this.ownedChild = null;
@@ -1528,9 +1822,14 @@ export class AgentGatewaySupervisor {
       return;
     }
     const probe = await this.dependencies.probeHttpService(this.bootstrapUrl, this.bootstrapHeaders);
+    if (this.stopping) return;
     if (probe === "ready") {
       this.ownership = "external";
+      this.markReady();
       return;
+    }
+    if (probe === "starting") {
+      throw new Error("Agent gateway is still initializing");
     }
     if (probe === "unexpected") {
       throw new Error(`Agent gateway endpoint is occupied by an unexpected service: ${this.bootstrapUrl}`);
@@ -1555,9 +1854,13 @@ export class AgentGatewaySupervisor {
       String(this.runtimeConfig.agentGatewayHealthPort)
     ], {
       MEMMY_CONFIG: this.runtimeConfig.configPath,
+      MEMMY_AGENT_DATA_DIR: dirname(this.runtimeConfig.configPath),
       MEMMY_AGENT_WORKSPACE: this.runtimeConfig.agentWorkspace,
       MEMMY_MEMORY_URL: this.runtimeConfig.memoryBaseUrl,
       MEMMY_MEMORY_TOKEN: this.runtimeConfig.memoryToken,
+      ...(existsSync(join(this.options.resourcesPath, "native", "sqlcipher", "libsqlcipher.dylib"))
+        ? { MEMMY_SQLCIPHER_LIBRARY: join(this.options.resourcesPath, "native", "sqlcipher", "libsqlcipher.dylib") }
+        : {}),
       MEMORY_SERVICE_URL: this.runtimeConfig.memoryBaseUrl,
       MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
       [MIGRATIONS_READY_CONFIG_ENV]: this.runtimeConfig.configPath,
@@ -1588,26 +1891,144 @@ export class AgentGatewaySupervisor {
     this.bindOwnedChild(child, generation);
 
     try {
-      await this.dependencies.waitForHttpService("agent-gateway", this.bootstrapUrl, child, this.bootstrapHeaders);
+      await this.dependencies.waitForHttpService("agent-gateway", this.bootstrapUrl, child, this.bootstrapHeaders,
+        readAgentGatewayStartupTimeout(this.runtimeConfig.configPath), () => this.stopping);
       if (this.stopping || this.ownedChild !== child || this.childGeneration !== generation) return;
-      this.hasReachedReady = true;
+      this.markReady();
       this.replacementNotice = null;
       this.startStableTimer(child, generation);
     } catch (error) {
       if (this.ownedChild === child) {
         await this.dependencies.stopManagedChild(child).catch(() => undefined);
+        if (this.ownedChild === child) {
+          this.ownedChild = null;
+          this.removeChild(child);
+          child.logWriter?.close();
+        }
       }
+      if (this.stopping) return;
       if (initialStartup) throw error;
+      const issue = classifyAgentGatewayStartupIssue(error);
+      if (issue) {
+        this.repairableStartupIssue = issue;
+        this.resolveReadyWaiters(issue);
+      }
+      // stopManagedChild can settle on exit before close; retry without relying
+      // on that later callback or on a previous generation having reached ready.
+      this.scheduleReplacement();
     }
   }
 
   private bindOwnedChild(child: ManagedChild, generation: number): void {
+    bindComputerUseOnboardingIpc(child.process,
+      () => !this.stopping && this.ownedChild === child && this.childGeneration === generation
+        && this.pendingRestartNotice?.childGeneration !== generation,
+      this.options.computerUseOnboarding);
+    bindScreenCaptureIpc(child.process,
+      () => !this.stopping && this.ownedChild === child && this.childGeneration === generation
+        && this.pendingRestartNotice?.childGeneration !== generation,
+      this.options.captureScreen);
+    bindComputerUseWindowCaptureIpc(child.process,
+      () => !this.stopping && this.ownedChild === child && this.childGeneration === generation
+        && this.pendingRestartNotice?.childGeneration !== generation,
+      this.options.captureComputerUseWindow);
     let closed = false;
+    const pendingEmbeddedRequests = new Map<string, AbortController>();
     child.process.on("message", (message) => {
       if (this.stopping
         || this.ownedChild !== child
         || this.childGeneration !== generation
         || this.pendingRestartNotice?.childGeneration === generation) {
+        return;
+      }
+      if (isComputerUseSurfaceMessage(message)) {
+        this.options.onComputerUseSurface?.(message, action => {
+          if (!isComputerUseSurfaceAction(action) || !child.process.connected
+              || this.ownedChild !== child || this.childGeneration !== generation) return;
+          try { child.process.send(action, () => undefined); } catch { /* Child exited. */ }
+        });
+        return;
+      }
+      if (isEmbeddedBrowserCancel(message)) {
+        pendingEmbeddedRequests.get(message.requestId)?.abort();
+        return;
+      }
+      if (isEmbeddedBrowserRequest(message)) {
+        if (pendingEmbeddedRequests.has(message.requestId)) return;
+        const controller = new AbortController();
+        pendingEmbeddedRequests.set(message.requestId, controller);
+        const childIsCurrent = () => !this.stopping && child.process.connected
+          && this.ownedChild === child && this.childGeneration === generation
+          && this.pendingRestartNotice?.childGeneration !== generation;
+        const isCurrentChild = () => childIsCurrent() && !controller.signal.aborted;
+        const tabId = message.tabId;
+        const emitEvent: EmbeddedExecutorEventSink = event => {
+          if (tabId === undefined || !childIsCurrent()) return;
+          child.process.send({ type: EMBEDDED_BROWSER_EVENT, tabId, ...event }, () => undefined);
+        };
+        void Promise.resolve(this.options.handleEmbeddedBrowserRequest?.(message, isCurrentChild, emitEvent) ?? null)
+          .then(result => {
+            if (isCurrentChild()) {
+              child.process.send({ type: EMBEDDED_BROWSER_RESULT, requestId: message.requestId,
+                ok: true, result }, () => undefined);
+            }
+          }).catch(error => {
+            if (isCurrentChild()) {
+              child.process.send({ type: EMBEDDED_BROWSER_RESULT, requestId: message.requestId,
+                ok: false, error: String(error instanceof Error ? error.message : error).slice(0, 500) }, () => undefined);
+            }
+          }).finally(() => { pendingEmbeddedRequests.delete(message.requestId); });
+        return;
+      }
+      if (isBrowserAccessRequest(message)) {
+        void Promise.resolve(this.options.approveBrowserAccess?.(message.origin, message.url) ?? 'deny')
+          .then(decision => {
+            if (!child.process.connected || this.ownedChild !== child || this.childGeneration !== generation) return;
+            child.process.send({ type: BROWSER_ACCESS_RESULT, requestId: message.requestId, decision }, () => undefined);
+          }).catch(() => {
+            if (child.process.connected) child.process.send({ type: BROWSER_ACCESS_RESULT,
+              requestId: message.requestId, decision: 'deny' }, () => undefined);
+          });
+        return;
+      }
+      if (isBrowserCapabilityRequest(message)) {
+        void Promise.resolve(this.options.approveBrowserCapability?.(message) ?? false)
+          .then(approved => {
+            if (!child.process.connected || this.ownedChild !== child || this.childGeneration !== generation) return;
+            child.process.send({ type: BROWSER_CAPABILITY_RESULT, requestId: message.requestId,
+              approved: approved === true }, () => undefined);
+          }).catch(() => {
+            if (child.process.connected && this.ownedChild === child && this.childGeneration === generation) {
+              child.process.send({ type: BROWSER_CAPABILITY_RESULT, requestId: message.requestId,
+                approved: false }, () => undefined);
+            }
+          });
+        return;
+      }
+      if (isNativeAppAccessRequest(message)) {
+        void Promise.resolve(this.options.approveNativeAppAccess?.(message) ?? 'deny')
+          .then(decision => {
+            if (!child.process.connected || this.ownedChild !== child || this.childGeneration !== generation) return;
+            const safeDecision = decision === 'allow-once' || decision === 'allow-always' ? decision : 'deny';
+            child.process.send({ type: NATIVE_APP_ACCESS_RESULT, requestId: message.requestId,
+              decision: safeDecision }, () => undefined);
+          }).catch(() => {
+            if (child.process.connected && this.ownedChild === child && this.childGeneration === generation) {
+              child.process.send({ type: NATIVE_APP_ACCESS_RESULT, requestId: message.requestId,
+                decision: 'deny' }, () => undefined);
+            }
+          });
+        return;
+      }
+      if (isBrowserDownloadRequest(message)) {
+        void Promise.resolve(this.options.chooseBrowserDownload?.(message.name, message.url) ?? null)
+          .then(filePath => {
+            if (!child.process.connected || this.ownedChild !== child || this.childGeneration !== generation) return;
+            child.process.send({ type: BROWSER_DOWNLOAD_RESULT, requestId: message.requestId, filePath }, () => undefined);
+          }).catch(() => {
+            if (child.process.connected) child.process.send({ type: BROWSER_DOWNLOAD_RESULT,
+              requestId: message.requestId, filePath: null }, () => undefined);
+          });
         return;
       }
       const notice = parseDesktopManagedRestartNotice(message);
@@ -1631,6 +2052,9 @@ export class AgentGatewaySupervisor {
     child.process.once("close", (code, signal) => {
       if (closed) return;
       closed = true;
+      if (this.ownedChild === child && this.childGeneration === generation) {
+        this.options.onComputerUseSurfaceStop?.();
+      }
       child.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
       this.handleOwnedChildClose(child, generation, code);
     });
@@ -1678,13 +2102,15 @@ export class AgentGatewaySupervisor {
   private async startReplacement(): Promise<void> {
     if (this.stopping) return;
     const probe = await this.dependencies.probeHttpService(this.bootstrapUrl, this.bootstrapHeaders);
+    if (this.stopping) return;
     if (probe === "ready") {
       this.ownership = "external";
       this.pendingRestartNotice = null;
       this.replacementNotice = null;
+      this.markReady();
       return;
     }
-    if (probe === "unexpected") {
+    if (probe === "starting" || probe === "unexpected") {
       this.scheduleReplacement();
       return;
     }
@@ -1851,7 +2277,12 @@ async function probeHttpService(url: string, headers: Record<string, string> = {
       headers,
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
     });
-    return response.ok ? "ready" : "unexpected";
+    if (response.ok) return "ready";
+    if (response.status === 503 && url.endsWith("/webui/bootstrap")) {
+      const body = await response.text();
+      if (body.trim() === "agent_runtime_initializing") return "starting";
+    }
+    return "unexpected";
   } catch {
     return "unreachable";
   }
@@ -1865,8 +2296,10 @@ async function probeMemoryService(url: string, headers: Record<string, string> =
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
     });
     if (!response.ok) return "unexpected";
-    const body = await response.json() as { ok?: unknown; protocolVersion?: unknown };
-    if (body.ok !== true) return "unexpected";
+    const body: unknown = await response.json();
+    if (!isRecord(body) || typeof body.ok !== "boolean") return "unexpected";
+    // `ok` also reflects model health. A degraded dev-start service still owns
+    // this endpoint and must be reused instead of starting a second listener.
     return body.protocolVersion === SUPPORTED_MEMORY_PROTOCOL_VERSION ? "ready" : "incompatible";
   } catch {
     return "unreachable";
@@ -1958,6 +2391,110 @@ export function readLiveMemoryServerLock(databasePath: string): MemoryServerLock
   }
 }
 
+/**
+ * Reuses the live database owner, or stops one that no longer makes progress.
+ * Migrations can outlast a single startup wait and run before the owner serves
+ * HTTP, so an owner that still burns CPU or writes to the database keeps its
+ * ownership for another window instead of being terminated mid-migration.
+ *
+ * @returns True when the existing owner became ready and can be reused.
+ */
+async function adoptOrRecoverMemoryOwner(
+  runtimeConfig: PackagedRuntimeConfig,
+  memoryEntry: string,
+  healthUrl: string,
+  healthHeaders: Record<string, string>,
+  lock: MemoryServerLock
+): Promise<boolean> {
+  let progress = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
+  for (let window = 0; window < MEMORY_OWNER_PROGRESS_WINDOWS; window += 1) {
+    try {
+      await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
+      return true;
+    } catch (error) {
+      // An owner that released the database, or a new one that replaced it,
+      // is left to the caller: it starts or adopts a service of its own.
+      const remaining = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+      if (!remaining || remaining.pid !== lock.pid) return false;
+      const current = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
+      if (!hasMemoryOwnerProgressed(progress, current)) {
+        console.warn(`Stopping unresponsive Memory owner pid ${lock.pid}: ${errorMessage(error)}`);
+        await stopLockedMemoryService(runtimeConfig, memoryEntry);
+        return false;
+      }
+      progress = current;
+    }
+  }
+  throw new Error(`Memory service pid ${lock.pid} kept working on the database without becoming ready at ${healthUrl}`);
+}
+
+async function memoryVerificationEntry(
+  runtimeConfig: PackagedRuntimeConfig,
+  entries: RuntimeEntryPaths
+): Promise<string> {
+  return (await readInstalledMemoryRuntime(runtimeConfig.configPath))?.entrypoint ?? entries.memoryEntry;
+}
+
+export interface MemoryOwnerProgress {
+  cpuMs?: number;
+  databaseBytes: number;
+  databaseMtimeMs: number;
+}
+
+export function sampleMemoryOwnerProgress(pid: number, databasePath: string): MemoryOwnerProgress {
+  const base = resolve(databasePath);
+  let databaseBytes = 0;
+  let databaseMtimeMs = 0;
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try {
+      const stats = statSync(`${base}${suffix}`);
+      databaseBytes += stats.size;
+      databaseMtimeMs = Math.max(databaseMtimeMs, stats.mtimeMs);
+    } catch {
+      // Journal companions only exist while a write transaction is open.
+    }
+  }
+  const cpuMs = readProcessCpuMs(pid);
+  return { ...(cpuMs === undefined ? {} : { cpuMs }), databaseBytes, databaseMtimeMs };
+}
+
+export function hasMemoryOwnerProgressed(previous: MemoryOwnerProgress, current: MemoryOwnerProgress): boolean {
+  if (previous.cpuMs !== undefined && current.cpuMs !== undefined
+    && current.cpuMs >= previous.cpuMs + MEMORY_OWNER_CPU_PROGRESS_MS) {
+    return true;
+  }
+  return current.databaseBytes !== previous.databaseBytes
+    || current.databaseMtimeMs > previous.databaseMtimeMs;
+}
+
+function readProcessCpuMs(pid: number): number | undefined {
+  try {
+    if (process.platform === "win32") {
+      // The counters are ASCII digits in 100-nanosecond units.
+      const query = [
+        "$ErrorActionPreference = 'Stop'",
+        `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+        "if (-not $process) { exit 2 }",
+        "[string][math]::Floor(($process.KernelModeTime + $process.UserModeTime) / 10000)"
+      ].join("; ");
+      const total = Number(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: PROCESS_QUERY_TIMEOUT_MS
+      }).trim());
+      return Number.isFinite(total) ? total : undefined;
+    }
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "time="], {
+      encoding: "utf8",
+      timeout: PROCESS_QUERY_TIMEOUT_MS
+    });
+    const seconds = parseElapsedSeconds(output.trim());
+    return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
+}
+
 async function waitForExistingMemoryService(
   healthUrl: string,
   healthHeaders: Record<string, string>,
@@ -1978,13 +2515,20 @@ async function waitForExistingMemoryService(
   }
 }
 
-async function stopLockedMemoryService(databasePath: string, memoryEntry: string): Promise<void> {
+async function stopLockedMemoryService(
+  runtimeConfig: PackagedRuntimeConfig,
+  memoryEntry: string
+): Promise<void> {
+  const databasePath = runtimeConfig.memoryDatabasePath;
   const lock = readLiveMemoryServerLock(databasePath);
   if (!lock) return;
   if (lock.pid === process.pid) {
     throw new Error("Memory server lock unexpectedly belongs to the desktop process");
   }
-  if (!isPackagedMemoryServiceProcess(lock.pid, memoryEntry)) {
+  const identity = readProcessIdentity(lock.pid);
+  const serviceHome = join(dirname(runtimeConfig.configPath), "memory-service");
+  if (!identity || !matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome)) {
+    if (removeStaleMemoryServerLock(databasePath, lock, identity)) return;
     throw new Error(`Refusing to stop unverified process pid ${lock.pid} from the Memory server lock`);
   }
 
@@ -1996,23 +2540,129 @@ async function stopLockedMemoryService(databasePath: string, memoryEntry: string
   }
 }
 
-function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string, exactEntryOnly = false): boolean {
+function isPackagedMemoryServiceProcess(
+  pid: number,
+  memoryEntry: string,
+  serviceHome: string,
+  exactEntryOnly = false
+): boolean {
+  const identity = readProcessIdentity(pid);
+  return identity !== undefined
+    && matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome, exactEntryOnly);
+}
+
+/**
+ * Recognizes a Memory server started from this home, including runtimes an
+ * earlier Desktop activated. An upgrade rewrites the installed pointer before
+ * the previous runtime releases the database, so the surviving lock owner is
+ * expected to run an entry the active pointer no longer names.
+ */
+export function matchesMemoryServiceCommandLine(
+  commandLine: string,
+  memoryEntry: string,
+  serviceHome: string,
+  exactEntryOnly = false
+): boolean {
+  const command = normalizeProcessPath(commandLine);
+  if (command.includes(normalizeProcessPath(resolve(memoryEntry)))) return true;
+  if (exactEntryOnly) return false;
+  const entryIndex = command.indexOf(MEMORY_SERVER_ENTRY_SUFFIX);
+  const installedRoot = `${normalizeProcessPath(resolve(serviceHome, "runtime"))}/`;
+  if (entryIndex > 0 && command.lastIndexOf(installedRoot, entryIndex) >= 0) return true;
+  return command.includes(`/memory-runtime${MEMORY_SERVER_ENTRY_SUFFIX}`)
+    || command.includes(`/dist/runtime/memory${MEMORY_SERVER_ENTRY_SUFFIX}`);
+}
+
+function normalizeProcessPath(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+interface ProcessIdentity {
+  commandLine: string;
+  startedAtMs?: number;
+}
+
+function readProcessIdentity(pid: number): ProcessIdentity | undefined {
   try {
-    const command = process.platform === "win32"
-      ? execFileSync("powershell.exe", [
-        "-NoProfile",
-        "-Command",
-        `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").CommandLine`
-      ], { encoding: "utf8", windowsHide: true })
-      : execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-    const normalizedCommand = command.replaceAll("\\", "/");
-    const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
-    return normalizedCommand.includes(normalizedEntry)
-      || (!exactEntryOnly && (normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
-        || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js")));
+    return process.platform === "win32" ? readWindowsProcessIdentity(pid) : readPosixProcessIdentity(pid);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Win32_Process holds Unicode paths, so the payload is transported as base64
+ * instead of through the console code page, which corrupts non-ASCII home
+ * directories on localized Windows installs.
+ */
+function readWindowsProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const query = [
+    "$ErrorActionPreference = 'Stop'",
+    `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+    "if (-not $process) { exit 2 }",
+    "$created = if ($process.CreationDate) { $process.CreationDate.ToUniversalTime().ToString('o') } else { '' }",
+    "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($created + '|' + [string]$process.CommandLine))"
+  ].join("; ");
+  const encoded = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: PROCESS_QUERY_TIMEOUT_MS
+  }).replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return undefined;
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const separator = decoded.indexOf("|");
+  if (separator < 0) return undefined;
+  const startedAtMs = Date.parse(decoded.slice(0, separator));
+  return {
+    commandLine: decoded.slice(separator + 1),
+    ...(Number.isFinite(startedAtMs) ? { startedAtMs } : {})
+  };
+}
+
+function readPosixProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const output = execFileSync("ps", ["-p", String(pid), "-o", "etime=,command="], {
+    encoding: "utf8",
+    timeout: PROCESS_QUERY_TIMEOUT_MS
+  });
+  const parsed = /^\s*(\S+)\s+([\s\S]*)$/.exec(output);
+  if (!parsed) return undefined;
+  const elapsedMs = parseElapsedSeconds(parsed[1]!);
+  return {
+    commandLine: parsed[2]!,
+    ...(elapsedMs === undefined ? {} : { startedAtMs: Date.now() - elapsedMs * 1_000 })
+  };
+}
+
+/** Parses a `ps` time column, formatted as `[[dd-]hh:]mm:ss[.ff]`. */
+function parseElapsedSeconds(value: string): number | undefined {
+  const parsed = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/.exec(value);
+  if (!parsed) return undefined;
+  const part = (group: string | undefined): number => (group ? Number(group) : 0);
+  return part(parsed[1]) * 86_400 + part(parsed[2]) * 3_600 + part(parsed[3]) * 60 + part(parsed[4]);
+}
+
+/**
+ * Drops a lock whose pid the operating system has already reassigned. Only a
+ * process that is demonstrably not a Memory server and that started after the
+ * lock was written qualifies, so a live owner is never disowned.
+ */
+function removeStaleMemoryServerLock(
+  databasePath: string,
+  lock: MemoryServerLock,
+  identity: ProcessIdentity | undefined
+): boolean {
+  if (identity?.startedAtMs === undefined) return false;
+  if (normalizeProcessPath(identity.commandLine).includes(MEMORY_SERVER_ENTRY_SUFFIX)) return false;
+  const lockPath = `${resolve(databasePath)}.server.lock`;
+  try {
+    if (identity.startedAtMs <= statSync(lockPath).mtimeMs + STALE_LOCK_TOLERANCE_MS) return false;
+    rmSync(lockPath, { force: true });
   } catch {
     return false;
   }
+  console.warn(`Removed a Memory server lock left for reused pid ${lock.pid}`);
+  return true;
 }
 
 function terminateProcessByPid(pid: number, force: boolean): void {
@@ -2054,12 +2704,14 @@ async function waitForHttpService(
   url: string,
   child: ManagedChild,
   headers: Record<string, string> = {},
-  timeoutMs = STARTUP_TIMEOUT_MS
+  timeoutMs = STARTUP_TIMEOUT_MS,
+  isCanceled: () => boolean = () => false
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
 
   while (Date.now() < deadline) {
+    if (isCanceled()) throw new Error(`${name} startup was canceled`);
     if (child.exitDescription) {
       throw new Error(`${name} exited before it became ready (${child.exitDescription}). ${formatChildTail(child)}`);
     }

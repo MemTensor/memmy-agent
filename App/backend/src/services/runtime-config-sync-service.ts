@@ -6,9 +6,11 @@ import {
 } from "../infrastructure/app-state-store/index.js";
 import {
   clearAccountModelProjectionFromMemmyConfig,
+  readRuntimeMemmyConfigUserMode,
   readRuntimeMemmyConfigState,
   writeAccountModelProjectionToMemmyConfig,
-  type RuntimeMemmyConfigState
+  type RuntimeMemmyConfigState,
+  type RuntimeProjectionResult
 } from "../infrastructure/memmy-config/index.js";
 
 export interface RuntimeConfigMigrationConsistency {
@@ -52,6 +54,12 @@ type RuntimeConfigSyncErrorState = {
   reason: string;
 };
 
+interface RestoredAccountProjection {
+  cloudUuid: string;
+  userId: string;
+  result: RuntimeProjectionResult;
+}
+
 /**
  * Hydrate current AppState from config.yaml. Missing runtime config is left untouched:
  * importing SQLite model rows into YAML belongs exclusively to startup migrations.
@@ -90,6 +98,8 @@ export async function syncRuntimeConfigWithAppState(
     }
     return accountChannelMismatchResult(options.appStateStore, wroteConfig);
   }
+  const restored = await restoreMissingActiveAccountProjection(options, state);
+  state = restored.state;
   switch (state.status) {
     case "valid_byok": {
       const clearedDormantProjection = await clearUntrustedAccountProjection(options, state.accountProjection);
@@ -99,7 +109,7 @@ export async function syncRuntimeConfigWithAppState(
         : hydrated;
     }
     case "valid_account":
-      return hydrateAccountRuntimeConfig(options, state);
+      return hydrateAccountRuntimeConfig(options, state, restored.projection);
     case "missing":
     case "empty":
       return {
@@ -135,6 +145,42 @@ export async function syncRuntimeConfigWithAppState(
   }
 }
 
+async function restoreMissingActiveAccountProjection(
+  options: SyncRuntimeConfigWithAppStateOptions,
+  state: RuntimeMemmyConfigState
+): Promise<{
+  state: RuntimeMemmyConfigState;
+  projection?: RestoredAccountProjection;
+}> {
+  if (state.status === "valid_account" || state.status === "invalid_yaml" || state.status === "conflict") {
+    return { state };
+  }
+
+  const session = options.appStateStore.repositories.accountSession.get();
+  if (!session.authenticated) return { state };
+  if (options.appStateStore.repositories.bootstrap.getAppSettings().userMode !== "account") {
+    return { state };
+  }
+
+  // An explicit BYOK selection remains authoritative even while the user is signed in.
+  // The repair is only for an account-mode database paired with an unset/incomplete runtime projection.
+  if (await readRuntimeMemmyConfigUserMode(options.memmyConfigPath) === "byok") {
+    return { state };
+  }
+
+  const cloudUuid = options.appStateStore.repositories.accountSession.getCloudUuid();
+  if (!cloudUuid) return { state };
+  const projection = await writeAccountModelProjectionToMemmyConfig({
+    cloudUuid,
+    userId: session.profile.userId,
+    preserveAccountByokSelection: true
+  }, options.memmyConfigPath);
+  return {
+    state: await readRuntimeMemmyConfigState(options.memmyConfigPath),
+    projection: { cloudUuid, userId: session.profile.userId, result: projection }
+  };
+}
+
 /** Handles sync runtime config for startup. */
 export async function syncRuntimeConfigForStartup(
   options: SyncRuntimeConfigForStartupOptions
@@ -159,8 +205,20 @@ async function reconcileMigratedAccountProjection(
   const session = options.appStateStore.repositories.accountSession.get();
   const projection = accountProjectionFromState(state);
   if (!session.authenticated) {
+    const authoritativeMigration = options.migrationConsistency?.accountSourceIsAuthoritative === true;
+    const recoveryCloudUuid = projection?.cloudUuid;
+    if (
+      authoritativeMigration
+      && recoveryCloudUuid
+      && options.appStateStore.repositories.accountSession.activateByCloudUuid(
+        recoveryCloudUuid,
+        options.accountChannel
+      )
+    ) {
+      return reconcileMigratedAccountProjection(options, state);
+    }
     if (projection || (
-      options.migrationConsistency?.accountSourceIsAuthoritative
+      authoritativeMigration
       && options.appStateStore.repositories.bootstrap.getAppSettings().userMode === "account"
     )) {
       throw createMigrationConsistencyError(
@@ -235,7 +293,8 @@ function hydrateByokRuntimeConfig(
 
 async function hydrateAccountRuntimeConfig(
   options: SyncRuntimeConfigWithAppStateOptions,
-  state: Extract<RuntimeMemmyConfigState, { status: "valid_account" }>
+  state: Extract<RuntimeMemmyConfigState, { status: "valid_account" }>,
+  restoredProjection?: RestoredAccountProjection
 ): Promise<RuntimeConfigSyncResult> {
   const { appStateStore } = options;
   const activated = appStateStore.repositories.accountSession.activateByCloudUuid(
@@ -259,14 +318,21 @@ async function hydrateAccountRuntimeConfig(
       source: "none",
       mode: appStateStore.repositories.bootstrap.getAppSettings().userMode,
       hydratedAppState: false,
-      wroteConfig: projection.changed,
+      wroteConfig: projection.changed || restoredProjection?.result.changed === true,
       reason: "account_projection_has_no_matching_local_session"
     };
   }
-  const projection = await writeAccountModelProjectionToMemmyConfig({
-    cloudUuid: state.cloudUuid,
-    userId: session.profile.userId
-  }, options.memmyConfigPath);
+  // Reuse a completed repair only after validating the session and its account identity.
+  const restoredForCurrentAccount = restoredProjection?.cloudUuid === state.cloudUuid
+    && restoredProjection.userId === session.profile.userId;
+  const projection = restoredForCurrentAccount ? restoredProjection.result : await writeAccountModelProjectionToMemmyConfig(
+    {
+      cloudUuid: state.cloudUuid,
+      userId: session.profile.userId,
+      preserveAccountByokSelection: true
+    },
+    options.memmyConfigPath
+  );
   appStateStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
   return {
     source: "runtime_config",
@@ -274,10 +340,12 @@ async function hydrateAccountRuntimeConfig(
     provider: "memmy_account",
     model: "agent_chat",
     hydratedAppState: true,
-    wroteConfig: projection.changed,
-    reason: projection.changed
-      ? "refreshed_account_projection_and_hydrated_account"
-      : "hydrated_account_from_runtime_config"
+    wroteConfig: projection.changed || restoredProjection?.result.changed === true,
+    reason: restoredForCurrentAccount && restoredProjection.result.changed
+      ? "restored_account_projection_and_hydrated_account"
+      : projection.changed
+        ? "refreshed_account_projection_and_hydrated_account"
+        : "hydrated_account_from_runtime_config"
   };
 }
 

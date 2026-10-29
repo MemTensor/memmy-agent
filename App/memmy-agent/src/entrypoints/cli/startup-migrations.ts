@@ -56,9 +56,11 @@ export function resolveStartupMigrationTarget(
     env,
   );
   if (input.config) setConfigPath(runtimeConfigFile);
+  const managed = env.AGENT_MANAGED_EXECUTION_REQUIRED === "1";
+  if (managed && !path.isAbsolute(env.MEMMY_AGENT_DATA_DIR ?? "")) throw new Error("Managed runtime data directory is required");
   return resolveMigrationTargets({
     runtimeConfigFile,
-    agentWorkspaceOverride: input.workspace ?? env.MEMMY_AGENT_WORKSPACE,
+    agentWorkspaceOverride: managed ? path.join(env.MEMMY_AGENT_DATA_DIR!, "workspace") : input.workspace ?? env.MEMMY_AGENT_WORKSPACE,
     sessionDagDirOverride: env.MEMMY_AGENT_SESSION_DAG_DIR,
     appDatabaseFile: input.appDatabase ?? env[APP_DATABASE_ENV],
     env,

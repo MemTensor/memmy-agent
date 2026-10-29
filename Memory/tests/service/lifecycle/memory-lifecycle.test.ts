@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../../../src/contracts/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { createMemoryServiceFixture, createBatchReflectionLlm } from "../../fixtures/memory-service-fixture.js";
 import {
   insertActivePolicyMemory,
   insertActiveSkillMemoryForTest,
@@ -237,7 +237,9 @@ describe("MemoryService / lifecycle / governance", () => {
   });
 
   it("exports redacted bundles, imports them, and records governance audit changes", async () => {
-    const first = createTestService();
+    const first = createTestService({
+      llm: createBatchReflectionLlm([], "secret raw user text should not be exported by default")
+    });
     const session = first.service.openSession({
       namespace: {
         source: "codex",
@@ -253,6 +255,7 @@ describe("MemoryService / lifecycle / governance", () => {
       answer: "secret raw assistant text should stay in raw turn only"
     });
     first.service.closeSession(session.sessionId);
+    await first.service.runWorkerOnce(20);
     await first.service.runWorkerOnce(20);
     await first.service.runWorkerOnce(20);
 

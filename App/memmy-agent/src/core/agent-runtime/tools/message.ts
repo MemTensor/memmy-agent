@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { OutboundMessage } from "../../runtime-messages/events.js";
 import { getWorkspacePath } from "../../../config/paths.js";
@@ -76,8 +77,8 @@ export class MessageTool extends Tool {
       "Proactively send a message to a user/channel, optionally with file attachments. " +
       "Use this for reminders, cross-channel delivery, or explicit proactive sends. " +
       "Do not use this for the normal reply in the current chat: answer naturally instead. " +
-      "If channel/chat_id would target the current runtime conversation, do not call this tool " +
-      "unless the user explicitly asked you to proactively send an existing file attachment. " +
+      "When a file is the task's final deliverable, attach it to the current conversation " +
+      "through the message tool's media parameter by default. " +
       "When generate_image creates images in the current chat, use the message tool " +
       "with the artifact paths in the media parameter to deliver the images to the user. " +
       "For proactive attachment delivery, use the 'media' parameter with file paths. " +
@@ -159,7 +160,7 @@ export class MessageTool extends Tool {
       }
 
       if (!this.restrictToWorkspace) {
-        const expanded = item.startsWith("~/") ? path.join(process.env.HOME ?? "", item.slice(2)) : item;
+        const expanded = /^~[\\/]/.test(item) ? path.join(os.homedir(), item.slice(2)) : item;
         resolved.push(path.isAbsolute(expanded) ? expanded : path.join(this.workspace, expanded));
         continue;
       }

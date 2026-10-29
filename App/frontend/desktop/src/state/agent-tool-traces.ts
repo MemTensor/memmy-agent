@@ -294,7 +294,7 @@ function buildToolSummary(
     }
     case "list_dir": {
       const target = firstPathField(args, ["path", "target_directory", "directory", "dir", "target"]);
-      return { verb: "Listed", detail: target ? basename(target) || target : "", category: "list" };
+      return { verb: "Listed", detail: target ? directoryDisplayName(target) : "", category: "list" };
     }
     case "edit_file": {
       const target = firstPathField(args, ["path", "file_path", "target_file", "file"]);
@@ -447,6 +447,98 @@ export function extractApplyPatchSummaryPaths(input: string): string[] {
   return paths;
 }
 
+const ACTIVITY_FILE_PATH_KEYS = new Set([
+  "path",
+  "filepath",
+  "targetfile",
+  "file",
+  "filename",
+  "targetnotebook",
+]);
+
+export interface ActivityPreviewFile {
+  path: string;
+  name: string;
+}
+
+/**
+ * A file edit can open in the side panel when it names one local file.
+ * Deletes stay inert: the preview would only report that the file is gone.
+ */
+export function activityPreviewFileFromEdit(edit: Pick<AgentFileEdit, "tool" | "path" | "absolute_path">): ActivityPreviewFile | null {
+  if (canonicalToolName(edit.tool) === "delete_file") return null;
+  return previewFileFromPath(edit.absolute_path?.trim() || edit.path);
+}
+
+/**
+ * Tool rows open from argument fields that carry a path, not from the tool name.
+ * One accepted path makes the row clickable. Several paths, a directory, a URL,
+ * or a display line that no longer has the original path stays plain text.
+ */
+export function activityPreviewFileFromToolEvent(event: AgentToolProgressEvent): ActivityPreviewFile | null {
+  const summary = summarizeToolCall(event);
+  if (summary?.category === "delete" || summary?.category === "list") return null;
+  const fn = isRecord(event.function) ? event.function : null;
+  const args = parseToolArguments(fn && "arguments" in fn ? fn.arguments : event.arguments);
+  const paths = activityFilePathsFromArguments(args);
+  if (paths.length > 1) return null;
+  if (paths.length === 1) return previewFileFromPath(paths[0]!);
+  const input = typeof args.input === "string" ? args.input : "";
+  return previewFileFromPath(singleNonDeletePatchPath(input) ?? "");
+}
+
+function activityFilePathsFromArguments(args: Record<string, unknown>): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const [key, value] of Object.entries(args)) {
+    if (!ACTIVITY_FILE_PATH_KEYS.has(key.toLowerCase().replace(/[-_]/g, ""))) continue;
+    const values = Array.isArray(value) ? value : [value];
+    for (const entry of values) {
+      if (typeof entry !== "string") continue;
+      const preview = previewFileFromPath(entry);
+      if (!preview) continue;
+      const identity = preview.path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      found.push(preview.path);
+    }
+  }
+  return found;
+}
+
+function singleNonDeletePatchPath(input: string): string | null {
+  if (!input.startsWith("*** Begin Patch")) return null;
+  const paths = extractApplyPatchSummaryPaths(input);
+  if (paths.length !== 1) return null;
+  const path = paths[0]!;
+  if (input.includes(`*** Delete File: ${path}`)) return null;
+  return path;
+}
+
+function previewFileFromPath(raw: string): ActivityPreviewFile | null {
+  const trimmed = raw.trim();
+  if (!trimmed || /[\s*?\u0000]/u.test(trimmed)) return null;
+  if (/^(https?:|mailto:|data:)/i.test(trimmed)) return null;
+  if (trimmed === "." || trimmed === ".." || trimmed === "~" || trimmed.startsWith("~/")) return null;
+  let path = trimmed;
+  if (/^file:/i.test(trimmed)) {
+    try {
+      path = decodeURIComponent(new URL(trimmed).pathname);
+    } catch {
+      return null;
+    }
+    if (!path || /[\s*?\u0000]/u.test(path)) return null;
+  } else if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^[a-z]:[\\/]/i.test(trimmed)) {
+    return null;
+  }
+  if (/[\\/]$/u.test(path)) return null;
+  if (path.split(/[\\/]/u).some((segment) => segment === "..")) return null;
+  const name = basename(path);
+  if (!name || name === "." || name === "..") return null;
+  if (!/\.[A-Za-z][A-Za-z0-9_+-]{0,15}$/u.test(name)) return null;
+  return { path, name };
+}
+
 function firstStringField(args: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const value = args[key];
@@ -496,6 +588,15 @@ function basename(value: string): string {
   const clean = value.replace(/[/\\]+$/u, "");
   const index = Math.max(clean.lastIndexOf("/"), clean.lastIndexOf("\\"));
   return index >= 0 ? clean.slice(index + 1) : clean;
+}
+
+/** `.` and `./` mean the working directory. Rendering them raw looks like a stray period. */
+function directoryDisplayName(target: string): string {
+  const trimmed = target.trim();
+  if (trimmed === "." || trimmed === "./" || trimmed === ".\\") {
+    return "current directory";
+  }
+  return basename(trimmed) || trimmed;
 }
 
 function hostnameOrTail(url: string): string {

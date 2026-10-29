@@ -36,6 +36,41 @@ describe("Bedrock provider", () => {
     expect(findByName("bedrock")?.backend).toBe("bedrock");
   });
 
+  it("lifts endpoint region and profile into the Bedrock provider", () => {
+    const provider = makeProvider(
+      new Config({
+        agents: { defaults: { modelPreset: "custom-bedrock" } },
+        providers: {
+          bedrock: {
+            region: "us-east-1",
+            profile: "legacy",
+            endpoints: {
+              chat: {
+                apiBase: "https://bedrock-runtime.us-west-2.amazonaws.com",
+                protocol: "bedrock-converse",
+                region: "us-west-2",
+                profile: "work",
+              },
+            },
+          },
+        },
+        modelPresets: {
+          "custom-bedrock": {
+            endpoint: "chat",
+            model: "anthropic.claude-3-5-sonnet",
+            provider: "bedrock",
+            source: "byok",
+            capabilities: ["agent"],
+          },
+        },
+      }),
+    ) as BedrockProvider;
+
+    expect(provider).toBeInstanceOf(BedrockProvider);
+    expect(provider.region).toBe("us-west-2");
+    expect(provider.profile).toBe("work");
+  });
+
   it("maps configured AWS profiles to SDK credential providers", async () => {
     const provider = new BedrockProvider({ region: "us-east-1", profile: "dev" });
     const client = await provider.makeClient();

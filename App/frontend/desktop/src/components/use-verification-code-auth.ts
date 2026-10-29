@@ -124,6 +124,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   const [feedback, setFeedback] = useState<AuthCodeFeedback | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interactionVersionRef = useRef(0);
+  const loginAttemptRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -167,6 +168,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     setSending(false);
     setCountdown(0);
     setLoginPending(false);
+    loginAttemptRef.current = null;
     setFeedback(null);
 
     if (timerRef.current) {
@@ -227,13 +229,24 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       return null;
     }
 
-    if (!clients || !verificationCode || loginPending) {
+    if (!verificationCode) {
+      setFeedback({ text: t("login.codePlaceholder"), tone: "error" });
       return null;
     }
 
+    if (!clients) {
+      setFeedback({ text: t("login.error.serviceUnavailable"), tone: "error" });
+      return null;
+    }
+
+    if (loginAttemptRef.current !== null) {
+      return null;
+    }
+
+    const interactionVersion = interactionVersionRef.current;
+    loginAttemptRef.current = interactionVersion;
     setLoginPending(true);
     setFeedback(null);
-    const interactionVersion = interactionVersionRef.current;
 
     try {
       const result = await clients.account.verifyCode(
@@ -272,6 +285,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       return null;
     } finally {
       if (isCurrentInteraction(interactionVersion)) {
+        loginAttemptRef.current = null;
         setLoginPending(false);
       }
     }

@@ -14,6 +14,9 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import type {
   MemoryAddRequest,
+  ExternalEvidenceSyncRequest,
+  ExternalEvidenceStatusRequest,
+  ExternalEvidenceSkillSuggestionRequest,
   MemoryGovernanceRequest,
   MemoryLayer,
   MemoryReloadConfigRequest,
@@ -22,19 +25,27 @@ import type {
   RuntimeNamespace,
   SessionOpenRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
+import { readDesktopAnalyticsIdentity } from "./desktop-analytics-identity.js";
+import {
+  createMemoryDesktopAddAnalytics,
+  type MemoryDesktopAddAnalytics,
+} from "./memory-add-analytics.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
   hitCountFromSearchResponse,
-  storedCountFromAddResponse,
   trackExternalHookCapture,
   trackExternalHookRecall,
+  trackStoredExternalMemoryAdd,
+  trackStoredExternalSourceTurnCapture,
   trackExternalToolCall,
   type PluginRuntimeAnalytics,
 } from "./plugin-runtime-analytics.js";
@@ -54,6 +65,7 @@ export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
+  "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
   "GET /api/v1/admin/export",
   "DELETE /api/v1/admin/data",
@@ -64,9 +76,15 @@ export const API_ROUTES = [
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
+  "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
+  "POST /api/v1/evidence/sync",
+  "POST /api/v1/evidence/status",
+  "POST /api/v1/evidence/skills/suggest",
+  "POST /api/v1/evidence/skills/:id/approve",
+  "PATCH /api/v1/evidence/skills/:id",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -92,6 +110,10 @@ export interface MemoryHttpServerOptions {
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   configPath?: string;
   viewerCli?: ViewerCliOptions;
   onRestartRequested?: () => void | Promise<void>;
@@ -114,6 +136,7 @@ interface AuthPrincipal {
   kind: "anonymous" | "local" | "cloud" | "scoped" | "viewer";
   tokenId?: string;
   namespace?: RuntimeNamespace;
+  authenticatedNamespace?: RuntimeNamespace;
   scopes: string[];
   timeZone?: string;
 }
@@ -134,11 +157,20 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
-  const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
+  const desktopIdentity = () => readDesktopAnalyticsIdentity(options.configPath);
+  const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics({
+    getUserId: () => desktopIdentity().userId,
+    getUserMode: () => desktopIdentity().userMode,
+  });
+  const memoryAddAnalytics = options.memoryAddAnalytics ?? createMemoryDesktopAddAnalytics({
+    getUserId: () => desktopIdentity().userId,
+    getUserMode: () => desktopIdentity().userMode,
+  });
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
-    scheduleWorker: autoWorker.schedule
+    scheduleWorker: autoWorker.schedule,
+    memoryAddAnalytics
   });
   const activeRequests = new Set<Promise<void>>();
   const server = createServer((request, response) => {
@@ -319,6 +351,7 @@ function createAutoWorkerDrain(
   let disposed = false;
   let startupReleased = false;
   let startupReconciled = false;
+  let workerStarted = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
@@ -331,6 +364,7 @@ function createAutoWorkerDrain(
     if (disposed) {
       return;
     }
+    workerStarted = true;
     if (running) {
       requested = true;
       return;
@@ -425,6 +459,24 @@ function createAutoWorkerDrain(
     }, 0);
   }
 
+  service.setAppBudgetReconcileListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    if (delayedTimer) {
+      clearTimeout(delayedTimer);
+      delayedTimer = undefined;
+    }
+    scheduleNextDueJob();
+  });
+
+  service.setPersistRecoveredListener(() => {
+    if (disposed || !workerStarted) {
+      return;
+    }
+    schedule();
+  });
+
   return {
     start(): void {
       if (disposed || startupReleased || startupTimer) {
@@ -451,6 +503,8 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      service.setAppBudgetReconcileListener(undefined);
+      service.setPersistRecoveredListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -494,6 +548,10 @@ async function routeRequest(
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health([...API_ROUTES]);
+  }
+  if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
+    requireMemoryRead(principal);
+    return service.memoryTokenBudget();
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
@@ -555,7 +613,8 @@ async function routeRequest(
     const result = await service.idempotent("sessions.close", request, { sessionId, request }, () =>
       service.closeSession(sessionId, request)
     );
-    scheduleAutoWorkerForEvolution(result, autoWorker);
+    // Close can queue L3 batches even when no episode closes, so always wake the worker.
+    autoWorker.schedule();
     return publicCloseSessionResponse(result);
   }
 
@@ -629,6 +688,56 @@ async function routeRequest(
     return publicStartTurnResponse(result);
   }
 
+  if (method === "POST" && path === "/api/v1/source-turns/complete") {
+    requireMemoryWrite(principal);
+    const input = asObject(body, "source-turn.complete");
+    const sourceIdentity = isRecord(input.sourceTurn) ? input.sourceTurn : {};
+    const requestedScope = isRecord(input.namespace) ? input.namespace : {};
+    const namespace = {
+      source: sourceIdentity.source,
+      profileId: sourceIdentity.profileId,
+      sessionKey: sourceIdentity.conversationId,
+      ...requestedScope
+    };
+    // Local headers may carry the generic default source; it is not a source restriction.
+    let scopedPrincipal = principal;
+    if ((principal.kind === "local" || principal.kind === "anonymous") &&
+        principal.namespace?.source === DEFAULT_NAMESPACE_SOURCE && typeof namespace.source === "string") {
+      scopedPrincipal = { ...principal, namespace: { ...principal.namespace, source: namespace.source } };
+    }
+    const request = strictEnvelopeWithPrincipal({ ...input, namespace }, scopedPrincipal) as unknown as SourceTurnCompleteRequest;
+    requireStringField(request, "query", "source-turn.complete");
+    requireStringField(request, "answer", "source-turn.complete");
+    const completeSourceTurn = () => service.completeSourceTurn({
+      namespace: request.namespace, timeZone: request.timeZone, source: request.source,
+      sourceTurn: request.sourceTurn, channel: request.channel, workspacePath: request.workspacePath,
+      ...(request.captureLegacyHistory === true ? { captureLegacyHistory: true } : {}),
+      ...(typeof request.legacyImportTurnId === "string" && request.legacyImportTurnId.trim()
+        ? { legacyImportTurnId: request.legacyImportTurnId.trim() }
+        : {}),
+      sessionId: request.sessionId, episodeId: request.episodeId,
+      query: request.query, answer: request.answer, reasoningSummary: request.reasoningSummary,
+      toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
+      sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
+      tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
+    });
+    const result = request.channel === "hook"
+      ? await trackStoredExternalSourceTurnCapture(
+        pluginRuntimeAnalytics,
+        {
+          source: request.source ?? request.sourceTurn?.source,
+          adapterId: request.adapterId,
+          namespace: request.namespace,
+          turnId: request.sourceTurn?.turnId,
+        },
+        request,
+        completeSourceTurn,
+      )
+      : completeSourceTurn();
+    if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
+    return result;
+  }
+
   const turnComplete = match(path, /^\/api\/v1\/turns\/([^/]+)\/complete$/);
   if (method === "POST" && turnComplete) {
     requireMemoryWrite(principal);
@@ -638,6 +747,7 @@ async function routeRequest(
     requireStringField(request, "answer", "turn.complete");
     const turnId = decodeMatchSegment(turnComplete, 1);
     const publicRequest: TurnCompleteRequest = {
+      ...(typeof request.recallApplied === "boolean" ? { recallApplied: request.recallApplied } : {}),
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
@@ -737,21 +847,64 @@ async function routeRequest(
       sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
-    const result = await trackExternalToolCall(
+    const idempotency = memoryAddIdempotency(publicRequest, path);
+    const result = await trackStoredExternalMemoryAdd(
       pluginRuntimeAnalytics,
-      { ...request, toolName: "memmy_memory_add" },
+      { ...request, layer: publicRequest.layer },
       () =>
-        service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+        service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
           service.addMemory(publicRequest)
         ),
-      (addResult) => ({
-        stored_count: storedCountFromAddResponse(addResult),
-        ...(publicRequest.layer ? { layer: publicRequest.layer } : {}),
-      }),
     );
     if (!publicRequest.deferProcessing) {
       autoWorker.schedule();
     }
+    return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/sync") {
+    requireMemoryWrite(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.sync"), principal) as unknown as ExternalEvidenceSyncRequest;
+    const result = service.syncExternalEvidence(request);
+    if (request.action === "upsert") autoWorker.schedule();
+    return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/status") {
+    requireMemoryRead(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.status"), principal) as unknown as ExternalEvidenceStatusRequest;
+    return service.externalEvidenceStatus(request);
+  }
+
+  if (method === "POST" && path === "/api/v1/evidence/skills/suggest") {
+    requireMemoryWrite(principal);
+    const request = evidenceEnvelopeWithPrincipal(asObject(body, "evidence.skills.suggest"), principal) as unknown as ExternalEvidenceSkillSuggestionRequest;
+    const result = await service.suggestExternalEvidenceSkill(request);
+    if (result.status === "active") autoWorker.schedule();
+    return result;
+  }
+  const evidenceSkillEdit = path.match(/^\/api\/v1\/evidence\/skills\/([^/]+)$/u);
+  if (method === "PATCH" && evidenceSkillEdit) {
+    requireMemoryWrite(principal);
+    const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+    const input = asObject(body, "evidence.skills.edit");
+    const request = scopedPrincipal.namespace ? strictEnvelopeWithPrincipal(input, scopedPrincipal)
+      : envelopeWithPrincipal(input, scopedPrincipal);
+    const result = service.updateExternalEvidenceSkill(decodeURIComponent(evidenceSkillEdit[1]!),
+      { body: input.body as string, expectedVersion: input.expectedVersion as number }, request);
+    autoWorker.schedule();
+    return result;
+  }
+  const evidenceSkillApprove = path.match(/^\/api\/v1\/evidence\/skills\/([^/]+)\/approve$/u);
+  if (method === "POST" && evidenceSkillApprove) {
+    requireMemoryWrite(principal);
+    const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+    const input = asObject(body, "evidence.skills.approve");
+    const request = scopedPrincipal.namespace
+      ? strictEnvelopeWithPrincipal(input, scopedPrincipal)
+      : envelopeWithPrincipal(input, scopedPrincipal);
+    const result = service.approveExternalEvidenceSkill(decodeURIComponent(evidenceSkillApprove[1]!), request);
+    autoWorker.schedule();
     return result;
   }
 
@@ -918,6 +1071,49 @@ async function routeRequest(
   }
 
   throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
+}
+
+function memoryAddIdempotency(
+  request: MemoryAddRequest,
+  path: string
+): { request: RequestEnvelope; fingerprint: unknown } {
+  const sourceAgentId = request.sourceAgentId?.trim();
+  const sourceSkillId = request.sourceSkillId?.trim();
+  const sourceContentHash = request.sourceContentHash?.trim();
+  const isAgentSourceSkill =
+    request.layer === "Skill" &&
+    Boolean(request.requestId) &&
+    Boolean(sourceAgentId) &&
+    Boolean(sourceSkillId) &&
+    Boolean(sourceContentHash) &&
+    request.adapterId === `agent-source:${sourceAgentId}`;
+
+  if (!isAgentSourceSkill) {
+    return {
+      request,
+      fingerprint: { path, request }
+    };
+  }
+
+  const identity = {
+    namespace: request.namespace,
+    sourceAgentId,
+    sourceSkillId,
+    sourceContentHash
+  };
+  return {
+    request: {
+      adapterId: request.adapterId,
+      // Version the key so legacy full-request fingerprints cannot keep
+      // conflicting after volatile Skill metadata changes.
+      requestId: `agent-source-skill:v2:${stableHash(identity)}`,
+      namespace: request.namespace
+    },
+    fingerprint: {
+      path,
+      skill: identity
+    }
+  };
 }
 
 function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
@@ -1185,6 +1381,7 @@ function authenticate(
       kind: "cloud",
       tokenId: stableTokenId(candidate!),
       namespace: mergeNamespaces(cloudNamespace, namespaceFromRequest(request, url)),
+      authenticatedNamespace: cloudNamespace,
       scopes: ["*"]
     };
   }
@@ -1194,6 +1391,7 @@ function authenticate(
       kind: "scoped",
       tokenId: stableTokenId(candidate!),
       namespace: mergeNamespaces(scoped.namespace, namespaceFromRequest(request, url)),
+      authenticatedNamespace: scoped.namespace,
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
   }
@@ -1366,6 +1564,16 @@ function strictEnvelopeWithPrincipal(
     namespace,
     timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   };
+}
+
+/** A producer's source is evidence identity, independent of its authenticated namespace. */
+function evidenceEnvelopeWithPrincipal(
+  body: Record<string, unknown>,
+  principal: AuthPrincipal
+): Record<string, unknown> {
+  const { source, ...envelope } = body;
+  const scopedPrincipal = { ...principal, namespace: principal.authenticatedNamespace ?? principal.namespace };
+  return { ...strictEnvelopeWithPrincipal(envelope, scopedPrincipal), source };
 }
 
 function parseV2OpenSessionRequest(value: Record<string, unknown>): SessionOpenRequest {

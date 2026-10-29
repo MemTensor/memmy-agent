@@ -9,11 +9,14 @@ import type {
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
+  SourceTurnCompleteInput,
+  SourceTurnCompleteOutput,
   EnqueueImportSummariesOutput,
   GetMemoryOutput,
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryTokenBudgetDto,
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
@@ -40,9 +43,25 @@ export interface MemoryRequestContext {
   userId?: string;
 }
 
+export interface ApproveObservedSkillOutput {
+  id: string;
+  status: "activated";
+  serverTime: string;
+}
+
+export interface UpdateObservedSkillInput {
+  body: string;
+  expectedVersion: number;
+}
+
+export interface UpdateObservedSkillOutput extends ApproveObservedSkillOutput {
+  version: number;
+}
+
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
   exportBundle?(): Promise<Record<string, unknown>>;
   clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 
@@ -52,10 +71,14 @@ export interface MemoryClient {
   startTurn(input: StartTurnInput, context?: MemoryRequestContext): Promise<StartTurnOutput>;
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
+  completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
+
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
+  approveObservedSkill(memoryId: string, context?: MemoryRequestContext): Promise<ApproveObservedSkillOutput>;
+  updateObservedSkill(memoryId: string, input: UpdateObservedSkillInput, context?: MemoryRequestContext): Promise<UpdateObservedSkillOutput>;
   recallEvidence(queryId: string, context?: MemoryRequestContext): Promise<RecallEvidenceOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;

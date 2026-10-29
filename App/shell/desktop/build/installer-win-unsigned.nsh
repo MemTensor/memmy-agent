@@ -2,6 +2,7 @@
 !include "getProcessInfo.nsh"
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
+!include "WinMessages.nsh"
 
 !ifndef MEMMY_WM_SETTINGCHANGE
   !define MEMMY_WM_SETTINGCHANGE 0x001A
@@ -99,6 +100,12 @@ Var pid
   Var MemmyMigrationLockPath
   Var MemmyMigrationLogPath
   Var MemmyInstallerPid
+  Var MemmyInstallNextButton
+  Var MemmyInstallNextText
+  Var MemmyLaunchMethod
+  Var MemmyLaunchResult
+  Var MemmyLaunchStartTick
+  Var MemmyLaunchElapsedMs
 
   ; Completed external-v1 installations can use electron-builder's standard NSIS upgrade.
   ; Legacy or uncertain layouts still relay through a copy outside $INSTDIR so old install-local
@@ -117,6 +124,7 @@ Var pid
     ReadRegStr $MemmyPreviousInstalledVersion HKCU "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
     Call MemmyRelayLegacyUpgrade
     StrCmp $MemmyIsRelayedUpgrade "1" memmy_custom_init_done
+    Call MemmyShowPreviousInstallDirectoryNotice
     ${If} ${Silent}
       Call MemmyValidateSelectedDirectories
       Pop $0
@@ -158,7 +166,45 @@ Var pid
       ${else}
         StrCpy $1 ""
       ${endif}
-      ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+
+      ; The finish-page leave callback runs before the wizard closes. A visible disabled
+      ; Finish button acknowledges the first click while Windows resolves the shortcut.
+      GetDlgItem $2 $HWNDPARENT 1
+      StrCpy $3 "Starting Memmy..."
+      StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 +2
+      StrCpy $3 "启动中"
+      SendMessage $2 ${WM_SETTEXT} 0 "STR:$3"
+      EnableWindow $2 0
+      StrCpy $0 $HWNDPARENT
+      System::Call 'user32::RedrawWindow(i r0, i 0, i 0, i 0x181)'
+
+      System::Call 'kernel32::GetTickCount() i.r2'
+      StrCpy $MemmyLaunchStartTick $2
+      ; A normal per-user install already has the user's token. Preserve the
+      ; de-elevating plug-in only when Setup was explicitly started as admin.
+      ${If} ${UAC_IsAdmin}
+        StrCpy $MemmyLaunchMethod "StdUtils.ExecShellAsUser"
+        ${StdUtils.ExecShellAsUser} $MemmyLaunchResult "$launchLink" "open" "$1"
+      ${Else}
+        StrCpy $MemmyLaunchMethod "ExecShell"
+        StrCpy $MemmyLaunchResult "error"
+        ClearErrors
+        ExecShell "open" "$launchLink" "$1"
+        IfErrors +2
+        StrCpy $MemmyLaunchResult "ok"
+      ${EndIf}
+      System::Call 'kernel32::GetTickCount() i.r2'
+      IntOp $MemmyLaunchElapsedMs $2 - $MemmyLaunchStartTick
+      Call MemmyLogLaunchResult
+
+      StrCmp $MemmyLaunchResult "ok" memmy_finish_launch_done
+      StrCmp $MemmyLaunchResult "fallback" memmy_finish_launch_done
+      StrCpy $3 "Memmy was installed, but Setup encountered a launch problem ($MemmyLaunchResult). Try opening Memmy from the Start menu."
+      StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 +2
+      StrCpy $3 "Memmy 已安装，但安装程序启动时遇到问题（$MemmyLaunchResult）。请尝试从开始菜单打开 Memmy。"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$3"
+
+      memmy_finish_launch_done:
     FunctionEnd
 
     !define MUI_PAGE_CUSTOMFUNCTION_PRE MemmySkipRelayedFinishPage
@@ -213,6 +259,21 @@ Var pid
 !endif
 
 !ifndef BUILD_UNINSTALLER
+Function MemmyLogLaunchResult
+  ; The Finish page closes immediately after this callback, so keep its result
+  ; in a small per-user log instead of relying on the hidden NSIS details view.
+  DetailPrint "Memmy launch: method=$MemmyLaunchMethod result=$MemmyLaunchResult elapsedMs=$MemmyLaunchElapsedMs"
+  CreateDirectory "$LOCALAPPDATA\Memmy\upgrade-logs"
+  ClearErrors
+  FileOpen $4 "$LOCALAPPDATA\Memmy\upgrade-logs\installer-launch.log" a
+  IfErrors memmy_launch_log_done
+  ${GetTime} "" "L" $5 $6 $7 $8 $9 $R0 $R1
+  FileWrite $4 "$5-$6-$7 $8:$9:$R0 version=${VERSION} method=$MemmyLaunchMethod result=$MemmyLaunchResult elapsedMs=$MemmyLaunchElapsedMs$\r$\n"
+  FileClose $4
+
+  memmy_launch_log_done:
+FunctionEnd
+
 Function MemmyNormalizeInstallDirectory
   ${GetFileName} "$INSTDIR" $R4
   StrCmp $R4 "${APP_FILENAME}" memmy_normalize_install_done
@@ -253,6 +314,22 @@ Function MemmyResolveMigrationPaths
     StrCpy $MemmyDirectSourceDataPath "$MemmyPreviousInstallDir\data"
     StrCpy $MemmyDirectSourceInstallDir "$MemmyPreviousInstallDir"
     StrCpy $MemmyDirectSourceAuthority "current-install-authority"
+FunctionEnd
+
+Function MemmyShowPreviousInstallDirectoryNotice
+  StrCmp $MemmyPreviousInstallDir "" memmy_previous_notice_done
+  ${If} ${Silent}
+    Goto memmy_previous_notice_done
+  ${EndIf}
+
+  StrCpy $R8 "Memmy is already installed at $\"$MemmyPreviousInstallDir$\".$\r$\nUse this directory to install the update. If you want to move Memmy, manually migrate your files before installing in another directory."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_previous_notice_show
+  StrCpy $R8 "Memmy 之前安装在“$MemmyPreviousInstallDir”。$\r$\n请使用此目录安装更新；如果要更换目录，请先手动迁移 Memmy 文件。"
+
+  memmy_previous_notice_show:
+    MessageBox MB_OK|MB_ICONINFORMATION "$R8"
+
+  memmy_previous_notice_done:
 FunctionEnd
 
 ; Input: $R0 is the exact directory to validate. Output: pushes "1" when
@@ -328,8 +405,57 @@ FunctionEnd
 ; installation-drive runtime folder. Output: pushes "1" on success, else "0".
 Function MemmyValidateSelectedDirectories
   Call MemmyNormalizeInstallDirectory
-  Call MemmyResolveMigrationPaths
 
+  StrCmp $MemmyPreviousInstallDir "" memmy_validate_resolve_paths
+  GetFullPathName $R6 "$INSTDIR"
+  GetFullPathName $R7 "$MemmyPreviousInstallDir"
+  StrCmp $R6 $R7 memmy_validate_resolve_paths
+  StrCpy $R8 "Memmy is already installed at $\"$MemmyPreviousInstallDir$\". Choose that directory to continue. If you want to move Memmy, manually migrate your files before installing in another directory."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_previous_directory_failed
+  StrCpy $R8 "Memmy 之前安装在“$MemmyPreviousInstallDir”。请返回并选择此目录继续安装；如果要更换目录，请先手动迁移 Memmy 文件。"
+  Goto memmy_validate_previous_directory_failed
+
+  memmy_validate_previous_directory_failed:
+    Goto memmy_validate_failed
+
+  memmy_validate_resolve_paths:
+  Call MemmyResolveMigrationPaths
+  ; The ownership helper itself returns immediately for C:, where runtime data
+  ; lives under this user's profile. Avoid starting a second PowerShell process
+  ; for that exact case; other drives still get the full ownership check.
+  ${GetRoot} "$MemmyTargetRuntimeHomePath" $R0
+  StrCpy $R1 $R0 1
+  StrCmp $R1 "C" memmy_validate_ownership_succeeded
+  StrCmp $R1 "c" memmy_validate_ownership_succeeded
+  Call MemmyExtractDataMigrationScript
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\MemmyDataMigration\MemmyWindowsRuntimeOwnership.ps1" -RuntimeHomePath "$MemmyTargetRuntimeHomePath"'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" memmy_validate_ownership_succeeded
+  ${If} ${Silent}
+    Goto memmy_validate_ownership_denied
+  ${EndIf}
+  StrCpy $R8 "Cannot verify that this drive's Memmy data belongs to your Windows account. Choose C: for a per-user installation, or a separate drive. Another folder on this same drive cannot isolate the data.$\r$\n$\r$\nI understand the risk and still want to install on this drive."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_ownership_confirm
+  StrCpy $R8 "无法确认此盘的 Memmy 数据属于当前 Windows 账户。请选择 C 盘按用户安装，或使用独立盘；选择同一盘上的其他文件夹无法隔离数据。$\r$\n$\r$\n我确认风险，仍要继续安装到该盘。"
+
+  memmy_validate_ownership_confirm:
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$R8" IDYES memmy_accept_drive_risk
+    Goto memmy_validate_failed
+
+  memmy_accept_drive_risk:
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\MemmyDataMigration\MemmyWindowsRuntimeOwnership.ps1" -RuntimeHomePath "$MemmyTargetRuntimeHomePath" -AcceptDriveRisk'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" memmy_validate_ownership_succeeded
+
+  memmy_validate_ownership_denied:
+    StrCpy $R8 "Cannot verify that this drive's Memmy data belongs to your Windows account. Choose C: for a per-user installation, or a separate drive. Another folder on this same drive cannot isolate the data."
+    StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_failed
+    StrCpy $R8 "无法确认此盘的 Memmy 数据属于当前 Windows 账户。请选择 C 盘按用户安装，或使用独立盘；选择同一盘上的其他文件夹无法隔离数据。"
+    Goto memmy_validate_failed
+
+  memmy_validate_ownership_succeeded:
   StrCpy $R0 "$INSTDIR"
   Call MemmyProbeWritableDirectory
   Pop $0
@@ -372,6 +498,7 @@ Function MemmyExtractDataMigrationScript
   CreateDirectory "$PLUGINSDIR\MemmyDataMigration"
   SetOutPath "$PLUGINSDIR\MemmyDataMigration"
   File /oname=MemmyWindowsDataMigration.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsDataMigration.ps1"
+  File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
   StrCpy $MemmyMigrationScriptPath "$PLUGINSDIR\MemmyDataMigration\MemmyWindowsDataMigration.ps1"
 FunctionEnd
 
@@ -380,6 +507,7 @@ Function MemmyExtractStandardUpgradeCheckScript
   CreateDirectory "$PLUGINSDIR\MemmyStandardUpgradeCheck"
   SetOutPath "$PLUGINSDIR\MemmyStandardUpgradeCheck"
   File /oname=MemmyWindowsStandardUpgradeCheck.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsStandardUpgradeCheck.ps1"
+  File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
   StrCpy $MemmyStandardUpgradeCheckScriptPath "$PLUGINSDIR\MemmyStandardUpgradeCheck\MemmyWindowsStandardUpgradeCheck.ps1"
 FunctionEnd
 
@@ -458,16 +586,16 @@ Function MemmyPrepareDirectDataMigration
     Pop $0
     Pop $1
     StrCmp $0 "0" memmy_direct_prepare_succeeded
-    DetailPrint "Memmy data migration was skipped after a safe rollback; installation will continue."
-    RMDir /r "$MemmyMigrationLockPath"
-    Goto memmy_direct_prepare_skipped
+    StrCpy $R8 "Memmy data migration could not be prepared. The existing data was left in place; close Memmy and retry the upgrade. Installation will not continue."
+    DetailPrint "$R8"
+    Goto memmy_direct_prepare_failed
 
   memmy_direct_prepare_failed:
-    DetailPrint "Memmy data migration helper is unavailable; installation will continue without automatic migration."
+    StrCpy $R8 "Memmy data migration helper is unavailable. The existing data was left in place; retry the upgrade after repairing the installation. Installation will not continue."
+    DetailPrint "$R8"
 
-  memmy_direct_prepare_skipped:
     StrCpy $MemmyDirectMigrationPrepared "0"
-    Push "1"
+    Push "0"
     Return
 
   memmy_direct_prepare_succeeded:
@@ -542,12 +670,35 @@ Function MemmyOnUserAbort
   Call MemmyRecoverDirectDataMigration
 FunctionEnd
 
+Function MemmyShowInstallCheckingFeedback
+  GetDlgItem $MemmyInstallNextButton $HWNDPARENT 1
+  StrCmp $MemmyInstallNextButton 0 memmy_install_feedback_done
+  ${NSD_GetText} $MemmyInstallNextButton $MemmyInstallNextText
+  StrCpy $0 "Checking..."
+  StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 +2
+  StrCpy $0 "检查中"
+  SendMessage $MemmyInstallNextButton ${WM_SETTEXT} 0 "STR:$0"
+  EnableWindow $MemmyInstallNextButton 0
+  ; Paint the wizard and its child controls before synchronous preflight work.
+  StrCpy $0 $HWNDPARENT
+  System::Call 'user32::RedrawWindow(i r0, i 0, i 0, i 0x181)'
+
+  memmy_install_feedback_done:
+FunctionEnd
+
+Function MemmyRestoreInstallButton
+  StrCmp $MemmyInstallNextButton 0 memmy_restore_install_done
+  SendMessage $MemmyInstallNextButton ${WM_SETTEXT} 0 "STR:$MemmyInstallNextText"
+  EnableWindow $MemmyInstallNextButton 1
+
+  memmy_restore_install_done:
+FunctionEnd
+
 Function MemmyValidateInstallPage
-  GetDlgItem $0 $HWNDPARENT 1
-  EnableWindow $0 1
   ${If} ${Silent}
     Abort
   ${EndIf}
+  Call MemmyShowInstallCheckingFeedback
   StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_validate_page_direct
   Call MemmyValidateSelectedDirectories
   Pop $0
@@ -557,7 +708,7 @@ Function MemmyValidateInstallPage
     GetFullPathName $1 "$INSTDIR"
     GetFullPathName $2 "$MemmyUpgradeTargetInstallDir"
     StrCmp $1 $2 0 memmy_validate_page_relayed_target_failed
-    Abort
+    Goto memmy_validate_page_continue
 
   memmy_validate_page_relayed_target_failed:
     StrCpy $R8 "The relayed upgrade target changed after compatibility migration started. Go back and select $\"$MemmyUpgradeTargetInstallDir$\"."
@@ -572,13 +723,20 @@ Function MemmyValidateInstallPage
     StrCpy $MemmyFinalDirectoryReady "1"
     Call MemmyRelayLegacyUpgrade
     StrCmp $MemmyUpgradeRoute "blocked" memmy_validate_page_show_error
+    Goto memmy_validate_page_continue
+
+  memmy_validate_page_continue:
+    Call MemmyRestoreInstallButton
     Abort
 
   memmy_validate_page_show_error:
+    Call MemmyRestoreInstallButton
     nsDialogs::Create 1018
     Pop $2
     StrCmp $2 error 0 memmy_validate_page_show
-    Abort
+    ; A failed error page must not skip the directory check and install anyway.
+    SetErrorLevel 5
+    Quit
 
   memmy_validate_page_show:
     ${NSD_CreateLabel} 0 0 100% 75u "$R8"
@@ -658,6 +816,7 @@ Function MemmyRelayLegacyUpgrade
     IfErrors memmy_relay_failed
     IfFileExists "$R1\MemmyWindowsUpgradeCleanup.ps1" 0 memmy_relay_failed
     File /oname=MemmyWindowsDataMigration.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsDataMigration.ps1"
+  File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
     IfErrors memmy_relay_failed
     IfFileExists "$R1\MemmyWindowsDataMigration.ps1" 0 memmy_relay_failed
 
@@ -826,6 +985,7 @@ Function MemmyInstallLaunchProxy
   File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\MemmyUpdatePrompt.ps1"
   File /oname=MemmyWindowsUpgradeRecovery.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsUpgradeRecovery.ps1"
   File /oname=MemmyWindowsDataMigration.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsDataMigration.ps1"
+  File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
 
   FileOpen $1 "$0\MemmyLauncher.vbs" w
   FileWrite $1 "Set shell = CreateObject($\"WScript.Shell$\")$\r$\n"
@@ -854,6 +1014,11 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "If fso.FolderExists(relayLockPath) Then$\r$\n"
   FileWrite $1 "  lockPath = relayLockPath$\r$\n"
+  FileWrite $1 "End If$\r$\n"
+  ; A cancelled direct upgrade can leave the install-local marker lock behind. Run the
+  ; same age/process-aware recovery used for relay locks before treating it as an active lock.
+  FileWrite $1 "If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
   FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"

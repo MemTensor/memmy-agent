@@ -84,6 +84,7 @@ export type AppAction =
   | { type: "bootstrap/loaded"; bootstrap: AppBootstrapResponse; initialPath: AppRoutePath }
   | { type: "events/statusChanged"; status: EventConnectionStatus }
   | { type: "navigation/changed"; path: AppRoutePath }
+  | { type: "window/visibilityChanged"; visible: boolean }
   | { type: "invitationToast/shown"; id: number; kind: InvitationToastKind }
   | { type: "invitationToast/cleared"; id: number }
   | { type: "settings/updated"; settings: Partial<AppSettingsDto> }
@@ -96,6 +97,8 @@ export type AppAction =
   | { type: "agentSources/error"; message: string }
   | { type: "agentSources/scanStarted"; sourceId: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
+  | { type: "agentSources/scanCancelRequested"; jobId: string }
+  | { type: "agentSources/scanCancelFailed"; message: string }
   | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
   | { type: "agentSources/scanCompletionExpired"; jobId: string }
   | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
@@ -130,6 +133,10 @@ export const appActions = {
   /** Handles navigate. */
   navigate(path: AppRoutePath): AppAction {
     return { type: "navigation/changed", path };
+  },
+
+  windowVisibilityChanged(visible: boolean): AppAction {
+    return { type: "window/visibilityChanged", visible };
   },
 
   showInvitationToast(kind: InvitationToastKind): AppAction {
@@ -188,6 +195,16 @@ export const appActions = {
   /** Handles agent source scan progress received. */
   agentSourceScanProgressReceived(progress: AgentSourceScanProgress): AppAction {
     return { type: "agentSources/scanProgress", progress };
+  },
+
+  /** Marks a scan as cancelling so late progress cannot restore the running card. */
+  agentSourceScanCancelRequested(jobId: string): AppAction {
+    return { type: "agentSources/scanCancelRequested", jobId };
+  },
+
+  /** Restores the scan controls after a cancel request fails. */
+  agentSourceScanCancelFailed(message: string): AppAction {
+    return { type: "agentSources/scanCancelFailed", message };
   },
 
   /** Handles agent source scan completed. */
@@ -260,6 +277,14 @@ export const agentActions = {
 
   pendingModelPresetCleared(scopeKey: string): AppAction {
     return { type: "agent/pendingModelPresetCleared", scopeKey };
+  },
+
+  thinkingToggled(scopeKey: string, enabled: boolean): AppAction {
+    return { type: "agent/thinkingToggled", scopeKey, enabled };
+  },
+
+  thinkingLevelChanged(scopeKey: string, level: string): AppAction {
+    return { type: "agent/thinkingLevelChanged", scopeKey, level };
   },
 
   modelSelectionRequestStarted(
@@ -394,7 +419,11 @@ export const agentActions = {
     return { type: "agent/transientSendFailed", chatId };
   },
 
-  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }): AppAction {
+  optimisticMessageRejected(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/optimisticMessageRejected", chatId, clientRequestId };
+  },
+
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string; queueIfBusy?: boolean }): AppAction {
     return { type: "agent/userMessageQueued", ...input };
   },
 

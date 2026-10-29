@@ -85,7 +85,9 @@ export function createCursorSourceAdapter(deps: CreateCursorSourceAdapterDeps = 
         });
 
         for await (const rawMessage of streamConversationWindow(
-          options.fullHistory ? streamCursorVscdb(target.stateDbPath) : readCursorVscdb(target.stateDbPath),
+          options.fullHistory
+            ? streamCursorVscdb(target.stateDbPath, options.signal)
+            : readCursorVscdb(target.stateDbPath, options.signal),
           options.since,
           options.signal,
           remainingMessageCapacity(options.maxMessages, emittedMessages),
@@ -175,6 +177,7 @@ function toConversationMessage(
     createdAt: rawMessage.createdAt,
     workspacePath: target.workspacePath,
     gitRoot: target.gitRoot,
+    ordinal: rawMessage.ordinal,
     rawMeta: Object.freeze({
       ...rawMessage.rawMeta,
       cursorStorageHash: target.storageHash

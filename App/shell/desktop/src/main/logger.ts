@@ -1,5 +1,6 @@
 import { app } from "electron";
 import { join } from "node:path";
+import { stdout, stderr } from "node:process";
 import log from "electron-log/main";
 import {
   DEFAULT_LOG_LEVEL,
@@ -14,6 +15,19 @@ const MAX_LOG_SIZE = 5 * 1024 * 1024;
 
 const MAX_LOG_FILES = 5;
 
+let consoleOutputBroken = false;
+let consoleErrorHandlersInstalled = false;
+
+function handleConsoleError(error: NodeJS.ErrnoException): void {
+  if (error.code !== "EPIPE") {
+    throw error;
+  }
+  // A launcher/terminal can close its pipe while the desktop keeps running.
+  // Do not log this failure through the failed transport or re-enable it later.
+  consoleOutputBroken = true;
+  log.transports.console.level = false;
+}
+
 export function developerSettingsPath(): string {
   return join(app.getPath("userData"), "developer-settings.json");
 }
@@ -23,6 +37,11 @@ function mainLogPath(): string {
 }
 
 export function initLogger(): void {
+  if (!consoleErrorHandlersInstalled) {
+    stdout.on("error", handleConsoleError);
+    stderr.on("error", handleConsoleError);
+    consoleErrorHandlersInstalled = true;
+  }
   log.initialize();
   log.transports.file.resolvePathFn = () => mainLogPath();
   log.transports.file.maxSize = MAX_LOG_SIZE;
@@ -32,10 +51,15 @@ export function initLogger(): void {
   applyLogLevel(getCurrentLogLevel());
 }
 
+/** Persist process lifecycle metadata even when the launcher has no console transport. */
+export function writeProcessDiagnostic(message: string): void {
+  log.error(message);
+}
+
 export function applyLogLevel(level: LogLevel): void {
   const normalized = parseLogLevel(level);
   log.transports.file.level = normalized;
-  log.transports.console.level = normalized;
+  log.transports.console.level = consoleOutputBroken ? false : normalized;
 }
 
 export function getCurrentLogLevel(): LogLevel {

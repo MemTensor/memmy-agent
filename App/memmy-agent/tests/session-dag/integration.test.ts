@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cmdHistoryDag } from "../../src/command/builtin.js";
 import { CommandContext } from "../../src/command/router.js";
 import { AgentLoop } from "../../src/core/agent-runtime/loop.js";
+import { Config } from "../../src/config/schema.js";
 import { Consolidator, MemoryStore } from "../../src/core/agent-runtime/memory.js";
 import { InboundMessage } from "../../src/core/runtime-messages/events.js";
 import { Session, SessionManager } from "../../src/core/session/manager.js";
@@ -165,6 +166,7 @@ describe("Session DAG integration", () => {
       model: "test-model",
       contextWindowTokens: 0,
       sessionDagQueue: queue as any,
+      config: new Config({ tools: { mcpServers: {} }, memmyMemory: { enabled: false } }),
     });
 
     await loop.processDirect("hello", { sessionKey: "cli:dag-loop" });
@@ -380,9 +382,109 @@ describe("Session DAG integration", () => {
     }
   });
 
+  it("tries the next processed turn when the first DAG boundary leaves no snapshot budget", async () => {
+    const root = tmpRoot();
+    const sessionKey = "cli:dag-later-boundary";
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const session = new Session({
+      key: sessionKey,
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+      ],
+    });
+    sessions.save(session);
+    const storePath = sessionDagDbPath(sessionKey, { MEMMY_AGENT_SESSION_DAG_DIR: path.join(root, "dag") });
+    const seedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
+    seedCompactionGraph(seedStore, 4);
+    seedStore.close();
+    const consolidator = new Consolidator({
+      store: new MemoryStore(root),
+      provider: provider(),
+      model: "test-model",
+      sessions,
+      contextWindowTokens: 10_000,
+      maxCompletionTokens: 100,
+      consolidationRatio: 0.5,
+      buildMessages: ({ history }: any) => history,
+      getToolDefinitions: () => [],
+      summaryMode: "dag",
+      dagQueue: { waitUntilProcessed: vi.fn(async () => true) } as any,
+      createDagStore: (key) => new SessionDagStore({ sessionKey: key, dbPath: storePath }),
+    });
+
+    const result = await consolidator.maybeConsolidateByTokens(session, {
+      replayMaxMessages: 4,
+      inputTokenBudget: 1_000,
+      estimateProjectionTokens: (_candidateSession, projection) => {
+        if (projection.visibleMessageStart === 0) return [100, "live"];
+        if (projection.summaryOverride == null) {
+          return [projection.visibleMessageStart === 2 ? 500 : 200, "live"];
+        }
+        return [400, "live"];
+      },
+    });
+
+    expect(result).toMatchObject({ started: true, changed: true, error: null });
+    expect(session.lastConsolidated).toBe(4);
+    expect(session.metadata.lastSummary).toMatchObject({ mode: "dag" });
+  });
+
+  it("uses remaining model input budget when retained context exceeds the compaction target", async () => {
+    const root = tmpRoot();
+    const sessionKey = "cli:dag-large-retained-context";
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const session = new Session({
+      key: sessionKey,
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    });
+    sessions.save(session);
+    const storePath = sessionDagDbPath(sessionKey, { MEMMY_AGENT_SESSION_DAG_DIR: path.join(root, "dag") });
+    const seedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
+    seedCompactionGraph(seedStore, session.messages.length);
+    seedStore.close();
+    const consolidator = new Consolidator({
+      store: new MemoryStore(root),
+      provider: provider(),
+      model: "test-model",
+      sessions,
+      contextWindowTokens: 10_000,
+      maxCompletionTokens: 100,
+      consolidationRatio: 0.5,
+      buildMessages: ({ history }: any) => history,
+      getToolDefinitions: () => [],
+      summaryMode: "dag",
+      dagQueue: { waitUntilProcessed: vi.fn(async () => true) } as any,
+      createDagStore: (key) => new SessionDagStore({ sessionKey: key, dbPath: storePath }),
+    });
+
+    const result = await consolidator.maybeConsolidateByTokens(session, {
+      replayMaxMessages: 2,
+      inputTokenBudget: 1_000,
+      estimateProjectionTokens: (_candidateSession, projection) => {
+        if (projection.visibleMessageStart === 0) return [1_000, "live"];
+        if (projection.summaryOverride == null) return [650, "live"];
+        return [800, "live"];
+      },
+    });
+
+    expect(result).toMatchObject({ started: true, changed: true, error: null });
+    expect(session.lastConsolidated).toBe(2);
+    expect(session.metadata.lastSummary).toMatchObject({ mode: "dag" });
+  });
+
   it.each([
-    { basePromptTokens: 500, expectedError: "Session DAG snapshot has no remaining token budget" },
-    { basePromptTokens: 490, expectedError: "Session DAG active path exceeds the remaining snapshot token budget" },
+    { basePromptTokens: 1_000, expectedError: "Session DAG snapshot has no remaining token budget" },
+    { basePromptTokens: 990, expectedError: "Session DAG active path exceeds the remaining snapshot token budget" },
   ])("does not commit DAG state when the retained projection exhausts the snapshot budget", async ({
     basePromptTokens,
     expectedError,

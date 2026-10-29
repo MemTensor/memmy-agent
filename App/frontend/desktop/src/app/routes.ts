@@ -17,6 +17,7 @@ export type AppRoutePath =
   | "/pet"
   | "/tools"
   | "/memory"
+  | "/knowledge"
   | "/memory-sources"
   | "/settings";
 
@@ -53,6 +54,7 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/pet": { path: "/pet", navKey: "nav.pet", requiresBootstrap: true },
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
+  "/knowledge": { path: "/knowledge", navKey: "nav.knowledge", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }
 };
@@ -449,8 +451,10 @@ export function resolveGiftTokenUsage(usedTokens: number, totalTokens: number, r
   return { usagePercent, isTokenLow };
 }
 
-// Current step of the home-page Deferred Guidance Sequence (DGS): switching pages triggers a reload that clears component state, so it's persisted to sessionStorage across reloads.
+// Keep the full product guide's progress across window reloads and app restarts.
 const DEFERRED_GUIDANCE_STEP_STORAGE_KEY = "memmy.deferredGuidanceStep";
+export const GUIDANCE_PROGRESS_STORAGE_KEY = "memmy.guidanceProgress.v1";
+export const GUIDANCE_PROGRESS_EVENT = "memmy:guidance-progress-changed";
 
 /**
  * Deferred guidance sequence step.
@@ -459,15 +463,29 @@ const DEFERRED_GUIDANCE_STEP_STORAGE_KEY = "memmy.deferredGuidanceStep";
  */
 export type DeferredGuidanceStep = "armed" | "improvement" | "product_tour" | "nickname";
 
-/**
- * Reads the current step of the deferred guidance sequence.
- *
- * @param storage sessionStorage (persists across window reloads, cleared on app restart).
- * @returns the current step; null if not armed or already finished.
- */
-export function readDeferredGuidanceStep(storage: Storage | undefined): DeferredGuidanceStep | null {
-  const value = storage?.getItem(DEFERRED_GUIDANCE_STEP_STORAGE_KEY);
+function guidancePersistentStorage(storage: Storage | undefined): Storage | undefined {
+  return typeof window !== "undefined" && storage === window.sessionStorage ? window.localStorage : undefined;
+}
+
+function parseDeferredGuidanceStep(value: string | null | undefined): DeferredGuidanceStep | null {
   return value === "armed" || value === "improvement" || value === "product_tour" || value === "nickname" ? value : null;
+}
+
+function notifyGuidanceProgressChanged(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(GUIDANCE_PROGRESS_EVENT));
+}
+
+/** Reads shared progress across restarts, falling back to legacy session-only guidance. */
+export function readDeferredGuidanceStep(
+  storage: Storage | undefined,
+  persistentStorage = guidancePersistentStorage(storage),
+): DeferredGuidanceStep | null {
+  const progress = persistentStorage?.getItem(GUIDANCE_PROGRESS_STORAGE_KEY);
+  const step = parseDeferredGuidanceStep(progress);
+  if (step) return step;
+  // Shared completion also overrides another window's stale session copy.
+  if (progress === "completed" || readGuidanceCompleted(persistentStorage)) return null;
+  return parseDeferredGuidanceStep(storage?.getItem(DEFERRED_GUIDANCE_STEP_STORAGE_KEY));
 }
 
 /**
@@ -476,8 +494,14 @@ export function readDeferredGuidanceStep(storage: Storage | undefined): Deferred
  * @param storage sessionStorage.
  * @param step target step.
  */
-export function writeDeferredGuidanceStep(storage: Storage | undefined, step: DeferredGuidanceStep): void {
+export function writeDeferredGuidanceStep(
+  storage: Storage | undefined,
+  step: DeferredGuidanceStep,
+  persistentStorage = guidancePersistentStorage(storage),
+): void {
   storage?.setItem(DEFERRED_GUIDANCE_STEP_STORAGE_KEY, step);
+  persistentStorage?.setItem(GUIDANCE_PROGRESS_STORAGE_KEY, step);
+  notifyGuidanceProgressChanged();
 }
 
 /**
@@ -485,8 +509,13 @@ export function writeDeferredGuidanceStep(storage: Storage | undefined, step: De
  *
  * @param storage sessionStorage.
  */
-export function clearDeferredGuidanceStep(storage: Storage | undefined): void {
+export function clearDeferredGuidanceStep(
+  storage: Storage | undefined,
+  persistentStorage = guidancePersistentStorage(storage),
+): void {
   storage?.removeItem(DEFERRED_GUIDANCE_STEP_STORAGE_KEY);
+  persistentStorage?.setItem(GUIDANCE_PROGRESS_STORAGE_KEY, "completed");
+  notifyGuidanceProgressChanged();
 }
 
 // Machine-level "guidance completed" marker: the full onboarding (scan permission -> improvement program -> product tour -> nickname)
@@ -512,6 +541,8 @@ export function readGuidanceCompleted(storage: Storage | undefined): boolean {
  */
 export function writeGuidanceCompleted(storage: Storage | undefined): void {
   storage?.setItem(GUIDANCE_COMPLETED_STORAGE_KEY, "1");
+  storage?.setItem(GUIDANCE_PROGRESS_STORAGE_KEY, "completed");
+  notifyGuidanceProgressChanged();
 }
 
 // Current product-tour step index: the tour overlay is mounted inside AppFrame, and advancing the tour to the tools step navigates to /tools, which remounts AppFrame

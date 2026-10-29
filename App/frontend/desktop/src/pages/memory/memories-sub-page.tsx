@@ -24,8 +24,9 @@ import {
 import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { MemoryAgentSourceTag } from "./memory-agent-source-tag.js";
 import { MemoryMarkdown } from "./memory-markdown.js";
+import { ObservedMemoryDetail, observationDisplayMetadata } from "./observed-memory-detail.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
-import { cleanMemoryBody, cleanMemoryText, displayMemoryTitle, drawerEyebrow, memoryDisplaySource } from "./memory-display.js";
+import { cleanMemoryBody, cleanMemoryText, displayMemoryTitle, drawerEyebrow, independentGeneratedTitle, isMemorySummaryWaiting, memoryDisplaySource, showsGeneratedSummaryRow, waitingPrimaryText } from "./memory-display.js";
 import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
@@ -63,6 +64,7 @@ export interface MemoriesSubPageProps {
   client: MemoryRuntimeClient | null;
   openRequest?: MemoryReferenceOpenRequest;
   onOpenSettings?: () => void;
+  onOpenHistorySource?: (historyId: string) => Promise<void>;
 }
 
 type ProcessingRetryFeedback =
@@ -351,7 +353,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     if (props.openRequest) {
       openDetailById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [props.openRequest?.requestId]);
 
   useEffect(() => {
@@ -370,6 +372,48 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     const interval = window.setInterval(() => void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined), MEMORIES_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [props.client, query, sourceAgent, page, t]);
+
+  useEffect(() => {
+    if (!props.client || detail?.status !== "ready") return;
+    const item = detail.data.item;
+    const processing = item.processing;
+    const processingActive = processing && processing.state !== "ready" && processing.state !== "ready_text_only"
+      && (processing.state !== "failed" || processing.autoRetryScheduled);
+    const pendingObservation = item.kind === "observed_activity" && observationDisplayMetadata(item).state === "pending"
+      && processing?.state !== "failed";
+    if (!processingActive && !pendingObservation) return;
+    const requestId = detailRequestIdRef.current;
+    let inFlight = false;
+    const interval = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void props.client!.getMemory(item.id).then((data) => {
+        if (requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
+      }).catch(() => undefined).finally(() => { inFlight = false; });
+    }, PROCESSING_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [props.client, detail]);
+
+  useEffect(() => {
+    if (!props.client || state.status !== "ready" || detail?.status !== "ready") return;
+    const current = detail.data.item;
+    const processing = current.processing;
+    // Active processing has its own fast poll. A finished/failed drawer still
+    // follows newer revisions seen by the normal list refresh (for example a
+    // changed History source or a retry started elsewhere).
+    if (processing && processing.state !== "ready" && processing.state !== "ready_text_only" && processing.state !== "failed") return;
+    const listed = state.data.items.find((item) => item.id === current.id);
+    if (!listed) return;
+    const newer = listed.version > current.version || Date.parse(listed.updatedAt) > Date.parse(current.updatedAt)
+      || (Date.parse(listed.processing?.updatedAt ?? "") || 0) > (Date.parse(processing?.updatedAt ?? "") || 0);
+    if (!newer) return;
+    const requestId = detailRequestIdRef.current;
+    let active = true;
+    void props.client.getMemory(current.id).then((data) => {
+      if (active && requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [props.client, state, detail]);
 
   return (
     <MemoriesSubPageView
@@ -395,6 +439,8 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onDeleteDetail={deleteMemoryDetail}
       onRetryProcessing={retryMemoryProcessing}
       onOpenSettings={props.onOpenSettings}
+      onOpenHistorySource={props.onOpenHistorySource}
+      onOpenSourceMemory={openDetailById}
       retryFeedback={retryFeedback}
       onCloseDetail={() => {
         detailRequestIdRef.current += 1;
@@ -420,6 +466,8 @@ export interface MemoriesSubPageViewProps {
   onDeleteDetail: (id: string) => Promise<void>;
   onRetryProcessing?: (id: string) => void | Promise<void>;
   onOpenSettings?: () => void;
+  onOpenHistorySource?: (historyId: string) => Promise<void>;
+  onOpenSourceMemory?: (memoryId: string) => void;
   retryFeedback?: ProcessingRetryFeedback;
   onCloseDetail: () => void;
   selectedMemoryId?: string | null;
@@ -474,6 +522,8 @@ export function MemoriesSubPageView(props: MemoriesSubPageViewProps) {
         onDelete={props.onDeleteDetail}
         onRetryProcessing={props.onRetryProcessing}
         onOpenSettings={props.onOpenSettings}
+        onOpenHistorySource={props.onOpenHistorySource}
+        onOpenSourceMemory={props.onOpenSourceMemory}
         retryFeedback={props.retryFeedback ?? null}
       />
     </section>
@@ -500,7 +550,15 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
         {visibleItems.length === 0 && <MemoryStateBox message={t("memory.memories.empty")} />}
         {visibleItems.map((item) => {
           const selected = props.selectedMemoryId === item.id || ("detail" in props.state && props.state.detail?.status === "ready" && props.state.detail.data.item.id === item.id);
+          const skippedObservation = item.kind === "observed_activity" && item.metadata?.observationStatus === "skipped";
           const processingStatus = memoryProcessingStatus(item);
+          const waiting = isMemorySummaryWaiting(item.processing);
+          const primaryText = waiting ? waitingPrimaryText(item) : displayMemoryTitle(item);
+          const summaryText = skippedObservation
+            ? cleanMemoryText(typeof item.metadata?.observationSkipReason === "string" ? item.metadata.observationSkipReason : item.summary)
+            : !waiting && showsGeneratedSummaryRow(item, waiting)
+              ? cleanMemoryText(item.summary)
+              : "";
           return (
             <div
               key={item.id}
@@ -517,14 +575,19 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
               className={`memory-card${selected ? " memory-card--selected" : ""}`}
             >
               <div className="memory-card__body">
-                <div className="memory-card__title">{displayMemoryTitle(item)}</div>
+                <div className="memory-card__title">{primaryText}</div>
+                {summaryText ? <div className="memory-card__summary">{summaryText}</div> : null}
                 <div className="memory-card__meta">
                   <MemoryAgentSourceTag sourceAgent={memoryDisplaySource(item)} label={t("memory.memories.source")} />
+                  {item.kind === "observed_activity" && <span className="memory-pill">{t("memory.memories.observedActivity")}</span>}
+                  {skippedObservation && <span className="memory-pill">{t("memory.memories.observationSkipped")}</span>}
                   <span>{formatDateTime(item.createdAt)}</span>
-                  <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>
+                  {item.kind !== "observed_activity" && <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>}
                   {processingStatus && (
                     <span className={`memory-pill memory-pill--processing${processingStatus === "failed" ? " memory-pill--failed" : ""}`}>
-                      {t(MEMORY_PROCESSING_STATUS_LABELS[processingStatus])}
+                      {t(item.kind === "observed_activity" && item.processing?.errorCode === "summary_model_unconfigured"
+                        && item.metadata?.observationStatus !== "processed" && item.metadata?.observationStatus !== "skipped"
+                        ? "memory.memories.observationWaitingForModel" : MEMORY_PROCESSING_STATUS_LABELS[processingStatus])}
                     </span>
                   )}
                   {item.metrics?.reflectionDone && (
@@ -560,6 +623,8 @@ function MemoryDetailPanel(props: {
   onDelete: (id: string) => Promise<void>;
   onRetryProcessing?: (id: string) => void | Promise<void>;
   onOpenSettings?: () => void;
+  onOpenHistorySource?: (historyId: string) => Promise<void>;
+  onOpenSourceMemory?: (memoryId: string) => void;
   retryFeedback: ProcessingRetryFeedback;
 }) {
   const { t } = useTranslation();
@@ -570,6 +635,12 @@ function MemoryDetailPanel(props: {
 
   const readyDetail = props.detail.status === "ready" ? props.detail.data : null;
   const eyebrow = readyDetail ? drawerEyebrow(readyDetail.item) : t("memory.memories.detailTitle");
+  const waiting = readyDetail ? isMemorySummaryWaiting(readyDetail.item.processing) : false;
+  const drawerTitle = readyDetail && (!waiting || readyDetail.item.kind === "observed_activity") && readyDetail.item.kind !== "span"
+    ? independentGeneratedTitle(readyDetail.item.kind === "observed_activity"
+      ? { ...readyDetail.item, generatedTitle: readyDetail.item.generatedTitle ?? readyDetail.item.title }
+      : readyDetail.item)
+    : undefined;
 
   return (
     <div className="memory-drawer-backdrop" onClick={props.onClose}>
@@ -577,12 +648,13 @@ function MemoryDetailPanel(props: {
         e.stopPropagation();
         props.onClose();
       }} />
-      <aside className="memory-drawer memory-drawer--entry" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title" onClick={(e) => e.stopPropagation()}>
+      <aside className="memory-drawer memory-drawer--entry" role="dialog" aria-modal="true" aria-labelledby={drawerTitle ? "memory-detail-heading" : "memory-detail-title"} onClick={(e) => e.stopPropagation()}>
         <header className="memory-drawer__header">
           <div>
             <div className="memory-drawer__identity">
               <span id="memory-detail-title" className="memory-drawer__eyebrow">{eyebrow}</span>
             </div>
+            {drawerTitle ? <h4 id="memory-detail-heading" className="memory-drawer__title">{drawerTitle}</h4> : null}
           </div>
           <button type="button" className="memory-drawer__close" onClick={props.onClose} aria-label={t("common.close")}>
             <X size={16} />
@@ -596,6 +668,8 @@ function MemoryDetailPanel(props: {
               detail={props.detail.data}
               onRetryProcessing={props.onRetryProcessing}
               onOpenSettings={props.onOpenSettings}
+              onOpenHistorySource={props.onOpenHistorySource}
+              onOpenSourceMemory={props.onOpenSourceMemory}
               retryFeedback={props.retryFeedback}
             />
           )}
@@ -616,13 +690,25 @@ function MemoryDetailBody(props: {
   detail: MemoryDetailOutput;
   onRetryProcessing?: (id: string) => void | Promise<void>;
   onOpenSettings?: () => void;
+  onOpenHistorySource?: (historyId: string) => Promise<void>;
+  onOpenSourceMemory?: (memoryId: string) => void;
   retryFeedback: ProcessingRetryFeedback;
 }) {
   const { t } = useTranslation();
   const detail = props.detail;
   const item = detail.item;
   const traceDetail = readTraceDetail(detail);
-  const summaryText = displayMemorySummaryText(item.summary, t);
+  const summaryText = displayMemorySummaryText(item.summary, t, item.processing);
+
+  if (item.kind === "observed_activity") {
+    return <ObservedMemoryDetail
+      key={item.id}
+      item={item}
+      onOpenHistorySource={props.onOpenHistorySource}
+      onOpenSourceMemory={props.onOpenSourceMemory}
+      processingNotice={<MemoryProcessingFailureCard item={item} onRetryProcessing={props.onRetryProcessing} onOpenSettings={props.onOpenSettings} retryFeedback={props.retryFeedback} />}
+    />;
+  }
 
   if (item.kind === "span") {
     const span = recordValue(recordValue(recordValue(item.metadata.properties).internal_info).span);
@@ -710,9 +796,13 @@ function MemoryProcessingFailureCard(props: {
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
   const retryError = feedback?.status === "error" ? feedback : null;
   const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
+  const settingsRequired = processing?.retryAction === "open_settings" && processing.state !== "ready" && processing.state !== "ready_text_only";
+  // Older memory services also flag a first attempt that is merely queued.
+  const autoRetryScheduled = Boolean(processing?.autoRetryScheduled && (processing.errorCode || processing.errorMessage));
   const processingRetryInProgress = Boolean(
     processing?.errorMessage &&
-    !processing.autoRetryScheduled &&
+    !settingsRequired &&
+    !autoRetryScheduled &&
     processing.state !== "failed" &&
     processing.state !== "ready" &&
     processing.state !== "ready_text_only"
@@ -721,7 +811,8 @@ function MemoryProcessingFailureCard(props: {
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
-    !processing?.autoRetryScheduled &&
+    !autoRetryScheduled &&
+    !settingsRequired &&
     feedback?.status !== "succeeded" &&
     feedback?.status !== "error"
   ) {
@@ -742,7 +833,9 @@ function MemoryProcessingFailureCard(props: {
       ? t("memory.memories.processing.retrying")
       : processing?.errorCode === "40309"
         ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
-        : processing?.autoRetryScheduled
+        : settingsRequired && processing?.state !== "failed"
+          ? t("memory.memories.processing.needsSettings")
+        : autoRetryScheduled
           ? t(ERROR_NOTICE_KEYS.memory.autoRetryScheduled)
           : t(ERROR_NOTICE_KEYS.memory.failed);
   return (
@@ -767,7 +860,7 @@ function MemoryProcessingFailureCard(props: {
         </ErrorNoticeDetail>
       ) : null}
       <div className="memory-processing-failure__actions">
-        {((processing?.state === "failed" && processing.retryAction === "open_settings") || processing?.errorCode === "40309") && props.onOpenSettings && !retryDisabled && (
+        {(settingsRequired || processing?.errorCode === "40309") && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
@@ -874,7 +967,7 @@ function TraceMemoryDetail(props: {
     : detail.steps.flatMap((step) => step.toolCalls);
   const turnEvents = buildTraceTurnEvents(detail, toolCalls);
   const hasTurnSteps = turnEvents.length > 0;
-  const summaryText = displayMemorySummaryText(detail.summary || props.item.summary, t);
+  const summaryText = displayMemorySummaryText(detail.summary || props.item.summary, t, props.item.processing);
 
   return (
     <>
@@ -1075,7 +1168,14 @@ function waitForProcessingPoll(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 500));
 }
 
-function displayMemorySummaryText(value: string | undefined | null, t: (key: MessageKey) => string): string {
+function displayMemorySummaryText(
+  value: string | undefined | null,
+  t: (key: MessageKey) => string,
+  processing?: MemoryProcessingRecord
+): string {
+  if (isMemorySummaryWaiting(processing)) {
+    return t(MEMORY_PROCESSING_STATUS_LABELS.summary);
+  }
   const cleaned = cleanMemoryText(value);
   const processingStatus = importProcessingSummaryStatus(cleaned);
   return processingStatus ? t(MEMORY_PROCESSING_STATUS_LABELS[processingStatus]) : cleaned;

@@ -44,7 +44,7 @@ describe("DeepSeek Harness source adapter", () => {
     const fixture = createFixture("session.jsonl.zstd");
     const incompleteFrame = zstdCompressSync(Buffer.from(JSON.stringify({
       type: "user/message",
-      seq: 4,
+      seq: 5,
       time: 1780404003000,
       data: {
         id: "incomplete-user",
@@ -81,6 +81,49 @@ describe("DeepSeek Harness source adapter", () => {
         workspacePath: fixture.workspacePath
       })
     ]);
+  });
+
+  it("discovers only the newest session generation in a directory", async () => {
+    const fixture = createFixture("session.jsonl");
+    writeFileSync(join(fixture.sessionFilePath.replace(/session\.jsonl$/u, "session.v1.jsonl")), "{}\n", "utf8");
+    writeFileSync(
+      join(fixture.sessionFilePath.replace(/session\.jsonl$/u, "session.v3.jsonl.zstd")),
+      zstdCompressSync(Buffer.from(JSON.stringify({
+        type: "session",
+        id: "dsh-session-1",
+        cwd: fixture.workspacePath
+      }) + "\n" + JSON.stringify({
+        type: "turn/start",
+        seq: 0,
+        time: 1780404000000,
+        data: { turn: 1 }
+      }) + "\n" + JSON.stringify({
+        type: "user/message",
+        seq: 1,
+        time: 1780404001000,
+        data: {
+          id: "user-v3",
+          role: "user",
+          source: { kind: "user" },
+          content: [{ type: "text", text: "from v3" }]
+        }
+      }) + "\n" + JSON.stringify({
+        type: "assistant/message",
+        seq: 2,
+        time: 1780404002000,
+        data: {
+          message: { id: "assistant-v3", role: "assistant", content: [{ type: "text", text: "v3 answer" }] }
+        }
+      }) + "\n" + JSON.stringify({
+        type: "turn/end",
+        seq: 3,
+        time: 1780404003000,
+        data: { turn: 1, reason: { kind: "completed" } }
+      }) + "\n"))
+    );
+    const adapter = createDeepseekHarnessSourceAdapter({ rootDirectory: fixture.rootDirectory });
+    const messages = await collect(adapter.scan({}));
+    expect(messages.map((message) => message.messageId)).toEqual(["user-v3", "assistant-v3"]);
   });
 
   it("does not detect a missing DeepSeek Harness home", async () => {
@@ -155,6 +198,12 @@ function createFixture(fileName: "session.jsonl" | "session.jsonl.zstd"): {
           content: [{ type: "text", text: "Done from DeepSeek Harness" }]
         }
       }
+    },
+    {
+      type: "turn/end",
+      seq: 4,
+      time: 1780404002500,
+      data: { turn: 1, reason: { kind: "completed" } }
     }
   ];
   const lines = rows.map((row) => JSON.stringify(row) + "\n");

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -107,5 +108,176 @@ describe.skipIf(process.platform !== "win32" && !hasPowerShell)("Windows session
     });
     expect(result.error).toBeUndefined();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(accepted ? 0 : 1);
+  });
+});
+
+
+// Execute the producer's actual inline JavaScript with controlled provider and
+// native-process boundaries. No fixture result is uploaded as provider evidence.
+const historyPath = resolve(import.meta.dirname, "../.github/workflows/windows-computer-history-validation.yml");
+const historySource = readFileSync(historyPath, "utf8");
+const historyWorkflow = YAML.parse(historySource);
+const historySteps = historyWorkflow.jobs.validate.steps as WorkflowStep[];
+const historyStep = (id: string) => historySteps.find(step => step.id === id)!;
+const candidateSha = "a".repeat(40);
+const callerSha = "b".repeat(40);
+const requiredWindowsSteps = ["source", "exact-head", "windows-os", "workspace-dependencies", "agent-dependencies",
+  "native-go", "computer-use-go", "source-build", "app-icons", "native-runtime", "history-contracts", "packaged-assets", "installer-boundary"];
+const passedWindowsSteps = () => Object.fromEntries(requiredWindowsSteps.map(id => [id, { outcome: "success", conclusion: "success" }]));
+
+function executeHistoryStep(id: string, overrides: Record<string, string> = {}, actualHead = candidateSha, platform = "win32", release = "10.0.26100", dirty = false) {
+  const writes = new Map<string, string>();
+  const env = {
+    INPUT_SOURCE_SHA: candidateSha, EVENT_NAME: "workflow_dispatch", EVENT_SHA: callerSha,
+    SOURCE_REPOSITORY: "MemTensor/memmy-agent", CANDIDATE_REPOSITORY: "MemTensor/memmy-agent",
+    CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/main-sync.yml@refs/heads/main",
+    CONTROLLER_WORKFLOW_SHA: callerSha, GITHUB_OUTPUT: "/output", RUNNER_TEMP: "/runner-temp",
+    EXPECTED_HEAD_SHA: candidateSha, SOURCE_MODE: "workflow_call", PROVIDER_RUN_ID: "12345", PROVIDER_RUN_ATTEMPT: "2",
+    VALIDATION_STEPS: JSON.stringify(passedWindowsSteps()), ...overrides,
+  };
+  const modules: Record<string, unknown> = {
+    "node:fs": {
+      appendFileSync: (file: string, value: string) => writes.set(file, (writes.get(file) ?? "") + value),
+      writeFileSync: (file: string, value: string) => writes.set(file, value), mkdirSync: () => {},
+    },
+    "node:path": { join: (...parts: string[]) => parts.join("/") },
+    "node:os": { platform: () => platform, release: () => release, arch: () => "x64" },
+    "node:child_process": { execFileSync: (command: string, args: string[]) => {
+      expect(command).toBe("git");
+      if (args[0] === "diff") { if (dirty) throw new Error("Tracked source changed"); return ""; }
+      expect(args).toEqual(["rev-parse", "HEAD"]); return actualHead + "\n";
+    } },
+  };
+  let error: unknown;
+  try { runInNewContext(historyStep(id).run!, { process: { env }, require: (name: string) => {
+    if (!(name in modules)) throw new Error(`Unexpected module ${name}`); return modules[name];
+  } }); } catch (caught) { error = caught; }
+  return { writes, error };
+}
+
+const receipts = (result: ReturnType<typeof executeHistoryStep>) => [...result.writes.entries()]
+  .filter(([file]) => file.endsWith("windows-provider-receipt.json"));
+
+describe("Windows History reusable provider source contract", () => {
+  it("keeps PR/manual entry points and adds a required exact-SHA reusable input", () => {
+    expect(Object.keys(historyWorkflow.on).sort()).toEqual(["pull_request", "workflow_call", "workflow_dispatch"]);
+    expect(historyWorkflow.on.workflow_call.inputs.source_sha).toMatchObject({ required: true, type: "string" });
+    expect(historyWorkflow.on.pull_request.paths).toContain("tests/windows-memory-workflow.test.ts");
+    expect(historyWorkflow.permissions).toEqual({ contents: "read" });
+    expect(historyWorkflow.jobs.validate.permissions).toBeUndefined();
+    expect(historySource).not.toMatch(/secrets\.|github\.token|pull_request_target|contents: write|actions: write/);
+    const checkout = historySteps.find(step => step.uses?.startsWith("actions/checkout@"))!;
+    expect(checkout.with).toMatchObject({ ref: "${{ steps.source.outputs.sha }}", "persist-credentials": false });
+    expect(historySteps.indexOf(historyStep("source"))).toBeLessThan(historySteps.indexOf(checkout));
+    expect(historySteps.indexOf(historyStep("exact-head"))).toBeGreaterThan(historySteps.indexOf(checkout));
+  });
+
+  it.each(["github-draft-release-v2.yml", "main-sync.yml", "main-sync-validation.yml"])("binds nested reusable %s to input SHA instead of caller github.sha", caller => {
+    const result = executeHistoryStep("source", { CONTROLLER_WORKFLOW_REF: `MemTensor/memmy-agent/.github/workflows/${caller}@refs/heads/main` });
+    expect(result.error).toBeUndefined();
+    expect(result.writes.get("/output")).toBe(`sha=${candidateSha}\nmode=workflow_call\nrepository=MemTensor/memmy-agent\n`);
+  });
+
+  it.each(["pull_request", "workflow_dispatch"])("preserves %s selected/merge SHA with no reusable input", event => {
+    const result = executeHistoryStep("source", { INPUT_SOURCE_SHA: "", EVENT_NAME: event, CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/windows-computer-history-validation.yml@refs/heads/main" });
+    expect(result.error).toBeUndefined();
+    expect(result.writes.get("/output")).toBe(`sha=${callerSha}\nmode=${event}\nrepository=MemTensor/memmy-agent\n`);
+  });
+
+  it.each(["a".repeat(39), "g".repeat(40), "refs/heads/main", candidateSha + "\n", "$(echo attack)"])("rejects invalid candidate %j before checkout", value => {
+    const result = executeHistoryStep("source", { INPUT_SOURCE_SHA: value });
+    expect(result.error).toBeDefined(); expect(result.writes.size).toBe(0);
+  });
+
+  it.each([
+    { SOURCE_REPOSITORY: "fork/memmy-agent" },
+    { CONTROLLER_WORKFLOW_REF: "fork/memmy-agent/.github/workflows/main-sync.yml@refs/heads/main" },
+    { CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/main-sync.yml@refs/heads/candidate" },
+    { CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/other.yml@refs/heads/main" },
+    { CONTROLLER_WORKFLOW_SHA: "short" },
+    { INPUT_SOURCE_SHA: "", EVENT_NAME: "workflow_run" },
+    { INPUT_SOURCE_SHA: "", EVENT_NAME: "workflow_dispatch" },
+  ])("rejects untrusted or unbound reusable invocation %j", overrides => {
+    const result = executeHistoryStep("source", overrides);
+    expect(result.error).toBeDefined(); expect(result.writes.size).toBe(0);
+  });
+
+  it("fails exact checkout mismatch before native validation", () => {
+    const result = executeHistoryStep("exact-head", {}, callerSha);
+    expect(result.error).toBeDefined(); expect(result.writes.size).toBe(0);
+  });
+  it("binds the authoritative fork head repository", () => {
+    const result = executeHistoryStep("source", { INPUT_SOURCE_REPOSITORY: "Fixture/memmy-agent" });
+    expect(result.error).toBeUndefined();
+    expect(result.writes.get("/output")).toContain("repository=Fixture/memmy-agent\n");
+    expect(historySteps.find(step => step.uses?.startsWith("actions/checkout@"))?.with?.repository)
+      .toBe("${{ steps.source.outputs.repository }}");
+  });
+});
+
+describe("Windows History provider completion contract", () => {
+  it("requires every existing native and package check without soft failures", () => {
+    expect(historyWorkflow.jobs.validate["runs-on"]).toBe("windows-2025");
+    for (const id of requiredWindowsSteps) {
+      expect(historyStep(id), id).toBeDefined();
+      expect(historyStep(id).if).toBeUndefined();
+      expect(historyStep(id)["continue-on-error"]).toBeUndefined();
+    }
+    expect(historyStep("native-go").run).toContain("go test ./...");
+    expect(historyStep("native-go").run).toContain("go vet -unsafeptr=false ./...");
+    expect(historyStep("computer-use-go").run).toContain("go test ./...");
+    expect(historyStep("computer-use-go").run).toContain("go vet ./...");
+    expect(historyStep("history-contracts").run).toContain("tests/windows-memory-workflow.test.ts");
+    for (const id of ["workspace-dependencies", "agent-dependencies", "native-go", "source-build", "app-icons", "native-runtime", "history-contracts", "packaged-assets", "installer-boundary"]) {
+      expect(historyStep(id).run, id).toContain("$LASTEXITCODE -ne 0");
+    }
+    expect(historyStep("native-runtime").run).toContain("$workerProbe.workerApiCompiled");
+    expect(historyStep("native-runtime").run).toContain("$probe.pureSelfTest");
+    expect(historyStep("native-runtime").run).toContain("$probe.desktopAccess -ne $false");
+    expect(historyStep("provider-receipt").shell).toBe("node {0}");
+    expect(historyStep("provider-receipt").if).toBe("${{ success() }}");
+    const upload = historySteps.find(step => step.uses?.startsWith("actions/upload-artifact@"))!;
+    expect(upload.if).toContain("steps.provider-receipt.outcome == 'success'");
+    expect(upload.with?.["if-no-files-found"]).toBe("error");
+    expect(upload.with?.name).toBe("${{ steps.provider-receipt.outputs.artifact_name }}");
+    expect(historySteps.indexOf(historyStep("provider-receipt"))).toBeGreaterThan(historySteps.indexOf(historyStep("installer-boundary")));
+  });
+
+  it("writes an exact-head receipt only after complete Windows native validation", () => {
+    const dirty = executeHistoryStep("provider-receipt", {}, candidateSha, "win32", "10.0.26100", true);
+    expect(dirty.error).toBeDefined(); expect(receipts(dirty)).toHaveLength(0);
+    const result = executeHistoryStep("provider-receipt");
+    expect(result.error).toBeUndefined(); expect(receipts(result)).toHaveLength(1);
+    const [file, json] = receipts(result)[0]!;
+    expect(file).toContain(`windows-provider-receipt-${candidateSha}-2/`);
+    expect(JSON.parse(json)).toMatchObject({ provider: "windows", status: "passed", headSha: candidateSha,
+      runId: "12345", runAttempt: 2, workflow_sha: callerSha,
+      os: { platform: "win32", build: 26100, arch: "x64" },
+      nativeModules: { windowsHistory: { goTests: "passed", goVet: "passed", workerSelfTest: "passed" } },
+      liveCaptureValidated: false, signedInstallerValidated: false });
+    expect(result.writes.get("/output")).toContain(`artifact_name=windows-provider-receipt-${candidateSha}-2`);
+  });
+
+  it.each(requiredWindowsSteps)("does not emit passed receipt when %s is missing, skipped or failed", id => {
+    for (const state of [undefined, { outcome: "skipped", conclusion: "skipped" },
+      { outcome: "failure", conclusion: "success" }, { outcome: "success", conclusion: "failure" }]) {
+      const steps = passedWindowsSteps() as Record<string, unknown>;
+      if (state) steps[id] = state; else delete steps[id];
+      const result = executeHistoryStep("provider-receipt", { VALIDATION_STEPS: JSON.stringify(steps) });
+      expect(result.error).toBeDefined(); expect(receipts(result)).toHaveLength(0); expect(result.writes.size).toBe(0);
+    }
+  });
+
+  it.each([
+    { overrides: {}, head: callerSha },
+    { overrides: { EXPECTED_HEAD_SHA: "short" } },
+    { overrides: { PROVIDER_RUN_ATTEMPT: "0" } },
+    { overrides: { PROVIDER_RUN_ID: "" } },
+    { overrides: { CONTROLLER_WORKFLOW_SHA: "short" } },
+    { overrides: {}, platform: "darwin" },
+    { overrides: {}, release: "10.0.19045" },
+  ])("does not issue provider success for invalid head/provider/OS %j", fixture => {
+    const result = executeHistoryStep("provider-receipt", fixture.overrides, fixture.head, fixture.platform, fixture.release);
+    expect(result.error).toBeDefined(); expect(receipts(result)).toHaveLength(0); expect(result.writes.size).toBe(0);
   });
 });

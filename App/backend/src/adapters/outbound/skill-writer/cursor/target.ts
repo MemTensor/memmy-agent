@@ -3,8 +3,14 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
+import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyResumeSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyResumeSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
@@ -42,9 +48,11 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
     async install(manifest) {
       await mkdir(cursorRootDirectory, { recursive: true });
       await replaceMemmySkillDirectory(cursorRootDirectory, manifest);
+      await replaceMemmyResumeSkillDirectory(cursorRootDirectory, CURSOR_TARGET_ID);
     },
 
     async uninstall(_targetId) {
+      await removeMemmyResumeSkillDirectory(cursorRootDirectory);
       await removeMemmySkillDirectory(cursorRootDirectory);
     },
 
@@ -52,16 +60,29 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
       return (await readTextFile(join(cursorRootDirectory, "skills", "memmy-memory", "SKILL.md"))).includes("name: memmy-memory");
     },
 
+    async isInstalledHookCurrent() {
+      const hookDirectory = join(cursorRootDirectory, HOOK_DIRECTORY_NAME);
+      return isInstalledMemmyHookCurrent({
+        source: CURSOR_TARGET_ID,
+        mode: "cursor",
+        hookScriptPath: join(hookDirectory, HOOK_SCRIPT_FILE_NAME),
+        bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
+      });
+    },
+
     async installPlugin(_targetId) {
       await mkdir(cursorRootDirectory, { recursive: true });
 
       const hookDirectory = join(cursorRootDirectory, HOOK_DIRECTORY_NAME);
       const hookScriptPath = join(hookDirectory, HOOK_SCRIPT_FILE_NAME);
+      const hookConfigPath = join(hookDirectory, HOOK_CONFIG_FILE_NAME);
+      const hookConfig = {
+        memmy_config_path: memmyConfigPath,
+        ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
+      };
       await mkdir(hookDirectory, { recursive: true });
-      await writeFileAtomically(
-        join(hookDirectory, HOOK_CONFIG_FILE_NAME),
-        `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
-      );
+      await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
       await writeFileAtomically(
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CURSOR_TARGET_ID, mode: "cursor" })
@@ -75,6 +96,11 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
 
       const manifest = renderMemmyPluginSkillManifest(_targetId);
       await replaceMemmySkillDirectory(cursorRootDirectory, manifest);
+      await replaceMemmyResumeSkillDirectory(cursorRootDirectory, CURSOR_TARGET_ID);
+      await writeFileAtomically(
+        hookConfigPath,
+        `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CURSOR_TARGET_ID, "cursor")) }, null, 2)}\n`
+      );
     },
 
     async uninstallPlugin(_targetId) {
@@ -83,6 +109,7 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, HOOK_CONFIG_FILE_NAME), { force: true });
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
+      await removeMemmyResumeSkillDirectory(cursorRootDirectory);
       await removeMemmySkillDirectory(cursorRootDirectory);
     }
   };

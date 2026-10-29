@@ -19,6 +19,7 @@ export interface NavigationState {
   currentPath: AppRoutePath;
   history: AppRoutePath[];
   preferredMode: PreferredMode | null;
+  windowVisible: boolean;
 }
 
 /** Contract for agent sources state. */
@@ -29,6 +30,7 @@ export interface AgentSourcesState {
   activeScanSourceId: string | null;
   error: string | null;
   scanProgress: AgentSourceScanProgress | null;
+  cancellingScanJobId: string | null;
   lastFinishedScanJobId: string | null;
   finishedScanJobIds: string[];
   recentScanCompletions: AgentSourceScanCompletion[];
@@ -105,7 +107,7 @@ const defaultModelConfig: ModelProviderConfig = {
 };
 
 /** Creates create initial app state. */
-export function createInitialAppState(): AppState {
+export function createInitialAppState(windowVisible = true): AppState {
   return {
     startup: {
       status: "idle",
@@ -116,7 +118,8 @@ export function createInitialAppState(): AppState {
     navigation: {
       currentPath: "/welcome",
       history: ["/welcome"],
-      preferredMode: null
+      preferredMode: null,
+      windowVisible
     },
     agentSources: {
       items: [],
@@ -125,6 +128,7 @@ export function createInitialAppState(): AppState {
       activeScanSourceId: null,
       error: null,
       scanProgress: null,
+      cancellingScanJobId: null,
       lastFinishedScanJobId: null,
       finishedScanJobIds: [],
       recentScanCompletions: [],
@@ -178,7 +182,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...state.agentSources,
           scanPreferences: action.bootstrap.scanPreferences
         },
-        agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: isAgentChatViewPath(action.initialPath) })
+        agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: state.navigation.windowVisible && isAgentChatViewPath(action.initialPath) })
       };
     case "events/statusChanged":
       return {
@@ -193,7 +197,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           currentPath: action.path,
           history: state.navigation.currentPath === action.path ? state.navigation.history : [...state.navigation.history, action.path]
         },
-        agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: isAgentChatViewPath(action.path) })
+        agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: state.navigation.windowVisible && isAgentChatViewPath(action.path) })
+      };
+    case "window/visibilityChanged":
+      if (state.navigation.windowVisible === action.visible) return state;
+      return {
+        ...state,
+        navigation: { ...state.navigation, windowVisible: action.visible },
+        agent: agentReducer(state.agent, {
+          type: "agent/chatViewVisibilityChanged",
+          visible: action.visible && isAgentChatViewPath(state.navigation.currentPath)
+        })
       };
     case "invitationToast/shown":
       return {
@@ -252,7 +266,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "agentSources/loaded":
       return {
         ...state,
-        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, isScanning: false, activeScanSourceId: null, error: null, scanProgress: null }
+        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, isScanning: false, activeScanSourceId: null, error: null, scanProgress: null, cancellingScanJobId: null }
       };
     case "agentSources/refreshed":
       return {
@@ -262,15 +276,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "agentSources/error":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isLoading: false, isScanning: false, activeScanSourceId: null, error: action.message, scanProgress: null }
+        agentSources: { ...state.agentSources, isLoading: false, isScanning: false, activeScanSourceId: null, error: action.message, scanProgress: null, cancellingScanJobId: null }
       };
     case "agentSources/scanStarted":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null }
+        agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null, cancellingScanJobId: null }
       };
     case "agentSources/scanProgress":
-      if (state.agentSources.finishedScanJobIds.includes(action.progress.jobId)) {
+      if (
+        state.agentSources.finishedScanJobIds.includes(action.progress.jobId) ||
+        state.agentSources.cancellingScanJobId === action.progress.jobId
+      ) {
         return state;
       }
       if (
@@ -291,7 +308,26 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           scanProgress: action.progress
         }
       };
-    case "agentSources/scanCompleted":
+    case "agentSources/scanCancelRequested":
+      return {
+        ...state,
+        agentSources: {
+          ...state.agentSources,
+          cancellingScanJobId: action.jobId,
+          error: null
+        }
+      };
+    case "agentSources/scanCancelFailed":
+      return {
+        ...state,
+        agentSources: {
+          ...state.agentSources,
+          cancellingScanJobId: null,
+          error: action.message
+        }
+      };
+    case "agentSources/scanCompleted": {
+      const finishedJobId = action.scan?.jobId ?? state.agentSources.cancellingScanJobId;
       return {
         ...state,
         agentSources: {
@@ -300,9 +336,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           activeScanSourceId: null,
           error: null,
           scanProgress: null,
-          lastFinishedScanJobId: action.scan?.jobId ?? state.agentSources.lastFinishedScanJobId,
-          finishedScanJobIds: action.scan
-            ? [...state.agentSources.finishedScanJobIds.filter((jobId) => jobId !== action.scan?.jobId), action.scan.jobId].slice(-20)
+          cancellingScanJobId: null,
+          lastFinishedScanJobId: finishedJobId ?? state.agentSources.lastFinishedScanJobId,
+          finishedScanJobIds: finishedJobId
+            ? [...state.agentSources.finishedScanJobIds.filter((jobId) => jobId !== finishedJobId), finishedJobId].slice(-20)
             : state.agentSources.finishedScanJobIds,
           recentScanCompletions: action.scan
             ? [
@@ -312,6 +349,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             : state.agentSources.recentScanCompletions
         }
       };
+    }
     case "agentSources/scanCompletionExpired":
       return {
         ...state,

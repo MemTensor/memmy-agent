@@ -17,6 +17,8 @@ export interface PendingFirstEncounterTaskLaunch {
   /** When set, Home opens this already-seeded chat instead of calling seed-chat again. */
   chatId?: string;
   sessionKey?: string;
+  /** Empty-history greetings have no imported task to verify in another Agent. */
+  showRelayFollowUp?: boolean;
   createdAt: number;
 }
 
@@ -24,6 +26,7 @@ export interface WritePendingFirstEncounterTaskLaunchOptions {
   assistantContent?: string;
   chatId?: string;
   sessionKey?: string;
+  showRelayFollowUp?: boolean;
   now?: number;
 }
 
@@ -45,6 +48,7 @@ export function writePendingFirstEncounterTaskLaunch(
     ...(assistantContent ? { assistantContent } : {}),
     ...(chatId ? { chatId } : {}),
     ...(sessionKey ? { sessionKey } : {}),
+    ...(typeof options.showRelayFollowUp === "boolean" ? { showRelayFollowUp: options.showRelayFollowUp } : {}),
     createdAt: options.now ?? Date.now()
   } satisfies PendingFirstEncounterTaskLaunch));
 }
@@ -81,6 +85,7 @@ export function consumePendingFirstEncounterTaskLaunch(
       ...(assistantContent ? { assistantContent } : {}),
       ...(chatId ? { chatId } : {}),
       ...(sessionKey ? { sessionKey } : {}),
+      ...(parsed.showRelayFollowUp === false ? { showRelayFollowUp: false } : {}),
       createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now()
     };
   } catch {

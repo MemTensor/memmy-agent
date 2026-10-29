@@ -43,6 +43,7 @@ function makeLoop(hooks: AgentHook[], extra: Record<string, any> = {}): AgentLoo
   return new AgentLoop({
     config: new Config({
       contextCompaction: { summaryMode: "text" },
+      agents: { defaults: { contextWindowTokens: 32_768 } },
       memmyMemory: { enabled: false },
     }),
     provider: provider(),
@@ -112,6 +113,27 @@ describe("lifecycle hooks", () => {
       spec: { hostProjectId: null, workspace: loop.workspace },
       metadata: { lifecycle: "system_prompt" },
     });
+  });
+
+  it.each(["ordinary", "system"])("passes one turn identity and cancellation signal through %s prompt and run", async (kind) => {
+    const contexts: AgentHookContext[] = [];
+    class IdentityHook extends AgentHook {
+      override async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> { contexts.push(ctx); }
+      override async beforeRun(ctx: AgentHookContext): Promise<void> { contexts.push(ctx); }
+    }
+    const loop = makeLoop([new IdentityHook()]);
+    const abort = new AbortController();
+    if (kind === "ordinary") {
+      await loop.processDirect("hello", { sessionKey: "cli:identity", abortSignal: abort.signal });
+    } else {
+      await loop.processSystemMessage({ channel: "system", chatId: "cli:identity", senderId: "system", content: "hello", metadata: {} } as any,
+        "cli:identity", { turnId: "identity-turn", abortSignal: abort.signal });
+    }
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0].spec.turnId).toEqual(expect.any(String));
+    expect(contexts[0].spec.turnId).toBe(contexts[1].spec.turnId);
+    expect(contexts[0].spec.abortSignal).toBe(contexts[1].spec.abortSignal);
+    expect(contexts[0].spec.abortSignal).toBeInstanceOf(AbortSignal);
   });
 
   it("emits sessionStart once for a newly created session", async () => {
@@ -272,7 +294,7 @@ describe("lifecycle hooks", () => {
       }
     }
     const hook = new VersionedPromptHook();
-    const loop = makeLoop([hook], { contextWindowTokens: 1_000 });
+    const loop = makeLoop([hook], { contextWindowTokens: 32_768 });
     const session = loop.sessions.getOrCreate("cli:versioned-cache");
     session.messages = [
       { role: "user", content: "old user message" },
@@ -282,7 +304,7 @@ describe("lifecycle hooks", () => {
     let estimates = 0;
     vi.spyOn(loop.consolidator, "estimateSessionPromptTokens").mockImplementation(() => {
       estimates += 1;
-      return estimates === 1 ? [1_200, "test"] : [100, "test"];
+      return estimates === 1 ? [30_000, "test"] : [100, "test"];
     });
     vi.spyOn(loop.consolidator, "pickConsolidationBoundary").mockReturnValue([1, 1]);
     vi.spyOn(loop.consolidator, "archive").mockResolvedValue("summary");
@@ -318,6 +340,9 @@ describe("lifecycle hooks", () => {
     const p = {
       generation: { maxTokens: 128 },
       getDefaultModel: () => "test-model",
+      // Keep the protected current turn within budget; the consolidation
+      // projection below supplies the over-budget state this test exercises.
+      estimatePromptTokens: vi.fn((): [number, string] => [100, "test"]),
       chatWithRetry: vi.fn(async (args: any) => {
         calls.push(args);
         events.push(`model-${calls.length}`);

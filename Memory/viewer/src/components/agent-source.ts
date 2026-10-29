@@ -1,6 +1,7 @@
 const DISPLAY_NAMES: Record<string, string> = {
   memmy: "Memmy",
   memmy_agent: "Memmy",
+  computer_history: "Memmy",
   cursor: "Cursor",
   claude_code: "Claude Code",
   codex: "Codex",
@@ -51,18 +52,20 @@ export function mergeAgentSourceOptions(
     options.set(source, { source, count: 0, label: sourceAgentLabel(sourceId) });
   }
   for (const item of distribution) {
-    const source = normalizeAgentSource(item.source);
-    options.set(source, { source, count: item.count, label: sourceAgentLabel(item.source) });
+    const source = filterAgentSource(item.source);
+    const current = options.get(source);
+    options.set(source, { source, count: (current?.count ?? 0) + item.count, label: sourceAgentLabel(source) });
   }
   for (const item of discovered) {
-    const source = normalizeAgentSource(item.sourceId);
+    const source = filterAgentSource(item.sourceId);
     const current = options.get(source);
+    let label = current?.label || sourceAgentLabel(item.sourceId);
+    if (source === "memmy_agent") label = sourceAgentLabel(source);
+    else if (!item.builtin) label = item.displayName || label;
     options.set(source, {
       source,
       count: current?.count ?? 0,
-      label: item.builtin
-        ? current?.label || sourceAgentLabel(item.sourceId)
-        : item.displayName || current?.label || sourceAgentLabel(item.sourceId),
+      label,
     });
   }
 
@@ -71,6 +74,11 @@ export function mergeAgentSourceOptions(
 
 export function sourceAgentLabel(sourceAgent: string): string {
   return DISPLAY_NAMES[normalizeAgentSource(sourceAgent)] ?? sourceAgent.trim();
+}
+
+function filterAgentSource(sourceAgent: string): string {
+  const source = normalizeAgentSource(sourceAgent);
+  return source === "memmy" || source === "computer_history" ? "memmy_agent" : source;
 }
 
 export function agentClass(sourceAgent: string): string {

@@ -1,3 +1,4 @@
+import { redactBrowserAuthArguments } from "./browser-auth-privacy.js";
 import { randomUUID } from "node:crypto";
 
 export type ProgressEvent = { type: string; [key: string]: any };
@@ -136,7 +137,7 @@ export function buildToolEventStartPayload(toolCall: any): Record<string, any> {
     call_id: String(toolCall?.id ?? ""),
     ui_tool_call_id: getOrCreateUiToolCallId(toolCall),
     name: toolCall?.name ?? toolCall?.function?.name ?? "",
-    arguments: toolCall?.arguments ?? {},
+    arguments: redactBrowserAuthArguments(toolCall?.name ?? toolCall?.function?.name, toolCall?.arguments ?? {}),
     result: null,
     error: null,
     files: [],
@@ -200,7 +201,7 @@ export function buildToolEventFinishPayloads(context: any): Array<Record<string,
       call_id: String(call?.id ?? ""),
       ui_tool_call_id: getOrCreateUiToolCallId(call),
       name: call?.name ?? call?.function?.name ?? "",
-      arguments: call?.arguments ?? {},
+      arguments: redactBrowserAuthArguments(call?.name ?? call?.function?.name, call?.arguments ?? {}),
       result: phase === "end" ? sanitized.result : null,
       error: null,
       files: eventFiles,

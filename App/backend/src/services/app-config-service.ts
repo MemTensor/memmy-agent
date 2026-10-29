@@ -103,7 +103,26 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       if (input.userMode) {
         await options.memmyConfigWriter?.writeUserMode?.(input.userMode);
       }
+      if (input.language) {
+        await options.memmyConfigWriter?.writeMemoryLanguage?.(input.language);
+        await options.memoryClient?.reloadConfig({ reason: "app_language_saved" });
+      }
       const settings = options.bootstrapRepository.updateAppSettings(input);
+      if (input.memoryByokDailyLimitM !== undefined || input.memoryByokTotalLimitM !== undefined) {
+        await options.memmyConfigWriter?.writeMemoryTokenBudget?.({
+          dailyLimitM: settings.memoryByokDailyLimitM,
+          totalLimitM: settings.memoryByokTotalLimitM
+        });
+        await options.memoryClient?.reloadConfig({ reason: "memory_token_budget_saved" });
+      }
+      if (input.userMode) {
+        try {
+          await options.memoryClient?.reloadConfig({ reason: "user_mode_saved" });
+        } catch {
+          // Settings are saved; saving the mode again or restarting Memory can retry the reload.
+          console.warn("Memory config reload failed after user mode was saved");
+        }
+      }
       preserveCompletedGuideWhenSwitchingToByok(previousOnboarding, options);
       return settings;
     },

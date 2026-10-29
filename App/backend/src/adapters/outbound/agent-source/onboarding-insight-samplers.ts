@@ -78,6 +78,10 @@ export function createSourceRegistryOnboardingConversationWindowReader(
 ): OnboardingConversationWindowReader {
   return {
     async readConversation(reference, options) {
+      if (options.signal?.aborted || options.deadlineMs <= 0) {
+        return null;
+      }
+      const deadlineAt = Date.now() + options.deadlineMs;
       const adapter = sourceRegistry.require(reference.sourceId);
       const deadlineSignal = AbortSignal.timeout(options.deadlineMs);
       const signal = options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal;
@@ -88,8 +92,14 @@ export function createSourceRegistryOnboardingConversationWindowReader(
         for await (const message of adapter.scan({
           maxScanTargets: CONVERSATION_SCAN_TARGETS,
           order: "recent_first",
+          fullHistory: true,
           signal
         })) {
+          if (signal.aborted || Date.now() >= deadlineAt) {
+            // The prefix of a long conversation can omit its newest turns.
+            // Let the caller retain the recent messages it already sampled.
+            return null;
+          }
           if (message.conversationId !== reference.conversationId) {
             if (foundConversation) {
               break;
@@ -111,11 +121,15 @@ export function createSourceRegistryOnboardingConversationWindowReader(
           });
         }
       } catch (error) {
-        if (!deadlineSignal.aborted && !options.signal?.aborted) {
+        if (!signal.aborted && Date.now() < deadlineAt) {
           throw error;
         }
+        return null;
       }
 
+      if (signal.aborted || Date.now() >= deadlineAt) {
+        return null;
+      }
       const windowMessages = selectConversationWindow(messages);
       if (windowMessages.length === 0) {
         return null;

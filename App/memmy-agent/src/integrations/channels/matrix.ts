@@ -7,9 +7,8 @@ import { getDataDir, getMediaDir } from "../../config/paths.js";
 import { BaseChannel } from "./base.js";
 
 export const TYPING_NOTICE_TIMEOUT_MS = 30_000;
-export let TYPING_KEEPALIVE_INTERVAL_MS = 20_000;
+export const TYPING_KEEPALIVE_INTERVAL_MS = 20_000;
 export const MATRIX_HTML_FORMAT = "org.matrix.custom.html";
-export const _ATTACH_MARKER = "[attachment: {}]";
 export const _ATTACH_TOO_LARGE = "[attachment: {} - too large]";
 export const _ATTACH_FAILED = "[attachment: {} - download failed]";
 export const _ATTACH_UPLOAD_FAILED = "[attachment: {} - upload failed]";
@@ -165,7 +164,7 @@ function renderInlineMarkdown(text: string): string {
 
 export function renderMarkdownHtml(text: string): string | null {
   try {
-    if (!/[#*`~^|!\[\]()>-]|https?:\/\//.test(text)) return null;
+    if (!new RegExp("[#*`~^|!\\[\\]()>-]|https?://").test(text)) return null;
     const lines = text.split(/\r?\n/);
     const blocks: string[] = [];
     let index = 0;
@@ -279,7 +278,7 @@ export class MatrixConfig {
   }
 }
 
-export let decryptAttachment = (ciphertext: Buffer, key: string, sha256: string, iv: string): Buffer => {
+export let decryptAttachment: (ciphertext: Buffer, key: string, sha256: string, iv: string) => Buffer = () => {
   throw new EncryptionError("Matrix encrypted attachment decryptor is not configured");
 };
 
@@ -402,8 +401,8 @@ export class MatrixChannel extends BaseChannel {
     }
   }
 
-  async onJoinError(response: any): Promise<void> {}
-  async onSendError(response: any): Promise<void> {}
+  async onJoinError(): Promise<void> {}
+  async onSendError(): Promise<void> {}
 
   async syncLoop(): Promise<void> {
     let backoff = 2;
@@ -584,7 +583,7 @@ export class MatrixChannel extends BaseChannel {
       path: filePath,
       mxcUrl,
     };
-    return [attachment, formatMarker(_ATTACH_MARKER, filePath)];
+    return [attachment, ""];
   }
 
   baseMetadata(room: any, event: any): Record<string, any> {
@@ -616,10 +615,14 @@ export class MatrixChannel extends BaseChannel {
     if (event?.sender === this.config.userId || this.isPreStartupEvent(event) || !this.shouldProcessMessage(room, event)) return;
     const [attachment, marker] = await this.fetchMediaAttachment(room, event);
     const parts: string[] = [];
-    if (typeof event?.body === "string" && event.body.trim()) parts.push(event.body.trim());
+    const source = this.eventSourceContent(event);
+    const declaredName = typeof source.filename === "string" ? source.filename.trim() : "";
+    const caption = typeof event?.body === "string" ? event.body.trim() : "";
+    if (caption && declaredName && caption !== declaredName) parts.push(caption);
     if (attachment?.type === "audio") {
       const transcription = await this.transcribeAudio(attachment.path);
-      parts.push(transcription ? `[transcription: ${transcription}]` : marker);
+      const audioText = transcription ? `[transcription: ${transcription}]` : marker;
+      if (audioText) parts.push(audioText);
     } else if (marker) {
       parts.push(marker);
     }
