@@ -355,6 +355,7 @@ export interface TurnStartRequest extends RequestEnvelope {
   turnId?: string;
   layers?: MemoryLayer[];
   contextHints?: Record<string, unknown>;
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget?: number;
 }
 
@@ -503,6 +504,7 @@ export interface MemorySearchRequest extends RequestEnvelope {
   layers?: MemoryLayer[];
   tags?: string[];
   limit?: number;
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget?: number;
   includeInjectedContext?: boolean;
   verbose?: boolean;

@@ -1,3 +1,4 @@
+import { budgetInjection } from "./injection-budget.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -652,50 +653,42 @@ export function buildInjectedContext(
       )
     : rendered;
 
-  void budget;
-  const sections: InjectedContext["sections"] = memories.map((section) => section.section);
-  const renderedSections: RenderedInjectedSection[] = [...memories];
-  const sourceMemoryIds: string[] = memories.flatMap((section) => section.section.memoryIds);
-  const droppedDueToBudget: Array<{
-    id: string;
-    kind: MemoryKind;
-    memoryLayer: RecallMemoryLayer;
-    reason: "token_budget";
-    tokenEstimate?: number;
-  }> = [];
-  let used = sections.reduce((sum, section) => sum + (section.tokenEstimate ?? 0), 0);
-  const guidance = decisionGuidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  const avoidance = failureAvoidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  if (guidance) {
-    const estimate = guidance.tokenEstimate ?? 0;
-    sections.push(guidance);
-    sourceMemoryIds.push(...guidance.memoryIds);
-    used += estimate;
-  }
-  if (avoidance) {
-    sections.push(avoidance);
-    sourceMemoryIds.push(...avoidance.memoryIds);
-    used += avoidance.tokenEstimate ?? 0;
-  }
-
-  const markdown = renderInjectedMarkdown(renderedSections, guidance, avoidance, retrievalMode, options);
-
-  return {
-    injectedContext: {
-      markdown,
-      sections,
-      tokenEstimate: used
-    },
-    sourceMemoryIds: uniq(sourceMemoryIds),
-    droppedDueToBudget
-  };
+  const fixedContextChars = renderInjectedMarkdown([], undefined, undefined, retrievalMode, options).length;
+  return budgetInjection(memories, budget, (selected) => {
+    const sections: InjectedContext["sections"] = selected.map((item) => item.section);
+    const sourceMemoryIds = selected.flatMap((item) => item.section.memoryIds);
+    const sourceMemories = contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds);
+    const guidance = decisionGuidanceSection(sourceMemories);
+    const avoidance = failureAvoidanceSection(sourceMemories);
+    if (guidance) {
+      sections.push(guidance);
+      sourceMemoryIds.push(...guidance.memoryIds);
+    }
+    if (avoidance) {
+      sections.push(avoidance);
+      sourceMemoryIds.push(...avoidance.memoryIds);
+    }
+    return {
+      injectedContext: {
+        markdown: renderInjectedMarkdown(selected, guidance, avoidance, retrievalMode, options),
+        sections
+      },
+      sourceMemoryIds: uniq(sourceMemoryIds)
+    };
+  }, (item) => item.section.memoryIds.map((id) => ({
+    id, kind: item.section.kind, memoryLayer: item.section.memoryLayer,
+    tokenEstimate: item.section.tokenEstimate
+  })), fixedContextChars);
 }
 
-function buildTimeFilteredInjectedContext(
+function buildTimeFilteredInjectedContext(memories: MemoryRow[], timeZone: string, budget: number) {
+  return budgetInjection(memories, budget,
+    (selected) => renderTimeFilteredInjectedContext(selected, timeZone),
+    (memory) => [{ id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer,
+      tokenEstimate: renderTimeFilteredInjectedContext([memory], timeZone).injectedContext.tokenEstimate }]);
+}
+
+function renderTimeFilteredInjectedContext(
   memories: MemoryRow[],
   timeZone: string
 ): {
@@ -2044,7 +2037,8 @@ export class RetrievalService {
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
           memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
-          timeZone
+          timeZone,
+          request.contextBudget ?? 1800
         )
       : buildInjectedContext(
           hits,
