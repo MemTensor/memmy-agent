@@ -606,11 +606,10 @@ async function routeRequest(
   const path = url.pathname;
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
-    // Desktop health checks establish the authenticated scope before the panel
-    // opens. Start its bounded background cache without awaiting aggregation.
-    if ((principal.kind === "local" || principal.kind === "cloud") && principal.timeZone && principal.namespace?.userId) {
+    // Local cache preparation starts with the ready service, without a login or
+    // health request. Cloud statistics still require an authenticated scope.
+    if (principal.kind === "cloud" && principal.timeZone && principal.namespace?.userId) {
       const input = { namespace: principal.namespace, timeZone: principal.timeZone };
-      service.panelOverviewStatsSnapshot(input,localPanel);
       service.panelStatsSnapshot(input,localPanel);
     }
     return service.health([...API_ROUTES]);

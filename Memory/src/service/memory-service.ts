@@ -310,6 +310,20 @@ export class MemoryService {
   private panelReader?: PanelReader;
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
+  private panelWarmupTimer?: ReturnType<typeof setTimeout>;
+  /** Local statistics describe the device; authenticated cloud scopes stay distinct. */
+  private panelStatsInput(input: RequestEnvelope, local: boolean) {
+    const scoped = this.panelInput(input, local);
+    return local && !scoped.namespace?.tenantId ? { ...scoped, namespace: undefined } : scoped;
+  }
+  startPanelWarmup(): void {
+    if (this.mode === "cloud" || this.closing || this.panelWarmupTimer) return;
+    this.panelWarmupTimer = setTimeout(() => {
+      this.panelWarmupTimer = undefined;
+      if (!this.closing) this.panelStatsSnapshot({}, true);
+    }, 0);
+    this.panelWarmupTimer.unref();
+  }
   private panelInput<T extends RequestEnvelope>(input:T,local=this.mode!=="cloud"):T {
     return localPanelRequest(this.withTimeZone(input),local);
   }
@@ -318,17 +332,20 @@ export class MemoryService {
     return this.panelStats;
   }
   panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
-    return this.sharedPanelStats().get(this.panelInput(input,local));
+    return this.sharedPanelStats().get(this.panelStatsInput(input,local));
   }
   panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
-    const snapshot=this.sharedPanelStats().get(this.panelInput(input,local));
+    const snapshot=this.sharedPanelStats().get(this.panelStatsInput(input,local));
     return {...snapshot,data:snapshot.data?.overview};
   }
 
   async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
     if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
     if(this.repos.db.name !== ":memory:") {
-      this.panelReader ??= new PanelReader(this.repos.db.name);
+      this.panelReader ??= new PanelReader(this.repos.db.name, 30_000, () => {
+        const activity = this.concurrency.snapshot();
+        return activity.activeJobs > 0 || activity.embeddingRequests > 0 || Object.values(activity.resources).some(value => value > 0);
+      });
       const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
       if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
       return result;
@@ -897,6 +914,7 @@ export class MemoryService {
     const requestsStopped = this.concurrency.close();
     this.panelBrowse?.clear();
     this.panelStats?.stop();
+    clearTimeout(this.panelWarmupTimer);
     const readerStopped = this.panelReader?.stop();
     this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
       this.stopConcurrencyMetrics();

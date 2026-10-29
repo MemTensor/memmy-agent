@@ -94,3 +94,21 @@ describe("foreground reads during background statistics", () => {
     expect(workers.instances).toHaveLength(1);
   });
 });
+
+it("pauses committed preparation batches for busy producers and resumes without restarting the worker",async()=>{
+  vi.useFakeTimers();
+  let busy=true;
+  const reader=new PanelReader("synthetic.sqlite",1000,()=>busy);
+  const stats=reader.run("stats",[{}],1);
+  const worker=workers.instances[0]!,id=worker.messages[0]!.id;
+  try{
+    worker.emit("message",{id,yield:true});
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(worker.messages).toHaveLength(1);
+    busy=false;await vi.advanceTimersByTimeAsync(25);
+    expect(worker.messages[1]).toEqual({resume:id});
+    worker.emit("message",{id,result:{safety:"safe",data:"finished"}});
+    await expect(stats).resolves.toEqual({safety:"safe",data:"finished"});
+    expect(workers.instances).toHaveLength(1);
+  }finally{const stop=reader.stop();worker.finishTermination();await stop;vi.useRealTimers();}
+});

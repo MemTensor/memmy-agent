@@ -26,10 +26,20 @@ function partsFor(method: string,args: unknown[]): PanelCachePart[] {
   }
   return [];
 }
-async function prepare(parts: PanelCachePart[]) {
+let resumePreparation: (() => void) | undefined;
+async function prepare(parts: PanelCachePart[], backgroundId?: number) {
+  let batches = 0;
   for (const part of parts)
-    while (fillPanelCacheBatch(cacheWriter, part, part === "logs" ? 64 : 512))
-      await setImmediate();
+    while (fillPanelCacheBatch(cacheWriter, part, part === "logs" ? 64 : 128)) {
+      // Release SQLite's writer after every small batch. Check producer
+      // activity initially and every four batches, avoiding an IPC round trip
+      // for each transaction when the service is idle.
+      if (backgroundId === undefined || batches++ % 4 !== 0) await setImmediate();
+      else await new Promise<void>(resolve => {
+        resumePreparation = resolve;
+        parentPort!.postMessage({ id: backgroundId, yield: true });
+      });
+    }
 }
 async function statistics(method: "stats" | "overviewStats", input: Parameters<PanelReadModel["panelStatistics"]>[0]) {
   const safety = panelSafetyToken(db.db);
@@ -46,14 +56,20 @@ async function statistics(method: "stats" | "overviewStats", input: Parameters<P
     : model.panelStatistics(input, rows);
   return { safety, data };
 }
-parentPort!.on("message", async ({ id, method, args }) => {
+parentPort!.on("message", async ({ id, method, args, resume }) => {
+  if (resume !== undefined) {
+    const continuePreparation = resumePreparation;
+    resumePreparation = undefined;
+    continuePreparation?.();
+    return;
+  }
   try {
     const parts = partsFor(method,args);
     // A source write racing preparation is retried before entering the read snapshot.
     let attempts = 0;
     while (true) {
       if (method === "logDetail") ensurePanelLogIds(cacheWriter,[args[0]]);
-      await prepare(parts);
+      await prepare(parts, method === "stats" || method === "overviewStats" ? id : undefined);
       db.db.exec("BEGIN");
       if (!(method === "logDetail" ? panelLogIdsPending(db.db,[args[0]]) : panelCachePending(db.db, parts)))
         break;

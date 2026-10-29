@@ -206,6 +206,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         });
         startupServer.activate(serviceServer);
         startupState.phase = "ready";
+        service.startPanelWarmup();
         writeRuntimeState(serviceHome, {
             pid: process.pid,
             endpoint: url,

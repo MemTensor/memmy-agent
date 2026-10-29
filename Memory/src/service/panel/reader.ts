@@ -22,9 +22,11 @@ export class PanelReader {
   private timer?: ReturnType<typeof setTimeout>;
   private stopping?: Promise<number>;
   private closed = false;
+  private resumeTimer?: ReturnType<typeof setTimeout>;
   constructor(
     private readonly path: string,
-    private readonly timeoutMs = 30_000
+    private readonly timeoutMs = 30_000,
+    private readonly backgroundBusy: () => boolean = () => false
   ) {}
   run<T>(method: string, args: unknown[], priority = 0, signal?: AbortSignal): Promise<Result<T>> {
     if (this.closed) return Promise.reject(new Error("Panel reader stopped"));
@@ -66,6 +68,7 @@ export class PanelReader {
     const worker = this.worker;
     if (!active || !isStatisticsMethod(active.method) || !worker) return;
     clearTimeout(this.timer);
+    clearTimeout(this.resumeTimer);
     this.active = undefined;
     this.worker = undefined;
     this.pending.push(active);
@@ -93,6 +96,21 @@ export class PanelReader {
         const active = this.active;
         if (!active || active.id !== message.id) return;
         clearTimeout(this.timer);
+        if (message.yield && isStatisticsMethod(active.method)) {
+          const resume = () => {
+            if (this.closed || this.worker !== worker || this.active !== active) return;
+            if (this.backgroundBusy()) {
+              this.resumeTimer = setTimeout(resume, 25);
+              this.resumeTimer.unref();
+              return;
+            }
+            this.timer = setTimeout(() => this.fail(new Error("Panel read exceeded time budget")), this.timeoutMs);
+            this.timer.unref();
+            worker.postMessage({ resume: active.id });
+          };
+          resume();
+          return;
+        }
         active.detach();
         this.active = undefined;
         if (message.error) active.reject(new MemoryServiceError(message.error.code, message.error.message));
@@ -116,6 +134,7 @@ export class PanelReader {
   }
   private fail(error: Error) {
     clearTimeout(this.timer);
+    clearTimeout(this.resumeTimer);
     this.active?.detach();
     this.active?.reject(error);
     this.active = undefined;

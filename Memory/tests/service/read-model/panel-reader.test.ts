@@ -83,3 +83,23 @@ describe("bounded readonly executor", () => {
     await reader.stop();
   });
 });
+
+it("warms without HTTP or UID and shares device statistics with the first page",async()=>{
+  const {db,service}=createTestService();
+  const safety=String(db.db.prepare("SELECT value_json FROM runtime_kv WHERE key='panel_safety_token'").pluck().get());
+  const data={overview:{counts:{memories:1}},analysis:{}};
+  const read=vi.spyOn(service,"readPanel").mockResolvedValue({safety,data});
+  service.startPanelWarmup();service.startPanelWarmup();
+  await vi.waitFor(()=>expect(read).toHaveBeenCalledTimes(1));
+  const result=service.panelStatsSnapshot({namespace:{source:"codex",profileId:"default",userId:"history-owner"}});
+  expect(result).toMatchObject({status:"ready",data});
+  expect(service.panelOverviewStatsSnapshot({namespace:{source:"cursor",profileId:"other",userId:"new-owner"}}).data).toEqual(data.overview);
+  expect(read).toHaveBeenCalledTimes(1);
+  await service.stop();
+});
+it("cancels startup warmup before it can touch closed storage",async()=>{
+  const {service}=createTestService();const read=vi.spyOn(service,"readPanel");
+  service.startPanelWarmup();await service.stop();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  expect(read).not.toHaveBeenCalled();
+});
