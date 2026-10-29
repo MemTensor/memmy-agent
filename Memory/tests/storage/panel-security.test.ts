@@ -3,9 +3,70 @@ import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.j
 import { Repositories } from "../../src/storage/repositories.js";
 import { panelSafetyToken } from "../../src/storage/panel-security.js";
 import { PanelBrowse } from "../../src/service/panel/browse.js";
+import { MemoryDb } from "../../src/storage/db.js";
 const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
+async function pendingCapture(status: string | null = "selected") {
+  const fixture = createTestService();
+  const repos = new Repositories(fixture.db.db);
+  const session = fixture.service.openSession({ namespace: { userId: "owner", source: "codex", profileId: "default" } });
+  const turn = await fixture.service.completeTurn("seed", { sessionId: session.sessionId, query: "question", answer: "answer" });
+  const raw = repos.runtime.getRawTurn(turn.rawTurnId)!;
+  const episode = repos.runtime.getEpisode(raw.episodeId)!;
+  const pending = repos.runtime.insertRawTurn({ ...raw, id: "pending", turnId: "pending", episodeId: undefined,
+    messagePayload: status === null ? {} : { episode_assignment: { status } } });
+  return { ...fixture, repos, pending, episode };
+}
 describe("panel safety generations", () => {
+  it.each(["pending", "selected"])("keeps normal %s first binding and same-task retries, but revokes an existing binding's move", async status => {
+    const { db, repos, pending, episode } = await pendingCapture(status);
+    const safety = panelSafetyToken(db.db);
+    repos.runtime.bindRawTurnEpisode(pending.id, episode.id, episode.updatedAt);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    repos.runtime.bindRawTurnEpisode(pending.id, episode.id, episode.updatedAt);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    const target = repos.runtime.createEpisode({ ...episode, id: "target", l1MemoryIds: [], rawTurnIds: [], turnCount: 0 });
+    repos.runtime.rebindRawTurnEpisode(pending.id, episode.id, target.id);
+    expect(panelSafetyToken(db.db)).not.toBe(safety);
+  });
+  it.each([null, "assigned", "applying", "invalid"])("still revokes a legacy/orphan first binding without a pending capture (%s)", async status => {
+    const { db, repos, pending, episode } = await pendingCapture(status);
+    const safety = panelSafetyToken(db.db);
+    repos.runtime.bindRawTurnEpisode(pending.id, episode.id, episode.updatedAt);
+    expect(panelSafetyToken(db.db)).not.toBe(safety);
+  });
+  it.each(["delete", "redact", "owner", "target owner", "target session", "session"])("does not exempt a first binding combined with a %s change", async change => {
+    const { db, repos, pending, episode, service } = await pendingCapture();
+    let target = episode.id;
+    if (change === "target owner" || change === "target session") {
+      const sessionId = change === "target session" ? service.openSession({}).sessionId : episode.sessionId;
+      target = repos.runtime.createEpisode({ ...episode, id: "different-scope", sessionId,
+        userId: change === "target owner" ? "other" : episode.userId, l1MemoryIds: [], rawTurnIds: [], turnCount: 0 }).id;
+    }
+    const extra = change === "delete" ? ",deleted_at='now'" : change === "redact" ? ",redacted_at='now'"
+      : change === "owner" ? ",user_id='other'" : change === "session" ? ",session_id=@session" : "";
+    const session = change === "session" ? service.openSession({}).sessionId : episode.sessionId;
+    const safety = panelSafetyToken(db.db);
+    db.db.prepare(`UPDATE raw_turns SET episode_id=@target${extra} WHERE id=@id`).run({ target, session, id: pending.id });
+    expect(panelSafetyToken(db.db)).not.toBe(safety);
+  });
+  it("replaces an existing v14 trigger without changing its safety token or facts", async () => {
+    const { db, repos, pending, episode } = await pendingCapture();
+    db.db.exec(`DROP TRIGGER panel_safety_raw_turns_update;
+      CREATE TRIGGER panel_safety_raw_turns_update AFTER UPDATE ON raw_turns
+      WHEN OLD.episode_id IS NOT NEW.episode_id BEGIN
+        UPDATE runtime_kv SET value_json='"old-trigger"' WHERE key='panel_safety_token';
+      END`);
+    const safety = panelSafetyToken(db.db);
+    const reopened = new MemoryDb({ path: db.path });
+    reopened.close();
+    expect(db.schemaVersion().version).toBe(14);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    repos.runtime.bindRawTurnEpisode(pending.id, episode.id, episode.updatedAt);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    db.db.prepare("UPDATE raw_turns SET redacted_at='now' WHERE id=?").run(pending.id);
+    expect(panelSafetyToken(db.db)).not.toBe(safety);
+  });
   it("never returns to an old token after empty clears or importing an old runtime key", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
