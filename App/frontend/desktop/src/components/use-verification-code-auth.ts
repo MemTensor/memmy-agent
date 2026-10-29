@@ -96,6 +96,14 @@ export function resolveAuthErrorMessage(
 
   const normalized = rawMessage.trim().toLowerCase();
 
+  if (error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429)) {
+    return t("login.error.rateLimited");
+  }
+
+  if (error instanceof ApiRequestError && [408, 504].includes(error.status)) {
+    return t("login.error.requestTimeout");
+  }
+
   if (
     channel === "email" &&
     error instanceof ApiRequestError &&
@@ -124,35 +132,47 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   const [feedback, setFeedback] = useState<AuthCodeFeedback | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interactionVersionRef = useRef(0);
+  const sendAttemptRef = useRef<number | null>(null);
+  const resendAllowedAtRef = useRef(0);
   const loginAttemptRef = useRef<number | null>(null);
+  const cooldownFeedbackRef = useRef<AuthCodeFeedback | null>(null);
+
+  const updateCountdown = useCallback(() => {
+    const remaining = Math.max(0, Math.ceil((resendAllowedAtRef.current - Date.now()) / 1000));
+    setCountdown(remaining);
+    if (remaining === 0) {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      const expiredFeedback = cooldownFeedbackRef.current;
+      cooldownFeedbackRef.current = null;
+      if (expiredFeedback) setFeedback(current => current === expiredFeedback ? null : current);
+    }
+  }, []);
 
   useEffect(() => {
+    window.addEventListener("focus", updateCountdown);
+    document.addEventListener("visibilitychange", updateCountdown);
     return () => {
+      window.removeEventListener("focus", updateCountdown);
+      document.removeEventListener("visibilitychange", updateCountdown);
+      interactionVersionRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
     };
-  }, []);
+  }, [updateCountdown]);
 
   function startCountdown(seconds: number) {
+    resendAllowedAtRef.current = Date.now() + seconds * 1000;
     setCountdown(seconds);
 
     if (timerRef.current) {
       clearInterval(timerRef.current);
     }
 
-    timerRef.current = setInterval(() => {
-      setCountdown((previous) => {
-        if (previous <= 1) {
-          if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-          }
-          return 0;
-        }
-        return previous - 1;
-      });
-    }, 1000);
+    timerRef.current = setInterval(updateCountdown, 1000);
   }
 
   function isCurrentInteraction(version: number): boolean {
@@ -160,6 +180,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   }
 
   const clearFeedback = useCallback(() => {
+    cooldownFeedbackRef.current = null;
     setFeedback(null);
   }, []);
 
@@ -168,7 +189,10 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     setSending(false);
     setCountdown(0);
     setLoginPending(false);
+    sendAttemptRef.current = null;
+    resendAllowedAtRef.current = 0;
     loginAttemptRef.current = null;
+    cooldownFeedbackRef.current = null;
     setFeedback(null);
 
     if (timerRef.current) {
@@ -185,13 +209,15 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       return;
     }
 
-    if (!clients || sending || countdown > 0) {
+    if (!clients || sendAttemptRef.current !== null || sending || Date.now() < resendAllowedAtRef.current) {
       return;
     }
 
+    updateCountdown();
     setSending(true);
     setFeedback(null);
     const interactionVersion = interactionVersionRef.current;
+    sendAttemptRef.current = interactionVersion;
     track({ name: "send_verification_code", params: { page_path: "login_flow", channel }, consentTier: "basic" });
 
     try {
@@ -206,9 +232,33 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      setFeedback({ text: resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"), tone: "error" });
+      const rateLimited = error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429);
+      const timedOut = (error instanceof ApiRequestError && [408, 504].includes(error.status))
+        || (error instanceof Error && error.name === "TimeoutError");
+      const interrupted = error instanceof Error && error.name === "AbortError";
+      const connectionFailed = error instanceof TypeError;
+      const serverFailed = error instanceof ApiRequestError && error.status >= 500;
+      const requestFailed = timedOut || interrupted || connectionFailed || serverFailed;
+      // Failed requests still need a retry buffer to avoid duplicate sends and throttling.
+      if (rateLimited || requestFailed) {
+        startCountdown(error instanceof ApiRequestError ? error.retryAfterSec ?? fallbackResendSeconds : fallbackResendSeconds);
+      }
+      const requestFailureKey: MessageKey = timedOut ? "login.codeRequestTimeout"
+        : interrupted ? "login.codeRequestInterrupted"
+          : connectionFailed ? "login.codeConnectionFailed"
+            : "login.codeRequestFailed";
+      const failureFeedback: AuthCodeFeedback = {
+        text: requestFailed && !rateLimited
+          ? t(requestFailureKey)
+          : resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"),
+        tone: "error"
+      };
+      cooldownFeedbackRef.current = rateLimited || requestFailed ? failureFeedback : null;
+      setFeedback(failureFeedback);
+      updateCountdown();
     } finally {
       if (isCurrentInteraction(interactionVersion)) {
+        sendAttemptRef.current = null;
         setSending(false);
       }
     }

@@ -33,6 +33,7 @@ import type { BootstrapRepository } from "../infrastructure/app-state-store/repo
 import type { MemmyConfigWriter, RuntimeProjectionResult } from "../infrastructure/memmy-config/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { OkResponse } from "@memmy/local-api-contracts";
+import { VerificationRequestError, toVerificationRequestError } from "./verification-request-error.js";
 
 const RESEND_WINDOW_MS = 60_000;
 
@@ -70,17 +71,26 @@ export interface CreateAccountServiceOptions {
 /** Creates create account service. */
 export function createAccountService(options: CreateAccountServiceOptions): AccountService {
   const now = options.now ?? (() => new Date());
+  const pendingCodeRequests = new Map<string, Promise<SendCodeResponse>>();
+  // Independent from successful-send records; survives renderer navigation while this service runs.
+  const failedCodeRetryAt = new Map<string, number>();
 
-  return {
-    async sendCode(input) {
-      assertExpectedAccountChannel(input.channel, options.accountChannel);
-      const key = toCodeKey(input);
-      const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
-      const remaining = getRemainingResendSeconds(sentAt, now());
-      if (remaining > 0) {
-        return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
-      }
+  async function sendCodeRequest(input: SendCodeInput, key: string): Promise<SendCodeResponse> {
+    const time = now().getTime();
+    for (const [address, retryAt] of failedCodeRetryAt) {
+      if (retryAt <= time) failedCodeRetryAt.delete(address);
+    }
+    const retryAt = failedCodeRetryAt.get(key);
+    if (retryAt !== undefined) {
+      throw new VerificationRequestError("Please wait before requesting another code", 429, Math.ceil((retryAt - time) / 1000));
+    }
+    const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
+    const remaining = getRemainingResendSeconds(sentAt, now());
+    if (remaining > 0) {
+      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
+    }
 
+    try {
       if (input.channel === "email") {
         await options.cloudClient.sendEmailCode({
           email: requireAddress(input.email, "email"),
@@ -92,10 +102,34 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
           zhEnv: input.locale === "zh"
         });
       }
+    } catch (error) {
+      const failure = toVerificationRequestError(error, RESEND_WINDOW_MS / 1000);
+      if (!failure) throw error;
+      failedCodeRetryAt.set(key, now().getTime() + RESEND_WINDOW_MS);
+      throw failure;
+    }
 
-      const sentAtNow = now().toISOString();
-      options.accountSessionRepository.markCodeSent(key, sentAtNow);
-      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
+    // Record only cloud-confirmed success, not a failed attempt or handset delivery.
+    options.accountSessionRepository.markCodeSent(key, now().toISOString());
+    return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
+  }
+
+  return {
+    async sendCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
+      const key = toCodeKey(input);
+      const pending = pendingCodeRequests.get(key);
+      if (pending) {
+        return pending;
+      }
+
+      const request = sendCodeRequest(input, key);
+      pendingCodeRequests.set(key, request);
+      try {
+        return await request;
+      } finally {
+        pendingCodeRequests.delete(key);
+      }
     },
 
     async verifyCode(input) {
@@ -106,7 +140,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         verificationCode: input.verificationCode,
         loginSource: input.loginSource,
         ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
-      });
+      }).catch((error: unknown) => { throw toVerificationRequestError(error) ?? error; });
       return finalizeCloudLogin(loginResult, input.channel, options);
     },
 
