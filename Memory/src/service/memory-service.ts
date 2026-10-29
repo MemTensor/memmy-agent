@@ -1139,6 +1139,7 @@ export class MemoryService {
     };
     return {
       ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
+      status: "ready",
       serviceVersion: PROJECT_VERSION,
       ...(MEMORY_RUNTIME_BUILD_ID ? { buildId: MEMORY_RUNTIME_BUILD_ID } : {}),
       protocolVersion: MEMORY_PROTOCOL_VERSION,
@@ -1150,6 +1151,7 @@ export class MemoryService {
       storage: {
         ...backend,
         schemaVersion: String(schema.version),
+        targetSchemaVersion: schema.version,
         ready: schema.version > 0,
         lastMigrationId: schema.lastMigrationId
       },

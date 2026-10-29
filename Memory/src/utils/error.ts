@@ -37,6 +37,9 @@ export function statusForCode(code: ApiErrorBody["error"]["code"]): number {
       return 409;
     case "rate_limited":
       return 429;
+    case "memory_starting":
+    case "memory_upgrading":
+      return 503;
     default:
       return 500;
   }

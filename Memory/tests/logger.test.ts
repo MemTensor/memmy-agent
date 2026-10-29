@@ -198,9 +198,11 @@ describe("Memory structured logger", () => {
       ["memory-service", "initialized"],
       ["memory-service", "config.reloaded"],
       ["memory-service", "service.starting"],
+      ["memory-service", "service.startup_stage"],
       ["memory-service", "service.listening"],
       ["memory-service", "service.fatal"],
-      ["memory-service", "config.endpoint_write_failed"]
+      ["memory-service", "config.endpoint_write_failed"],
+      ["storage", "storage.startup_stage"]
     ];
 
     for (const [component, event] of events) {
@@ -209,6 +211,8 @@ describe("Memory structured logger", () => {
         delayMs: 100,
         errorMessage: "test error",
         path: "/health",
+        phase: "storage.opening",
+        elapsedMs: 42,
         status: 200
       });
     }
@@ -217,6 +221,8 @@ describe("Memory structured logger", () => {
     expect(output).toContain("HTTP request succeeded");
     expect(output).toContain("HTTP request rejected");
     expect(output).toContain("HTTP request failed");
+    expect(output).toContain("Memory service startup stage");
+    expect(output).toContain("Memory storage startup stage");
     expect(output).not.toMatch(/[\u3400-\u9fff]/u);
   });
 });
