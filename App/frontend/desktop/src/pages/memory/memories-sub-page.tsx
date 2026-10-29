@@ -797,21 +797,12 @@ function MemoryProcessingFailureCard(props: {
   const retryError = feedback?.status === "error" ? feedback : null;
   const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
   const settingsRequired = processing?.retryAction === "open_settings" && processing.state !== "ready" && processing.state !== "ready_text_only";
-  // Older memory services also flag a first attempt that is merely queued.
-  const autoRetryScheduled = Boolean(processing?.autoRetryScheduled && (processing.errorCode || processing.errorMessage));
-  const processingRetryInProgress = Boolean(
-    processing?.errorMessage &&
-    !settingsRequired &&
-    !autoRetryScheduled &&
-    processing.state !== "failed" &&
-    processing.state !== "ready" &&
-    processing.state !== "ready_text_only"
-  );
-  const retryInProgress = feedback?.status === "running" || processingRetryInProgress;
+  // Background processing keeps its normal progress indicator, even when a
+  // previous attempt failed. Only an explicit manual retry needs this feedback.
+  const retryInProgress = feedback?.status === "running";
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
-    !autoRetryScheduled &&
     !settingsRequired &&
     feedback?.status !== "succeeded" &&
     feedback?.status !== "error"
@@ -835,13 +826,11 @@ function MemoryProcessingFailureCard(props: {
         ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
         : settingsRequired && processing?.state !== "failed"
           ? t("memory.memories.processing.needsSettings")
-        : autoRetryScheduled
-          ? t(ERROR_NOTICE_KEYS.memory.autoRetryScheduled)
-          : t(ERROR_NOTICE_KEYS.memory.failed);
+        : t(ERROR_NOTICE_KEYS.memory.failed);
   return (
     <section
-      className={`agent-model-error-notice memory-processing-notice${feedback?.status === "succeeded" ? " memory-processing-notice--success" : ""}`}
-      role={feedback?.status === "succeeded" ? "status" : "alert"}
+      className={`agent-model-error-notice memory-processing-notice${feedback?.status === "succeeded" ? " memory-processing-notice--success" : retryInProgress ? " memory-processing-notice--progress" : ""}`}
+      role={feedback?.status === "succeeded" || retryInProgress ? "status" : "alert"}
     >
       <div className="agent-model-error-notice__header">
         {feedback?.status === "succeeded"
@@ -851,7 +840,7 @@ function MemoryProcessingFailureCard(props: {
             : <AlertTriangle size={16} className="agent-model-error-notice__icon" aria-hidden="true" />}
         <h5 className="agent-model-error-notice__title">{title}</h5>
       </div>
-      {displayedErrorMessage && feedback?.status !== "succeeded" ? (
+      {displayedErrorMessage && feedback?.status !== "succeeded" && !retryInProgress ? (
         <ErrorNoticeDetail
           showLabel={t("agent.error.showDetails")}
           hideLabel={t("agent.error.hideDetails")}
@@ -967,7 +956,10 @@ function TraceMemoryDetail(props: {
     : detail.steps.flatMap((step) => step.toolCalls);
   const turnEvents = buildTraceTurnEvents(detail, toolCalls);
   const hasTurnSteps = turnEvents.length > 0;
-  const summaryText = displayMemorySummaryText(detail.summary || props.item.summary, t, props.item.processing);
+  const rawBody = !hasTurnSteps && props.item.body?.trim() ? props.item.body : undefined;
+  // The read model owns summary validity and legacy field precedence. Raw trace
+  // metadata may still contain a placeholder or an older copy of the summary.
+  const summaryText = displayMemorySummaryText(props.item.summary, t, props.item.processing);
 
   return (
     <>
@@ -998,11 +990,13 @@ function TraceMemoryDetail(props: {
       </section>
 
       <section className="memory-detail-card">
-        <h5 className="memory-detail-card__label">{t("memory.memories.turnSteps")}</h5>
+        <h5 className="memory-detail-card__label">{t(rawBody ? "memory.memories.body" : "memory.memories.turnSteps")}</h5>
         {hasTurnSteps ? (
           <div className="memory-turn">
             {turnEvents.map((event) => <TraceTurnEventBlock key={event.key} event={event} />)}
           </div>
+        ) : rawBody ? (
+          <div className="memory-detail-text memory-detail-raw-body">{rawBody}</div>
         ) : (
           <MemoryStateBox message={t("memory.memories.noTurnSteps")} />
         )}
@@ -1033,7 +1027,7 @@ function TraceTurnEventBlock(props: { event: TraceTurnEvent }) {
 
   return (
     <MemoryTurnBlock label={label} tone={event.kind}>
-      <MemoryMarkdown text={event.text} />
+      <MemoryMarkdown text={event.text} literalHtml />
     </MemoryTurnBlock>
   );
 }

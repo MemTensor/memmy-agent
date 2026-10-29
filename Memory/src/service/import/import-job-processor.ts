@@ -15,6 +15,7 @@ import type {
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import { clip, firstLine } from "../../utils/text.js";
+import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import { isObservationMemory, observationJobPayload } from "../observation-memory-state.js";
 import { externalSkillJobPayload } from "../evidence/history-skill-policy.js";
 
@@ -133,6 +134,8 @@ export interface ImportJobProcessorDeps {
   };
   runtime: {
     appendChange(change: Record<string, unknown>): number;
+    getJob(id: string): EvolutionJobRecord | undefined;
+    latestJobForTarget(targetMemoryId: string, jobType: JobType): { payload: Record<string, unknown> } | undefined;
   };
 }
 
@@ -353,6 +356,10 @@ export class ImportJobProcessor {
           d.processing.update(inserted.id, { activeJobId: job.id, updatedAt: at }, ["summary_pending"]);
         }
       }
+      if (!importTrace && d.config.algorithm.capture.embedAfterCapture) {
+        d.enqueueJob({ jobType: "embedding", userId: inserted.userId, sessionId: inserted.sessionId, targetMemoryId: inserted.id,
+          payload: { source: "memory.add", changeSeq }, createdAt: at });
+      }
       return { upsert, changeSeq, duplicateMemory: undefined };
     });
     if (persisted.duplicateMemory) {
@@ -375,10 +382,6 @@ export class ImportJobProcessor {
       d.enqueueJob({ jobType: "episode_idle_close", userId: inserted.userId, sessionId: inserted.sessionId,
         dedupeKey: `episode_idle_close:memory.add:${inserted.id}`,
         payload: { triggerMemoryId: inserted.id, triggerSource: "memory.add", triggeredAt: receivedAt }, createdAt: receivedAt });
-    }
-    if (!importTrace && d.config.algorithm.capture.embedAfterCapture) {
-      d.enqueueJob({ jobType: "embedding", userId: inserted.userId, sessionId: inserted.sessionId, targetMemoryId: inserted.id,
-        payload: { source: "memory.add", changeSeq: persisted.changeSeq }, createdAt: at });
     }
     const item = d.memories.toListItem(inserted);
     const response = { id: item.id, kind: item.kind, memoryLayer: item.memoryLayer, status: item.status, title: item.title,
@@ -411,7 +414,10 @@ export class ImportJobProcessor {
       if (!latest || latest.state !== "failed" || !latest.stage) return latest ? { accepted: false, processing: latest } : undefined;
       const summaryJobType = summaryProcessingJobType(memory);
       const job = d.enqueueJob({ jobType: latest.stage === "summary" ? summaryJobType : "embedding", userId: memory.userId,
-        sessionId: memory.sessionId, targetMemoryId: memory.id, payload: { source: "memory.processing.manual_retry", previousErrorCode: latest.errorCode ?? undefined, ...observationJobPayload(memory), ...externalSkillJobPayload(memory) },
+        sessionId: memory.sessionId, targetMemoryId: memory.id, payload: { source: "memory.processing.manual_retry", previousErrorCode: latest.errorCode ?? undefined, ...observationJobPayload(memory), ...externalSkillJobPayload(memory),
+          ...(latest.stage === "summary" && summaryJobType === "trace_summary"
+            ? turnJudgeJobFlags(d.runtime.latestJobForTarget(memory.id, "trace_summary")?.payload)
+            : {}) },
         maxAttempts: latest.stage === "summary" ? 3 : 6, createdAt: at });
       const processing = d.processing.save({ ...latest, state: latest.stage === "summary" ? "summary_pending" : "embedding_pending", activeJobId: job.id,
         attemptCount: 0, manualRetryCount: latest.manualRetryCount + 1, retryAction: "retry", updatedAt: at });
@@ -426,7 +432,10 @@ export class ImportJobProcessor {
     if (!d.config.algorithm.enableMemoryAdd) return 0;
     let restarted = 0;
     for (const failed of d.processing.listByStates(["failed"], limit)) {
+      // Configuration blocks resume via the worker's configuration fingerprint
+      // change or an explicit manual retry, never on every service restart.
       if (!failed.stage || failed.retryAction === "none") continue;
+      if (failed.activeJobId && d.runtime.getJob(failed.activeJobId)?.blockedReason === "configuration") continue;
       const memory = d.memories.get(failed.memoryId);
       if (!memory) continue;
       if (failed.stage !== "summary" && d.memories.hasVector(memory.id, "vec_summary")) {
@@ -460,7 +469,8 @@ export class ImportJobProcessor {
         if (!current || current.state !== "failed" || !current.stage || current.retryAction === "none") return undefined;
         const jobType = current.stage === "summary" ? summaryProcessingJobType(memory) : "embedding";
         const job = d.enqueueJob({ jobType, userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
-          payload: { source: "memory.processing.lifecycle_retry", previousErrorCode: current.errorCode ?? undefined, ...observationJobPayload(memory), ...externalSkillJobPayload(memory) },
+          payload: { source: "memory.processing.lifecycle_retry", previousErrorCode: current.errorCode ?? undefined, ...observationJobPayload(memory), ...externalSkillJobPayload(memory),
+            ...(jobType === "trace_summary" ? turnJudgeJobFlags(d.runtime.latestJobForTarget(memory.id, jobType)?.payload) : {}) },
           maxAttempts: current.stage === "summary" ? 3 : 6, createdAt: at });
         const processing = d.processing.save({ ...current, state: current.stage === "summary" ? "summary_pending" : "embedding_pending", activeJobId: job.id,
           attemptCount: 0, retryAction: "retry", updatedAt: at });
@@ -579,7 +589,9 @@ function repairPlaceholderImportSummary(
 ): void {
   if (!memoryNeedsImportSummary(memory)) return;
   const existing = d.processing.get(memory.id);
-  if (existing && (existing.state === "summary_pending" || existing.state === "summarizing")) return;
+  // A scan replay must not turn a terminal model failure into an implicit retry.
+  // Failed jobs retain their diagnostics and the explicit background retry policy.
+  if (existing && (existing.state === "summary_pending" || existing.state === "summarizing" || existing.state === "failed")) return;
   d.memories.deleteVector(memory.id, "vec_summary");
   const processing = d.processing.save({
     memoryId: memory.id,

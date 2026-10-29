@@ -6,6 +6,8 @@ export const KNOWLEDGE_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion^="knowledge-"]';
 export const THREAD_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion^="thread-"]';
+export const TOOLS_DRAG_EXCLUSION_SELECTOR =
+  '[data-window-drag-exclusion="tools-tabs"]';
 export const WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion="windows-titlebar"]';
 
@@ -47,6 +49,7 @@ function sameRects(
 export function resolveWindowDragExclusionSelector(path: string): string | undefined {
   if (path === "/knowledge") return KNOWLEDGE_DRAG_EXCLUSION_SELECTOR;
   if (path === "/main") return THREAD_DRAG_EXCLUSION_SELECTOR;
+  if (path === "/tools") return TOOLS_DRAG_EXCLUSION_SELECTOR;
   return undefined;
 }
 

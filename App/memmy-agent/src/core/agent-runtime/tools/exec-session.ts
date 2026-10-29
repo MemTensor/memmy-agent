@@ -2,6 +2,16 @@ import { ChildProcess, ChildProcessWithoutNullStreams, spawn } from "node:child_
 import { randomUUID } from "node:crypto";
 import { Tool, type ToolExecutionContext } from "./base.js";
 import { CommandOutputDecoder, type CommandOutputDecoderOptions } from "./command-output-decoder.js";
+import { castParameterAliases, normalizeParameterAliases, OUTPUT_LIMIT_ALIASES, OUTPUT_LIMIT_DESCRIPTION } from "./parameter-aliases.js";
+
+const STDIN_ALIASES = [
+  ["session_id", "sessionId"],
+  ["close_stdin", "closeStdin"],
+  ["yield_time_ms", "yieldTimeMs"],
+  ["wait_for", "waitFor"],
+  ["wait_timeout_ms", "waitTimeoutMs"],
+  ...OUTPUT_LIMIT_ALIASES,
+] as const;
 
 export const DEFAULT_YIELD_MS = 1000;
 export const MAX_YIELD_MS = 30_000;
@@ -323,6 +333,10 @@ export class ExecSession {
 
   private isDone(): boolean {
     return processExited(this.process);
+  }
+
+  get finished(): boolean {
+    return this.streamsClosed;
   }
 
   async write(data: string): Promise<string | null> {
@@ -671,11 +685,21 @@ export class WriteStdinTool extends Tool {
         yield_time_ms: { type: "integer", minimum: 0, maximum: MAX_YIELD_MS },
         wait_for: { type: "string" },
         wait_timeout_ms: { type: "integer", minimum: 0, maximum: MAX_WAIT_FOR_MS },
-        max_output_chars: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
-        max_output_tokens: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
+        max_output_chars: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS, description: OUTPUT_LIMIT_DESCRIPTION },
       },
       required: ["session_id"],
     };
+  }
+
+  castParams(params: Record<string, any>): Record<string, any> {
+    return castParameterAliases(params, STDIN_ALIASES, (value) => super.castParams(value));
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    if (!params || typeof params !== "object" || Array.isArray(params)) return super.validateParams(params);
+    const normalized = normalizeParameterAliases(params, STDIN_ALIASES);
+    if (normalized.error) return [normalized.error];
+    return super.validateParams(normalized.params);
   }
 
   async execute(params: {
@@ -696,23 +720,26 @@ export class WriteStdinTool extends Tool {
     max_output_tokens?: number | null;
     maxOutputTokens?: number | null;
   } = {}, context?: ToolExecutionContext): Promise<string> {
-    const sessionId = params.session_id ?? params.sessionId ?? "";
+    params = this.castParams(params);
+    const errors = this.validateParams(params);
+    if (errors.length) return `Error: ${errors.join("; ")}`;
+    const sessionId = params.session_id!;
     const outputLimit = clampSessionInt(
-      params.max_output_chars ?? params.maxOutputChars ?? params.max_output_tokens ?? params.maxOutputTokens,
+      params.max_output_chars,
       DEFAULT_MAX_OUTPUT_CHARS,
       1000,
       MAX_OUTPUT_CHARS,
     );
     try {
-      const waitFor = params.wait_for ?? params.waitFor;
+      const waitFor = params.wait_for;
       if (waitFor) {
         return this.waitForOutput({
           sessionId,
           chars: params.chars,
-          closeStdin: params.close_stdin ?? params.closeStdin ?? false,
+          closeStdin: params.close_stdin ?? false,
           terminate: params.terminate ?? false,
           waitFor,
-          waitTimeoutMs: clampSessionInt(params.wait_timeout_ms ?? params.waitTimeoutMs, DEFAULT_WAIT_FOR_MS, 0, MAX_WAIT_FOR_MS),
+          waitTimeoutMs: clampSessionInt(params.wait_timeout_ms, DEFAULT_WAIT_FOR_MS, 0, MAX_WAIT_FOR_MS),
           maxOutputChars: outputLimit,
           abortSignal: context?.abortSignal ?? null,
         });
@@ -720,9 +747,9 @@ export class WriteStdinTool extends Tool {
       const poll = await this.manager.write({
         sessionId,
         chars: params.chars,
-        closeStdin: params.close_stdin ?? params.closeStdin ?? false,
+        closeStdin: params.close_stdin ?? false,
         terminate: params.terminate ?? false,
-        yieldTimeMs: clampSessionInt(params.yield_time_ms ?? params.yieldTimeMs, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
+        yieldTimeMs: clampSessionInt(params.yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
         maxOutputChars: outputLimit,
         abortSignal: context?.abortSignal ?? null,
       });

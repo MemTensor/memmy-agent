@@ -803,6 +803,7 @@ body.memmy-window-fullscreen {
 
 .agent-composer-toolbar .composer-actions {
   margin-left: auto;
+  min-width: 0;
 }
 
 /* Composer bottom-right controls: one shared hit size / color / spacing. */
@@ -811,6 +812,15 @@ body.memmy-window-fullscreen {
   align-items: center;
   gap: 4px;
   overflow: visible;
+}
+
+/* The home row is anchored at the right; give its model label a finite area
+   so the fixed-size file, microphone and send buttons cannot push it out. */
+.home-empty-composer > .composer-actions {
+  left: 12px;
+  right: 16px;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .composer-action-btn {
@@ -1073,6 +1083,7 @@ body.memmy-window-fullscreen {
   position: relative;
   z-index: 50;
   display: flex;
+  flex: 0 1 auto;
   width: max-content;
   max-width: 180px;
   min-width: 0;
@@ -1082,14 +1093,17 @@ body.memmy-window-fullscreen {
 }
 
 .agent-model-selector__control.select-control--compact {
-  width: max-content;
-  max-width: 180px;
+  flex-shrink: 1;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow: visible;
 }
 
 .agent-model-selector__button {
-  width: max-content;
-  max-width: 180px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   height: 32px !important;
   min-height: 32px !important;
   padding: 0 28px 0 8px !important;
@@ -1104,7 +1118,7 @@ body.memmy-window-fullscreen {
 
 .agent-model-selector__button .select-control__selection {
   gap: 6px;
-  overflow: visible;
+  overflow: hidden;
   align-items: center;
 }
 
@@ -1987,6 +2001,20 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   padding-top: var(--codex-toolbar-height);
 }
 
+/* When the main sidebar is folded on macOS, the knowledge list becomes the
+   window's left edge. Keep its heading below the native window controls. */
+.sidebar-shell--hidden:not(.sidebar-shell--windows-titlebar)
+  .app-frame-main--sidebar-hidden .memmy-knowledge .mk-side {
+  padding-top: calc(var(--codex-toolbar-height) + 16px);
+}
+
+/* Tools already reserve the content toolbar above their scroll region. The
+   extra collapsed-sidebar padding should only supply a small control gap. */
+.sidebar-shell--hidden:not(.sidebar-shell--windows-titlebar)
+  .app-frame-main--sidebar-hidden .tools-page-content {
+  padding-top: 20px;
+}
+
 .community-popover-grid {
   align-items: center;
   grid-template-columns: 118px auto;
@@ -2260,6 +2288,8 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 .agent-workspace-layout > .home-empty-screen {
   min-width: 0;
   flex: 1 1 auto;
+  margin-right: var(--thread-panel-offset, 0px);
+  transition: margin-right 200ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .app-frame-content-topbar.thread-topbar {
@@ -2279,12 +2309,14 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 }
 
 .agent-workspace-layout.thread-panel-motion--closing > .agent-conversation-panel,
+.agent-workspace-layout.thread-panel-motion--closing > .home-empty-screen,
 .app-frame-content-topbar.thread-panel-motion--closing {
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
 }
 
 .agent-workspace-layout.thread-panel-motion--resizing > .agent-conversation-panel,
+.agent-workspace-layout.thread-panel-motion--resizing > .home-empty-screen,
 .app-frame-content-topbar.thread-panel-motion--resizing {
   transition: none;
 }
@@ -2557,6 +2589,21 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   background: var(--color-background-paper);
   color: var(--color-text-ink);
   font-family: var(--font-sans);
+}
+
+.thread-panel--overlay {
+  border-left: 0;
+}
+
+/* At narrow widths the preview owns the conversation area. The chat topbar
+   otherwise paints above its tabs because the topbar has a higher z-index. */
+.app-frame-main:has(> .thread-panel--overlay[aria-hidden="false"])
+  > .app-frame-content-topbar.thread-topbar {
+  display: none;
+}
+
+.app-frame-main--sidebar-hidden > .thread-panel--overlay .thread-panel__header {
+  padding-left: var(--codex-sidebar-hidden-topbar-padding);
 }
 
 .thread-panel--fullscreen {
@@ -3332,6 +3379,21 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   padding: 8px 24px 32px;
 }
 
+.agent-activity-output-file {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 13px;
+}
+.agent-activity-output-file__notice { margin-top: 6px; font-size: 12px; opacity: .65; }
+.thread-preview__paged { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.thread-preview__text-pager { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.thread-preview__text-pager button { flex-shrink: 0; white-space: nowrap; }
+.thread-preview__text-pager span { flex-basis: 100%; opacity: .65; }
+.thread-preview__text-page { flex: 1 1 auto; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 13px; }
+
 .thread-preview__code,
 .thread-preview__table-wrap {
   min-height: 0;
@@ -3681,6 +3743,40 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 .agent-message-content--streaming > .agent-message-content__p:has(+ .agent-streaming-cursor) {
   display: inline;
   margin-bottom: 0;
+}
+
+/* A quiet running turn sweeps its last visible line after three seconds. */
+.agent-stall-shimmer {
+  background-image:
+    linear-gradient(90deg, transparent, var(--color-action-sky-hover), transparent),
+    linear-gradient(var(--agent-stall-ink), var(--agent-stall-ink));
+  background-repeat: no-repeat;
+  background-size: var(--agent-stall-band) var(--agent-stall-height), 100% 100%;
+  background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agent-stall-sweep 1.8s linear infinite;
+}
+
+.agent-stall-shimmer :where(code, .agent-activity-diff, .agent-activity-diff *) {
+  -webkit-text-fill-color: currentColor;
+}
+
+@keyframes agent-stall-sweep {
+  from {
+    background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
+  }
+  to {
+    background-position: var(--agent-stall-to) var(--agent-stall-y), 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-stall-shimmer {
+    animation: none;
+    background-position: calc((var(--agent-stall-from) + var(--agent-stall-to)) / 2) var(--agent-stall-y), 0 0;
+  }
 }
 
 .agent-thinking-pulse {
@@ -4370,118 +4466,6 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   max-height: min(432px, calc(100dvh - var(--agent-composer-overlay-height, 120px) + 16px));
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-
-.agent-queue-panel {
-  max-height: min(200px, 32dvh);
-  overflow: hidden;
-}
-
-.agent-queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: min(200px, 32dvh);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.agent-queue-item {
-  display: flex;
-  min-height: 40px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px 0 12px;
-  border-radius: var(--radius-composer);
-  background: color-mix(in srgb, var(--color-border-stone) 16%, var(--color-background-paper));
-}
-
-.agent-queue-item__source {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
-}
-
-.agent-queue-item__source-mark {
-  display: block;
-  width: 16px;
-  height: 16px;
-  max-width: 16px;
-  max-height: 16px;
-  flex: 0 0 16px;
-  object-fit: contain;
-}
-
-.agent-queue-item__source-image {
-  border-radius: 3px;
-}
-
-.agent-queue-item__text {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
-  font-size: 13px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-queue-item__actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-  margin-left: auto;
-}
-
-.agent-queue-item__remove,
-.agent-queue-item__steer,
-.agent-queue-item__edit {
-  display: inline-flex;
-  width: 24px;
-  height: 24px;
-  min-width: 24px;
-  flex: 0 0 24px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
-  cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
-}
-
-.agent-queue-item__steer:hover:not(:disabled),
-.agent-queue-item__edit:hover:not(:disabled),
-.agent-queue-item__remove:hover:not(:disabled) {
-  background: var(--color-canvas-oat);
-}
-
-.agent-queue-item__remove:hover:not(:disabled) {
-  color: var(--color-status-error);
-}
-
-.agent-queue-item__remove:focus-visible,
-.agent-queue-item__steer:focus-visible,
-.agent-queue-item__edit:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-action-sky) 32%, transparent);
-}
-
-.agent-queue-item__remove:disabled,
-.agent-queue-item__steer:disabled,
-.agent-queue-item__edit:disabled {
-  cursor: not-allowed;
-  opacity: 0.38;
 }
 
 .agent-chat-bubble-frame {
@@ -7068,6 +7052,16 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   text-transform: uppercase;
 }
 
+.memory-processing-notice--progress {
+  border-color: var(--color-border-stone);
+  background: var(--color-background-paper);
+}
+
+.memory-processing-notice--progress .agent-model-error-notice__icon,
+.memory-processing-notice--progress .agent-model-error-notice__title {
+  color: var(--color-text-ink);
+}
+
 .memory-processing-notice--success {
   border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
   background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));
@@ -7559,6 +7553,10 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   font-size: 13px;
   line-height: 1.68;
   overflow-wrap: anywhere;
+}
+
+.memory-markdown__literal-html {
+  white-space: pre-wrap;
 }
 
 .memory-markdown :first-child {
@@ -11495,6 +11493,121 @@ body.memmy-platform-windows :is(
   color: var(--color-action-sky-hover);
 }
 
+.app-frame-sidebar .app-frame-nav-button:hover,
+.app-frame-sidebar .app-frame-nav-button:focus-visible,
+.app-frame-sidebar .app-frame-recording-nav:hover .app-frame-nav-button,
+.app-frame-sidebar .app-frame-recording-nav:focus-within .app-frame-nav-button {
+  background: var(--color-nav-active-bg);
+  color: var(--color-action-sky-hover);
+}
+
+.app-frame-recording-nav { position: relative; }
+.app-frame-recording-nav .app-frame-nav-button { padding-right: 90px; }
+.app-frame-recording-nav--recording .app-frame-nav-button { background: var(--color-nav-active-bg); }
+.app-frame-recording-nav__controls {
+  position: absolute;
+  top: 50%;
+  right: 17px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.app-frame-recording-nav--recording .app-frame-recording-nav__controls,
+.app-frame-recording-nav:has(.app-frame-recording-nav__control--stop) .app-frame-recording-nav__controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-frame-recording-nav:hover .app-frame-recording-nav__controls,
+.app-frame-recording-nav:focus-within .app-frame-recording-nav__controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-frame-recording-nav__control,
+.app-frame-recording-nav__signal {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--color-action-sky-hover);
+}
+.app-frame-recording-nav__signal { color: color-mix(in srgb, var(--color-text-ink) 62%, transparent); }
+.app-frame-recording-wave {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+.app-frame-recording-wave > span {
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleY(.45);
+  transform-origin: center;
+}
+.app-frame-recording-wave > span:nth-child(2),
+.app-frame-recording-wave > span:nth-child(4) { transform: scaleY(.75); }
+.app-frame-recording-wave > span:nth-child(3) { transform: scaleY(.95); }
+.app-frame-recording-wave--live > span { animation: app-frame-recording-wave 700ms ease-in-out infinite alternate; }
+.app-frame-recording-wave--live > span:nth-child(2) { animation-duration: 520ms; animation-delay: -260ms; }
+.app-frame-recording-wave--live > span:nth-child(3) { animation-duration: 760ms; animation-delay: -570ms; }
+.app-frame-recording-wave--live > span:nth-child(4) { animation-duration: 600ms; animation-delay: -180ms; }
+.app-frame-recording-wave--live > span:nth-child(5) { animation-duration: 820ms; animation-delay: -690ms; }
+@keyframes app-frame-recording-wave { from { transform: scaleY(.25); } to { transform: scaleY(.9); } }
+@media (prefers-reduced-motion: reduce) { .app-frame-recording-wave--live > span { animation: none; } }
+.app-frame-recording-pause-glyph {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  gap: 4px;
+}
+.app-frame-recording-pause-glyph > span { width: 4px; height: 12px; border-radius: 2px; background: currentColor; }
+.app-frame-recording-stop-glyph { width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
+.app-frame-recording-nav__control--record {
+  width: auto;
+  gap: 4px;
+  padding: 0 4px;
+  color: var(--color-text-ink);
+  font-size: 12px;
+  line-height: 20px;
+}
+.app-frame-recording-nav__control--record .app-frame-recording-wave { color: color-mix(in srgb, var(--color-text-ink) 62%, transparent); }
+.app-frame-recording-nav__post-status {
+  position: absolute;
+  top: 50%;
+  right: 19px;
+  transform: translateY(-50%);
+  color: var(--color-action-sky-hover);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.app-frame-recording-nav__post-status--view {
+  padding: 2px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.app-frame-recording-nav__post-status--view:hover,
+.app-frame-recording-nav__post-status--view:focus-visible {
+  background: color-mix(in srgb, var(--color-action-sky-hover) 10%, transparent);
+}
+.app-frame-recording-nav__control:hover,
+.app-frame-recording-nav__control:focus-visible { background: color-mix(in srgb, var(--color-action-sky-hover) 10%, transparent); }
+.app-frame-recording-nav__control--stop { color: #ff5f57; }
+.app-frame-recording-nav__control--stop:hover,
+.app-frame-recording-nav__control--stop:focus-visible { background: color-mix(in srgb, #ff5f57 10%, transparent); }
+.app-frame-recording-nav__control:disabled { opacity: .45; cursor: not-allowed; }
+.app-frame-recording-nav__control svg,
+.app-frame-recording-nav__signal svg { width: 16px; height: 16px; }
+
 .app-frame-footer-action {
   width: calc(100% - 16px);
   margin: 0 8px;
@@ -14309,6 +14422,13 @@ body.memmy-platform-windows :is(
   background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
 }
 
+.ch-source-dialog__list--apps {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 0;
+}
+
 .ch-source-dialog__add {
   display: flex;
   align-items: center;
@@ -14323,6 +14443,15 @@ body.memmy-platform-windows :is(
   font-size: 14px;
   font-weight: 550;
   cursor: pointer;
+}
+
+.ch-source-dialog__add--app {
+  flex: none;
+  z-index: 1;
+  border-bottom: 1px solid var(--ch-border);
+  border-radius: 0;
+  padding-block: 12px;
+  background: var(--ch-surface);
 }
 
 .ch-source-dialog__add-icon {
@@ -14341,18 +14470,15 @@ body.memmy-platform-windows :is(
 }
 
 .ch-source-dialog__app-menu {
-  position: absolute;
-  z-index: 5;
   display: flex;
   flex-direction: column;
-  width: 240px;
-  max-height: 350px;
+  flex: 0 1 220px;
+  min-height: 120px;
   overflow: auto;
-  padding: 4px;
-  border: 1px solid var(--ch-border);
-  border-radius: 12px;
-  background: var(--ch-surface);
-  box-shadow: 0 12px 32px rgb(22 24 31 / 16%);
+  margin-top: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-text-ink) 18%, var(--ch-surface));
+  background: color-mix(in srgb, var(--color-canvas-oat) 55%, var(--ch-surface));
 }
 
 .ch-source-dialog__app-search {
@@ -14438,6 +14564,12 @@ body.memmy-platform-windows :is(
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
+}
+
+.ch-source-dialog__list--apps .ch-source-dialog__rules {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ch-source-dialog__rules li {

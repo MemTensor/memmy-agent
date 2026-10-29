@@ -113,7 +113,7 @@ describe("exec session tools", () => {
     expect(result).toContain("Exit code: 0");
   });
 
-  it("falls back to non-empty aliases when preferred alias is empty", async () => {
+  it("rejects empty and non-empty aliases instead of silently selecting a command", async () => {
     const root = tmpDir("memmy-exec-empty-alias-");
     const subdir = path.join(root, "subdir");
     fs.mkdirSync(subdir);
@@ -126,8 +126,8 @@ describe("exec session tools", () => {
       shell: "",
     });
 
-    expect(result).toContain(subdir);
-    expect(result).toContain("Exit code: 0");
+    expect(result).toContain("Conflicting parameters: command and cmd");
+    expect(result).not.toContain("Exit code:");
   });
 
   it("returns completed output when yield_time_ms is used", async () => {
@@ -328,7 +328,7 @@ describe("exec session tools", () => {
     expect(helpers).toHaveLength(2);
   });
 
-  it("accepts max_output_tokens for session output", async () => {
+  it("accepts deprecated max_output_tokens as a character limit for session output", async () => {
     const root = tmpDir("memmy-exec-tokens-");
     const manager = new ExecSessionManager();
     const exec = new ExecTool({ workspace: root, sessionManager: manager, config: new ExecToolConfig({ timeoutS: 5 }) });
@@ -343,7 +343,7 @@ describe("exec session tools", () => {
     expect(result).toContain("Exit code: 0");
   });
 
-  it("accepts max_output_tokens for one-shot output", async () => {
+  it("accepts deprecated max_output_tokens as a character limit for one-shot output", async () => {
     const root = tmpDir("memmy-exec-one-shot-tokens-");
 
     const result = await new ExecTool({ workspace: root, config: new ExecToolConfig({ timeoutS: 5 }) }).execute({
@@ -439,7 +439,7 @@ describe("exec session tools", () => {
     expect(result).toContain("Exit code:");
   });
 
-  it("accepts max_output_tokens for write_stdin output", async () => {
+  it("accepts deprecated max_output_tokens as a character limit for write_stdin output", async () => {
     const root = tmpDir("memmy-exec-stdin-tokens-");
     const manager = new ExecSessionManager();
     const exec = new ExecTool({ workspace: root, sessionManager: manager, config: new ExecToolConfig({ timeoutS: 5 }) });

@@ -29,9 +29,9 @@ describe("OpenCode V2 live capture and historical scan", () => {
           ...buildSourceTurnRequest(channel === "hook" ? live.turn! : scanned.turn!, channel),
           namespace: { source: "opencode", profileId: "build", userId: "fixture-user" }
         });
-        const first = service.completeSourceTurn(request(firstChannel));
+        const first = (await service.completeSourceTurn(request(firstChannel)));
         expect(first.status).toBe("stored");
-        const second = service.completeSourceTurn(request(firstChannel === "hook" ? "agent_source_scan" : "hook"));
+        const second = (await service.completeSourceTurn(request(firstChannel === "hook" ? "agent_source_scan" : "hook")));
         expect(second.status).toBe("existing");
         expect(second.result?.l1MemoryId).toBe(first.result?.l1MemoryId);
       }
@@ -65,10 +65,10 @@ describe("OpenCode V2 migration and immutable native boundaries", () => {
       const read = async (turnId: string) => (await readOpencodeSourceTurn(createOpencodeDatabaseSource(native)!, { conversationId: "session", turnId })).turn;
       const migrated = await read("old-user");
       expect(migrated).toMatchObject({ completedAt: new Date(time + 2).toISOString(), profileId: "build", answer: "Verified migrated storage behavior." });
-      const capture = (turn: NonNullable<typeof migrated>, channel: "hook" | "agent_source_scan") => service.completeSourceTurn({
+      const capture = async (turn: NonNullable<typeof migrated>, channel: "hook" | "agent_source_scan") => (await service.completeSourceTurn({
         ...buildSourceTurnRequest(turn, channel), namespace: { source: "opencode", profileId: "build", userId: "fixture-user" }
-      });
-      expect(capture(migrated!, firstChannel).status).toBe("stored");
+      }));
+      expect((await capture(migrated!, firstChannel)).status).toBe("stored");
       insert.run("new-user", "user", JSON.stringify({ text: "Inspect and document native boundaries.", time: { created: time + 10 } }), 2, time + 10);
       insert.run("tool-step", "assistant", JSON.stringify({ agent: "build", finish: "tool-calls", time: { created: time + 11, completed: time + 12 }, content: [{ type: "tool", id: "read", name: "read", time: { created: time + 11, completed: time + 12 }, state: { status: "completed", input: {}, content: [{ type: "text", text: "file contents" }] } }] }), 3, time + 11);
       expect(await read("new-user")).toBeNull(); // completed tool step is not a completed execution
@@ -77,7 +77,7 @@ describe("OpenCode V2 migration and immutable native boundaries", () => {
       insert.run("idle", "idle", JSON.stringify({ outcome: "succeeded", time: { created: time + 15 } }), 5, time + 15);
       const completed = await read("new-user");
       expect(completed).not.toBeNull();
-      expect(capture(completed!, firstChannel).status).toBe("stored");
+      expect((await capture(completed!, firstChannel)).status).toBe("stored");
       insert.run("maintenance", "synthetic", JSON.stringify({ text: "System continuation" }), 6, time + 16);
       insert.run("maintenance-answer", "assistant", JSON.stringify({ agent: "build", finish: "stop", time: { created: time + 17, completed: time + 18 }, content: [{ type: "text", text: "This is not part of the previous user turn." }] }), 7, time + 17);
       insert.run("maintenance-idle", "idle", JSON.stringify({ outcome: "succeeded", time: { created: time + 19 } }), 8, time + 19);
@@ -86,8 +86,8 @@ describe("OpenCode V2 migration and immutable native boundaries", () => {
       expect(await read("new-user")).toEqual(completed);
       expect(await read("old-user")).toEqual(migrated);
       const second = firstChannel === "hook" ? "agent_source_scan" : "hook";
-      expect(capture((await read("new-user"))!, second).status).toBe("existing");
-      expect(capture((await read("old-user"))!, second).status).toBe("existing");
+      expect((await capture((await read("new-user"))!, second)).status).toBe("existing");
+      expect((await capture((await read("old-user"))!, second)).status).toBe("existing");
       expect(db.db.prepare("SELECT COUNT(*) AS count FROM source_turn_captures").get()).toEqual({ count: 2 });
       native.exec("DELETE FROM session_message WHERE id = 'old-user'");
       expect(await read("old-user")).toBeNull();

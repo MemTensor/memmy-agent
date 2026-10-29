@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCommand } from "../../Memory/src/cli/commands.js";
 import { PROJECT_VERSION } from "../../Memory/src/cli/project-version.js";
 import {
@@ -10,12 +10,17 @@ import {
   MemoryDb,
   MemoryService,
   type Embedder,
-  type LlmClient
+  type JobRef,
+  type LlmClient,
+  type LlmMessage,
+  type LlmCompletionOptions
 } from "../../Memory/src/index.js";
+import { Repositories } from "../../Memory/src/storage/repositories.js";
 
 const tempRoots: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -34,20 +39,32 @@ describe("memory layer smoke plan", () => {
       .toBe("tsc -p tests/smoke/tsconfig.json --noEmit");
     expect(manifest.scripts["smoke:memory-layer"])
       .toContain("npm run smoke:memory-layer:test");
+    expect(manifest.scripts["smoke:memory-layer:test"])
+      .toContain("tests/smoke/async-capture-http.test.ts");
     expect(manifest.scripts["smoke:memory-layer"])
       .toContain("tsx tests/smoke/memory-layer-smoke.ts");
   });
 
-  it("stores, processes, reads, and recalls a verified turn through the real Memory service", async () => {
+  it.each([[1, false], [1, true], [20, false], [20, true]] as const)("stores, processes, reads, and recalls a verified turn with budget %i, turnJudge=%s", async (workerBudget, turnJudge) => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-smoke-"));
     tempRoots.push(root);
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const repos = new Repositories(db.db);
+    let judgeCalls = 0;
+    const llm = createSmokeSummaryLlm(() => { judgeCalls++; });
+    const embedder = createSmokeEmbedder();
+    const modelCalls = [
+      vi.spyOn(llm, "complete"),
+      vi.spyOn(llm, "completeJson"),
+      vi.spyOn(embedder, "embed"),
+      vi.spyOn(embedder, "embedOne")
+    ];
     const service = new MemoryService({
       db,
       mode: "dev",
-      config: DEFAULT_MEMMY_CONFIG,
-      llm: createSmokeSummaryLlm(),
-      embedder: createSmokeEmbedder(),
+      config: { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm, session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge } } },
+      llm,
+      embedder,
       fetchAppMemoryBudget: async () => null
     });
     const namespace = {
@@ -68,7 +85,7 @@ describe("memory layer smoke plan", () => {
         requestId: "smoke-session-open",
         namespace
       });
-      const completed = service.completeTurn("smoke-turn-1", {
+      const completed = await service.completeTurn("smoke-turn-1", {
         adapterId: "smoke-plan",
         requestId: "smoke-turn-complete",
         sessionId: session.sessionId,
@@ -89,20 +106,64 @@ describe("memory layer smoke plan", () => {
       expect(completed).toMatchObject({
         sessionId: session.sessionId,
         turnId: "smoke-turn-1",
-        episodeId: expect.any(String),
+        assignmentStatus: "pending",
         rawTurnId: expect.any(String),
         l1MemoryId: expect.any(String)
       });
+      expect(completed.episodeId).toBeUndefined();
+      expect(db.db.prepare("SELECT user_text, assistant_text FROM raw_turns WHERE id=?").get(completed.rawTurnId))
+        .toMatchObject({ user_text: "How should the v1.0.2 release workflow be verified?", assistant_text: "Run the release contracts and publish only after every attachment succeeds." });
       expect(completed.jobs.map((job) => job.jobType)).toContain("trace_summary");
 
-      const summaryWorker = await service.runWorkerOnce(20, { namespace });
-      expect(summaryWorker.failed).toBe(0);
-      expect(summaryWorker.jobs.map((job) => job.jobType)).toContain("trace_summary");
+      // Continuous refill may process the summary and its embedding in one call.
+      // Collect bounded rounds so this smoke contract also holds with a small budget.
+      const processedJobs: JobRef[] = [];
+      let drained = false;
+      for (let round = 0; round < 20; round += 1) {
+        const worker = await service.runWorkerOnce(workerBudget, { namespace });
+        expect(worker.failed).toBe(0);
+        expect(worker.embeddingRetries.failed).toBe(0);
+        expect(worker.succeeded).toBe(worker.leased);
+        processedJobs.push(...worker.jobs);
+        if (worker.leased === 0 && worker.embeddingRetries.leased === 0) {
+          drained = true;
+          break;
+        }
+      }
+      expect(drained, "Smoke jobs must finish within the bounded worker rounds").toBe(true);
+      for (const jobType of ["trace_summary", "embedding"] as const) {
+        const jobs = processedJobs.filter((job) =>
+          job.jobType === jobType && job.targetMemoryId === completed.l1MemoryId
+        );
+        expect(jobs).toHaveLength(1);
+        expect(jobs[0]?.status).toBe("succeeded");
+      }
+      expect(new Set(processedJobs.map((job) => job.jobId)).size).toBe(processedJobs.length);
+      expect(repos.memories.hasVector(completed.l1MemoryId, "vec_summary")).toBe(true);
+      expect(repos.processing.get(completed.l1MemoryId)).toMatchObject({ state: "ready" });
 
-      const embeddingWorker = await service.runWorkerOnce(20, { namespace });
-      expect(embeddingWorker.failed).toBe(0);
-      expect(embeddingWorker.jobs.map((job) => job.jobType)).toContain("embedding");
+      const callsAfterProcessing = modelCalls.map((spy) => spy.mock.calls.length);
+      for (let round = 0; round < 2; round += 1) {
+        const idleWorker = await service.runWorkerOnce(workerBudget, { namespace });
+        expect(idleWorker).toMatchObject({
+          leased: 0, succeeded: 0, failed: 0, jobs: [],
+          embeddingRetries: { leased: 0, succeeded: 0, failed: 0, items: [] }
+        });
+      }
+      expect(modelCalls.map((spy) => spy.mock.calls.length)).toEqual(callsAfterProcessing);
 
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const raw = db.db.prepare("SELECT episode_id FROM raw_turns WHERE id=?").get(completed.rawTurnId) as { episode_id: string | null };
+        if (raw.episode_id) break;
+        const run = await service.runWorkerOnce(20, { namespace });
+        expect(run.failed).toBe(0);
+      }
+      expect(db.db.prepare("SELECT episode_id FROM raw_turns WHERE id=?").get(completed.rawTurnId)).toMatchObject({ episode_id: expect.any(String) });
+      expect(judgeCalls).toBe(turnJudge ? 1 : 0);
+      expect(db.db.prepare("SELECT job_type,status FROM evolution_jobs WHERE target_memory_id=? AND job_type IN ('trace_summary','embedding') ORDER BY job_type").all(completed.l1MemoryId))
+        .toEqual(["embedding", "trace_summary"].map(job_type => ({ job_type, status: "succeeded" })));
+      expect(db.db.prepare("SELECT state FROM memory_processing_state WHERE memory_id=?").get(completed.l1MemoryId))
+        .toEqual({ state: "ready" });
       const detail = service.getMemory(completed.l1MemoryId, { namespace });
       expect(detail).toMatchObject({
         id: completed.l1MemoryId,
@@ -202,7 +263,7 @@ function createSmokeEmbedder(): Embedder {
   };
 }
 
-function createSmokeSummaryLlm(): LlmClient {
+function createSmokeSummaryLlm(onJudge: () => void = () => {}): LlmClient {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -214,14 +275,19 @@ function createSmokeSummaryLlm(): LlmClient {
     async complete() {
       return JSON.stringify({ title: "Smoke turn", summary: "Verified smoke summary" });
     },
-    async completeJson<T extends Record<string, unknown>>(messages) {
+    async completeJson<T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions) {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Release verification", summary: "Verify the release workflow" } as unknown as T;
       const system = messages
         .filter((message) => message.role === "system")
         .map((message) => message.content)
         .join("\n");
-      if (system.includes("Judge L1 and User Memory independently")) {
+      const joint = system.includes("In one answer you judge four things");
+      if (joint) onJudge();
+      if (joint || system.includes("Judge L1 and User Memory independently")) {
         return {
+          ...(joint ? { relation: null, feedback: null, reason: "First turn" } : {}),
           l1: {
+            ...(joint ? { unverified_answer: false } : {}),
             title: "Release verification",
             summary: "Verified release contracts and attachments.",
             evidence: [{ quote: "release workflow", role: "user", kind: "task_request" }]

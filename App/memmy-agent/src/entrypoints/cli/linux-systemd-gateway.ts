@@ -217,10 +217,15 @@ export async function probeGateway(
       signal: controller.signal,
     });
     if (response.status === 503) {
-      return {
-        status: "unavailable",
-        detail: "bootstrap HTTP 503",
-      };
+      // Retry only known startup responses from the current or legacy listener.
+      // Other 503 responses can come from an incompatible upstream endpoint.
+      const startupBody = (await response.text()).trim();
+      if (startupBody === "agent_runtime_initializing") {
+        return { status: "unavailable", detail: "agent runtime is initializing" };
+      }
+      if (startupBody === "Gateway is still starting") {
+        return { status: "unavailable", detail: "bootstrap HTTP 503" };
+      }
     }
     if (!response.ok) {
       return {

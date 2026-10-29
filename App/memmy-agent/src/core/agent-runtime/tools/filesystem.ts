@@ -9,6 +9,11 @@ import { isPathInside, resolveWorkspacePath, workspaceRelative } from "./path-ut
 import { extractText } from "../../../utils/document.js";
 import { getMediaDir } from "../../../config/paths.js";
 import { BUILTIN_SKILLS_DIR } from "../skills.js";
+import {
+  EXTERNAL_CONTENT_BANNER,
+  boundedHeadTail,
+  readPersistedToolResultMetadata,
+} from "../../../utils/helpers.js";
 
 const IGNORED_DIRS = new Set([".git", "node_modules"]);
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -594,7 +599,7 @@ export class ReadFileTool extends Tool {
       "Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. " +
       "Use find_files/list_dir first when the path is uncertain. " +
       "Read the relevant range before editing so replacements or patches are based on current content. " +
-      "Use offset and limit for text file lines. For documents use pages for PDF page ranges, " +
+      "Use offset and limit for text file lines, or char_offset/char_limit for oversized single lines. For documents use pages for PDF page ranges, " +
       "and char_offset/char_limit to read extracted text in chunks (also within a large PDF page). " +
       "Follow the returned char_offset with the same path/pages until the required content is read; " +
       "an excerpt is not the full document. Use force=true to re-read text even if unchanged."
@@ -609,8 +614,8 @@ export class ReadFileTool extends Tool {
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
         pages: { type: "string", description: "PDF page or inclusive page range, e.g. 15 or 15-20." },
-        char_offset: { type: "integer", minimum: 0, description: "Documents only: zero-based UTF-16 offset in extracted text after PDF page selection. Use the returned continuation offset." },
-        char_limit: { type: "integer", minimum: 1, description: "Documents only: requested chunk size in UTF-16 units (default 32000; capped to the output budget)." },
+        char_offset: { type: "integer", minimum: 0, description: "Text files and documents: zero-based UTF-16 offset (after PDF page selection). Use the returned continuation offset." },
+        char_limit: { type: "integer", minimum: 1, description: "Text files and documents: requested raw chunk size in UTF-16 units (default 32000; capped to the output budget)." },
         force: { type: "boolean" },
       },
       required: ["path"],
@@ -629,7 +634,7 @@ export class ReadFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}): Promise<any> {
+  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}, context?: ToolExecutionContext): Promise<any> {
     const requested = params.path;
     if (!requested) return "Error reading file: Unknown path";
     if (isBlockedDevicePath(requested)) {
@@ -661,6 +666,31 @@ export class ReadFileTool extends Tool {
       }
       const content = await fs.readFile(target, "utf8");
       if (!content) return "Empty file";
+      const metadata = readPersistedToolResultMetadata(target);
+      const provenance = metadata?.untrusted
+        ? `${EXTERNAL_CONTENT_BANNER}\nSource tool: ${metadata.sourceTool ?? "external"}\n\n` : "";
+      const budget = Math.max(1, Math.min(ReadFileTool.MAX_CHARS, context?.maxResultChars ?? ReadFileTool.MAX_CHARS));
+      if (params.char_offset !== undefined || params.char_limit !== undefined) {
+        const offset = params.char_offset ?? 0;
+        const limit = params.char_limit ?? 32000;
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > content.length || !Number.isSafeInteger(limit) || limit < 1)
+          return "Error reading file: char_offset/char_limit must be valid UTF-16 character positions and a positive limit.";
+        const budgetError = () => "Error: read_file budget too small; increase the result budget.".slice(0, budget);
+        if (offset > 0 && /[\uDC00-\uDFFF]/.test(content[offset]!) && /[\uD800-\uDBFF]/.test(content[offset - 1]!))
+          return "Error: char_offset splits a UTF-16 surrogate pair; use the returned continuation offset.".slice(0, budget);
+        const footerFor = (end: number) => `\n[Raw fragment chars ${offset}-${end} of ${content.length}; not standalone JSON. ${end < content.length ? `Continue with char_offset=${end}.` : "End of file"}]`;
+        // Reserve the actual footer size. A fixed reservation can prevent every read
+        // from advancing when the model has a small per-tool result budget.
+        const requestedSize = limit === 1 && /[\uD800-\uDBFF]/.test(content[offset]!) && /[\uDC00-\uDFFF]/.test(content[offset + 1]!) ? 2 : limit;
+        let end = Math.min(content.length, offset + Math.min(requestedSize, Math.max(0, budget - provenance.length)));
+        while (provenance.length + end - offset + footerFor(end).length > budget && end > offset) {
+          end = Math.max(offset, end - (provenance.length + end - offset + footerFor(end).length - budget));
+        }
+        if (end < content.length && /[\uD800-\uDBFF]/.test(content[end - 1]!) && /[\uDC00-\uDFFF]/.test(content[end]!)) end -= 1;
+        if (end === offset && offset < content.length) return budgetError();
+        if (provenance.length + footerFor(end).length > budget) return budgetError();
+        return provenance + content.slice(offset, end) + footerFor(end);
+      }
       const lines = splitFileLines(content);
       const offset = params.offset ?? 1;
       if (offset > lines.length) return `Error reading file: offset ${offset} beyond end (${lines.length} lines)`;
@@ -671,7 +701,7 @@ export class ReadFileTool extends Tool {
       let selected = lines.slice(offset - 1, params.limit ? offset - 1 + params.limit : undefined);
       let body = lineNumbered(selected, offset);
       let nextOffset = offset + selected.length;
-      while (body.length > ReadFileTool.MAX_CHARS && selected.length > 1) {
+      while (body.length > Math.max(0, budget - provenance.length - 300) && selected.length > 1) {
         selected = selected.slice(0, Math.max(1, Math.floor(selected.length * 0.8)));
         body = lineNumbered(selected, offset);
         nextOffset = offset + selected.length;
@@ -681,7 +711,11 @@ export class ReadFileTool extends Tool {
           ? `\n\nUse offset=${nextOffset} to continue.`
           : "\n\nEnd of file";
       this.fileStates().recordRead(target, offset, limit);
-      return body + footer;
+      if (provenance.length + body.length + footer.length > budget) {
+        const hint = `${provenance}Long line: use read_file char_offset/char_limit for raw fragments. ${context?.availableTools?.includes("exec") ? "Use exec with an integer-safe parser for specific fields/records; narrow oversized queries." : "Fragments are not standalone JSON; do not infer missing fields."}\n`;
+        return hint.slice(0, budget) + boundedHeadTail(body, Math.max(0, Math.min(4000, budget) - hint.length));
+      }
+      return provenance + body + footer;
     } catch (error) {
       const msg = (error as NodeJS.ErrnoException).code === "ENOENT" ? "not found" : (error as Error).message;
       return `Error reading file: ${msg}`;
@@ -798,6 +832,80 @@ export class WriteFileTool extends Tool {
   }
 }
 
+const EDIT_FILE_ALIASES = [
+  ["old_text", "oldText"],
+  ["new_text", "newText"],
+  ["replace_all", "replaceAll"],
+  ["line_hint", "lineHint"],
+  ["expected_replacements", "expectedReplacements"],
+] as const;
+
+/** Normalize legacy inputs while rejecting ambiguous values before file access. */
+function normalizeEditAliases(params: Record<string, any>): { params: Record<string, any>; error: string | null } {
+  const normalized = { ...params };
+  for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+    const value = params[canonical];
+    const legacy = params[alias];
+    // Nullish values are unset for compatibility; empty text and false are explicit values.
+    if (value != null && legacy != null && value !== legacy) {
+      return { params, error: `Conflicting parameters: ${canonical} and ${alias} must have the same value when both are provided.` };
+    }
+    if (value == null && legacy !== undefined) normalized[canonical] = legacy;
+    if (normalized[canonical] === undefined) delete normalized[canonical];
+    delete normalized[alias];
+  }
+  return { params: normalized, error: null };
+}
+
+interface EditFileParams {
+  path?: string;
+  old_text?: string;
+  oldText?: string;
+  new_text?: string;
+  newText?: string;
+  replace_all?: boolean;
+  replaceAll?: boolean;
+  occurrence?: number | null;
+  line_hint?: number | null;
+  lineHint?: number | null;
+  expected_replacements?: number | null;
+  expectedReplacements?: number | null;
+}
+
+function resolveEditParams(params: EditFileParams) {
+  return {
+    oldText: params.old_text,
+    newText: params.new_text,
+    replaceAll: params.replace_all ?? false,
+    occurrence: params.occurrence ?? null,
+    lineHint: params.line_hint ?? null,
+    expectedReplacements: params.expected_replacements ?? null,
+  };
+}
+
+/** Pure validation shared by registry preparation and direct execution, before any file access. */
+function editOptionsError(options: ReturnType<typeof resolveEditParams>): string | null {
+  const { oldText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
+  for (const [name, value] of [
+    ["occurrence", occurrence], ["line_hint", lineHint], ["expected_replacements", expectedReplacements],
+  ] as const) {
+    if (value != null && value < 1) return `${name} must be >= 1.`;
+    if (value != null && !Number.isInteger(value)) return `${name} must be a positive integer.`;
+  }
+  if (replaceAll && occurrence != null) return "occurrence cannot be used with replace_all=true.";
+  if (replaceAll && lineHint != null) return "line_hint cannot be used with replace_all=true.";
+  if (occurrence != null && lineHint != null) return "line_hint cannot be used with occurrence.";
+  if (oldText === "") {
+    if (replaceAll || occurrence != null || lineHint != null) {
+      return "old_text is empty (create mode); omit occurrence and line_hint, and leave replace_all false.";
+    }
+    if (expectedReplacements != null && expectedReplacements !== 1) {
+      return `expected ${expectedReplacements} replacements but would make 1 (create mode).`;
+    }
+  }
+  return null;
+}
+
 export class EditFileTool extends Tool {
   static scopes = new Set(["core", "subagent", "memory"]);
   static MAX_EDIT_FILE_SIZE = 1024 * 1024 * 1024;
@@ -838,6 +946,9 @@ export class EditFileTool extends Tool {
     return (
       "Perform a small, exact replacement in one file by replacing old_text with new_text. " +
       "Use this for narrow text substitutions with old_text copied from read_file. " +
+      "Choose at most one selector: occurrence, line_hint, or replace_all=true; they are mutually exclusive. " +
+      "With no selector, old_text must match exactly once. expected_replacements is an independent count assertion. " +
+      "Empty old_text creates a missing file or fills an empty/whitespace-only file; omit selectors in this mode. " +
       "For multi-file, structural, or generated code edits, prefer apply_patch."
     );
   }
@@ -846,21 +957,38 @@ export class EditFileTool extends Tool {
     return {
       type: "object",
       properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        oldText: { type: "string" },
-        new_text: { type: "string" },
-        newText: { type: "string" },
-        replace_all: { type: "boolean" },
-        replaceAll: { type: "boolean" },
-        occurrence: { type: ["integer", "null"], minimum: 1 },
-        line_hint: { type: ["integer", "null"], minimum: 1 },
-        lineHint: { type: ["integer", "null"], minimum: 1 },
-        expected_replacements: { type: ["integer", "null"], minimum: 1 },
-        expectedReplacements: { type: ["integer", "null"], minimum: 1 },
+        path: { type: "string", description: "File path, absolute or relative to the workspace." },
+        old_text: { type: "string", description: "Required text to replace, copied from read_file. Empty string selects create mode: create a missing file or fill an empty/whitespace-only file, without selectors." },
+        new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
+        replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. When true, cannot be combined with non-null occurrence or line_hint, or used in create mode. When false, may be combined with occurrence or line_hint, or used in create mode." },
+        occurrence: { type: ["integer", "null"], minimum: 1, description: "Select the 1-based occurrence of old_text in file order. Omit or use null when unused. Cannot be combined with line_hint or replace_all=true, or used in create mode." },
+        line_hint: { type: ["integer", "null"], minimum: 1, description: "Select the match whose start is nearest this 1-based line number; equal-distance ties fail. Omit or use null when unused. Cannot be combined with occurrence or replace_all=true, or used in create mode." },
+        expected_replacements: { type: ["integer", "null"], minimum: 1, description: "Independent assertion of the number of selected replacements, checked before writing. Works with every selection mode; does not select a match. Omit or use null to skip; create mode accepts only 1 when supplied, including a no-op." },
       },
-      required: ["path"],
+      required: ["path", "old_text", "new_text"],
     };
+  }
+
+  castParams(params: Record<string, any>): Record<string, any> {
+    const cast = super.castParams(params);
+    if (!cast || typeof cast !== "object" || Array.isArray(cast)) return cast;
+    for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+      if (alias in cast) {
+        cast[alias] = super.castParams({ [canonical]: cast[alias] })[canonical];
+      }
+    }
+    // On conflict, preserve both cast values so validateParams can report the error.
+    return normalizeEditAliases(cast).params;
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    if (!params || typeof params !== "object" || Array.isArray(params)) return super.validateParams(params);
+    const normalized = normalizeEditAliases(params);
+    if (normalized.error) return [normalized.error];
+    const errors = super.validateParams(normalized.params);
+    if (errors.length) return errors;
+    const error = editOptionsError(resolveEditParams(normalized.params as EditFileParams));
+    return error ? [error] : [];
   }
 
   setContext(ctx: any): void {
@@ -871,32 +999,18 @@ export class EditFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: {
-    path?: string;
-    old_text?: string;
-    oldText?: string;
-    new_text?: string;
-    newText?: string;
-    replace_all?: boolean;
-    replaceAll?: boolean;
-    occurrence?: number | null;
-    line_hint?: number | null;
-    lineHint?: number | null;
-    expected_replacements?: number | null;
-    expectedReplacements?: number | null;
-  } = {}, context?: ToolExecutionContext): Promise<string> {
+  async execute(params: EditFileParams = {}, context?: ToolExecutionContext): Promise<string> {
+    params = this.castParams(params) as EditFileParams;
+    if (!params || typeof params !== "object" || Array.isArray(params)) return "Error editing file: parameters must be an object.";
+    const normalized = normalizeEditAliases(params);
+    if (normalized.error) return `Error: ${normalized.error}`;
+    params = normalized.params as EditFileParams;
     if (!params.path) return "Error editing file: Unknown path";
-    const oldText = params.old_text ?? params.oldText;
-    const newText = params.new_text ?? params.newText;
+    const { oldText, newText, replaceAll, occurrence, lineHint, expectedReplacements } = resolveEditParams(params);
     if (oldText == null) return "Error editing file: Unknown old_text";
     if (newText == null) return "Error editing file: Unknown new_text";
-    const replaceAll = params.replace_all ?? params.replaceAll ?? false;
-    const occurrence = params.occurrence ?? null;
-    const lineHint = params.line_hint ?? params.lineHint ?? null;
-    const expectedReplacements = params.expected_replacements ?? params.expectedReplacements ?? null;
-    if (occurrence != null && occurrence < 1) return "Error: occurrence must be >= 1.";
-    if (lineHint != null && lineHint < 1) return "Error: line_hint must be >= 1.";
-    if (expectedReplacements != null && expectedReplacements < 1) return "Error: expected_replacements must be >= 1.";
+    const parameterErrors = this.validateParams(params);
+    if (parameterErrors.length) return `Error: ${parameterErrors.join("; ")}`;
     const target = resolveWorkspacePath(this.workspace, params.path);
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error editing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;
@@ -944,9 +1058,6 @@ export class EditFileTool extends Tool {
       throwIfAborted(signal);
       if (!matches.length) return notFoundMessage(normalizedOld, normalized, params.path);
       const count = matches.length;
-      if (replaceAll && occurrence != null) return "Error: occurrence cannot be used with replace_all=true.";
-      if (replaceAll && lineHint != null) return "Error: line_hint cannot be used with replace_all=true.";
-      if (occurrence != null && lineHint != null) return "Error: line_hint cannot be used with occurrence.";
       if (count > 1 && !replaceAll) {
         if (occurrence != null) {
           if (occurrence > count) return `Error: occurrence ${occurrence} is out of range; old_text appears ${count} times.`;

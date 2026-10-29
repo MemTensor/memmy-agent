@@ -25,6 +25,7 @@ import type {
   SynthesizeDecisionRepairDraft
 } from "../feedback/feedback-experience.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { representativeEpisodeFeedback } from "./turn-judge.js";
 import {
   SPAN_BIG_TURN_ENABLED,
   SPAN_BIG_TURN_MIN_TOOL_CALLS
@@ -74,6 +75,9 @@ export class RewardPipeline {
     const rewardSource = this.rewardSourceForJob(job);
     if (!rewardSource) return;
     const { source, trace } = rewardSource;
+    // A queued feedback job may predate assignment. Closure will schedule a
+    // fresh Episode reward after binding; never score a pending turn alone.
+    if (this.deps.repos.runtime.isRawTurnAttributionPending(rawTurnIdFromMemory(source))) return;
     const episode = trace.episodeId ? this.deps.repos.runtime.getEpisode(trace.episodeId) : undefined;
     if (episode && episode.status !== "closed") return;
     const phase = episode ? "final" : "feedback";
@@ -84,8 +88,9 @@ export class RewardPipeline {
     const episodeFeedback = episode?.feedbackIds
       .map((id) => this.deps.repos.runtime.getFeedback(id))
       .filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
-    const latestEpisodeFeedback = [...episodeFeedback].reverse().find((item) => item.channel === "explicit")
-      ?? episodeFeedback[episodeFeedback.length - 1];
+    // A neutral reaction (strength 0, written every turn by turn.judge.v1) does
+    // not stand in for an earlier positive or negative one.
+    const latestEpisodeFeedback = representativeEpisodeFeedback(episodeFeedback);
     const fallbackFeedback = heuristicHumanScore(latestEpisodeFeedback
       ? [latestEpisodeFeedback]
       : payloadHasFeedback
@@ -103,7 +108,9 @@ export class RewardPipeline {
     const episodeTraces = this.deps.repos.memories
       .list({ memoryLayer: "L1", status: "activated" }, 1000)
       .map((memory) => this.deps.traceMeta(memory))
-      .filter((item): item is TraceMeta => Boolean(item && item.episodeId === trace.episodeId))
+      .filter((item): item is TraceMeta => Boolean(item && (trace.episodeId
+        ? item.episodeId === trace.episodeId
+        : item.id === trace.id)))
       .sort((a, b) => a.ts - b.ts);
     const skipReason = episodeFeedback.length > 0 || payloadHasFeedback
       ? null

@@ -6,7 +6,7 @@ source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
-AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
+AGENT_SOURCE_CORE_DIR="$ROOT_DIR/Memory/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
@@ -888,6 +888,12 @@ package_step_start "Build native Windows History recorder from source"
 bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-history.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" amd64
 package_step_start "Stage Windows memmy-agent workspace runtime packages"
+# local-api-contracts shares scan ordering with Memory through this browser-safe package.
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$MEMORY_DIR/AgentSourceCore/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$MEMORY_DIR/AgentSourceCore/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
 mkdir -p "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -985,6 +991,10 @@ RUNTIME_NODE_DIR="$(to_node_readable_path "$RUNTIME_DIR")"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_NODE_DIR"
+
+package_step_start "Prepare legacy plugin migration state"
+node "$ROOT_DIR/scripts/internal/shared/prepare-plugin-migration-state.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins"
 
 package_step_start "Create Windows CLI launchers and embedding model"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"

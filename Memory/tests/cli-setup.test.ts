@@ -493,6 +493,56 @@ describe("memmy-memory CLI setup commands", () => {
     }
   });
 
+  it.each([false, true])("handles platform embedding source markers during CLI setup (edited: %s)", async edited => {
+    const root = tempRoot(), configPath = join(root, "config.yaml");
+    const endpoint = "https://platform.example.test/v1";
+    const initial = {
+      app: { userMode: "account", userId: "owner" },
+      providers: { memmy_account: { ownerAccountId: "owner", apiKey: "fixture-key", endpoints: { platform: { apiBase: endpoint, protocol: "memmy-account" } } } },
+      modelPresets: { platform: { provider: "memmy_account", endpoint: "platform", model: "embedding", source: "account", ownerAccountId: "owner", capabilities: ["embedding"] } },
+      modelAssignments: { account: { ownerAccountId: "owner", embedding: "platform" } },
+      memmyMemory: { embedding: { provider: "openai_compatible", sourceProvider: "memmy_account", mode: "custom", endpoint: edited ? "https://personal.example.test/v1" : endpoint, model: "embedding", apiKey: "fixture-key" } },
+    };
+    writeFileSync(configPath, YAML.stringify(initial));
+    await runCommand({ argv: ["init", "--home", root, "--config", configPath, "--db", join(root, "memory.sqlite"), "--skip-agent-skills"] });
+    const saved = YAML.parse(readFileSync(configPath, "utf8"));
+    expect(saved.memmyMemory.embedding).toBeUndefined();
+    expect(saved.modelAssignments.account.embedding === "platform").toBe(!edited);
+    expect(Object.keys(saved.modelPresets)).toHaveLength(edited ? 2 : 1);
+    expect(saved.providers.memmy_account).toEqual(initial.providers.memmy_account);
+    if (edited) expect(saved.modelPresets[saved.modelAssignments.account.embedding]).toMatchObject({ provider: "openai", source: "byok" });
+  });
+
+  it.each(["stale-platform-copy", "personal"])("keeps an existing %s selection across repeated platform refresh and CLI startup", async selection => {
+    const root = tempRoot(), configPath = join(root, "config.yaml");
+    const endpoint = "https://platform.example.test/v1";
+    const initial = {
+      app: { userMode: "account", userId: "owner" },
+      providers: {
+        memmy_account: { ownerAccountId: "owner", apiKey: "old-key", endpoints: { platform: { apiBase: endpoint, protocol: "memmy-account" } } },
+        openai: { endpoints: { existing: { apiBase: selection === "personal" ? "https://personal.example.test/v1" : endpoint, protocol: "openai-embeddings", apiKey: "old-key" } } },
+      },
+      modelPresets: {
+        platform: { provider: "memmy_account", endpoint: "platform", model: "embedding", source: "account", ownerAccountId: "owner", capabilities: ["embedding"] },
+        existing: { provider: "openai", endpoint: "existing", model: "embedding", source: "byok", capabilities: ["embedding"] },
+      },
+      modelAssignments: { account: { ownerAccountId: "owner", embedding: "existing" } },
+    };
+    writeFileSync(configPath, YAML.stringify(initial));
+    for (const key of ["current-key", "current-key", "refreshed-key"]) {
+      const projected = YAML.parse(readFileSync(configPath, "utf8"));
+      projected.providers.memmy_account.apiKey = key;
+      projected.memmyMemory = { ...projected.memmyMemory, embedding: { provider: "openai_compatible", sourceProvider: "memmy_account", mode: "cloud", endpoint, model: "embedding", apiKey: key } };
+      writeFileSync(configPath, YAML.stringify(projected));
+      await runCommand({ argv: ["init", "--home", root, "--config", configPath, "--db", join(root, "memory.sqlite"), "--skip-agent-skills"] });
+      const saved = YAML.parse(readFileSync(configPath, "utf8"));
+      expect(saved.modelPresets).toEqual(initial.modelPresets);
+      expect(saved.providers.openai).toEqual(initial.providers.openai);
+      expect(saved.modelAssignments).toEqual(initial.modelAssignments);
+      expect(saved.memmyMemory.embedding).toBeUndefined();
+    }
+  });
+
   it("moves embedding connections into the model catalog during setup", async () => {
     for (const embedding of [
       {

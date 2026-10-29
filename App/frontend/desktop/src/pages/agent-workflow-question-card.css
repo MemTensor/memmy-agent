@@ -1,0 +1,13 @@
+.agent-question-summary { color: #73817d; font-size: 13px; }
+.agent-question-summary > summary { cursor: pointer; padding: 10px 0; }
+.agent-question-summary__body { display: grid; gap: 12px; padding: 12px 16px; border: 1px solid #e3eeec; border-radius: 10px; background: #fff; color: #253331; line-height: 1.7; }
+.agent-question-summary__body p:first-child { color: #8b9694; font-size: 12px; }
+.agent-question-card[data-workflow="literature-review"] { border: 1px solid #e3eeec; border-radius: 14px; background: #fff; box-shadow: none; }
+.agent-question-card[data-workflow="literature-review"] > div:first-child { padding: 18px 20px; border-color: #e3eeec; }
+.agent-question-card[data-workflow="literature-review"] button[aria-pressed="true"] { background: #f5f9f8; box-shadow: inset 2px 0 #54bbae; }
+.agent-question-card[data-workflow="literature-review"] .agent-question-card__index { color: #8b9694; background: #f5f9f8; }
+.agent-question-card[data-workflow="literature-review"] button[aria-pressed="true"] > svg { color: #54bbae; }
+.agent-question-card[data-workflow="literature-review"] > div:last-child button { background: #54bbae; }
+
+.agent-question-card[data-workflow="literature-review"] > div:first-child > span:nth-child(2) { margin-left: auto; }
+.agent-question-card[data-workflow="literature-review"] > div:first-child > button { padding: 4px; color: #8b9694; }

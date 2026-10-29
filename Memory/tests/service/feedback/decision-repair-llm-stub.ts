@@ -18,6 +18,7 @@ export function createDecisionRepairEvolutionLlm(): LlmClient {
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "reward.reward.r_human.v7") {
         return {
           goal_achievement: 1,

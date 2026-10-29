@@ -67,13 +67,38 @@ function cancelableTaskWithSignal(): Promise<void> & { cancel: () => boolean; do
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms = 3000, label = "operation"): Promise<T> {
-  return await Promise.race([
-    promise,
-    new Promise<T>((resolve, reject) => setTimeout(() => reject(new Error(`timeout: ${label}`)), ms)),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timeout: ${label}`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 describe("task cancellation", () => {
+  it("releases fixture deadline timers after bounded waits settle", async () => {
+    vi.useFakeTimers();
+    try {
+      await expect(withTimeout(Promise.resolve("done"), 1000, "resolved fixture")).resolves.toBe("done");
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(withTimeout(Promise.reject(new Error("failed fixture")), 1000, "rejected fixture"))
+        .rejects.toThrow("failed fixture");
+      expect(vi.getTimerCount()).toBe(0);
+      const waiting = withTimeout(new Promise<never>(() => undefined), 10, "pending fixture");
+      const failure = expect(waiting).rejects.toThrow("timeout: pending fixture");
+      await vi.advanceTimersByTimeAsync(10);
+      await failure;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports no active task for /stop when nothing is running", async () => {
     const loop = makeLoop();
     const msg = new InboundMessage({ channel: "test", senderId: "u1", chatId: "c1", content: "/stop" });
@@ -474,7 +499,7 @@ describe("task cancellation", () => {
         content: "执行一个长任务",
         metadata: { webui: true, wantsStream: true },
       }));
-      await withTimeout(providerEntered);
+      await withTimeout(providerEntered, 3000, "stop provider entered");
       expect(seenSignal).toBeInstanceOf(AbortSignal);
 
       await loop.bus.publishInbound(new InboundMessage({
@@ -485,11 +510,11 @@ describe("task cancellation", () => {
         metadata: { webui: true },
       }));
 
-      const first = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const second = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const third = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const fourth = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const fifth = await withTimeout(loop.bus.consumeOutbound(), 2000);
+      const first = await withTimeout(loop.bus.consumeOutbound(), 2000, "stop outbound first");
+      const second = await withTimeout(loop.bus.consumeOutbound(), 2000, "stop outbound second");
+      const third = await withTimeout(loop.bus.consumeOutbound(), 2000, "stop outbound third");
+      const fourth = await withTimeout(loop.bus.consumeOutbound(), 2000, "stop outbound fourth");
+      const fifth = await withTimeout(loop.bus.consumeOutbound(), 2000, "stop outbound fifth");
 
       const signal = seenSignal as unknown as AbortSignal;
       expect(signal.aborted).toBe(true);
@@ -505,7 +530,7 @@ describe("task cancellation", () => {
       expect(session.messages.some((message) => message.content === "Error: task cancelled")).toBe(false);
     } finally {
       loop.stop();
-      await withTimeout(running, 1000);
+      await withTimeout(running, 1000, "stop loop shutdown");
     }
   });
 

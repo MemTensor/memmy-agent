@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { createOpencodeSkillTarget as backend } from "../App/backend/src/adapters/outbound/skill-writer/opencode/target.ts";
 import { createOpencodeSkillTarget as memory } from "../Memory/src/agent-source/integration/opencode/target.ts";
 import { readOpencodeDatabase } from "../Memory/src/agent-source/adapters/opencode/db-reader.ts";
-import { selectSourceTurn } from "../AgentSourceCore/src/source-turn.ts";
+import { selectSourceTurn } from "../Memory/AgentSourceCore/src/source-turn.ts";
 
 assert(process.env.OPENCODE_V2_BINARY, "Set OPENCODE_V2_BINARY to the official 2.0.26 CLI");
 const root = await mkdtemp(join(tmpdir(), "memmy-opencode-lifecycle-"));

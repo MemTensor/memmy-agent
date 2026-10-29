@@ -102,6 +102,15 @@ export function traceSummaryEmbeddingText(memory: MemoryRow): string | undefined
   ].join("\n\n");
 }
 
+/** Re-embed an existing action channel from its action content, not its summary. */
+export function traceActionEmbeddingText(memory: MemoryRow): string {
+  const trace = traceMetaFromMemory(memory);
+  return trace
+    ? [trace.agentText, ...trace.toolCalls.map(call => JSON.stringify(call)), trace.reflection ?? ""]
+      .filter(Boolean).join("\n") || memory.memoryValue
+    : memory.memoryValue;
+}
+
 export function embeddingRetryTargetKindForMemory(memory: MemoryRow): EmbeddingRetryTargetKind {
   if (memory.memoryLayer === "L1") return "trace";
   if (memory.memoryLayer === "L2") return "policy";
@@ -114,10 +123,11 @@ export function embeddingRetryVectorFieldForMemory(memory: MemoryRow): Embedding
 }
 
 export function embeddingRetryBackoffMs(attemptNo: number): number {
-  return Math.min(
+  const base = Math.min(
     EMBEDDING_RETRY_MAX_BACKOFF_MS,
     EMBEDDING_RETRY_BASE_BACKOFF_MS * 2 ** Math.max(0, attemptNo - 1)
   );
+  return Math.min(EMBEDDING_RETRY_MAX_BACKOFF_MS, Math.round(base * (0.8 + Math.random() * 0.4)));
 }
 
 export function embeddingRetryToRunItem(retry: EmbeddingRetryRecord): EmbeddingRetryRunItem {

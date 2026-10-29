@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createPackageWithOptions, listPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
+import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
 import {
   normalizePublicCloudService,
   writeDesktopEditionManifest,
@@ -29,6 +30,34 @@ afterEach(() => {
 });
 
 describe("packaged desktop runtime configuration", () => {
+  it.each(["mac/build-dmg.sh", "win/build-nsis.sh"])("stages executable scan ordering for standalone agent contracts: %s", (script) => {
+    const root = fixtureRoot();
+    const memory = join(root, "Memory");
+    const core = join(memory, "AgentSourceCore");
+    mkdirSync(join(core, "dist/src"), { recursive: true });
+    const repo = dirname(dirname(fileURLToPath(import.meta.url)));
+    writeFileSync(join(core, "package.json"), readFileSync(join(repo, "Memory/AgentSourceCore/package.json")));
+    // Packaging guards run before workspace builds on a clean checkout.
+    // Compile the actual shared implementation inside the isolated fixture.
+    const source = readFileSync(join(repo, "Memory/AgentSourceCore/src/scan-state.ts"), "utf8");
+    writeFileSync(join(core, "dist/src/scan-state.js"), transpileModule(source, {
+      compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
+    }).outputText);
+    const runtime = join(root, "runtime");
+    const build = readFileSync(join(repo, "scripts/internal", script), "utf8");
+    const stage = build.slice(build.lastIndexOf('RUNTIME_AGENT_SOURCE_CORE_DIR='), build.indexOf('RUNTIME_LOCAL_API_CONTRACTS_DIR='));
+    expect(stage).toContain('cp -R');
+    const staged = spawnSync("bash", ["-eu", "-c", stage], { env: { ...process.env, MEMORY_DIR: memory, RUNTIME_DIR: runtime }, encoding: "utf8" });
+    expect(staged.status, staged.stderr).toBe(0);
+    const agent = join(runtime, "memmy-agent");
+    writeFileSync(join(agent, "check.mjs"), `import { acceptsScanUpdate } from '@memmy/agent-source-core/scan-state';
+      import { createRequire } from 'node:module';
+      createRequire(import.meta.url).resolve('@memmy/agent-source-core/package.json');
+      if (acceptsScanUpdate({version:{generation:2,sequence:3}}, {version:{generation:2,sequence:2}})) throw Error('stale accepted');`);
+    const imported = spawnSync(process.execPath, [join(agent, "check.mjs")], { encoding: "utf8" });
+    expect(imported.status, imported.stderr).toBe(0);
+  });
+
   it("writes exactly the public allowlist and never serializes env decoys", async () => {
     const root = fixtureRoot();
     const envFile = join(root, ".env");
@@ -219,7 +248,7 @@ describe("packaged desktop runtime configuration", () => {
     seedMemoryBuildInputs(root);
     const memoryDir = join(root, "Memory");
     const runtimeDir = join(root, "runtime");
-    const coreDir = join(root, "AgentSourceCore");
+    const coreDir = join(root, "Memory", "AgentSourceCore");
     const buildScript = readFileSync(join(
       dirname(fileURLToPath(import.meta.url)),
       "..", "scripts", "internal", "mac", "build-dmg.sh",
@@ -232,8 +261,8 @@ describe("packaged desktop runtime configuration", () => {
       lockfileVersion: 3,
       requires: true,
       packages: {
-        "node_modules/@memmy/agent-source-core": { resolved: "AgentSourceCore", link: true },
-        AgentSourceCore: { name: "@memmy/agent-source-core", version: "0.0.0" },
+        "node_modules/@memmy/agent-source-core": { resolved: "Memory/AgentSourceCore", link: true },
+        "Memory/AgentSourceCore": { name: "@memmy/agent-source-core", version: "0.0.0" },
         "node_modules/zod": { version: "4.4.3" },
       },
     });
@@ -250,12 +279,12 @@ describe("packaged desktop runtime configuration", () => {
       buildId: expect.stringMatching(/^[a-f0-9]{64}$/), schemaVersion: 9
     });
     expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({
-      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      "@memmy/agent-source-core": "file:../../../../../../Memory/AgentSourceCore",
       zod: "4.4.3",
     });
     const lock = JSON.parse(readFileSync(join(runtimeDir, "package-lock.json"), "utf8"));
     expect(lock.packages[""].dependencies).toEqual({
-      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      "@memmy/agent-source-core": "file:../../../../../../Memory/AgentSourceCore",
       zod: "4.4.3",
     });
     expect(lock.packages["node_modules/@memmy/agent-source-core"]).toBeUndefined();
@@ -642,7 +671,7 @@ await import(pathToFileURL(process.argv[1]).href);
       "..", "scripts", "internal", "win", "build-nsis.sh",
     ), "utf8");
 
-    expect(buildScript).toContain('AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"');
+    expect(buildScript).toContain('AGENT_SOURCE_CORE_DIR="$ROOT_DIR/Memory/AgentSourceCore"');
     expect(buildScript).toContain(
       'node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs"',
     );
@@ -830,11 +859,11 @@ function fixtureRoot() {
 }
 
 function seedMemoryBuildInputs(root) {
-  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "AgentSourceCore/src"]) {
+  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src"]) {
     mkdirSync(join(root, path), { recursive: true });
   }
   for (const path of ["Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
-    "Memory/viewer/package.json", "AgentSourceCore/package.json", "AgentSourceCore/tsconfig.json",
+    "Memory/viewer/package.json", "Memory/AgentSourceCore/package.json", "Memory/AgentSourceCore/tsconfig.json",
     "tsconfig.base.json", "package-lock.json"]) writeFixtureJson(join(root, path), {});
   writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 9;\n");
   writeFileSync(join(root, "Memory/viewer/vite.config.ts"), "export default {};\n");

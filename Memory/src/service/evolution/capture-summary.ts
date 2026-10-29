@@ -10,6 +10,10 @@ const ATTACHMENT_LINE_PATTERN =
   /^-\s+(.+?)\s{2,}\(([^,\r\n]+),\s*([^)]+)\)\s{2,}(.+)$/;
 const MAX_ATTACHMENT_METADATA_ITEMS = 5;
 
+export const CAPTURE_TITLE_MAX_CHARS = 30;
+// Also bounds import summaries, which share this constant.
+export const CAPTURE_SUMMARY_MAX_CHARS = 300;
+
 export interface CaptureSummarySource {
   userText: string;
   agentText: string;

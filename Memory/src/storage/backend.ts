@@ -32,6 +32,7 @@ export interface StorageBackendFactoryOptions {
   endpoint?: string;
   token?: string;
   schemaVersion?: string;
+  skipMigrations?: boolean;
 }
 
 export class SqliteStorageBackend implements StorageBackend {
@@ -119,5 +120,5 @@ export function createStorageBackend(options: StorageBackendFactoryOptions = {})
       options.schemaVersion
     );
   }
-  return new SqliteStorageBackend(new MemoryDb({ path: options.sqlitePath }), mode);
+  return new SqliteStorageBackend(new MemoryDb({ path: options.sqlitePath, skipMigrations: options.skipMigrations }), mode);
 }

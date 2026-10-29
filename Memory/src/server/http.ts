@@ -1,3 +1,4 @@
+import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -6,6 +7,7 @@ import {
   type AgentSourceExecutor
 } from "../agent-source/runtime.js";
 import {
+  EmbeddingInferenceInputSchema,
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -30,6 +32,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
+import { withoutWorkerSchedulerContext } from "../service/worker/worker-scheduler.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
@@ -78,6 +81,7 @@ export const API_ROUTES = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
+  "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
   "POST /api/v1/evidence/sync",
@@ -108,6 +112,8 @@ export interface MemoryHttpServerOptions {
   auth?: MemoryHttpAuthOptions;
   workerStartupFallbackMs?: number;
   workerPostHealthDelayMs?: number;
+  /** Maximum delay before an idle worker checks for orphaned or overdue work. */
+  workerIdlePollMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
   memoryAddAnalytics?: Pick<
@@ -150,12 +156,14 @@ interface AutoWorkerDrain {
 
 const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
 const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+const DEFAULT_WORKER_IDLE_POLL_MS = 30_000;
 const serverCleanup = new WeakMap<Server, () => Promise<void>>();
 
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
   const autoWorker = createAutoWorkerDrain(options.service, {
     startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
-    postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
+    postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS,
+    idlePollMs: Math.max(10, options.workerIdlePollMs ?? DEFAULT_WORKER_IDLE_POLL_MS)
   });
   const desktopIdentity = () => readDesktopAnalyticsIdentity(options.configPath);
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics({
@@ -169,6 +177,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
   const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
     service: options.service,
     configPath: options.configPath,
+    legacyDatabasePath: process.env.MEMMY_APP_DATABASE,
     scheduleWorker: autoWorker.schedule,
     memoryAddAnalytics
   });
@@ -243,6 +252,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           return;
         }
       }
+      if (isAgentSourceScanPath(url.pathname)) {
+        assertLocalAgentSourceRequest(request, principal.kind);
+        const scanResult = await routeAgentSourceScan(agentSources, request.method, url, body);
+        if (!scanResult) throw new MemoryServiceError("not_found", "Unknown Agent source operation");
+        writeJson(response, scanResult.status ?? 200, scanResult.body);
+        return;
+      }
       const result = await routeRequest(
         options.service,
         autoWorker,
@@ -252,6 +268,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         principal,
         Boolean(options.onShutdownRequested),
         pluginRuntimeAnalytics,
+        agentSources,
         requestId
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
@@ -343,6 +360,7 @@ function createAutoWorkerDrain(
   options: {
     startupFallbackMs: number;
     postHealthDelayMs: number;
+    idlePollMs: number;
   }
 ): AutoWorkerDrain {
   let running = false;
@@ -359,8 +377,15 @@ function createAutoWorkerDrain(
   let activeDrain: Promise<void> | undefined;
   const maxCycles = 40;
   const workerBatchSize = 4;
+  const admissionAbort = new AbortController();
 
-  async function drain(): Promise<void> {
+  function drain(): Promise<void> {
+    // A wake-up can originate from a running job's async descendants. It queues
+    // independent work rather than awaiting that job's own execution boundary.
+    return withoutWorkerSchedulerContext(drainUnscoped);
+  }
+
+  async function drainUnscoped(): Promise<void> {
     if (disposed) {
       return;
     }
@@ -386,7 +411,12 @@ function createAutoWorkerDrain(
         for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
           const result = await service.runWorkerOnce(workerBatchSize, {
             priorityCohortOnly: true
-          });
+          }, { continuous: true, signal: admissionAbort.signal, onYieldToPendingRequests: () => {
+            // Keep an automatic continuation behind the accepted manual work.
+            // Awaiting the shared scheduler provides the wake-up; polling zero
+            // results would either lose the tail or spin while manual work runs.
+            requested = true;
+          } });
           if (result.leased === 0 && result.embeddingRetries.leased === 0) {
             break;
           }
@@ -424,20 +454,21 @@ function createAutoWorkerDrain(
       return;
     }
     const delayMs = nextWorkerRunAfterDelayMs(service);
-    if (delayMs === undefined) {
-      return;
-    }
+    // Recheck even with no known due job: a legacy writer or another process
+    // may leave an orphan after the worker has already become idle.
+    const wakeAfterMs = Math.min(delayMs ?? options.idlePollMs, options.idlePollMs);
     delayedTimer = setTimeout(() => {
       delayedTimer = undefined;
       requested = true;
       void drain();
-    }, delayMs);
+    }, wakeAfterMs);
   }
 
   function schedule(): void {
     if (disposed) {
       return;
     }
+    service.notifyWorkerWorkAvailable();
     startupReleased = true;
     requested = true;
     if (startupTimer) {
@@ -467,8 +498,12 @@ function createAutoWorkerDrain(
       clearTimeout(delayedTimer);
       delayedTimer = undefined;
     }
-    scheduleNextDueJob();
+    service.notifyWorkerWorkAvailable();
+    if (!running) scheduleNextDueJob();
   });
+
+  // Capture failures still leave durable work, even when the HTTP response fails.
+  service.setCapturePendingListener(schedule);
 
   service.setPersistRecoveredListener(() => {
     if (disposed || !workerStarted) {
@@ -503,8 +538,10 @@ function createAutoWorkerDrain(
     schedule,
     async dispose(): Promise<void> {
       disposed = true;
+      admissionAbort.abort();
       service.setAppBudgetReconcileListener(undefined);
       service.setPersistRecoveredListener(undefined);
+      service.setCapturePendingListener(undefined);
       requested = false;
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -542,6 +579,7 @@ async function routeRequest(
   principal: AuthPrincipal,
   canShutdown: boolean,
   pluginRuntimeAnalytics: PluginRuntimeAnalytics,
+  agentSources: AgentSourceExecutor,
   requestId: string
 ): Promise<unknown> {
   const path = url.pathname;
@@ -733,7 +771,7 @@ async function routeRequest(
         request,
         completeSourceTurn,
       )
-      : completeSourceTurn();
+      : await completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
     return result;
   }
@@ -813,6 +851,12 @@ async function routeRequest(
         ),
       (result) => ({ hit_count: hitCountFromSearchResponse(result) }),
     ));
+  }
+
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    requireMemoryRead(principal);
+    const request = EmbeddingInferenceInputSchema.parse(body);
+    return service.embedTexts(request.texts, request.role);
   }
 
   const recallEvidence = match(path, /^\/api\/v1\/memory\/recalls\/([^/]+)$/);
@@ -916,9 +960,9 @@ async function routeRequest(
       "worker.import-summaries.enqueue.memoryIds"
     );
     const result = service.enqueuePendingImportSummaries(10_000, memoryIds);
-    if (result.enqueued > 0) {
-      autoWorker.schedule();
-    }
+    // An existing queued task also needs a wake-up. Producers enqueue and
+    // observe status instead of starting their own targeted worker execution.
+    autoWorker.schedule();
     return result;
   }
 
@@ -959,7 +1003,7 @@ async function routeRequest(
 
   if (method === "DELETE" && path === "/api/v1/admin/data") {
     requireMemoryWrite(principal);
-    return service.clearAllData();
+    return agentSources.clearAllData();
   }
 
   if (method === "GET" && path === "/api/v1/panel/analysis") {
@@ -1159,6 +1203,7 @@ function publicCompleteTurnResponse(result: unknown): Record<string, unknown> {
     turnId: record.turnId,
     sessionId: record.sessionId,
     episodeId: record.episodeId,
+    assignmentStatus: record.assignmentStatus,
     rawTurnId: record.rawTurnId,
     userMemoryId: record.userMemoryId,
     userMemoryIds: record.userMemoryIds,

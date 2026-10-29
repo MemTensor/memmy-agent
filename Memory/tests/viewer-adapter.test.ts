@@ -3,6 +3,17 @@ import { deriveEpisodeStatus } from "../agent-contract/episode-status.js";
 import { adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 
 describe("Memmy Viewer response adapter", () => {
+  it("preserves the embedding enqueue response without reporting work as completed", () => {
+    const response = {
+      accepted: true,
+      mode: "repair",
+      enqueued: 3,
+      serverTime: "2026-10-20T00:00:00.000Z",
+    };
+    expect(adaptViewerResponse("POST", "/api/v1/embeddings/rebuild", { mode: "repair" }, response))
+      .toEqual(response);
+  });
+
   it("uses the Memory service version for the Viewer version", () => {
     const result = adaptViewerResponse("GET", "/api/v1/health", undefined, {
       ok: true,

@@ -63,9 +63,9 @@ describe("prototype page structure alignment", () => {
 
   it("aligns utility pages with their prototype counterparts", () => {
     expect(source("pages/api-key-page.tsx")).toContain("min-h-screen bg-canvas-oat px-4 pt-4 pb-8 relative overflow-hidden");
-    expect(source("pages/tools-page.tsx")).toContain("app-frame-page-content h-full overflow-y-auto py-6");
-    expect(source("pages/tools-page.tsx")).toContain("tools-icon-grid");
-    expect(source("styles.css")).toContain("grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));");
+    expect(source("pages/tools-page.tsx")).toContain("app-frame-page-content h-full overflow-y-auto tools-page-content");
+    expect(source("pages/connection-catalog-section.tsx")).toContain("plugin-marketplace-grid");
+    expect(source("pages/plugin-tools-layout.css")).toContain("grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));");
     expect(source("styles.css")).toContain("gap: 8px;");
     expect(source("styles.css")).toContain("gap: 12px;");
     expect(source("styles.css")).not.toContain("aspect-ratio: 1 / 1");

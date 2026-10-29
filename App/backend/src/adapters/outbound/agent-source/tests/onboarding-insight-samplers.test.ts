@@ -8,7 +8,7 @@ import {
   createSourceRegistryOnboardingConversationWindowReader,
   createWorkbuddyInsightSampler
 } from "../onboarding-insight-samplers.js";
-import { createSourceRegistry } from "../source-registry.js";
+import { createSourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
 
 const roots: string[] = [];
 

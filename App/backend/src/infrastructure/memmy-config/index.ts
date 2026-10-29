@@ -51,6 +51,43 @@ const ACCOUNT_MODELS = {
 type AccountCapability = keyof typeof ACCOUNT_MODELS;
 type AccountPresetIds = Record<AccountCapability, string>;
 
+export type BundledPluginPreferences = Record<string, { enabled: boolean }>;
+
+/**
+ * Reads explicit enablement for first-party bundled plugins.
+ *
+ * Missing entries deliberately default to enabled in the bootstrap service.
+ * A malformed file returns null so startup preserves the previous plugin state.
+ */
+export async function readBundledPluginPreferences(
+  configPath: string,
+  pluginIds: readonly string[]
+): Promise<BundledPluginPreferences | null> {
+  let root: unknown;
+  try {
+    root = YAML.parse(await readFile(configPath, "utf8")) ?? {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    console.warn(`Bundled plugin preferences could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const plugins = (root as Record<string, unknown>).plugins;
+  if (plugins === undefined) return {};
+  if (!plugins || typeof plugins !== "object" || Array.isArray(plugins)) return null;
+
+  const preferences: BundledPluginPreferences = {};
+  for (const pluginId of pluginIds) {
+    const entry = (plugins as Record<string, unknown>)[pluginId];
+    if (entry === undefined) continue;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const enabled = (entry as Record<string, unknown>).enabled;
+    if (typeof enabled !== "boolean") return null;
+    preferences[pluginId] = { enabled };
+  }
+  return preferences;
+}
+
 /** Handles resolve memmy account api base. */
 export function resolveMemmyAccountApiBase(): string {
   return `${resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE)}/api/agentExternal/v1`;
@@ -108,6 +145,14 @@ export interface RuntimeProjectionResult {
   memoryConfigAffected: boolean;
 }
 
+export interface CatalogEndpointRequestOptions {
+  apiBase: string;
+  protocol: string;
+  inheritProviderDefaults?: boolean;
+  apiKey?: string;
+  extraHeaders?: Record<string, string>;
+}
+
 export interface MemmyConfigWriter {
   readModelConfig?(): Promise<ModelConfigView>;
 
@@ -118,6 +163,8 @@ export interface MemmyConfigWriter {
   ): Promise<ModelSelectionResolution>;
 
   readEndpointApiKey?(provider: string, endpointId: string): Promise<string | null>;
+
+  readEndpointRequestOptions?(provider: string, endpointId: string): Promise<CatalogEndpointRequestOptions | null>;
 
   /** Atomically persist the active account/BYOK namespace without rewriting the model catalog. */
   writeUserMode?(mode: UserMode): Promise<void>;
@@ -206,6 +253,10 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
       return readCatalogEndpointApiKey(configPath, provider, endpointId);
     },
 
+    async readEndpointRequestOptions(provider, endpointId) {
+      return readCatalogEndpointRequestOptions(configPath, provider, endpointId);
+    },
+
     async writeUserMode(mode) {
       await mutateRuntimeConfig(configPath, (config) => {
         const app = asRecord(config.app);
@@ -276,7 +327,24 @@ export async function readCatalogEndpointApiKey(
   const provider = asRecord(asRecord(config.providers)?.[providerId]);
   const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
   if (!provider || !endpoint) return null;
-  return existingString(endpoint.apiKey) ?? existingString(provider.apiKey) ?? null;
+  return existingString(endpoint.apiKey) ?? (endpoint.inheritProviderDefaults === false ? null : existingString(provider.apiKey)) ?? null;
+}
+
+export async function readCatalogEndpointRequestOptions(
+  configPath: string, providerId: string, endpointId: string
+): Promise<CatalogEndpointRequestOptions | null> {
+  const config = await readCurrentRuntimeConfig(configPath);
+  const provider = asRecord(asRecord(config.providers)?.[providerId]);
+  const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
+  if (!provider || !endpoint || !existingString(endpoint.apiBase) || !existingString(endpoint.protocol)) return null;
+  const inherited = endpoint.inheritProviderDefaults === false ? {} : provider;
+  const apiKey = existingString(endpoint.apiKey) ?? existingString(inherited.apiKey);
+  const extraHeaders = Object.fromEntries(Object.entries({
+    ...asRecord(inherited.extraHeaders), ...asRecord(endpoint.extraHeaders)
+  }).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  return { apiBase: existingString(endpoint.apiBase)!, protocol: existingString(endpoint.protocol)!,
+    ...(typeof endpoint.inheritProviderDefaults === "boolean" ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
+    ...(apiKey ? { apiKey } : {}), ...(Object.keys(extraHeaders).length ? { extraHeaders } : {}) };
 }
 
 async function readCurrentRuntimeConfig(configPath: string): Promise<Record<string, unknown>> {
@@ -929,13 +997,15 @@ function updateAccountAssignment(
     imageGeneration: "image_generation"
   } as const;
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
+  const legacyLocalEmbedding = sameOwner
+    && asRecord(asRecord(config.memmyMemory)?.embedding)?.mode === "local";
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
     const keepBuiltInLocalEmbedding = field === "embedding"
       && sameOwner
-      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+      && (current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID || legacyLocalEmbedding);
     next[field] = keepBuiltInLocalEmbedding
-      ? current
+      ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
       : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
         ? current
         : presetIds[capability];

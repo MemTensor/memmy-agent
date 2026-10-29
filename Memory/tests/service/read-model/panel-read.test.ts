@@ -1,3 +1,4 @@
+import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
 import { PanelItemsOutputSchema } from "../../../src/contracts/memory-runtime.js";
@@ -71,16 +72,16 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("uses the current trace summary when rendering memory_add logs", () => {
+  it("uses the current trace summary when rendering memory_add logs", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: { source: "codex", profileId: "default", userId: "user-panel-log-summary" }
     });
-    const completed = service.completeTurn("turn-panel-log-summary", {
+    const completed = (await service.completeTurn("turn-panel-log-summary", {
       sessionId: session.sessionId,
       query: "Summarize this trace for the log panel.",
       answer: "The worker will generate a concise trace summary."
-    });
+    }));
     const repos = new Repositories(db.db);
     const trace = repos.memories.get(completed.l1MemoryId);
     expect(trace).toBeDefined();
@@ -199,7 +200,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("uses trace user text until a generated summary is available", () => {
+  it("uses trace user text until a generated summary is available", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const namespace = {
@@ -208,11 +209,11 @@ describe("MemoryService / read model / panel", () => {
       userId: "user-panel-trace-title"
     };
     const session = service.openSession({ namespace });
-    const completed = service.completeTurn("turn-panel-trace-title", {
+    const completed = (await service.completeTurn("turn-panel-trace-title", {
       sessionId: session.sessionId,
       query: "修复项目级会话的启动兼容问题",
       answer: "已定位并修复旧会话缺少工作区绑定的问题。"
-    });
+    }));
 
     const pendingItem = service.panelItems({ namespace, layer: "L1" }).items[0];
     expect(pendingItem?.processing?.state).toBe("summary_pending");
@@ -243,7 +244,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("returns waiting source text and generated titles through the panel schema", () => {
+  it("returns waiting source text and generated titles through the panel schema", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const namespace = {
@@ -252,11 +253,11 @@ describe("MemoryService / read model / panel", () => {
       userId: "user-panel-display-fields"
     };
     const session = service.openSession({ namespace });
-    const completed = service.completeTurn("turn-panel-display-fields", {
+    const completed = (await service.completeTurn("turn-panel-display-fields", {
       sessionId: session.sessionId,
       query: "请修复自动扫描卡顿并运行测试",
       answer: "已完成修复并运行测试。"
-    });
+    }));
     const at = new Date().toISOString();
     const source = repos.memories.get(completed.l1MemoryId)!;
     const longSummary = "已修复自动扫描卡顿，并验证标题与摘要显示。".repeat(6);
@@ -347,6 +348,32 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
+  it("cleans old imported context on panel/detail reads without rewriting stored content", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const namespace = { source: "codex", profileId: "preview", userId: "user-preview" };
+    const userText = '<in-app-browser-context source="ambient-ui-state">\n页面内容\n</in-app-browser-context>\n请修复扫描标题';
+    const added = addAgentSourceImport(service, namespace, userText, "preview-context");
+    const row = repos.memories.get(added.id)!;
+    // Simulate a record imported before this repair; reads must not depend on
+    // re-importing it or rewriting its stored provisional title.
+    row.info.title = '<in-app-browser-context source="ambient-ui-state">';
+    repos.memories.update(row);
+    const before = repos.memories.get(added.id)!;
+    const listed = service.panelItems({ namespace, layer: "L1" }).items.find(item => item.id === added.id);
+    expect(listed?.sourceText).toBe("请修复扫描标题");
+    expect(listed?.processing?.state).toBe("summary_pending");
+    expect(listed?.generatedTitle).toBeUndefined();
+    expect(detailFromMemory(before).sourceText).toBe("请修复扫描标题");
+    expect(repos.memories.get(added.id)).toEqual(before);
+
+    const contextOnly = addAgentSourceImport(service, namespace, '<in-app-browser-context>\n页面内容\n</in-app-browser-context>', "preview-context-only");
+    const empty = service.panelItems({ namespace, layer: "L1" }).items.find(item => item.id === contextOnly.id);
+    expect(empty?.sourceText).toBeUndefined();
+    expect(detailFromMemory(repos.memories.get(contextOnly.id)!).sourceText).toBeUndefined();
+    db.close();
+  });
+
   it("does not treat an imported user-sentence title as a generated title", () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
@@ -392,14 +419,14 @@ describe("MemoryService / read model / panel", () => {
       userId: "user-panel-pagination"
     };
     const session = service.openSession({ namespace });
-    const completed = ["alpha", "beta", "gamma"].map((suffix) =>
-      service.completeTurn(`turn-panel-pagination-${suffix}`, {
+    const completed = (await Promise.all(["alpha", "beta", "gamma"].map(async (suffix) =>
+      (await service.completeTurn(`turn-panel-pagination-${suffix}`, {
         sessionId: session.sessionId,
         query: `panel pagination needle ${suffix}`,
         answer: `stored panel pagination needle ${suffix}`,
         tags: ["panel-pagination"]
-      })
-    );
+      }))
+    )));
 
     const firstPage = service.panelItems({
       namespace,
@@ -451,7 +478,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("filters L1 panel items by source Agent before pagination", () => {
+  it("filters L1 panel items by source Agent before pagination", async () => {
     const { db, service } = createTestService();
     const userId = "user-panel-source-agent";
     const cursorSession = service.openSession({
@@ -463,21 +490,21 @@ describe("MemoryService / read model / panel", () => {
     const codexSession = service.openSession({
       namespace: { source: "codex", profileId: "default", userId }
     });
-    const cursorMemory = service.completeTurn("turn-panel-source-cursor", {
+    const cursorMemory = (await service.completeTurn("turn-panel-source-cursor", {
       sessionId: cursorSession.sessionId,
       query: "cursor panel source memory",
       answer: "cursor answer"
-    });
-    const memmyMemory = service.completeTurn("turn-panel-source-memmy", {
+    }));
+    const memmyMemory = (await service.completeTurn("turn-panel-source-memmy", {
       sessionId: memmySession.sessionId,
       query: "memmy panel source memory",
       answer: "memmy answer"
-    });
-    const otherMemory = service.completeTurn("turn-panel-source-other", {
+    }));
+    const otherMemory = (await service.completeTurn("turn-panel-source-other", {
       sessionId: codexSession.sessionId,
       query: "other panel source memory",
       answer: "other answer"
-    });
+    }));
     db.db.prepare("UPDATE memories SET agent_id = 'test_agent', session_id = NULL WHERE id = ?")
       .run(otherMemory.l1MemoryId);
 
@@ -500,7 +527,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("lists tasks from episodes, clamps pages, and deletes a whole task transactionally", () => {
+  it("lists tasks from episodes, clamps pages, and deletes a whole task transactionally", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -508,21 +535,24 @@ describe("MemoryService / read model / panel", () => {
       userId: "user-panel-tasks"
     };
     const session = service.openSession({ namespace });
-    const completed = service.completeTurn("turn-panel-task", {
+    const completed = (await service.completeTurn("turn-panel-task", {
       sessionId: session.sessionId,
       query: "find this task by its conversation",
       answer: "task answer"
-    });
+    }));
 
+    await settleCaptureAssignments(service);
     expect(service.panelTasks({ namespace, q: "conversation", page: 99 })).toMatchObject({
-      tasks: [{ id: completed.episodeId, memoryIds: [completed.l1MemoryId] }],
+      tasks: [{ id: assignedEpisodeId(service, completed), memoryIds: [completed.l1MemoryId] }],
       page: 1,
       total: 1,
       totalPages: 1
     });
-    expect(service.deletePanelTask(completed.episodeId, { namespace })).toMatchObject({
+    await settleCaptureAssignments(service);
+    const taskId = assignedEpisodeId(service, completed);
+    expect(service.deletePanelTask(taskId, { namespace })).toMatchObject({
       ok: true,
-      id: completed.episodeId,
+      id: taskId,
       deletedMemoryIds: [completed.l1MemoryId]
     });
     expect(service.panelTasks({ namespace, page: 1 })).toMatchObject({ tasks: [], total: 0, page: 1 });
@@ -680,7 +710,7 @@ describe("MemoryService / read model / panel", () => {
     });
   });
 
-  it("normalizes internal panel source labels for overview distribution", () => {
+  it("normalizes internal panel source labels for overview distribution", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -688,11 +718,11 @@ describe("MemoryService / read model / panel", () => {
       userId: "source-label-user"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-source-label", {
+    const complete = (await service.completeTurn("turn-source-label", {
       sessionId: session.sessionId,
       query: "remember source label normalization",
       answer: "internal pipeline sources should not be displayed"
-    });
+    }));
 
     const firstSummary = service.panelOverviewSummary({ namespace });
     const firstSources = firstSummary.sourceDistribution.map((item) => item.source);
@@ -756,11 +786,11 @@ describe("MemoryService / read model / panel", () => {
       namespace,
       sessionId: "openclaw-memory-agent:main:test"
     });
-    const complete = service.completeTurn("turn-source-openclaw", {
+    const complete = (await service.completeTurn("turn-source-openclaw", {
       sessionId: session.sessionId,
       query: "remember openclaw panel source",
       answer: "OpenClaw should be displayed as the source agent."
-    });
+    }));
 
     const list = service.panelItems({ namespace, layer: "L1" });
     const itemBeforeEmbedding = list.items.find((item) => item.id === complete.l1MemoryId);
@@ -772,8 +802,9 @@ describe("MemoryService / read model / panel", () => {
     expect(detail.item.tags).toContain("摘要总结中");
     expect(detail.item.tags).not.toContain("openclaw");
     expect(detail.item.metadata.source).toBe("openclaw");
-    expect(detail.refs.episode).toMatchObject({
-      id: complete.episodeId,
+    await settleCaptureAssignments(service);
+    expect(service.getMemory(complete.l1MemoryId, { namespace }).refs.episode).toMatchObject({
+      id: assignedEpisodeId(service, complete),
       sessionId: session.sessionId,
       status: "open"
     });
@@ -790,7 +821,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("shows panel change logs, jobs, and overview across namespaces", () => {
+  it("shows panel change logs, jobs, and overview across namespaces", async () => {
     const { db, service } = createTestService();
     const namespaceA = {
       source: "codex",
@@ -806,16 +837,16 @@ describe("MemoryService / read model / panel", () => {
     };
     const sessionA = service.openSession({ namespace: namespaceA });
     const sessionB = service.openSession({ namespace: namespaceB });
-    const completeA = service.completeTurn("turn-namespace-a", {
+    const completeA = (await service.completeTurn("turn-namespace-a", {
       sessionId: sessionA.sessionId,
       query: "namespace a memory",
       answer: "stored in namespace a"
-    });
-    const completeB = service.completeTurn("turn-namespace-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-namespace-b", {
       sessionId: sessionB.sessionId,
       query: "namespace b memory",
       answer: "stored in namespace b"
-    });
+    }));
 
     const changesA = service.panelChanges({ namespace: namespaceA });
     expect(changesA.changes.map((change) => change.id)).toContain(completeA.l1MemoryId);

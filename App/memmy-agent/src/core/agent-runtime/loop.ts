@@ -1,7 +1,10 @@
+import { agentTaskActivity } from "./task-activity.js";
+import { OUTPUT_FEEDBACK_KEY, OutputDelivery, clearOutputDelivery, DELIVERY_NOT_CONFIRMED, hasOutputObligations } from "./tools/output-location.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
 import fs from "node:fs";
+import type { MemmyMemoryReplaySnapshot } from "../../memmy-memory/protocol.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -110,6 +113,9 @@ import { ToolLoader } from "./tools/loader.js";
 import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
+import { TaskPlanRuntime } from "./task-plan-runtime.js";
+import { createTaskPlanContinuation } from "./task-plan-continuation.js";
+import { createArtifactDeliveryContinuation } from "./artifact-delivery-continuation.js";
 import { FileStateStore } from "./tools/file-state.js";
 import { connectMissingServers, handleRuntimeControl, reloadLock, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
 import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
@@ -359,6 +365,7 @@ type AgentLoopInit = {
   providerRetryMode?: string;
   toolHintMaxLength?: number;
   maxToolResultChars?: number;
+  toolResultCompressionEnabled?: boolean;
   maxMessages?: number;
   unifiedSession?: boolean;
   timezone?: string | null;
@@ -580,13 +587,13 @@ export function hasReportedInOutUsage(
 
 class AsyncMutex {
   private locked = false;
-  private waiters: Array<{ priority: number; resume: () => void }> = [];
+  private waiters: Array<{ priority: number; key?: string; resume: () => void }> = [];
 
-  async runExclusive<T>(fn: () => Promise<T>, priority = Date.now()): Promise<T> {
+  async runExclusive<T>(fn: () => Promise<T>, priority = Date.now(), key?: string): Promise<T> {
     if (this.locked) {
       await new Promise<void>((resume) => {
         const index = this.waiters.findIndex((waiter) => waiter.priority > priority);
-        const waiter = { priority, resume };
+        const waiter = { priority, key, resume };
         if (index < 0) this.waiters.push(waiter);
         else this.waiters.splice(index, 0, waiter);
       });
@@ -600,6 +607,15 @@ class AsyncMutex {
       if (next) next.resume();
       else this.locked = false;
     }
+  }
+
+  reorderWaiters(orderedKeys: readonly string[]): void {
+    const rank = new Map(orderedKeys.map((key, index) => [key, index]));
+    const indices = this.waiters.flatMap((waiter, index) =>
+      waiter.key && rank.has(waiter.key) ? [index] : []);
+    const reordered = indices.map((index) => this.waiters[index]!)
+      .sort((left, right) => rank.get(left.key!)! - rank.get(right.key!)!);
+    indices.forEach((index, position) => { this.waiters[index] = reordered[position]!; });
   }
 }
 
@@ -635,6 +651,11 @@ export type QueueSnapshotDescriptor = {
 
 export type RemoveQueuedMessageResult = {
   outcome: "removed" | "already_dequeued" | "missing";
+  revision: number;
+};
+
+export type ReorderQueuedMessageResult = {
+  outcome: "reordered" | "stale" | "unsupported";
   revision: number;
 };
 
@@ -799,6 +820,7 @@ export class AgentLoop {
   providerRetryMode: string;
   toolHintMaxLength: number;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
   maxMessages: number;
   unifiedSession: boolean;
   backgroundTasks: Array<Promise<any>> = [];
@@ -809,6 +831,7 @@ export class AgentLoop {
   startTime: number;
   lastUsageBySession: Map<string, Record<string, number>>;
   goalRuntime: GoalRuntime;
+  taskPlanRuntime: TaskPlanRuntime;
   scheduledGoalSessions: Map<string, { goalId: string; updatedAt: string }>;
   activeTasks: Map<string, any[]>;
   pendingQueues: Map<string, AsyncQueue<InboundMessage>>;
@@ -894,8 +917,9 @@ export class AgentLoop {
     this.providerRetryMode = init.providerRetryMode ?? defaults.providerRetryMode;
     this.toolHintMaxLength = init.toolHintMaxLength ?? defaults.toolHintMaxLength;
     this.maxToolResultChars = init.maxToolResultChars ?? defaults.maxToolResultChars;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? defaults.toolResultCompressionEnabled;
     const requestedMaxMessages = init.maxMessages ?? defaults.maxMessages;
-    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 120;
+    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 80;
     this.maxMessages = normalizedMaxMessages;
     this.defaultModelPreset = new ModelPresetConfig({
       endpoint: "default",
@@ -922,6 +946,7 @@ export class AgentLoop {
       scheduleGoalWork: (sessionKey, goal) => this.scheduleGoalWork(sessionKey, goal),
       invalidateGoalWork: (sessionKey) => this.scheduledGoalSessions.delete(sessionKey),
     });
+    this.taskPlanRuntime = new TaskPlanRuntime({ sessions: this.sessions, bus: this.bus });
     this.projectStore = init.projectStore ?? null;
     this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
     const terminalControlRoot = this.sessions.root
@@ -952,6 +977,7 @@ export class AgentLoop {
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
       maxToolResultChars: this.maxToolResultChars,
+      toolResultCompressionEnabled: this.toolResultCompressionEnabled,
       llmWallTimeoutForSession: (sessionKey) => runnerWallLlmTimeoutS(this.sessions, sessionKey),
       lifecycleHook: () => this.lifecycleHook(),
       computerUseTools: () => [...this.tools].map(([, tool]) => tool)
@@ -985,6 +1011,7 @@ export class AgentLoop {
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
     this.dream = this.fileMemoryEnabled
       ? new Dream({
+          toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           store: this.context.memory,
           provider: this.provider,
           model: this.model ?? "",
@@ -1091,6 +1118,7 @@ export class AgentLoop {
       fileStateStore: this.fileStateStore,
       browserSessionManager: this.browserSessionManager,
       goalRuntime: this.goalRuntime,
+      taskPlanRuntime: this.taskPlanRuntime,
       readonlySkillRoots,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
@@ -2192,6 +2220,45 @@ export class AgentLoop {
     return this.getQueueSnapshot(sessionKey);
   }
 
+  async reorderQueuedWebuiMessages(
+    sessionKey: string,
+    orderedIds: readonly string[],
+    expectedRevision: number,
+  ): Promise<ReorderQueuedMessageResult> {
+    return this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const revision = this.queueRevision(sessionKey);
+      const slots = (this.turnSlots.get(sessionKey) ?? []).filter((slot) =>
+        slot.state === "queued" && slot.announcedToWebui && isSharedQueueMessage(slot.root));
+      const inbox = this.goalRuntime.inbox(sessionKey).filter((entry) =>
+        entry.turnId === null && this.queueDescriptorFromInboxEntry(sessionKey, entry) !== null);
+      const currentIds = [
+        ...slots.map((slot) => String(slot.root.metadata.client_request_id)),
+        ...inbox.map((entry) => String(entry.metadata.client_request_id)),
+      ];
+      if (revision !== expectedRevision || orderedIds.length < 2
+        || orderedIds.length !== currentIds.length
+        || new Set(orderedIds).size !== orderedIds.length
+        || orderedIds.some((id) => !currentIds.includes(id))) {
+        return { outcome: "stale" as const, revision };
+      }
+      if (slots.length && inbox.length) return { outcome: "unsupported" as const, revision };
+      const originalTimes = [...slots.map((slot) => Date.parse(String(slot.root.metadata.queued_at))),
+        ...inbox.map((entry) => Date.parse(String(entry.metadata.queued_at)))];
+      const first = Math.min(...originalTimes.filter(Number.isFinite));
+      const queuedAtById = new Map(orderedIds.map((id, index) =>
+        [id, new Date(first + index).toISOString()]));
+      if (slots.length) {
+        for (const slot of slots) {
+          slot.root.metadata.queued_at = queuedAtById.get(String(slot.root.metadata.client_request_id))!;
+        }
+        this.lockFor(sessionKey).reorderWaiters(orderedIds);
+      } else {
+        await this.goalRuntime.reorderInboxEntries(sessionKey, orderedIds, queuedAtById);
+      }
+      return { outcome: "reordered" as const, revision: this.advanceQueueRevision(sessionKey) };
+    });
+  }
+
   async removeQueuedMessage(
     sessionKey: string,
     clientRequestId: string,
@@ -2438,7 +2505,11 @@ export class AgentLoop {
   }
 
   syncSubagentRuntimeLimits(): void {
-    if (this.subagents) (this.subagents as any).maxIterations = this.maxIterations;
+    if (this.subagents) {
+      this.subagents.maxIterations = this.maxIterations;
+      this.subagents.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
+    }
+    if (this.dream) this.dream.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
   }
 
   buildModelPresetSnapshot(name: string): Record<string, any> {
@@ -2701,6 +2772,12 @@ export class AgentLoop {
     if (waits.length) await Promise.allSettled(waits);
     const subagents = this.subagents as any;
     const subCancelled = subagents?.cancelBySession ? await subagents.cancelBySession(key) : subagents?.cancel_by_session ? await subagents.cancel_by_session(key) : 0;
+    // Stopping also ends an unfinished file task, unless a retained task is still running it.
+    const session = this.sessions.get(key);
+    if (!retained.length && hasOutputObligations(session?.metadata)) {
+      clearOutputDelivery(session!.metadata);
+      this.sessions.save(session!);
+    }
     return cancelled + Number(subCancelled || 0);
   }
 
@@ -2763,6 +2840,8 @@ export class AgentLoop {
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
+      ...(msg.internal || msg.channel === "system" || msg.senderId === "subagent"
+        ? { internal_context: "runtime_notification" } : {}),
       ...(clientRequestId
         ? { client_request_id: clientRequestId }
         : {}),
@@ -3005,6 +3084,7 @@ export class AgentLoop {
     if (!content.trim()) return false;
     ctx.session!.addMessage("user", content, {
       internal_context: "goal_continuation",
+      turn_id: ctx.turnId,
       ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg) } : {}),
     });
     this.sessions.save(ctx.session!, { fsync: true });
@@ -3464,6 +3544,7 @@ export class AgentLoop {
   ): void {
     let lastAssistantIdx: number | null = null;
     for (const message of messages.slice(skip)) {
+      if (message[OUTPUT_FEEDBACK_KEY]) continue;
       const entry = { ...message };
       delete entry.webui_queue_steer_origin;
       const role = entry.role;
@@ -3471,9 +3552,9 @@ export class AgentLoop {
       if (role === "assistant" && !content && !entry.tool_calls?.length) continue;
       if (role === "tool") {
         const maxChars = resolveToolResultMaxChars(entry.name, this.maxToolResultChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME);
-        if (typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
+        if (this.toolResultCompressionEnabled && typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
         else if (Array.isArray(content)) {
-          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: true, maxTextChars: maxChars });
+          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: this.toolResultCompressionEnabled, maxTextChars: maxChars });
           if (!filtered.length) continue;
           entry.content = filtered;
         }
@@ -3747,6 +3828,7 @@ export class AgentLoop {
       midTurnContext = null,
       consolidator = null,
       onTokenCompactionEvent = null,
+      outputUserText = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3771,6 +3853,8 @@ export class AgentLoop {
       midTurnContext?: MidTurnContextDescriptor | null;
       consolidator?: Consolidator | null;
       onTokenCompactionEvent?: TokenCompactionEventCallback | null;
+      /** The live user message of this turn; null for system, subagent and internal turns. */
+      outputUserText?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3780,10 +3864,34 @@ export class AgentLoop {
     const activeContextWindowTokens = modelSelection?.snapshot.contextWindowTokens
       ?? this.contextWindowTokens;
     const activeTools = tools ?? this.tools;
+    const deliveryMessageTool = activeTools.get("message");
+    let heldDeliveryStream = "";
+    const deliveryAwareStream = onStream ? async (delta: string) => {
+      if (deliveryMessageTool instanceof MessageTool && deliveryMessageTool.hasPendingPluginFiles()) {
+        heldDeliveryStream += delta;
+      } else {
+        if (heldDeliveryStream) {
+          await onStream(heldDeliveryStream);
+          heldDeliveryStream = "";
+        }
+        await onStream(delta);
+      }
+    } : null;
+    const deliveryAwareStreamEnd = onStream || onStreamEnd ? async (options: { resuming?: boolean } = {}) => {
+      if (heldDeliveryStream) {
+        if (!options.resuming) await onStream?.(heldDeliveryStream);
+        heldDeliveryStream = "";
+      }
+      await onStreamEnd?.(options);
+    } : null;
+    const deliveryContinuation = createArtifactDeliveryContinuation(() => {
+      const messageTool = activeTools.get("message");
+      return messageTool instanceof MessageTool ? messageTool.turnDeliveredMediaPaths() : [];
+    });
     const checkpointSession = session;
     const checkpoint = checkpointSession ? (payload: Record<string, any>) => this.setRuntimeCheckpoint(checkpointSession, payload) : null;
     const activeSessionKey = session?.key ?? sessionKey ?? null;
-    const loopHook = new AgentProgressHook(onProgress, onStream, onStreamEnd, {
+    const loopHook = new AgentProgressHook(onProgress, deliveryAwareStream, deliveryAwareStreamEnd, {
       channel: channel ?? "cli",
       chatId: chatId ?? "direct",
       messageId: messageId ?? null,
@@ -3804,9 +3912,29 @@ export class AgentLoop {
       },
     });
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
+    const taskPlanContinuation = createTaskPlanContinuation(() => activeSessionKey
+      ? this.taskPlanRuntime.get(activeSessionKey) : null);
+    const requestIndex = initialMessages.length - 1;
+    const originalRequestContent = structuredClone(initialMessages[requestIndex]?.content);
+    const turnMemory: { snapshot: MemmyMemoryReplaySnapshot | null } = { snapshot: null };
+    const deliveryKey = session?.key ?? null;
+    // Subagents keep using this after the turn ends: always the session's current metadata.
+    const outputLocation = new OutputDelivery(deliveryKey ? {
+      metadata: () => (this.sessions.get(deliveryKey) ?? session!).metadata,
+      save: () => {
+        const current = this.sessions.get(deliveryKey);
+        if (current) this.sessions.save(current);
+      },
+    } : {}, sessionWorkspace, outputUserText);
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
+        finalResponseContinuation: (response) => taskPlanContinuation(response) ?? deliveryContinuation(response),
+        privateSkillRefs: session?.metadata?.privatePluginSkillRefs,
+        onPrivateSkillRefsChanged: session ? (refs) => {
+          session.metadata.privatePluginSkillRefs = refs;
+          this.sessions.save(session);
+        } : undefined,
         provider: activeProvider,
         tools: activeTools,
         model: activeModel,
@@ -3818,15 +3946,17 @@ export class AgentLoop {
           ?? activeProvider?.generation?.reasoningEffort
           ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
+        toolResultCompressionEnabled: this.toolResultCompressionEnabled,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
+        outputLocation,
         sessionKey: activeSessionKey,
         hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
         contextBlockLimit: this.contextBlockLimit,
         providerRetryMode: this.providerRetryMode,
         progressCallback: onProgress,
-        streamProgressDeltas: Boolean(onStream),
+        streamProgressDeltas: Boolean(deliveryAwareStream),
         retryWaitCallback: onRetryWait,
         checkpointCallback: checkpoint,
         llmTimeoutS: runnerWallLlmTimeoutS(this.sessions, activeSessionKey, {
@@ -3838,6 +3968,7 @@ export class AgentLoop {
         hook,
         concurrentTools: true,
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey, msg => {
+          if (!msg.internal && msg.channel !== "system") outputLocation.addUserText(msg.content);
           const request = computerUseRequestContext(msg, turnId);
           // A real user steer replaces the blocked/approved message scope.
           // Automatic subagent notices never confer a new user authorization.
@@ -3846,6 +3977,18 @@ export class AgentLoop {
         }),
         internalTurnContext,
         actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
+        memoryContextCallback: (ownerTurnId, content) => {
+          turnMemory.snapshot = {
+            turnId: ownerTurnId,
+            // Preserve the existing rule that saved images become path placeholders.
+            content: this.sanitizePersistedBlocks(structuredClone(content)),
+          };
+          const owner = session?.messages.findLast((message) => message.role === "user" && message.turn_id === ownerTurnId);
+          if (owner) {
+            owner.memmy_memory = structuredClone(turnMemory.snapshot);
+            this.sessions.save(session!);
+          }
+        },
         onMaxFinalizationStarting,
         currentTurnMessageStartIndex: midTurnContext?.transcriptStartIndex ?? null,
         beforeFollowupModelRequest: midTurnContext && session && consolidator
@@ -3859,6 +4002,13 @@ export class AgentLoop {
           : null,
       }),
     );
+    // Normal turns were persisted early; system turns are saved by their existing saveTurn path.
+    const request = result.messages?.[requestIndex];
+    if (turnMemory.snapshot && request?.role === "user") {
+      request.memmy_memory = turnMemory.snapshot;
+      request.turn_id = turnMemory.snapshot.turnId;
+      request.content = originalRequestContent;
+    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {
@@ -3919,7 +4069,7 @@ export class AgentLoop {
       ? errorCategory ?? "model_failed"
       : null;
     const messageTool = (tools ?? this.tools).get("message");
-    if (messageTool instanceof MessageTool && messageTool.sentInTurn) {
+    if (messageTool instanceof MessageTool && messageTool.sentInTurn && !finalContent?.startsWith(DELIVERY_NOT_CONFIRMED)) {
       if (stopReason !== "maxIterations" && (!hadInjections || stopReason === "emptyFinalResponse")) return null;
     }
     return new OutboundMessage({
@@ -4133,12 +4283,12 @@ export class AgentLoop {
                   turnSource: parseTurnSource(entry.metadata.turn_source),
                 })
               : ctx.msg;
-            this.appendUserMessage(source, session, {}, entry?.receivedAt);
+            this.appendUserMessage(source, session, { turn_id: ctx.turnId }, entry?.receivedAt);
           },
         );
         ctx.userPersistedEarly = Boolean(persisted.entry || ctx.msg.content.trim() || ctx.msg.media.length);
       } else {
-        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
+        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!, { turn_id: ctx.turnId });
         requestTiming("agent.user_persisted");
       }
     }
@@ -4332,6 +4482,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
+      outputUserText: ctx.msg.internal || ctx.msg.channel === "system" || ctx.msg.metadata?.injectedEvent ? null : ctx.msg.content,
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -4805,6 +4956,14 @@ export class AgentLoop {
   async processMessageInternal(
     message: InboundMessage,
     sessionKey?: string,
+    options: Parameters<AgentLoop["processMessageTurn"]>[2] = {},
+  ): Promise<OutboundMessage | null> {
+    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options));
+  }
+
+  private async processMessageTurn(
+    message: InboundMessage,
+    sessionKey?: string,
     {
       onProgress,
       onStream,
@@ -4948,6 +5107,8 @@ export class AgentLoop {
               this.clearPendingUserTurn(session);
               this.clearRuntimeCheckpoint(session);
             }
+            // An explicit cancel ends the file task; it is not reported as undelivered later.
+            clearOutputDelivery(session.metadata);
             this.sessions.save(session, { fsync: sessionKey.startsWith("cli:") });
           }
         }
@@ -5473,7 +5634,7 @@ export class AgentLoop {
           }
           return;
         }
-      }, queuedAt);
+      }, queuedAt, String(initialSlot.root.metadata?.client_request_id ?? ""));
     } finally {
       await this.cleanupOwnedSlots(
         sessionKey,

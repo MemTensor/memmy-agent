@@ -41,6 +41,8 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
+  "episode_assignment",
+  "episode_finalize",
   "episode_idle_close",
   "episode_title",
   "trace_summary",
@@ -240,7 +242,7 @@ export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 /** Schema for raw turn summary. */
 export const RawTurnSummarySchema = z.object({
   rawTurnId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
   turnId: NonEmptyStringSchema,
   userText: z.string().optional(),
   assistantText: z.string().optional(),
@@ -466,7 +468,8 @@ export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 export const CompleteTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
+  assignmentStatus: z.enum(["pending", "assigned"]).optional(),
   rawTurnId: NonEmptyStringSchema,
   userMemoryId: z.string().optional(),
   userMemoryIds: z.array(NonEmptyStringSchema).optional(),
@@ -491,6 +494,22 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
+
+/** Generate vectors with the embedding model currently owned by the Memory runtime. */
+export const EmbeddingInferenceInputSchema = z.object({
+  texts: z.array(z.string().min(1).max(16_000)).min(1).max(256),
+  role: z.enum(["query", "document"]).default("document")
+}).superRefine((input, context) => {
+  const totalCharacters = input.texts.reduce((sum, text) => sum + text.length, 0);
+  if (totalCharacters > 200_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["texts"],
+      message: "Total embedding input exceeds 200000 characters"
+    });
+  }
+});
+export type EmbeddingInferenceInput = z.input<typeof EmbeddingInferenceInputSchema>;
 
 /** Schema for default search output. */
 export const DefaultSearchOutputSchema = z.object({

@@ -2187,6 +2187,7 @@ function relationLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; maxTokens?: number }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       messagesByOperation?.set(options.operation, messages);
       optionsByOperation?.set(options.operation, options);

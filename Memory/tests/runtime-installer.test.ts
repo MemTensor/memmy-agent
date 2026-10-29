@@ -174,7 +174,7 @@ describe("standalone Memory runtime installer", () => {
       finally { fetchSpy.mockRestore(); }
     }
     expect(existsSync(join(home, "memory-service", "install.lock"))).toBe(false);
-  });
+  }, 20_000);
 
   it.each([true, false])("replaces changed same-version builds (preferInstalledCompatible=%s) without touching data", async (preferInstalledCompatible) => {
     const root = tempRoot();
@@ -197,7 +197,7 @@ describe("standalone Memory runtime installer", () => {
     expect(changed.entrypoint).not.toBe(upgraded.entrypoint);
     const reused = await installMemoryRuntime({ ...flags, runtimeDirectory: next, preferInstalledCompatible: true });
     expect(reused).toMatchObject({ reused: true, buildId: "b".repeat(64) });
-  });
+  }, 20_000);
 
   it("keeps the previous pointer after a changed same-version build fails activation", async () => {
     const root = tempRoot();

@@ -1506,6 +1506,7 @@ type DreamInit = {
   maxBatchSize?: number;
   maxIterations?: number;
   maxToolResultChars?: number;
+  toolResultCompressionEnabled?: boolean;
   annotateLineAges?: boolean;
 };
 
@@ -1534,6 +1535,7 @@ export class Dream {
   maxBatchSize: number;
   maxIterations: number;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
   annotateLineAges: boolean;
   runner: AgentRunner;
   tools: ToolRegistry;
@@ -1567,6 +1569,7 @@ export class Dream {
     this.maxBatchSize = init.maxBatchSize ?? 20;
     this.maxIterations = init.maxIterations ?? 10;
     this.maxToolResultChars = init.maxToolResultChars ?? 16_000;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? false;
     this.annotateLineAges = init.annotateLineAges ?? true;
     this.runner = new AgentRunner();
     this.tools = this.buildTools();
@@ -1706,6 +1709,7 @@ export class Dream {
           model: this.model,
           maxIterations: this.maxIterations,
           maxToolResultChars: this.maxToolResultChars,
+          toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           failOnToolError: false,
         }),
       );

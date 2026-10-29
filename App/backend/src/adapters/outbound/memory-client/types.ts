@@ -6,6 +6,8 @@ import type {
   CloseSessionOutput,
   DeleteMemoryInput,
   DeleteMemoryOutput,
+  EmbeddingInferenceInput,
+  EmbeddingInferenceOutput,
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
@@ -58,7 +60,17 @@ export interface UpdateObservedSkillOutput extends ApproveObservedSkillOutput {
   version: number;
 }
 
+export interface AgentSourceScanClient {
+  list(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceList>;
+  start(input: import("@memmy/local-api-contracts").AgentSourceScanInput): Promise<import("@memmy/local-api-contracts").AgentSourceScanJobResponse>;
+  status(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceScanState>;
+  results(jobId: string, cursor?: string, limit?: number): Promise<import("@memmy/local-api-contracts").ScanResultPage>;
+  pause(input?: import("@memmy/local-api-contracts").ScanControlInput): Promise<import("@memmy/local-api-contracts").MemoryScanControlResponse>;
+  cancel(input?: import("@memmy/local-api-contracts").ScanControlInput): Promise<import("@memmy/local-api-contracts").MemoryScanControlResponse>;
+}
+
 export interface MemoryClient {
+  agentSources?: AgentSourceScanClient;
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
@@ -74,6 +86,7 @@ export interface MemoryClient {
   completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
+  embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;

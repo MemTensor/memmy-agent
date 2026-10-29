@@ -29,7 +29,7 @@ describe("Windows Memory validation workflow", () => {
       ".github/workflows/windows-memory-validation.yml",
       "tests/windows-memory-workflow.test.ts",
       "Memory/**",
-      "AgentSourceCore/**",
+      "Memory/AgentSourceCore/**",
       "package-lock.json",
     ]));
     expect(workflow.permissions).toEqual({ contents: "read" });

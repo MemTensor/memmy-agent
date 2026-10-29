@@ -16,6 +16,7 @@ const PLACEHOLDER_TITLES = new Set([
   "system",
   "tool",
   "developer",
+  "\u6458\u8981\u603B\u7ED3\u4E2D",
   "\u6458\u8981\u6392\u961F\u4E2D",
   "\u6458\u8981\u6574\u7406\u4E2D",
   "\u5EFA\u7ACB\u7D22\u5F15\u4E2D",
@@ -63,8 +64,9 @@ export function displayMemoryTitle(item: MemoryDisplayItem, ...candidates: Array
   if (generatedTitle) return generatedTitle;
 
   const summary = readySummary(item.summary);
-  if (item.kind === "trace" && summary) {
-    return summary;
+  if (item.kind === "trace") {
+    // All processing states use the read model preview, never raw source text.
+    return summary ?? waitingPrimaryText(item);
   }
 
   for (const value of [summary, ...candidates, firstUserQueryLine(item.body), firstReadableBodyLine(item.body), item.title]) {
@@ -99,10 +101,9 @@ export function experienceDisplayTitle(item: MemoryDisplayItem): string | undefi
 export function waitingPrimaryText(item: MemoryDisplayItem): string {
   const source = cleanMemoryText(item.sourceText);
   if (usableWaitingText(source)) return source;
-  if (item.kind === "policy") return displayMemoryId(item.id);
-  return firstUserQueryLine(item.body)
-    ?? firstReadableBodyLine(item.body)
-    ?? displayMemoryId(item.id);
+  // The read model owns preview extraction. Re-reading raw body here would
+  // resurrect injected context that it deliberately excluded from sourceText.
+  return displayMemoryId(item.id);
 }
 
 export function independentGeneratedTitle(item: MemoryDisplayItem): string | undefined {

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../../../../src/core/agent-runtime/loop.js";
 import { SubagentManager, SubagentStatus } from "../../../../src/core/agent-runtime/subagent.js";
 import {
@@ -53,11 +53,15 @@ describe("search tools", () => {
       config: new WebSearchConfig({ provider: "brave" }),
       configLoader: () => new WebSearchConfig({ provider: "duckduckgo", maxResults: 3 }),
     });
-    (tool as any).searchDuckduckgo = async function searchDuckduckgo(query: string, n: number): Promise<string> {
-      return `${this.config.provider}:${query}:${n}`;
-    };
-
-    await expect(tool.execute("memmy")).resolves.toBe("duckduckgo:memmy:3");
+    const fetchMock = vi.fn(async (_url: string) => new Response(Array.from({ length: 5 }, (_, i) =>
+      `<a class="result__a" href="https://example.com/${i}">Result ${i}</a>`).join("")));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await tool.execute("memmy");
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain("html.duckduckgo.com");
+      expect(result).toContain("Result 2");
+      expect(result).not.toContain("Result 3");
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("finds files by query, glob, and type", async () => {

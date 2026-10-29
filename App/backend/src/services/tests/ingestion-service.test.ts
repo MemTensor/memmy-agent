@@ -10,7 +10,7 @@ import {
   type IngestionWarning
 } from "../ingestion-service.js";
 import type { AgentSourceRepository } from "../../infrastructure/agent-source-store/index.js";
-import type { ConversationMessage } from "../../adapters/outbound/agent-source/types.js";
+import type { ConversationMessage } from "@memmy/agent-source-readers/adapters/types";
 
 describe("native Codex ingestion", () => {
   function nativeMessages(complete = true): ConversationMessage[] {

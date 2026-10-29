@@ -1,4 +1,7 @@
 import { requestTiming } from "../../utils/request-timing.js";
+import { collectPrivateSkillRefs, normalizePrivateSkillRefs, projectPrivateSkillInstructions } from "./private-plugin-skills.js";
+import type { PluginSkillRef } from "@memmy/local-api-contracts";
+import { withMemmyMemoryTurnContext, withMemmyMemoryPrompt, projectMemmyMemoryPrompt, type MemmyMemoryTurnContext } from "../../memmy-memory/protocol.js";
 import crypto from "node:crypto";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
 import path from "node:path";
@@ -11,6 +14,7 @@ import {
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
+import { MessageTool } from "./tools/message.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
 import { withToolExecutionRequestContext } from "./tools/context.js";
@@ -30,6 +34,8 @@ import {
   extractReasoning,
   IncrementalThinkExtractor,
   maybePersistToolResult,
+  formatExternalToolText,
+  type ToolOutputFile,
   stripThink,
   truncateText,
 } from "../../utils/helpers.js";
@@ -49,6 +55,7 @@ import { renderTemplate } from "../../utils/prompt-templates.js";
 import type { TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
 import { resolveToolResultMaxChars, type ToolResultMaxCharsByName } from "./tool-result-budget.js";
 import { convertMcpToolContent } from "./tools/mcp.js";
+import { OUTPUT_FEEDBACK_KEY, takeOutputPaths, withOutputPaths, type OutputDelivery } from "./tools/output-location.js";
 
 const DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model.";
 const PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model error.]";
@@ -140,6 +147,10 @@ type PendingImageBatch = {
 };
 
 export class AgentRunSpec {
+  privateSkillRefs: PluginSkillRef[];
+  privateSkillRequestStarted = false;
+  privateSkillPromptTokens = 0;
+  onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
   messages: Record<string, any>[];
   initialMessages: Record<string, any>[];
   tools?: ToolRegistry | any;
@@ -150,6 +161,9 @@ export class AgentRunSpec {
   temperature: number | null;
   reasoningEffort?: string | null;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
+  memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
+  memoryTurnContext: MemmyMemoryTurnContext | null = null;
   toolResultMaxCharsByName: ToolResultMaxCharsByName;
   failOnToolError: boolean;
   concurrentTools: boolean;
@@ -158,6 +172,7 @@ export class AgentRunSpec {
   maxIterationsMessage: string | null;
   maxIterationsFinalPrompt: string | null;
   workspace?: string | null;
+  outputLocation?: OutputDelivery;
   sessionKey?: string | null;
   hostProjectId?: string | null;
   contextWindowTokens?: number | null;
@@ -177,8 +192,11 @@ export class AgentRunSpec {
   onMaxFinalizationStarting?: (() => void) | null;
   currentTurnMessageStartIndex?: number | null;
   beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+  finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
 
   constructor(init: {
+    privateSkillRefs?: unknown;
+    onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
     messages?: Record<string, any>[];
     initialMessages?: Record<string, any>[];
     provider?: LLMProvider;
@@ -189,6 +207,8 @@ export class AgentRunSpec {
     temperature?: number | null;
     reasoningEffort?: string | null;
     maxToolResultChars?: number;
+    toolResultCompressionEnabled?: boolean;
+    memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
     toolResultMaxCharsByName?: ToolResultMaxCharsByName;
     failOnToolError?: boolean;
     concurrentTools?: boolean;
@@ -197,6 +217,7 @@ export class AgentRunSpec {
     maxIterationsMessage?: string | null;
     maxIterationsFinalPrompt?: string | null;
     workspace?: string | null;
+    outputLocation?: OutputDelivery;
     sessionKey?: string | null;
     hostProjectId?: string | null;
     contextWindowTokens?: number | null;
@@ -216,7 +237,10 @@ export class AgentRunSpec {
     onMaxFinalizationStarting?: (() => void) | null;
     currentTurnMessageStartIndex?: number | null;
     beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+    finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
   } = {}) {
+    this.privateSkillRefs = normalizePrivateSkillRefs(init.privateSkillRefs);
+    this.onPrivateSkillRefsChanged = init.onPrivateSkillRefsChanged;
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
     this.tools = init.tools;
@@ -226,6 +250,8 @@ export class AgentRunSpec {
     this.temperature = init.temperature ?? 0.7;
     this.reasoningEffort = init.reasoningEffort ?? null;
     this.maxToolResultChars = init.maxToolResultChars ?? 100_000;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? false;
+    this.memoryContextCallback = init.memoryContextCallback;
     this.toolResultMaxCharsByName = init.toolResultMaxCharsByName ?? {};
     this.failOnToolError = init.failOnToolError ?? false;
     this.concurrentTools = init.concurrentTools ?? false;
@@ -234,6 +260,7 @@ export class AgentRunSpec {
     this.maxIterationsMessage = init.maxIterationsMessage ?? null;
     this.maxIterationsFinalPrompt = init.maxIterationsFinalPrompt ?? null;
     this.workspace = init.workspace ?? null;
+    this.outputLocation = init.outputLocation;
     this.sessionKey = init.sessionKey ?? null;
     this.hostProjectId = init.hostProjectId ?? null;
     this.contextWindowTokens = init.contextWindowTokens ?? null;
@@ -253,6 +280,7 @@ export class AgentRunSpec {
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
     this.currentTurnMessageStartIndex = init.currentTurnMessageStartIndex ?? null;
     this.beforeFollowupModelRequest = init.beforeFollowupModelRequest ?? null;
+    this.finalResponseContinuation = init.finalResponseContinuation ?? null;
   }
 }
 
@@ -328,6 +356,8 @@ export class AgentRunner {
         && injection.role === "user"
         && messages.at(-1)?.role === "user"
         && injection.webui_queue_steer_origin !== true
+        && !injection.memmy_prompt
+        && !messages.at(-1)?.memmy_prompt
       ) {
         const merged = { ...messages.at(-1)! };
         merged.content = AgentRunner.mergeMessageContent(merged.content, injection.content);
@@ -367,6 +397,7 @@ export class AgentRunner {
             ? { webui_request_digest: item.webui_request_digest }
             : {}),
           ...(typeof item.turn_id === "string" ? { turn_id: item.turn_id } : {}),
+          ...(item.internal_context ? { internal_context: item.internal_context } : {}),
           ...(item.turn_source ? { turn_source: structuredClone(item.turn_source) } : {}),
           ...(item.webui_queue_steer_origin === true
             ? { webui_queue_steer_origin: true }
@@ -380,7 +411,9 @@ export class AgentRunner {
         if (text.trim()) messages.push({ role: "user", content: text });
       }
     }
-    return messages.slice(0, MAX_INJECTIONS_PER_TURN);
+    return messages.slice(0, MAX_INJECTIONS_PER_TURN).map((message) => withMemmyMemoryPrompt(
+      message, spec.memoryTurnContext, message.internal_context ? "runtime_notification" : "user_followup",
+    ));
   }
 
   private async tryDrainInjections(
@@ -424,8 +457,11 @@ export class AgentRunner {
         delete providerMessage.webui_request_digest;
         delete providerMessage.turn_id;
         delete providerMessage.turn_source;
+        delete providerMessage.memmy_prompt;
+        delete providerMessage.internal_context;
         delete providerMessage.webui_queue_steer_origin;
         delete providerMessage.webui_queue_steer_recovery;
+        delete providerMessage[OUTPUT_FEEDBACK_KEY];
         return providerMessage;
       }),
       tools,
@@ -437,6 +473,21 @@ export class AgentRunner {
     if (spec.maxTokens != null) args.maxTokens = spec.maxTokens;
     if (spec.reasoningEffort != null) args.reasoningEffort = spec.reasoningEffort;
     return args;
+  }
+
+  private toolDefinitions(spec: AgentRunSpec): Record<string, any>[] {
+    const definitions = spec.tools?.getDefinitions?.() ?? [];
+    return spec.outputLocation ? withOutputPaths(definitions) : definitions;
+  }
+
+  private withOutputInstruction(spec: AgentRunSpec, messages: Record<string, any>[]): Record<string, any>[] {
+    if (!spec.outputLocation) return messages;
+    const instruction = spec.outputLocation.instruction();
+    const index = messages.findIndex((message) => message.role === "system" && typeof message.content === "string");
+    if (index < 0) return [{ role: "system", content: instruction }, ...messages];
+    return messages.map((message, position) => position === index
+      ? { ...message, content: `${message.content}\n\n${instruction}` }
+      : message);
   }
 
   private static imageIdentity(block: Record<string, any>): string {
@@ -816,8 +867,29 @@ export class AgentRunner {
     const shouldEmitLive = (): boolean => boundary?.shouldEmitLive() ?? spec.abortSignal?.aborted !== true;
     const timeoutS = normalizeTimeout(spec.llmTimeoutS);
     const tools = options.toolsOverride === undefined
-      ? spec.tools?.getDefinitions?.() ?? []
+      ? this.toolDefinitions(spec)
       : options.toolsOverride;
+    try {
+      const previousRefs = JSON.stringify(spec.privateSkillRefs);
+      const publicMessages = messages;
+      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted);
+      if (spec.privateSkillRefs.length) {
+        const privateMessage = messages[0];
+        spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
+        // Reserve private context without ever exposing it to transcript compaction or checkpoints.
+        messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
+          toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
+        })];
+      }
+      spec.privateSkillRequestStarted = true;
+      if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
+    } catch {
+      return new LLMResponse({ content: "Private plugin instructions could not be loaded. Sign in, check connectivity and plugin version, then resume the task. No plugin work was started by this model request.",
+        finishReason: "error", errorKind: "invalid_request", errorCode: "plugin_skill_load_failed", errorShouldRetry: false });
+    }
+    // Keep runtime scope metadata intact while reserving private skill context.
+    // Project once after trimming so the real user request remains the anchor.
+    messages = withMemmyMemoryTurnContext(messages, spec.memoryTurnContext);
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);
@@ -968,7 +1040,10 @@ export class AgentRunner {
     context: AgentHookContext,
     imageTextState: TurnImageTextState,
   ): Promise<LLMResponse> {
-    const retryMessages = [...messages, buildFinalizationRetryMessage()];
+    const retryMessages = [...messages];
+    AgentRunner.appendInjectedMessages(retryMessages, [withMemmyMemoryPrompt(
+      buildFinalizationRetryMessage(), spec.memoryTurnContext, "empty_recovery",
+    )]);
     return this.requestModelWithImagePolicy(spec, retryMessages, hook, context, imageTextState, {
       toolsOverride: null,
       forceNonStreaming: true,
@@ -1018,6 +1093,7 @@ export class AgentRunner {
         content = converted;
       }
     }
+    if (!spec.toolResultCompressionEnabled) return content;
     const maxChars = resolveToolResultMaxChars(name, spec.maxToolResultChars, spec.toolResultMaxCharsByName);
     try {
       content = maybePersistToolResult(
@@ -1080,13 +1156,36 @@ export class AgentRunner {
       return { call, result: repeatedLookup + hint, event, error: spec.failOnToolError ? new Error(repeatedLookup) : null };
     }
 
+    if (call.name === "message" && spec.outputLocation) {
+      // A message is a delivery channel: it may not reach the user before the files do.
+      const problem = await spec.outputLocation.verify();
+      if (problem) {
+        const result = `Error: message not sent. ${problem} Do not tell the user the files are ready; finish them first.`;
+        const event = { name: call.name, status: "error", detail: eventDetail("", result, 120) };
+        return { call, result: result + hint, event, error: spec.failOnToolError ? new Error(result) : null };
+      }
+    }
+    const { args: toolArgs, outputPaths } = takeOutputPaths(call.name, call.arguments);
+    const declaresOutputs = Boolean(spec.outputLocation && Array.isArray(outputPaths) && outputPaths.length);
+    // Checked now, recorded only once the tool succeeded: a failed call leaves nothing to deliver.
+    let outputFiles: string[] = [];
+    if (spec.outputLocation && outputPaths !== undefined) {
+      const resolved = await spec.outputLocation.resolveOutputs(outputPaths);
+      if (typeof resolved === "string") {
+        const declarationError = resolved;
+        const event = { name: call.name, status: "error", detail: eventDetail("", declarationError, 120) };
+        return { call, result: declarationError + hint, event, error: spec.failOnToolError ? new Error(declarationError) : null };
+      }
+      outputFiles = resolved;
+    }
+
     const prepare = spec.tools?.prepareCall;
     let tool: any = null;
-    let params: any = call.arguments;
+    let params: any = toolArgs;
     let prepError: string | null = null;
     if (typeof prepare === "function") {
       try {
-        const prepared = prepare.call(spec.tools, call.name, call.arguments);
+        const prepared = prepare.call(spec.tools, call.name, toolArgs);
         if (Array.isArray(prepared) && prepared.length === 3) [tool, params, prepError] = prepared;
       } catch (error) {
         prepError = String((error as Error).message ?? error);
@@ -1129,12 +1228,29 @@ export class AgentRunner {
     let stopTurn: string | undefined;
     try {
       let raw: any;
+      let preparedText: { content: string; displayText?: string } | undefined;
+      let outputFile: ToolOutputFile | undefined;
       const fileMutationOutcomes = new Map<string, FileMutationOutcome>();
       await spec.hook?.beforeToolCall(new AgentHookContext({ spec, toolCalls: [call] }), call);
       const toolContext: ToolExecutionContext = {
+        outputLocation: spec.outputLocation,
+        ...(declaresOutputs ? { trackOutputProducer: (isRunning: () => boolean) => spec.outputLocation!.track(isRunning) } : {}),
+        maxResultChars: resolveToolResultMaxChars(call.name, spec.maxToolResultChars, spec.toolResultMaxCharsByName),
+        availableTools: (spec.tools?.getDefinitions?.() ?? []).map((definition: any) => definition.function?.name ?? definition.name).filter(Boolean),
+        formatTextResult: (text, options) => {
+          preparedText = formatExternalToolText(text, options, {
+            workspace: spec.workspace, sessionKey: spec.sessionKey, callId: call.id ?? "tool",
+            maxChars: resolveToolResultMaxChars(call.name, spec.maxToolResultChars, spec.toolResultMaxCharsByName),
+            onFile: (file) => { outputFile = file; },
+          });
+          return preparedText.content;
+        },
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
+        uiToolCallId: getOrCreateUiToolCallId(call),
+        sessionKey: spec.sessionKey ?? null,
+        modelPreset: spec.actualModelContext?.presetId ?? null,
         stopTurn: (message) => { stopTurn ??= message; },
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {
@@ -1142,6 +1258,7 @@ export class AgentRunner {
             changed: outcome.changed,
           });
         },
+
       };
       const run = tool && typeof tool.execute === "function"
         ? tool.execute(params, toolContext)
@@ -1151,7 +1268,7 @@ export class AgentRunner {
       let event: Record<string, any>;
       let error: any = null;
       if (typeof raw === "string" && raw.startsWith("Error")) {
-        if (progressCallback && fileEditTrackers.length) {
+          if (progressCallback && fileEditTrackers.length) {
           await invokeFileEditProgress(
             progressCallback,
             fileEditTrackers.map((tracker) => buildFileEditErrorEvent(tracker, raw)),
@@ -1166,6 +1283,7 @@ export class AgentRunner {
         error = spec.failOnToolError ? new Error(raw) : null;
         raw = raw + hint;
       } else {
+        spec.outputLocation?.record(outputFiles);
         const detail = toolEventDetail(raw);
         event = { name: call.name, status: "ok", detail };
       }
@@ -1180,7 +1298,11 @@ export class AgentRunner {
           )),
         );
       }
-      const result = this.normalizeToolResult(spec, call.id, call.name, raw);
+      const result = preparedText?.content === raw ? raw : this.normalizeToolResult(spec, call.id, call.name, raw);
+      if (preparedText?.displayText !== undefined) event.display_text = preparedText.displayText;
+      if (outputFile) event.output_file = outputFile;
+      const messageTool = spec.tools?.get?.("message");
+      if (messageTool instanceof MessageTool) messageTool.observePluginToolResult(call.name, raw);
       if (stopTurn) event.status = "error";
       await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [result], toolEvents: [event] }), call, result);
       return { call, result, event, error, ...(stopTurn ? { stopTurn } : {}) };
@@ -1355,7 +1477,7 @@ export class AgentRunner {
     let prepared = this.applyToolResultBudget(spec, messages);
     prepared = AgentRunner.dropOrphanToolResults(prepared);
     prepared = AgentRunner.backfillMissingToolResults(prepared);
-    prepared = AgentRunner.microcompact(prepared);
+    if (spec.toolResultCompressionEnabled) prepared = AgentRunner.microcompact(prepared);
     return prepared;
   }
 
@@ -1364,7 +1486,9 @@ export class AgentRunner {
     messages: Record<string, any>[],
     options: PrepareMessagesOptions,
   ): number {
-    const prepared = this.prepareMessagesBeforeSnip(spec, messages);
+    const prepared = withMemmyMemoryTurnContext(
+      this.prepareMessagesBeforeSnip(spec, messages), spec.memoryTurnContext,
+    );
     const estimateResult = estimatePromptTokensChain(
       spec.provider ?? this.provider,
       spec.model ?? null,
@@ -1431,7 +1555,7 @@ export class AgentRunner {
     spec: AgentRunSpec,
     messages: Record<string, any>[],
     options: PrepareMessagesOptions = {
-      toolsForRequest: spec.tools?.getDefinitions?.() ?? [],
+      toolsForRequest: this.toolDefinitions(spec),
       reservedPromptTokens: 0,
     },
   ): Record<string, any>[] {
@@ -1443,7 +1567,7 @@ export class AgentRunner {
     const estimateResult = estimatePromptTokensChain(
       spec.provider ?? this.provider,
       spec.model ?? null,
-      messages,
+      withMemmyMemoryTurnContext(messages, spec.memoryTurnContext),
       options.toolsForRequest ?? [],
     );
     const estimate = Array.isArray(estimateResult) ? estimateResult[0] : estimateResult;
@@ -1455,7 +1579,7 @@ export class AgentRunner {
       const result = estimatePromptTokensChain(
         spec.provider ?? this.provider,
         spec.model ?? null,
-        candidate,
+        withMemmyMemoryTurnContext(candidate, spec.memoryTurnContext),
         options.toolsForRequest ?? [],
       );
       return Array.isArray(result) ? result[0] : result;
@@ -1464,9 +1588,20 @@ export class AgentRunner {
       const tokens = count(candidate);
       return Number.isFinite(tokens) && tokens <= budget;
     };
-    const latestUserIndex = rest.findLastIndex((message) => message.role === "user");
-    const anchor = latestUserIndex >= 0 ? [rest[latestUserIndex]] : [];
-    const currentTurn = rest.slice(latestUserIndex + 1);
+    const isCurrentRequest = (message: Record<string, any>): boolean => Boolean(spec.memoryTurnContext
+      && message.role === "user"
+      && message.memmy_prompt?.turnId === spec.memoryTurnContext.turnId
+      && ["user_request", "user_followup"].includes(message.memmy_prompt.kind));
+    const currentRequestIndex = rest.findIndex(isCurrentRequest);
+    const latestUserIndex = rest.findLastIndex((message) => message.role === "user"
+      && message.internal_context !== "runtime_notification"
+      && message.internal_context !== "memmy_internal_prompt"
+      && (!message.memmy_prompt || ["user_request", "user_followup"].includes(message.memmy_prompt.kind)));
+    // A steer supplements the current request. Keep its original constraints
+    // even when large intervening tool outputs prevent replaying the full turn.
+    const anchorIndex = currentRequestIndex >= 0 ? currentRequestIndex : latestUserIndex;
+    const anchor = anchorIndex >= 0 ? [rest[anchorIndex]] : [];
+    const currentTurn = rest.slice(anchorIndex + 1);
     // An assistant tool-call message and all of its results form one exchange.
     // Cutting between them can lose the latest observation or invent a backfill.
     const exchanges: Record<string, any>[][] = [];
@@ -1479,6 +1614,9 @@ export class AgentRunner {
     }
     const retained = new Set<number>();
     if (exchanges.length) retained.add(exchanges.length - 1);
+    exchanges.forEach((exchange, index) => {
+      if (exchange.some(isCurrentRequest)) retained.add(index);
+    });
     const latestImage = exchanges.findLastIndex((exchange) => exchange.some((message) => (
       Array.isArray(message.content) && message.content.some((block: any) => block?.type === "image_url")
     )));
@@ -1498,7 +1636,7 @@ export class AgentRunner {
       ...anchor,
       ...exchanges.flatMap((exchange, index) => retained.has(index) ? exchange : []),
     ];
-    // Preserve the current request, final exchange and newest screenshot even if
+    // Preserve all current user requests, final exchange and newest screenshot even if
     // they cannot fit. The final request guard then returns a local error.
     const ensureLegalStart = (candidate: Record<string, any>[]): Record<string, any>[] => {
       const firstNonSystem = candidate.findIndex((message) => message.role !== "system");
@@ -1517,8 +1655,8 @@ export class AgentRunner {
     }
     // Recover older context only at whole user-turn boundaries, after keeping
     // as much of the current turn as fits.
-    if (latestUserIndex > 0) {
-      const previous = rest.slice(0, latestUserIndex);
+    if (anchorIndex > 0) {
+      const previous = rest.slice(0, anchorIndex);
       let end = previous.length;
       while (end > 0) {
         let start = end - 1;
@@ -1579,12 +1717,15 @@ export class AgentRunner {
 
   async run(spec: AgentRunSpec): Promise<AgentRunResult> {
     spec.turnId ??= crypto.randomUUID();
+    spec.memoryTurnContext = null;
     spec.provider ??= this.provider;
     if (!spec.provider) throw new Error("AgentRunSpec.provider is required");
     const hook = spec.hook ?? new AgentHook();
     const requiresBufferedLlmContent = hook.requiresBufferedLlmContent();
     const streamsHookContent = hook.wantsStreaming() && !requiresBufferedLlmContent;
     const messages = [...spec.initialMessages];
+    if (!spec.privateSkillRefs.length) spec.privateSkillRefs = collectPrivateSkillRefs(messages);
+    spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     const toolCalls: any[] = [];
     const toolEvents: Record<string, any>[] = [];
     const toolsUsed: string[] = [];
@@ -1598,6 +1739,7 @@ export class AgentRunner {
     let error: string | null = null;
     let emptyContentRetries = 0;
     let lengthRecoveries = 0;
+    let deliveryRetries = 0;
     let injectionCycles = 0;
     let hadInjections = false;
     let pendingHookInjections: AgentHookMessage[] = [];
@@ -1620,7 +1762,7 @@ export class AgentRunner {
         error = finalContent;
         break;
       }
-      const toolsForRequest = spec.tools?.getDefinitions?.() ?? [];
+      const toolsForRequest = this.toolDefinitions(spec);
       if (iteration > 0) {
         modelContextProjection = await this.updateProjectionBeforeFollowup(
           spec,
@@ -1630,7 +1772,7 @@ export class AgentRunner {
             requestKind: "iteration",
             iteration,
             toolsForRequest,
-            reservedPromptTokens: 0,
+            reservedPromptTokens: spec.privateSkillPromptTokens,
           },
         );
         if (spec.abortSignal?.aborted) {
@@ -1647,13 +1789,14 @@ export class AgentRunner {
       let requestMessages = messages;
       if (requestOnlyInjections.length) {
         requestMessages = messages.map((message) => ({ ...message }));
-        AgentRunner.appendInjectedMessages(requestMessages, requestOnlyInjections);
+        AgentRunner.appendInjectedMessages(requestMessages, requestOnlyInjections.map((message) =>
+          withMemmyMemoryPrompt(message, spec.memoryTurnContext, "hook_continuation")));
         console.info("AgentHook.beforeIteration injected request-only content:", requestOnlyInjections);
       }
-      let messagesForModel = this.modelContextMessages(requestMessages, modelContextProjection);
+      let messagesForModel = this.withOutputInstruction(spec, this.modelContextMessages(requestMessages, modelContextProjection));
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
         toolsForRequest,
-        reservedPromptTokens: 0,
+        reservedPromptTokens: spec.privateSkillPromptTokens,
       });
       messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
 
@@ -1663,7 +1806,8 @@ export class AgentRunner {
         hook,
         context,
         imageTextState,
-        { forceNonStreaming: requiresBufferedLlmContent },
+        // A reply claiming delivery must not reach the user before it is verified.
+        { forceNonStreaming: requiresBufferedLlmContent || Boolean(spec.outputLocation?.hasFiles) },
       );
       const iterationUsage = this.usageDict(response.usage);
       this.accumulateUsage(usage, iterationUsage);
@@ -1742,6 +1886,9 @@ export class AgentRunner {
           toolEvents.push(item.event);
           const toolMessage = { role: "tool", tool_call_id: item.call.id, name: item.call.name, content: item.result };
           messages.push(toolMessage);
+          const previousRefs = JSON.stringify(spec.privateSkillRefs);
+          spec.privateSkillRefs = collectPrivateSkillRefs([toolMessage], spec.privateSkillRefs);
+          if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
           completed.push(toolMessage);
         }
         context.toolResults = executed.map((item) => item.result);
@@ -1851,7 +1998,7 @@ export class AgentRunner {
             thinkingBlocks: response.thinkingBlocks,
             finishReason: response.finishReason,
           }));
-          messages.push(buildLengthRecoveryMessage());
+          messages.push(withMemmyMemoryPrompt(buildLengthRecoveryMessage(), spec.memoryTurnContext, "length_recovery"));
           await hook.afterIteration(context);
           continue;
         }
@@ -1930,6 +2077,8 @@ export class AgentRunner {
       if (finalizeInjections?.length) {
         const canContinue = iteration + 1 < spec.maxIterations;
         if (streamsHookContent) {
+          // A terminal stream end follows the delivery check; its result is applied after the loop.
+          if (!canContinue) await spec.outputLocation?.verify();
           await hook.onStreamEnd(context, { resuming: canContinue });
         }
         await hook.afterIteration(context);
@@ -1940,11 +2089,33 @@ export class AgentRunner {
         hookContinuationExhausted = true;
         break;
       }
-      if (streamsHookContent) {
-        await hook.onStreamEnd(context, { resuming: false });
-      }
 
+      // A reply claiming delivery must be verified before it becomes the final answer.
+      // Checked before the stream ends; retries and remaining iterations only decide whether the model may fix it.
+      const deliveryProblem = spec.outputLocation ? await spec.outputLocation.verify() : null;
+      if (deliveryProblem && deliveryRetries < 2 && iteration + 1 < spec.maxIterations) {
+        // Let the model fix it; neither the unverified reply nor this feedback is persisted.
+        deliveryRetries += 1;
+        if (streamsHookContent) {
+          await hook.onStreamEnd(context, { resuming: true });
+        }
+        messages.push({ ...(assistant ?? buildAssistantMessage(clean)), [OUTPUT_FEEDBACK_KEY]: true });
+        messages.push(withMemmyMemoryPrompt(
+          { role: "user", content: deliveryProblem, [OUTPUT_FEEDBACK_KEY]: true }, spec.memoryTurnContext, "delivery_retry",
+        ));
+        await hook.afterIteration(context);
+        continue;
+      }
+      const deliveryContinuation = spec.finalResponseContinuation?.({ finalContent: clean as string, messages });
+      if (streamsHookContent) {
+        await hook.onStreamEnd(context, { resuming: Boolean(deliveryContinuation) });
+      }
       messages.push(assistant ?? buildAssistantMessage(clean));
+      if (deliveryContinuation) {
+        messages.push({ role: "system", content: deliveryContinuation });
+        await hook.afterIteration(context);
+        continue;
+      }
       await this.emitCheckpoint(spec, {
         phase: "finalResponse",
         iteration,
@@ -1971,10 +2142,11 @@ export class AgentRunner {
         });
       if (spec.maxIterationsFinalPrompt && !hookContinuationExhausted) {
         spec.onMaxFinalizationStarting?.();
-        const reservedPromptTokens = estimateMessageTokens({
+        const finalPrompt = withMemmyMemoryPrompt({
           role: "user",
           content: spec.maxIterationsFinalPrompt,
-        });
+        }, spec.memoryTurnContext, "max_iterations");
+        const reservedPromptTokens = estimateMessageTokens(projectMemmyMemoryPrompt(finalPrompt)) + spec.privateSkillPromptTokens;
         if (!spec.abortSignal?.aborted) {
           modelContextProjection = await this.updateProjectionBeforeFollowup(
             spec,
@@ -1993,15 +2165,12 @@ export class AgentRunner {
           stopReason = "cancelled";
           error = finalContent;
         } else {
-          const finalizationMessages = this.modelContextMessages(messages, modelContextProjection);
+          const finalizationMessages = this.withOutputInstruction(spec, this.modelContextMessages(messages, modelContextProjection));
           const preparedMessages = this.prepareMessagesForModel(spec, finalizationMessages, {
             toolsForRequest: null,
             reservedPromptTokens,
           }).map((message) => ({ ...message }));
-          AgentRunner.appendInjectedMessages(preparedMessages, [{
-            role: "user",
-            content: spec.maxIterationsFinalPrompt,
-          }]);
+          AgentRunner.appendInjectedMessages(preparedMessages, [finalPrompt]);
           const requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
           const context = new AgentHookContext({
             spec,
@@ -2092,6 +2261,21 @@ export class AgentRunner {
         const [drained, cycles] = await this.tryDrainInjections(spec, messages, null, injectionCycles, { phase: "after maxIterations" });
         injectionCycles = cycles;
         if (drained) hadInjections = true;
+      }
+    }
+
+    // Every ending that would tell the user the work is done is checked once more here.
+    if (spec.outputLocation && finalContent != null && ["completed", "maxIterations", "emptyFinalResponse"].includes(stopReason)) {
+      const deliveryProblem = await spec.outputLocation.verify();
+      if (deliveryProblem) {
+        finalContent = deliveryProblem;
+        finalContentStreamed = false;
+        stopReason = "toolError";
+        error = "Output delivery not confirmed";
+        AgentRunner.appendFinalMessage(messages, finalContent);
+      } else if (stopReason !== "maxIterations") {
+        // An unfinished run keeps its list; an empty reply after a message-tool delivery does not.
+        spec.outputLocation.complete();
       }
     }
 

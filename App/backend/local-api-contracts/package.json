@@ -13,11 +13,12 @@
     }
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
-    "test": "npm run typecheck && vitest run tests/desktop-runtime-manifest.test.ts tests/language.test.ts tests/model-catalog-resolver.test.ts tests/model-thinking-levels.test.ts",
+    "build": "npm run build -w @memmy/agent-source-core && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "test": "npm run typecheck && vitest run tests/desktop-runtime-manifest.test.ts tests/language.test.ts tests/model-catalog-resolver.test.ts tests/model-thinking-levels.test.ts tests/agent-source-scan.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@memmy/agent-source-core": "file:../../../Memory/AgentSourceCore"
   }
 }

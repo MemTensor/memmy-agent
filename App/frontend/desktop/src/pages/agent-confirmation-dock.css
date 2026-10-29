@@ -1,0 +1,178 @@
+@import "./literature-review-original-cards.css";
+.agent-confirmation-dock { display: flex; flex-direction: column; gap: 10px; }
+.agent-question-dock:empty, .agent-confirmation-dock:empty { display: none; }
+/* The native question card covers the composer until the answer is submitted. */
+.agent-question-dock:not(:empty) { position: relative; display: flex; min-width: 0; flex-direction: column; margin-bottom: 10px; }
+/* With waiting messages, keep the queue above the card instead of letting the card cover it. */
+.agent-composer-flow:has(> .agent-queue-panel) .agent-question-dock:not(:empty) { position: relative; right: auto; bottom: auto; left: auto; min-height: 0; justify-content: flex-start; }
+.agent-composer-flow:has(> .agent-queue-panel) .agent-question-dock .agent-confirmation-card { flex: 0 1 auto; max-height: max(160px, min(360px, calc(100dvh - 450px))); }
+.agent-composer-flow:has(.agent-question-dock:not(:empty)) > .agent-queue-panel,
+.agent-composer-flow:has(.agent-question-dock:not(:empty)) > .agent-queue-panel .agent-queue-list { max-height: min(160px, 22dvh); }
+.agent-confirmation-dock .plugin-capability-region--pinned:has(.review-interaction-shell) { max-height: none; overflow: visible; padding: 0; }
+.agent-confirmation-card { border:1px solid color-mix(in srgb,var(--color-border-stone) 50%,transparent); border-radius:var(--radius-card-lg,10px); background:var(--color-background-paper); box-shadow:0 12px 32px rgba(17,29,28,.08); width:100%; }
+.agent-question-dock .agent-confirmation-card { display:flex; flex: 1; flex-direction:column; max-height:max(220px,min(490px,calc(100dvh - 310px))); }
+.agent-confirmation-card__header { padding:10px 14px; min-height:48px; border-bottom:1px solid color-mix(in srgb,var(--color-border-stone) 40%,transparent); flex-shrink:0; }
+.agent-confirmation-card__header > span:first-child { font-size:14px; line-height:1.5; font-weight:600; color:var(--color-text-ink); }
+.agent-confirmation-card__header > span:last-child { font-size:11px; }
+.agent-confirmation-card__body { min-height:0; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:#d5e4df transparent; }
+.agent-confirmation-card__body > [role="group"] { padding:12px 0 4px; border-color:color-mix(in srgb,var(--color-border-stone) 38%,transparent); }
+.agent-confirmation-card__body > [role="group"] > div:first-child { padding:0 14px 8px; font-size:13px; line-height:1.45; font-weight:600; }
+.agent-confirmation-card__body button { min-height:42px; padding:8px; font-size:13px; border-color:color-mix(in srgb,var(--color-border-stone) 35%,transparent); }
+.agent-confirmation-card__body button .block.text-sm { font-size:13px; }
+.agent-confirmation-card__body button[aria-pressed="true"] { background:color-mix(in srgb,var(--color-canvas-oat) 72%,var(--color-background-paper)); box-shadow:inset 2px 0 0 var(--color-action-sky); }
+.agent-confirmation-card__body .agent-question-card__index { width:20px; height:20px; font-size:11px; background:color-mix(in srgb,var(--color-canvas-oat) 90%,transparent); color:color-mix(in srgb,var(--color-text-ink) 55%,transparent); }
+.agent-confirmation-card__footer { padding:10px 14px; border-top:1px solid color-mix(in srgb,var(--color-border-stone) 40%,transparent); background:var(--color-background-paper); flex-shrink:0; }
+.agent-confirmation-card__footer > button { height:31px; min-height:31px; border:1px solid transparent; border-radius:var(--radius-btn); background:var(--color-action-sky); color:#fff; font-size:12px; font-weight:600; padding:0 11px; }
+.agent-confirmation-card__footer > button:hover:not(:disabled) { background:var(--color-action-sky-hover); }
+.agent-question-answer { color: var(--color-text-ink); font-size: 14px; line-height: 24px; }
+.agent-question-answer > summary { display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 7px; min-height: 28px; cursor: pointer; list-style: none; padding: 2px 0; color: color-mix(in srgb, var(--color-text-ink) 58%, transparent); transition: color 120ms ease; }
+.agent-question-answer--interrupted { display: inline-flex; align-items: center; gap: 7px; min-height: 28px; padding: 2px 0; color: color-mix(in srgb, var(--color-text-ink) 58%, transparent); }
+.agent-question-answer > summary:is(:hover, :focus-visible) { color: color-mix(in srgb, var(--color-text-ink) 75%, transparent); }
+.agent-question-answer > summary::-webkit-details-marker { display: none; }
+.agent-question-answer > summary > svg:first-child { color: #6d9982; flex-shrink: 0; }
+.agent-question-answer--process > summary > svg:first-child { color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); }
+.agent-question-answer > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-question-answer > summary > svg:last-child { flex-shrink: 0; margin-left: -3px; opacity: 0; transition: transform 160ms ease, opacity 120ms ease; }
+.agent-question-answer > summary:hover > svg:last-child,
+.agent-question-answer > summary:focus-visible > svg:last-child { opacity: 1; }
+.agent-question-answer[open] > summary > svg:last-child { transform: rotate(90deg); }
+.agent-question-answer__details { display: grid; gap: 10px; margin: 6px 0 10px 21px; padding-left: 12px; border-left: 2px solid color-mix(in srgb,var(--color-text-ink) 14%,transparent); }
+.agent-question-answer--process .agent-question-answer__details { margin: 8px 0 0; padding: 14px 16px; border: 0; border-radius: 12px; background: color-mix(in srgb,var(--color-text-ink) 6%,var(--color-background-paper)); }
+.agent-question-answer--review { display: inline-flex; max-width: 100%; min-width: 0; align-items: center; gap: 7px; min-height: 28px; padding: 2px 0; color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); }
+.agent-question-answer--review > svg { flex: 0 0 auto; color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); }
+.agent-question-answer--review__label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-question-answer__details > div { display: grid; gap: 2px; }
+.agent-question-answer__details dt { color: color-mix(in srgb,var(--color-text-ink) 50%,transparent); }
+.agent-question-answer__details dd { margin: 0; color: color-mix(in srgb,var(--color-text-ink) 78%,transparent); overflow-wrap: anywhere; }
+.review-native-card { color: var(--color-text-ink); font-size: 13px; line-height: 1.6; }
+.review-native-card > div:first-child > div > p:first-child, .review-source-card > div:first-child > div > div:first-child > p { font-size: 14px; font-weight: 600; color: var(--color-text-ink); }
+.review-source-card > div:first-child > svg { display: none; }
+.review-source-card .mt-2.flex { flex-wrap: wrap; }
+.review-native-card button, .review-native-card label.cursor-pointer { border-radius: 7px; font-size: 12px; }
+.review-native-card button.text-action-sky { border-color: transparent; background: var(--color-action-sky); color: white; font-weight: 500; }
+.agent-activity-cluster--compact .agent-activity-cluster__toggle { align-items: center; gap: 8px; min-height: 30px; font-size: 14px; line-height: 24px; }
+.agent-activity-cluster--compact .agent-activity-cluster__toggle > span { white-space: normal; }
+.agent-activity-cluster--compact .agent-activity-cluster__status { display: inline-flex; max-width: 100%; min-width: 0; align-items: center; gap: 7px; color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); font-size: 14px; font-weight: 400; line-height: 24px; }
+.agent-activity-cluster--compact .agent-activity-cluster__toggle:is(:hover, :focus-visible) .agent-activity-cluster__status { color: color-mix(in srgb,var(--color-text-ink) 75%,transparent); }
+.agent-activity-cluster--compact .agent-activity-cluster__status-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-activity-cluster--compact .agent-activity-cluster__status-mascot { width: 26px; height: 26px; object-fit: contain; }
+.agent-activity-cluster--compact .agent-activity-cluster__chevron { width: 14px; height: 14px; margin-left: 0; align-self: center; color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); opacity: .7; }
+.agent-activity-cluster--compact .agent-activity-cluster__toggle:hover .agent-activity-cluster__chevron,
+.agent-activity-cluster--compact .agent-activity-cluster__toggle:focus-visible .agent-activity-cluster__chevron { opacity: 1; }
+.agent-activity-cluster--compact .agent-activity-cluster__body { gap: 12px; margin: 0; padding: 12px 0 0; }
+.agent-activity-cluster--compact.agent-activity-cluster--running { min-height: 0; }
+.agent-activity-cluster--compact.agent-activity-cluster--live .agent-activity-cluster__body { gap: 12px; padding: 12px 0 0; }
+.agent-activity-cluster--compact .agent-activity-cluster__body > .agent-activity-segment__items { gap: 12px; }
+.agent-activity-cluster--compact .agent-activity-process-fold__body,
+.agent-activity-cluster--compact .agent-activity-process-fold__body .agent-activity-segment__items { gap: 4px; }
+.agent-activity-cluster--compact .agent-live-phase { display: flex; min-height: 28px; align-items: center; gap: 7px; padding: 2px 0; }
+.agent-activity-cluster--compact.agent-activity-cluster--open:not(.agent-activity-cluster--running):not(.agent-activity-cluster--waiting) .agent-activity-cluster__body { border-left: 0; padding-left: 0; }
+/* One gap owns the rhythm between process blocks; individual rows add no extra outer spacing. */
+.agent-activity-cluster--compact .agent-activity-cluster__body > :is(.agent-context-compaction-divider, .agent-activity-reasoning-history, .agent-activity-tool-batch, .agent-activity-segment--narration, .agent-question-answer) { margin-block: 0; }
+.agent-activity-cluster--compact .agent-activity-timeline-item--tool,
+.agent-activity-cluster--compact .agent-activity-timeline-item--file-edit { align-items: center; gap: 7px; }
+.agent-activity-cluster--compact .agent-activity-tool-details__summary { align-items: center; gap: 7px; }
+.agent-activity-cluster--compact .agent-activity-timeline-item__icon { width: 14px; height: 14px; margin-top: 0; align-self: center; }
+.agent-activity-cluster--compact .agent-activity-timeline-item__line { align-items: center; font-size: 14px; line-height: 24px; }
+.agent-activity-cluster--compact .agent-activity-timeline-item--thought { font-size: 14px; line-height: 24px; }
+.agent-activity-cluster--compact .agent-activity-timeline-item__detail,
+.agent-activity-cluster--compact button.agent-activity-file-link.agent-activity-timeline-item__detail { margin-left: 6px; }
+.agent-activity-cluster--compact .agent-activity-timeline-item__line > .agent-activity-timeline-item__detail:first-child { margin-left: 0; }
+.agent-activity-cluster--compact .agent-activity-timeline-item__status { font-size: 14px; }
+/* Live rows can replace a plugin progress row in place. Keep them fully visible
+   from the first frame so a status rename never looks like a blank flash. */
+.agent-activity-timeline-item--live-pending .agent-activity-timeline-item__icon.lucide-loader-circle { animation: agent-task-plan-spin 1.2s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity-timeline-item--live-pending .agent-activity-timeline-item__icon.lucide-loader-circle { animation: none; }
+}
+.agent-activity-tool-batch { margin: 0; }
+.agent-activity-tool-batch__summary { display: flex; width: fit-content; align-items: center; gap: 7px; max-width: 100%; min-height: 28px; padding: 2px 0; color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); font-size: 14px; line-height: 24px; cursor: pointer; list-style: none; transition: color 120ms ease; }
+.agent-activity-tool-batch__summary:is(:hover, :focus-visible) { color: color-mix(in srgb,var(--color-text-ink) 75%,transparent); }
+.agent-activity-tool-batch__summary::-webkit-details-marker { display: none; }
+.agent-activity-tool-batch__icon { flex-shrink: 0; color: color-mix(in srgb,var(--color-text-ink) 45%,transparent); }
+.agent-activity-tool-batch__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-activity-tool-batch__chevron { flex-shrink: 0; color: color-mix(in srgb,var(--color-text-ink) 46%,transparent); opacity: 0; transition: transform 160ms ease, opacity 120ms ease; }
+.agent-activity-tool-batch[open] .agent-activity-tool-batch__chevron { transform: rotate(90deg); }
+.agent-activity-tool-batch__summary:hover .agent-activity-tool-batch__chevron,
+.agent-activity-tool-batch__summary:focus-visible .agent-activity-tool-batch__chevron { opacity: 1; }
+.agent-activity-tool-batch__body { margin: 4px 0 0; padding: 0; }
+.legal-process-status { min-width: 0; color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); }
+.legal-process-status__row { display: flex; min-width: 0; align-items: flex-start; gap: 12px; }
+.legal-process-status__details { min-width: 0; }
+.legal-process-status__summary { display: inline-flex; max-width: 100%; min-width: 0; min-height: 28px; align-items: center; gap: 7px; padding: 2px 0; font-size: 14px; line-height: 24px; }
+.legal-process-status__summary .agent-activity-tool-batch__chevron { margin-left: 0; opacity: .7; }
+.legal-process-status__label { min-width: 0; overflow-wrap: anywhere; }
+.legal-process-status__percent { flex: none; color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); font-size: 12px; font-variant-numeric: tabular-nums; }
+.legal-process-status__spinner, .legal-process-status__complete { flex: none; color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); }
+@media (prefers-reduced-motion: no-preference) { .legal-process-status__spinner { animation: agent-task-plan-spin 1.2s linear infinite; } }
+.legal-process-status__tasks { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 0 21px; padding: 0 0 0 12px; border-left: 2px solid color-mix(in srgb,var(--color-text-ink) 14%,transparent); }
+.legal-process-status__task { display: flex; min-width: 0; align-items: baseline; gap: 7px; font-size: 13px; line-height: 22px; }
+.legal-process-status__task-marker { flex: none; color: color-mix(in srgb,var(--color-text-ink) 48%,transparent); }
+.legal-process-status__task-state { flex: none; color: color-mix(in srgb,var(--color-text-ink) 45%,transparent); }
+.legal-process-status__task--failed .legal-process-status__task-marker, .legal-process-status__task--failed .legal-process-status__task-state { color: var(--color-status-error); }
+.legal-process-status__cancel, .legal-process-status__cancelled { flex: none; margin-left: auto; padding: 4px 0; color: color-mix(in srgb,var(--color-text-ink) 55%,transparent); font-size: 12px; line-height: 20px; }
+.legal-process-status__cancel:hover { color: var(--color-status-error); }
+.legal-process-status__cancel:disabled { opacity: .5; }
+.legal-process-status__cancel-error { display: block; color: var(--color-status-error); font-size: 12px; }
+.legal-process-outcome { display: inline-flex; max-width: 100%; min-height: 28px; align-items: center; gap: 7px; padding: 2px 0; color: var(--color-status-error); font-size: 14px; line-height: 24px; }
+.legal-process-outcome svg { flex: none; }
+.legal-process-outcome span { min-width: 0; overflow-wrap: anywhere; }
+.legal-process-outcome--cancelled { color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); }
+.agent-activity-process-fold__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.agent-activity-process-fold__body > :is(.agent-context-compaction-divider, .agent-activity-reasoning-history, .agent-activity-tool-batch, .agent-activity-segment--narration, .agent-question-answer) { margin-block: 0; }
+.agent-activity-process-fold__body .agent-activity-tool-card__value { max-height: none; overflow: visible; }
+.agent-activity-cluster--compact .agent-activity-segment__label { font-size: 14px; line-height: 24px; }
+.agent-activity-reasoning-history { margin: 0; color: color-mix(in srgb,var(--color-text-ink) 56%,transparent); }
+.agent-activity-reasoning-history > summary { display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 7px; min-height: 28px; padding: 2px 0; cursor: pointer; font-size: 14px; line-height: 24px; list-style: none; transition: color 120ms ease; }
+.agent-activity-reasoning-history > summary:is(:hover, :focus-visible) { color: color-mix(in srgb,var(--color-text-ink) 75%,transparent); }
+.agent-activity-reasoning-history > summary::-webkit-details-marker { display: none; }
+.agent-activity-reasoning-history__chevron { flex-shrink: 0; color: color-mix(in srgb,var(--color-text-ink) 46%,transparent); opacity: 0; transition: transform 160ms ease, opacity 120ms ease; }
+.agent-activity-reasoning-history[open] .agent-activity-reasoning-history__chevron { transform: rotate(90deg); }
+.agent-activity-reasoning-history > summary:hover .agent-activity-reasoning-history__chevron,
+.agent-activity-reasoning-history > summary:focus-visible .agent-activity-reasoning-history__chevron { opacity: 1; }
+.agent-activity-reasoning-history__body { margin: 8px 0 0; padding: 0; border: 0; }
+/* Markdown paragraphs and lists are 0.875em of their root. Reasoning stays
+   at 14px; user-facing narration inherits the same 15px body size it had
+   while streaming so it does not shrink when folded into a process. */
+.agent-activity-cluster--compact .agent-message-content.agent-message-content--reasoning { font-size: calc(14px / 0.875); line-height: 1.65; }
+.agent-activity-segment__live-label { display: inline-flex; align-items: center; gap: 7px; color: color-mix(in srgb,var(--color-text-ink) 58%,transparent); font-size: 14px; line-height: 24px; }
+@media (max-width: 580px) {
+  .agent-confirmation-card__header { padding:10px 14px; }
+  .agent-confirmation-card__header > span:first-child { font-size:14px; }
+  .agent-confirmation-card__footer { padding:10px 14px; }
+}
+/* Native uploads and deliveries use the same card anatomy as the sandboxed steps. */
+.review-interaction-shell--native:has(.review-source-card) { padding:0; }
+.review-source-card { display:flex; flex-direction:column; max-height:max(220px,min(490px,calc(100dvh - 310px))); font-size:14px; }
+.review-card-header { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid color-mix(in srgb,var(--color-border-stone) 40%,transparent); flex-shrink:0; }
+.review-card-header h3 { margin:0; flex:1; min-width:0; font-size:16px; font-weight:600; }
+.review-card-header > span { font-size:11px; color:color-mix(in srgb,var(--color-text-ink) 45%,transparent); }
+.review-card-body { padding:14px 16px; display:flex; flex-direction:column; gap:12px; min-height:0; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+.review-card-hint { font-size:12px; line-height:1.6; color:color-mix(in srgb,var(--color-text-ink) 48%,transparent); white-space:pre-line; }
+.review-source-card .litrev-source-card__body { gap:12px; }
+.review-source-card .litrev-wizard-card__count { font-size:12px; }
+.review-source-card .litrev-source-card__policy { font-size:12px; }
+.review-source-card .litrev-source-list__name { font-size:14px; font-weight:500; }
+.review-source-card .litrev-source-list__row small { font-size:12px; }
+.review-source-card .litrev-source-card__actions .button { display:inline-flex; align-items:center; gap:6px; min-height:32px; font-size:13px; }
+.review-source-card .review-card-footer button { font-size:13px; font-weight:400; }
+.review-source-card .litrev-source-list__row small { max-width:180px; overflow:hidden; text-overflow:ellipsis; }
+.review-source-card .litrev-source-list__row .litrev-source-list__error { color:var(--color-status-error,#b44c42); }
+.review-source-picker { display:flex; align-items:center; gap:12px; padding:16px 12px; border:1px dashed var(--color-border-stone); border-radius:8px; background:color-mix(in srgb,var(--color-canvas-oat) 55%,white); }
+.review-source-picker > svg { color:var(--color-action-sky-hover); flex-shrink:0; }
+.review-source-picker > div:first-of-type { flex:1; min-width:0; }
+.review-source-picker__actions { display:flex; flex-wrap:wrap; gap:8px; }
+.review-secondary-button { display:inline-flex; align-items:center; justify-content:center; cursor:pointer; border:1px solid var(--color-border-stone); border-radius:8px; min-height:31px; padding:0 11px; background:white; font-size:12px; }
+.review-secondary-button:focus-within { outline:2px solid var(--color-action-sky); outline-offset:2px; }
+.review-secondary-button:has(input:disabled) { opacity:.5; cursor:not-allowed; }
+.review-source-files { display:flex; flex-direction:column; gap:8px; }
+.review-source-files li { display:flex; align-items:center; gap:10px; border:1px solid color-mix(in srgb,var(--color-border-stone) 50%,transparent); padding:8px 10px; border-radius:8px; }
+.review-source-files li > div { flex:1; min-width:0; }
+.review-source-files li p { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.review-source-files li span { font-size:11px; }
+.review-source-files li button { padding:5px; color:color-mix(in srgb,var(--color-text-ink) 45%,transparent); }
+.review-card-footer { display:flex; justify-content:flex-end; gap:8px; min-height:58px; padding:8px 14px; border-top:1px solid color-mix(in srgb,var(--color-border-stone) 40%,transparent); flex-shrink:0; align-items:center; }
+.review-card-footer button { min-height:31px; padding:0 11px; }
+.review-interaction-shell .button,.review-interaction-shell button { font-weight:400; }
+.review-interaction-shell .plugin-error-card { background:transparent; border:0; border-left:2px solid var(--color-status-error,#bd786b); border-radius:0; font-size:12px; padding:8px 10px; overflow-wrap:anywhere; }
+@media(max-width:580px) { .review-source-picker { flex-wrap:wrap; } .review-source-picker__actions { padding-left:34px; flex-basis:100%; } }

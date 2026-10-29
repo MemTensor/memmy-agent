@@ -18,10 +18,11 @@ import { CHANNELS, MANAGED_INTEGRATION_TOOLKITS } from "../toolkit-catalog.js";
 
 describe("integrationMeta", () => {
   it("包含 managed-auth 全表和 6 个渠道", () => {
-    expect(MANAGED_INTEGRATION_TOOLKITS).toHaveLength(118);
+    expect(MANAGED_INTEGRATION_TOOLKITS).toHaveLength(117);
     expect(CHANNELS).toHaveLength(6);
-    expect(getAllIntegrationMeta()).toHaveLength(124);
+    expect(getAllIntegrationMeta()).toHaveLength(123);
     expect(getIntegrationMeta("github")?.name).toBe("GitHub");
+    expect(getIntegrationMeta("strava")).toBeUndefined();
     expect(getIntegrationMeta("wechat")?.authKind).toBe("qrCode");
   });
 

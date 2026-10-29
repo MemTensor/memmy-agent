@@ -1,10 +1,8 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_MEMMY_CONFIG,
-  MemoryDb,
-  type LlmClient
-} from "../../../src/index.js";
+import { MemoryDb, type LlmClient } from "../../../src/index.js";
 import {
   createCapturingEmbedder,
   createMemoryServiceFixture
@@ -25,7 +23,7 @@ function createFeedbackRefinerLlm(calls: Array<{
 }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.evolution,
+      ...LEGACY_TEST_CONFIG.evolution,
       provider: "host",
       endpoint: "http://127.0.0.1/feedback-refiner",
       model: "feedback-refiner"
@@ -40,6 +38,7 @@ function createFeedbackRefinerLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "failure.experience.sink.v5") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
@@ -88,16 +87,16 @@ describe("MemoryService / feedback / experience", () => {
         userId: "user-feedback-experience"
       }
     });
-    const complete = service.completeTurn("turn-feedback-experience", {
+    const complete = (await service.completeTurn("turn-feedback-experience", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-experience",
       query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
       answer: "Parsed the filing and validated the issuer field."
-    });
+    }));
 
     const ok = await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "positive",
@@ -137,7 +136,7 @@ describe("MemoryService / feedback / experience", () => {
 
     const avoid = await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "negative",
@@ -228,19 +227,19 @@ describe("MemoryService / feedback / experience", () => {
       skillLlm: createFeedbackRefinerLlm(calls),
       embedder: createCapturingEmbedder([]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -253,16 +252,16 @@ describe("MemoryService / feedback / experience", () => {
         userId: "user-feedback-refiner"
       }
     });
-    const complete = service.completeTurn("turn-feedback-refiner", {
+    const complete = (await service.completeTurn("turn-feedback-refiner", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-refiner",
       query: "Parse a SEC 13F filing and extract issuer CUSIP holdings.",
       answer: "I parsed the filename as the issuer name."
-    });
+    }));
 
     const feedbackResponse = await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "negative",

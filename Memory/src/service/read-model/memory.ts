@@ -1,6 +1,6 @@
 import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { kindFromMemory } from "../../storage/repositories.js";
-import { displayFieldsForMemory, observedActivitySummary } from "./display-fields.js";
+import { displayFieldsForMemory, isTraceMemory, observedActivitySummary, storedTraceSummary } from "./display-fields.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
 import { isRecord } from "../../utils/json.js";
@@ -35,6 +35,7 @@ export function detailTitleForMemory(memory: MemoryRow): string {
 }
 
 export function detailSummaryForMemory(memory: MemoryRow): string {
+  if (isTraceMemory(memory)) return storedTraceSummary(memory) ?? "";
   const observationSummary = observedActivitySummary(memory);
   if (observationSummary) return observationSummary;
   if (memory.properties.internal_info.memory_kind === "work_memory") {

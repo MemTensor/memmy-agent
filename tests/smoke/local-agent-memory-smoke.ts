@@ -2,15 +2,15 @@ import Database from "better-sqlite3";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
   MemoryService,
-  createLlmClient,
   listenMemoryHttpServer,
   type Embedder
 } from "../../Memory/src/index.js";
+import { createTurnJudgeLlm } from "../../Memory/tests/service/session/turn-judge-llm.js";
 import {
   createAgentSourceExecutor,
   type AgentSourceExecutor
@@ -40,6 +40,7 @@ export type LocalAgentSourceId = typeof DEFAULT_SOURCE_IDS[number];
 interface SyntheticSourceFixture {
   sourceId: LocalAgentSourceId;
   adapter: SourceAdapter;
+  expectedMessageCount: number;
   rawSecret: string;
   redactionMarker: string;
   expectedAssistantText: string;
@@ -100,11 +101,12 @@ export async function runLocalAgentMemorySmoke(
     );
 
     db = new MemoryDb({ path: memoryDbPath });
-    const llm = createLlmClient(config.summary);
+    const { llm } = createTurnJudgeLlm();
     const service = new MemoryService({
       db,
       mode: "dev",
       config,
+      configLoader: () => ({ config, path: configPath }),
       llm,
       skillLlm: llm,
       embedder: createSmokeEmbedder(),
@@ -120,17 +122,20 @@ export async function runLocalAgentMemorySmoke(
       resolveAgentSkillRoot: () => null
     });
 
-    await assertSourcesAvailable(executor, sourceIds, 0);
+    await assertSourcesAvailable(executor, fixtures, false);
     await runScanAndWait(executor, scanSourceId(sourceIds));
-    const scannedMessages = await assertSourcesAvailable(executor, sourceIds, 2);
+    const scannedMessages = await assertSourcesAvailable(executor, fixtures, true);
     const memoryIdsBySource = readImportedMemoryIds(service, fixtures);
     const memoryIds = sourceIds.map((sourceId) => requireMapValue(memoryIdsBySource, sourceId));
     assertImportedDetails(service, fixtures, memoryIdsBySource);
     await drainImportedMemoryWorkers(service, memoryIds);
+    for (const memoryId of memoryIds) {
+      assert(service.getMemory(memoryId).status === "activated", "Processed source memory must be activated");
+    }
 
     const firstState = readExecutorState(statePath, sourceIds);
     await runScanAndWait(executor, scanSourceId(sourceIds));
-    await assertSourcesAvailable(executor, sourceIds, 2);
+    await assertSourcesAvailable(executor, fixtures, true);
     const dedupedMemoryIds = readImportedMemoryIds(service, fixtures);
     for (const sourceId of sourceIds) {
       assert(
@@ -218,20 +223,14 @@ export async function runLocalAgentMemorySmoke(
       query: SHARED_RECALL_QUERY,
       layers: ["L1"]
     });
-    assert(
-      typeof toolSearch === "string" && toolSearch.includes('<memmy_memory_context source="tool_search">'),
-      "Agent search tool must wrap the real HTTP result in a Memmy context packet"
-    );
+    assertToolMemoryPacket(toolSearch, "tool_search", runtime);
     assert(!toolSearch.includes("No relevant Memmy memories found."), "Agent search tool must expose imported memories");
     assertNoRawSecrets(toolSearch, fixtures, "Agent search tool result");
 
     const firstMemoryId = memoryIds[0];
     assert(firstMemoryId, "At least one imported memory id is required");
     const toolGet = await registry.execute("memmy_memory_get", { id: firstMemoryId });
-    assert(
-      typeof toolGet === "string" && toolGet.includes('<memmy_memory_context source="tool_get">'),
-      "Agent get tool must wrap the real HTTP result in a Memmy context packet"
-    );
+    assertToolMemoryPacket(toolGet, "tool_get", runtime);
     assert(toolGet.includes(`id: ${firstMemoryId}`), "Agent get tool must identify the requested memory");
     assertNoRawSecrets(toolGet, fixtures, "Agent get tool result");
 
@@ -344,45 +343,50 @@ function createSourceFixture(root: string, sourceId: LocalAgentSourceId): Synthe
 }
 
 function createCursorFixture(root: string): SyntheticSourceFixture {
-  const workspaceRoot = join(root, "fixtures", "cursor", "workspace");
   const storageRoot = join(root, "fixtures", "cursor", "User", "workspaceStorage");
-  const storagePath = join(storageRoot, "smoke-workspace");
-  mkdirSync(join(workspaceRoot, ".git"), { recursive: true });
+  const storagePath = join(root, "fixtures", "cursor", "User", "globalStorage");
+  const globalStateDbPath = join(storagePath, "state.vscdb");
+  mkdirSync(storageRoot, { recursive: true });
   mkdirSync(storagePath, { recursive: true });
-  writeFileSync(
-    join(storagePath, "workspace.json"),
-    `${JSON.stringify({ folder: pathToFileURL(workspaceRoot).href })}\n`,
-    "utf8"
-  );
-  const stateDb = new Database(join(storagePath, "state.vscdb"));
+  const composerId = "cursor-smoke-conversation";
+  const bubbles = [
+    {
+      bubbleId: "cursor-smoke-user",
+      type: 1,
+      text: `${SHARED_RECALL_QUERY} for Cursor. Authorization: Bearer ${CURSOR_SECRET}`,
+      createdAt: "2026-09-01T00:00:00.000Z"
+    },
+    {
+      bubbleId: "cursor-smoke-assistant",
+      type: 2,
+      text: "Cursor smoke assistant confirms the isolated release checklist.",
+      createdAt: "2026-09-01T00:00:01.000Z"
+    }
+  ];
+  const stateDb = new Database(globalStateDbPath);
   try {
-    stateDb.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    stateDb.prepare("INSERT INTO ItemTable(key, value) VALUES (?, ?)").run(
-      "composerData:cursor-smoke-conversation",
+    stateDb.exec("CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, isSubagent INTEGER)");
+    stateDb.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    stateDb.prepare("INSERT INTO composerHeaders (composerId, isSubagent) VALUES (?, 0)").run(composerId);
+    const insert = stateDb.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)");
+    insert.run(
+      `composerData:${composerId}`,
       JSON.stringify({
-        conversationId: "cursor-smoke-conversation",
-        messages: [
-          {
-            id: "cursor-smoke-user",
-            role: "user",
-            content: `${SHARED_RECALL_QUERY} for Cursor. Authorization: Bearer ${CURSOR_SECRET}`,
-            createdAt: "2026-09-01T00:00:00.000Z"
-          },
-          {
-            id: "cursor-smoke-assistant",
-            role: "assistant",
-            content: "Cursor smoke assistant confirms the isolated release checklist.",
-            createdAt: "2026-09-01T00:00:01.000Z"
-          }
-        ]
+        composerId,
+        status: "completed",
+        fullConversationHeadersOnly: bubbles.map(({ bubbleId, type, createdAt }) => ({ bubbleId, type, createdAt }))
       })
     );
+    for (const bubble of bubbles) {
+      insert.run(`bubbleId:${composerId}:${bubble.bubbleId}`, JSON.stringify(bubble));
+    }
   } finally {
     stateDb.close();
   }
   return {
     sourceId: "cursor",
-    adapter: createCursorSourceAdapter({ storageRoot }),
+    adapter: createCursorSourceAdapter({ storageRoot, globalStateDbPath }),
+    expectedMessageCount: 2,
     rawSecret: CURSOR_SECRET,
     redactionMarker: "[REDACTED:authorization_bearer]",
     expectedAssistantText: "Cursor smoke assistant confirms the isolated release checklist."
@@ -406,7 +410,12 @@ function createCodexFixture(root: string): SyntheticSourceFixture {
       JSON.stringify({
         timestamp: "2026-09-01T00:01:00.000Z",
         type: "session_meta",
-        payload: { cwd: workspaceRoot }
+        payload: { id: "019e72be-500b-7f02-9400-112c5a194e5c", cwd: workspaceRoot }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-01T00:01:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "codex-smoke-turn" }
       }),
       JSON.stringify({
         timestamp: "2026-09-01T00:01:01.000Z",
@@ -425,6 +434,11 @@ function createCodexFixture(root: string): SyntheticSourceFixture {
           role: "assistant",
           content: [{ type: "output_text", text: "Codex smoke assistant confirms the isolated release checklist." }]
         }
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-01T00:01:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "codex-smoke-turn" }
       })
     ].join("\n"),
     "utf8"
@@ -432,6 +446,8 @@ function createCodexFixture(root: string): SyntheticSourceFixture {
   return {
     sourceId: "codex",
     adapter: createCodexSourceAdapter({ sessionsRoot }),
+    // The native reader also stages the task_complete system message.
+    expectedMessageCount: 3,
     rawSecret: CODEX_SECRET,
     redactionMarker: "[REDACTED:openai_api_key]",
     expectedAssistantText: "Codex smoke assistant confirms the isolated release checklist."
@@ -443,7 +459,8 @@ function createClaudeCodeFixture(root: string): SyntheticSourceFixture {
   const projectsRoot = join(fixtureRoot, "projects");
   const workspaceRoot = join(fixtureRoot, "workspace");
   const projectDirectory = join(projectsRoot, "-smoke-workspace");
-  const transcriptPath = join(projectDirectory, "claude-smoke-session.jsonl");
+  const sessionId = "19e74616-8b83-4f16-936f-63caf804a008";
+  const transcriptPath = join(projectDirectory, `${sessionId}.jsonl`);
   mkdirSync(join(workspaceRoot, ".git"), { recursive: true });
   mkdirSync(projectDirectory, { recursive: true });
   writeFileSync(
@@ -451,13 +468,15 @@ function createClaudeCodeFixture(root: string): SyntheticSourceFixture {
     [
       JSON.stringify({
         type: "user",
+        origin: { kind: "human" },
+        promptId: "claude-smoke-prompt",
         message: {
           role: "user",
           content: `${SHARED_RECALL_QUERY} for Claude Code. ANTHROPIC_API_KEY=${CLAUDE_SECRET}`
         },
         uuid: "claude-smoke-user",
         timestamp: "2026-09-01T00:02:00.000Z",
-        sessionId: "claude-smoke-session",
+        sessionId,
         cwd: workspaceRoot
       }),
       JSON.stringify({
@@ -468,8 +487,15 @@ function createClaudeCodeFixture(root: string): SyntheticSourceFixture {
         },
         uuid: "claude-smoke-assistant",
         timestamp: "2026-09-01T00:02:01.000Z",
-        sessionId: "claude-smoke-session",
+        sessionId,
         cwd: workspaceRoot
+      }),
+      JSON.stringify({
+        type: "system",
+        subtype: "turn_duration",
+        uuid: "claude-smoke-duration",
+        timestamp: "2026-09-01T00:02:02.000Z",
+        sessionId
       })
     ].join("\n"),
     "utf8"
@@ -477,6 +503,7 @@ function createClaudeCodeFixture(root: string): SyntheticSourceFixture {
   return {
     sourceId: "claude_code",
     adapter: createClaudeCodeSourceAdapter({ projectsRoot }),
+    expectedMessageCount: 2,
     rawSecret: CLAUDE_SECRET,
     redactionMarker: "[REDACTED:anthropic_api_key]",
     expectedAssistantText: "Claude Code smoke assistant confirms the isolated release checklist."
@@ -485,13 +512,15 @@ function createClaudeCodeFixture(root: string): SyntheticSourceFixture {
 
 async function assertSourcesAvailable(
   executor: AgentSourceExecutor,
-  sourceIds: readonly LocalAgentSourceId[],
-  expectedMessageCount: number
+  fixtures: readonly SyntheticSourceFixture[],
+  imported: boolean
 ): Promise<number> {
   const listed = await executor.list();
-  assert(listed.sources.length === sourceIds.length, "Executor must expose only the selected synthetic sources");
+  assert(listed.sources.length === fixtures.length, "Executor must expose only the selected synthetic sources");
   let total = 0;
-  for (const sourceId of sourceIds) {
+  for (const fixture of fixtures) {
+    const { sourceId } = fixture;
+    const expectedMessageCount = imported ? fixture.expectedMessageCount : 0;
     const source = listed.sources.find((item) => item.sourceId === sourceId);
     assert(source, `Executor must expose synthetic source ${sourceId}`);
     assert(source.available, `Synthetic source ${sourceId} must be detected`);
@@ -533,8 +562,6 @@ function readImportedMemoryIds(
   for (const fixture of fixtures) {
     const panel = service.panelItems({
       layer: "L1",
-      status: "activated",
-      tags: ["agent-source", fixture.sourceId],
       sourceAgent: fixture.sourceId,
       limit: 10
     });
@@ -579,7 +606,8 @@ async function drainImportedMemoryWorkers(service: MemoryService, memoryIds: rea
     ) {
       return;
     }
-    const worker = await service.runWorkerOnce(20, { targetMemoryIds: [...memoryIds] });
+    // Native captures also queue episode assignment jobs without a target memory id.
+    const worker = await service.runWorkerOnce(20);
     assert(worker.failed === 0, "Imported memory worker jobs must not fail");
     assert(worker.embeddingRetries.failed === 0, "Imported memory embedding retries must not fail");
   }
@@ -645,6 +673,22 @@ function assertExecutorStateDeduplicated(
       `${sourceId} repeated scan must preserve its persisted source checkpoint`
     );
   }
+}
+
+function assertToolMemoryPacket(
+  value: unknown,
+  source: "tool_search" | "tool_get",
+  runtime: MemmyMemoryToolRuntime,
+): asserts value is string {
+  assert(typeof value === "string", `${source} must return a text context packet`);
+  const memory = value.match(/<memmy_memory_context\b([^>]*)>([\s\S]*?)<\/memmy_memory_context>/);
+  const turnId = runtime.currentTurnId() ?? "unscoped";
+  assert(memory?.[1]?.includes(`source="${source}"`), `${source} must identify the memory source`);
+  assert(memory?.[1]?.includes(`turn_id="${turnId}"`), `${source} must use the runtime memory turn`);
+  assert(memory?.[2]?.trim(), `${source} must include memory evidence`);
+  const request = value.match(/<current_user_request\b([^>]*)>([\s\S]*?)<\/current_user_request>/);
+  assert(request?.[1]?.includes(`turn_id="${turnId}"`), `${source} must scope the request to the same turn`);
+  assert(request?.[2]?.trim() === runtime.currentUserText(), `${source} must preserve the current user request`);
 }
 
 function createToolRuntime(sessionId: string): MemmyMemoryToolRuntime {
