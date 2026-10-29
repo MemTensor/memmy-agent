@@ -100,8 +100,7 @@ describe("review regressions for native source turns", () => {
     expect(result.reason).toBe("turn_incomplete");
   });
 
-  it("still captures a finished Cursor turn after a later user message", async () => {
-    const bubbles: Record<string, Record<string, unknown>> = {
+  it("still captures a finished Cursor turn after a later user message", async () => {    const bubbles: Record<string, Record<string, unknown>> = {
       u: { type: 1, text: "Implement the configuration reader.", createdAt: t, requestId: "req" },
       a: { type: 2, text: "Configuration inspected.", createdAt: t },
       u2: { type: 1, text: "Thanks.", createdAt: "2099-01-01T10:01:00.000Z", requestId: "req2" }
@@ -119,6 +118,44 @@ describe("review regressions for native source turns", () => {
     };
     const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
     expect(result.turn?.answer).toBe("Configuration inspected.");
+  });
+
+  it("reads a Cursor turn whose header list lives in composerConvHeaders rows", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Implement the configuration reader.", createdAt: t, requestId: "req" },
+      a: { type: 2, text: "Configuration inspected.", createdAt: t }
+    };
+    const headers = Object.entries(bubbles).map(([bubbleId, bubble]) => ({ bubbleId, type: bubble.type }));
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      // Newer Cursor versions keep the chat's inline list empty and split the headers over their own rows.
+      composerData: () => ({ status: "completed", fullConversationHeadersOnly: [] }),
+      conversationHeaders: () => headers,
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
+    expect(result.turn).toMatchObject({
+      conversationId: "c",
+      turnId: "u",
+      query: "Implement the configuration reader.",
+      answer: "Configuration inspected."
+    });
+  });
+
+  it("prefers the inline header list while Cursor still writes one", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      inline: { type: 1, text: "Inline header list.", createdAt: t, requestId: "req" },
+      answer: { type: 2, text: "Inline answer.", createdAt: t },
+      stale: { type: 1, text: "Chunked header list.", createdAt: "2099-01-01T10:01:00.000Z", requestId: "req2" }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({ status: "completed", fullConversationHeadersOnly: [{ bubbleId: "inline", type: 1 }, { bubbleId: "answer", type: 2 }] }),
+      conversationHeaders: () => [{ bubbleId: "stale", type: 1 }],
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
+    expect(result.turn).toMatchObject({ query: "Inline header list.", answer: "Inline answer." });
   });
 
   it("keeps an OpenCode turn on the user message agent after session.agent changes", async () => {

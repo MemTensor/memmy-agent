@@ -2,6 +2,7 @@
 import { access } from "node:fs/promises";
 import { resolveClaudeCodeProjectsDirectory } from "../../agent-paths.js";
 import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
+import { readJsonlSessionTitle } from "../jsonl-session-title.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { discoverClaudeCodeSessions } from "./project-discovery.js";
@@ -68,6 +69,9 @@ export function createClaudeCodeSourceAdapter(deps: CreateClaudeCodeSourceAdapte
           message: session.sessionFilePath
         });
 
+        // Claude Code keeps the conversation's own title next to its turns; reading it once per file
+        // gives every message of the file the name the person sees in Claude Code.
+        const sessionTitle = await readJsonlSessionTitle(session.sessionFilePath);
         for await (const rawMessage of streamConversationWindow(
           readClaudeCodeTranscript(session.sessionFilePath, options.signal),
           options.since,
@@ -79,7 +83,7 @@ export function createClaudeCodeSourceAdapter(deps: CreateClaudeCodeSourceAdapte
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
           emittedMessages += 1;
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
-          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, sessionTitle);
         }
       }
 
@@ -93,7 +97,8 @@ function toConversationMessage(
   sourceId: string,
   rawMessage: RawClaudeCodeMessage,
   discoveredWorkspacePath: string | null,
-  discoveredGitRoot: string | null
+  discoveredGitRoot: string | null,
+  sessionTitle: string | null
 ): ConversationMessage {
   return {
     messageId: rawMessage.messageId,
@@ -105,6 +110,7 @@ function toConversationMessage(
     workspacePath: rawMessage.workspacePath ?? discoveredWorkspacePath,
     gitRoot: rawMessage.gitRoot ?? discoveredGitRoot,
     ordinal: rawMessage.ordinal,
+    ...(sessionTitle ? { sessionTitle } : {}),
     rawMeta: rawMessage.rawMeta
   };
 }

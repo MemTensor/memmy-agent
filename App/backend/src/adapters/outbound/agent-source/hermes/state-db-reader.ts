@@ -25,13 +25,27 @@ export async function* readHermesStateDb(path: string, signal?: AbortSignal): As
     const source = createSource(db);
     if (!source) return;
     const workspaces = new Map([...source.sessions()].map((session) => [session.id, session.cwd ?? null]));
+    // Hermes names each session itself; the title column is read here rather than through the turn parser.
+    const titles = readSessionTitles(db);
     for await (const message of readHermesSessions(source, signal)) {
       const cwd = workspaces.get(message.conversationId) ?? null;
-      yield { ...message, workspacePath: cwd, gitRoot: cwd };
+      const sessionTitle = titles.get(message.conversationId);
+      yield { ...message, workspacePath: cwd, gitRoot: cwd, ...(sessionTitle ? { sessionTitle } : {}) };
     }
   } finally {
     db.close();
   }
+}
+
+/** Session titles, when this Hermes stores them; older schemas have no such column. */
+function readSessionTitles(db: DatabaseSync): ReadonlyMap<string, string> {
+  const titles = new Map<string, string>();
+  if (!tableColumns(db, "sessions").has("title")) return titles;
+  for (const row of db.prepare("SELECT id, title FROM sessions").all() as unknown as Array<{ id: string; title: string | null }>) {
+    const title = typeof row.title === "string" ? row.title.replace(/\s+/gu, " ").trim() : "";
+    if (row.id && title) titles.set(row.id, title);
+  }
+  return titles;
 }
 
 /** A database without the conversation tables is not a conversation store. */

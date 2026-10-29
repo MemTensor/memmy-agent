@@ -29,6 +29,7 @@ type ThreadPreviewState =
   | { status: "unsupported" }
   | { status: "too-large" }
   | { status: "unavailable" }
+  | { status: "ready"; kind: "paged-text"; text: string; start: number; end: number; total: number; url: string }
   | { status: "ready"; kind: "pdf" | "html"; objectUrl: string }
   | { status: "ready"; kind: "image" | "video"; url: string }
   | { status: "ready"; kind: "markdown" | "code" | "text" | "csv"; text: string }
@@ -146,6 +147,7 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
       </div>
       <div className="thread-preview__body">
         <ThreadPreviewBody
+          fetchFn={context.fetchFn}
           name={tab.name}
           path={filePath ?? tab.name}
           state={result.state}
@@ -165,6 +167,7 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
 }
 
 function ThreadPreviewBody(props: {
+  fetchFn?: typeof fetch;
   name: string;
   path: string;
   state: ThreadPreviewState;
@@ -216,6 +219,8 @@ function ThreadPreviewBody(props: {
     );
   }
   switch (state.kind) {
+    case "paged-text":
+      return <PagedTextPreview key={props.path} initial={state} name={props.name} fetchFn={props.fetchFn} />;
     case "pdf":
       return <iframe className="thread-preview__frame" src={state.objectUrl} title={props.name} />;
     case "html":
@@ -283,6 +288,68 @@ function ThreadPreviewBody(props: {
         </div>
       );
   }
+}
+
+const TEXT_PAGE_BYTES = 256 * 1024;
+type TextPage = { status: "ready"; kind: "paged-text"; text: string; start: number; end: number; total: number; url: string };
+
+async function readTextPage(url: string, offset: number, fetchFn: typeof fetch = fetch): Promise<TextPage | Response> {
+  const response = await fetchFn(url, { cache: "no-store", headers: { Range: `bytes=${offset}-${offset + TEXT_PAGE_BYTES + 2}` } });
+  // A readable empty file cannot satisfy a byte range. Only the initial
+  // request with an explicit zero total should enter the normal empty preview.
+  if (offset === 0 && response.status === 416 && response.headers.get("content-range")?.trim() === "bytes */0") {
+    return { status: "ready", kind: "paged-text", text: "", start: 0, end: 0, total: 0, url };
+  }
+  if (!response.ok) throw new Error(`preview request failed: ${response.status}`);
+  if (response.status !== 206) return response;
+  const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+  if (!range) throw new Error("Missing text range metadata");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let first = 0;
+  while (first < Math.min(3, bytes.length) && (bytes[first]! & 0xc0) === 0x80) first++;
+  let end = Math.min(bytes.length, first + TEXT_PAGE_BYTES);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let text: string | undefined;
+  for (let trim = 0; trim <= 3 && end >= first; trim++, end--) {
+    try { text = decoder.decode(bytes.subarray(first, end)); break; } catch { /* retry a complete UTF-8 boundary */ }
+  }
+  if (text === undefined) throw new Error("Invalid UTF-8 preview");
+  return { status: "ready", kind: "paged-text", text, start: Number(range[1]) + first,
+    end: Number(range[1]) + end, total: Number(range[3]), url };
+}
+
+function PagedTextPreview(props: { initial: TextPage; name: string; fetchFn?: typeof fetch }) {
+  const { t } = useTranslation();
+  const [page, setPage] = useState(props.initial);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const textRef = useRef<HTMLPreElement>(null);
+  const showTail = useRef(false);
+  useEffect(() => {
+    if (textRef.current) textRef.current.scrollTop = showTail.current ? textRef.current.scrollHeight : 0;
+  }, [page]);
+  const load = async (offset: number) => {
+    setLoading(true); setFailed(false);
+    try {
+      const next = await readTextPage(page.url, offset, props.fetchFn);
+      if (next instanceof Response) throw new Error("Range preview unavailable");
+      showTail.current = offset > 0 && next.end >= next.total;
+      setPage(next);
+    } catch { setFailed(true); }
+    finally { setLoading(false); }
+  };
+  return <div className="thread-preview__paged">
+    <div className="thread-preview__text-pager" role="group" aria-label={t("home.threadPanel.preview.pages")}>
+      <button type="button" disabled={loading || page.start === 0} onClick={() => void load(0)}>{t("home.threadPanel.preview.firstPage")}</button>
+      <button type="button" disabled={loading || page.start === 0} onClick={() => void load(Math.max(0, page.start - TEXT_PAGE_BYTES))}>{t("home.threadPanel.preview.previousPage")}</button>
+      <span>{page.start}–{page.end} / {page.total} B</span>
+      <button type="button" disabled={loading || page.end >= page.total} onClick={() => void load(page.end)}>{t("home.threadPanel.preview.nextPage")}</button>
+      <button type="button" disabled={loading || page.end >= page.total} onClick={() => void load(Math.max(0, page.total - TEXT_PAGE_BYTES))}>{t("home.threadPanel.preview.lastPage")}</button>
+    </div>
+    {failed ? <p role="alert">{t("home.threadPanel.preview.unavailable")}</p> : null}
+    {loading ? <p role="status">{t("home.threadPanel.preview.loading")}</p> : null}
+    <pre ref={textRef} className="thread-preview__text-page" aria-label={props.name}>{page.text}</pre>
+  </div>;
 }
 
 function ThreadCsvTable(props: { text: string; delimiter: string }) {
@@ -365,6 +432,19 @@ async function loadFilePreview(
   if (!mediaUrl) return { state: { status: "unavailable" }, path };
   if (kind === "image" || kind === "video") return { state: { status: "ready", kind, url: mediaUrl }, path };
 
+  // Large raw text stays bounded in both network reads and rendering. Smaller
+  // files retain the existing full-file preview/editor behavior.
+  if (["code", "text", "markdown", "csv"].includes(kind)) {
+    const first = await readTextPage(mediaUrl, 0, context.fetchFn);
+    if (!(first instanceof Response)) {
+      if (first.total > THREAD_TEXT_PREVIEW_MAX_BYTES) return { state: first, path };
+      if (first.end >= first.total) return { state: { status: "ready", kind: kind as "code" | "text" | "markdown" | "csv", text: first.text }, path };
+    } else {
+      const blob = await first.blob();
+      if (blob.size > THREAD_TEXT_PREVIEW_MAX_BYTES) return { state: { status: "too-large" }, path };
+      return { state: { status: "ready", kind: kind as "code" | "text" | "markdown" | "csv", text: await blob.text() }, path };
+    }
+  }
   const blob = await fetchBlob(mediaUrl, context.fetchFn);
   if (kind === "pdf") {
     const objectUrl = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));

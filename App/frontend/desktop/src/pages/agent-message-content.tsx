@@ -36,6 +36,8 @@ interface AgentMessageContentProps {
   onPreviewFile?: InAppFilePreviewHandler;
   deferRender?: boolean;
   deferredRevealDelayMs?: number;
+  /** Local file links stay names. Nothing in the message can open or preview a file. */
+  readOnlyFileReferences?: boolean;
   className?: string;
   style?: CSSProperties;
 }
@@ -138,6 +140,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
+        if (props.readOnlyFileReferences) return <StaticFileName path={localPath} label={children} />;
         return <FileReferenceChip path={localPath} label={children} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
       }
       if (isMailtoHref(href)) {
@@ -180,6 +183,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       if (isDirectMediaUrl(url)) {
         return <img src={url} alt={alt ?? ""} className="agent-message-content__image" />;
       }
+      if (props.readOnlyFileReferences) return <StaticFileName path={url} label={alt} />;
       return <FileReferenceChip path={url} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} preferPreview />;
     },
     // Spacing, size, and color for every markdown block live in ONE place —
@@ -234,7 +238,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     td({ children, style }) {
       return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</td>;
     }
-  }), [props.artifactClient, props.isStreaming, props.onPreviewFile]);
+  }), [props.artifactClient, props.isStreaming, props.onPreviewFile, props.readOnlyFileReferences]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -270,6 +274,7 @@ function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, ne
     && previous.onPreviewFile === next.onPreviewFile
     && previous.deferRender === next.deferRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
+    && previous.readOnlyFileReferences === next.readOnlyFileReferences
     && previous.className === next.className
     && previous.style === next.style;
 }
@@ -478,6 +483,27 @@ function CodeBlock(props: { code: string; language: string | null; highlight: bo
       )}
     </div>
   );
+}
+
+function StaticFileName(props: { path: string; label?: ReactNode }) {
+  const cleanPath = cleanPathToken(props.path);
+  const text = reactNodeText(props.label).trim();
+  return (
+    <span
+      className="agent-message-content__file-chip inline-flex max-w-full min-w-0 cursor-default items-center gap-1.5 overflow-hidden rounded-tag border border-border-stone/40 bg-canvas-oat/70 px-2 py-1 align-baseline text-xs text-text-ink/65"
+      title={cleanPath}
+    >
+      <FileText size={12} className="shrink-0" aria-hidden="true" />
+      <span className="min-w-0 truncate">{text || basename(cleanPath)}</span>
+    </span>
+  );
+}
+
+function reactNodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map((child) => reactNodeText(child)).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return reactNodeText(node.props.children);
+  return "";
 }
 
 function FileReferenceChip(props: {

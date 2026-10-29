@@ -189,6 +189,26 @@ describe("agent source auto inject service", () => {
     expect(calls).toEqual(["plugin:cursor:auto_inject"]);
   });
 
+  it("adds the hook for an agent that only had the skill installed", async () => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() {
+          return [source("codex", "skill_installed", true)];
+        },
+        async isInstalledHookCurrent() {
+          return false;
+        }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => ({ ...enabledPreferences, autoInjectSkill: false })
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({ installed: ["codex"], failed: [] });
+    expect(calls).toEqual(["plugin:codex:auto_inject"]);
+  });
+
   it("leaves a current hook in place and still installs a newly found agent", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({

@@ -14,7 +14,7 @@ export function createLocalKnowledgeClient(
   fetcher: typeof fetch = fetch,
 ): KnowledgeRecallClient {
   return {
-    async recall(query, signal) {
+    async recall(query, workspace, signal) {
       let runtime: Record<string, unknown>;
       try {
         runtime = record(JSON.parse(await fs.readFile(runtimeFile, "utf8")));
@@ -39,7 +39,9 @@ export function createLocalKnowledgeClient(
             "Content-Type": "application/json",
             "x-memmy-local-token": text(runtime.localToken),
           },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify(
+            workspace ? { query, workspace } : { query },
+          ),
         });
         if (!response.ok) throw new KnowledgeError("知识库服务暂时不可用", 503);
         const data = record(await response.json());

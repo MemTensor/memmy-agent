@@ -2561,7 +2561,7 @@ function ToolGroupSegmentLabel(props: { segment: ActivityToolGroupSegment }) {
  * dimmed, result normal — with no form labels. This single
  * generic shape works for any tool, however exotic its payload.
  */
-function ToolDetailRows(props: { item: ActivityToolStepItem }) {
+function ToolDetailRows(props: { item: ActivityToolStepItem; t: Translate; onOpenActivityFile?: (file: ActivityPreviewFile) => void }) {
   const sections = props.item.details.filter((detail) => detail.value.trim().length > 0);
   if (!sections.length) {
     return null;
@@ -2574,7 +2574,17 @@ function ToolDetailRows(props: { item: ActivityToolStepItem }) {
           data-detail={detail.label.toLowerCase()}
           className="agent-activity-tool-card__section"
         >
-          <pre className="agent-activity-tool-card__value">{detail.value}</pre>
+          {detail.label === "Result" && props.item.event.output_file && props.item.event.display_text === undefined ? (
+            <div>
+              <button type="button" className="agent-activity-file-link agent-activity-output-file" data-activity-file-path={props.item.event.output_file.path}
+                onClick={() => props.onOpenActivityFile?.({ path: props.item.event.output_file!.path, name: props.item.event.output_file!.name })}>
+                <FileText size={14} aria-hidden="true" />
+                <span>{props.item.event.output_file.name}</span>
+                <span>({props.item.event.output_file.sizeBytes.toLocaleString()} B)</span>
+              </button>
+              <p className="agent-activity-output-file__notice">{props.t("agent.activity.savedOutput")}</p>
+            </div>
+          ) : <pre className="agent-activity-tool-card__value">{detail.value}</pre>}
         </div>
       ))}
     </div>
@@ -2723,7 +2733,7 @@ function TraceLine(props: { item: ActivityToolStepItem; t: Translate; onOpenActi
           {summary}
           <ChevronRight size={12} aria-hidden="true" className="agent-activity-tool-details__chevron" />
         </summary>
-        <ToolDetailRows item={props.item} />
+        <ToolDetailRows item={props.item} t={props.t} onOpenActivityFile={props.onOpenActivityFile} />
       </details>
     );
   }
@@ -3165,7 +3175,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   const rows: ActivityToolDetail[] = [];
   const rawArguments = isRecord(event.function) && "arguments" in event.function ? event.function.arguments : event.arguments;
   appendToolDetailRow(rows, "Arguments", rawArguments);
-  appendToolDetailRow(rows, "Result", event.result);
+  appendToolDetailRow(rows, "Result", event.display_text ?? event.result);
   appendToolDetailRow(rows, "Files", event.files);
   appendToolDetailRow(rows, "Embeds", event.embeds);
   appendToolDetailRow(rows, "Error", event.error);
@@ -3296,13 +3306,7 @@ function sanitizeDomId(value: string): string {
 
 function formatToolDetailValue(value: unknown): string {
   if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    try {
-      return truncateToolDetailValue(formatStructuredToolDetail(JSON.parse(trimmed)));
-    } catch {
-      return truncateToolDetailValue(trimmed.replace(/\n{3,}/gu, "\n\n"));
-    }
+    return truncateToolDetailValue(value);
   }
   try {
     return truncateToolDetailValue(formatStructuredToolDetail(value));

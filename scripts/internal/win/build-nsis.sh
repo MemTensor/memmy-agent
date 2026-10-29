@@ -796,6 +796,7 @@ verify_packaged_windows_unpacked_artifacts() {
     "$(to_node_readable_path "$UNPACKED_DIR/resources/browser-extension")"
   require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"
   require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy.cmd"
+  require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-project.cmd"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
   if ! grep -Fq 'set "ENTRY=%RESOURCES_DIR%\memory-runtime\dist\src\cli\index.js"' \
     "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"; then
@@ -1139,6 +1140,7 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
 package_step_start "Create Windows CLI launchers and embedding model"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\memmy-agent\\dist\\main.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-project.cmd" "app.asar\\dist\\cli\\memmy-project.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 

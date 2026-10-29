@@ -1,7 +1,11 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
+import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
+import { ComposerInlineEditor, caretAtTextStart } from "./composer-inline-editor.js";
+import { mentionEmptyLabelKey } from "./collab-session-mention.js";
+import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -41,7 +45,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMessage, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
+import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMessage, type AgentState, type AgentThinkingState, type ComposerMention } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -53,6 +57,12 @@ import {
   type PendingImage
 } from "../state/agent-composer-state.js";
 import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection, resolveThinkingConfigForModel, type ModelCandidate, type ModelWorkspace } from "../state/model-workspace.js";
+import {
+  CollabSessionMentionMenu,
+  applyMention,
+  mentionQueryFromInput,
+  useCollabSessionCandidates
+} from "./collab-session-mention.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -98,7 +108,7 @@ import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, Folder, MessageSquare, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -349,7 +359,7 @@ export function requestAgentStop(input: RequestAgentStopInput): boolean {
   }
 }
 
-export function isSingleLineComposerInput(element: HTMLTextAreaElement): boolean {
+export function isSingleLineComposerInput(element: HTMLElement): boolean {
   const style = window.getComputedStyle(element);
   const lineHeight = Number.parseFloat(style.lineHeight);
   const paddingTop = Number.parseFloat(style.paddingTop) || 0;
@@ -924,7 +934,7 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const workspaceLayoutRef = useRef<HTMLDivElement | null>(null);
@@ -999,11 +1009,46 @@ export function HomePage() {
   );
   const selectedComposerCommand = composerCommandDraft.command;
   const composerInput = composerCommandDraft.text;
+  // The @ menu: the caret decides which mention is being typed, so it is tracked with the text.
+  const [composerCaret, setComposerCaret] = useState(0);
+
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
+  const collabProjects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  const mentionQuery = useMemo(
+    () => (mentionDismissed ? null : mentionQueryFromInput(composerInput, composerCaret)),
+    [composerInput, composerCaret, mentionDismissed]
+  );
+  const pendingMentions = state.agent.composerMentionsByScope[chatScopeKey] ?? [];
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  // A reference stays inside the project the task belongs to, so the @ menu needs that project first: the
+  // draft's target for a new task, the session's project for an existing one.
+  const composerLocalProjectId = selectedDraftProject?.id
+    ?? (state.agent.currentSessionKey
+      ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+      : undefined)
+    ?? null;
+  const composerOnlineProjectId = useMemo(() => {
+    if (!composerLocalProjectId) return null;
+    return getCollabProjectsSnapshot().projects?.find((project) => project.localProjectId === composerLocalProjectId)?.id ?? null;
+  }, [composerLocalProjectId, collabProjects]);
+  const mentionCandidates = useCollabSessionCandidates({
+    client: collabClient,
+    mention: mentionQuery,
+    projectId: composerOnlineProjectId
+  });
+  // Any @ opens the menu, so it always answers: the candidates, an empty project, or a task outside one.
+  const mentionOpen = mentionQuery !== null;
+  const mentionProjectName = collabProjects.projects?.find((project) => project.id === composerOnlineProjectId)?.name ?? null;
+  const mentionEmpty = mentionEmptyLabelKey({ projectName: composerOnlineProjectId ? mentionProjectName : null });
+  const mentionEmptyLabel = mentionEmpty.key === "home.mention.empty"
+    ? t("home.mention.empty", mentionEmpty.values)
+    : t("home.mention.noProject");
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1850,6 +1895,11 @@ export function HomePage() {
     const submittedDraft = input;
     const submittedAttachments = [...pendingAttachments];
     const submittedCommand = selectedComposerCommand;
+    const submittedMentions = [...pendingMentions];
+    // The agent needs the file paths; the bubble shows only what the person wrote.
+    const contentWithReferences = submittedMentions.length
+      ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${input}`
+      : input;
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -1866,8 +1916,9 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: input,
-        displayContent: selectedComposerCommand ? composerInput : undefined,
+        content: contentWithReferences,
+        // With references or a command the wire text differs from what was typed; show the typed part.
+        displayContent: (selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -1880,7 +1931,8 @@ export function HomePage() {
           sendScopeKey,
           submittedDraft,
           submittedAttachments,
-          submittedCommand
+          submittedCommand,
+          submittedMentions
         ),
         settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments),
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
@@ -2272,6 +2324,9 @@ export function HomePage() {
    */
   function updateComposerInput(value: string) {
     setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    // Typing again reopens the @ menu after an escape.
+    setMentionDismissed(false);
+    setMentionIndex(0);
     setSlashMenuDismissed(false);
     if (
       slashQueryFromInput(value) != null &&
@@ -2297,7 +2352,14 @@ export function HomePage() {
    *
    * @param element The textarea whose height should be adjusted.
    */
-  function resizeComposerInput(element: HTMLTextAreaElement) {
+  function resizeComposerInput(element: HTMLElement) {
+    // 内联编辑器随内容自然长高，高度由 CSS 的 min/max-height 兜住。给它写死 height 会把它压成一行，
+    // 因为 div 的 scrollHeight 只反映当前内容，不像 rows=3 的 textarea 一开始就有三行高。
+    if (!(element instanceof HTMLTextAreaElement)) {
+      element.style.height = "";
+      setIsComposerSingleLine(isSingleLineComposerInput(element));
+      return;
+    }
     element.style.height = "auto";
     const isSingleLine = isSingleLineComposerInput(element);
     setIsComposerSingleLine(isSingleLine);
@@ -2329,6 +2391,7 @@ export function HomePage() {
   function stageComposerForSend(scopeKey: string) {
     setSelectedComposerCommandForScope(scopeKey, null);
     setComposerDraftForScope(scopeKey, "");
+    dispatch(agentActions.composerMentionsUpdated(scopeKey, []));
     setPendingAttachmentsForScope(scopeKey, []);
     resetTransientConversationUi();
     resetComposerHeight();
@@ -2338,7 +2401,8 @@ export function HomePage() {
     scopeKey: string,
     draft: string,
     attachments: PendingAttachment[],
-    command: typeof COMPOSER_GOAL_COMMAND | null
+    command: typeof COMPOSER_GOAL_COMMAND | null,
+    mentions: ComposerMention[] = []
   ) {
     const currentDraft = composerDraftsRef.current[scopeKey] ?? "";
     const currentAttachments = pendingAttachmentsRef.current[scopeKey] ?? [];
@@ -2352,6 +2416,7 @@ export function HomePage() {
     }
     setComposerDraftForScope(scopeKey, currentDraft ? `${draft}\n\n${currentDraft}` : draft);
     setPendingAttachmentsForScope(scopeKey, restoredAttachments);
+    if (mentions.length) dispatch(agentActions.composerMentionsUpdated(scopeKey, mentions));
     window.requestAnimationFrame(() => {
       if (scopeKey === chatScopeKey && inputRef.current) {
         resizeComposerInput(inputRef.current);
@@ -2626,9 +2691,70 @@ export function HomePage() {
    *
    * @param event The textarea keyboard event.
    */
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  /**
+   * Downloads the session so its file is current, then writes the reference into the message. An agent that reads
+   * the message therefore gets the file path without asking the person for anything else.
+   */
+  async function selectMentionSession(session: CollabProjectSession) {
+    if (!mentionQuery) return;
+    const mention = mentionQuery;
+    let reference = session.shareText;
+    try {
+      const downloaded = await collabClient?.readReference(session.shareText || session.link);
+      if (downloaded?.text) reference = downloaded.text;
+    } catch {
+      // A failed download still leaves the link, which the agent can read with the skill.
+    }
+    const scopeKey = chatScopeKey;
+    const existing = state.agent.composerMentionsByScope[scopeKey] ?? [];
+    if (!existing.some((item) => item.id === session.id)) {
+      dispatch(agentActions.composerMentionsUpdated(scopeKey, [
+        ...existing,
+        { id: session.id, title: session.title, reference }
+      ]));
+    }
+    // The chip carries the reference, so the typed token only disappears.
+    const next = applyMention(composerInput, mention, "");
+    updateComposerInput(next);
+    setMentionDismissed(true);
+    setComposerCaret(Math.max(0, mention.start));
+  }
+
+  function removeMention(scopeKey: string, id: string) {
+    const existing = state.agent.composerMentionsByScope[scopeKey] ?? [];
+    dispatch(agentActions.composerMentionsUpdated(scopeKey, existing.filter((item) => item.id !== id)));
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
       return;
+    }
+
+    if (mentionOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionDismissed(true);
+        return;
+      }
+      // With no candidates the menu only explains why; arrows and Enter must fall through to the message.
+      if (mentionCandidates.length > 0) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setMentionIndex((index) => (index + 1) % mentionCandidates.length);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setMentionIndex((index) => (index - 1 + mentionCandidates.length) % mentionCandidates.length);
+          return;
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          const picked = mentionCandidates[mentionIndex] ?? mentionCandidates[0];
+          if (picked) void selectMentionSession(picked);
+          return;
+        }
+      }
     }
 
     if (slashMenuOpen) {
@@ -2653,6 +2779,18 @@ export function HomePage() {
       if (event.key === "Escape") {
         event.preventDefault();
         setSlashMenuDismissed(true);
+        return;
+      }
+    }
+
+    // Backspace at the very start of the text removes the chip in front of it, like a chat mention.
+    if (event.key === "Backspace" && pendingMentions.length) {
+      const element = inputRef.current;
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      if (element && range?.collapsed && caretAtTextStart(element, range)) {
+        event.preventDefault();
+        removeMention(chatScopeKey, pendingMentions[pendingMentions.length - 1]!.id);
         return;
       }
     }
@@ -2715,7 +2853,7 @@ export function HomePage() {
     }
   }
 
-  function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+  function handleComposerPaste(event: ClipboardEvent<HTMLDivElement>) {
     const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
       return;
@@ -2913,6 +3051,17 @@ export function HomePage() {
                 onDragOver={handleComposerDragOver}
                 onDrop={handleComposerDrop}
               >
+                {mentionOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <CollabSessionMentionMenu
+                      sessions={mentionCandidates}
+                      selectedIndex={mentionIndex}
+                      heading={t("home.mention.sessions")}
+                      emptyLabel={mentionEmptyLabel}
+                      onSelect={(session) => void selectMentionSession(session)}
+                    />
+                  </div>
+                )}
                 {slashMenuOpen && (
                   <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
@@ -2940,18 +3089,23 @@ export function HomePage() {
                     />
                   </div>
                 ) : null}
-                <textarea
-                  ref={inputRef}
+                <ComposerInlineEditor
+                  editorRef={inputRef}
                   value={composerInput}
+                  chips={pendingMentions.map((item) => ({ id: item.id, label: item.title }))}
                   placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                  rows={3}
-                  onChange={(event) => {
-                    updateComposerInput(event.target.value);
-                    resizeComposerInput(event.target);
+                  removeChipLabel={t("common.remove")}
+                  className="w-full px-5 pt-4 pb-12 text-sm rounded-card-lg bg-background-paper"
+                  onChange={(value, caret) => {
+                    setComposerCaret(caret);
+                    updateComposerInput(value);
+                    const element = inputRef.current;
+                    if (element) resizeComposerInput(element);
                   }}
+                  onCaretChange={setComposerCaret}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
-                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                  onRemoveChip={(id) => removeMention(chatScopeKey, id)}
                 />
                 <div className="composer-actions absolute bottom-3 right-4 z-50">
                   <AgentModelSelector
@@ -3069,6 +3223,17 @@ export function HomePage() {
           <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">
               <div className="agent-composer-flow">
+                {mentionOpen && (
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <CollabSessionMentionMenu
+                      sessions={mentionCandidates}
+                      selectedIndex={mentionIndex}
+                      heading={t("home.mention.sessions")}
+                      emptyLabel={mentionEmptyLabel}
+                      onSelect={(session) => void selectMentionSession(session)}
+                    />
+                  </div>
+                )}
                 {slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
@@ -3152,18 +3317,23 @@ export function HomePage() {
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
                     />
-                    <textarea
-                      ref={inputRef}
+                    <ComposerInlineEditor
+                      editorRef={inputRef}
                       value={composerInput}
+                      chips={pendingMentions.map((item) => ({ id: item.id, label: item.title }))}
                       placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                      rows={1}
-                      onChange={(event) => {
-                        updateComposerInput(event.target.value);
-                        resizeComposerInput(event.target);
+                      removeChipLabel={t("common.remove")}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper`}
+                      onChange={(value, caret) => {
+                        setComposerCaret(caret);
+                        updateComposerInput(value);
+                        const element = inputRef.current;
+                        if (element) resizeComposerInput(element);
                       }}
+                      onCaretChange={setComposerCaret}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      onRemoveChip={(id) => removeMention(chatScopeKey, id)}
                     />
                     <div className="agent-composer-toolbar">
                       <div className="agent-composer-toolbar__leading">
@@ -3448,7 +3618,8 @@ export function ProjectTargetPicker(props: {
   const selectedLabel = props.registryState === "corrupt"
     ? t("home.project.registryUnavailable")
     : props.selectedProject
-      ? workspaceFolderName(props.selectedProject.rootPath)
+      // 项目可以重命名，显示名称以项目名为准；没有名称时才退回目录名。
+      ? props.selectedProject.name.trim() || workspaceFolderName(props.selectedProject.rootPath)
       : t("home.project.optional");
   const visibleProjects = props.registryState === "ready"
     ? filterProjectTargetPickerProjects(props.projects, query, props.sessions)

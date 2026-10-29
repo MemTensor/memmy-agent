@@ -4,6 +4,8 @@ import { record, text, type KnowledgeEvidence } from "./types.js";
 type Message = Record<string, unknown>;
 export interface KnowledgeRunContext {
   messages: Message[];
+  /** 会话的工作目录；属于某个协作项目时，该项目关联的知识库也参与检索。 */
+  workspace?: string | null;
   spec?: {
     abortSignal?: AbortSignal | null;
     internalTurnContext?: { kind?: string; objective?: string };
@@ -41,6 +43,7 @@ export class KnowledgeRecall {
     try {
       const result = await this.client.recall(
         query.slice(0, 8000),
+        ctx.workspace ?? null,
         ctx.spec?.abortSignal ?? undefined,
       );
       if (ctx.spec?.abortSignal?.aborted) return;

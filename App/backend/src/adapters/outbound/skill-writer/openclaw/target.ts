@@ -8,7 +8,12 @@ import {
   resolveOpenclawConfigPath,
   resolveOpenclawStateDirectory
 } from "../../agent-paths.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
@@ -64,6 +69,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       const existing = removeCliMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, manifest));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -79,6 +85,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
         await writeFileAtomically(filePath, removeMarkerBlock(existing));
       }
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isInstalled(_targetId) {
@@ -129,6 +136,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
         upsertMarkerBlock(removeCliMarkerBlock(await readTextFile(filePath)), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstallPlugin(_targetId) {
@@ -140,6 +148,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       await rm(join(root, "extensions", PLUGIN_DIRECTORY_NAME), { recursive: true, force: true });
       await removeOpenclawPluginConfig(configPath);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async detectMemoryPluginConflict() {

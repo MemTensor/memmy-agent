@@ -128,6 +128,8 @@ import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
 import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
 import { createKnowledgeHook } from "../../knowledge/register.js";
+import { createProjectInstructionsHook } from "../../project-instructions/index.js";
+import { createCollabInstructionsHook } from "../../collab-instructions/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -881,6 +883,11 @@ export class AgentLoop {
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
     this.extraHooks.unshift(createKnowledgeHook());
+    // 协作项目的指令走自己的文件与段落，与本机项目指令互不覆盖。
+    // 先登记、后执行：下面的本机项目指令钩子会插在它前面先跑，协作段才能按 after 定位到本机段之后。
+    this.extraHooks.unshift(createCollabInstructionsHook());
+    // 项目里新建的 Memmy 任务都要遵循该项目的项目指令，像项目级的 AGENTS.md 一样带在系统提示词里。
+    this.extraHooks.unshift(createProjectInstructionsHook());
     this.memmyMemoryIntegration = installMemmyMemory(this.config, {
       workspace: this.workspace,
       hooks: this.extraHooks,

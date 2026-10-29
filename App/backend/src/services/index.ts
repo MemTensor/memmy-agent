@@ -1,4 +1,5 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
@@ -58,6 +59,14 @@ import {
   type SkillDistributionService
 } from "./skill-distribution-service.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
+import {
+  createProjectInstructionsService,
+  type ProjectInstructionsService
+} from "./project-instructions-service.js";
+import {
+  createCollabInstructionsService,
+  type CollabInstructionsService
+} from "./collab-instructions-service.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -84,6 +93,10 @@ export interface BackendServices {
   asr: AsrService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
+  /** 本机项目的项目指令：按文件夹归属，只属于这台电脑。 */
+  projectInstructions: ProjectInstructionsService;
+  /** 协作项目指令的本机缓存：按云端项目 id 归属，只读于任务注入。 */
+  collabInstructions: CollabInstructionsService;
 }
 
 export interface CreateBackendServicesOptions {
@@ -261,6 +274,15 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     tokenQuota: createTokenQuotaService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
+    }),
+    projectInstructions: createProjectInstructionsService({
+      // 与 Memmy 任务、其他 Agent 的钩子读同一份文件：配置目录下的 project-instructions.json。
+      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
+    }),
+    collabInstructions: createCollabInstructionsService({
+      // 与协作项目的注入钩子读同一份文件：配置目录下的 collab-project-instructions.json。
+      // 它与上面的本机项目指令文件互不读写，只靠装配处各自接好。
+      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
     })
   };
 }
@@ -268,7 +290,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
 export { createBootstrapService };
 export type { BootstrapScenario, BootstrapService };
 
-function createCatalogAgentTaskModelResolver(
+export function createCatalogAgentTaskModelResolver(
   appStateStore: AppStateStore,
   memmyConfigWriter: MemmyConfigWriter
 ): OnboardingInsightAgentTaskModelResolver {

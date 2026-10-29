@@ -10,11 +10,12 @@ import {
 } from "../src/main/windows-cli-path.js";
 
 describe("Windows packaged CLI installation", () => {
-  it("installs the two packaged .cmd launchers without extensionless files", async () => {
+  it("installs the packaged .cmd launchers without extensionless files", async () => {
     const resourcesPath = "C:\\Program Files\\Memmy\\resources";
     const memoryCli = win32.join(resourcesPath, "cli", "memmy-memory.cmd");
     const memmyCli = win32.join(resourcesPath, "cli", "memmy.cmd");
-    const packagedFiles = new Set([memoryCli, memmyCli]);
+    const projectCli = win32.join(resourcesPath, "cli", "memmy-project.cmd");
+    const packagedFiles = new Set([memoryCli, memmyCli, projectCli]);
     const ensureUserPath = vi.fn(async () => true);
 
     const result = await installPackagedWindowsCliTools(resourcesPath, {
@@ -33,7 +34,8 @@ describe("Windows packaged CLI installation", () => {
       binDirectory: win32.join(resourcesPath, "cli"),
       installed: [
         { name: "memmy-memory", source: memoryCli, target: memoryCli },
-        { name: "memmy", source: memmyCli, target: memmyCli }
+        { name: "memmy", source: memmyCli, target: memmyCli },
+        { name: "memmy-project", source: projectCli, target: projectCli }
       ],
       pathUpdated: true,
       profilePaths: [WINDOWS_USER_PATH_LOCATION]
@@ -53,13 +55,14 @@ describe("Windows packaged CLI installation", () => {
 
     expect(accessed).toEqual([
       "D:\\应用 安装\\记忆助手\\resources\\cli\\memmy-memory.cmd",
-      "D:\\应用 安装\\记忆助手\\resources\\cli\\memmy.cmd"
+      "D:\\应用 安装\\记忆助手\\resources\\cli\\memmy.cmd",
+      "D:\\应用 安装\\记忆助手\\resources\\cli\\memmy-project.cmd"
     ]);
     expect(result.installed.map((entry) => entry.target)).toEqual(accessed);
     expect(result.pathUpdated).toBe(false);
   });
 
-  it.each(["memmy-memory.cmd", "memmy.cmd"])(
+  it.each(["memmy-memory.cmd", "memmy.cmd", "memmy-project.cmd"])(
     "returns a clear error when %s is missing",
     async (missingName) => {
       const resourcesPath = "C:\\Memmy\\resources";

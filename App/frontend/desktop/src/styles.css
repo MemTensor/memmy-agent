@@ -228,6 +228,15 @@ body.memmy-window-fullscreen {
    composer must NEVER get this: it is 76px tall single-line (12px padding
    multi-line), so an opaque 44px strip covers the text line itself — the
    field looks dead: invisible placeholder, invisible caret, "can't type". */
+/* 新任务页输入框沿用原来 textarea 的尺寸：1.6 行高、三行起步、352px 上限并滚动。
+   min-height 按 border-box 计算，所以要带上 pt-4 + pb-12 的 4rem 内边距；否则去掉 padding 后只剩一行。 */
+.home-empty-composer .composer-inline-editor {
+  line-height: 1.6;
+  min-height: calc(3 * 1.6em + 4rem);
+  max-height: 352px;
+  overflow-y: auto;
+}
+
 .home-empty-composer.agent-composer-shell::after {
   content: "";
   position: absolute;
@@ -748,6 +757,82 @@ body.memmy-window-fullscreen {
 .composer-command-chip__icon--remove {
   opacity: 0;
   transform: scale(0.75);
+}
+
+/* 输入框：引用的会话作为行内 chip，与被引用的提问在同一行，像聊天里的 @ 提及 */
+.composer-inline-editor {
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+  /* An empty editor is a bare div: keep one line tall so the field never collapses. */
+  min-height: 1.5em;
+}
+
+.composer-inline-editor:empty::before {
+  content: attr(data-placeholder);
+  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
+  pointer-events: none;
+}
+
+/* chip 与输入文字共用同一条基线：inline-block + 继承行高，避免 flex 居中把基线错开 */
+.composer-inline-chip {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-action-sky) 13%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 85%, var(--color-text-ink));
+  /* Same size as the surrounding text, so the chip's baseline and the typed text's coincide. */
+  font-size: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  vertical-align: baseline;
+  user-select: none;
+}
+
+.composer-inline-chip__leading {
+  position: relative;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  vertical-align: -2px;
+  cursor: pointer;
+}
+
+.composer-inline-chip__icon {
+  position: absolute;
+  inset: 1px;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.composer-inline-chip__icon--idle {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.composer-inline-chip__icon--remove {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
+.composer-inline-chip__leading:hover .composer-inline-chip__icon--idle {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
+.composer-inline-chip__leading:hover .composer-inline-chip__icon--remove {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.composer-inline-chip__label {
+  display: inline;
 }
 
 .composer-command-chip__label {
@@ -3332,6 +3417,21 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   padding: 8px 24px 32px;
 }
 
+.agent-activity-output-file {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 13px;
+}
+.agent-activity-output-file__notice { margin-top: 6px; font-size: 12px; opacity: .65; }
+.thread-preview__paged { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.thread-preview__text-pager { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.thread-preview__text-pager button { flex-shrink: 0; white-space: nowrap; }
+.thread-preview__text-pager span { flex-basis: 100%; opacity: .65; }
+.thread-preview__text-page { flex: 1 1 auto; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 13px; }
+
 .thread-preview__code,
 .thread-preview__table-wrap {
   min-height: 0;
@@ -5203,14 +5303,15 @@ button {
 }
 
 /* Expanded composers keep controls in a footer so text can use the full row. */
-.agent-composer-shell--expanded textarea.agent-composer-input--conversation {
+.agent-composer-shell--expanded .composer-inline-editor.agent-composer-input--conversation {
   padding-right: 1rem;
   padding-bottom: 6px;
 }
 
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
    Keep overflow-y:auto (not hidden): if single-line detection lags behind wrapped content, the field must stay scrollable. */
-.agent-composer-shell textarea.agent-composer-input--single {
+.agent-composer-shell textarea.agent-composer-input--single,
+.agent-composer-shell .composer-inline-editor.agent-composer-input--single {
   height: 76px;
   padding-top: 16px;
   padding-bottom: 20px;
@@ -5232,23 +5333,23 @@ button {
   box-shadow: 0 16px 32px -8px rgb(17 29 28 / 0.06), 0 2px 4px -4px rgb(17 29 28 / 0.1);
 }
 
-.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation {
+/* 会话输入框：行内 chip 需要块级排版，故文本与 chip 共用同一可编辑区 */
+.agent-conversation-composer .agent-composer-shell .composer-inline-editor.agent-composer-input--conversation {
   padding-top: 12px;
   padding-bottom: 0;
   border-radius: 23px 23px 0 0;
   color: var(--color-text-ink);
   font-size: 15px;
   line-height: 26.25px;
+  min-height: 26.25px;
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 /* Wrapped drafts keep the single-line height as their floor so a second
    line never shrinks the box. */
-.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation:not(.agent-composer-input--single) {
+.agent-conversation-composer .agent-composer-shell .composer-inline-editor.agent-composer-input--conversation:not(.agent-composer-input--single) {
   min-height: 76px;
-}
-
-.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation::placeholder {
-  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
 }
 
 .agent-conversation-composer .agent-composer-shell--expanded .agent-composer-toolbar {
@@ -11863,13 +11964,61 @@ body.memmy-platform-windows :is(
   --sidebar-row-bg: color-mix(in srgb, var(--color-action-sky) 16%, var(--color-sidebar-bg));
 }
 
+/* 待审核的加入申请：能看见项目名和状态，但不能当成本机项目去打开；划过或点一下会静默重查。 */
+.app-frame-project-row--pending {
+  /* 这一行是按钮：光标和焦点环都按可点击处理，点下去只重查一次，不会有别的动作。 */
+  cursor: pointer;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  appearance: none;
+}
+
+.app-frame-project-row__mark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  padding: var(--sidebar-rail-pad-y) 0 var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+}
+
+.app-frame-project-row__main--static {
+  cursor: default;
+}
+
+.app-frame-project-pending {
+  flex: none;
+  margin-right: var(--sidebar-rail-pad-x);
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 72%, var(--color-text-ink));
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 600;
+}
+
+/* The icon is its own hit area: it expands the project's sessions, the rest of the row opens the board. */
+.app-frame-project-row__toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  align-self: stretch;
+  padding: var(--sidebar-rail-pad-y) 0 var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .app-frame-project-row__main {
   display: flex;
   min-width: 0;
   flex: 1;
   align-items: center;
   gap: var(--sidebar-rail-gap);
-  padding: var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  padding: var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x) var(--sidebar-rail-pad-y) var(--sidebar-rail-gap);
   border: 0;
   background: transparent;
   color: inherit;

@@ -1107,6 +1107,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:install-cli-tools")');
     expect(mainSource).toContain("async function installCliTools");
     expect(mainSource).toContain("installPackagedWindowsCliTools");
+    expect(mainSource).toContain("installPackagedWindowsCliOnBoot");
     expect(mainSource).toContain("resolveCliInstallStrategy(");
     expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
     expect(mainSource).toContain(') === "packaged-windows"');
@@ -1141,9 +1142,16 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(agentPackage.bin).toEqual({ memmy: "./dist/main.js" });
     expect(agentPackageLock.packages?.[""]?.bin).toEqual({ memmy: "dist/main.js" });
-    expect(mainSource).toContain('const memmyCli = join(cliDirectory, "memmy")');
-    expect(mainSource).toContain('await Promise.all([access(memoryCli), access(memmyCli)])');
-    expect(mainSource).toContain('installSymlink(memmyCli, join(binDirectory, "memmy"))');
+    expect(mainSource).toContain("await installPackagedMacCliLaunchers()");
+    expect(mainSource).toContain("renderMemmyCliLauncher");
+    expect(mainSource).toContain('["memmy", join(cliDirectory, "memmy")]');
+    expect(mainSource).toContain('["memmy-project", join(cliDirectory, "memmy-project")]');
+    expect(mainSource).toContain("bundledCliInstallDecision");
+    expect(mainSource).not.toContain("await Promise.all([access(memoryCli), access(memmyCli), access(sessionCli)])");
+    expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy-project" "dist/cli/memmy-project.js"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-project.cmd"');
+    expect(mainSource).toContain("installSymlink(source, join(binDirectory, name))");
+    expect(mainSource).toContain("installSystemBinSymlink(source, name)");
     expect(mainSource).not.toContain(['join(cliDirectory, "', 'memmy-agent', '")'].join(""));
     expect(mainSource).not.toContain(['join(binDirectory, "', 'memmy-agent', '")'].join(""));
     expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy"');

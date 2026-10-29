@@ -44,6 +44,11 @@ export interface RawSourceMessage {
   createdAt: string;
   ordinal: number;
   rawMeta: Readonly<Record<string, unknown>>;
+  /**
+   * The title the agent generated for the conversation, for sources whose parser can reach it.
+   * Sources that only carry messages leave it out.
+   */
+  sessionTitle?: string;
 }
 
 /** Canonical turn is stored once, on the final staged message, including its native completion evidence. */
