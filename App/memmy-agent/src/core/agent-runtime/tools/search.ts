@@ -1,7 +1,9 @@
+import { AuthorizedReadBatch, managedExecutionRequired } from "../managed-execution.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { minimatch } from "minimatch";
+import { extractText } from "../../../utils/document.js";
 import { Tool } from "./base.js";
 import { isPathInside, resolveWorkspacePath, workspaceRelative } from "./path-utils.js";
 import { getMediaDir } from "../../../config/paths.js";
@@ -157,7 +159,7 @@ export class SearchTool extends Tool {
     return path.relative(root, target).replaceAll(path.sep, "/") || ".";
   }
 
-  async *iterFiles(root: string): AsyncIterable<string> {
+  async *iterFiles(root: string, batch = new AuthorizedReadBatch(root)): AsyncIterable<string> {
     const stat = await safeStat(root);
     if (!stat) return;
     if (stat.isFile()) {
@@ -165,11 +167,15 @@ export class SearchTool extends Tool {
       return;
     }
     if (!stat.isDirectory()) return;
-    const entries = await fs.readdir(root, { withFileTypes: true });
+    const entries = await batch.read(root, () => fs.readdir(root, { withFileTypes: true }));
+    if (!entries) return;
     const dirs = entries.filter((entry) => entry.isDirectory() && !IGNORE_DIRS.has(entry.name)).map((entry) => entry.name).sort();
     const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
-    for (const file of files) yield path.join(root, file);
-    for (const dir of dirs) yield* this.iterFiles(path.join(root, dir));
+    for (const file of files) {
+      const target = path.join(root, file);
+      yield target;
+    }
+    for (const dir of dirs) yield* this.iterFiles(path.join(root, dir), batch);
   }
 }
 
@@ -213,7 +219,7 @@ export class FindFilesTool extends SearchTool {
     };
   }
 
-  async *iterPaths(root: string, { includeDirs = false }: { includeDirs?: boolean } = {}): AsyncIterable<string> {
+  async *iterPaths(root: string, { includeDirs = false }: { includeDirs?: boolean } = {}, batch = new AuthorizedReadBatch(root)): AsyncIterable<string> {
     const stat = await safeStat(root);
     if (!stat) return;
     if (stat.isFile()) {
@@ -221,15 +227,18 @@ export class FindFilesTool extends SearchTool {
       return;
     }
     if (!stat.isDirectory()) return;
+    const entries = await batch.read(root, () => fs.readdir(root, { withFileTypes: true }));
+    if (!entries) return;
     if (includeDirs) yield root;
-    const entries = await fs.readdir(root, { withFileTypes: true });
     const dirs = entries.filter((entry) => entry.isDirectory() && !IGNORE_DIRS.has(entry.name)).map((entry) => entry.name).sort();
     const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
-    for (const file of files) yield path.join(root, file);
+    for (const file of files) {
+      const target = path.join(root, file);
+      yield target;
+    }
     for (const dir of dirs) {
       const child = path.join(root, dir);
-      if (includeDirs) yield child;
-      yield* this.iterPaths(child, { includeDirs });
+      yield* this.iterPaths(child, { includeDirs }, batch);
     }
   }
 
@@ -262,7 +271,8 @@ export class FindFilesTool extends SearchTool {
       const root = stat.isDirectory() ? target : path.dirname(target);
       const matches: Array<{ display: string; mtime: number }> = [];
 
-      for await (const candidate of this.iterPaths(target, { includeDirs })) {
+      const batch = new AuthorizedReadBatch(target);
+      for await (const candidate of this.iterPaths(target, { includeDirs }, batch)) {
         const candidateStat = await safeStat(candidate);
         if (!candidateStat) continue;
         if (candidateStat.isDirectory() && !includeDirs) continue;
@@ -273,14 +283,16 @@ export class FindFilesTool extends SearchTool {
         if (candidateStat.isFile() && !matchesType(name, params.type)) continue;
         if (candidateStat.isDirectory() && params.type) continue;
         if (!matchesQuery(displayPath, params.query)) continue;
-        matches.push({ display: displayPath + (candidateStat.isDirectory() ? "/" : ""), mtime: candidateStat.mtimeMs });
+        const add = async () => { matches.push({ display: displayPath + (candidateStat.isDirectory() ? "/" : ""), mtime: candidateStat.mtimeMs }); };
+        if (candidateStat.isDirectory()) await add();
+        else await batch.read(candidate, add);
       }
 
       matches.sort((a, b) => (sort === "modified" ? b.mtime - a.mtime || a.display.localeCompare(b.display) : a.display.localeCompare(b.display)));
       const [paged, truncated] = paginate(matches.map((item) => item.display), limit, offset);
-      if (!paged.length) return "No files found";
+      if (!paged.length) return batch.format(batch.deniedPaths ? "No authorized files found" : "No files found");
       const note = paginationNote(limit, offset, truncated);
-      return note ? `${paged.join("\n")}\n\n${note}` : paged.join("\n");
+      return batch.format(note ? `${paged.join("\n")}\n\n${note}` : paged.join("\n"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EACCES") return `Error: ${(error as Error).message}`;
       return `Error finding files: ${(error as Error).message}`;
@@ -310,7 +322,7 @@ export class GrepTool extends SearchTool {
     return (
       "Search file contents with a regex pattern. " +
       "Default output_mode is files_with_matches (file paths only); use content mode for matching lines with context. " +
-      "Prefer this over shell grep for ordinary workspace searches. Skips binary and files >2 MB. Supports glob/type filtering."
+      "Prefer this over shell grep for ordinary workspace searches. In managed runs, also searches PDF and DOCX text. Skips other binary files and files >2 MB. Supports glob/type filtering."
     );
   }
 
@@ -412,7 +424,8 @@ export class GrepTool extends SearchTool {
       const counts = new Map<string, number>();
       const fileMtimes = new Map<string, number>();
 
-      for await (const filePath of this.iterFiles(target)) {
+      const batch = new AuthorizedReadBatch(target);
+      for await (const filePath of this.iterFiles(target, batch)) {
         const fileStat = await safeStat(filePath);
         if (!fileStat?.isFile()) continue;
         const relPath = path.relative(root, filePath).replaceAll(path.sep, "/") || path.basename(filePath);
@@ -422,17 +435,22 @@ export class GrepTool extends SearchTool {
           skippedLarge += 1;
           continue;
         }
-        const raw = await fs.readFile(filePath).catch(() => null);
-        if (!raw || isBinary(raw)) {
-          skippedBinary += 1;
-          continue;
-        }
         let content: string;
-        try {
+        if (managedExecutionRequired() && [".pdf", ".docx"].includes(path.extname(filePath).toLowerCase())) {
+          const extracted = await batch.read(filePath, () => extractText(filePath, { maxChars: null }));
+          if (extracted === undefined) continue;
+          if (extracted == null || extracted.startsWith("[error:")) {
+            return `Error searching document ${this.displayPath(filePath, root)}: ${extracted ?? "unsupported format"}`;
+          }
+          content = extracted;
+        } else {
+          const raw = await batch.read(filePath, () => fs.readFile(filePath).catch(() => null));
+          if (raw === undefined) continue;
+          if (!raw || isBinary(raw)) {
+            skippedBinary += 1;
+            continue;
+          }
           content = raw.toString("utf8");
-        } catch {
-          skippedBinary += 1;
-          continue;
         }
 
         const lines = content.split(/\r?\n/);
@@ -512,7 +530,7 @@ export class GrepTool extends SearchTool {
         const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
         notes.push(`(total matches: ${total} in ${counts.size} files)`);
       }
-      return notes.length ? `${result}\n\n${notes.join("\n")}` : result;
+      return batch.format(notes.length ? `${result}\n\n${notes.join("\n")}` : result);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EACCES") return `Error: ${(error as Error).message}`;
       return `Error searching files: ${(error as Error).message}`;

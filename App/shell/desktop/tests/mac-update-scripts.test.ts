@@ -53,12 +53,25 @@ describe.runIf(process.platform === "darwin")("macOS automatic update validation
     fs.writeFileSync(marker, "pending");
     tools = {
       "/usr/bin/pgrep": mockTool("pgrep", "exit 1"),
-      "/usr/bin/lipo": mockTool("lipo", 'case " $(cat "$(dirname "$3")/architecture") " in *" $2 "*) exit 0;; *) exit 1;; esac'),
+      "/usr/bin/lipo": mockTool("lipo", 'if [ "$1" = "-verify_arch" ]; then exit 2; fi; case " $(cat "$(dirname "$1")/architecture") " in *" $3 "*) exit 0;; *) exit 1;; esac'),
       "/usr/bin/sw_vers": mockTool("sw_vers", "echo 14.0"),
       "/usr/bin/xattr": mockTool("xattr", "exit 0"),
-      "/usr/bin/codesign": mockTool("codesign", `for arg in "$@"; do app="$arg"; done
-if [ "$1" = -dv ]; then echo "TeamIdentifier=$(cat "$app/team")" >&2; exit 0; fi
-for arg in "$@"; do if [ "$arg" = -R ] && [ -f "$app/untrusted-chain" ]; then exit 1; fi; done
+      "/usr/bin/codesign": mockTool("codesign", `app=""
+prev=""
+requirement=""
+for arg in "$@"; do
+  if [ "$prev" = "-R" ]; then requirement="$arg"; fi
+  prev="$arg"
+  app="$arg"
+done
+if [ "$1" = "-dv" ]; then echo "TeamIdentifier=$(cat "$app/team")" >&2; exit 0; fi
+if [ -n "$requirement" ]; then
+  case "$requirement" in
+    "=anchor apple generic "*"field.1.2.840.113635.100.6.1.13"*) ;;
+    *) exit 2 ;;
+  esac
+  if [ -f "$app/untrusted-chain" ]; then exit 1; fi
+fi
 if [ -f "$app/fail-after-replace" ] && [ "$app" = '${destination}' ]; then exit 1; fi
 [ "$(cat "$app/signature")" = valid ]`),
     };
@@ -95,13 +108,35 @@ if [ -f "$app/fail-after-replace" ] && [ "$app" = '${destination}' ]; then exit 
   it.each([
     ["1.2.1", "1.2.2-rc.1", false],
     ["1.2.2-rc.1", "1.2.2-rc.1", false],
-    ["1.2.2-rc.1", "1.2.2", false],
-    ["1.2.2", "1.2.2-rc.1", true],
-    ["1.2.2-rc.10", "1.2.2-rc.2", true],
-  ])("compares package %s against current %s with prerelease precedence", (version, currentVersion, allowed) => {
+    ["1.2.2-rc.1", "1.2.2", true],
+    ["1.2.2", "1.2.2-rc.1", false],
+    ["1.2.2-rc.10", "1.2.2-rc.2", false],
+    ["1.2.401", "1.2.4", true],
+    ["1.2.402", "1.2.401", true],
+    ["1.2.5", "1.2.402", true],
+    ["1.2.6", "1.2.5", true],
+    ["1.3.0", "1.2.6", true],
+    ["1.2.401", "1.2.5", false],
+    ["1.2.10", "1.2.9", false],
+    ["1.2.5+build.2", "1.2.5+build.1", true],
+  ])("compares package %s against current %s by character", (version, currentVersion, allowed) => {
     fixture(staged, "replacement", { CFBundleShortVersionString: version });
     expect(install({ expectedVersion: version, currentVersion }).status === 0).toBe(allowed);
     expect(fs.readFileSync(path.join(destination, "tag"), "utf8")).toBe(allowed ? "replacement" : "original");
+  });
+
+  it("stages a 1.2.5 update over 1.2.401", () => {
+    const dmg = path.join(root, "dmg");
+    fixture(path.join(dmg, "Memmy.app"), "replacement", { CFBundleShortVersionString: "1.2.5" });
+    tools["/usr/bin/hdiutil"] = mockTool("hdiutil", 'if [ "$1" = attach ]; then cp -R "$2"/. "$6"; fi');
+    fs.rmSync(staged, { recursive: true });
+    fs.rmSync(`${staged}.ready`);
+    const helper = path.join(root, "stage.zsh");
+    fs.writeFileSync(helper, instrument(createMacDmgUpdateStageScript({ architecture: "arm64", teamIdentifier: "MEMMYTEAM1", expectedVersion: "1.2.5", currentVersion: "1.2.401" })));
+    const result = spawnSync("/bin/zsh", [helper, dmg, staged, `${staged}.ready`, log], { encoding: "utf8", timeout: 10_000 });
+    expect(result.status, fs.readFileSync(log, "utf8")).toBe(0);
+    expect(fs.existsSync(`${staged}.ready`)).toBe(true);
+    expect(fs.readFileSync(path.join(staged, "tag"), "utf8")).toBe("replacement");
   });
 
   it("rejects a symlink at the destination without changing its target", () => {
@@ -162,5 +197,16 @@ exec /bin/rm "$@"`);
     expect(result.status).not.toBe(0);
     expect(fs.existsSync(`${staged}.ready`)).toBe(false);
     expect(fs.readFileSync(path.join(destination, "tag"), "utf8")).toBe("original");
+  });
+});
+
+describe("macOS update architecture command", () => {
+  it("passes the executable to lipo before -verify_arch", () => {
+    const options = { architecture: "arm64" as const, teamIdentifier: "MEMMYTEAM1", expectedVersion: "1.2.4", currentVersion: "1.2.3" };
+    for (const script of [createMacDmgUpdateStageScript(options), createMacDmgUpdateInstallScript(options)]) {
+      expect(script).toContain('/usr/bin/lipo "$app_path/Contents/MacOS/$bundle_executable" -verify_arch "$EXPECTED_ARCH"');
+      expect(script).toContain(`local signing_requirement='=anchor apple generic and identifier "cn.memtensor.memmy" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "MEMMYTEAM1"'`);
+      expect(script).toContain('codesign --verify --deep --strict -R "$signing_requirement" "$app_path"');
+    }
   });
 });

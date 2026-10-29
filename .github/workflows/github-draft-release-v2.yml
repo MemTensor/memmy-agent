@@ -4,8 +4,8 @@ on:
   # Use the base repository's trusted workflow and admit only its canonical
   # release branches in the job guard below.
   pull_request_target:
-    types: [closed]
-    branches: [main]
+    types: [ closed ]
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       version:
@@ -37,8 +37,7 @@ permissions:
 jobs:
   release:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
+      github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        startsWith(github.event.pull_request.head.ref, 'release/v'))
     concurrency:
@@ -937,6 +936,31 @@ jobs:
             exit 1
           fi
           trap - EXIT
+      - name: Verify completed draft for synchronization
+        id: sync-source
+        if: ${{ steps.release.outputs.create_draft == 'true' }}
+        env:
+          SYNC_TAG: ${{ steps.release.outputs.tag }}
+          SYNC_SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
+          SYNC_CONTROLLER_SHA: ${{ github.workflow_sha }}
+          SYNC_ASSET_DIR: release-assets
+          MAIN_SYNC_REQUEST_PATH: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+          SYNC_RELEASE_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        run: |-
+          set -euo pipefail
+          # Separate from upload cleanup: sync failure never deletes a complete Draft.
+          controller="$RUNNER_TEMP/main-sync-controller"
+          mkdir -p "$controller"
+          git archive "$SYNC_CONTROLLER_SHA" scripts/main-sync .github/main-sync.json | tar -x -C "$controller"
+          node "$controller/scripts/main-sync/cli.mjs" signal
+      - name: Publish CodingAgent synchronization request
+        if: ${{ steps.sync-source.outputs.sync_ready == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memmy-main-sync-request-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Record the manual publish boundary
         if: ${{ steps.release.outputs.create_draft == 'true' }}
@@ -975,3 +999,7 @@ jobs:
             fi
             echo "- Set create_draft=true only when intentionally creating a Draft Release."
           } >> "$GITHUB_STEP_SUMMARY"
+    outputs:
+      sync_ready: ${{ steps.sync-source.outputs.sync_ready }}
+      sync_release_id: ${{ steps.sync-source.outputs.release_id }}
+      sync_source_sha: ${{ steps.sync-source.outputs.source_sha }}

@@ -28,7 +28,7 @@
     "lint": "npm run memory:lint && npm run workspace:lint",
     "typecheck": "npm run memory:lint && npm run workspace:typecheck",
     "test": "npm run test:release-workflow && npm run test:packaging-guards && npm run test:contracts && npm run test:opencode && npm run memory:test && npm run workspace:test && npm run agent:test:tui-cursor",
-    "test:release-workflow": "vitest run tests/release-workflow.test.ts tests/oss-crc64.test.mjs tests/windows-memory-workflow.test.ts",
+    "test:release-workflow": "vitest run tests/release-workflow.test.ts tests/oss-crc64.test.mjs tests/windows-memory-workflow.test.ts tests/windows-provider-receipt-workflow.test.ts tests/main-sync",
     "test:packaging-guards": "vitest run tests/package-version-guard.test.mjs tests/packaged-runtime-config.test.mjs tests/open-computer-use-packaging.test.mjs tests/computer-history-packaging.test.mjs tests/prune-packaged-runtime.test.mjs tests/prune-native-platforms.test.mjs tests/windows-desktop-sqlite-vec.test.mjs tests/package-logging.test.mjs tests/bundled-plugins-source.test.mjs tests/renderer-bootstrap.test.mjs tests/macos-library-deployment-target.test.mjs tests/runtime-bundle.test.ts",
     "test:office-plugin:e2e": "node scripts/test-office-plugin-e2e.mjs",
     "test:literature-review-plugin:e2e": "node scripts/test-literature-review-plugin-e2e.mjs",
