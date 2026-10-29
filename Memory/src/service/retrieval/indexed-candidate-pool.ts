@@ -1,3 +1,4 @@
+import { setImmediate as yieldToIO } from "node:timers/promises";
 import { isRecord } from "../../utils/json.js";
 import type {
   CompiledRetrievalQuery,
@@ -117,7 +118,7 @@ export class IndexedCandidatePool {
       if (!keyCache.has(memory.id)) keyCache.set(memory.id, recallSourceKey(memory, this.deps.repos) ?? `id:${memory.id}`);
       return keyCache.get(memory.id)!;
     };
-    const refill = (filter: MemoryFilter, limit: number, channel: string,
+    const refill = async (filter: MemoryFilter, limit: number, channel: string,
       run: (filter: MemoryFilter, limit: number, onWindow: (ids: string[], more: boolean) => void) => MemorySearchIdHit[]) => {
       if (filter.memoryLayer !== "L1") {
         try { return run(filter, limit, () => {}); }
@@ -205,6 +206,7 @@ export class IndexedCandidatePool {
         } else if (!window && hits.length < size) {diagnostic.stopReason="scope_exhausted"; break;}
         if (excluded.size === before) {diagnostic.stopReason="no_progress"; break;}
         if (round === 127) diagnostic.stopReason="work_budget_limited";
+        else await yieldToIO();
       }
       diagnostic.uniqueCandidates=Math.min(accepted.size,limit);
       diagnostic.unknownIdentityCount=unknownIdentities.size;
@@ -213,7 +215,7 @@ export class IndexedCandidatePool {
     };
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
     const layers = input.layers;
-    const addRoute = (run: () => MemorySearchIdHit[]): void => {
+    const addRoute = (run: () => MemorySearchIdHit[] | Promise<MemorySearchIdHit[]>): void => {
       routeTasks.push(Promise.resolve().then(run));
     };
 
@@ -231,13 +233,13 @@ export class IndexedCandidatePool {
 
       if (queryVector) {
         if (layer === "L1") {
-          addRoute(() => {
+          addRoute(async () => {
             const tags = input.config.tagFilter === "off" ? [] : input.compiledQuery.tags;
             const search = (field: "vec_summary" | "vec_action", anyOfTags?: string[]) =>
               refill(filter, vectorPool, field, (scoped, limit, onWindow) =>
                 this.deps.repos.memories.searchVectorIds(queryVector, field, scoped, limit, {anyOfTags, onWindow}));
-            if (!tags.length) return [...search("vec_summary"), ...search("vec_action")];
-            const tagged=[...search("vec_summary", tags), ...search("vec_action", tags)];
+            if (!tags.length) return [...await search("vec_summary"), ...await search("vec_action")];
+            const tagged=[...await search("vec_summary", tags), ...await search("vec_action", tags)];
             return tagged.length || input.config.tagFilter === "on" ? tagged : search("vec_summary");
           });
         } else {

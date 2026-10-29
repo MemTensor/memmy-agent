@@ -152,6 +152,22 @@ describe("recall source groups and quota refill", () => {
     expect(result.diagnostics.find(route=>route.channel==="fts")?.stopReason).toBe("error");
   });
 
+  it("yields between batches so cancellation can stop further reads and retain verified partial results", async () => {
+    const {repos,pool}=fixture();
+    for(let i=0;i<35;i++)repos.memories.insert(memory(`z-${i}`,"repeated"));
+    for(let i=0;i<25;i++)repos.memories.insert(memory(`a-${i}`));
+    const controller=new AbortController();
+    const search=repos.memories.searchPatternIds.bind(repos.memories);
+    const calls=vi.spyOn(repos.memories,"searchPatternIds").mockImplementation((terms,filter,limit)=>{
+      queueMicrotask(()=>controller.abort());
+      return search(terms,filter,limit);
+    });
+    const result=await pool.indexedRetrievalCandidatePool({...input(),budget:{signal:controller.signal}});
+    expect(result.memories).toHaveLength(1);
+    expect(result.diagnostics[0]?.stopReason).toBe("cancelled");
+    expect(calls).toHaveBeenCalledTimes(1);
+  });
+
   it("does not repeatedly scan a source when the storage layer makes no progress", async () => {
     const {repos,pool}=fixture();
     repos.memories.insert(memory("a"));
