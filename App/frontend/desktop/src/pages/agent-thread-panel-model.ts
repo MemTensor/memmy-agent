@@ -219,22 +219,6 @@ export function relativeThreadPath(root: string, target: string): string | null 
   return matches ? normalizedTarget.slice(prefix.length) : null;
 }
 
-const WRITTEN_FILE_TOOLS = new Set(["write_file", "write", "create_file", "save_file", "new_file"]);
-const WRITTEN_DELIVERY_EXTENSIONS = new Set(["html", "htm", "md", "markdown", "mdx"]);
-
-/**
- * A page or markdown document the agent wrote. Code stays in Changes until
- * the assistant attaches it; these files are the delivery itself.
- */
-export function writtenDeliveryFile(edit: NonNullable<AgentChatMessage["fileEdits"]>[number]): { path: string; name: string } | null {
-  if (!WRITTEN_FILE_TOOLS.has(edit.tool) || edit.status !== "done") return null;
-  const path = (edit.absolute_path || edit.path || "").trim();
-  if (!path.startsWith("/") && !path.startsWith("\\\\") && !/^[a-zA-Z]:[\\/]/.test(path)) return null;
-  const name = path.split(/[/\\]/).filter(Boolean).pop() || path;
-  if (!WRITTEN_DELIVERY_EXTENSIONS.has(threadFileExtension(name))) return null;
-  return { path, name };
-}
-
 export function collectThreadArtifacts(messages: AgentChatMessage[]): ThreadArtifact[] {
   const artifacts = new Map<string, ThreadArtifact>();
   const add = (artifact: Omit<ThreadArtifact, "key">) => {
@@ -244,13 +228,9 @@ export function collectThreadArtifacts(messages: AgentChatMessage[]): ThreadArti
   };
 
   for (const message of messages) {
-    // Pages and markdown documents are deliveries. Code stays in Changes until attached.
-    for (const edit of message.fileEdits ?? []) {
-      const written = writtenDeliveryFile(edit);
-      if (written) add(written);
-    }
     if (message.role !== "assistant" || message.kind === "trace" || message.kind === "context_compaction" || message.isStreaming) continue;
-    // Attachments explicitly delivered by the assistant. Markdown links stay in the answer.
+    // Only attachments explicitly delivered by the assistant belong in Artifacts.
+    // Markdown links remain clickable in the answer, and file edits belong in Changes.
     for (const media of message.media ?? []) {
       const path = media.path?.trim() || undefined;
       const url = media.url?.trim() || undefined;

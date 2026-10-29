@@ -204,6 +204,7 @@ describe("Bundled Tool Contract", () => {
     expect(content).toContain("That link is the highlight");
     expect(content).toContain("Do not abbreviate the target with `...`");
     expect(content).toContain("still use this link");
+    expect(content).toContain("That attachment is the delivery card");
     expect(content).toContain("the cards are the file list");
     expect(content).toContain("use it once");
     expect(content).toContain("## Scheduling and Background Work");

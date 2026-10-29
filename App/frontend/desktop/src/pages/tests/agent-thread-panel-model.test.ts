@@ -90,7 +90,7 @@ describe("thread panel model", () => {
     expect(artifacts[2]).toMatchObject({ key: "/work/out/report.pdf", path: "/work/out/report.pdf" });
   });
 
-  it("lists html writes in artifacts while the answer is still streaming, and leaves other writes in changes", () => {
+  it("leaves written pages and markdown in changes until the assistant attaches them", () => {
     const messages = [
       message({
         id: "write-1",
@@ -118,7 +118,7 @@ describe("thread panel model", () => {
       message({ id: "answer-2", content: "改配色", isStreaming: true }),
     ];
 
-    expect(collectThreadArtifacts(messages).map((artifact) => artifact.name)).toEqual(["index.html", "note.md"]);
+    expect(collectThreadArtifacts(messages)).toEqual([]);
     expect(collectThreadFileChanges(messages).map((change) => change.name)).toEqual(["index.html", "app.py", "main.ts", "note.md"]);
   });
 

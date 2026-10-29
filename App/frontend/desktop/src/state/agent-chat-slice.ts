@@ -3092,7 +3092,9 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
         }
         {
           const nextState = appendAssistantMessage(activeState, event);
-          return assistantMessageHasMedia(event)
+          const text = typeof event.text === "string" ? event.text : typeof event.content === "string" ? event.content : "";
+          const attachedToWrittenAnswer = !text.trim() && openTurnHasWrittenAnswerWithMedia(nextState.messages);
+          return assistantMessageHasMedia(event) && (Boolean(text.trim()) || attachedToWrittenAnswer)
             ? setSuppressAssistantStreamUntilTurnEnd(nextState, chatId, true)
             : nextState;
         }
@@ -3484,13 +3486,60 @@ function appendAssistantDelta(state: AgentState, text: string, turnId: string | 
   return syncCurrentMessages({ ...state, messages, isSending: keepBusy });
 }
 
+function openTurnHasWrittenAnswerWithMedia(messages: AgentChatMessage[]): boolean {
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  return messages.slice(lastUserIndex + 1).some((message) => (
+    message.role === "assistant"
+    && message.kind !== "trace"
+    && message.kind !== "narration"
+    && Boolean(message.content.trim())
+    && Boolean(message.media?.length)
+  ));
+}
+
+function absorbEmptyDelivery(
+  messages: AgentChatMessage[],
+  answerIndex: number,
+  turnId: string | null
+): { messages: AgentChatMessage[]; answerIndex: number } {
+  const answer = messages[answerIndex];
+  if (!answer || answer.media?.length || !answer.content.trim()) return { messages, answerIndex };
+  let donorIndex = -1;
+  for (let index = answerIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || (!turnId && message.role === "user")) break;
+    if (turnId && message.turnId && message.turnId !== turnId) continue;
+    if (message.role !== "assistant" || message.kind === "trace" || message.kind === "context_compaction") continue;
+    if (message.content.trim() || !message.media?.length) continue;
+    donorIndex = index;
+    break;
+  }
+  if (donorIndex < 0) return { messages, answerIndex };
+  const donor = messages[donorIndex]!;
+  const next = messages.filter((_, index) => index !== donorIndex);
+  const nextAnswerIndex = donorIndex < answerIndex ? answerIndex - 1 : answerIndex;
+  const target = next[nextAnswerIndex];
+  if (!target) return { messages, answerIndex };
+  next[nextAnswerIndex] = {
+    ...target,
+    media: mergeDeliveryMedia(target.media, donor.media ?? [])
+  };
+  return { messages: next, answerIndex: nextAnswerIndex };
+}
+
 function endAssistantStream(
   state: AgentState,
   text: string | undefined,
   resuming: boolean,
   turnId: string | null
 ): AgentState {
-  const messages = [...state.messages];
+  let messages = [...state.messages];
   const lastIndex = latestMessageIndexForTurn(messages, turnId);
   const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   let closedIndex = -1;
@@ -3501,6 +3550,9 @@ function endAssistantStream(
       ...(turnId ? { turnId } : {})
     };
     closedIndex = lastIndex;
+    const absorbed = absorbEmptyDelivery(messages, closedIndex, turnId);
+    messages = absorbed.messages;
+    closedIndex = absorbed.answerIndex;
   }
   if (resuming) {
     // The runtime says this text segment is a mid-turn draft: the loop will
@@ -4083,6 +4135,43 @@ function appendCompleteReasoningMessage(state: AgentState, text: string, turnId:
   return closeReasoningStream(appendReasoningDelta(state, text, turnId), turnId);
 }
 
+function findLatestAnswerTextIndex(
+  messages: AgentChatMessage[],
+  turnId: string | null
+): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || (!turnId && message.role === "user")) break;
+    if (turnId && message.turnId && message.turnId !== turnId) continue;
+    if (message.role !== "assistant" || message.proactiveDelivery === "cron") continue;
+    if (message.kind === "trace" || message.kind === "context_compaction" || message.agentUi != null) continue;
+    if (!message.content.trim()) continue;
+    return index;
+  }
+  return -1;
+}
+
+function withoutNarrationKind(message: AgentChatMessage): AgentChatMessage {
+  if (message.kind !== "narration") return message;
+  const { kind, activitySegmentId, ...promoted } = message;
+  void kind;
+  void activitySegmentId;
+  return promoted;
+}
+
+function mergeDeliveryMedia(
+  current: AgentChatMediaAttachment[] | undefined,
+  incoming: AgentChatMediaAttachment[]
+): AgentChatMediaAttachment[] {
+  const merged = [...(current ?? [])];
+  for (const item of incoming) {
+    const key = item.path || item.url || item.name;
+    if (!key || merged.some((existing) => (existing.path || existing.url || existing.name) === key)) continue;
+    merged.push(item);
+  }
+  return merged;
+}
+
 function findLatestStreamingAssistantAnswerIndex(
   messages: AgentChatMessage[],
   turnId: string | null = null
@@ -4276,6 +4365,21 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
     : updatedLast?.role === "assistant" && updatedLast.isStreaming && updatedLast.kind !== "trace" && updatedLast.kind !== "narration"
       ? updatedLastIndex
       : findLatestStreamingAssistantAnswerIndex(messages, turnId);
+  if (targetIndex < 0 && !text.trim() && media?.length && !modelError && agentUi == null) {
+    const attachIndex = findLatestAnswerTextIndex(messages, turnId);
+    if (attachIndex >= 0) {
+      const target = messages[attachIndex]!;
+      messages[attachIndex] = {
+        ...withoutNarrationKind(target),
+        media: mergeDeliveryMedia(target.media, media),
+        ...(turnId ? { turnId } : {}),
+        isStreaming: false,
+        reasoningStreaming: false
+      };
+      return syncCurrentMessages({ ...state, messages });
+    }
+  }
+
   const preservePartialImageAnswer = targetIndex >= 0
     && Boolean(messages[targetIndex]?.content.trim())
     && (modelError?.category === "image_input_unsupported" || modelError?.category === "image_analysis_failed");

@@ -1799,6 +1799,48 @@ describe("agent chat slice", () => {
     expect(state.suppressAssistantStreamUntilTurnEndByChatId["chat-1"]).toBeUndefined();
   });
 
+  it("attaches an empty media delivery to the answer already written", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    const answer = "报告写好了：[report.docx](/Users/yuan/Documents/report.docx)";
+    const media = [{ kind: "file" as const, url: "/api/media/report", name: "report.docx", path: "/Users/yuan/Documents/report.docx" }];
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+    });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: answer } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "stream_end", chat_id: "chat-1", text: answer, resuming: true } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message", chat_id: "chat-1", text: "", media_urls: media }
+    });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "报告已附上" } });
+
+    const answers = state.messages.filter((message) => message.role === "assistant" && message.kind !== "trace" && message.kind !== "narration");
+    expect(answers.map((message) => message.content)).toEqual([answer]);
+    expect(answers[0]?.media).toEqual(media);
+    expect(state.messages.filter((message) => message.kind === "narration")).toHaveLength(0);
+    expect(state.messages.map((message) => message.content)).not.toContain("报告已附上");
+  });
+
+  it("moves an earlier empty delivery onto the answer that follows it", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    const answer = "报告写好了：[report.docx](/Users/yuan/Documents/report.docx)";
+    const media = [{ kind: "file" as const, url: "/api/media/report", name: "report.docx", path: "/Users/yuan/Documents/report.docx" }];
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message", chat_id: "chat-1", text: "", media_urls: media }
+    });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: answer } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "stream_end", chat_id: "chat-1", text: answer } });
+
+    const answers = state.messages.filter((message) => message.role === "assistant" && message.kind !== "trace" && message.kind !== "narration");
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.content).toBe(answer);
+    expect(answers[0]?.media).toEqual(media);
+  });
+
   it("suppresses assistant media follow-up hints and reasoning until turn end", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
 

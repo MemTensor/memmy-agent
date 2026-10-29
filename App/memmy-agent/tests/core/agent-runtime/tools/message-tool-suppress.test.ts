@@ -202,6 +202,7 @@ describe("MessageTool turn tracking", () => {
     const tool = new MessageTool();
 
     expect(tool.description).toContain("Do not use this for a text-only normal reply in the current chat");
+    expect(tool.description).toContain("That attachment is the delivery card");
     expect(tool.description).toContain("generate_image creates images in the current chat");
     expect(tool.parameters.properties.content.description).toContain("Do not use this for a normal reply in the current chat");
   });

@@ -54,6 +54,7 @@ describe("prompt templates", () => {
     expect(text).toContain("That link is the highlight");
     expect(text).toContain("Do not abbreviate the target with `...`");
     expect(text).toContain("still use this Markdown link");
+    expect(text).toContain("That call is what shows the delivery card");
     expect(text).toContain("the attachment cards are the file list");
     expect(text).toContain("use it once");
     expect(text).not.toContain(

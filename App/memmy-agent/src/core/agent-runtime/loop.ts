@@ -3854,8 +3854,10 @@ export class AgentLoop {
       }
     } : null;
     const deliveryAwareStreamEnd = onStream || onStreamEnd ? async (options: { resuming?: boolean } = {}) => {
+      // Release held text even when the turn continues to attach files. The
+      // attachment omits its own text and hangs on this answer.
       if (heldDeliveryStream) {
-        if (!options.resuming) await onStream?.(heldDeliveryStream);
+        await onStream?.(heldDeliveryStream);
         heldDeliveryStream = "";
       }
       await onStreamEnd?.(options);

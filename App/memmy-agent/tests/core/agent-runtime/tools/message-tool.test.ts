@@ -71,6 +71,32 @@ describe("MessageTool", () => {
     expect(sent[0].metadata).toEqual({ recordChannelDelivery: true });
   });
 
+  it("omits content when attaching files onto an answer already written in this chat", async () => {
+    const sent: OutboundMessage[] = [];
+    const tool = new MessageTool({ sendCallback: async (msg) => { sent.push(msg); } });
+    tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1" }));
+    tool.armAttachToExistingAnswer(true);
+
+    await tool.execute({ content: "报告", media: ["/tmp/report.docx"] });
+
+    expect(sent[0]?.content).toBe("");
+    expect(sent[0]?.media).toEqual([path.resolve("/tmp/report.docx")]);
+    expect(tool.consumeAttachedWithoutNewText()).toBe(true);
+  });
+
+  it("keeps message content when this chat has no answer yet or the target is another channel", async () => {
+    const sent: OutboundMessage[] = [];
+    const tool = new MessageTool({ sendCallback: async (msg) => { sent.push(msg); } });
+    tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1" }));
+
+    await tool.execute({ content: "图片好了", media: ["/tmp/generated.png"] });
+    tool.armAttachToExistingAnswer(true);
+    await tool.execute({ content: "报告", channel: "telegram", chat_id: "1", media: ["/tmp/report.docx"] });
+
+    expect(sent.map((message) => message.content)).toEqual(["图片好了", "报告"]);
+    expect(tool.consumeAttachedWithoutNewText()).toBe(false);
+  });
+
   it("inherits metadata for the same target", async () => {
     const sent: OutboundMessage[] = [];
     const tool = new MessageTool({ sendCallback: async (msg) => { sent.push(msg); } });

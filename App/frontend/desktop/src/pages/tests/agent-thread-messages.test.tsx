@@ -2068,7 +2068,7 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain('href="file:///Users/yuan/deck.pptx"');
   });
 
-  it("hangs a card for an html page the turn wrote, without a message attachment", () => {
+  it("does not hang a card for an html page the turn wrote without attaching it", () => {
     const path = "/Users/yuan/Documents/预览.html";
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -2097,9 +2097,9 @@ describe("AgentThreadMessages", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-delivered-files");
-    expect(html).toContain('data-testid="agent-attachment-card-file"');
-    expect(html).toContain("预览.html");
+    expect(html).not.toContain("agent-delivered-files");
+    expect(html).not.toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("agent-message-content__file-chip");
     expect(html).toContain(`title="${path}"`);
   });
 
@@ -2205,7 +2205,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain(`title="${path}"`);
   });
 
-  it("hangs a card for a markdown document the turn wrote", () => {
+  it("does not hang a card for a markdown document the turn wrote without attaching it", () => {
     const path = "/Users/yuan/Documents/笔记.md";
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -2231,12 +2231,12 @@ describe("AgentThreadMessages", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-delivered-files");
-    expect(html).toContain('data-testid="agent-attachment-card-file"');
-    expect(html).toContain("笔记.md");
+    expect(html).not.toContain("agent-delivered-files");
+    expect(html).not.toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("说明写好了");
   });
 
-  it("links a delivered filename in the answer while keeping its attachment card", () => {
+  it("keeps a delivered filename as text while showing its attachment card", () => {
     const path = "/Users/yuan/Documents/report.docx";
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -2257,38 +2257,13 @@ describe("AgentThreadMessages", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("agent-message-content__file-link");
-    expect(html).toContain(`title="${path}"`);
+    expect(html).not.toContain("agent-message-content__file-link");
     expect(html).toContain("agent-delivered-files");
+    expect(html).toContain("report.docx");
     expect(html).toContain("other.docx");
   });
 
-  it("highlights a delivered filename once when the answer repeats it", () => {
-    const path = "/Users/yuan/Documents/report.docx";
-    const html = renderToString(
-      <I18nProvider language="zh-CN">
-        <AgentThreadMessages
-          chatScopeKey="chat-delivered-file-mention-once"
-          messages={[{
-            id: "answer",
-            role: "assistant",
-            content: "先看 `report.docx`。\n\n- `report.docx` 降级版",
-            media: [{ kind: "file", path, name: "report.docx" }]
-          }]}
-          artifactClient={{
-            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
-            openArtifact: async () => undefined,
-            revealArtifact: async () => undefined
-          }}
-        />
-      </I18nProvider>
-    );
-
-    expect(html.match(/agent-message-content__file-link/g)).toHaveLength(1);
-    expect(html).toContain("降级版");
-  });
-
-  it("turns a backticked absolute path and a path-only code block into file links", () => {
+  it("keeps a backticked filename, a truncated name, and a path-only code block as text", () => {
     const path = "/Users/yuan/Documents/report.docx";
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -2297,33 +2272,7 @@ describe("AgentThreadMessages", () => {
           messages={[{
             id: "answer",
             role: "assistant",
-            content: `地址是 \`${path}\`。\n\n\`\`\`\n${path}\n\`\`\``
-          }]}
-          artifactClient={{
-            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
-            openArtifact: async () => undefined,
-            revealArtifact: async () => undefined
-          }}
-        />
-      </I18nProvider>
-    );
-
-    expect(html.match(/agent-message-content__file-link/g)).toHaveLength(1);
-    expect(html).toContain(`title="${path}"`);
-    expect(html).toContain(">report.docx</span>");
-    expect(html).not.toContain("agent-message-content__code-block");
-  });
-
-  it("links a truncated delivered filename once and leaves an ambiguous name as text", () => {
-    const path = "/Users/yuan/Documents/report.docx";
-    const linked = renderToString(
-      <I18nProvider language="zh-CN">
-        <AgentThreadMessages
-          chatScopeKey="chat-truncated-delivered-name"
-          messages={[{
-            id: "answer",
-            role: "assistant",
-            content: "先看 `.../report.docx`，再看 .../report.docx。",
+            content: `先看 \`report.docx\`，再看 \`.../report.docx\`。\n\n地址是 \`${path}\`。\n\n\`\`\`\n${path}\n\`\`\``,
             media: [{ kind: "file", path, name: "report.docx" }]
           }]}
           artifactClient={{
@@ -2334,32 +2283,12 @@ describe("AgentThreadMessages", () => {
         />
       </I18nProvider>
     );
-    expect(linked.match(/agent-message-content__file-link/g)).toHaveLength(1);
-    expect(linked).toContain(`title="${path}"`);
 
-    const ambiguous = renderToString(
-      <I18nProvider language="zh-CN">
-        <AgentThreadMessages
-          chatScopeKey="chat-ambiguous-delivered-name"
-          messages={[{
-            id: "answer",
-            role: "assistant",
-            content: "两份都叫 `report.docx`。",
-            media: [
-              { kind: "file", path: "/Users/yuan/a/report.docx", name: "report.docx" },
-              { kind: "file", path: "/Users/yuan/b/report.docx", name: "report.docx" }
-            ]
-          }]}
-          artifactClient={{
-            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
-            openArtifact: async () => undefined,
-            revealArtifact: async () => undefined
-          }}
-        />
-      </I18nProvider>
-    );
-    expect(ambiguous).toContain("agent-message-content__inline-code");
-    expect(ambiguous).not.toContain("agent-message-content__file-link");
+    expect(html).not.toContain("agent-message-content__file-link");
+    expect(html).toContain("agent-message-content__inline-code");
+    expect(html).toContain("agent-message-content__code-block");
+    expect(html).toContain(path);
+    expect(html).toContain("agent-delivered-files");
   });
 
   it("renders inline code local paths as normal markdown code", () => {
