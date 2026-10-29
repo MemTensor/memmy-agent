@@ -3843,22 +3843,33 @@ export class AgentLoop {
     const activeTools = tools ?? this.tools;
     const deliveryMessageTool = activeTools.get("message");
     let heldDeliveryStream = "";
+    const deferredLegacyAnswers = new Set<string>();
+    let legacyPublishedText = "";
+    const publishStream = async (delta: string) => {
+      await onStream?.(delta);
+      if (!onStreamEnd) legacyPublishedText += delta;
+    };
     const deliveryAwareStream = onStream ? async (delta: string) => {
       if (deliveryMessageTool instanceof MessageTool && deliveryMessageTool.hasPendingPluginFiles()) {
         heldDeliveryStream += delta;
       } else {
         if (heldDeliveryStream) {
-          await onStream(heldDeliveryStream);
+          await publishStream(heldDeliveryStream);
           heldDeliveryStream = "";
         }
-        await onStream(delta);
+        await publishStream(delta);
       }
     } : null;
     const deliveryAwareStreamEnd = onStream || onStreamEnd ? async (options: { resuming?: boolean } = {}) => {
-      // Release held text even when the turn continues to attach files. The
-      // attachment omits its own text and hangs on this answer.
+      // Resumption-aware clients can anchor attachments to the answer already
+      // written. Legacy text-only clients cannot distinguish that draft from a
+      // final delivery claim, so keep it deferred until an actual send succeeds.
       if (heldDeliveryStream) {
-        await onStream?.(heldDeliveryStream);
+        if (options.resuming && !onStreamEnd) {
+          deferredLegacyAnswers.add(heldDeliveryStream.trim());
+        } else {
+          await publishStream(heldDeliveryStream);
+        }
         heldDeliveryStream = "";
       }
       await onStreamEnd?.(options);
@@ -3954,6 +3965,16 @@ export class AgentLoop {
           : null,
       }),
     );
+    const selectedAnswer = result.finalContent ?? result.content;
+    if (onStream && !onStreamEnd && !abortSignal?.aborted
+      && typeof selectedAnswer === "string"
+      && deferredLegacyAnswers.has(selectedAnswer.trim())
+      && !legacyPublishedText.trimEnd().endsWith(selectedAnswer.trim())
+      && deliveryMessageTool instanceof MessageTool
+      && deliveryMessageTool.turnDeliveredMediaPaths().length > 0) {
+      await publishStream(selectedAnswer);
+      result.finalContentStreamed = true;
+    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {
