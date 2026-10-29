@@ -25,10 +25,10 @@ it.each(["inactive page", "background window"])("defers invalidated list and sta
   const client = createMemoryRuntimeClientStub({ checkPanelView, getPanelStats } as never);
   function Fixture() {
     const [content, setContent] = useState("");
-    const view = usePanelViewStatus(client, "L2", () => setContent(""), async () => setContent(await reload()));
+    usePanelViewStatus(client, "L2", () => setContent(""), async () => setContent(await reload()));
     const stats = usePanelStats(client, "analysis", async () => ({ count: 0 }));
     useEffect(() => setContent("private list"), []);
-    return <div>{content} {view.expired ? "expired" : "checked"} {JSON.stringify(stats.state)}</div>;
+    return <div>{content} {JSON.stringify(stats.state)}</div>;
   }
   const render = async (visible: boolean) => act(async () => root.render(
     <PanelVisibilityContext.Provider value={visible}><Fixture /></PanelVisibilityContext.Provider>
@@ -45,7 +45,6 @@ it.each(["inactive page", "background window"])("defers invalidated list and sta
     await act(async () => vi.advanceTimersByTimeAsync(120_000));
     expect(container.textContent).not.toContain("private list");
     expect(container.textContent).not.toContain('"count":42');
-    expect(container.textContent).toContain("expired");
     expect(checkPanelView).not.toHaveBeenCalled();
     expect(getPanelStats).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();

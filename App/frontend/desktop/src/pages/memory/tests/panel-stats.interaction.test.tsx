@@ -18,15 +18,15 @@ describe("statistics failure lifecycle", () => {
       .mockRejectedValueOnce(new ApiRequestError("denied", 403));
     const client = createMemoryRuntimeClientStub({getPanelStats});
     function Fixture() {
-      const {state, connectionError} = usePanelStats(client, "overview", async () => ({count: 0}));
-      return <div>{JSON.stringify(state)} {connectionError}</div>;
+      const {state} = usePanelStats(client, "overview", async () => ({count: 0}));
+      return <div>{JSON.stringify(state)}</div>;
     }
     try {
       await act(async () => root.render(<Fixture/>));
       expect(container.textContent).toContain('"count":42');
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
       expect(container.textContent).toContain('"count":42');
-      expect(container.textContent).toContain("offline");
+      expect(container.textContent).not.toContain("offline");
       await act(async () => vi.advanceTimersByTimeAsync(120_000));
       expect(container.textContent).not.toContain('"count":42');
       expect(container.textContent).toContain("denied");

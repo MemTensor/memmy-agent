@@ -1,9 +1,8 @@
-import { PanelTaskCheckOutputSchema, type PanelTaskCheckOutput } from "@memmy/local-api-contracts";
 import {PanelLogsOutputSchema,PanelLogDetailOutputSchema,type PanelLogsInput,type PanelLogsOutput,type PanelLogDetailOutput} from "@memmy/local-api-contracts";
 import {PanelStatsOutputSchema,PanelOverviewStatsOutputSchema,type PanelStatsOutput,type PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
 import { PanelBrowseClient } from "./panel-browse-client.js";
 import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
-import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema, type PanelTaskSummariesOutput, type PanelTaskDetailOutput, type PanelTaskFieldInput, type PanelTaskFieldOutput } from "@memmy/local-api-contracts";
+import { PanelTaskSummariesOutputSchema, type PanelTaskSummariesOutput } from "@memmy/local-api-contracts";
 import {
   CloseSessionInputSchema,
   CloseSessionOutputSchema,
@@ -100,9 +99,6 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "GET /api/v1/panel/task-summaries",
-  "GET /api/v1/panel/task-details/:id",
-  "GET /api/v1/panel/task-details/:id/check",
-  "GET /api/v1/panel/task-details/:id/turns/:turnId/field",
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
 
@@ -135,9 +131,6 @@ export interface MemoryRuntimeClient {
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
   listPanelItems(input: PanelItemsInput, signal?: AbortSignal): Promise<PanelItemsOutput>;
   listPanelTaskSummaries?(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTaskSummariesOutput | PanelTasksOutput>;
-  checkPanelTask?(id: string, signal?: AbortSignal): Promise<PanelTaskCheckOutput>;
-  getPanelTaskDetail?(id: string, cursor?: string, signal?: AbortSignal): Promise<PanelTaskDetailOutput>;
-  getPanelTaskField?(id: string, turnId: string, input: PanelTaskFieldInput, signal?: AbortSignal): Promise<PanelTaskFieldOutput>;
   listPanelTasks(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
 }
@@ -314,18 +307,6 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         const legacyPath = withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input));
         return panelQueue.request(legacyPath, (sharedSignal) => requestJson({config, path: legacyPath, schema: PanelTasksOutputSchema, init: {signal: sharedSignal}}), signal);
       }
-    },
-    async checkPanelTask(id, signal) {
-      const path = `/api/v1/panel/task-details/${encodeURIComponent(id)}/check`;
-      return panelQueue.request(path, sharedSignal => requestJson({config, path, schema: PanelTaskCheckOutputSchema, init: {signal: sharedSignal}}), signal);
-    },
-    async getPanelTaskDetail(id, cursor, signal) {
-      const path = withQuery(`/api/v1/panel/task-details/${encodeURIComponent(id)}`, {cursor});
-      return panelQueue.request(path, (sharedSignal) => requestJson({config, path, schema: PanelTaskDetailOutputSchema, init: {signal: sharedSignal}}), signal);
-    },
-    async getPanelTaskField(id, turnId, input, signal) {
-      const path = withQuery(`/api/v1/panel/task-details/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId)}/field`, input);
-      return panelQueue.request(path, (sharedSignal) => requestJson({config, path, schema: PanelTaskFieldOutputSchema, init: {signal: sharedSignal}}), signal);
     },
     async listPanelTasks(input, signal) {
       const path = withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input));

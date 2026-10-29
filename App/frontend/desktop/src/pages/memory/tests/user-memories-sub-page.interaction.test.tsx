@@ -111,6 +111,9 @@ describe("UserMemoriesSubPage interaction", () => {
     expect(drawer?.querySelector(".memory-drawer__title")).toBeNull();
     expect(drawer?.textContent?.split(active.summary).length).toBe(2);
     expect(drawer?.textContent).toContain("表达次数2");
+    for (const label of ["来源轮次", "替代记忆", "被替代为", "归档原因"]) {
+      expect([...drawer!.querySelectorAll("dt")].map(node => node.textContent)).not.toContain(label);
+    }
     act(() => container.querySelector<HTMLButtonElement>(".memory-drawer-backdrop__close")?.click());
     expect(container.querySelector(".memory-drawer")).toBeNull();
   });

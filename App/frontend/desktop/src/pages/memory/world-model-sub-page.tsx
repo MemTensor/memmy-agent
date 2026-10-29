@@ -1,6 +1,6 @@
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
 /** World model sub page module. */
 import { useEffect, useRef, useState } from "react";
@@ -243,7 +243,6 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   }, [props.openRequest?.requestId]);
 
   return (
-    <PanelViewGate status={viewStatus}>
     <WorldModelSubPageView
       state={state}
       detail={detail}
@@ -252,7 +251,6 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
         props.client?.refreshPanelView?.("L3");
         const data = await search(page, { useCache: false, preserve:true });
@@ -269,7 +267,6 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       onCloseWorldModel={closeWorldModel}
       onOpenMemoryReference={props.onOpenMemoryReference}
     />
-    </PanelViewGate>
   );
 }
 
@@ -283,7 +280,6 @@ export interface WorldModelSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
-  viewNotice?: import("react").ReactNode;
   onOpenWorldModel: (item: MemoryListItem) => void;
   onDeleteWorldModel: (id: string) => Promise<void>;
   onCloseWorldModel: () => void;
@@ -305,7 +301,6 @@ export function WorldModelSubPageView(props: WorldModelSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.worldModel.description")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
-        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">

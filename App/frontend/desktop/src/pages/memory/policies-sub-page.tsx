@@ -1,6 +1,6 @@
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
 import { useEffect, useRef, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
@@ -206,7 +206,6 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
   }, [props.openRequest?.requestId]);
 
   return (
-    <PanelViewGate status={viewStatus}>
     <section className="memory-panel">
       <div className="memory-panel__header">
         <div className="memory-panel__header-main">
@@ -228,7 +227,6 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
           }
         }} />
       </div>
-      <PanelViewNotice {...viewStatus} />
       <div className="memory-toolbar">
         <label className="memory-search">
           <Search size={15} className="memory-search__icon" />
@@ -256,7 +254,6 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
         onOpenMemoryReference={props.onOpenMemoryReference}
       />
     </section>
-    </PanelViewGate>
   );
 }
 

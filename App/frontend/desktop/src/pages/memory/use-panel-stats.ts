@@ -13,7 +13,6 @@ export function usePanelStats<T>(
 ) {
   const [state, setState] = useState<RemoteData<T>>({ status: "loading" });
   const [snapshot, setSnapshot] = useState<PanelStatsOutput | PanelOverviewStatsOutput>();
-  const [connectionError, setConnectionError] = useState<string>();
   const generation = useRef(0);
   const oldService = useRef(false);
   const overviewStatsUnsupported = useRef(false);
@@ -45,7 +44,6 @@ export function usePanelStats<T>(
           }
           if (result) {
             if (current !== generation.current) return;
-            setConnectionError(undefined);
             setSnapshot(result);
             setState(
               selectedData
@@ -62,14 +60,12 @@ export function usePanelStats<T>(
       }
       const data = await legacy();
       if (current === generation.current) {
-        setConnectionError(undefined);
         setState({ status: "ready", data });
       }
     } catch (error) {
       if (current === generation.current) {
         const message = toErrorMessage(error);
         const unsafe = error instanceof ApiRequestError && [401, 403, 404, 409].includes(error.status);
-        setConnectionError(message);
         if (unsafe) setSnapshot(undefined);
         setState((previous) => (!unsafe && previous.status === "ready" ? previous : { status: "error", message }));
       }
@@ -82,7 +78,6 @@ export function usePanelStats<T>(
     overviewStatsUnsupported.current = false;
     setState({ status: "loading" });
     setSnapshot(undefined);
-    setConnectionError(undefined);
     if (visible) void load().catch(() => undefined);
     return () => {
       generation.current++;
@@ -100,5 +95,5 @@ export function usePanelStats<T>(
   }, [client, section, visible]);
   const preparingInterval = 100;
   usePanelPoll(Boolean(client), load, snapshot?.status === "preparing" ? preparingInterval : 60_000);
-  return { state, snapshot, connectionError };
+  return { state };
 }

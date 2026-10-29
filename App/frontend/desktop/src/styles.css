@@ -5737,37 +5737,6 @@ code {
   line-height: 1.5;
 }
 
-.memory-panel-update-notice {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  margin: 0 0 16px;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--color-status-error) 28%, var(--color-background-paper));
-  border-radius: var(--radius-btn);
-  background: color-mix(in srgb, var(--color-status-error-soft) 60%, var(--color-background-paper));
-  color: color-mix(in srgb, var(--color-status-error) 62%, var(--color-text-ink));
-  font-family: var(--font-sans);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 18px;
-  overflow-wrap: anywhere;
-}
-
-.memory-panel__header:has(> .memory-panel-update-notice) {
-  flex-wrap: wrap;
-  column-gap: 10px;
-  row-gap: 10px;
-}
-
-.memory-panel__header:has(> .memory-panel-update-notice) > .memory-panel__header-main {
-  flex: 1 1 180px;
-}
-
-.memory-panel__header > .memory-panel-update-notice {
-  margin: 0;
-}
-
 .memory-refresh-button {
   display: inline-flex;
   align-items: center;

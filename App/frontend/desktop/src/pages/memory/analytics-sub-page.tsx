@@ -1,4 +1,3 @@
-import { MemoryStateBox } from "./memory-state-box.js";
 import {usePanelStats} from "./use-panel-stats.js";
 import { useEffect, useRef, useState } from "react";
 import type { PanelAnalysisOutput } from "@memmy/local-api-contracts";
@@ -47,9 +46,9 @@ export function loadAnalyticsData(client: MemoryRuntimeClient): Promise<PanelAna
 
 export function AnalyticsSubPage(props: AnalyticsSubPageProps) {
   const { t } = useTranslation();
-  const {state,snapshot,connectionError}=usePanelStats<PanelAnalysisOutput>(props.client,"analysis",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadAnalyticsData(props.client);});
+  const {state}=usePanelStats<PanelAnalysisOutput>(props.client,"analysis",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadAnalyticsData(props.client);});
 
-  return <>{connectionError && state.status === "ready" && <div role="alert"><MemoryStateBox message={connectionError} tone="error" /></div>}{snapshot?.status==="error" && snapshot.data && <div role="alert"><MemoryStateBox message={snapshot.error ?? ""} tone="error" /></div>}<AnalyticsSubPageView state={state} /></>;
+  return <AnalyticsSubPageView state={state} />;
 }
 
 export function AnalyticsSubPageView(props: { state: RemoteData<PanelAnalysisOutput> }) {

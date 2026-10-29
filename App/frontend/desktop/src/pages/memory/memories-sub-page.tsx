@@ -1,6 +1,6 @@
 import { usePanelReadGuard, usePanelVisible } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { usePanelLoad } from "./use-panel-load.js";
 import { usePanelPoll } from "./use-panel-poll.js";
@@ -437,7 +437,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   }, [props.client, state, detail]);
 
   return (
-    <PanelViewGate status={viewStatus}>
     <MemoriesSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
       detail={detail}
@@ -447,7 +446,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onSourceAgentChange={changeSourceAgent}
       onSearch={runSearch}
       onPageChange={changePage}
-      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
         props.client?.refreshPanelView?.("L1");
         const data = await refresh(page, sourceAgent, { useCache: false, preserve:true });
@@ -473,7 +471,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       }}
       selectedMemoryId={selectedMemoryId}
     />
-    </PanelViewGate>
   );
 }
 
@@ -487,7 +484,6 @@ export interface MemoriesSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
-  viewNotice?: import("react").ReactNode;
   onOpenDetail: (item: PanelItemsOutput["items"][number]) => void;
   onDeleteDetail: (id: string) => Promise<void>;
   onRetryProcessing?: (id: string) => void | Promise<void>;
@@ -513,7 +509,6 @@ export function MemoriesSubPageView(props: MemoriesSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.memories.description")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
-        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <div className="memory-source-search-control">

@@ -1,6 +1,6 @@
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
 import { useEffect, useRef, useState } from "react";
 import type { MemoryListItem, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
@@ -93,7 +93,6 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
   }
 
   return (
-    <PanelViewGate status={viewStatus}>
     <section className="memory-panel">
       <div className="memory-panel__header">
         <div className="memory-panel__header-main">
@@ -109,7 +108,6 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
         }} />
       </div>
 
-      <PanelViewNotice {...viewStatus} />
       <div className="memory-toolbar">
         <label className="memory-search">
           <Search size={15} className="memory-search__icon" />
@@ -214,10 +212,6 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                   <dd className="break-all">{metadataText(selected, "sourceTurnId")}</dd>
                   <dt>{t("memory.userMemories.expressionCount")}</dt>
                   <dd>{metadataArray(selected, "sourceTurnRefs").length}</dd>
-                  <dt>{t("memory.userMemories.sourceReferences")}</dt><dd>{metadataArray(selected, "sourceTurnRefs").join(", ") || "—"}</dd>
-                  <dt>{t("memory.userMemories.replaces")}</dt><dd>{metadataText(selected, "replacesMemoryId")}</dd>
-                  <dt>{t("memory.userMemories.replacedBy")}</dt><dd>{metadataText(selected, "replacedByMemoryId")}</dd>
-                  <dt>{t("memory.userMemories.archiveReason")}</dt><dd>{metadataText(selected, "archiveReason")}</dd>
                 </dl>
               </section>
             </div>
@@ -226,7 +220,6 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
         </div>
       ) : null}
     </section>
-    </PanelViewGate>
   );
 }
 

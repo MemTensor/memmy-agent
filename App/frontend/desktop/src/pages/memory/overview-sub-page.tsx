@@ -1,4 +1,3 @@
-import { MemoryStateBox } from "./memory-state-box.js";
 import {usePanelStats} from "./use-panel-stats.js";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { PanelOverviewOutput } from "@memmy/local-api-contracts";
@@ -65,9 +64,9 @@ export function loadOverviewData(client: MemoryRuntimeClient): Promise<PanelOver
 
 export function OverviewSubPage(props: OverviewSubPageProps) {
   const { t } = useTranslation();
-  const {state,snapshot,connectionError}=usePanelStats<PanelOverviewOutput>(props.client,"overview",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadOverviewData(props.client);});
+  const {state}=usePanelStats<PanelOverviewOutput>(props.client,"overview",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadOverviewData(props.client);});
 
-  return <>{connectionError && state.status === "ready" && <div role="alert"><MemoryStateBox message={connectionError} tone="error" /></div>}{snapshot?.status==="error" && snapshot.data && <div role="alert"><MemoryStateBox message={snapshot.error ?? ""} tone="error" /></div>}<OverviewSubPageView state={state} onNavigate={props.onNavigate} /></>;
+  return <OverviewSubPageView state={state} onNavigate={props.onNavigate} />;
 }
 
 export function OverviewSubPageView(props: {

@@ -1,7 +1,7 @@
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
 import { useEffect, useRef, useState } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
@@ -327,7 +327,6 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   }, [props.openRequest?.requestId]);
 
   return (
-    <PanelViewGate status={viewStatus}>
     <SkillsSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
       detail={detail}
@@ -336,7 +335,6 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
         props.client?.refreshPanelView?.("Skill");
         const data = await refresh(page, { useCache: false, preserve:true });
@@ -356,7 +354,6 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onCloseSkill={closeSkill}
       onOpenMemoryReference={props.onOpenMemoryReference}
     />
-    </PanelViewGate>
   );
 }
 
@@ -370,7 +367,6 @@ export interface SkillsSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
-  viewNotice?: import("react").ReactNode;
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
   onApproveObservedSkill?: (id: string) => Promise<void>;
@@ -393,7 +389,6 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.skills.description")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
-        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">

@@ -1,10 +1,8 @@
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
-import {PanelViewGate,PanelViewNotice,usePanelViewStatus} from "./panel-view-status.js";
-import { TaskConversation } from "./task-conversation.js";
-import { isUnsupportedPanelRoute } from "../../api/memory-runtime-client.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState } from "react";
-import type { PanelTaskItem, PanelTaskSummary, PanelTaskDetailOutput } from "@memmy/local-api-contracts";
+import type { PanelTaskItem, PanelTaskSummary } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime, formatUserTime } from "../../lib/user-time-zone.js";
 import {
@@ -147,32 +145,28 @@ export function TasksSubPage(props: TasksSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<TasksState>({ status: "loading" });
   const [selectedTask, setSelectedTask] = useState<MemoryTask | null>(null);
-  const [taskDetail, setTaskDetail] = useState<RemoteData<PanelTaskDetailOutput> | null>(null);
   const detailGeneration = useRef(0);
-  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
-  function closeTask() { detailGeneration.current++; setSelectedTask(null); setTaskDetail(null); }
-  async function fetchTaskDetail(id: string) {
+  const detailAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbortRef.current?.abort(); }, [props.client]);
+  function closeTask() { detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null); }
+  async function openTaskDetail(id: string) {
+    if (!props.client || !canRead()) return;
     const generation = ++detailGeneration.current;
-    setTaskDetail({status: "loading"});
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
     try {
-      if (!props.client?.getPanelTaskDetail) throw new Error(t("memory.detailUnavailable"));
-      const data = await props.client.getPanelTaskDetail(id);
-      if (generation !== detailGeneration.current) return;
-      setSelectedTask(taskFromPanelItem(data.task, t)); setTaskDetail({status: "ready", data});
-    } catch (error) {
-      if (generation !== detailGeneration.current) return;
-      if (isUnsupportedPanelRoute(error) && props.client) { await openLegacyTask(id, generation); return; }
-      setTaskDetail({status: "error", message: toErrorMessage(error)});
-    }
-  }
-  async function openLegacyTask(id: string, generation: number) {
-    try {
-      const list = await props.client!.listPanelTasks({q: id.split("::").at(-1), page: 1});
-      if (generation !== detailGeneration.current) return;
-      const item = list.tasks.find(task => task.id === id || task.id.split("::").at(-1) === id.split("::").at(-1));
+      const localId = id.split("::").at(-1);
+      const list = await props.client.listPanelTasks({ q: localId, page: 1 }, controller.signal);
+      if (generation !== detailGeneration.current || !canRead()) return;
+      const item = list.tasks.find(task => task.id === id || task.id.split("::").at(-1) === localId);
       if (!item) throw new Error(t("memory.detailUnavailable"));
-      setSelectedTask(taskFromPanelItem(item,t)); setTaskDetail(null);
-    } catch (error) { if (generation === detailGeneration.current) setTaskDetail({status: "error", message: toErrorMessage(error)}); }
+      setSelectedTask(taskFromPanelItem(item, t));
+    } catch (error) {
+      if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) {
+        setState({ status: "error", message: toErrorMessage(error) });
+      }
+    }
   }
   const requestIdRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -252,8 +246,8 @@ export function TasksSubPage(props: TasksSubPageProps) {
       subPage: "tasks",
       filterLayer: tasksFilterLayer
     }));
-    setSelectedTask(task);
-    if (task.summaryOnly) void fetchTaskDetail(task.id);
+    if (task.summaryOnly) void openTaskDetail(task.id);
+    else { closeTask(); setSelectedTask(task); }
   }
 
   function openTaskById(id: string) {
@@ -262,8 +256,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       return;
     }
 
-    if (props.client.getPanelTaskDetail) void fetchTaskDetail(id);
-    else void openLegacyTask(id, ++detailGeneration.current);
+    void openTaskDetail(id);
   }
 
   function changePage(nextPage: number) {
@@ -298,7 +291,6 @@ export function TasksSubPage(props: TasksSubPageProps) {
   }, [props.openRequest?.requestId]);
 
   return (
-    <PanelViewGate status={viewStatus}>
     <TasksSubPageView
       state={state}
       query={query}
@@ -306,7 +298,6 @@ export function TasksSubPage(props: TasksSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      viewNotice={<PanelViewNotice {...viewStatus} />}
       onRefresh={async () => {
         props.client?.refreshPanelView?.("tasks");
         const data = await refresh(page, { useCache: false, preserve:true });
@@ -321,9 +312,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       onOpenTask={openTask}
       onDeleteTask={deleteTask}
       onCloseTask={closeTask}
-      conversation={taskDetail?.status === "ready" && props.client ? <TaskConversation key={`${taskDetail.data.task.id}:${detailGeneration.current}`} client={props.client} initial={taskDetail.data} /> : taskDetail ? <MemoryStateBox message={taskDetail.status === "error" ? taskDetail.message : t("common.loading")} /> : undefined}
     />
-    </PanelViewGate>
   );
 }
 
@@ -335,11 +324,9 @@ export interface TasksSubPageViewProps {
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
-  viewNotice?: import("react").ReactNode;
   onOpenTask: (task: MemoryTask) => void;
   onDeleteTask: (task: MemoryTask) => Promise<void>;
   onCloseTask: () => void;
-  conversation?: import("react").ReactNode;
 }
 
 export function TasksSubPageView(props: TasksSubPageViewProps) {
@@ -356,7 +343,6 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
           <p className="memory-panel__subtitle">{t("memory.tasks.subtitle")}</p>
         </div>
         <MemoryRefreshButton onClick={props.onRefresh} />
-        {props.viewNotice}
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">
@@ -427,13 +413,12 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
       )}
       {props.state.status === "ready" && <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />}
 
-      {!props.selectedTask && props.conversation}
-      {props.selectedTask && <TaskDetailDrawer conversation={props.conversation} task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
+      {props.selectedTask && <TaskDetailDrawer task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
     </section>
   );
 }
 
-function TaskDetailDrawer(props: { conversation?: import("react").ReactNode; task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
+function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
   const { t } = useTranslation();
   const task = props.task;
   const skillLabel = task.skillStatus ? skillStatusLabel(task.skillStatus, t) : t("memory.tasks.skill.queued");
@@ -478,11 +463,11 @@ function TaskDetailDrawer(props: { conversation?: import("react").ReactNode; tas
 
           <section className="memory-detail-card">
             <h5 className="memory-detail-card__label">{t("memory.tasks.conversation")}</h5>
-            {props.conversation ?? (task.chat.length > 0 ? (
+            {task.chat.length > 0 ? (
               <TaskChatLog messages={task.chat} />
             ) : (
               <MemoryStateBox message={t("memory.tasks.noConversation")} />
-            ))}
+            )}
           </section>
         </div>
         <MemoryDrawerDeleteAction onDelete={() => props.onDelete(task)} />
