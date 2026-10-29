@@ -41,7 +41,7 @@ describe("bounded readonly executor", () => {
     service.panelOverviewStatsSnapshot(input);
     service.panelStatsSnapshot(input);
     await vi.waitFor(()=>expect(service.panelStatsSnapshot(input).status).toBe("ready"));
-    expect(read).toHaveBeenCalledExactlyOnceWith("stats",[input]);
+    expect(read).toHaveBeenCalledExactlyOnceWith("stats",[{...input,userId:undefined,namespace:undefined}]);
     expect(service.panelOverviewStatsSnapshot(input).data).toEqual(data.overview);
     expect(service.panelStatsSnapshot(input).data).toEqual(data);
     service.addMemory({content:"incremental write",source:"codex"});

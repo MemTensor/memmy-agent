@@ -94,6 +94,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/panel/overview-stats",
   "POST /api/v1/panel/logs",
   "GET /api/v1/panel/logs/:id",
+  "GET /api/v1/panel/memory/:id",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
@@ -120,6 +121,7 @@ export interface MemoryRuntimeClient {
   search(input: SearchInput): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(id: string): Promise<GetMemoryOutput>;
+  getPanelMemory?(id:string):Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
   approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
   updateObservedSkill?(id: string, input: { body: string; expectedVersion: number }): Promise<{ id: string; status: "activated"; version: number; serverTime: string }>;
@@ -216,6 +218,11 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
 
     async addMemory(input) {
       return requestJson({ config, path: "/api/v1/memory/add", schema: AddMemoryOutputSchema, body: AddMemoryInputSchema.parse(input) });
+    },
+
+    async getPanelMemory(id) {
+      try{return await requestJson({config,path:`/api/v1/panel/memory/${encodeURIComponent(id)}`,schema:GetMemoryOutputSchema});}
+      catch(error){if(!isUnsupportedPanelRoute(error))throw error;return this.getMemory(id);}
     },
 
     async getMemory(id) {
@@ -443,4 +450,9 @@ function appendQueryValue(query: URLSearchParams, key: string, value: unknown): 
 export function isUnsupportedPanelRoute(error: unknown): boolean {
   return error instanceof ApiRequestError && error.status === 404 && error.code === "not_found"
     && (/is not registered/i.test(error.message) || /route .*not found/i.test(error.message));
+}
+
+/** Management-only detail reads; older runtimes retain their existing authorization. */
+export function readMemoryPanelDetail(client:MemoryRuntimeClient,id:string):Promise<GetMemoryOutput> {
+  return client.getPanelMemory ? client.getPanelMemory(id) : client.getMemory(id);
 }

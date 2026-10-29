@@ -6,6 +6,7 @@ import type { PanelBrowseInput, PanelBrowseOutput } from "@memmy/local-api-contr
 import type { PanelTaskSummariesOutput, PanelTaskDetailOutput, PanelTaskFieldInput, PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 /** Panel service module. */
 import type {
+  GetMemoryOutput,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -22,6 +23,7 @@ import type { RuntimeContext } from "./runtime-context.js";
 
 /** Contract for panel service. */
 export interface PanelService {
+  memory(id:string,ctx:RuntimeContext):Promise<GetMemoryOutput>;
   overview(ctx: RuntimeContext): Promise<PanelOverviewOutput>;
   analysis(ctx: RuntimeContext): Promise<PanelAnalysisOutput>;
   items(input: PanelItemsInput, ctx: RuntimeContext): Promise<PanelItemsOutput>;
@@ -41,8 +43,12 @@ export interface PanelService {
 
 /** Creates create panel service. */
 export function createPanelService(deps: { memoryClient: MemoryClient; getUserId: () => string }): PanelService {
-  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: deps.getUserId() });
+  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: undefined });
+  const writeContext=(ctx:RuntimeContext):RuntimeContext=>({...ctx,userId:deps.getUserId()});
   return {
+    async memory(id,ctx){
+      return deps.memoryClient.panelMemory ? deps.memoryClient.panelMemory(id,context(ctx)) : deps.memoryClient.getMemory({memoryId:id},context(ctx));
+    },
     async overview(ctx) {
       return deps.memoryClient.panelOverview(context(ctx));
     },
@@ -60,8 +66,8 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
     async stats(ctx) {return deps.memoryClient.panelStats(context(ctx));},
     async overviewStats(ctx) {return deps.memoryClient.panelOverviewStats(context(ctx));},
     async browse(input,ctx) {
-      // Section travels on each call so task views keep the established device scope.
-      return deps.memoryClient.panelBrowse(input,input.filter?.section === "tasks" ? {...ctx,userId:undefined} : context(ctx));
+      // Every management read uses the device library; write identity stays account-scoped.
+      return deps.memoryClient.panelBrowse(input,context(ctx));
     },
     async taskSummaries(input, ctx) {
       return deps.memoryClient.panelTaskSummaries(input, {...ctx, userId: undefined});
@@ -81,7 +87,7 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
     },
 
     async deleteTask(id, ctx) {
-      return deps.memoryClient.deletePanelTask(id, context(ctx));
+      return deps.memoryClient.deletePanelTask(id, writeContext(ctx));
     },
 
     async memoryApiLogs(input, ctx) {

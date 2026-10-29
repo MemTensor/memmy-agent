@@ -50,7 +50,7 @@ describe("REST panel contract", () => {
       expect(warmOverview).not.toHaveBeenCalled();
       expect(warmAnalysis).not.toHaveBeenCalled();
       await fetch(`${endpoint}/api/v1/health`, {headers: statsHeaders});
-      expect(warmOverview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({namespace: expect.objectContaining({userId: "local-user"}),timeZone: "+08:00"}));
+      expect(warmOverview).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({namespace: expect.objectContaining({userId: "local-user"}),timeZone: "+08:00"}),true);
       expect(warmAnalysis).toHaveBeenCalledTimes(1);
       let overviewStats;
       await vi.waitFor(async () => {

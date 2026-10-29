@@ -1,3 +1,4 @@
+import {localPanelRequest} from "./panel/local-read.js";
 import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
@@ -309,15 +310,18 @@ export class MemoryService {
   private panelReader?: PanelReader;
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
+  private panelInput<T extends RequestEnvelope>(input:T,local=this.mode!=="cloud"):T {
+    return localPanelRequest(this.withTimeZone(input),local);
+  }
   private sharedPanelStats() {
     this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db));
     return this.panelStats;
   }
-  panelStatsSnapshot(input:RequestEnvelope) {
-    return this.sharedPanelStats().get(input);
+  panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    return this.sharedPanelStats().get(this.panelInput(input,local));
   }
-  panelOverviewStatsSnapshot(input:RequestEnvelope) {
-    const snapshot=this.sharedPanelStats().get(input);
+  panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    const snapshot=this.sharedPanelStats().get(this.panelInput(input,local));
     return {...snapshot,data:snapshot.data?.overview};
   }
 
@@ -338,7 +342,7 @@ export class MemoryService {
       : method === "detail" ? model.panelTaskDetail(args[0] as string,args[1] as Parameters<PanelReadModel["panelTaskDetail"]>[1])
       : method === "field" ? model.panelTaskField(args[0] as string,args[1] as string,args[2] as Parameters<PanelReadModel["panelTaskField"]>[2],args[3] as Parameters<PanelReadModel["panelTaskField"]>[3])
       : method === "logs" ? model.panelLogs(args[0] as Parameters<PanelReadModel["panelLogs"]>[0],args[1] as RequestEnvelope)
-      : method === "logDetail" ? model.panelLogDetail(args[0] as number)
+      : method === "logDetail" ? model.panelLogDetail(args[0] as number,args[1] as RequestEnvelope)
       : method === "overview" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
       : method === "analysis" ? model.panelAnalysis(args[0] as RequestEnvelope)
       : method === "legacyTasks" ? model.panelTasks(args[0] as Parameters<PanelReadModel["panelTasks"]>[0])
@@ -347,9 +351,9 @@ export class MemoryService {
     return {safety:panelSafetyToken(this.repos.db),data:data as T};
   }
 
-  browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal) {
+  browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal,local=this.mode!=="cloud") {
     this.panelBrowse ??= new PanelBrowse({read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
-    const filter={...input.filter,...request};
+    const filter=this.panelInput({...input.filter,...request},local);
     if(input.op==="create") return this.panelBrowse.create(filter,signal);
     if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
     if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter,signal);
@@ -715,6 +719,8 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       assertEpisodeInScope: this.assertEpisodeInScope.bind(this),
       assertMemoryInScope: this.assertMemoryInScope.bind(this),
+      assertPanelMemoryInScope: this.assertMemoryTenantScope.bind(this),
+      assertPanelEpisodeInScope: this.assertPanelEpisodeInScope.bind(this),
       namespaceForSession,
       readableMemoryIdKind,
       invalidArgument: (message) => new MemoryServiceError("invalid_argument", message),
@@ -2409,6 +2415,21 @@ export class MemoryService {
     return this.episodeReadModel.timeline(this.withTimeZone(input));
   }
 
+  getPanelMemory(id:string,request:RequestEnvelope={},local=this.mode!=="cloud"):MemoryGetResponse {
+    if(!local)return this.getMemory(id,request);
+    this.assertMemorySearchEnabled();
+    const userMemory=this.repos.userMemories.getForDisplay(id);
+    if(userMemory){
+      const item=userMemoryPanelItem(userMemory);
+      const detail={...item,memoryLayer:"UserMemory" as const,body:userMemory.content,sourceMemoryIds:[],metadata:item.metadata??{}};
+      return {...detail,item:detail,refs:{},etag:`user-memory-${userMemory.updatedAt}`};
+    }
+    const memory=this.repos.memories.getForDisplay(id);
+    if(memory && (memory.status==="deleted" || !this.repos.memories.visibleEvidenceIds([id],true).has(id)))
+      throw new MemoryServiceError("not_found","Memory is unavailable");
+    return this.episodeReadModel.getMemory(id,this.withTimeZone(request),true);
+  }
+
   getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
     this.assertMemorySearchEnabled();
     const userMemory = this.repos.userMemories.getForDisplay(id);
@@ -3094,7 +3115,7 @@ export class MemoryService {
     excludedSourceAgents?: string[];
     limit?: number;
     offset?: number;
-  } = {}): {
+  } = {},local=this.mode!=="cloud"): {
     logs: ReturnType<Repositories["runtime"]["listApiLogs"]>["logs"];
     total: number;
     limit: number;
@@ -3102,7 +3123,7 @@ export class MemoryService {
     nextOffset?: number;
     serverTime: string;
   } {
-    return this.panelReadModel.apiLogs(input);
+    return this.panelReadModel.apiLogs(input,local);
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3156,7 +3177,7 @@ export class MemoryService {
     etag: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelOverview(this.withTimeZone(input));
+    return this.panelReadModel.panelOverview(this.panelInput(input));
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3174,7 +3195,7 @@ export class MemoryService {
     }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
+    return this.panelReadModel.panelOverviewSummary(this.panelInput(input));
   }
 
   panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3193,7 +3214,7 @@ export class MemoryService {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    return this.panelReadModel.panelAnalysis(this.withTimeZone(input));
+    return this.panelReadModel.panelAnalysis(this.panelInput(input));
   }
 
   panelItems(input: RequestEnvelope & {
@@ -3220,7 +3241,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelItems(this.withTimeZone(input));
+    return this.panelReadModel.panelItems(this.panelInput(input));
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
@@ -3239,19 +3260,19 @@ export class MemoryService {
     hasPrev: boolean;
     serverTime: string;
   } {
-    return this.panelReadModel.panelTasks(this.withTimeZone(input));
+    return this.panelReadModel.panelTasks(this.panelInput(input));
   }
 
   panelTaskSummaries(input: Parameters<PanelReadModel["panelTaskSummaries"]>[0]) {
-    return this.panelReadModel.panelTaskSummaries(this.withTimeZone(input));
+    return this.panelReadModel.panelTaskSummaries(this.panelInput(input));
   }
 
   panelTaskDetail(id: string, input: Parameters<PanelReadModel["panelTaskDetail"]>[1]) {
-    return this.panelReadModel.panelTaskDetail(id, this.withTimeZone(input));
+    return this.panelReadModel.panelTaskDetail(id, this.panelInput(input));
   }
 
   panelTaskField(id: string, turnId: string, field: Parameters<PanelReadModel["panelTaskField"]>[2], input: Parameters<PanelReadModel["panelTaskField"]>[3]) {
-    return this.panelReadModel.panelTaskField(id, turnId, field, this.withTimeZone(input));
+    return this.panelReadModel.panelTaskField(id, turnId, field, this.panelInput(input));
   }
 
   panelChanges(input: RequestEnvelope & {
@@ -3877,6 +3898,16 @@ export class MemoryService {
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
+    this.assertMemoryTenantScope(memory,namespace);
+  }
+
+  private assertPanelEpisodeInScope(episode:EpisodeRecord,namespace?:RuntimeNamespace):void {
+    const session=this.requireSession(episode.sessionId);
+    const tenant=session.meta.tenant_id ?? session.meta.tenantId ?? null;
+    if(tenant!==(namespace?.tenantId??null))throw new MemoryServiceError("forbidden","task belongs to a different tenant");
+  }
+
+  private assertMemoryTenantScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
     const internal = memory.properties.internal_info;
     // The local panel is shared across source/user/profile settings. History
     // keeps its original user ID across config changes; preserve panel deletion

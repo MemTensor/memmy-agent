@@ -4,11 +4,11 @@ import { MemoryServiceError } from "../utils/error.js";
 import { ensurePanelCache, ensurePanelLogIds, panelLogRevision } from "./panel-cache.js";
 import { panelSafetyToken } from "./panel-security.js";
 /** References are indexed; visibility always comes from current authoritative endpoints. */
-function visibleLog(id: string): string {
+function visibleLog(id: string,local:boolean): string {
   return `NOT EXISTS(SELECT 1 FROM panel_log_refs reference WHERE reference.log_id=${id} AND NOT EXISTS(
   SELECT 1 FROM memories m JOIN panel_memory_visibility f ON f.id=m.id LEFT JOIN raw_turns r ON r.id=f.raw_id
    WHERE m.id=reference.ref_id AND m.deleted_at IS NULL AND m.status!='deleted'
-   AND (f.raw_id IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=m.user_id))
+   AND (f.raw_id IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${local?"(m.session_id IS NULL OR m.session_id=r.session_id)":"r.user_id IS m.user_id"}))
   UNION ALL SELECT 1 FROM user_memories u WHERE u.id=reference.ref_id AND u.deleted_at IS NULL AND u.status!='deleted'
   UNION ALL SELECT 1 FROM episodes e WHERE e.id=reference.ref_id))`;
 }
@@ -21,7 +21,7 @@ const counts = new WeakMap<Database.Database, {
   values: Map<string, number>;
 }>();
 export class PanelLogReader {
-  constructor(private readonly db: Database.Database) { }
+  constructor(private readonly db: Database.Database,private readonly local=true) { }
   list(input: {
     tools?: string[];
     sourceAgent?: string;
@@ -66,7 +66,7 @@ export class PanelLogReader {
       conditions.push("l.id IN (SELECT value FROM json_each(?))");
       params.push(JSON.stringify(ids));
     }
-    conditions.push(visibleLog("l.id"));
+    conditions.push(visibleLog("l.id",this.local));
     if (input.skillId) {
       conditions.push("l.skill_id=?");
       params.push(input.skillId.split("::").at(-1)!.trim());
@@ -110,12 +110,12 @@ export class PanelLogReader {
     if (!ids.length)
       return new Set();
     ensurePanelLogIds(this.db, ids);
-    return new Set(this.db.prepare(`SELECT a.id FROM api_logs a WHERE a.id IN (SELECT value FROM json_each(?)) AND ${visibleLog("a.id")}`).pluck().all(JSON.stringify(ids)) as number[]);
+    return new Set(this.db.prepare(`SELECT a.id FROM api_logs a WHERE a.id IN (SELECT value FROM json_each(?)) AND ${visibleLog("a.id",this.local)}`).pluck().all(JSON.stringify(ids)) as number[]);
   }
   detail(id: number) {
     ensurePanelLogIds(this.db, [id]);
     const row = this.db.prepare(`SELECT a.id,a.tool_name AS toolName,a.source_agent AS sourceAgent,a.input_json AS inputJson,a.output_json AS outputJson,a.duration_ms AS durationMs,a.success,a.called_at AS calledAt
-   FROM api_logs a WHERE a.id=? AND ${visibleLog("a.id")}`).get(id) as (Omit<ApiLogRecord, "success"> & {
+   FROM api_logs a WHERE a.id=? AND ${visibleLog("a.id",this.local)}`).get(id) as (Omit<ApiLogRecord, "success"> & {
       success: number;
     }) | undefined;
     if (!row)

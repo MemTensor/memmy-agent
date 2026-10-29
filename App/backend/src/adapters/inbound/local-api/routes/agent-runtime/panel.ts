@@ -10,6 +10,10 @@ import { cancellableRuntimeContextFromRequest as panelRequestContext } from "../
 import type { AgentRuntimeRouteDeps } from "./index.js";
 
 export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
+  app.get("/api/v1/panel/memory/:id",{preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>{
+    const {id}=z.object({id:z.string().min(1)}).parse(request.params);
+    return reply.send(await deps.services.panel.memory(id,panelRequestContext(request,reply,deps.timeZone)));
+  }));
   app.get(
     "/api/v1/panel/overview",
     { preHandler: deps.authenticateRuntimeToken },

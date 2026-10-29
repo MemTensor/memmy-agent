@@ -79,7 +79,7 @@ parentPort!.on("message", async ({ id, method, args }) => {
           case "logs":
             return { safety, data: model.panelLogs(args[0], args[1]) };
           case "logDetail":
-            return { safety, data: model.panelLogDetail(args[0]) };
+            return { safety, data: model.panelLogDetail(args[0],args[1]) };
           case "overview":
             return { safety, data: model.panelOverviewSummary(args[0]) };
           case "analysis":

@@ -1,3 +1,4 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
@@ -105,7 +106,7 @@ export function loadSkillsDataPage(client: MemoryRuntimeClient, query = "", page
 }
 
 export function loadSkillDetail(client: MemoryRuntimeClient, skillId: string): Promise<GetMemoryOutput> {
-  return client.getMemory(skillId);
+  return readMemoryPanelDetail(client,skillId);
 }
 
 export async function loadSkillTimeline(client: MemoryRuntimeClient, skillId: string): Promise<SkillTimelineEntry[]> {
@@ -544,7 +545,7 @@ function SkillDrawer(props: {
                 const epoch = ++saveRequestEpoch.current;
                 const isCurrent = () => currentDetailId.current === id && saveRequestEpoch.current === epoch;
                 setOpeningEditor(true);
-                void props.client.getMemory(id).then(latest => {
+                void readMemoryPanelDetail(props.client,id).then(latest => {
                   if (latest.item.id !== id || !isCurrent()) return;
                   setEditedBody(latest.item.body);
                   setEditedVersion(latest.item.version);

@@ -122,7 +122,7 @@ export function MemoryPage(props: MemoryPageProps) {
   const client = clients?.memoryRuntime ?? null;
   usePanelPrefetch(client,activePage);
   // Release the old scope before newly mounted children start passive loads.
-  useLayoutEffect(()=>()=>client?.resetPanelView?.(),[client,state.account.userId,state.bootstrap?.app.userMode]);
+  useLayoutEffect(()=>()=>client?.resetPanelView?.(),[client]);
   const historyQuotaExhausted = isComputerHistoryQuotaExhausted(state?.bootstrap);
   const onHistoryQuotaUpdate = useCallback((usage: TokenUsageDto) => {
     dispatch(appActions.tokenUsageUpdated(usage));
@@ -234,7 +234,6 @@ export function MemoryPage(props: MemoryPageProps) {
 
   return (
     <MemoryPageView
-      key={`${state.account.userId ?? "local"}:${state.bootstrap?.app.userMode ?? ""}`}
       activePage={activePage}
       onActivePageChange={handleSubPageChange}
       onBack={() => dispatch(appActions.navigate("/main"))}

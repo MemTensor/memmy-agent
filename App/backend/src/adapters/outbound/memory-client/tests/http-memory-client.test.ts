@@ -75,6 +75,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/processing/status",
       "/api/v1/memory/:id/processing/retry",
       "/api/v1/memory/logs",
+      "/api/v1/panel/memory/:memoryId",
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
       "/api/v1/panel/items",

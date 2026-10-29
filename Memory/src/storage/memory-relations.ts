@@ -108,14 +108,15 @@ export function repairMemoryRelations(
 /** Batch validate historical Episode arrays against live, currently owned endpoints. */
 export function effectiveEpisodeMemoryIds(
   db: Database.Database,
-  episodes: Array<{ id: string; userId?: string; l1MemoryIds: string[] }>
+  episodes: Array<{ id: string; userId?: string; sessionId?:string; l1MemoryIds: string[] }>,
+  local=false
 ): Map<string, Set<string>> {
   const ids = [...new Set(episodes.flatMap((episode) => episode.l1MemoryIds))];
   if (!ids.length) return new Map();
   const rows = db
     .prepare(
       `SELECT m.id,coalesce(r.episode_id,${EPISODE_SOURCE_SQL}) AS episodeId,
-    ${RAW_SOURCE_SQL} AS rawId,r.id AS foundRaw,m.user_id AS owner,r.user_id AS rawOwner
+    ${RAW_SOURCE_SQL} AS rawId,r.id AS foundRaw,m.user_id AS owner,r.user_id AS rawOwner,m.session_id AS memorySession,r.session_id AS rawSession
     FROM memories m LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
     WHERE m.id IN(SELECT value FROM json_each(?)) AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'
     AND (r.id IS NULL OR (r.deleted_at IS NULL AND r.redacted_at IS NULL))`
@@ -127,6 +128,7 @@ export function effectiveEpisodeMemoryIds(
     foundRaw: string | null;
     owner: string;
     rawOwner: string | null;
+    memorySession:string|null; rawSession:string|null;
   }>;
   const live = new Map(rows.map((row) => [row.id, row]));
   return new Map(
@@ -137,8 +139,10 @@ export function effectiveEpisodeMemoryIds(
           const row = live.get(id);
           return (
             row &&
-            (!episode.userId || row.owner === episode.userId) &&
-            (!row.rawId || (row.foundRaw && row.owner === row.rawOwner)) &&
+            (local || !episode.userId || row.owner === episode.userId) &&
+            (!row.rawId || (row.foundRaw && (local
+              ? (!episode.sessionId || row.rawSession===episode.sessionId) && (!row.memorySession || row.memorySession===row.rawSession)
+              : row.owner === row.rawOwner))) &&
             (!row.episodeId || row.episodeId === episode.id)
           );
         })

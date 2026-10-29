@@ -39,7 +39,7 @@ const FIELD_CACHE_BYTES = 16 * 1024 * 1024;
 
 /** Display-only SQL: large dialogue and tool payloads never cross this boundary implicitly. */
 export class PanelTaskReader {
-  constructor(private readonly db: Database.Database) {
+  constructor(private readonly db: Database.Database,private readonly local=true) {
     db.function("panel_field_hash", { deterministic: true }, (value: unknown) =>
       createHash("sha256")
         .update(String(value ?? ""))
@@ -47,14 +47,18 @@ export class PanelTaskReader {
     );
   }
 
+  private parentScope(raw="raw_turns") {
+    return `EXISTS(SELECT 1 FROM episodes e WHERE e.id=${raw}.episode_id AND ${this.local?`${raw}.session_id=e.session_id`:`${raw}.user_id IS e.user_id`})`;
+  }
+
   summaries(ids: string[]): Map<string, { firstUserText: string; firstAssistantText: string; toolCallCount: number }> {
     if (!ids.length) return new Map();
     const rows = this.db
       .prepare(
         `SELECT e.id,
-      coalesce((SELECT substr(r.user_text, 1, 180) FROM raw_turns r WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=e.user_id AND trim(coalesce(r.user_text,'')) != '' ORDER BY r.created_at, r.id LIMIT 1),'') AS firstUserText,
-      coalesce((SELECT substr(r.assistant_text, 1, 180) FROM raw_turns r WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=e.user_id AND trim(coalesce(r.assistant_text,'')) != '' ORDER BY r.created_at, r.id LIMIT 1),'') AS firstAssistantText,
-      (SELECT count(*) FROM raw_turns r, json_each(r.tool_calls_json) c WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=e.user_id AND c.type='object') AS toolCallCount
+      coalesce((SELECT substr(r.user_text, 1, 180) FROM raw_turns r WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${this.local?"r.session_id=e.session_id":"r.user_id IS e.user_id"} AND trim(coalesce(r.user_text,'')) != '' ORDER BY r.created_at, r.id LIMIT 1),'') AS firstUserText,
+      coalesce((SELECT substr(r.assistant_text, 1, 180) FROM raw_turns r WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${this.local?"r.session_id=e.session_id":"r.user_id IS e.user_id"} AND trim(coalesce(r.assistant_text,'')) != '' ORDER BY r.created_at, r.id LIMIT 1),'') AS firstAssistantText,
+      (SELECT count(*) FROM raw_turns r, json_each(r.tool_calls_json) c WHERE r.episode_id=e.id AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${this.local?"r.session_id=e.session_id":"r.user_id IS e.user_id"} AND c.type='object') AS toolCallCount
       FROM episodes e WHERE e.id IN (SELECT value FROM json_each(?))`
       )
       .all(JSON.stringify(ids)) as Array<{
@@ -88,7 +92,7 @@ export class PanelTaskReader {
       length(coalesce(assistant_text,'')) > ${PREVIEW_CHARACTERS} AS moreAssistant,
       length(coalesce(reasoning_summary,'')) > ${PREVIEW_CHARACTERS} AS moreReasoning,
       json_array_length(tool_calls_json) AS toolCallCount, json_array_length(tool_results_json) AS toolResultCount
-      FROM raw_turns WHERE episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND raw_turns.user_id=(SELECT user_id FROM episodes WHERE id=raw_turns.episode_id)
+      FROM raw_turns WHERE episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND ${this.parentScope()}
       ${before ? "AND (created_at, id) < (?, ?)" : ""}
       ORDER BY created_at DESC, id DESC LIMIT ?`
       )
@@ -155,7 +159,7 @@ export class PanelTaskReader {
   latest(episodeId: string): TurnKey | undefined {
     return this.db
       .prepare(
-        `SELECT id, created_at AS createdAt FROM raw_turns WHERE episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND raw_turns.user_id=(SELECT user_id FROM episodes WHERE id=raw_turns.episode_id) ORDER BY created_at DESC,id DESC LIMIT 1`
+        `SELECT id, created_at AS createdAt FROM raw_turns WHERE episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND ${this.parentScope()} ORDER BY created_at DESC,id DESC LIMIT 1`
       )
       .get(episodeId) as TurnKey | undefined;
   }
@@ -168,7 +172,7 @@ export class PanelTaskReader {
       if (
         !this.db
           .prepare(
-            "SELECT 1 FROM raw_turns WHERE id=? AND episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND raw_turns.user_id=(SELECT user_id FROM episodes WHERE id=raw_turns.episode_id)"
+            `SELECT 1 FROM raw_turns WHERE id=? AND episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND ${this.parentScope()}`
           )
           .get(turnId, episodeId)
       )
@@ -179,7 +183,7 @@ export class PanelTaskReader {
       .prepare(
         `SELECT 1 FROM raw_turns WHERE id=? AND episode_id=?
       AND deleted_at IS NULL AND redacted_at IS NULL
-      AND raw_turns.user_id=(SELECT user_id FROM episodes WHERE id=raw_turns.episode_id)`
+      AND ${this.parentScope()}`
       )
       .get(turnId, episodeId);
     if (!visible) throw new MemoryServiceError("not_found", "Task turn is unavailable");
@@ -247,7 +251,7 @@ export class PanelTaskReader {
       substr(coalesce(json_extract(CASE WHEN tool.type='object' THEN tool.value ELSE '{}' END,'$.name'),json_extract(CASE WHEN tool.type='object' THEN tool.value ELSE '{}' END,'$.toolName'),json_extract(CASE WHEN tool.type='object' THEN tool.value ELSE '{}' END,'$.tool_call_id'),'Tool'),1,80) AS name,
       length(tool.value) AS characters,panel_field_hash(tool.value) AS hash
       FROM raw_turns, json_each(${FIELDS[field]}) tool
-      WHERE raw_turns.id=? AND episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND raw_turns.user_id=(SELECT user_id FROM episodes WHERE id=raw_turns.episode_id) AND tool.key>=?
+      WHERE raw_turns.id=? AND episode_id=? AND deleted_at IS NULL AND redacted_at IS NULL AND ${this.parentScope()} AND tool.key>=?
       ORDER BY tool.key LIMIT ?`
       )
       .all(turnId, episodeId, offset, limit + 1) as Array<{

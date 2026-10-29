@@ -1,3 +1,4 @@
+import {localPanelRequest} from "../service/panel/local-read.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import {PanelLogsInputSchema} from "../contracts/memory-runtime.js";
 import { PanelBrowseInputSchema } from "../contracts/memory-runtime.js";
@@ -97,6 +98,7 @@ export const API_ROUTES = [
   "POST /api/v1/worker/run",
   "POST /api/v1/worker/import-summaries/enqueue",
   "GET /api/v1/memory/logs",
+  "GET /api/v1/panel/memory/:id",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/overview-stats",
   "GET /api/v1/panel/analysis",
@@ -596,6 +598,8 @@ async function routeRequest(
   requestId: string,
   signal?: AbortSignal
 ): Promise<unknown> {
+  const localPanel=principal.kind==="local"||principal.kind==="anonymous";
+  const panelEnvelope=localPanelRequest({namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
   const readPanel = (method:string,args:unknown[]) => service.readPanel(method,args,signal);
   const path = url.pathname;
 
@@ -604,8 +608,8 @@ async function routeRequest(
     // opens. Start its bounded background cache without awaiting aggregation.
     if ((principal.kind === "local" || principal.kind === "cloud") && principal.timeZone && principal.namespace?.userId) {
       const input = { namespace: principal.namespace, timeZone: principal.timeZone };
-      service.panelOverviewStatsSnapshot(input);
-      service.panelStatsSnapshot(input);
+      service.panelOverviewStatsSnapshot(input,localPanel);
+      service.panelStatsSnapshot(input,localPanel);
     }
     return service.health([...API_ROUTES]);
   }
@@ -1002,7 +1006,7 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/panel/overview") {
     requirePanelRead(principal);
     return (await readPanel("overview", [{
-      namespace: principal.namespace,
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone
     }])).data;
   }
@@ -1022,10 +1026,16 @@ async function routeRequest(
     return agentSources.clearAllData();
   }
 
+  const panelMemory=path.match(/^\/api\/v1\/panel\/memory\/([^/]+)$/u);
+  if(method==="GET"&&panelMemory){
+    requirePanelRead(principal);
+    return service.getPanelMemory(decodeURIComponent(panelMemory[1]!),{namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
+  }
+
   if (method === "GET" && path === "/api/v1/panel/analysis") {
     requirePanelRead(principal);
     return (await readPanel("analysis", [{
-      namespace: principal.namespace,
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone
     }])).data;
   }
@@ -1034,7 +1044,7 @@ async function routeRequest(
     requirePanelRead(principal);
     return publicPanelItemsResponse((await readPanel("items", [{
       userSummary: url.searchParams.get("userSummary") === "true",
-      namespace: principal.namespace,
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone,
       layer: parseRecallLayer(url.searchParams.get("layer")),
       status: parseStatus(url.searchParams.get("status")),
@@ -1049,39 +1059,39 @@ async function routeRequest(
     requirePanelRead(principal);
     const input=PanelLogsInputSchema.safeParse(body);
     if(!input.success) throw new MemoryServiceError("invalid_argument","Invalid log query");
-    return (await readPanel("logs",[input.data,{namespace:principal.namespace}])).data;
+    return (await readPanel("logs",[input.data,{namespace:panelEnvelope.namespace}])).data;
   }
   const logDetail=path.match(/^\/api\/v1\/panel\/logs\/(\d+)$/u);
-  if(method==="GET"&&logDetail) {requirePanelRead(principal);return (await readPanel("logDetail",[Number(logDetail[1])])).data;}
+  if(method==="GET"&&logDetail) {requirePanelRead(principal);return (await readPanel("logDetail",[Number(logDetail[1]),{namespace:panelEnvelope.namespace}])).data;}
   if (method === "GET" && path === "/api/v1/panel/stats") {
     requirePanelRead(principal);
-    return service.panelStatsSnapshot({namespace:principal.namespace,timeZone:principal.timeZone});
+    return service.panelStatsSnapshot(panelEnvelope,localPanel);
   }
   if (method === "GET" && path === "/api/v1/panel/overview-stats") {
     requirePanelRead(principal);
-    return service.panelOverviewStatsSnapshot({namespace:principal.namespace,timeZone:principal.timeZone});
+    return service.panelOverviewStatsSnapshot(panelEnvelope,localPanel);
   }
   if (method === "POST" && path === "/api/v1/panel/browse") {
     requirePanelRead(principal);
     const parsed = PanelBrowseInputSchema.safeParse(body);
     if (!parsed.success) throw new MemoryServiceError("invalid_argument","Invalid panel browse request");
-    return service.browsePanel(parsed.data,{namespace:principal.namespace,timeZone:principal.timeZone},signal);
+    return service.browsePanel(parsed.data,{namespace:panelEnvelope.namespace,timeZone:principal.timeZone},signal,localPanel);
   }
 
   if (method === "GET" && path === "/api/v1/panel/task-summaries") {
     requirePanelRead(principal);
-    return (await readPanel("tasks", [{ namespace: principal.namespace, timeZone: principal.timeZone,
+    return (await readPanel("tasks", [{ namespace: panelEnvelope.namespace, timeZone: principal.timeZone,
       q: url.searchParams.get("q") ?? undefined, page: parseNumber(url.searchParams.get("page")) }])).data;
   }
   const taskCheckPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)\/check$/u);
   if (method === "GET" && taskCheckPath) {
     requirePanelRead(principal);
-    return (await readPanel("taskCheck", [decodeURIComponent(taskCheckPath[1]!), { namespace: principal.namespace }])).data;
+    return (await readPanel("taskCheck", [decodeURIComponent(taskCheckPath[1]!), { namespace: panelEnvelope.namespace }])).data;
   }
   const taskDetailPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)$/u);
   if (method === "GET" && taskDetailPath) {
     requirePanelRead(principal);
-    return (await readPanel("detail", [decodeURIComponent(taskDetailPath[1]!), { namespace: principal.namespace,
+    return (await readPanel("detail", [decodeURIComponent(taskDetailPath[1]!), { namespace: panelEnvelope.namespace,
       ...parsePanelInput(PanelTaskDetailInputSchema, url), timeZone: principal.timeZone }])).data;
   }
   const taskFieldPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)\/turns\/([^/]+)\/field$/u);
@@ -1089,13 +1099,13 @@ async function routeRequest(
     requirePanelRead(principal);
     const {field, ...input} = parsePanelInput(PanelTaskFieldInputSchema, url);
     return (await readPanel("field", [decodeURIComponent(taskFieldPath[1]!), decodeURIComponent(taskFieldPath[2]!), field,
-      { ...input, namespace: principal.namespace, timeZone: principal.timeZone }])).data;
+      { ...input, namespace: panelEnvelope.namespace, timeZone: principal.timeZone }])).data;
   }
 
   if (method === "GET" && path === "/api/v1/panel/tasks") {
     requirePanelRead(principal);
     return publicPanelTasksResponse((await readPanel("legacyTasks", [{
-      namespace: principal.namespace,
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone,
       q: url.searchParams.get("q") ?? undefined,
       page: parseNumber(url.searchParams.get("page"))
@@ -1110,7 +1120,7 @@ async function routeRequest(
       excludedSourceAgents: url.searchParams.getAll("excludedSourceAgents"),
       limit: parseNumber(url.searchParams.get("limit")),
       offset: parseNumber(url.searchParams.get("offset"))
-    });
+    },localPanel);
   }
 
   if (method === "POST" && path === "/api/v1/memory/processing/status") {

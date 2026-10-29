@@ -60,7 +60,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(27);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(28);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -83,6 +83,7 @@ describe("memory runtime client", () => {
       "GET /api/v1/panel/overview-stats",
       "POST /api/v1/panel/logs",
       "GET /api/v1/panel/logs/:id",
+      "GET /api/v1/panel/memory/:id",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/items",
@@ -304,4 +305,29 @@ it("reuses the prefetched user-memory view on its first real page read", async (
     expect(operations).toMatchObject([{op:"create",filter:{layer:"UserMemory",userSummary:true}},{op:"check"}]);
     expect(operations).toHaveLength(2);
   } finally { vi.unstubAllGlobals(); }
+});
+
+describe("local management detail route",()=>{
+  const at="2026-10-29T00:00:00Z";
+  const item={id:"trace-other",kind:"trace",memoryLayer:"L1",status:"activated",title:"Historical record",summary:"summary",body:"full local body",tags:[],sourceMemoryIds:[],metadata:{},createdAt:at,updatedAt:at,version:1};
+  const detail={...item,item,refs:{},etag:"detail"};
+  afterEach(()=>vi.unstubAllGlobals());
+  it("keeps management and ordinary memory detail routes separate",async()=>{
+    const fetchMock=vi.fn(async(_url:URL|RequestInfo)=>new Response(JSON.stringify(detail)));vi.stubGlobal("fetch",fetchMock);
+    const client=createHttpMemoryRuntimeClient(runtimeConfig);
+    expect((await client.getPanelMemory!(item.id)).item.body).toBe(item.body);
+    expect((await client.getMemory(item.id)).item.body).toBe(item.body);
+    expect(fetchMock.mock.calls.map(([url])=>String(url))).toEqual([runtimeConfig.baseUrl+"/api/v1/panel/memory/trace-other",runtimeConfig.baseUrl+"/api/v1/memory/trace-other"]);
+  });
+  it("falls back for an old unsupported route but preserves authorization and deletion errors",async()=>{
+    const fetchMock=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({error:{code:"not_found",message:"Route GET:/api/v1/panel/memory/trace-other not found",requestId:"unsupported"}}),{status:404})).mockResolvedValueOnce(new Response(JSON.stringify(detail)));
+    vi.stubGlobal("fetch",fetchMock);
+    expect((await createHttpMemoryRuntimeClient(runtimeConfig).getPanelMemory!(item.id)).item.body).toBe(item.body);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for(const status of [401,403,404]){
+      fetchMock.mockReset().mockResolvedValue(new Response(JSON.stringify({error:{code:status===404?"not_found":"forbidden",message:"Memory is unavailable",requestId:"denied"}}),{status}));
+      await expect(createHttpMemoryRuntimeClient(runtimeConfig).getPanelMemory!(item.id)).rejects.toMatchObject({status});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
 });

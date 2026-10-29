@@ -208,10 +208,10 @@ export class PanelReadModel {
       const evidence=isRecord(internal.external_evidence)||isRecord(internal.external_evidence_candidate);
       if(evidence && request.namespace && (externalEvidenceNamespaceForMemory(memory).tenantId||null)!==(request.namespace.tenantId||null)) throw new MemoryServiceError("forbidden","Skill unavailable");
     }
-    const result = new PanelLogReader(this.deps.repos.db).list(input);
+    const result = new PanelLogReader(this.deps.repos.db,!request.namespace?.userId).list(input);
     return {...result,logs:this.withCurrentTraceSummaries(result.logs)};
   }
-  panelLogDetail(id:number) {return {log:this.withCurrentTraceSummaries([new PanelLogReader(this.deps.repos.db).detail(id)])[0]!,serverTime:this.now()};}
+  panelLogDetail(id:number,request:RequestEnvelope={}) {return {log:this.withCurrentTraceSummaries([new PanelLogReader(this.deps.repos.db,!request.namespace?.userId).detail(id)])[0]!,serverTime:this.now()};}
 
   apiLogs(input: {
     tools?: Array<"memory_add" | "memory_search" | "skill_generate" | "skill_evolve">;
@@ -219,7 +219,7 @@ export class PanelReadModel {
     excludedSourceAgents?: string[];
     limit?: number;
     offset?: number;
-  } = {}): {
+  } = {},local=false): {
     logs: ReturnType<Repositories["runtime"]["listApiLogs"]>["logs"];
     total: number;
     limit: number;
@@ -236,7 +236,7 @@ export class PanelReadModel {
       limit,
       offset
     });
-    const visible = new PanelLogReader(this.deps.repos.db).visibleIds(result.logs.map(log => log.id));
+    const visible = new PanelLogReader(this.deps.repos.db,local).visibleIds(result.logs.map(log => log.id));
     return {
       logs: this.withCurrentTraceSummaries(result.logs.filter(log => visible.has(log.id))),
       total: result.total,
@@ -417,7 +417,7 @@ export class PanelReadModel {
     return {
       counts: {
         memories: memories.filter((memory) => memory.memoryLayer === "L1").length,
-        userMemories: userId ? this.deps.repos.userMemories.countForPanel({ userId }) : 0,
+        userMemories: this.deps.repos.userMemories.countForPanel({ userId }),
         skills: memories.filter((memory) => memory.memoryLayer === "Skill").length,
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
@@ -497,7 +497,7 @@ export class PanelReadModel {
     if (input.layer === "UserMemory") {
       const userId = input.userId ?? input.namespace?.userId;
       const requestedPage = normalizePageNumber(input.page);
-      if (!userId || input.status === "resolving") {
+      if (input.status === "resolving") {
         return emptyPanelItems(requestedPage, pageSize, this.now());
       }
       const status = input.status === "activated"
@@ -560,7 +560,7 @@ export class PanelReadModel {
         ).map((hit) => hit.id))
       : this.deps.repos.memories.listForPanel(filter, pageSize, offset);
     return {
-      items: this.displayItems(memories),
+      items: this.displayItems(memories,!input.namespace?.userId),
       page,
       pageSize,
       total,
@@ -573,7 +573,7 @@ export class PanelReadModel {
     };
   }
 
-  private displayItems(memories: ReturnType<Repositories["memories"]["getManyForPanel"]>) {
+  private displayItems(memories: ReturnType<Repositories["memories"]["getManyForPanel"]>,local=true) {
     const processingById = new Map(this.deps.repos.processing.getMany(memories.map((memory) => memory.id))
       .map((processing) => [processing.memoryId, processing]));
     const scopes = this.deps.repos.l3WorldModels.getScopesByMemoryIds(
@@ -585,7 +585,7 @@ export class PanelReadModel {
     const evidenceIds = [...new Set(memories.flatMap((memory) =>
       memory.memoryLayer === "L2" && !storedGeneratedTitle(memory) ? evidenceMemoryIds(memory) : []
     ))];
-    const visibleEvidence = this.deps.repos.memories.visibleEvidenceIds(evidenceIds);
+    const visibleEvidence = this.deps.repos.memories.visibleEvidenceIds(evidenceIds,local);
     const evidenceById = new Map(
       this.deps.repos.memories.getManyForPanel(evidenceIds)
         .filter(memory => visibleEvidence.has(memory.id))
@@ -617,21 +617,21 @@ export class PanelReadModel {
     if (input.section === "tasks") return this.deps.repos.runtime.panelEpisodeIds(input.namespace?.userId, input.q, input.sourceAgent);
     if (input.layer === "UserMemory") {
       const userId = input.namespace?.userId ?? input.userId;
-      if (!userId || input.status === "resolving") return [];
+      if (input.status === "resolving") return [];
       return this.deps.repos.userMemories.panelMemberIds({userId, query: input.q, sourceAgent: input.sourceAgent, status: input.status === "activated" ? "active" : input.status});
     }
     return this.deps.repos.memories.panelMemberIds({panelSource: true, memoryLayer: input.layer, status: input.status, tags:input.tags, agentId: input.sourceAgent, excludedAgentIds:input.excludedSourceAgents}, input.q);
   }
 
   panelPageByIds(ids: string[], input: Parameters<PanelReadModel["panelMembers"]>[0]) {
-    if (input.section === "tasks") return {tasks: this.taskSummaries(this.deps.repos.runtime.getEpisodesForPanel(ids))};
+    if (input.section === "tasks") return {tasks: this.taskSummaries(this.deps.repos.runtime.getEpisodesForPanel(ids),input)};
     if (input.layer === "UserMemory") {
       const userId = input.namespace?.userId ?? input.userId;
-      return {items: userId ? this.deps.repos.userMemories.getManyForPanel(ids,userId).map(memory => {
+      return {items: this.deps.repos.userMemories.getManyForPanel(ids,userId).map(memory => {
         const item = userMemoryPanelItem(memory); return {...item, metadata: {...item.metadata, fullContentAvailable:true}};
-      }) : []};
+      })};
     }
-    return {items: this.displayItems(this.deps.repos.memories.getManyForPanel(ids))};
+    return {items: this.displayItems(this.deps.repos.memories.getManyForPanel(ids),!input.namespace?.userId)};
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
@@ -663,7 +663,7 @@ export class PanelReadModel {
       query,
       input.sourceAgent,
     );
-    const existingIds = effectiveEpisodeMemoryIds(this.deps.repos.db, episodes);
+    const existingIds = effectiveEpisodeMemoryIds(this.deps.repos.db, episodes,!input.namespace?.userId);
     const pendingTitleIds = this.deps.repos.runtime.episodesWithJob(
       episodes.map((episode) => episode.id), "episode_title", ["queued", "leased"]
     );
@@ -675,7 +675,7 @@ export class PanelReadModel {
           pendingTitleIds.has(episode.id)
         ),
         memoryIds: [...new Set(episode.l1MemoryIds)].filter((memoryId) => existingIds.get(episode.id)?.has(memoryId)),
-        turns: this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000).map(this.deps.rawTurnSummary),
+        turns: this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000).filter(turn=>!turn.redactedAt && turn.sessionId===episode.sessionId).map(this.deps.rawTurnSummary),
         updatedAt: episode.updatedAt
       })),
       page,
@@ -694,13 +694,13 @@ export class PanelReadModel {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
     const episodes = this.deps.repos.runtime.listEpisodes(input.namespace?.userId, pageSize, (page-1)*pageSize, input.q?.trim() || undefined, input.sourceAgent);
-    return { tasks: this.taskSummaries(episodes), page, pageSize, total, totalPages, hasNext: page < totalPages, hasPrev: page > 1, serverTime: this.now() };
+    return { tasks: this.taskSummaries(episodes,input), page, pageSize, total, totalPages, hasNext: page < totalPages, hasPrev: page > 1, serverTime: this.now() };
   }
 
-  private taskSummaries(episodes: EpisodeRecord[]) {
-    const existing = effectiveEpisodeMemoryIds(this.deps.repos.db, episodes);
+  private taskSummaries(episodes: EpisodeRecord[],input:RequestEnvelope={}) {
+    const existing = effectiveEpisodeMemoryIds(this.deps.repos.db, episodes,!input.namespace?.userId);
     const pending = this.deps.repos.runtime.episodesWithJob(episodes.map((episode) => episode.id), "episode_title", ["queued", "leased"]);
-    const previews = new PanelTaskReader(this.deps.repos.db).summaries(episodes.map((episode) => episode.id));
+    const previews = new PanelTaskReader(this.deps.repos.db,!input.namespace?.userId).summaries(episodes.map((episode) => episode.id));
     return episodes.map((episode) => ({ id: episode.id, episode: this.deps.episodeRef(episode, pending.has(episode.id)),
       memoryIds: [...new Set(episode.l1MemoryIds)].filter((id) => existing.get(episode.id)?.has(id)), updatedAt: episode.updatedAt,
       firstUserText: previews.get(episode.id)?.firstUserText ?? "", firstAssistantText: previews.get(episode.id)?.firstAssistantText ?? "",
@@ -715,17 +715,17 @@ export class PanelReadModel {
 
   panelTaskCheck(id: string, input: RequestEnvelope) {
     this.requireTask(id, input);
-    return { latestTurnId: new PanelTaskReader(this.deps.repos.db).latest(id)?.id, serverTime: this.now() };
+    return { latestTurnId: new PanelTaskReader(this.deps.repos.db,!input.namespace?.userId).latest(id)?.id, serverTime: this.now() };
   }
 
   panelTaskDetail(id: string, input: RequestEnvelope & { cursor?: string }) {
     const episode = this.requireTask(id, input);
-    return { task: this.taskSummaries([episode])[0]!, ...new PanelTaskReader(this.deps.repos.db).turns(id, input.cursor), serverTime: this.now() };
+    return { task: this.taskSummaries([episode],input)[0]!, ...new PanelTaskReader(this.deps.repos.db,!input.namespace?.userId).turns(id, input.cursor), serverTime: this.now() };
   }
 
   panelTaskField(id: string, turnId: string, field: PanelTurnField, input: RequestEnvelope & { offset?: number; revision?: string; toolId?:string }) {
     this.requireTask(id, input);
-    return { ...new PanelTaskReader(this.deps.repos.db).field(id, turnId, field, input.offset, input.revision, input.toolId), serverTime: this.now() };
+    return { ...new PanelTaskReader(this.deps.repos.db,!input.namespace?.userId).field(id, turnId, field, input.offset, input.revision, input.toolId), serverTime: this.now() };
   }
 
   panelChanges(input: RequestEnvelope & {

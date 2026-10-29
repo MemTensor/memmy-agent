@@ -1,3 +1,4 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
@@ -93,7 +94,7 @@ export function loadWorldModelDataPage(client: MemoryRuntimeClient, query: strin
 
 /** Reads load world model detail. */
 export function loadWorldModelDetail(client: MemoryRuntimeClient, worldModelId: string): Promise<GetMemoryOutput> {
-  return client.getMemory(worldModelId);
+  return readMemoryPanelDetail(client,worldModelId);
 }
 
 function worldModelCacheKeys(query: string, page: number): string[] {

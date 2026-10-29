@@ -109,6 +109,7 @@ export interface MemoryClient {
     timeoutMs?: number;
   }): Promise<WorkerRunOutput>;
 
+  panelMemory?(id:string,context?:MemoryRequestContext):Promise<GetMemoryOutput>;
   panelOverview(context?: MemoryRequestContext): Promise<PanelOverviewOutput>;
   panelAnalysis(context?: MemoryRequestContext): Promise<PanelAnalysisOutput>;
   panelItems(input: PanelItemsInput, context?: MemoryRequestContext): Promise<PanelItemsOutput>;

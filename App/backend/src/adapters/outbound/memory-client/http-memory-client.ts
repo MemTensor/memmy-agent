@@ -290,6 +290,10 @@ export function createHttpMemoryClient(
       });
     },
 
+    async panelMemory(id,context){
+      return request("GET","panelMemory",GetMemoryOutputSchema,{params:{memoryId:id},context,maxRetries:0});
+    },
+
     async panelOverview(context) {
       return request("GET", "panelOverview", PanelOverviewOutputSchema, { context, maxRetries: 0 });
     },

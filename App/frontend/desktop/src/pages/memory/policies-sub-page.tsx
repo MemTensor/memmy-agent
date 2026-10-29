@@ -1,3 +1,4 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
@@ -173,8 +174,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void props.client
-      .getMemory(id)
+    void readMemoryPanelDetail(props.client,id)
       .then((data) => { if (generation === detailGeneration.current) setDetail({ status: "ready", data }); })
       .catch((error) => { if (generation === detailGeneration.current) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }

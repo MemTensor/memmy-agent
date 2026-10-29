@@ -90,14 +90,9 @@ describe("bounded panel task reads", () => {
     expect(() =>
       service.panelTaskField(id, raw.id, "userText", { offset: first.nextOffset, revision: first.revision })
     ).toThrow("changed");
-    expect(() =>
-      service.panelTaskDetail(id, { namespace: { source: "codex", profileId: "default", userId: "other" } })
-    ).toThrow("unavailable");
-    expect(() =>
-      service.panelTaskField(id, raw.id, "userText", {
-        namespace: { source: "codex", profileId: "default", userId: "other" }
-      })
-    ).toThrow("unavailable");
+    const other={source:"codex",profileId:"default",userId:"other"};
+    expect(service.panelTaskDetail(id,{namespace:other}).turns).toHaveLength(1);
+    expect(service.panelTaskField(id,raw.id,"userText",{namespace:other}).text).toBe("changed");
     repos.runtime.updateRawTurn({ ...raw, redactedAt: new Date().toISOString() });
     expect(() => service.panelTaskField(id, raw.id, "userText", {})).toThrow("unavailable");
     expect(service.panelTaskDetail(id, {}).turns).toHaveLength(0);

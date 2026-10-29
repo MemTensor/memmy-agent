@@ -782,17 +782,17 @@ export class MemoryRepository {
   }
 
   /** Validate evidence endpoints without hydrating their dialogue or vectors. */
-  visibleEvidenceIds(ids: readonly string[]): Set<string> {
+  visibleEvidenceIds(ids: readonly string[],local=false): Set<string> {
     if (!ids.length) return new Set();
     return new Set(this.db.prepare(`SELECT m.id FROM memories m
       LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
       WHERE m.id IN (SELECT value FROM json_each(?)) AND m.deleted_at IS NULL AND m.status!='deleted'
-      AND (${RAW_SOURCE_SQL} IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=m.user_id))`
+      AND (${RAW_SOURCE_SQL} IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${local?'(m.session_id IS NULL OR m.session_id=r.session_id)':'r.user_id=m.user_id'}))`
     ).pluck().all(toJson(ids)) as string[]);
   }
 
-  effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; l1MemoryIds: string[]}>): Map<string, Set<string>> {
-    return effectiveEpisodeMemoryIds(this.db, episodes);
+  effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; sessionId?:string; l1MemoryIds: string[]}>,local=false): Map<string, Set<string>> {
+    return effectiveEpisodeMemoryIds(this.db, episodes,local);
   }
 
   ownedEpisodeL1Ids(episode: { id: string; userId: string; l1MemoryIds: string[] }): string[] {
@@ -1688,7 +1688,7 @@ export class UserMemoryRepository {
   }
 
   listForPanel(input: {
-    userId: string;
+    userId?: string;
     status?: UserMemoryStatus;
     query?: string;
     sourceAgent?: string;
@@ -1705,20 +1705,20 @@ export class UserMemoryRepository {
     ).all(...params, input.limit, input.offset) as UserMemorySqlRow[]).map(userMemoryFromSql);
   }
 
-  panelMemberIds(input: {userId: string; status?: UserMemoryStatus; query?: string; sourceAgent?: string}): string[] {
+  panelMemberIds(input: {userId?: string; status?: UserMemoryStatus; query?: string; sourceAgent?: string}): string[] {
     const {where,params} = userMemoryPanelFilter(input);
     return this.db.prepare(`SELECT id FROM user_memories WHERE ${where} ORDER BY updated_at DESC,id DESC`).pluck().all(...params) as string[];
   }
 
-  getManyForPanel(ids: string[], userId: string): UserMemoryRecord[] {
+  getManyForPanel(ids: string[], userId?: string): UserMemoryRecord[] {
     const columns = DISPLAY_USER_MEMORY_COLUMNS.replace(" content,", " substr(content,1,180) AS content,");
-    const rows = this.db.prepare(`SELECT ${columns} FROM user_memories WHERE user_id=? AND deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`).all(userId,JSON.stringify(ids)) as UserMemorySqlRow[];
+    const rows = this.db.prepare(`SELECT ${columns} FROM user_memories WHERE ${userId===undefined?"1=1":"user_id=?"} AND deleted_at IS NULL AND status!='deleted' AND id IN (SELECT value FROM json_each(?))`).all(...(userId===undefined?[]:[userId]),JSON.stringify(ids)) as UserMemorySqlRow[];
     const byId = new Map(rows.map(row => [row.id, userMemoryFromSql(row)]));
     return ids.flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
   }
 
   countForPanel(input: {
-    userId: string;
+    userId?: string;
     status?: UserMemoryStatus;
     query?: string;
     sourceAgent?: string;
@@ -7120,13 +7120,13 @@ function userMemoryFromSql(row: UserMemorySqlRow): UserMemoryRecord {
 }
 
 function userMemoryPanelFilter(input: {
-  userId: string;
+  userId?: string;
   status?: UserMemoryStatus;
   query?: string;
   sourceAgent?: string;
 }): { where: string; params: Array<string> } {
-  const clauses = ["user_id = ?"];
-  const params = [input.userId];
+  const clauses = input.userId===undefined ? ["1=1"] : ["user_id = ?"];
+  const params:string[] = input.userId===undefined ? [] : [input.userId];
   if (input.status) {
     clauses.push("status = ?");
     params.push(input.status);

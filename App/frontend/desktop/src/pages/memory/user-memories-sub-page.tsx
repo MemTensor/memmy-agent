@@ -1,3 +1,4 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
 import { usePanelReadGuard } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
@@ -44,7 +45,7 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
     if (!item.metadata?.fullContentAvailable || !props.client) return;
     setDetailStatus({status: "loading"});
     try {
-      const result = await props.client.getMemory(item.id);
+      const result = await readMemoryPanelDetail(props.client,item.id);
       if (generation !== detailGeneration.current) return;
       setSelected({...result.item, summary: result.item.body}); setDetailStatus(null);
     } catch (error) { if (generation === detailGeneration.current) setDetailStatus({status: "error", message: toErrorMessage(error)}); }
