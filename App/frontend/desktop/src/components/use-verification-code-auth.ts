@@ -96,6 +96,10 @@ export function resolveAuthErrorMessage(
 
   const normalized = rawMessage.trim().toLowerCase();
 
+  if (error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429)) {
+    return t("login.error.rateLimited");
+  }
+
   if (
     channel === "email" &&
     error instanceof ApiRequestError &&
@@ -124,10 +128,13 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   const [feedback, setFeedback] = useState<AuthCodeFeedback | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interactionVersionRef = useRef(0);
+  const sendAttemptRef = useRef<number | null>(null);
+  const resendAllowedAtRef = useRef(0);
   const loginAttemptRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
+      interactionVersionRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
@@ -135,6 +142,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   }, []);
 
   function startCountdown(seconds: number) {
+    resendAllowedAtRef.current = Date.now() + seconds * 1000;
     setCountdown(seconds);
 
     if (timerRef.current) {
@@ -168,6 +176,8 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     setSending(false);
     setCountdown(0);
     setLoginPending(false);
+    sendAttemptRef.current = null;
+    resendAllowedAtRef.current = 0;
     loginAttemptRef.current = null;
     setFeedback(null);
 
@@ -185,13 +195,14 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       return;
     }
 
-    if (!clients || sending || countdown > 0) {
+    if (!clients || sendAttemptRef.current !== null || sending || countdown > 0 || Date.now() < resendAllowedAtRef.current) {
       return;
     }
 
     setSending(true);
     setFeedback(null);
     const interactionVersion = interactionVersionRef.current;
+    sendAttemptRef.current = interactionVersion;
     track({ name: "send_verification_code", params: { page_path: "login_flow", channel }, consentTier: "basic" });
 
     try {
@@ -206,9 +217,23 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      setFeedback({ text: resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"), tone: "error" });
+      const rateLimited = error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429);
+      // A lost response or server error cannot prove that the code was not sent.
+      const unconfirmed = error instanceof ApiRequestError
+        ? error.status >= 500
+        : error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name));
+      if (rateLimited || unconfirmed) {
+        startCountdown(fallbackResendSeconds);
+      }
+      setFeedback({
+        text: unconfirmed && !rateLimited
+          ? t("login.sendCodeUnconfirmed")
+          : resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"),
+        tone: "error"
+      });
     } finally {
       if (isCurrentInteraction(interactionVersion)) {
+        sendAttemptRef.current = null;
         setSending(false);
       }
     }

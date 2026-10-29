@@ -72,32 +72,48 @@ export interface CreateAccountServiceOptions {
 /** Creates create account service. */
 export function createAccountService(options: CreateAccountServiceOptions): AccountService {
   const now = options.now ?? (() => new Date());
+  const pendingCodeRequests = new Map<string, Promise<SendCodeResponse>>();
+
+  async function sendCodeRequest(input: SendCodeInput, key: string): Promise<SendCodeResponse> {
+    const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
+    const remaining = getRemainingResendSeconds(sentAt, now());
+    if (remaining > 0) {
+      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
+    }
+
+    if (input.channel === "email") {
+      await options.cloudClient.sendEmailCode({
+        email: requireAddress(input.email, "email"),
+        zhEnv: input.locale === "zh"
+      });
+    } else {
+      await options.cloudClient.sendPhoneCode({
+        phoneNumber: requireAddress(input.phoneNumber, "phoneNumber"),
+        zhEnv: input.locale === "zh"
+      });
+    }
+
+    // Only a confirmed delivery response may populate the successful-send record.
+    options.accountSessionRepository.markCodeSent(key, now().toISOString());
+    return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
+  }
 
   return {
     async sendCode(input) {
       assertExpectedAccountChannel(input.channel, options.accountChannel);
       const key = toCodeKey(input);
-      const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
-      const remaining = getRemainingResendSeconds(sentAt, now());
-      if (remaining > 0) {
-        return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
+      const pending = pendingCodeRequests.get(key);
+      if (pending) {
+        return pending;
       }
 
-      if (input.channel === "email") {
-        await options.cloudClient.sendEmailCode({
-          email: requireAddress(input.email, "email"),
-          zhEnv: input.locale === "zh"
-        });
-      } else {
-        await options.cloudClient.sendPhoneCode({
-          phoneNumber: requireAddress(input.phoneNumber, "phoneNumber"),
-          zhEnv: input.locale === "zh"
-        });
+      const request = sendCodeRequest(input, key);
+      pendingCodeRequests.set(key, request);
+      try {
+        return await request;
+      } finally {
+        pendingCodeRequests.delete(key);
       }
-
-      const sentAtNow = now().toISOString();
-      options.accountSessionRepository.markCodeSent(key, sentAtNow);
-      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
     },
 
     async verifyCode(input) {

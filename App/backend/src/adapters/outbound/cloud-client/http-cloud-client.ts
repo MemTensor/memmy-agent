@@ -69,6 +69,8 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+// Code delivery can include an upstream SMS/email provider round trip.
+const CLOUD_VERIFICATION_TIMEOUT_MS = 20_000;
 const CLOUD_SOCIAL_LOGIN_TIMEOUT_MS = 20_000;
 const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
 /** fun-asr uses the same asynchronous file job for chat clips and long recordings. */
@@ -114,7 +116,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendEmailCode(input: SendEmailCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendEmailVerification", {
+      await requestBoolean(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/sendEmailVerification", {
         body: {
           email: input.email,
           zhEnv: input.zhEnv
@@ -126,18 +128,19 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendPhoneCode(input: SendPhoneCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendPhoneVerification", {
+      await requestBoolean(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/sendPhoneVerification", {
         body: {
           phoneNumber: input.phoneNumber,
           zhEnv: input.zhEnv
         },
         lang: langFromZhEnv(input.zhEnv),
-        deviceId
+        deviceId,
+        toError: toCloudPhoneVerificationError
       });
     },
 
     async login(input: CloudLoginInput): Promise<CloudLoginResult> {
-      const data = await requestCloudData<Record<string, unknown>>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/login", {
+      const data = await requestCloudData<Record<string, unknown>>(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/login", {
         body: {
           ...(input.email ? { email: input.email } : {}),
           ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
@@ -147,7 +150,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         },
         lang: "zh",
         deviceId,
-        ...(input.email ? { toError: toCloudEmailVerificationError } : {})
+        toError: input.email ? toCloudEmailVerificationError : toCloudPhoneVerificationError
       });
 
       return toCloudLoginResult(data);
@@ -993,6 +996,13 @@ function toCloudEmailVerificationError(status: number, envelope: CloudEnvelope):
   const message = envelope.message || `Cloud email verification request failed with HTTP ${status}`;
 
   return Object.assign(new Error(message), { code });
+}
+
+/** Keeps phone HTTP/business throttling recognizable by the local API. */
+function toCloudPhoneVerificationError(status: number, envelope: CloudEnvelope): Error {
+  return Object.assign(new Error(envelope.message || `Cloud phone verification request failed with HTTP ${status}`), {
+    code: classifyCloudError(status, envelope.code)
+  });
 }
 
 /**

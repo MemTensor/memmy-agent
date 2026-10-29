@@ -28,6 +28,75 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("shares one pending code delivery for the same address", async () => {
+    let finish!: () => void;
+    let calls = 0;
+    let marks = 0;
+    const delivery = new Promise<void>((resolve) => { finish = resolve; });
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendPhoneCode() { calls += 1; await delivery; }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        markCodeSent() { marks += 1; }
+      }
+    });
+    const input = { channel: "phone", phoneNumber: "13800138000", locale: "zh" } as const;
+    const first = service.sendCode(input);
+    const second = service.sendCode(input);
+    finish();
+    expect(await Promise.all([first, second])).toEqual([
+      { ok: true, resendAfterSec: 60 }, { ok: true, resendAfterSec: 60 }
+    ]);
+    expect(calls).toBe(1);
+    expect(marks).toBe(1);
+  });
+
+  it("releases a failed pending delivery and never records it as sent", async () => {
+    let fail!: (error: Error) => void;
+    let calls = 0;
+    let marks = 0;
+    const delivery = new Promise<void>((_resolve, reject) => { fail = reject; });
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendEmailCode() { calls += 1; if (calls <= 1) await delivery; }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        markCodeSent() { marks += 1; }
+      }
+    });
+    const input = { channel: "email", email: "test@example.com", locale: "zh" } as const;
+    const first = service.sendCode(input);
+    const second = service.sendCode(input);
+    fail(new TypeError("fetch failed"));
+    const results = await Promise.allSettled([first, second]);
+    expect(results.every(result => result.status === "rejected")).toBe(true);
+    expect(marks).toBe(0);
+    await expect(service.sendCode(input)).resolves.toEqual({ ok: true, resendAfterSec: 60 });
+    expect(calls).toBe(2);
+    expect(marks).toBe(1);
+  });
+
+  it("allows different addresses to send independently", async () => {
+    const addresses: string[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendEmailCode(input) { addresses.push(input.email); }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+    await Promise.all([
+      service.sendCode({ channel: "email", email: "first@example.com", locale: "zh" }),
+      service.sendCode({ channel: "email", email: "second@example.com", locale: "en" })
+    ]);
+    expect(addresses).toEqual(["first@example.com", "second@example.com"]);
+  });
+
   it("keeps cloud grants across nickname edits but removes them on authoritative cloud refresh", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-account-grants-"));
     const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
