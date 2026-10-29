@@ -5,7 +5,7 @@ import {
   worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
-import type { LlmClient } from "../../model/types.js";
+import type { Embedder, LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
@@ -54,6 +54,7 @@ export interface EvolutionJobProcessorDeps {
   config: MemmyConfig;
   llm: LlmClient;
   skillLlm: LlmClient;
+  embedder: Embedder;
   traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null;
   namespaceIdFromMemory(memory: MemoryRow): string;
   buildMemory(input: Record<string, unknown>): MemoryRow;
@@ -120,6 +121,7 @@ export class EvolutionJobProcessor {
       repos: deps.repos,
       nowIso,
       get skillLlm() { return owner.deps.skillLlm; },
+      get embedder() { return owner.deps.embedder; },
       traceMeta: deps.traceMeta,
       projectIdFromMemory,
       profileIdFromMemory,
@@ -170,6 +172,7 @@ export class EvolutionJobProcessor {
       synthesizeDecisionRepairDraft: deps.synthesizeDecisionRepairDraft,
       isTraceEligibleForL2: this.policy.isTraceEligibleForL2.bind(this.policy),
       recordCandidatePoolTrace: this.policy.recordCandidatePoolTrace.bind(this.policy),
+      recomputePolicyStats: this.policy.recomputePolicyStats.bind(this.policy),
       repairEvidenceValueDiff: deps.repairEvidenceValueDiff
     });
     this.negativeExperience = new NegativeExperiencePipeline({
@@ -187,7 +190,7 @@ export class EvolutionJobProcessor {
     return this.policy.induceL2(job);
   }
 
-  associateL2(job: EvolutionJobRecord): void {
+  associateL2(job: EvolutionJobRecord): Promise<void> {
     return this.policy.associateL2(job);
   }
 
@@ -357,10 +360,11 @@ export class EvolutionJobProcessor {
         item.policy?.status === "active"
       )
       .map(({ memory, policy }) => {
+        const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
         const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
           l2MemoryId: policy.id,
           limit: 1000
-        }).map((link) => link.l1MemoryId));
+        }).filter((link) => !unifiedEvidence || link.relation === "supports").map((link) => link.l1MemoryId));
         const candidateTraceIds = Array.from(new Set([
           ...policy.sourceTraceIds,
           ...linkedTraceIds
@@ -369,7 +373,9 @@ export class EvolutionJobProcessor {
           .getMany(candidateTraceIds)
           .map((candidate) => this.deps.traceMeta(candidate))
           .filter((trace): trace is TraceMeta => Boolean(
-            trace && this.policy.isTraceEligibleForL2(trace)
+            trace && (unifiedEvidence
+              ? trace.userId === memory.userId && this.policy.isPolicyEvidenceValid(trace, policy)
+              : this.policy.isTraceEligibleForL2(trace))
           ));
         return { memory, policy, linkedTraceIds, validTraces };
       });
@@ -377,6 +383,7 @@ export class EvolutionJobProcessor {
 
   invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
     if (memory.memoryLayer === "L1") {
+      this.deps.repos.runtime.invalidateUnifiedL2Source(memory.id, memory.userId, at);
       const policyIds = Array.from(new Set(
         this.deps.repos.runtime
           .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })

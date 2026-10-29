@@ -434,6 +434,7 @@ export class MemoryService {
       get config() { return evolutionOwner.config; },
       get llm() { return evolutionOwner.llm; },
       get skillLlm() { return evolutionOwner.skillLlm; },
+      get embedder() { return evolutionOwner.embedder; },
       traceMeta: this.traceMeta.bind(this),
       namespaceIdFromMemory,
       buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
@@ -2798,6 +2799,14 @@ export class MemoryService {
       deletedAt: mode === "delete" ? at : rawTurn.deletedAt
     };
     this.repos.runtime.updateRawTurn(redacted);
+    // New extraction snapshots are source material too; withdraw them with their raw source.
+    for (let offset = 0; ; offset += 500) {
+      const page = this.repos.memories.list({ userId: rawTurn.userId, sessionId: rawTurn.sessionId, memoryLayer: "L1" }, 500, offset);
+      for (const memory of page) {
+        if (this.traceMeta(memory)?.rawTurnId === rawTurn.id) this.evolutionJobs.invalidateMemoryDependencies(memory, at);
+      }
+      if (page.length < 500) break;
+    }
     const changeSeq = this.repos.runtime.appendChange({
       memoryId: rawTurn.id,
       namespaceId: namespaceIdFromContext(rawTurnNamespace),

@@ -13,6 +13,7 @@ import type { ActualModelContext } from "../../src/contracts/index.js";
 // Suites for legacy capture/retrieval behavior keep that mode explicit as the
 // production default changes. Enabled/default-on suites use production config.
 export const LEGACY_TEST_CONFIG = { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm,
+  l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" as const },
   session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false } } };
 
 export function createMemoryServiceFixture(): {

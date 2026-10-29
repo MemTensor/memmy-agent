@@ -4979,8 +4979,11 @@ export class RuntimeRepository {
     now?: string;
     limit?: number;
   }): CandidatePoolRecord[] {
-    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)"];
+    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)",
+      "COALESCE(json_extract(evidence_json, '$.schemaVersion'), 0) != 2"];
     const params: SqlValue[] = [input.now ?? nowIso()];
+    // Preserve the legacy shared candidate pool. Unified candidates use the
+    // separately scoped listUnifiedL2Candidates method below.
     if (input.candidateKey) {
       clauses.push("candidate_key = ?");
       params.push(input.candidateKey);
@@ -4995,6 +4998,106 @@ export class RuntimeRepository {
       )
       .all(...params, input.limit ?? 1000) as SqlCandidatePoolRow[];
     return rows.map(candidatePoolFromSql);
+  }
+
+  getUnifiedL2Candidate(id: string, userId: string): CandidatePoolRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE id = ? AND user_id = ? AND json_extract(evidence_json, '$.schemaVersion') = 2`
+    ).get(id, userId) as SqlCandidatePoolRow | undefined;
+    return row ? candidatePoolFromSql(row) : undefined;
+  }
+
+  /** Keep a completed candidate completed on replay, and reopen it only for changed source evidence. */
+  upsertUnifiedL2Candidate(input: Omit<CandidatePoolRecord, "status" | "expiresAt">): void {
+    this.db.prepare(
+      `INSERT INTO l2_candidate_pool (
+        id, user_id, session_id, source_memory_id, candidate_key, candidate_value,
+        score, status, evidence_json, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL)
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        candidate_key = excluded.candidate_key,
+        candidate_value = excluded.candidate_value,
+        score = excluded.score,
+        status = CASE
+          WHEN json_extract(l2_candidate_pool.evidence_json, '$.sourceVersion') =
+               json_extract(excluded.evidence_json, '$.sourceVersion')
+          THEN l2_candidate_pool.status ELSE 'pending' END,
+        evidence_json = excluded.evidence_json,
+        updated_at = excluded.updated_at,
+        expires_at = NULL
+      WHERE l2_candidate_pool.user_id = excluded.user_id
+        AND l2_candidate_pool.source_memory_id = excluded.source_memory_id`
+    ).run(input.id, input.userId, input.sessionId ?? null, input.sourceMemoryId,
+      input.candidateKey, input.candidateValue, input.score, toJson(input.evidence),
+      input.createdAt, input.updatedAt);
+  }
+
+  listUnifiedL2Candidates(input: {
+    userId: string;
+    episodeId: string | null;
+    limit?: number;
+  }): CandidatePoolRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.episodeId') IS ?
+       ORDER BY created_at ASC, id ASC LIMIT ?`
+    ).all(input.userId, input.episodeId, input.limit ?? -1) as SqlCandidatePoolRow[];
+    return rows.map(candidatePoolFromSql);
+  }
+
+  markUnifiedL2CandidateProcessed(input: {
+    id: string;
+    userId: string;
+    sourceVersion: string;
+    operations: unknown;
+    at: string;
+  }): boolean {
+    const result = this.db.prepare(
+      `UPDATE l2_candidate_pool
+       SET status = 'promoted', updated_at = ?,
+           evidence_json = json_set(evidence_json, '$.processedAt', ?, '$.operations', json(?))
+       WHERE id = ? AND user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.sourceVersion') = ?`
+    ).run(input.at, input.at, toJson(input.operations ?? null), input.id, input.userId, input.sourceVersion);
+    return result.changes === 1;
+  }
+
+  /** Remove withdrawn source text while retaining committed-operation idempotency tombstones. */
+  invalidateUnifiedL2Source(sourceMemoryId: string, userId: string, at = nowIso()): {
+    candidates: number;
+    snapshots: number;
+    operations: number;
+  } {
+    return this.db.transaction(() => {
+      const candidates = this.db.prepare(
+        `DELETE FROM l2_candidate_pool WHERE source_memory_id = ? AND user_id = ?
+         AND json_extract(evidence_json, '$.schemaVersion') = 2`
+      ).run(sourceMemoryId, userId).changes;
+      const snapshots = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.input', '$.operations'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE key LIKE 'l2.extract.snapshot.v1:%'
+           AND json_extract(json_extract(value_json, '$.scope'), '$[0]') = ?
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.input.L1_RECORDS') AS source
+                       WHERE json_extract(source.value, '$.id') = ?)`
+      ).run(at, at, userId, sourceMemoryId).changes;
+      const operations = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.operation'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE key LIKE 'l2.extract.operation.v1:%'
+           AND EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ?)
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.operation.l1_ids') AS source
+                       WHERE source.value = ?)`
+      ).run(at, at, sourceMemoryId, userId, sourceMemoryId).changes;
+      return { candidates, snapshots, operations };
+    })();
   }
 
   pruneCandidatePool(now = nowIso()): number {

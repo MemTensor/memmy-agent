@@ -73,6 +73,8 @@ export interface TraceMemoryMeta {
 }
 
 export interface PolicyMemoryMeta {
+  schemaVersion?: number;
+  lessonType?: "principle" | "local_procedure" | "check" | "troubleshooting";
   id: string;
   memory: MemoryRow;
   title: string;
@@ -3308,6 +3310,8 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
   if (!policy) return null;
   const decisionGuidance = recordField(policy, "decision_guidance");
   return {
+    schemaVersion: numberField(policy, "schema_version"),
+    lessonType: statusField(policy, "lesson_type", ["principle", "local_procedure", "check", "troubleshooting"]),
     id: memory.id,
     memory,
     title: stringField(policy, "title") ?? memory.memoryKey ?? firstLine(memory.memoryValue),
@@ -3333,14 +3337,14 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
       "repair_instruction",
       "preference",
       "verifier_feedback"
-    ]) ?? "success_pattern",
+    ]) ?? (numberField(policy, "schema_version") === 2 ? "verifier_feedback" : "success_pattern"),
     evidencePolarity: statusField(policy, "evidence_polarity", [
       "positive",
       "negative",
       "mixed",
       "neutral"
-    ]) ?? "positive",
-    skillEligible: booleanField(policy, "skill_eligible") ?? true,
+    ]) ?? (numberField(policy, "schema_version") === 2 ? "neutral" : "positive"),
+    skillEligible: booleanField(policy, "skill_eligible") ?? numberField(policy, "schema_version") !== 2,
     signature: stringField(policy, "signature") ?? "_|_|_|_",
     sourceEpisodeIds: stringArrayField(policy, "source_episode_ids"),
     sourceTraceIds: stringArrayField(policy, "source_trace_ids"),
@@ -3381,6 +3385,13 @@ export function policyIsEligibleForDownstream(
 }
 
 export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
+  if (policy.schemaVersion === 2) {
+    const raw = getInternal<Record<string, unknown>>(policy.memory, "policy");
+    return raw?.generation_method !== "rule_fallback" &&
+      Boolean(policy.lessonType && policy.sourceTraceIds.length && policy.procedure.trim()) &&
+      (policy.lessonType !== "troubleshooting" || Boolean(policy.trigger.trim())) &&
+      (policy.status === "active" || policy.status === "candidate");
+  }
   if (policy.experienceType !== "failure_avoidance" && policy.evidencePolarity !== "negative") {
     return true;
   }
@@ -3823,6 +3834,17 @@ export function packL2InductionTraces(
     budget -= block.length;
   }
   return `${header}\n${blocks.join("\n")}`;
+}
+
+/** Bounded dialogue for unified L2; retain more explanation than legacy induction. */
+export function packL2TraceContext(trace: TraceMemoryMeta | null) {
+  return {
+    user_text: truncateText(trace?.userText ?? "", 600),
+    agent_text: truncateText(trace?.agentText ?? "", 1_200),
+    reflection: truncateText(trace?.reflection ?? "", 300),
+    // The aggregate cap also bounds unusually long tool names.
+    tool_calls: truncateText(formatTraceTools(trace?.toolCalls), 600)
+  };
 }
 
 function formatTraceTools(calls: readonly ToolCallPayload[] | undefined): string {

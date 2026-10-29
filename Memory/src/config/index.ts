@@ -186,6 +186,11 @@ export interface AlgorithmConfig {
     implicitConfidenceCap: number;
   };
   l2Induction: {
+    mode: "unified" | "legacy";
+    recallCosine: number;
+    recallTopK: number;
+    maxInputChars: number;
+    maxOutputTokens: number;
     useLlm: boolean;
     minEpisodesForInduction: number;
     minEpisodesForActivation: number;
@@ -452,6 +457,11 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       implicitConfidenceCap: 0.65
     },
     l2Induction: {
+      mode: "unified",
+      recallCosine: 0.55,
+      recallTopK: 5,
+      maxInputChars: 48_000,
+      maxOutputTokens: 8_192,
       useLlm: true,
       minEpisodesForInduction: 1,
       minEpisodesForActivation: 3,
@@ -1259,6 +1269,11 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       )
     },
     l2Induction: {
+      mode: l2.mode === "legacy" ? "legacy" : "unified",
+      recallCosine: Math.max(-1, Math.min(1, numberValue(l2.recallCosine, 0.55))),
+      recallTopK: Math.max(1, Math.floor(numberValue(l2.recallTopK, 5))),
+      maxInputChars: Math.max(1_000, numberValue(l2.maxInputChars, 48_000)),
+      maxOutputTokens: Math.max(256, numberValue(l2.maxOutputTokens, 8_192)),
       useLlm: booleanValue(l2.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.useLlm),
       minEpisodesForInduction: numberValue(l2.minEpisodesForInduction, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForInduction),
       minEpisodesForActivation: numberValue(l2.minEpisodesForActivation, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForActivation),
