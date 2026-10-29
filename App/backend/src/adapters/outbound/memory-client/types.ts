@@ -12,6 +12,8 @@ import type {
   CloseSessionOutput,
   DeleteMemoryInput,
   DeleteMemoryOutput,
+  EmbeddingInferenceInput,
+  EmbeddingInferenceOutput,
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
@@ -91,6 +93,7 @@ export interface MemoryClient {
   completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
+  embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;

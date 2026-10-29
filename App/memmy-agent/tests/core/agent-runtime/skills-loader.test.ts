@@ -311,13 +311,13 @@ describe("SkillsLoader disabled skills", () => {
   it("hides Office skills from the builtin surface but keeps same-named workspace skills", () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     const { workspace, builtin } = makeWorkspace();
-    for (const name of ["docx", "pptx", "xlsx"]) {
+    for (const name of ["docx", "pdf", "pptx", "xlsx"]) {
       writeSkill(builtin, name, { metadataJson: { always: true }, body: `# builtin ${name}` });
     }
     writeSkill(builtin, "computer-history", { body: "# Computer History" });
     const loader = new SkillsLoader(workspace, builtin);
 
-    for (const name of ["docx", "pptx", "xlsx"]) {
+    for (const name of ["docx", "pdf", "pptx", "xlsx"]) {
       expect(loader.listSkills(false).map((entry) => entry.name)).not.toContain(name);
       expect(loader.loadSkill(name)).toBeNull();
       expect(loader.getAlwaysSkills()).not.toContain(name);

@@ -7,9 +7,17 @@
  */
 import type { MessageKey } from "../i18n/messages.js";
 import type { AgentImageMime } from "../lib/agent-image-encode.js";
-import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
+import type { MemmyAgentMediaAttachment, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 export type ComposerDraftValue = string | ((currentValue: string) => string);
+
+export interface ComposerContextReference {
+  kind: "path";
+  id: string;
+  label: string;
+  fileCount?: number;
+  totalBytes?: number;
+}
 
 export interface PendingAttachmentBase {
   id: string;
@@ -19,6 +27,8 @@ export interface PendingAttachmentBase {
   status: "encoding" | "ready" | "error";
   originalBytes: number;
   errorKey?: MessageKey;
+  /** The queued file already exists in the gateway media store. */
+  reusedMedia?: MemmyAgentMediaAttachment & { path: string };
 }
 
 export interface PendingImage extends PendingAttachmentBase {
@@ -33,6 +43,7 @@ export interface PendingImage extends PendingAttachmentBase {
 export interface PendingFileAttachment extends PendingAttachmentBase {
   kind: "file";
   status: "ready" | "error";
+  localPath?: string;
   uploadBlob?: Blob;
   uploadMime?: UploadedAgentMedia["mime"];
   uploadBytes?: number;

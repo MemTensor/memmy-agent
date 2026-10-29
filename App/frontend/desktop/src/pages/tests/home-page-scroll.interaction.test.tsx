@@ -86,6 +86,44 @@ describe("HomePage conversation scrolling", () => {
     expect(findScrollToLatestButton()).toBeNull();
   });
 
+  it("keeps the conversation shell blank while a switched task's history loads", () => {
+    let dispatch!: ReturnType<typeof useAppState>["dispatch"];
+    function CaptureDispatch() {
+      dispatch = useAppState().dispatch;
+      return null;
+    }
+    act(() => root.render(
+      <AppProviders>
+        <AgentRuntimeBridge>
+          <CaptureDispatch />
+          <HomePage />
+        </AgentRuntimeBridge>
+      </AppProviders>
+    ));
+
+    act(() => {
+      dispatch(agentActions.historyLoading("websocket:first", "first", "load-first"));
+      dispatch(agentActions.historyLoaded({
+        schemaVersion: 1, sessionKey: "websocket:first",
+        messages: [{ role: "user", content: "第一个任务" }]
+      }, "load-first"));
+    });
+    expect(container.textContent).toContain("第一个任务");
+
+    act(() => dispatch(agentActions.historyLoading("websocket:second", "second", "load-second")));
+    expect(container.querySelector(".home-empty-screen")).toBeNull();
+    expect(container.querySelector('.agent-conversation-panel[aria-busy="true"]')).not.toBeNull();
+    expect(container.querySelector(".agent-conversation-composer")).toBeNull();
+    expect(container.textContent).not.toContain("我能为你做什么？");
+
+    act(() => dispatch(agentActions.historyLoaded({
+      schemaVersion: 1, sessionKey: "websocket:second",
+      messages: [{ role: "user", content: "第二个任务" }]
+    }, "load-second")));
+    expect(container.querySelector('.agent-conversation-panel[aria-busy="true"]')).toBeNull();
+    expect(container.textContent).toContain("第二个任务");
+  });
+
   it("tracks the real composer overlay height without pulling an actively reading user down", () => {
     let overlayHeight = 180;
     let resizeCallback: ResizeObserverCallback | null = null;

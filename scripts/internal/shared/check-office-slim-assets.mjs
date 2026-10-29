@@ -15,7 +15,7 @@ try {
 if (!hasDist) throw new Error(`Runtime dist directory is missing: ${root}`);
 
 const forbidden = [
-  "dist/skills/docx", "dist/skills/pptx", "dist/skills/xlsx",
+  "dist/skills/docx", "dist/skills/pdf", "dist/skills/pptx", "dist/skills/xlsx",
   "dist/extra-dependencies/office-rendering", "dist/extra-dependencies/docx-rendering",
 ];
 const present = forbidden.filter((relative) => {

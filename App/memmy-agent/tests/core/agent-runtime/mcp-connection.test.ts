@@ -1,6 +1,7 @@
+import { NATIVE_APP_ACCESS_REQUEST, NATIVE_APP_ACCESS_RESULT } from "@memmy/local-api-contracts";
 import { macPermissionSettingsGuide } from "../../../src/tools/computer-use/mac-permission-settings.js";
 import fs from "node:fs";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -148,12 +149,113 @@ afterEach(() => {
 });
 
 describe("MCP connection helpers", () => {
-  it.runIf(process.platform === 'darwin')('asks before controlling an app and skips the prompt after always allow', async () => {
+  it("refreshes an already connected plugin catalog after install and disable without closing the transport", async () => {
+    const root = tempRoot();
+    setConfigPath(path.join(root, "config.yaml"));
+    const servers = { plugins: { command: "plugin-bridge" } };
+    saveConfig(new Config({ tools: { mcpServers: servers } }));
+    const names: string[] = [];
+    const session = fakeSession(names);
+    const closed: string[] = [];
+    setMcpRuntimeForTest(runtimeFor({ "plugin-bridge": session }, { closed }) as any);
+    const registry = new ToolRegistry();
+    const state = { mcpServers: servers, mcpStacks: await connectMcpServers(servers, registry) };
+    expect(registry.toolNames).toEqual([]);
+
+    names.push("plugin_session-start", "plugin_material-collect");
+    await expect(reloadServers(state, registry)).resolves.toMatchObject({ ok: true, refreshed: ["plugins"] });
+    expect(registry.has("mcp_plugins_plugin_session-start")).toBe(true);
+    expect(registry.has("mcp_plugins_plugin_material-collect")).toBe(true);
+    const stack = state.mcpStacks.plugins;
+    session.listTools = async () => { throw new Error("temporary discovery outage"); };
+    await expect(reloadServers(state, registry)).resolves.toMatchObject({ ok: false, failed: ["plugins"] });
+    expect(registry.has("mcp_plugins_plugin_session-start")).toBe(true);
+    session.listTools = fakeSession(names).listTools;
+    names.length = 0;
+    await expect(reloadServers(state, registry)).resolves.toMatchObject({ ok: true, refreshed: ["plugins"] });
+    expect(registry.toolNames).toEqual([]);
+    expect(state.mcpStacks.plugins).toBe(stack);
+    expect(closed).toEqual([]);
+    await stack!.aclose();
+  });
+  it("refreshes plugin tools in the current registry after runtime initialization replaces the connection registry", async () => {
+    const root = tempRoot();
+    setConfigPath(path.join(root, "config.yaml"));
+    const servers = { plugins: { command: "plugin-bridge" } };
+    saveConfig(new Config({ tools: { mcpServers: servers } }));
+    const names = ["read_plugin_skill"];
+    const closed: string[] = [];
+    setMcpRuntimeForTest(runtimeFor({ "plugin-bridge": fakeSession(names) }, { closed }) as any);
+    const initial = new ToolRegistry();
+    const state = { mcpServers: servers, mcpStacks: await connectMcpServers(servers, initial) };
+    // AgentLoop replaces this registry when adding browser tools during startup.
+    const current = new ToolRegistry();
+    for (const [, tool] of initial) current.register(tool);
+    expect(current.getDefinitions()).toHaveLength(1); // populate its schema cache
+    const connection = state.mcpStacks.plugins;
+    names.push("plugin_office_status");
+    await expect(reloadServers(state, current)).resolves.toMatchObject({ ok: true, tool_counts: { plugins: 2 } });
+    expect(current.has("mcp_plugins_plugin_office_status")).toBe(true);
+    expect(current.getDefinitions()).toHaveLength(2);
+    names.splice(1);
+    await reloadServers(state, current);
+    expect(current.has("mcp_plugins_plugin_office_status")).toBe(false);
+    expect(state.mcpStacks.plugins).toBe(connection);
+    expect(closed).toEqual([]);
+    await connection!.aclose();
+  });
+  it("refreshes plugin tools into the replacement live registry", async () => {
+    const root = tempRoot();
+    setConfigPath(path.join(root, "config.yaml"));
+    const servers = { plugins: { command: "plugin-bridge" } };
+    saveConfig(new Config({ tools: { mcpServers: servers } }));
+    const names: string[] = [];
+    const session = fakeSession(names);
+    setMcpRuntimeForTest(runtimeFor({ "plugin-bridge": session }) as any);
+    const startupRegistry = new ToolRegistry();
+    const state = { mcpServers: servers, mcpStacks: await connectMcpServers(servers, startupRegistry) };
+    const liveRegistry = new ToolRegistry();
+
+    names.push("plugin_session-start", "plugin_material-collect");
+    await expect(reloadServers(state, liveRegistry)).resolves.toMatchObject({
+      ok: true,
+      refreshed: ["plugins"],
+      tool_counts: { plugins: 2 },
+    });
+    expect(liveRegistry.has("mcp_plugins_plugin_session-start")).toBe(true);
+    expect(liveRegistry.has("mcp_plugins_plugin_material-collect")).toBe(true);
+    expect(startupRegistry.toolNames).toEqual([]);
+
+    await state.mcpStacks.plugins!.aclose();
+  });
+  it.runIf(process.platform === 'darwin')('uses the private Desktop guide instead of doctor through the real MCP registration', async () => {
+    vi.stubEnv('MEMMY_DESKTOP_MANAGED_GATEWAY', '1');
     const prepare = vi.spyOn(desktopOnboardingClient, 'prepare').mockResolvedValue({ app: 'com.example.Memmy', pid: 42 });
     const guide = vi.spyOn(desktopOnboardingClient, 'guide').mockResolvedValue(false);
-    const doctor = vi.spyOn(permissionChecks, 'nativePermissionDoctor');
+    const doctorProbe = vi.fn(async () => ({ state: 'unknown' as const }));
+    const doctor = vi.spyOn(permissionChecks, 'nativePermissionDoctor').mockReturnValue(doctorProbe);
     const pause = vi.spyOn(nativeLifecycle, 'stopOwnedNativeAgent').mockResolvedValue(undefined);
     const allowed = vi.spyOn(nativeAppApprovalStore, 'isAllowed').mockReturnValue(false);
+    // Vitest's fork has an IPC parent too. Model the Desktop approval reply
+    // explicitly instead of sending the request to the test runner and waiting.
+    const desktopMessages = new EventEmitter();
+    const accessRequests: Array<Record<string, unknown>> = [];
+    const desktopProcess = Object.create(process) as NodeJS.Process;
+    Object.defineProperties(desktopProcess, {
+      connected: { value: true },
+      on: { value: desktopMessages.on.bind(desktopMessages) },
+      removeListener: { value: desktopMessages.removeListener.bind(desktopMessages) },
+      send: { value: vi.fn((message: Record<string, unknown>, callback?: (error: Error | null) => void) => {
+        if (message.type !== NATIVE_APP_ACCESS_REQUEST) throw new Error('Unexpected Desktop IPC fixture request');
+        accessRequests.push(message);
+        queueMicrotask(() => desktopMessages.emit('message', {
+          type: NATIVE_APP_ACCESS_RESULT, requestId: message.requestId, decision: 'deny',
+        }));
+        callback?.(null);
+        return true;
+      }) },
+    });
+    vi.stubGlobal('process', desktopProcess);
     const binary = bundledComputerUseBinary();
     const session = { ...fakeSession([...OCU_TOOLS]), ping: async () => {}, callTool: vi.fn().mockImplementation(async (name: string) =>
       name === 'list_apps'
@@ -170,6 +272,9 @@ describe("MCP connection helpers", () => {
       const denied = await tool.execute({ app: 'Notes' }, { stopTurn: stop });
       expect(denied).toContain('was not allowed to use this app');
       expect(stop).toHaveBeenCalledOnce();
+      expect(accessRequests).toEqual([expect.objectContaining({
+        type: NATIVE_APP_ACCESS_REQUEST, platform: 'darwin', appId: 'com.apple.Notes',
+      })]);
       expect(session.callTool).toHaveBeenCalledWith('list_apps', {}, 30);
       expect(session.callTool).not.toHaveBeenCalledWith('get_app_state', expect.anything(), 30);
       allowed.mockReturnValue(true);
@@ -178,9 +283,13 @@ describe("MCP connection helpers", () => {
       (tool as any).setContext(new RequestContext({ messageId: 'desktop-allowed', sessionKey: 'approval-test', channel: 'webui', chatId: 'chat' }));
       const result = await tool.execute({ app: 'Notes' }, { stopTurn: stop });
       expect(result).toContain('Accessibility permission is required.');
+      expect(accessRequests).toHaveLength(1);
+      expect(desktopMessages.listenerCount('message')).toBe(0);
+      expect(guide).toHaveBeenCalledOnce();
+      expect(doctorProbe).not.toHaveBeenCalled();
       expect(session.callTool).toHaveBeenCalledWith('get_app_state', { app: 'com.apple.Notes' }, 30);
     } finally {
-      await stacks.memmy_computer_use?.aclose(); prepare.mockRestore(); guide.mockRestore(); doctor.mockRestore(); pause.mockRestore(); allowed.mockRestore(); vi.unstubAllEnvs();
+      await stacks.memmy_computer_use?.aclose(); prepare.mockRestore(); guide.mockRestore(); doctor.mockRestore(); pause.mockRestore(); allowed.mockRestore(); vi.unstubAllEnvs(); vi.unstubAllGlobals();
     }
   });
   it.runIf(process.platform === "darwin")("preserves explicit custom OCU launchers without inventing a doctor contract", async () => {
@@ -522,6 +631,44 @@ describe("MCP connection helpers", () => {
     expect(loop.tools.has("mcp_browserbase_navigate")).toBe(false);
     expect((loop as any).mcpStacks.browserbase).toBeUndefined();
     expect(closed).toEqual(["browserbase-mcp"]);
+  });
+
+  it("rediscovers plugin tools with unchanged config while preserving other live connections", async () => {
+    const root = tempRoot();
+    setConfigPath(path.join(root, "config.yaml"));
+    const config = new Config({ tools: { mcpServers: {
+      plugins: { command: "plugin-bridge" },
+      other: { command: "other-mcp" },
+    } } });
+    saveConfig(config);
+    const closed: string[] = [];
+    const sessions = { "plugin-bridge": fakeSession([]), "other-mcp": fakeSession(["read"]) };
+    setMcpRuntimeForTest(runtimeFor(sessions, { closed }) as any);
+    const loop = makeLoop(root, {});
+    try {
+      await reloadServers(loop as any, loop.tools);
+      expect(loop.tools.toolNames.filter((name) => name.startsWith("mcp_plugins_"))).toEqual([]);
+      const otherStack = (loop as any).mcpStacks.other;
+      sessions["plugin-bridge"].listTools = fakeSession(["review_create_task", "review_get_status"]).listTools;
+      const installed = await reloadServers(loop as any, loop.tools);
+      expect(installed).toMatchObject({ ok: true, changed: [], refreshed: ["plugins"], tool_counts: { plugins: 2, other: 1 } });
+      expect(loop.tools.has("mcp_plugins_review_create_task")).toBe(true);
+      expect(loop.tools.has("mcp_plugins_review_get_status")).toBe(true);
+      expect((loop as any).mcpStacks.other).toBe(otherStack);
+      expect(closed).toEqual([]);
+
+      sessions["plugin-bridge"].listTools = fakeSession([]).listTools;
+      await reloadServers(loop as any, loop.tools);
+      expect(loop.tools.has("mcp_plugins_review_create_task")).toBe(false);
+      expect(loop.tools.has("mcp_plugins_review_get_status")).toBe(false);
+      expect(loop.tools.has("mcp_other_read")).toBe(true);
+
+      sessions["plugin-bridge"].listTools = fakeSession(["review_create_task"]).listTools;
+      await reloadServers(loop as any, loop.tools);
+      expect(loop.tools.has("mcp_plugins_review_create_task")).toBe(true);
+    } finally {
+      await loop.closeMcp();
+    }
   });
 
   it("routes MCP reload requests through runtime control without restart", async () => {

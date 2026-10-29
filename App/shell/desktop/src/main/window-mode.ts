@@ -52,7 +52,16 @@ export interface FullWindowWorkAreaSize {
 export const fullWindowOptions = {
   width: 1200,
   height: 780,
-  minWidth: 980,
+  /*
+   * Keeps a narrowed window wide enough for the chat and the workspace preview
+   * to share the row.
+   *
+   * The preview pane caps its own width so the chat keeps a minimum share of the
+   * row (see the shared-row fit in pages/sidebar-resize.tsx), which handles the
+   * narrow case on its own; this floor is the second half of the guarantee, so a
+   * fully-narrowed window still lands beside the preview rather than under it.
+   */
+  minWidth: 1024,
   minHeight: 640,
   title: "Memmy",
   backgroundColor: "#f1f8f7"

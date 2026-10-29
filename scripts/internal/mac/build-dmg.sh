@@ -1173,6 +1173,9 @@ package_step_start "Verify packaged runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_DIR"
+package_step_start "Prepare legacy plugin migration state"
+node "$ROOT_DIR/scripts/internal/shared/prepare-plugin-migration-state.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins"
 package_step_start "Prepare bundled embedding model"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"

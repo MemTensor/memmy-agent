@@ -1204,6 +1204,7 @@ export class MemoryService {
     };
     return {
       ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
+      status: "ready",
       serviceVersion: PROJECT_VERSION,
       ...(MEMORY_RUNTIME_BUILD_ID ? { buildId: MEMORY_RUNTIME_BUILD_ID } : {}),
       protocolVersion: MEMORY_PROTOCOL_VERSION,
@@ -1215,6 +1216,7 @@ export class MemoryService {
       storage: {
         ...backend,
         schemaVersion: String(schema.version),
+        targetSchemaVersion: schema.version,
         ready: schema.version > 0,
         lastMigrationId: schema.lastMigrationId
       },
@@ -1250,6 +1252,29 @@ export class MemoryService {
           }
         : {}),
       serverTime: nowIso()
+    };
+  }
+
+  async embedTexts(
+    texts: string[],
+    role: "query" | "document" = "document"
+  ): Promise<{
+    embeddings: number[][];
+    model: { provider: string; model: string; mode: "cloud" | "local" | "custom"; dimension: number };
+  }> {
+    const embeddings = await this.embedder.embed(texts, role);
+    const dimension = embeddings[0]?.length ?? 0;
+    if (dimension < 1 || embeddings.some((embedding) => embedding.length !== dimension)) {
+      throw new MemoryServiceError("internal", "embedding provider returned inconsistent vector dimensions");
+    }
+    return {
+      embeddings,
+      model: {
+        provider: this.embedder.config.provider,
+        model: this.embedder.config.model || this.embedder.config.provider,
+        mode: this.config.embedding.mode,
+        dimension
+      }
     };
   }
 

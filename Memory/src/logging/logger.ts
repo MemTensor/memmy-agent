@@ -237,8 +237,12 @@ function messageForEvent(component: string, event: string, fields: MemoryLogFiel
       return `Configuration reloaded${details(fields, ["changed", "requiresRestart", "restartFailedProcessing"])}${configDetails(fields)}`;
     case "service.starting":
       return `Memory service starting${details(fields, ["host", "port", "mode", "storageBackend", "sqlitePath", "configPath"])}`;
+    case "service.startup_stage":
+      return `Memory service startup stage${details(fields, ["phase", "elapsedMs"])}`;
     case "service.listening":
       return `Memory service listening${details(fields, ["url", "mode", "storageBackend"])}`;
+    case "storage.startup_stage":
+      return `Memory storage startup stage${details(fields, ["phase", "elapsedMs", "currentSchemaVersion", "targetSchemaVersion"])}`;
     case "service.fatal":
       return `Memory service encountered a fatal error${details(fields, ["errorMessage"])}`;
     case "config.endpoint_write_failed":

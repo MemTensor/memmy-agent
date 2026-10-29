@@ -1,0 +1,61 @@
+import { describe, expect, it, vi } from "vitest";
+import { createArtifactDeliveryContinuation, publishedFilesFromPluginResult } from "../../../src/core/agent-runtime/artifact-delivery-continuation.js";
+import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
+import { LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
+
+describe("plugin file inventory", () => {
+  it("reads published files from MCP text and structured-content blocks", () => {
+    const content = JSON.stringify({ publishedFiles: [{ name: "报告.docx", path: "/workspace/报告.docx" }] });
+    expect(publishedFilesFromPluginResult([
+      { type: "text", text: content },
+      { type: "text", text: `[structuredContent]\n${content}` }
+    ])).toEqual([{ name: "报告.docx", path: "/workspace/报告.docx" }]);
+  });
+
+  it("reminds once about undelivered files without automatically sending every output", () => {
+    const files = { role: "tool", name: "mcp_plugins_plugin_review_render_12345678",
+      content: JSON.stringify({ publishedFiles: [
+        { name: "review.pdf", path: "/workspace/review.pdf" },
+        { name: "memmy-logo.png", path: "/workspace/memmy-logo.png" },
+      ] }) };
+    const messages = [{ role: "user", content: "生成综述" }, files];
+    const continuation = createArtifactDeliveryContinuation(() => []);
+    const reminder = continuation({ finalContent: "全部产物已交付", messages });
+    expect(reminder).toContain("message(media=[absolute paths])");
+    expect(reminder).toContain("choose the files needed for that outcome");
+    expect(reminder).not.toContain("memmy-logo.png");
+    expect(continuation({ finalContent: "已完成", messages })).toBeNull();
+    expect(createArtifactDeliveryContinuation(() => ["/workspace/review.pdf"])(
+      { finalContent: "已交付", messages }
+    )).toBeNull();
+  });
+
+  it("continues the original turn after a false delivery claim and lets the Agent attach a file", async () => {
+    const delivered: string[] = [];
+    const resultText = JSON.stringify({ publishedFiles: [{ name: "review.pdf", path: "/workspace/review.pdf" }] });
+    let step = 0;
+    const provider: any = { getDefaultModel: () => "test", chatWithRetry: vi.fn(async () => {
+      step++;
+      if (step === 1) return new LLMResponse({ content: null, toolCalls: [new ToolCallRequest({
+        id: "render", name: "mcp_plugins_plugin_review_render_12345678", arguments: {}
+      })] });
+      if (step === 2) return new LLMResponse({ content: "全部产物已交付" });
+      if (step === 3) return new LLMResponse({ content: null, toolCalls: [new ToolCallRequest({
+        id: "send", name: "message", arguments: { content: "报告", media: ["/workspace/review.pdf"] }
+      })] });
+      return new LLMResponse({ content: "报告已附上" });
+    }) };
+    const tools: any = { getDefinitions: () => [], execute: vi.fn(async (name: string) => {
+      if (name === "message") { delivered.push("/workspace/review.pdf"); return "sent"; }
+      return resultText;
+    }) };
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "生成综述" }], provider, tools,
+      finalResponseContinuation: createArtifactDeliveryContinuation(() => delivered),
+    }));
+    expect(result.finalContent).toBe("报告已附上");
+    expect(tools.execute.mock.calls.map((call: any[]) => call[0])).toEqual([
+      "mcp_plugins_plugin_review_render_12345678", "message"
+    ]);
+  });
+});

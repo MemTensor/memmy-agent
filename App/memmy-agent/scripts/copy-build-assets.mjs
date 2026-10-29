@@ -7,9 +7,9 @@ import { writeBrowserHistorySensor } from "./generate-browser-history-sensor.mjs
 // Both desktop packages ship the same passive sensor as the Agent's History source.
 await writeBrowserHistorySensor();
 
-// Keep Office source available for future work, but do not ship or advertise
-// its built-in skills in the v1.1.6 Computer Use candidate.
-const excludedOfficeSkills = ["docx", "pptx", "xlsx"];
+// Keep source resources for plugins/office, which packages them independently.
+// Default App builds must not ship or advertise these built-in format skills.
+const excludedOfficeSkills = ["docx", "pdf", "pptx", "xlsx"];
 const excludedSkillRoots = new Set(excludedOfficeSkills.map((skill) => path.resolve("src", "skills", skill)));
 
 const staleDirectories = [

@@ -1,3 +1,5 @@
+import { PluginSkillRefSchema, type PluginSkillRef } from "@memmy/local-api-contracts";
+import { createHash } from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -21,7 +23,6 @@ import { probeNativePermissions, guideNativePermissions } from "../../../tools/c
 import { stopOwnedNativeAgent } from "../../../tools/computer-use/native-agent-lifecycle.js";
 import { ToolRegistry } from "./registry.js";
 import { storeToolImageArtifact } from "../../../utils/artifacts.js";
-import { legacyComputerUseToolName, memmyComputerUseToolName } from "../../../config/computer-use-server.js";
 import { isManagedOcuConfig, managedOcuEnvironment, openComputerUseEnvironment, resolveOpenComputerUseCommand } from "../../../tools/computer-use/open-computer-use-binary.js";
 
 import { computerUsePermissionError } from "../../../tools/computer-use/mac-permission-settings.js";
@@ -46,7 +47,11 @@ const TRANSIENT_EXC_NAMES = new Set([
 
 const WINDOWS_SHELL_LAUNCHERS = new Set(["npx", "npm", "pnpm", "yarn", "bunx"]);
 const SANITIZE_RE = /_+/g;
+const MAX_TOOL_NAME_LENGTH = 64;
+const TOOL_NAME_HASH_LENGTH = 12;
 const RELOAD_LOCKS = new WeakMap<object, Promise<void>>();
+// Per MCP connection and conversation, populated only by the internal request projection.
+const PRIVATE_SKILL_READY = new WeakMap<object, Map<string, Map<string, PluginSkillRef>>>();
 
 type Runtime = {
   ClientSession: new (read: any, write: any) => any;
@@ -97,11 +102,26 @@ class SdkClientSession {
     return this.client.listTools({}, { timeout: 15_000 });
   }
 
-  async callTool(name: string, args: Record<string, any>, timeout: number, signal?: AbortSignal | null): Promise<any> {
+  async callTool(
+    name: string,
+    args: Record<string, any>,
+    timeout: number,
+    meta?: Record<string, string>,
+    signal?: AbortSignal | null,
+  ): Promise<any> {
     return this.client.callTool(
-      { name, arguments: args },
+      { name, arguments: args, ...(meta ? { _meta: meta } : {}) },
       undefined,
-      { timeout: timeout * 1000, ...(signal ? { signal } : {}) },
+      {
+        timeout: timeout * 1000,
+        maxTotalTimeout: timeout * 1000,
+        resetTimeoutOnProgress: true,
+        // Request a progress token even when callers do not surface progress.
+        // Local interactive plugin calls use it for transport keepalives while
+        // they are legitimately waiting for user input.
+        onprogress: () => undefined,
+        ...(signal ? { signal } : {})
+      },
     );
   }
 
@@ -153,7 +173,14 @@ async function loadRuntime(): Promise<Runtime> {
 }
 
 export function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(SANITIZE_RE, "_");
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(SANITIZE_RE, "_");
+  if (sanitized.length <= MAX_TOOL_NAME_LENGTH) return sanitized;
+
+  // OpenAI-compatible APIs cap function names at 64 characters. Keep a readable
+  // prefix and a deterministic digest so similarly prefixed MCP tools stay unique.
+  const digest = createHash("sha256").update(sanitized).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
+  const prefixLength = MAX_TOOL_NAME_LENGTH - TOOL_NAME_HASH_LENGTH - 1;
+  return `${sanitized.slice(0, prefixLength)}_${digest}`;
 }
 
 export function isTransient(error: unknown): boolean {
@@ -494,6 +521,7 @@ export class MCPToolWrapper extends Tool {
   private toolDescription: string;
   private toolParameters: Record<string, any>;
   private toolTimeout: number;
+  private sendMemmyContext: boolean;
 
   constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30, private readonly permissionPreflight?: MacPermissionPreflight, private readonly managed?: ManagedOcuHost) {
     super();
@@ -504,6 +532,7 @@ export class MCPToolWrapper extends Tool {
     this.toolDescription = toolDef.description || toolDef.name;
     this.toolParameters = normalizeSchemaForOpenAI(toolDef.inputSchema ?? { type: "object", properties: {} });
     this.toolTimeout = toolTimeout;
+    this.sendMemmyContext = serverName === "plugins";
   }
 
   get exclusive(): boolean { return Boolean(this.managed || this.permissionPreflight); }
@@ -527,6 +556,28 @@ export class MCPToolWrapper extends Tool {
 
   setContext(context: RequestContext): void {
     this.requestContext.set(context);
+  }
+
+  /** Internal channel: never routed through execute(), tool results, UI events or history. */
+  async resolvePluginSkillInstructions(ref: PluginSkillRef, signal?: AbortSignal | null, sessionKey?: string | null): Promise<string> {
+    if (this.serverName !== "plugins" || this.originalName !== "read_plugin_skill") throw new Error("plugin_skill_loader_unavailable");
+    const expected = PluginSkillRefSchema.parse(ref);
+    const result = await this.session.callTool("resolve_plugin_skill_context", { ref: expected }, this.toolTimeout,
+      { "memmy.dev/cloud-skills": "1" }, signal);
+    const envelope = result?._meta?.["memmy.dev/private-skill-context"];
+    const actual = PluginSkillRefSchema.safeParse(envelope?.ref);
+    if (actual.success && envelope.reloadRequired === true && actual.data.pluginId === expected.pluginId && actual.data.skillId === expected.skillId) {
+      throw Object.assign(new Error("plugin_skill_version_changed"), { code: "plugin_skill_version_changed", ref: actual.data });
+    }
+    if (result?.isError || !actual.success || JSON.stringify(actual.data) !== JSON.stringify(expected)
+      || typeof envelope.instructions !== "string" || Buffer.byteLength(envelope.instructions) > 512 * 1024) throw new Error("plugin_skill_load_failed");
+    let sessions = PRIVATE_SKILL_READY.get(this.session);
+    if (!sessions) { sessions = new Map(); PRIVATE_SKILL_READY.set(this.session, sessions); }
+    const key = sessionKey ?? "default";
+    let ready = sessions.get(key);
+    if (!ready) { ready = new Map(); sessions.set(key, ready); }
+    ready.set(`${expected.pluginId}/${expected.skillId}`, expected);
+    return envelope.instructions;
   }
 
   async execute(params: Record<string, any> = {}, context?: ToolExecutionContext): Promise<string | Array<Record<string, any>>> {
@@ -633,10 +684,15 @@ export class MCPToolWrapper extends Tool {
       }
     }
     if (context?.abortSignal?.aborted) return "(MCP tool call was cancelled)";
+    const meta = this.sendMemmyContext ? pluginCallMeta(context) : undefined;
+    const turnId = this.requestContext.get()?.metadata?.turn_id;
+    if (meta && typeof turnId === "string") meta["memmy.dev/turn-id"] = turnId;
+    const ready = PRIVATE_SKILL_READY.get(this.session)?.get(context?.sessionKey ?? "default");
+    if (meta && ready?.size) meta["memmy.dev/private-skills-ready"] = JSON.stringify([...ready.values()]);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const result: any = await timeoutPromise(
-          this.session.callTool(this.originalName, params, this.toolTimeout),
+          this.session.callTool(this.originalName, params, this.toolTimeout, meta, context?.abortSignal),
           this.toolTimeout,
           "timeout",
         );
@@ -659,6 +715,16 @@ export class MCPToolWrapper extends Tool {
     }
     return "(MCP tool call failed)";
   }
+}
+
+function pluginCallMeta(context?: ToolExecutionContext): Record<string, string> | undefined {
+  const entries = [
+    ["memmy.dev/cloud-skills", "1"],
+    ["memmy.dev/session-key", context?.sessionKey],
+    ["memmy.dev/tool-call-id", context?.uiToolCallId ?? context?.callId],
+    ["memmy.dev/model-preset", context?.modelPreset],
+  ].filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 export class MCPResourceWrapper extends Tool {
@@ -790,7 +856,11 @@ export class MCPPromptWrapper extends Tool {
   }
 }
 
-type Stack = { close?: () => Promise<void>; aclose: () => Promise<void> };
+type Stack = {
+  close?: () => Promise<void>;
+  aclose: () => Promise<void>;
+  refreshTools?: (registry: ToolRegistry) => Promise<void>;
+};
 
 async function enterMaybe(context: any, stack: Array<() => Promise<void>>): Promise<any> {
   const value = await context;
@@ -935,30 +1005,41 @@ export async function connectMcpServers(
         }
         return { tools, resources, prompts };
       })(), 15, `MCP server '${name}' discovery timed out`);
-      const tools = discovered.tools;
       const enabledTools = new Set(cfgValue(cfg, "enabled_tools", "enabledTools") ?? ["*"]);
       const allowAll = enabledTools.has("*");
-      const matched = new Set<string>();
-      const availableRaw = (tools?.tools ?? []).map((tool: any) => tool.name);
-      const availableWrapped = (tools?.tools ?? []).map((tool: any) => sanitizeName(`mcp_${name}_${tool.name}`));
-      for (const toolDef of tools?.tools ?? []) {
-        const wrapped = sanitizeName(`mcp_${name}_${toolDef.name}`);
-        if (!allowAll && !enabledTools.has(toolDef.name) && !enabledTools.has(wrapped)) continue;
-        registry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30, undefined, managed));
-        if (enabledTools.has(toolDef.name)) matched.add(toolDef.name);
-        if (enabledTools.has(wrapped)) matched.add(wrapped);
-      }
-      if (enabledTools.size && !allowAll) {
-        const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry)
-          && !(managed && ["get_screen_state", memmyComputerUseToolName("get_screen_state"), legacyComputerUseToolName("get_screen_state")].includes(entry)));
-        if (unknown.length) {
-          console.warn(
-            `MCP server '${name}': enabledTools entries not found: ${unknown.join(", ")}. ` +
-              `Available raw names: ${availableRaw.join(", ") || "(none)"}. ` +
-              `Available wrapped names: ${availableWrapped.join(", ") || "(none)"}`,
-          );
+      const registeredTools = new Set<string>();
+      let registeredRegistry = registry;
+      const registerTools = (tools: any, targetRegistry = registeredRegistry) => {
+        for (const toolName of registeredTools) {
+          registeredRegistry.unregister(toolName);
+          if (targetRegistry !== registeredRegistry) targetRegistry.unregister(toolName);
         }
-      }
+        registeredTools.clear();
+        const matched = new Set<string>();
+        const availableRaw = (tools?.tools ?? []).map((tool: any) => tool.name);
+        const availableWrapped = (tools?.tools ?? []).map((tool: any) => sanitizeName(`mcp_${name}_${tool.name}`));
+        for (const toolDef of tools?.tools ?? []) {
+          const wrapped = sanitizeName(`mcp_${name}_${toolDef.name}`);
+          if (!allowAll && !enabledTools.has(toolDef.name) && !enabledTools.has(wrapped)) continue;
+          targetRegistry.register(new MCPToolWrapper(liveSession, name, toolDef, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30, undefined, managed));
+          registeredTools.add(wrapped);
+          if (enabledTools.has(toolDef.name)) matched.add(toolDef.name);
+          if (enabledTools.has(wrapped)) matched.add(wrapped);
+        }
+        if (enabledTools.size && !allowAll) {
+          const unknown = [...enabledTools].map(String).filter((entry) => !matched.has(entry)
+            && !(managed && ["get_screen_state", "mcp_open_computer_use_get_screen_state"].includes(entry)));
+          if (unknown.length) {
+            console.warn(
+              `MCP server '${name}': enabledTools entries not found: ${unknown.join(", ")}. ` +
+                `Available raw names: ${availableRaw.join(", ") || "(none)"}. ` +
+                `Available wrapped names: ${availableWrapped.join(", ") || "(none)"}`,
+            );
+          }
+        }
+        registeredRegistry = targetRegistry;
+      };
+      registerTools(discovered.tools);
       for (const resource of discovered.resources) {
         registry.register(new MCPResourceWrapper(liveSession, name, resource, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
       }
@@ -966,6 +1047,11 @@ export async function connectMcpServers(
         registry.register(new MCPPromptWrapper(liveSession, name, prompt, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
       }
       stacks[name] = {
+        refreshTools: async (targetRegistry) => {
+          // Discover first so a temporary failure does not discard usable tools or interrupt active calls.
+          const tools = await timeoutPromise(liveSession.listTools?.(), 15, `MCP server '${name}' tool refresh timed out`);
+          registerTools(tools, targetRegistry);
+        },
         close: async () => {
           for (const close of closers.reverse()) await close().catch(() => undefined);
         },
@@ -1213,7 +1299,21 @@ export async function reloadServers(state: McpState, registry: ToolRegistry): Pr
     state.mcpConnected = Object.keys(state.mcpStacks).length > 0;
 
     const failed = toConnectNames.filter((name) => !(name in connected)).sort();
-    const unchanged = !removed.length && !added.length && !changed.length && !retryMissing.length;
+    const refreshed: string[] = [];
+    // The local plugin bridge's URL stays the same when plugins are installed or disabled.
+    // Refresh its live catalog without replacing the transport used by ongoing interactions.
+    if (nextNames.has("plugins") && !toConnectNames.includes("plugins")) {
+      const refresh = state.mcpStacks?.plugins?.refreshTools;
+      if (refresh) {
+        try {
+          await refresh(registry);
+          refreshed.push("plugins");
+        } catch {
+          failed.push("plugins");
+        }
+      }
+    }
+    const unchanged = !removed.length && !added.length && !changed.length && !retryMissing.length && !refreshed.length;
     let message: string;
     if (failed.length) message = `MCP config reloaded, but some servers did not connect: ${failed.join(", ")}`;
     else if (unchanged) message = "MCP config is already live.";
@@ -1227,8 +1327,12 @@ export async function reloadServers(state: McpState, registry: ToolRegistry): Pr
       changed,
       removed,
       retried: retryMissing,
+      refreshed,
       connected: Object.keys(state.mcpStacks).sort(),
       configured: Object.keys(state.mcpServers).sort(),
+      tool_counts: Object.fromEntries([...nextNames].sort().map((name) => [
+        name, registry.toolNames.filter((toolName) => toolName.startsWith(toolPrefix(name))).length,
+      ])),
       failed,
       tools_removed: toolsRemoved,
       requires_restart: false,

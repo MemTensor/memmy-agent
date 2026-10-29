@@ -15,6 +15,10 @@ export type TextResultOptions = {
 };
 
 export type ToolExecutionContext = {
+  /** Unique UI identity, even when a provider reuses its tool-call ID. */
+  uiToolCallId?: string | null;
+  sessionKey?: string | null;
+  modelPreset?: string | null;
   maxResultChars?: number;
   availableTools?: string[];
   /** Keep raw external text separate from its bounded model and UI representations. */

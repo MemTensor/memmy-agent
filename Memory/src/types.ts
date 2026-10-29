@@ -123,6 +123,8 @@ export interface ApiErrorBody {
       | "not_found"
       | "conflict"
       | "rate_limited"
+      | "memory_starting"
+      | "memory_upgrading"
       | "internal";
     message: string;
     requestId?: string;
@@ -617,6 +619,7 @@ export interface RawTurnRedactRequest extends RequestEnvelope {
 
 export interface HealthResponse {
   ok: boolean;
+  status?: "starting" | "upgrading" | "ready" | "failed";
   buildId?: string;
   serviceVersion: string;
   protocolVersion: number;
@@ -629,6 +632,7 @@ export interface HealthResponse {
     backend: "sqlite" | "openmem-cloud-rest";
     backendId?: "sqlite-local" | "openmem-cloud-rest";
     schemaVersion: string;
+    targetSchemaVersion?: number;
     ready: boolean;
     lastMigrationId?: string;
     fullText?: "fts5" | "tsvector" | "remote" | "none";
@@ -637,6 +641,13 @@ export interface HealthResponse {
     idempotency?: boolean;
     jobs?: boolean;
     importExport?: boolean;
+  };
+  startup?: {
+    phase: string;
+    elapsedMs: number;
+    currentSchemaVersion?: number;
+    targetSchemaVersion: number;
+    error?: string;
   };
   models: {
     summary: {

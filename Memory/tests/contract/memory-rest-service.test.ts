@@ -114,6 +114,31 @@ async function runUntilSummaryIndexed(
 
 describe("MemoryService / REST contract", () => {
 
+  it("exposes the current embedding model through a read-scoped inference endpoint", async () => {
+    const seenTexts: string[] = [];
+    const seenRoles: Array<"query" | "document" | undefined> = [];
+    const { db, service } = createTestService({ embedder: createCapturingEmbedder(seenTexts, seenRoles) });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/models/embedding/infer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ texts: ["section", "evidence"], role: "document" })
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        embeddings: [[1, 0, 0], [0, 1, 0]],
+        model: { provider: "local", model: "capturing-test-embedding", mode: "local", dimension: 3 }
+      });
+      expect(seenTexts).toEqual(["section", "evidence"]);
+      expect(seenRoles).toEqual(["document", "document"]);
+    });
+    db.close();
+  });
+
   it("deduplicates Agent source Skills by stable identity and content hash", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });
