@@ -5554,6 +5554,15 @@ export class RuntimeRepository {
           if (table === "runtime_kv" && row.key === "panel_safety_token") continue;
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          // A partial/older bundle can replace a raw turn while retaining newer
+          // target memories. Its captured IDs cannot certify the target database.
+          if (table === "raw_turns" && typeof normalized.message_payload_json === "string") {
+            const payload = parseJson<unknown>(normalized.message_payload_json, undefined);
+            if (isRecord(payload) && "captured_memory_ids" in payload) {
+              delete payload.captured_memory_ids;
+              normalized.message_payload_json = toJson(payload);
+            }
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);

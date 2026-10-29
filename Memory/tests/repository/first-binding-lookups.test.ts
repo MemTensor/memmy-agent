@@ -93,4 +93,14 @@ describe("first binding lookup through existing indexes", () => {
     ]);
     expect(repos.memories.getIncludingDeleted("trace-target")?.info.episode_id).toBe(episode.id);
   });
+
+  it("does not trust an older imported raw ID list over retained target memories", async () => {
+    const { db, repos, raw, add } = await setup();
+    add("first");
+    const olderRaw = db.db.prepare("SELECT * FROM raw_turns WHERE id=?").get(raw.id);
+    add("later");
+    repos.runtime.importBundleTables({ raw_turns: [olderRaw] }, { conflictStrategy: "replace" });
+    expect(repos.runtime.getRawTurn(raw.id)!.messagePayload?.captured_memory_ids).toBeUndefined();
+    expect(repos.runtime.l1MemoryIdsForRawTurn(raw.id).sort()).toEqual(["first", "later"]);
+  });
 });
