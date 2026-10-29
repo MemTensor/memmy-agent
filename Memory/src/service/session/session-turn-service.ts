@@ -1271,6 +1271,7 @@ export class SessionTurnService {
       sourceMemoryIds,
       usage: {},
       messagePayload: {
+        captured_memory_ids: [],
         time_zone: request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone"),
         compact: {
           contextPacketId,
@@ -2226,6 +2227,7 @@ export class SessionTurnService {
           sourceMemoryIds,
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
+            captured_memory_ids: [],
             ...(sourceTurn ? { source_turn: sourceTurn } : {}),
             turn_start: turnStartPayload,
             turn_complete: {
@@ -2726,6 +2728,7 @@ export class SessionTurnService {
         sourceMemoryIds: [],
         usage: {},
         messagePayload: {
+          captured_memory_ids: [],
           observe: {
             requestId: input.requestId,
             adapterId: input.adapterId
@@ -3196,6 +3199,7 @@ export class SessionTurnService {
       sourceMemoryIds: [],
       usage: {},
       messagePayload: {
+        captured_memory_ids: [],
         subagentStart: {
           subagentId,
           task: input.task,

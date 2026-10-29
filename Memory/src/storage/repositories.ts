@@ -2889,6 +2889,27 @@ export class RuntimeRepository {
   }
 
   l1MemoryIdsForRawTurn(rawTurnId: string): string[] {
+    return this.memoryIdsForRawTurn(rawTurnId, true);
+  }
+
+  private memoryIdsForRawTurn(rawTurnId: string, l1Only: boolean, knownRaw?: RawTurnRecord): string[] {
+    const raw = knownRaw ?? this.getRawTurn(rawTurnId);
+    const layer = l1Only ? "memory_layer = 'L1' AND " : "";
+    const reference = l1Only
+      ? "(json_extract(info_json, '$.raw_turn_id') = @raw OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = @raw)"
+      : "json_extract(info_json, '$.raw_turn_id') = @raw";
+    // raw_turns.id and memories.id already have primary-key indexes. Only new
+    // captures opt in to write-maintained IDs; historical rows retain a full lookup.
+    const ids = raw?.messagePayload?.captured_memory_ids;
+    if (Array.isArray(ids) && ids.every(id => typeof id === "string")) {
+      const lookup = this.db.prepare(`SELECT id FROM memories WHERE id = @id AND ${layer}${reference}`);
+      return uniq(ids).flatMap(id => {
+        const row = lookup.get({ raw: rawTurnId, id }) as { id: string } | undefined;
+        return row ? [row.id] : [];
+      });
+    }
+    if (!l1Only) return (this.db.prepare(`SELECT id FROM memories WHERE ${reference}`)
+      .all({ raw: rawTurnId }) as Array<{ id: string }>).map(row => row.id);
     return (this.db.prepare(`SELECT id FROM memories WHERE memory_layer = 'L1' AND
       (json_extract(info_json, '$.raw_turn_id') = ? OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = ?)`)
       .all(rawTurnId, rawTurnId) as Array<{ id: string }>).map(r => r.id);
@@ -2910,7 +2931,7 @@ export class RuntimeRepository {
     const raw = this.getRawTurn(rawTurnId);
     const episode = this.getEpisode(episodeId);
     if (!raw || !episode || raw.sessionId !== episode.sessionId) throw new Error("invalid first episode binding");
-    const l1Ids = this.l1MemoryIdsForRawTurn(rawTurnId);
+    const l1Ids = this.memoryIdsForRawTurn(rawTurnId, true, raw);
     if (raw.episodeId && raw.episodeId !== episodeId) {
       this.moveTurnLinks({ rawTurnId, l1MemoryIds: l1Ids, fromEpisodeId: raw.episodeId, toEpisodeId: episodeId, at });
     }
@@ -2925,9 +2946,12 @@ export class RuntimeRepository {
     for (const table of ['artifacts', 'feedback', 'decision_repairs', 'l3_world_model_input_traces', 'source_turn_captures', 'skill_trials']) {
       this.db.prepare(`UPDATE ${table} SET episode_id = ? WHERE raw_turn_id = ?`).run(episodeId, rawTurnId);
     }
+    const targetIds = this.memoryIdsForRawTurn(rawTurnId, false, raw);
+    // Resolve provenance once through primary keys (or the legacy
+    // compatibility path), rather than nesting a memories scan inside an UPDATE.
     this.db.prepare(`UPDATE evolution_jobs SET episode_id = ? WHERE json_extract(payload_json, '$.rawTurnId') = ?
-      OR target_memory_id IN (SELECT id FROM memories WHERE json_extract(info_json, '$.raw_turn_id') = ?)`)
-      .run(episodeId, rawTurnId, rawTurnId);
+      OR target_memory_id IN (SELECT value FROM json_each(?))`)
+      .run(episodeId, rawTurnId, toJson(targetIds));
     for (const row of this.db.prepare("SELECT id FROM feedback WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeFeedback(episodeId, row.id, at);
     for (const row of this.db.prepare("SELECT id FROM decision_repairs WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeDecisionRepair(episodeId, row.id, at);
     for (const row of this.db.prepare("SELECT skill_memory_id FROM skill_trials WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ skill_memory_id: string }>) this.appendEpisodeDerivedMemory(episodeId, "Skill", row.skill_memory_id, at);
@@ -2979,7 +3003,9 @@ export class RuntimeRepository {
              tool_results_json = @toolResultsJson,
              source_memory_ids_json = @sourceMemoryIdsJson,
              usage_json = @usageJson,
-             message_payload_json = @messagePayloadJson,
+             message_payload_json = CASE WHEN json_type(message_payload_json,'$.captured_memory_ids')='array'
+               THEN json_set(@messagePayloadJson,'$.captured_memory_ids',json_extract(message_payload_json,'$.captured_memory_ids'))
+               ELSE @messagePayloadJson END,
              status = @status,
              redacted_at = @redactedAt,
              deleted_at = @deletedAt

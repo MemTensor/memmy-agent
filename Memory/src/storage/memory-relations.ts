@@ -11,6 +11,19 @@ const POLICY_SOURCES_SQL = `coalesce(json_extract(m.properties_json,'$.internal_
 /** Runs inside the memory write transaction. Historical arrays/links stay stored;
  * panel readers validate both endpoints and current declared provenance. */
 export function maintainMemoryRelations(db: Database.Database, id: string, invalidate = true): void {
+  // New raw turns opt in at creation. Keep this inverse relation in the same
+  // transaction as insert/update/import, including tombstones. Stale IDs are
+  // harmless: readers revalidate each target's current declared provenance.
+  const rawIds = db.prepare(`SELECT json_extract(info_json,'$.raw_turn_id') AS direct,
+    json_extract(properties_json,'$.internal_info.trace.raw_turn_id') AS trace FROM memories WHERE id=?`)
+    .get(id) as { direct: unknown; trace: unknown } | undefined;
+  for (const rawId of new Set([rawIds?.direct, rawIds?.trace])) {
+    if (typeof rawId !== "string" || !rawId) continue;
+    db.prepare(`UPDATE raw_turns SET message_payload_json=json_insert(message_payload_json,'$.captured_memory_ids[#]',?)
+      WHERE id=? AND json_type(message_payload_json,'$.captured_memory_ids')='array'
+        AND NOT EXISTS(SELECT 1 FROM json_each(message_payload_json,'$.captured_memory_ids') WHERE value=?)`)
+      .run(id, rawId, id);
+  }
   const memory = db
     .prepare(
       `SELECT id,user_id AS userId,memory_layer AS layer,updated_at AS at,
