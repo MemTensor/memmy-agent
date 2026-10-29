@@ -1793,6 +1793,10 @@ export class AgentRunner {
         }
         const executed = await withToolExecutionRequestContext(context,
           () => this.executeTools(spec, response.toolCalls, externalLookupCounts, workspaceViolationCounts));
+        // Drain per-batch attachment state even on failure. Nonfatal tool errors
+        // are carried by event.status while the optional item.error stays empty.
+        const attachedWithoutNewText = messageTool instanceof MessageTool
+          && messageTool.consumeAttachedWithoutNewText();
         const completed: Record<string, any>[] = [];
         for (const item of executed) {
           item.call.arguments = redactBrowserAuthArguments(item.call.name, item.call.arguments);
@@ -1871,7 +1875,7 @@ export class AgentRunner {
         });
         emptyContentRetries = 0;
         lengthRecoveries = 0;
-        if (messageTool instanceof MessageTool && messageTool.consumeAttachedWithoutNewText()) {
+        if (attachedWithoutNewText && executed.every((item) => item.event.status !== "error")) {
           const answer = assistantAnswerBeforeDelivery(messages);
           if (answer) {
             finalContent = answer;

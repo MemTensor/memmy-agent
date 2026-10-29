@@ -132,6 +132,80 @@ describe("progress events and tool hints", () => {
     expect(finalContent).toBe("当前无法发送文件。");
     expect(streamed).toEqual(["当前无法发送文件。"]);
   });
+  it.each([false, true])("does not finalize a mixed attachment batch, including a later read: %s", async (followWithRead) => {
+    const loop = makeLoop();
+    const first = path.join(loop.workspace, "first.pdf");
+    const second = path.join(loop.workspace, "second.pdf");
+    const note = path.join(loop.workspace, "status.txt");
+    fs.writeFileSync(first, "first report");
+    fs.writeFileSync(second, "second report");
+    fs.writeFileSync(note, "diagnostic state");
+    const messageTool = loop.tools.get("message") as MessageTool;
+    messageTool.markPendingPluginFiles();
+    messageTool.setSendCallback(async (message) => {
+      if ((message.media ?? []).some((file) => path.basename(file) === "second.pdf")) {
+        throw new Error("second attachment rejected");
+      }
+      await loop.bus.publishOutbound(message);
+    });
+    (loop.provider as any).supportsProgressDeltas = true;
+    const failure = "第一份已发送，第二份发送失败。";
+    const responses = [
+      new LLMResponse({ content: "全部产物已交付。", toolCalls: [] }),
+      new LLMResponse({ content: null, toolCalls: [
+        new ToolCallRequest({ id: "send-first", name: "message", arguments: { media: [first] } }),
+        new ToolCallRequest({ id: "send-second", name: "message", arguments: { media: [second] } }),
+      ] }),
+      ...(followWithRead ? [new LLMResponse({ content: null, toolCalls: [
+        new ToolCallRequest({ id: "read-status", name: "read_file", arguments: { path: note } }),
+      ] })] : []),
+      new LLMResponse({ content: failure, toolCalls: [] }),
+    ];
+    const requests: Array<Record<string, any>[]> = [];
+    const chat = vi.fn(async (args: any) => {
+      requests.push(args.messages.map((message: Record<string, any>) => ({ ...message })));
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected model request after partial delivery");
+      if (typeof response.content === "string") await args.onContentDelta(response.content);
+      return response;
+    });
+    (loop.provider as any).chatStreamWithRetry = chat;
+    const streamed: string[] = [];
+    const toolEvents: any[] = [];
+    const [finalContent] = await loop.runAgentLoop([
+      { role: "user", content: "生成并发送两份报告" },
+      { role: "tool", name: "mcp_plugins_plugin_review_render_12345678", tool_call_id: "render",
+        content: [{ type: "text", text: JSON.stringify({ publishedFiles: [
+          { name: "first.pdf", path: first }, { name: "second.pdf", path: second },
+        ] }) }] },
+    ], {
+      onStream: async (delta: string) => { streamed.push(delta); },
+      onProgress: withProgressCapabilities(async (_content: unknown, options: any) => {
+        toolEvents.push(...(options?.toolEvents ?? []));
+      }, { toolEvents: true }),
+    });
+    expect(messageTool.turnDeliveredMediaPaths()).toEqual([first]);
+    const outbound = await drain(loop.bus);
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].media).toEqual([first]);
+    expect(toolEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "end", name: "message", call_id: "send-first" }),
+      expect.objectContaining({ phase: "error", name: "message", call_id: "send-second" }),
+    ]));
+    expect(finalContent).toBe(failure);
+    expect(streamed).toEqual([failure]);
+    expect(chat).toHaveBeenCalledTimes(followWithRead ? 4 : 3);
+    expect(requests[2]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "tool", tool_call_id: "send-second",
+        content: expect.stringContaining("Error sending message: second attachment rejected") }),
+    ]));
+    if (followWithRead) {
+      expect(toolEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ phase: "end", name: "read_file", call_id: "read-status" }),
+      ]));
+    }
+  });
+
   it("writes the answer before attaching its card for resumption-aware streams", async () => {
     const answer = "报告已经生成，正文保留在这条答复中。";
     const result = await successfulArtifactDelivery(answer, true);
