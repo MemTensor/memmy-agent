@@ -1,3 +1,4 @@
+import { setImmediate as yieldToIO } from "node:timers/promises";
 import { EpisodeSelectionRequired, selectionInput, selectionKey, selectEpisode, type EpisodeSelectionContext, type EpisodeSelectionResult } from "./episode-selection.js";
 import {
   captureTurnSteps,
@@ -3354,6 +3355,7 @@ export class SessionTurnService {
         repos: this.deps.repos
       }).memories;
       if (batch.length < Math.min(500,10_000-(excluded.size-fresh.length))) break;
+      await yieldToIO();
     }
     const retrieval = retrievePluginMemories({
       query,
@@ -3419,11 +3421,11 @@ export class SessionTurnService {
         .map((memory) => this.deps.rawTurnIdFromMemory(memory))
         .filter((id): id is string => Boolean(id))
     );
-    const retrievedSiblingTraceIds = retrievedRawTurnIds.size > 0
-      ? candidates
-          .filter((memory) => memory.memoryLayer === "L1" && retrievedRawTurnIds.has(this.deps.rawTurnIdFromMemory(memory) ?? ""))
-          .map((memory) => memory.id)
-      : [];
+    const siblingCandidates = candidates.filter(memory => memory.memoryLayer === "L1" &&
+      retrievedRawTurnIds.has(this.deps.rawTurnIdFromMemory(memory) ?? ""));
+    const retrievedSiblingTraceIds = this.deps.repos.memories.getMany(siblingCandidates.map(memory => memory.id))
+      .filter(memory => expected.has(memory.id) && (memory.status === "activated" || memory.status === "resolving") &&
+        revision(memory) === revision(expected.get(memory.id)!)).map(memory => memory.id);
     const sourceMemoryIds = uniq([
       ...retrievedMemories.flatMap((memory) => this.deps.retrievedMemorySourceIds(memory)),
       ...retrievedSiblingTraceIds,

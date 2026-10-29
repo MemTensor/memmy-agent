@@ -1,3 +1,4 @@
+import { setImmediate as yieldToIO } from "node:timers/promises";
 import type { SeededChannelScores } from "../../algorithm/plugin-algorithms.js";
 import type {
   RetrievalQueryExtract,
@@ -2374,6 +2375,7 @@ export class RetrievalService {
       }).slice(0,input.limit);
       if(injectableMemories.length>=input.limit || take>=active.length || take>=10_000 || routeHits.length===0) break;
       take=Math.min(active.length,10_000,Math.max(take+1,take*2));
+      await yieldToIO();
     }
     return {memories,hits:injectableMemories.map(memory=>userMemoryRecallHit(memory,bestScoreById.get(memory.id) ?? 0))};
   }
