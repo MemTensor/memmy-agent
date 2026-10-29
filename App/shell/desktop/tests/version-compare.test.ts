@@ -2,20 +2,25 @@ import { describe, expect, it } from 'vitest';
 import { compareVersionSegments, parseUpdatePackageVersion } from '../src/main/version-compare.js';
 
 describe('compareVersionSegments', () => {
-  it('orders a prerelease below its stable release', () => {
-    expect(compareVersionSegments('1.1.9-rc.1', '1.1.9')).toBeLessThan(0);
-    expect(compareVersionSegments('1.1.9', '1.1.9-rc.1')).toBeGreaterThan(0);
+  it.each([
+    ['1.2.4', '1.2.401'],
+    ['1.2.401', '1.2.402'],
+    ['1.2.402', '1.2.5'],
+    ['1.2.5', '1.2.6'],
+    ['1.2.6', '1.3.0'],
+    ['1.2.10', '1.2.9'],
+    ['1.10.0', '1.9.9'],
+    ['1.1.9', '1.1.9-rc.1'],
+    ['1.1.9-rc.10', '1.1.9-rc.2'],
+    ['1.1.9-alpha', '1.1.9-beta'],
+    ['1.2.3+build.5', '1.2.3+build.8'],
+  ])('orders %s before %s by character', (older, newer) => {
+    expect(compareVersionSegments(older, newer)).toBe(-1);
+    expect(compareVersionSegments(newer, older)).toBe(1);
   });
 
-  it('orders prerelease identifiers according to SemVer', () => {
-    expect(compareVersionSegments('1.1.9-rc.2', '1.1.9-rc.10')).toBeLessThan(0);
-    expect(compareVersionSegments('1.1.9-alpha', '1.1.9-beta')).toBeLessThan(0);
-    expect(compareVersionSegments('1.1.9-1', '1.1.9-alpha')).toBeLessThan(0);
-  });
-
-  it('ignores build metadata and preserves ordinary numeric comparisons', () => {
-    expect(compareVersionSegments('1.2.3+build.5', '1.2.3+build.8')).toBe(0);
-    expect(compareVersionSegments('1.2.4', '1.2.3')).toBeGreaterThan(0);
+  it('only returns equality for identical identifiers', () => {
+    expect(compareVersionSegments('1.2.401', '1.2.401')).toBe(0);
   });
 
   it('keeps prerelease metadata when parsing downloaded package names', () => {

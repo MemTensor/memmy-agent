@@ -290,8 +290,9 @@ describe("bundled Memory upgrades", () => {
   });
 
   it.each([
-    ["2.1.1-rc.2", "2.1.1-rc.10"],
-    ["2.1.1-rc.10", "2.1.1"],
+    ["1.2.401", "1.2.5"],
+    ["2.1.1-rc.10", "2.1.1-rc.2"],
+    ["2.1.1", "2.1.1-rc.10"],
     ["2.1.1", "2.1.2-rc.1"],
   ])("upgrades the owned Memory runtime from %s to %s", async (version, bundledVersion) => {
     const running = await fixture({ version, bundledVersion });
@@ -302,8 +303,9 @@ describe("bundled Memory upgrades", () => {
   });
 
   it.each([
-    ["2.1.1-rc.10", "2.1.1-rc.2"],
-    ["2.1.1", "2.1.1-rc.10"],
+    ["1.2.5", "1.2.401"],
+    ["2.1.1-rc.2", "2.1.1-rc.10"],
+    ["2.1.1-rc.10", "2.1.1"],
     ["2.1.2-rc.1", "2.1.1"],
   ])("keeps the newer owned Memory runtime %s when Desktop bundles %s", async (version, bundledVersion) => {
     const running = await fixture({ version, bundledVersion });

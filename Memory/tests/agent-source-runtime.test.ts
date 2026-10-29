@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { setImmediate as yieldToIO } from "node:timers/promises";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAgentSourceExecutor,
@@ -504,6 +505,7 @@ describe("standalone Agent source executor", () => {
       io[0]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
       expect(addMemory).toHaveBeenCalledTimes(1);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(1);
@@ -521,6 +523,7 @@ describe("standalone Agent source executor", () => {
       io[1]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
       expect(addMemory).toHaveBeenCalledTimes(2);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(2);
@@ -944,12 +947,14 @@ async function waitForAutomaticScanCompletion(
   executor: ReturnType<typeof createAgentSourceExecutor>,
   previousJobId: string | null
 ): Promise<void> {
+  const deadline = performance.now() + 2_000;
   for (;;) {
     const status = executor.scanStatus();
     if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
       expect(status.error).toBeNull();
       return;
     }
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
     await yieldToIO();
   }
 }

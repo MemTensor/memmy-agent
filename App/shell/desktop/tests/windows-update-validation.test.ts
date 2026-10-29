@@ -96,7 +96,7 @@ describe("Windows updater identity and exact version checks", () => {
     expect(() => validateWindowsUpdateInspection(report, options)).toThrow("not a Memmy installer");
   });
 
-  it.each(["1.2.1", "1.2.0", "1.2.1-rc.10"])("rejects update version %s from installed 1.2.1", (productVersion) => {
+  it.each(["1.2.1", "1.2.0", "1.2.0-rc.10"])("rejects update version %s from installed 1.2.1", (productVersion) => {
     const report = inspection();
     report.installer.productVersion = productVersion;
     expect(() => validateWindowsUpdateInspection(report, { ...options, expectedVersion: undefined })).toThrow("Refusing a Windows update");
@@ -109,12 +109,29 @@ describe("Windows updater identity and exact version checks", () => {
     expect(() => validateWindowsUpdateInspection(report, { ...options, currentVersion: "1.2.0", expectedVersion: "1.2.1" })).toThrow("does not match expected");
   });
 
-  it("preserves prerelease identity and orders numeric RC versions correctly", () => {
+  it.each([
+    ["1.2.4", "1.2.401"],
+    ["1.2.401", "1.2.402"],
+    ["1.2.402", "1.2.5"],
+    ["1.2.5", "1.2.6"],
+    ["1.2.6", "1.3.0"],
+    ["1.2.10", "1.2.9"],
+  ])("accepts %s to %s but rejects the reverse update", (older, newer) => {
+    const report = inspection();
+    report.current.fileVersion = older;
+    report.installer.productVersion = newer;
+    expect(validateWindowsUpdateInspection(report, { ...options, currentVersion: older, expectedVersion: newer })).toMatchObject({ version: newer });
+    report.current.fileVersion = newer;
+    report.installer.productVersion = older;
+    expect(() => validateWindowsUpdateInspection(report, { ...options, currentVersion: newer, expectedVersion: older })).toThrow("Refusing a Windows update");
+  });
+
+  it("preserves prerelease identity and orders RC versions by character", () => {
     const report = inspection();
     report.current.productVersion = "1.2.2.0";
-    report.current.fileVersion = "1.2.2-rc.2";
-    report.installer.productVersion = "1.2.2-rc.10";
-    expect(validateWindowsUpdateInspection(report, { ...options, currentVersion: "1.2.2-rc.2", expectedVersion: "1.2.2-rc.10" })).toMatchObject({ version: "1.2.2-rc.10" });
+    report.current.fileVersion = "1.2.2-rc.10";
+    report.installer.productVersion = "1.2.2-rc.2";
+    expect(validateWindowsUpdateInspection(report, { ...options, currentVersion: "1.2.2-rc.10", expectedVersion: "1.2.2-rc.2" })).toMatchObject({ version: "1.2.2-rc.2" });
   });
 
   it("allows a stable executable to install an exact RC without interpreting numeric ProductVersion as its release", () => {

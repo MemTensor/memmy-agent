@@ -1,3 +1,4 @@
+import { authenticateAgentRuntime, createManagedExecutionScope, managedExecutionRequired, withManagedExecution } from "../../core/agent-runtime/managed-execution.js";
 import { requestTiming, withRequestTiming } from "../../utils/request-timing.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -252,6 +253,12 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
     sessionLocks: new Map<string, Promise<void>>(),
     activeRequests: new Map(),
   };
+  const managed = managedExecutionRequired();
+  if (managed && !authenticateAgentRuntime(request)) return errorJson(401, "Managed runtime authentication required");
+  const controller = new AbortController();
+  const permissionAbort = new AbortController();
+  const permissionSignal = AbortSignal.any([request.signal, permissionAbort.signal, controller.signal]);
+  let permission: ReturnType<typeof createManagedExecutionScope> | undefined;
   const contentType = request.headers.get("content-type") ?? "";
   let text = "";
   let mediaPaths: string[] = [];
@@ -262,6 +269,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
 
   try {
     if (contentType.startsWith("multipart/")) {
+      if (managed) return errorJson(400, "Managed requests require a JSON approval context");
       [text, mediaPaths, sessionId, requestedModel] = await parseMultipart(request);
     } else {
       let body: any;
@@ -270,6 +278,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
       } catch {
         return errorJson(400, "Invalid JSON body");
       }
+      if (managed) permission = createManagedExecutionScope(body.managed_execution, permissionSignal);
       stream = Boolean(body.stream);
       requestedModel = body.model;
       [text, mediaPaths] = parseJsonContent(body);
@@ -293,7 +302,6 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
   const sessionKey = sessionId ? `api:${sessionId}` : API_SESSION_KEY;
   const requestKey = JSON.stringify([sessionKey, requestId]);
   if (context.activeRequests.has(requestKey)) return errorJson(409, "Request is already running");
-  const controller = new AbortController();
   let finish!: () => void;
   const done = new Promise<void>((resolve) => { finish = resolve; });
   context.activeRequests.set(requestKey, { controller, done });
@@ -315,6 +323,9 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
       ? { metadata: { model_preset: context.agentLoop.modelPreset } } : {}),
   };
 
+  const invoke = (args: Record<string, any>) => withManagedExecution(permission, () => callAgent(context, args));
+  const endPermission = () => { if (permission) permission.active = false; permissionAbort.abort(); };
+
   if (stream) {
     const chunkId = `chatcmpl-${crypto.randomUUID().slice(0, 12)}`;
     const encoder = new TextEncoder();
@@ -330,6 +341,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
             closed = true;
           }
         };
+        if (permission) permission.onEvent = event => write(`data: ${JSON.stringify({ memmy_event: event })}\n\n`);
         const close = (): void => {
           if (closed) return;
           closed = true;
@@ -355,13 +367,13 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
             for (const event of options.toolEvents ?? []) {
               const phase = String(event?.phase ?? "");
               if (phase === "start") {
-                write(sseMemmyEvent("tool_call", {
+                if (!permission) write(sseMemmyEvent("tool_call", {
                   callId: String(event.call_id ?? event.ui_tool_call_id ?? "call"),
                   name: String(event.name ?? "tool"),
                   input: event.arguments ?? {},
                 }, context.modelName, chunkId));
               } else if (phase === "end" || phase === "error") {
-                write(sseMemmyEvent("tool_result", {
+                if (!permission) write(sseMemmyEvent("tool_result", {
                   callId: String(event.call_id ?? event.ui_tool_call_id ?? "call"),
                   name: String(event.name ?? "tool"),
                   output: phase === "error" ? event.error ?? "Tool execution failed" : event.result ?? null,
@@ -379,7 +391,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
               controller.signal.throwIfAborted();
               requestTiming("api.session_lock_acquired");
               // Model and tool calls own their deadlines; a whole turn has none.
-              const response = await callAgent(context, {
+              const response = await invoke({
                 ...baseArgs,
                 onProgress,
                 onStream,
@@ -400,6 +412,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
               message: controller.signal.aborted ? "Task cancelled by user." : selectionUnavailable ? "会话绑定的模型已不可用，请重新选择模型。" : "Memmy runtime failed while processing the request.",
             } })}\n\n`);
           } finally {
+            endPermission();
             if (!failed) {
               write(sseChunk("", context.modelName, chunkId, "stop"));
               write(SSE_DONE);
@@ -412,6 +425,7 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
       },
       cancel() {
         closed = true;
+        endPermission();
       },
     });
     return new Response(body, {
@@ -427,12 +441,12 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
   try {
     const reply = await withSessionLock(context, sessionKey, async () => {
       controller.signal.throwIfAborted();
-      const first = await callAgent(context, baseArgs);
+      const first = await invoke(baseArgs);
       controller.signal.throwIfAborted();
       let textResponse = responseText(first);
       let usage = responseUsage(first);
       if (!textResponse.trim()) {
-        const retry = await callAgent(context, baseArgs);
+        const retry = await invoke(baseArgs);
         controller.signal.throwIfAborted();
         textResponse = responseText(retry);
         usage = mergeUsageRecords(usage, responseUsage(retry));
@@ -445,11 +459,13 @@ async function handleTimedChatCompletions(request: Request, ctx?: ApiContext): P
     if (controller.signal.aborted) return errorJson(409, "Task cancelled by user.", "cancelled");
     return errorJson(500, "Internal server error", "server_error");
   } finally {
+    endPermission();
     finishRequest();
   }
 }
 
 async function handleCancel(request: Request, ctx: ApiContext): Promise<Response> {
+  if (managedExecutionRequired() && !authenticateAgentRuntime(request)) return errorJson(401, "Managed runtime authentication required");
   let body: any;
   try {
     body = await request.json();
@@ -513,7 +529,7 @@ export async function handleModels(request?: Request, ctx?: Pick<ApiContext, "mo
 }
 
 export async function handleHealth(): Promise<Response> {
-  return Response.json({ status: "ok" });
+  return Response.json({ status: "ok", ...(managedExecutionRequired() ? { permissionProtocol: 1, managedExecutionProtocol: 2, managedExecutionRequired: true, macosSandbox: process.env.AGENT_MACOS_SANDBOX === "1" } : {}) });
 }
 
 export function createApp(

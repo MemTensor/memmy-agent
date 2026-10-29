@@ -100,6 +100,7 @@ export function panelSourceForMemory(memory: MemoryRow): string {
     external.source === "computer_history" || typeof provenance.historyId === "string"
   )) return "computer_history";
   return panelSourceForStatsRow({
+    id: memory.id,
     conversationId: memory.conversationId,
     sessionId: memory.sessionId,
     agentId: memory.agentId,
