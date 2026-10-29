@@ -24,6 +24,29 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
+  it("can remove a connection after the source sessions directory disappears", async () => {
+    const root = tempRoot();
+    const uninstallPlugin = vi.fn(async () => {});
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService,
+      configPath: join(root, "config.yaml"), statePath: join(root, "state.json"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: root },
+        detect: async () => false, async *scan() {}
+      }]),
+      integrationRegistry: createSkillTargetRegistry([{
+        targetId: "codex", displayName: "Codex", async resolveRootDirectory() { return root; },
+        async install() {}, async uninstall() {}, async isInstalled() { return false; }, uninstallPlugin
+      }])
+    });
+    try {
+      await expect(executor.mutateConnection("codex", "plugin", "POST")).rejects.toThrow("not installed");
+      await executor.mutateConnection("codex", "plugin", "DELETE");
+      expect(uninstallPlugin).toHaveBeenCalledOnce();
+      expect(JSON.parse(readFileSync(join(root, "state.json"), "utf8")).sources.codex)
+        .toMatchObject({ status: "not_connected", autoInjectSuppressed: true });
+    } finally { await executor.dispose(); }
+  });
   it.each([[false, true], [true, true], [false, false]])("refreshes installed OpenCode with auto injection disabled, removal=%s, storedState=%s", async (removed, storedState) => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
