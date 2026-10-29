@@ -1172,12 +1172,13 @@ describe("HomePage", () => {
     expect(html).toContain('data-testid="agent-file-icon-docx"');
     expect(html).toContain('data-testid="agent-file-icon-xlsx"');
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
     expect(html).toContain("agent-attachment-card__file-tile--docx");
     expect(html).toContain("agent-attachment-card__file-tile--xlsx");
     expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
+    expect(html).toContain('data-neutral-file-kind="text"');
+    expect(html).toContain('data-neutral-file-kind="data"');
+    expect(html).toContain('data-neutral-file-kind="sheet"');
     expect(html).toContain('aria-label="PDF file"');
     expect(html).toContain('aria-label="Word document"');
     expect(html).toContain('aria-label="Spreadsheet file"');

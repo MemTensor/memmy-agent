@@ -439,7 +439,7 @@ it("keeps the microphone owner mounted while its composer bar is occluded", asyn
   } finally { act(() => root.unmount()); container.remove(); dock.remove(); }
 });
 
-it("keeps Agent plugin files out of automatic delivery cards", async () => {
+it("does not show a diagnosis report until the assistant delivers it", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -454,8 +454,8 @@ it("keeps Agent plugin files out of automatic delivery cards", async () => {
       <PluginCapabilityHost region="flow" calls={[report]} plugins={[plugin]}
         client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
     </I18nProvider></PluginUiProvider>));
-    expect(container.querySelector(".legal-delivery-card")).toBeNull();
-    expect(container.textContent).not.toContain("企业-诊断报告");
+    expect(container.querySelector(".agent-delivered-files")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("企业-诊断报告");
   } finally {
     act(() => root.unmount());
     container.remove();

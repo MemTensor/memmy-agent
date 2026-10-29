@@ -16,10 +16,13 @@ const mocks = vi.hoisted(() => ({
   openArtifact: vi.fn(() => true),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
+  activeTurnIdByChatId: {} as Record<string, string | null>,
+  stopInFlightByChatId: {} as Record<string, boolean>,
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
 vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
-  state: { agent: { currentChatId: mocks.chatId, currentSessionKey: mocks.chatId ? `websocket:${mocks.chatId}` : null, isSending: mocks.sending },
+  state: { agent: { currentChatId: mocks.chatId, currentSessionKey: mocks.chatId ? `websocket:${mocks.chatId}` : null, isSending: mocks.sending,
+    messages: mocks.messages, activeTurnIdByChatId: mocks.activeTurnIdByChatId, stopInFlightByChatId: mocks.stopInFlightByChatId },
     account: { userId: "test-user" }, bootstrap: { app: { userMode: "account" } } }, dispatch: mocks.dispatch
 }) }));
 vi.mock("../recording-entry.js", async (original) => {
@@ -63,7 +66,8 @@ describe("conversation feature integration", () => {
       conversationId: "websocket:legal-chat", origin: "agent", event: { type: "progress", current: 0, message: "Preparing" } }));
   };
   beforeEach(() => {
-    vi.clearAllMocks(); mocks.chatId = null; mocks.sending = false; mocks.messages = []; mocks.list.mockResolvedValue([plugin]);
+    vi.clearAllMocks(); mocks.chatId = null; mocks.sending = false; mocks.messages = [];
+    mocks.activeTurnIdByChatId = {}; mocks.stopInFlightByChatId = {}; mocks.list.mockResolvedValue([plugin]);
     localStorage.clear();
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
@@ -78,15 +82,31 @@ describe("conversation feature integration", () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
-  it("offers scenarios from active installed plugins on the new-task screen", async () => {
+  it("offers legal scenarios only while that plugin can be used", async () => {
     const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
       icon: "scale", prompt: "帮我生成诊断报告" };
+    const office = { id: "office", name: "制作办公文档", description: "创建或修改 Word、Excel、PPT 和 PDF",
+      icon: "FileText", prompt: "制作办公文档" };
     mocks.list.mockResolvedValue([
       { ...plugin, manifest: { ...plugin.manifest, scenarios: [scenario] } },
-      { ...plugin, id: "disabled-legal", state: "disabled", manifest: { ...plugin.manifest, scenarios: [scenario] } }
+      { ...plugin, id: "disabled-legal", state: "disabled", manifest: { ...plugin.manifest, scenarios: [scenario] } },
+      { ...plugin, id: "office", state: "active", manifest: { ...plugin.manifest, scenarios: [office] } }
     ]);
     await act(async () => render());
     expect(features.scenarios).toEqual([{ ...scenario, pluginId: "legal-labor" }]);
+  });
+
+  it("shows no home scenario when the legal plugin cannot be used", async () => {
+    const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
+      icon: "scale", prompt: "帮我生成诊断报告" };
+    const office = { id: "office", name: "制作办公文档", description: "创建或修改 Word、Excel、PPT 和 PDF",
+      icon: "FileText", prompt: "制作办公文档" };
+    mocks.list.mockResolvedValue([
+      { ...plugin, eligibility: { canUse: false }, manifest: { ...plugin.manifest, scenarios: [scenario] } },
+      { ...plugin, id: "office", state: "active", manifest: { ...plugin.manifest, scenarios: [office] } }
+    ]);
+    await act(async () => render());
+    expect(features.scenarios).toEqual([]);
   });
 
   it("publishes an idle interview for the shared right task panel", async () => {
@@ -164,6 +184,41 @@ describe("conversation feature integration", () => {
     await act(async () => expect(features.runCommand("/legal-record")).toBe(true));
     expect(container.querySelector(".recording-entry-card")).not.toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("covers the guide and recording shortcuts while the Agent's legal question is open", async () => {
+    await enterLegalConversation();
+    expect(button("诊断指引")).toBeDefined();
+    expect(button("访谈录音")).toBeDefined();
+    await act(async () => button("访谈录音")!.click());
+    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    await act(async () => {
+      ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "guide-call",
+        conversationId: "legal-chat", origin: "user", event: { type: "artifact", artifact: { id: "template", name: "准备清单.xlsx",
+          role: "setup", uri: "plugin-artifact://template", mediaType: "application/vnd.ms-excel" } } });
+      ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "guide-call",
+        conversationId: "legal-chat", origin: "user", event: { type: "interaction", request: { interactionId: "guide",
+          type: "question", payload: { title: "诊断指引", readOnly: true } } } });
+    });
+    expect(container.querySelector(".diagnostic-guidance-card")).not.toBeNull();
+
+    mocks.activeTurnIdByChatId = { "legal-chat": "turn-1" };
+    mocks.messages = [{ id: "q", role: "assistant", content: "", turnId: "turn-1", agentUi: { questionCard: {
+      version: 1, requestId: "question-1", questions: [{ id: "handle", prompt: "刚录到的这段要怎么处理？",
+        options: [{ id: "rerecord", label: "重新录一遍用工访谈" }, { id: "ignore", label: "忽略这段" }],
+        allowMultiple: false, allowOther: true }] } } }];
+    await act(async () => render());
+
+    expect(button("诊断指引")).toBeUndefined();
+    expect(button("访谈录音")).toBeUndefined();
+    expect(container.querySelector(".diagnostic-guidance-card")).toBeNull();
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+
+    mocks.messages = [];
+    await act(async () => render());
+    expect(button("诊断指引")).toBeDefined();
+    expect(button("访谈录音")).toBeDefined();
+    expect(container.querySelector(".diagnostic-guidance-card")).not.toBeNull();
   });
 
   it("opens the read-only guide directly and leaves session creation to the Agent", async () => {

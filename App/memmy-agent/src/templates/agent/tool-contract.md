@@ -107,6 +107,8 @@ records general tool contracts and less obvious usage patterns.
 - `read_file` reads content only for your analysis; it does not send the file to the user.
 - When sending an existing local file, attach it through the message/media mechanism instead of pasting file contents, unless the user asks for text.
 - When sending an existing local file, use the `message` tool's `media` parameter. Check that the file exists and is ready to open. Do not include local paths in cross-channel delivery text.
+- When the reply points the user to a local file, the only form is `[filename](/absolute/path/filename)`. That link is the highlight and opens in the in-app preview. The label is the filename and the target is the full absolute path. Do not abbreviate the target with `...`. A bare path, a backticked path, or a path in a code block is not a highlight. When the user asks for an address, a path, or a highlight, still use this link. Do not link a file that does not exist.
+- When the same files are attached, the cards are the file list. Do not repeat those filenames as a catalog. If the prose names an attached file, use that Markdown link, and use it once.
 
 ## Scheduling and Background Work
 

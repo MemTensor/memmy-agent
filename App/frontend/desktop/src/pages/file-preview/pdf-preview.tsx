@@ -221,10 +221,18 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
   }, [changePage, matchIndex, matches]);
 
   if (failed) {
-    return <div className="workspace-artifact-preview-empty"><strong>{t("filePreview.failed")}</strong></div>;
+    return (
+      <div className="thread-preview__placeholder" role="status">
+        <span className="thread-preview__placeholder-message">{t("filePreview.failed")}</span>
+      </div>
+    );
   }
   if (!document) {
-    return <div className="workspace-artifact-preview-empty"><strong>{t("filePreview.loading")}</strong></div>;
+    return (
+      <div className="thread-preview__placeholder" role="status">
+        <span className="thread-preview__placeholder-message">{t("filePreview.loading")}</span>
+      </div>
+    );
   }
 
   const effectiveScale = fit === null ? scale : undefined;

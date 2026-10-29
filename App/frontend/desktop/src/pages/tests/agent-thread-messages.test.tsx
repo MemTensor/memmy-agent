@@ -1962,6 +1962,12 @@ describe("AgentThreadMessages", () => {
     expect(stylesSource).toContain(".agent-message-content__table-scroll");
     expect(stylesSource).toContain(".agent-message-content__code-block");
     expect(stylesSource).toContain(".agent-message-content__file-chip");
+    expect(stylesSource).toContain("button.agent-message-content__file-link {");
+    expect(stylesSource).toContain("color: var(--color-action-sky);");
+    expect(stylesSource).toContain("font-weight: 600;");
+    expect(stylesSource).toContain("text-decoration: underline;");
+    expect(stylesSource).toContain("background: transparent;");
+    expect(stylesSource).toContain("button.agent-message-content__file-link--error,");
     expect(stylesSource).toContain(".agent-message-content--reasoning");
     expect(stylesSource).toContain(".agent-message-content--reasoning .agent-message-content__list p");
     expect(stylesSource).toContain(".agent-message-content--reasoning :where(strong, b)");
@@ -2060,6 +2066,300 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('title="/Users/yuan/deck.pptx"');
     expect(html).toContain(">deck.pptx</span>");
     expect(html).not.toContain('href="file:///Users/yuan/deck.pptx"');
+  });
+
+  it("hangs a card for an html page the turn wrote, without a message attachment", () => {
+    const path = "/Users/yuan/Documents/预览.html";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-written-file-card"
+          messages={[
+            {
+              id: "write",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              fileEdits: [{ call_id: "call-write", tool: "write_file", path, absolute_path: path, phase: "end", status: "done", added: 10, deleted: 0 }]
+            },
+            {
+              id: "answer",
+              role: "assistant",
+              content: `写好了：[预览.html](${path})`
+            }
+          ]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "预览.html", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("agent-delivered-files");
+    expect(html).toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("预览.html");
+    expect(html).toContain(`title="${path}"`);
+  });
+
+  it("holds the html delivery card until the turn stops sending", () => {
+    const path = "/Users/yuan/Documents/预览.html";
+    const messages = [
+      {
+        id: "write",
+        role: "tool" as const,
+        kind: "trace" as const,
+        content: "",
+        fileEdits: [{ call_id: "call-write", tool: "write_file", path, absolute_path: path, phase: "end" as const, status: "done" as const, added: 10, deleted: 0 }]
+      },
+      {
+        id: "answer",
+        role: "assistant" as const,
+        content: "页面先写好了",
+        media: [{ kind: "file" as const, path, name: "预览.html" }]
+      }
+    ];
+    const held = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages chatScopeKey="chat-hold-html-card" isSending messages={messages} />
+      </I18nProvider>
+    );
+    expect(held).not.toContain("agent-delivered-files");
+    expect(held).toContain("页面先写好了");
+
+    const settled = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages chatScopeKey="chat-show-html-card" isSending={false} messages={messages} />
+      </I18nProvider>
+    );
+    expect(settled).toContain("agent-delivered-files");
+    expect(settled).toContain("预览.html");
+  });
+
+  it("keeps the html delivery card off a reply that is still streaming", () => {
+    const path = "/Users/yuan/Documents/预览.html";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-streaming-html-card"
+          isSending={false}
+          messages={[
+            {
+              id: "write",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              fileEdits: [{ call_id: "call-write", tool: "write_file", path, absolute_path: path, phase: "end", status: "done", added: 10, deleted: 0 }]
+            },
+            {
+              id: "answer",
+              role: "assistant",
+              content: "两个文件都写好了",
+              isStreaming: true,
+              media: [{ kind: "file", path, name: "预览.html" }]
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("两个文件都写好了");
+    expect(html).not.toContain("agent-delivered-files");
+  });
+
+  it("does not hang a card for a code file the turn merely wrote", () => {
+    const path = "/Users/yuan/Documents/app.py";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-written-code-file"
+          messages={[
+            {
+              id: "write",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              fileEdits: [
+                { call_id: "call-py", tool: "write_file", path, absolute_path: path, phase: "end", status: "done", added: 10, deleted: 0 }
+              ]
+            },
+            {
+              id: "answer",
+              role: "assistant",
+              content: `写好了：[app.py](${path})`
+            }
+          ]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "app.py", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).not.toContain("agent-delivered-files");
+    expect(html).not.toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("agent-message-content__file-chip");
+    expect(html).toContain(`title="${path}"`);
+  });
+
+  it("hangs a card for a markdown document the turn wrote", () => {
+    const path = "/Users/yuan/Documents/笔记.md";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-written-markdown-file"
+          messages={[
+            {
+              id: "write",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              fileEdits: [
+                { call_id: "call-md", tool: "write_file", path, absolute_path: path, phase: "end", status: "done", added: 4, deleted: 0 }
+              ]
+            },
+            {
+              id: "answer",
+              role: "assistant",
+              content: "说明写好了"
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("agent-delivered-files");
+    expect(html).toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("笔记.md");
+  });
+
+  it("links a delivered filename in the answer while keeping its attachment card", () => {
+    const path = "/Users/yuan/Documents/report.docx";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-delivered-file-mention"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: "报告已完成：report.docx。另请参见 other.docx。",
+            media: [{ kind: "file", path, name: "report.docx" }]
+          }]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("agent-message-content__file-link");
+    expect(html).toContain(`title="${path}"`);
+    expect(html).toContain("agent-delivered-files");
+    expect(html).toContain("other.docx");
+  });
+
+  it("highlights a delivered filename once when the answer repeats it", () => {
+    const path = "/Users/yuan/Documents/report.docx";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-delivered-file-mention-once"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: "先看 `report.docx`。\n\n- `report.docx` 降级版",
+            media: [{ kind: "file", path, name: "report.docx" }]
+          }]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html.match(/agent-message-content__file-link/g)).toHaveLength(1);
+    expect(html).toContain("降级版");
+  });
+
+  it("turns a backticked absolute path and a path-only code block into file links", () => {
+    const path = "/Users/yuan/Documents/report.docx";
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-absolute-path-links"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: `地址是 \`${path}\`。\n\n\`\`\`\n${path}\n\`\`\``
+          }]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html.match(/agent-message-content__file-link/g)).toHaveLength(1);
+    expect(html).toContain(`title="${path}"`);
+    expect(html).toContain(">report.docx</span>");
+    expect(html).not.toContain("agent-message-content__code-block");
+  });
+
+  it("links a truncated delivered filename once and leaves an ambiguous name as text", () => {
+    const path = "/Users/yuan/Documents/report.docx";
+    const linked = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-truncated-delivered-name"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: "先看 `.../report.docx`，再看 .../report.docx。",
+            media: [{ kind: "file", path, name: "report.docx" }]
+          }]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+    expect(linked.match(/agent-message-content__file-link/g)).toHaveLength(1);
+    expect(linked).toContain(`title="${path}"`);
+
+    const ambiguous = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-ambiguous-delivered-name"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: "两份都叫 `report.docx`。",
+            media: [
+              { kind: "file", path: "/Users/yuan/a/report.docx", name: "report.docx" },
+              { kind: "file", path: "/Users/yuan/b/report.docx", name: "report.docx" }
+            ]
+          }]}
+          artifactClient={{
+            resolveArtifact: async (value) => ({ ok: true, path: value, name: "report.docx", kind: "file" }),
+            openArtifact: async () => undefined,
+            revealArtifact: async () => undefined
+          }}
+        />
+      </I18nProvider>
+    );
+    expect(ambiguous).toContain("agent-message-content__inline-code");
+    expect(ambiguous).not.toContain("agent-message-content__file-link");
   });
 
   it("renders inline code local paths as normal markdown code", () => {
@@ -2194,10 +2494,10 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("agent-attachment-card");
     expect(html).toContain("agent-attachment-card__preview");
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
+    expect(html).toContain('data-testid="agent-file-icon-pdf"');
     expect(html).toContain('style="max-width:min(100%, 32rem)"');
     expect(html).toContain('style="width:100%;max-height:26rem"');
     expect(html).toContain('data-testid="user-file-attachment"');
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
     expect(html).toContain(">shot<");
     expect(html).toContain(">report.pdf<");
     expect(html).toContain('title="report.pdf"');
@@ -2560,9 +2860,9 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("agent-delivered-files");
     expect(html).toContain(">PPTX<");
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
+    expect(html).toContain("agent-attachment-card__file-tile--pptx");
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
     expect(html).not.toContain("rounded-tag");
     expect(html).not.toContain('href="/Users/yuan/deck.pptx"');
     expect(html).not.toContain('img src="/Users/yuan/deck.pptx"');

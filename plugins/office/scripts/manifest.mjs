@@ -20,8 +20,6 @@ export const manifest = {
   skills: formats.map(format => ({ id: `office-${format}`, name: `Office ${format.toUpperCase()}`,
     description: `Create, inspect, edit, render and deliver ${format.toUpperCase()} files through the Office plugin.`,
     entry: `skills/office-${format}/SKILL.md` })),
-  scenarios: [{ id: "office", name: "制作办公文档", description: "创建或修改 Word、Excel、PPT 和 PDF", icon: "FileText",
-    prompt: "使用 Office 插件帮我制作办公文档。先根据我的需求确定文件格式，再生成、检查并交付文件。" }],
   capabilities: [
     capability("office_status", "Check supported operations and whether LibreOffice/Poppler are available before starting. Missing runtimes must be reported, never treated as successful QA.", {}),
     capability("office_import", "Copy an uploaded DOCX/PDF/PPTX/XLSX/CSV/TSV into an isolated task. Keep the original unchanged. Returns taskId and file name for later operations.", { path: string }, ["path"]),

@@ -3052,6 +3052,7 @@ export function HomePage() {
           }}
           controller={threadPanel}
           messages={state.agent.messages}
+          conversationId={state.agent.currentChatId}
           workspaceRoot={activeTask?.cwd.trim() || workspaceEnvironment.data?.snapshot.cwd || null}
           previewContext={{
             artifactClient: sessionArtifactClient,

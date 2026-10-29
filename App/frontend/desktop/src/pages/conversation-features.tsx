@@ -11,6 +11,7 @@ import { useAppState } from "../state/app-state.js";
 import { appActions } from "../state/app-actions.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { answeredUnresolvedPluginInteraction, pendingPluginInteraction, pluginInteractionCompletedLabel, pluginInteractionWaitingLabel } from "../app/plugin-interaction-waiting-label.js";
+import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
@@ -171,9 +172,20 @@ export function useConversationFeatures(options: {
 
   const legalFlowCardOpen = prepared.some((call) => isActiveLegalWorkflowCard(call)
     && !ui?.hiddenCallIds.has(call.callId) && !ui?.dismissedCallIds.has(call.callId));
+  const chatId = state.agent.currentChatId;
+  const activeTurnId = chatId ? state.agent.activeTurnIdByChatId[chatId] ?? null : null;
+  // This question is drawn under the shortcuts. They have to leave until it is answered.
+  const nativeLegalQuestionOpen = chatId !== null
+    && state.agent.stopInFlightByChatId[chatId] !== true
+    && calls.some((call) => call.pluginId === "legal-labor")
+    && pendingAgentQuestion(options.agentMessages ?? [], activeTurnId) !== null;
+  const legalQuestionOwnsComposer = legalFlowCardOpen || nativeLegalQuestionOpen;
+  const presented = legalQuestionOwnsComposer
+    ? prepared.filter((call) => !(call.pluginId === "legal-labor" && call.capabilityId === "guide-open"))
+    : prepared;
   const toggleCompactRecording = () => {
     setError(null);
-    if (legalFlowCardOpen) return;
+    if (legalQuestionOwnsComposer) return;
     if (!recordingAuthenticated) { dispatch(appActions.navigate("/welcome")); return; }
     const owner = normalizePluginConversationId(conversationId)!;
     const pluginRecorder = pluginRecordings.get(owner);
@@ -190,7 +202,7 @@ export function useConversationFeatures(options: {
   const invoke = async (plugin: InstalledPlugin, command: PluginCommandContribution, args = "") => {
     // This shortcut is a Host recorder, not a material-collect capability call.
     if (plugin.id === "legal-labor" && command.command === "/legal-record") { toggleCompactRecording(); return; }
-    if (legalFlowCardOpen && plugin.id === "legal-labor") return;
+    if (legalQuestionOwnsComposer && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
     setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(conversationId)!); return next; });
     if (command.agentSkillId) { latest.current.onDraft(`${command.command} ${args}`); return; }
@@ -250,8 +262,8 @@ export function useConversationFeatures(options: {
         if (normalizePluginConversationId(call.conversationId) !== normalizePluginConversationId(conversationId)) return;
         if (!await latest.current.onSend(buildLegalDiagnosisContinuation(call))) throw new Error(t("home.media.error.sendFailed"));
       }} /> : null;
-  const cards = <><div ref={setRecordingBar} />{host(prepared, "flow")}{host(prepared, "pinned")}
-    {recording.compactOpen && !legalFlowCardOpen ? <RecordingEntryCard session={recording.session}
+  const cards = <><div ref={setRecordingBar} />{host(presented, "flow")}{host(presented, "pinned")}
+    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.session}
       disabled={!clients?.asr} onClose={recording.closeCompact} onOpenList={() => openRecording()} /> : null}
     {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
@@ -274,7 +286,7 @@ export function useConversationFeatures(options: {
   const pinnedCapabilities = new Set(targets.filter(({ command }) => command.pinned)
     .map(({ plugin, command }) => `${plugin.id}:${command.capabilityId}`));
   const pinnedTargets = state.agent.currentChatId
-    ? selectPinnedCommandsForLegalWorkflow(selectConversationPinnedCommands(targets, calls), legalFlowCardOpen)
+    ? selectPinnedCommandsForLegalWorkflow(selectConversationPinnedCommands(targets, calls), legalQuestionOwnsComposer)
     : [];
   const shortcuts = <PinnedPluginCommandBar targets={pinnedTargets} disabled={!clients}
     recordingOpen={recordingShortcutOpen(recording.compactOpen, pluginRecording, hiddenRecordings.has(recordingOwner))}

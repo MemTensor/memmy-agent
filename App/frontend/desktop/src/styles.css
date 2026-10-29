@@ -4937,14 +4937,15 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 
 .agent-message-content__link {
   color: var(--color-action-sky);
-  text-decoration-line: none;
+  font-weight: 600;
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
   overflow-wrap: anywhere;
   transition: color 150ms ease;
 }
 
 .agent-message-content__link:hover {
   color: var(--color-action-sky-hover);
-  text-decoration-line: underline;
 }
 
 .agent-message-content__inline-code {
@@ -5124,6 +5125,56 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 .agent-message-content__file-chip {
   max-width: 100%;
   vertical-align: baseline;
+}
+
+/* Local file links are buttons so the desktop can open them in the preview.
+   They use the same link treatment as web links: sky color, underline, and
+   semibold weight, with no code-chip background. */
+button.agent-message-content__file-link {
+  display: inline;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-action-sky);
+  font: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+button.agent-message-content__file-link:hover,
+button.agent-message-content__file-link:focus-visible {
+  color: var(--color-action-sky-hover);
+}
+
+button.agent-message-content__file-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 35%, transparent);
+  outline-offset: 2px;
+}
+
+button.agent-message-content__file-link:disabled {
+  cursor: default;
+  opacity: 1;
+  color: var(--color-action-sky);
+}
+
+button.agent-message-content__file-link--error,
+button.agent-message-content__file-link--error:hover,
+button.agent-message-content__file-link--error:disabled {
+  background: transparent;
+  color: var(--color-status-error);
 }
 
 .sr-only {

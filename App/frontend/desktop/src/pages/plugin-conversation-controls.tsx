@@ -64,17 +64,18 @@ export interface PluginScenarioTarget extends PluginScenarioContribution {
 
 
 /**
- * Collects the scenario entry cards contributed by enabled plugins.
+ * Collects the legal scenario cards for the empty home screen.
  *
- * Only active plugins contribute: a disabled plugin cannot serve the work its
- * card would start, so offering it would dead-end.
+ * Only the legal plugin contributes these cards, and only while the account
+ * can use it. Office and every other plugin stay off this row. Without that
+ * permission the home screen falls back to the three generic commands.
  *
  * @param plugins Installed plugins.
- * @returns Scenario cards to offer on the empty home screen.
+ * @returns Legal scenario cards, or an empty list when the plugin cannot be used.
  */
 export function collectPluginScenarios(plugins: InstalledPlugin[]): PluginScenarioTarget[] {
   return plugins
-    .filter((plugin) => plugin.state === "active")
+    .filter((plugin) => plugin.id === "legal-labor" && plugin.state === "active" && plugin.eligibility?.canUse !== false)
     .flatMap((plugin) => (plugin.manifest.scenarios ?? []).map((scenario) => ({ ...scenario, pluginId: plugin.id })));
 }
 
@@ -135,7 +136,7 @@ export function selectConversationPinnedCommands(targets: PluginCommandTarget[],
 }
 
 
-/** Legal workflow cards own the composer until the user handles that step. */
+/** Legal workflow cards, including the Agent's own question, own the composer until that step is handled. */
 export function selectPinnedCommandsForLegalWorkflow(targets: PluginCommandTarget[], workflowCardOpen: boolean): PluginCommandTarget[] {
   return workflowCardOpen ? targets.filter((target) => target.plugin.id !== "legal-labor") : targets;
 }

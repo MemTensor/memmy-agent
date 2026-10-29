@@ -42,10 +42,12 @@ describe("thread panel model", () => {
     expect(threadPreviewKind("notes.md")).toBe("markdown");
     expect(threadPreviewKind("brief.docx")).toBe("document");
     expect(threadPreviewKind("sheet.XLSX")).toBe("document");
+    expect(threadPreviewKind("bundle.ZIP")).toBe("unsupported");
+    expect(threadPreviewKind("bundle.rar")).toBe("unsupported");
     for (const extension of ["tex", "bib", "sty"]) expect(threadPreviewKind(`review.${extension}`)).toBe("code");
   });
 
-  it("opens supported files in the thread panel and leaves unsupported files to the system app", () => {
+  it("opens every local file in the thread panel, including formats that cannot be previewed", () => {
     expect(threadTabForInAppPreview({
       name: "示例公司00000_年报测试.md",
       path: "/work/示例公司00000_年报测试.md",
@@ -59,7 +61,8 @@ describe("thread panel model", () => {
     expect(threadTabForInAppPreview({ name: "notes.md", url: "http://127.0.0.1/api/media/notes" })?.id).toBe("file:http://127.0.0.1/api/media/notes");
     expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toMatchObject({ name: "交付物.xlsx", type: "file" });
     expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toMatchObject({ name: "report.pdf", type: "file" });
-    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toBeNull();
+    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toMatchObject({ name: "archive.zip", type: "file" });
+    expect(threadTabForInAppPreview({ name: "archive.rar", path: "/work/archive.rar" })).toMatchObject({ name: "archive.rar", type: "file" });
   });
 
   it("collects delivered assistant files, not files merely linked or edited", () => {
@@ -85,6 +88,56 @@ describe("thread panel model", () => {
 
     expect(artifacts.map((artifact) => artifact.name)).toEqual(["data.xlsx", "script.py", "report.pdf"]);
     expect(artifacts[2]).toMatchObject({ key: "/work/out/report.pdf", path: "/work/out/report.pdf" });
+  });
+
+  it("lists html writes in artifacts while the answer is still streaming, and leaves other writes in changes", () => {
+    const messages = [
+      message({
+        id: "write-1",
+        role: "tool",
+        kind: "trace",
+        content: "",
+        fileEdits: [
+          { call_id: "w1", tool: "write_file", path: "/work/index.html", absolute_path: "/work/index.html", status: "done", added: 1, deleted: 0 },
+          { call_id: "py", tool: "write_file", path: "/work/app.py", absolute_path: "/work/app.py", status: "done", added: 4, deleted: 0 },
+          { call_id: "ts", tool: "write", path: "/work/main.ts", absolute_path: "/work/main.ts", status: "done", added: 2, deleted: 0 },
+        ],
+      }),
+      message({ id: "answer-1", content: "页面好了", isStreaming: false }),
+      message({
+        id: "write-2",
+        role: "tool",
+        kind: "trace",
+        content: "",
+        fileEdits: [
+          { call_id: "w2", tool: "write_file", path: "/work/note.md", absolute_path: "/work/note.md", status: "done", added: 1, deleted: 0 },
+          { call_id: "e2", tool: "edit_file", path: "/work/index.html", absolute_path: "/work/index.html", status: "done", added: 2, deleted: 1 },
+          { call_id: "js", tool: "replace_in_file", path: "/work/app.py", absolute_path: "/work/app.py", status: "done", added: 1, deleted: 1 },
+        ],
+      }),
+      message({ id: "answer-2", content: "改配色", isStreaming: true }),
+    ];
+
+    expect(collectThreadArtifacts(messages).map((artifact) => artifact.name)).toEqual(["index.html", "note.md"]);
+    expect(collectThreadFileChanges(messages).map((change) => change.name)).toEqual(["index.html", "app.py", "main.ts", "note.md"]);
+  });
+
+  it("keeps a code file in artifacts when the assistant delivers it", () => {
+    const artifacts = collectThreadArtifacts([
+      message({
+        role: "tool",
+        kind: "trace",
+        content: "",
+        fileEdits: [{ call_id: "py", tool: "write_file", path: "/work/app.py", absolute_path: "/work/app.py", status: "done", added: 1, deleted: 0 }],
+      }),
+      message({
+        content: "脚本已附上",
+        isStreaming: false,
+        media: [{ kind: "file", path: "/work/app.py", name: "app.py" }],
+      }),
+    ]);
+
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["app.py"]);
   });
 
   it("waits until the assistant finishes before offering a new artifact", () => {

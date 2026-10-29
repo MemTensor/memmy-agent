@@ -51,21 +51,83 @@ const TRAILING_PUNCTUATION_RE = /[.,;:!?，。；：！？)）\]]+$/;
 const LONG_TEXT_WRAP_CLASS = "break-words [overflow-wrap:anywhere]";
 const LIST_ITEM_BLOCK_TAGS = new Set(["p", "pre", "blockquote", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
 
+type DeliveredFileRef = { name: string; path: string };
+type FileMentionClaim = (path: string, name: string, source: "path" | "name") => boolean;
+
+function deliveredFileRefs(deliveredFiles: AgentMessageContentProps["deliveredFiles"]): DeliveredFileRef[] {
+  return (deliveredFiles ?? []).flatMap((file) => {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) return [];
+    const name = basename(file.name?.trim() || path);
+    return name ? [{ name, path }] : [];
+  });
+}
+
+function uniqueDeliveredFiles(deliveredFiles: AgentMessageContentProps["deliveredFiles"]): DeliveredFileRef[] {
+  const counts = new Map<string, number>();
+  const refs = deliveredFileRefs(deliveredFiles);
+  for (const file of refs) counts.set(file.name, (counts.get(file.name) ?? 0) + 1);
+  return refs.filter((file) => counts.get(file.name) === 1);
+}
+
+function mentionNeedles(file: DeliveredFileRef): string[] {
+  const needles = [file.path, `.../${file.name}`, `…/${file.name}`, file.name];
+  return needles.filter((needle, index) => needle.length > 0 && needles.indexOf(needle) === index);
+}
+
+function hasMentionBoundary(text: string, index: number, length: number): boolean {
+  return !/[\w.-]/u.test(text[index - 1] ?? "") && !/[\w.-]/u.test(text[index + length] ?? "");
+}
+
+function absoluteLocalPathToken(value: string): string | null {
+  const trimmed = cleanPathToken(value);
+  if (!trimmed || trimmed.includes("\n")) return null;
+  if (/^file:/i.test(trimmed)) return localArtifactPathFromHref(trimmed);
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^[a-z]:[\\/]/i.test(trimmed)) return null;
+  if (trimmed.startsWith("/") || trimmed.startsWith("~/") || /^[a-z]:[\\/]/i.test(trimmed) || trimmed.startsWith("\\\\")) {
+    return trimmed;
+  }
+  return null;
+}
+
+function absolutePathLines(code: string): string[] | null {
+  const lines = code.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const paths: string[] = [];
+  for (const line of lines) {
+    const path = absoluteLocalPathToken(line);
+    if (!path) return null;
+    paths.push(path);
+  }
+  return paths;
+}
+
+function deliveredFileForToken(
+  token: string,
+  uniqueFiles: readonly DeliveredFileRef[],
+): DeliveredFileRef | null {
+  const cleaned = cleanPathToken(token);
+  const exact = uniqueFiles.find((file) => file.name === cleaned || file.path === cleaned);
+  if (exact) return exact;
+  const truncated = /^(?:\.\.\.|…)[/\\]+(.+)$/u.exec(cleaned);
+  if (!truncated) return null;
+  const name = basename(truncated[1] ?? "");
+  return uniqueFiles.find((file) => file.name === name) ?? null;
+}
+
 function linkDeliveredFileMentions(
   children: ReactNode,
   deliveredFiles: AgentMessageContentProps["deliveredFiles"],
   artifactClient: AgentArtifactClient | null | undefined,
   onPreviewFile: InAppFilePreviewHandler | undefined,
   isStreaming: boolean | undefined,
+  claimMention: FileMentionClaim,
 ): ReactNode {
   if (!artifactClient) return children;
-  const files = (deliveredFiles ?? []).flatMap((file) => {
-    const path = file.path?.trim();
-    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) return [];
-    const name = basename(file.name?.trim() || path);
-    return name ? [{ name, path }] : [];
-  }).sort((left, right) => right.name.length - left.name.length);
-  if (!files.length) return children;
+  const needles = uniqueDeliveredFiles(deliveredFiles)
+    .flatMap((file) => mentionNeedles(file).map((needle) => ({ ...file, needle })))
+    .sort((left, right) => right.needle.length - left.needle.length || left.needle.localeCompare(right.needle));
+  if (!needles.length) return children;
 
   let key = 0;
   return Children.toArray(children).flatMap((child) => {
@@ -73,38 +135,29 @@ function linkDeliveredFileMentions(
     const parts: ReactNode[] = [];
     let cursor = 0;
     while (cursor < child.length) {
-      let match: { name: string; path: string; index: number } | null = null;
-      for (const file of files) {
-        let index = child.indexOf(file.name, cursor);
-        while (index >= 0 && (
-          /[\w.-]/u.test(child[index - 1] ?? "") || /[\w.-]/u.test(child[index + file.name.length] ?? "")
-        )) index = child.indexOf(file.name, index + 1);
-        if (index >= 0 && (!match || index < match.index || index === match.index && file.name.length > match.name.length)) {
-          match = { ...file, index };
+      let match: { name: string; path: string; needle: string; index: number } | null = null;
+      for (const needle of needles) {
+        let index = child.indexOf(needle.needle, cursor);
+        while (index >= 0 && !hasMentionBoundary(child, index, needle.needle.length)) {
+          index = child.indexOf(needle.needle, index + 1);
+        }
+        if (index >= 0 && (!match || index < match.index || (index === match.index && needle.needle.length > match.needle.length))) {
+          match = { name: needle.name, path: needle.path, needle: needle.needle, index };
         }
       }
       if (!match) break;
       if (match.index > cursor) parts.push(child.slice(cursor, match.index));
-      parts.push(<FileReferenceChip key={`delivered-file-${key++}`} path={match.path} label={match.name} variant="link" isStreaming={isStreaming} artifactClient={artifactClient} onPreviewFile={onPreviewFile} />);
-      cursor = match.index + match.name.length;
+      if (claimMention(match.path, match.name, "name")) {
+        parts.push(<FileReferenceChip key={`delivered-file-${key++}`} path={match.path} label={match.name} variant="link" isStreaming={isStreaming} artifactClient={artifactClient} onPreviewFile={onPreviewFile} />);
+      } else {
+        parts.push(match.needle);
+      }
+      cursor = match.index + match.needle.length;
     }
     if (!parts.length) return [child];
     if (cursor < child.length) parts.push(child.slice(cursor));
     return parts;
   });
-}
-
-function findDeliveredFileForInlineCode(
-  code: string,
-  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
-): { path: string } | null {
-  for (const file of deliveredFiles ?? []) {
-    const path = file.path?.trim();
-    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) continue;
-    const name = basename(file.name?.trim() || path);
-    if (code === name || code === basename(path) || code === path) return { path };
-  }
-  return null;
 }
 
 function listItemElementTag(node: ReactNode): string | null {
@@ -197,7 +250,37 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     [props.content, props.isStreaming]
   );
   const deferred = useDeferredMarkdownRender(source, Boolean(props.deferRender), Boolean(props.isStreaming), props.deferredRevealDelayMs);
-  const components = useMemo<Components>(() => ({
+  const components = useMemo<Components>(() => {
+    // One highlight per file. A later bare name or repeated path stays ordinary text.
+    const linkedFileKeys = new Set<string>();
+    const claimMention: FileMentionClaim = (path, name, source) => {
+      const pathKey = `path:${path}`;
+      const nameKey = `name:${name}`;
+      if (source === "name") {
+        if (linkedFileKeys.has(nameKey) || linkedFileKeys.has(pathKey)) return false;
+        linkedFileKeys.add(nameKey);
+        linkedFileKeys.add(pathKey);
+        return true;
+      }
+      if (linkedFileKeys.has(pathKey)) return false;
+      linkedFileKeys.add(pathKey);
+      linkedFileKeys.add(nameKey);
+      return true;
+    };
+    const knownFiles = deliveredFileRefs(props.deliveredFiles);
+    const uniqueFiles = uniqueDeliveredFiles(props.deliveredFiles);
+    const mention = (children: ReactNode) => linkDeliveredFileMentions(
+      children,
+      props.deliveredFiles,
+      props.artifactClient,
+      props.onPreviewFile,
+      props.isStreaming,
+      claimMention,
+    );
+    const fileLink = (path: string, label: string, key: string) => (
+      <FileReferenceChip key={key} path={path} label={label} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
+    );
+    return ({
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
@@ -260,24 +343,44 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
       const isInline = !language && !raw.includes("\n");
       if (isInline) {
-        const deliveredFile = props.artifactClient ? findDeliveredFileForInlineCode(code, props.deliveredFiles) : null;
-        if (deliveredFile) {
-          return <FileReferenceChip path={deliveredFile.path} label={code} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
-        }
-        if (props.artifactClient && isLikelyLocalPath(code)) {
-          return <FileReferenceChip path={code} label={code} variant="link" verifiedOnly isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        if (props.artifactClient) {
+          const absolute = absoluteLocalPathToken(code);
+          if (absolute) {
+            const known = knownFiles.find((file) => file.path === absolute);
+            const name = known?.name ?? basename(absolute);
+            if (!claimMention(absolute, name, "path")) return <>{code}</>;
+            return fileLink(known?.path ?? absolute, name, `inline-path-${absolute}`);
+          }
+          const deliveredFile = deliveredFileForToken(code, uniqueFiles);
+          if (deliveredFile) {
+            if (!claimMention(deliveredFile.path, deliveredFile.name, "name")) return <>{code}</>;
+            return fileLink(deliveredFile.path, deliveredFile.name, `inline-name-${deliveredFile.path}`);
+          }
         }
         return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
+      }
+      const pathLines = !language && props.artifactClient ? absolutePathLines(code) : null;
+      if (pathLines) {
+        return (
+          <div className="agent-message-content__path-lines">
+            {pathLines.map((path, index) => {
+              const known = knownFiles.find((file) => file.path === path);
+              const name = known?.name ?? basename(path);
+              if (!claimMention(path, name, "path")) return <div key={`${path}-${index}`}>{path}</div>;
+              return <div key={`${path}-${index}`}>{fileLink(known?.path ?? path, name, `fence-path-${path}-${index}`)}</div>;
+            })}
+          </div>
+        );
       }
       return <CodeBlock code={code} language={language} highlight={!props.isStreaming} />;
     },
     p({ children }) {
       return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>
-        {linkDeliveredFileMentions(children, props.deliveredFiles, props.artifactClient, props.onPreviewFile, props.isStreaming)}
+        {mention(children)}
       </p>;
     },
     li({ children, className }) {
-      return <li className={className}>{withListItemLead(children)}</li>;
+      return <li className={className}>{withListItemLead(mention(children))}</li>;
     },
     ul({ children }) {
       return <ul className={`agent-message-content__list agent-message-content__list--unordered ${LONG_TEXT_WRAP_CLASS}`}>{children}</ul>;
@@ -301,12 +404,12 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       );
     },
     th({ children, style }) {
-      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</th>;
+      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`} style={style}>{mention(children)}</th>;
     },
     td({ children, style }) {
-      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</td>;
+      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{mention(children)}</td>;
     }
-  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
+  }); }, [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;

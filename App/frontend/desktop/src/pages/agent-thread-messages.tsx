@@ -7,7 +7,7 @@ import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
  * component keeps activity grouped and renders the complete trace list returned
  * by live WebSocket events and /webui-thread history.
  */
-import { Fragment, memo, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode, type SVGProps } from "react";
+import { Fragment, createContext, memo, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode, type SVGProps } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -66,6 +66,7 @@ import {
   type ToolTraceCategory,
 } from "../state/agent-tool-traces.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
+import { writtenDeliveryFile } from "./agent-thread-panel-model.js";
 import { ErrorNoticeDetail } from "./error-notice-detail.js";
 import {
   formatAgentModelError,
@@ -169,6 +170,8 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
   const interactionAnchor = processInteraction ? units.reduce((last, unit, index) =>
     unit.type === "activity" && unit.isCurrentTurnActivity ? index : last, -1) : -1;
   const finalAssistantAnswerIndices = useMemo(() => findFinalAssistantAnswerUnitIndices(units, { isSending: props.isSending }), [props.isSending, units]);
+  const writtenMediaByAnswer = useMemo(() => writtenDeliveryMediaByAnswer(units), [units]);
+  const lastUserUnitIndex = useMemo(() => findLastUserUnitIndex(units), [units]);
   const recallEvidenceAnchors = useMemo(
     () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
     [props.isSending, units]
@@ -285,6 +288,8 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
             {unit.message.proactiveDelivery === "cron" ? <ProactiveMessageDivider message={unit.message} /> : null}
             <SingleMessage
               message={unit.message}
+              writtenMedia={writtenMediaByAnswer.get(index)}
+              holdDeliveryCards={props.isSending === true && index > lastUserUnitIndex}
               artifactClient={props.artifactClient}
               onPreviewFile={props.onPreviewFile}
               onOpenActivityFile={props.onOpenActivityFile}
@@ -336,6 +341,40 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
     && previous.memoryRuntimeClient === next.memoryRuntimeClient
     && previous.onAnswerQuestion === next.onAnswerQuestion;
+}
+
+function writtenDeliveryAttachment(edit: AgentFileEdit): AgentChatMediaAttachment | null {
+  const file = writtenDeliveryFile(edit);
+  return file ? { kind: "file", path: file.path, name: file.name } : null;
+}
+
+function mediaAlreadyHasFile(media: AgentChatMediaAttachment[] | undefined, file: AgentChatMediaAttachment): boolean {
+  return (media ?? []).some((item) => item.path === file.path || (item.name && item.name === file.name));
+}
+
+/** Pages and markdown documents written in the activity immediately before an assistant answer. */
+export function writtenDeliveryMediaByAnswer(units: AgentDisplayUnit[]): Map<number, AgentChatMediaAttachment[]> {
+  const mediaByAnswer = new Map<number, AgentChatMediaAttachment[]>();
+  units.forEach((unit, index) => {
+    if (unit.type !== "single" || unit.message.role !== "assistant") return;
+    const files: AgentChatMediaAttachment[] = [];
+    const seen = new Set<string>();
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const previous = units[cursor];
+      if (!previous || previous.type === "retry_wait") continue;
+      if (previous.type !== "activity") break;
+      for (const message of previous.messages) {
+        for (const edit of message.fileEdits ?? []) {
+          const file = writtenDeliveryAttachment(edit);
+          if (!file || seen.has(file.path) || mediaAlreadyHasFile(unit.message.media, file)) continue;
+          seen.add(file.path);
+          files.push(file);
+        }
+      }
+    }
+    if (files.length) mediaByAnswer.set(index, files);
+  });
+  return mediaByAnswer;
 }
 
 export function buildAgentDisplayUnits(messages: AgentChatMessage[], options: { chatScopeKey: string; retryWaitStatus?: AgentRetryWaitStatus | null }): AgentDisplayUnit[] {
@@ -577,6 +616,10 @@ function findRecallEvidenceUserAnchors(
 
 interface SingleMessageProps {
   message: AgentChatMessage;
+  /** Files this turn wrote. The client hangs them as delivery cards; the model does not have to attach them. */
+  writtenMedia?: AgentChatMediaAttachment[];
+  /** The current turn is still running, so a finished file must not flash in before the reply ends. */
+  holdDeliveryCards?: boolean;
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
   onOpenActivityFile?: (file: ActivityPreviewFile) => void;
@@ -718,6 +761,12 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     );
   }
 
+  const replyStillWriting = message.isStreaming === true || message.reasoningStreaming === true;
+  const deliveredMedia = props.holdDeliveryCards || replyStillWriting
+    ? undefined
+    : props.writtenMedia?.length
+      ? [...(message.media ?? []), ...props.writtenMedia]
+      : message.media;
   const isFinalAnswer = props.isFinalAssistantAnswer !== false || props.forceMessageActions === true;
   const assistantCopyReady = isFinalAnswer && isAssistantMessageCopyReady(message);
   const displayedContent = resolveAgentMessageDisplayContent(message, {
@@ -748,11 +797,12 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
               isStreaming={message.isStreaming}
               artifactClient={props.artifactClient}
               onPreviewFile={props.onPreviewFile}
+              deliveredFiles={deliveredMedia}
               deferRender={props.deferContentRender}
               deferredRevealDelayMs={props.deferredRevealDelayMs}
             />
-            {message.media?.length ? (
-              <AssistantMediaAttachmentList media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
+            {deliveredMedia?.length ? (
+              <AssistantMediaAttachmentList media={deliveredMedia} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
             ) : null}
           </div>
           <MessageBubbleCopyButton text={displayedContent} align="left" available={assistantCopyReady} timestamp={timestamp} />
@@ -1139,6 +1189,8 @@ function formatMessageTimestamp(date: Date): string {
 
 function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMessageProps): boolean {
   return previous.message === next.message
+    && previous.writtenMedia === next.writtenMedia
+    && previous.holdDeliveryCards === next.holdDeliveryCards
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
     && previous.onOpenActivityFile === next.onOpenActivityFile
