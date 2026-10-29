@@ -12,11 +12,15 @@ const cacheWriter = new Database(workerData.path, { fileMustExist: true });
 cacheWriter.pragma("busy_timeout = 1000");
 cacheWriter.pragma("synchronous = NORMAL");
 const model = createPanelReaderModel(db);
-function partsFor(method: string): PanelCachePart[] {
+function partsFor(method: string,args: unknown[]): PanelCachePart[] {
   if (["stats", "overviewStats", "analysis"].includes(method))
     return ["memories", "metrics"];
   if (method === "overview")
     return ["memories"];
+  if (["items","members","page"].includes(method)) {
+    const input=args[method==="page"?1:0] as {section?:string;layer?:string} | undefined;
+    if (input?.section!=="tasks" && input?.layer!=="UserMemory") return ["memories"];
+  }
   if (method === "logs") {
     return ["logs", "visibility"];
   }
@@ -44,7 +48,7 @@ async function statistics(method: "stats" | "overviewStats", input: Parameters<P
 }
 parentPort!.on("message", async ({ id, method, args }) => {
   try {
-    const parts = partsFor(method);
+    const parts = partsFor(method,args);
     // A source write racing preparation is retried before entering the read snapshot.
     let attempts = 0;
     while (true) {

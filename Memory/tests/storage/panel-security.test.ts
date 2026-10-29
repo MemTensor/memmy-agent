@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import { panelSafetyToken } from "../../src/storage/panel-security.js";
+import { createLocalOwnerFixture } from "../fixtures/panel-local-owners.js";
 import { PanelBrowse } from "../../src/service/panel/browse.js";
 import { MemoryDb } from "../../src/storage/db.js";
-const { cleanup, createTestService } = createMemoryServiceFixture();
+const ownerFixture=createMemoryServiceFixture();
+const { cleanup, createTestService } = ownerFixture;
 afterEach(cleanup);
 async function pendingCapture(status: string | null = "selected") {
   const fixture = createTestService();
@@ -49,6 +51,38 @@ describe("panel safety generations", () => {
     const safety = panelSafetyToken(db.db);
     db.db.prepare(`UPDATE raw_turns SET episode_id=@target${extra} WHERE id=@id`).run({ target, session, id: pending.id });
     expect(panelSafetyToken(db.db)).not.toBe(safety);
+  });
+  it.each(["pending","selected"])("preserves NULL-owner %s first binding but still revokes rebinds and privacy changes",async status=>{
+    const {db,repos,turns}=await createLocalOwnerFixture(ownerFixture),turn=turns[2]!;
+    const episode=repos.runtime.getEpisode(turn.episodeId!)!;
+    db.db.prepare("UPDATE raw_turns SET episode_id=NULL,message_payload_json=json_set(message_payload_json,'$.episode_assignment.status',?) WHERE id=?").run(status,turn.rawTurnId);
+    const safety=panelSafetyToken(db.db);
+    repos.runtime.bindRawTurnEpisode(turn.rawTurnId,episode.id,episode.updatedAt);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    repos.runtime.bindRawTurnEpisode(turn.rawTurnId,episode.id,episode.updatedAt);
+    expect(panelSafetyToken(db.db)).toBe(safety);
+    const target=repos.runtime.createEpisode({...episode,id:"new-null-target",l1MemoryIds:[],rawTurnIds:[],turnCount:0});
+    repos.runtime.rebindRawTurnEpisode(turn.rawTurnId,episode.id,target.id);
+    expect(panelSafetyToken(db.db)).not.toBe(safety);
+    const rebound=panelSafetyToken(db.db);
+    db.db.prepare("UPDATE raw_turns SET redacted_at='now' WHERE id=?").run(turn.rawTurnId);
+    expect(panelSafetyToken(db.db)).not.toBe(rebound);
+  });
+  it.each(["raw session","memory session"])("revokes cached pages when the %s changes",async change=>{
+    const {db,turns}=await createLocalOwnerFixture(ownerFixture),turn=turns[0]!;
+    const before=panelSafetyToken(db.db);
+    if(change==="raw session")db.db.prepare("UPDATE raw_turns SET session_id=? WHERE id=?").run(turns[1]!.sessionId,turn.rawTurnId);
+    else db.db.prepare("UPDATE memories SET session_id=? WHERE id=?").run(turns[1]!.sessionId,turn.l1MemoryId);
+    expect(panelSafetyToken(db.db)).not.toBe(before);
+  });
+  it("does not exempt a NULL-owner first binding to a different historical owner",async()=>{
+    const {db,repos,turns}=await createLocalOwnerFixture(ownerFixture),turn=turns[2]!;
+    const episode=repos.runtime.getEpisode(turn.episodeId!)!;
+    const wrong=repos.runtime.createEpisode({...episode,id:"wrong-owner-target",userId:"a",l1MemoryIds:[],rawTurnIds:[],turnCount:0});
+    db.db.prepare("UPDATE raw_turns SET episode_id=NULL,message_payload_json=json_set(message_payload_json,'$.episode_assignment.status','pending') WHERE id=?").run(turn.rawTurnId);
+    const before=panelSafetyToken(db.db);
+    db.db.prepare("UPDATE raw_turns SET episode_id=? WHERE id=?").run(wrong.id,turn.rawTurnId);
+    expect(panelSafetyToken(db.db)).not.toBe(before);
   });
   it("replaces an existing v14 trigger without changing its safety token or facts", async () => {
     const { db, repos, pending, episode } = await pendingCapture();

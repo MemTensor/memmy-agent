@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { MemoryDb } from "../../src/storage/db.js";
 import { PanelLogReader } from "../../src/storage/panel-log-read.js";
-import { ensurePanelCache, fillPanelCacheBatch, panelMemoryStats, panelCachePending, panelAnalysisLogs, installPanelCache } from "../../src/storage/panel-cache.js";
+import { ensurePanelCache, fillPanelCacheBatch, panelMemoryStats, panelCachePending, panelAnalysisLogs, installPanelCache, PANEL_CACHE_VERSION } from "../../src/storage/panel-cache.js";
 import { panelRecallScore } from "../../src/service/read-model/model-costs.js";
 import { Repositories } from "../../src/storage/repositories.js";
 const now = "2026-10-29T08:00:00Z";
@@ -108,6 +108,26 @@ describe("persistent panel projections", () => {
     finally {
       db.close();
     }
+  });
+  it("rebuilds a v1 presentation cache on reopen while preserving every source row and schema version",()=>{
+    const root=mkdtempSync(join(tmpdir(),"panel-cache-v1-")),path=join(root,"memory.sqlite");
+    let db=new MemoryDb({path});
+    try{
+      addMemory(db,"kept-v1");log(db,"kept payload");
+      ensurePanelCache(db.db,["memories","logs","visibility","metrics"]);
+      const before={memories:db.db.prepare("SELECT * FROM memories").all(),logs:db.db.prepare("SELECT * FROM api_logs").all()};
+      db.db.exec(`DROP TABLE panel_memory_facts;
+        CREATE TABLE panel_memory_facts(id TEXT PRIMARY KEY,memory_layer TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source TEXT NOT NULL);
+        INSERT INTO panel_memory_facts VALUES('kept-v1','L1','activated','now','now','codex');
+        UPDATE panel_cache_meta SET version=1`);
+      db.close();db=new MemoryDb({path});
+      expect(db.schemaVersion().version).toBe(14);
+      expect(db.db.prepare("SELECT version FROM panel_cache_meta").pluck().get()).toBe(PANEL_CACHE_VERSION);
+      expect([...panelMemoryStats(db.db)]).toHaveLength(1);
+      expect(db.db.prepare("SELECT raw_id,session_id FROM panel_memory_facts").get()).toEqual({raw_id:null,session_id:null});
+      expect(new PanelLogReader(db.db).list({q:"kept payload"}).total).toBe(1);
+      expect({memories:db.db.prepare("SELECT * FROM memories").all(),logs:db.db.prepare("SELECT * FROM api_logs").all()}).toEqual(before);
+    }finally{if(db.db.open)db.close();rmSync(root,{recursive:true,force:true});}
   });
   it("materializes only requested legacy detail IDs and validates raw source rebinding", () => {
     const db = new MemoryDb({ path: ":memory:" });

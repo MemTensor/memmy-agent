@@ -1,4 +1,5 @@
 import { memoryDisplayedSourceSql } from "./panel-source-sql.js";
+import { panelVisibleMemorySql } from "./panel-cache.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
@@ -7603,6 +7604,7 @@ function layerWeight(layer: MemoryLayer): number {
 function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlValue[] } {
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
+  if (filter.panelVisible) clauses.push(panelVisibleMemorySql());
 
   addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);

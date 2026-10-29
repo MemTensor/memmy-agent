@@ -1,4 +1,4 @@
-import { panelAnalysisLogs, panelMemoryStats } from "../../storage/panel-cache.js";
+import { ensurePanelCache, panelAnalysisLogs, panelMemoryStats, panelVisibleMemoryIds } from "../../storage/panel-cache.js";
 import type { MemoryRow } from "../../types.js";
 import { effectiveEpisodeMemoryIds } from "../../storage/memory-relations.js";
 import {externalEvidenceNamespaceForMemory} from "../external-evidence-source.js";
@@ -536,8 +536,10 @@ export class PanelReadModel {
         serverTime: this.now()
       };
     }
+    ensurePanelCache(this.deps.repos.db,["memories"]);
     const filter: MemoryFilter = {
       panelSource: true,
+      panelVisible: true,
       memoryLayer: input.layer,
       status: input.status,
       tags: input.tags,
@@ -620,7 +622,8 @@ export class PanelReadModel {
       if (input.status === "resolving") return [];
       return this.deps.repos.userMemories.panelMemberIds({userId, query: input.q, sourceAgent: input.sourceAgent, status: input.status === "activated" ? "active" : input.status});
     }
-    return this.deps.repos.memories.panelMemberIds({panelSource: true, memoryLayer: input.layer, status: input.status, tags:input.tags, agentId: input.sourceAgent, excludedAgentIds:input.excludedSourceAgents}, input.q);
+    ensurePanelCache(this.deps.repos.db,["memories"]);
+    return this.deps.repos.memories.panelMemberIds({panelSource: true, panelVisible: true, memoryLayer: input.layer, status: input.status, tags:input.tags, agentId: input.sourceAgent, excludedAgentIds:input.excludedSourceAgents}, input.q);
   }
 
   panelPageByIds(ids: string[], input: Parameters<PanelReadModel["panelMembers"]>[0]) {
@@ -631,7 +634,8 @@ export class PanelReadModel {
         const item = userMemoryPanelItem(memory); return {...item, metadata: {...item.metadata, fullContentAvailable:true}};
       })};
     }
-    return {items: this.displayItems(this.deps.repos.memories.getManyForPanel(ids),!input.namespace?.userId)};
+    const visible=panelVisibleMemoryIds(this.deps.repos.db,ids);
+    return {items: this.displayItems(this.deps.repos.memories.getManyForPanel(ids.filter(id=>visible.has(id))),!input.namespace?.userId)};
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {

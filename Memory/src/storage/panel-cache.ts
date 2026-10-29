@@ -5,7 +5,7 @@ import { RAW_SOURCE_SQL } from "./memory-relations.js";
 import type { MemoryStatsRow } from "../types.js";
 import { panelSourceForStatsRow } from "../utils/panel-source.js";
 /** Rebuildable presentation data. Source tables and their authorization remain authoritative. */
-export const PANEL_CACHE_VERSION = 1;
+export const PANEL_CACHE_VERSION = 2;
 const TABLES = {
   memories: "panel_memory_dirty",
   api_logs: "panel_log_dirty"
@@ -17,7 +17,7 @@ export function installPanelCache(db: Database.Database): void {
   CREATE TABLE IF NOT EXISTS panel_memory_dirty(id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_log_dirty(id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_metric_dirty(id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS panel_memory_facts(id TEXT PRIMARY KEY, memory_layer TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS panel_memory_facts(id TEXT PRIMARY KEY, memory_layer TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source TEXT NOT NULL,raw_id TEXT,session_id TEXT);
   CREATE TABLE IF NOT EXISTS panel_memory_visibility(id TEXT PRIMARY KEY,raw_id TEXT);
   CREATE INDEX IF NOT EXISTS idx_panel_memory_raw ON panel_memory_visibility(raw_id,id);
   CREATE TABLE IF NOT EXISTS panel_visibility_dirty(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
@@ -156,7 +156,7 @@ function fillNativeFacts(db: Database.Database, part: "memories" | "metrics" | "
     else if (part === "memories") {
       const displayed = memoryDisplayedSourceSql("CASE WHEN json_type(info_json,'$.source')='text' THEN json_extract(info_json,'$.source') END");
       db.prepare(`INSERT OR REPLACE INTO panel_memory_facts SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
-    panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id)
+    panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id),${RAW_SOURCE_SQL},m.session_id
     FROM memories m WHERE m.rowid IN (SELECT rowid FROM memories WHERE id IN (SELECT value FROM json_each(?))) AND m.deleted_at IS NULL`).run(keys);
     }
     else {
@@ -195,9 +195,25 @@ export function panelLogIdsPending(db: Database.Database, ids: readonly number[]
   return Boolean(db.prepare(`SELECT 1 FROM panel_visibility_dirty d JOIN panel_log_refs r ON r.ref_id=d.id
     WHERE r.log_id IN (SELECT value FROM json_each(?)) LIMIT 1`).get(JSON.stringify(ids)));
 }
+/** Shared management predicate. Source state is read live through its primary key;
+ * only the declared source pointer is cached, so raw privacy changes need no JSON scan. */
+function visibleFactSql(fact: string): string {
+  return `${fact}.status!='deleted' AND (${fact}.raw_id IS NULL OR EXISTS(
+    SELECT 1 FROM raw_turns r WHERE r.id=${fact}.raw_id AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+      AND (${fact}.session_id IS NULL OR ${fact}.session_id=r.session_id)))`;
+}
+export function panelVisibleMemorySql(memory = "memories"): string {
+  return `EXISTS(SELECT 1 FROM panel_memory_facts panel_fact WHERE panel_fact.id=${memory}.id AND ${visibleFactSql("panel_fact")})`;
+}
+export function panelVisibleMemoryIds(db: Database.Database, ids: readonly string[]): Set<string> {
+  ensurePanelCache(db,["memories"]);
+  if (!ids.length) return new Set();
+  return new Set(db.prepare(`SELECT f.id FROM panel_memory_facts f WHERE f.id IN(SELECT value FROM json_each(?)) AND ${visibleFactSql("f")}`)
+    .pluck().all(JSON.stringify(ids)) as string[]);
+}
 export function* panelMemoryStats(db: Database.Database): IterableIterator<MemoryStatsRow> {
   ensurePanelCache(db, ["memories"]);
-  for (const row of db.prepare("SELECT memory_layer,status,created_at,updated_at,source FROM panel_memory_facts").iterate() as IterableIterator<{
+  for (const row of db.prepare(`SELECT memory_layer,status,created_at,updated_at,source FROM panel_memory_facts f WHERE ${visibleFactSql("f")}`).iterate() as IterableIterator<{
     memory_layer: MemoryStatsRow["memoryLayer"];
     status: MemoryStatsRow["status"];
     created_at: string;
