@@ -89,16 +89,6 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
     finally { db.close(); }
   }
 
-  if (words[0] === "db" && words[1] === "rollback-panel") {
-    const path = requireValue("db", optionString(options,"db"));
-    const {default: Database} = await import("better-sqlite3");
-    const {rollbackPanelSchema} = await import("../storage/panel-rollback.js");
-    const {getSchemaVersion} = await import("../storage/schema.js");
-    const db = new Database(path,{fileMustExist:true});
-    try {rollbackPanelSchema(db);return {ok:true,schemaVersion:getSchemaVersion(db).version,path};}
-    finally {db.close();}
-  }
-
   if (words[0] === "raw") {
     return runRaw(words.slice(1), parsed, requestOptions(parsed, context.fetch));
   }
@@ -622,7 +612,6 @@ function helpText(): string {
     "  upgrade [--version <ver>]    Upgrade Memory and installed agent adapters",
     "  stop                         Stop the background Memory service",
     "  db repair-relations --db PATH [--after ID]  Repair one batch of declared historical relations",
-    "  db rollback-panel --db PATH  Offline schema 14 to 13 rollback; stop all Memory services first",
     "  service start|stop|status    Control the installed user service",
     "  service repair-launcher     Repair a legacy Windows task without starting it",
     "  serve                        Explain how to connect to an external Memory service",

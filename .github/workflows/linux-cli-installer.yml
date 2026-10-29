@@ -52,9 +52,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    env:
-      # The CLI build uses CPU inference; avoid the optional CUDA binary download.
-      ONNXRUNTIME_NODE_INSTALL_CUDA: skip
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
