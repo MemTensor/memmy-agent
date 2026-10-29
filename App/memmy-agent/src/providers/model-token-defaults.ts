@@ -433,6 +433,8 @@ export const MODEL_TOKEN_DEFAULTS = defineModelTokenDefaults([
     contextWindowTokens: 204_800,
     maxTokens: 65_536,
   },
+  // Source: https://platform.minimax.io/docs/guides/models-intro.md
+  { models: ["MiniMax-M3.1-Flash"], contextWindowTokens: 1_000_000, maxTokens: 524_288 },
   { models: ["MiniMax-M3"], contextWindowTokens: 1_000_000, maxTokens: 131_072 },
 
   // Doubao / Volcengine. Reviewed 2026-10-14.
