@@ -1946,7 +1946,7 @@ export class RetrievalService {
     // even when it must not be returned to an agent.
     const includeUserMemory = !onboardingFirstReportHit && semanticLayers.includes("L1");
     const userMemoryCount = includeUserMemory
-      ? this.deps.repos.userMemories.listActive(context.userId).length
+      ? this.deps.repos.userMemories.countActive(context.userId)
       : 0;
     const candidateCount = onboardingFirstReportHit
       ? 1
@@ -2019,6 +2019,7 @@ export class RetrievalService {
       return {memories, retrieval};
     };
     let {memories, retrieval} = prepare(retrievalOutput);
+    const userMemoryBudget = {deadlineAt: Date.now() + 5_000, rows: 0};
     const userMemoryOutput = includeUserMemory && !timeFilter
       ? await this.retrieveUserMemories({
           userId: context.userId,
@@ -2026,9 +2027,10 @@ export class RetrievalService {
           queryVectorText,
           queryExtract,
           limit: retrievalLimit,
+          budget: userMemoryBudget,
           excludeSourceTurnIds: recentRawTurnIds
         })
-      : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[] };
+      : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[], diagnostics: [] as RecallRouteDiagnostic[] };
     const merge = () => {
       const agentHits = onboardingFirstReportHit || timeFilter
         ? retrieval.hits : filterL1TraceSpanRecallHits(retrieval.hits, memories);
@@ -2062,7 +2064,7 @@ export class RetrievalService {
     }
     if (mergedState.result.hits.length < retrievalLimit && mergedState.duplicateLoss > 0 &&
       !refillStatuses.includes("recall_refill:no_progress")) refillStatuses.push("recall_refill:work_budget_limited");
-    const merged = mergedState.result;
+    let merged = mergedState.result;
     const rerankAt = Date.now();
     const filteredHits = onboardingFirstReportHit
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
@@ -2095,8 +2097,43 @@ export class RetrievalService {
       return !user || Boolean(currentUsers.get(id)?.status === "active" && JSON.stringify(currentUsers.get(id)) === JSON.stringify(user));
     };
     const beforeRevalidation = hits.length;
-    const verifiedHits = hits.filter(hit => [hit.id, ...(hit.memberMemoryIds ?? [])].every(unchanged));
-    if (verifiedHits.length !== hits.length) refillStatuses.push("recall_refill:concurrent_change");
+    const validHit = (hit: RecallHit) => [hit.id, ...(hit.memberMemoryIds ?? [])].every(unchanged);
+    const concurrentChangeDropped = hits.filter(hit => !validHit(hit)).length;
+    let verifiedHits = concurrentChangeDropped > 0 && !onboardingFirstReportHit && !timeFilter
+      ? mmrRecallHits(filteredHits.hits.filter(validHit), retrievalLimit, tuning.mmrLambda)
+      : hits.filter(validHit);
+    if (concurrentChangeDropped > 0) refillStatuses.push("recall_refill:concurrent_change");
+    // With model filtering disabled, fresh query results can replenish invalidated rows.
+    // With it enabled, only the already approved reserve above may supply replacements.
+    if (concurrentChangeDropped > 0 && !this.deps.config.algorithm.retrieval.llmFilterEnabled && !onboardingFirstReportHit && !timeFilter) {
+      for (let round = 0; round < 8 && verifiedHits.length < retrievalLimit; round++) {
+        const prior = verifiedHits.map(hit => hit.id).join("\0");
+        const priorCandidates = memories.map(memory => `${memory.id}:${memory.version}`).join("\0");
+        if (retrievalOutput.refill) {
+          retrievalOutput = await retrievalOutput.refill(retrievalLimit - verifiedHits.length);
+          ({memories, retrieval} = prepare(retrievalOutput));
+        }
+        if (userMemoryRecallEnabled && includeUserMemory && Date.now() < userMemoryBudget.deadlineAt) {
+          Object.assign(userMemoryOutput, await this.retrieveUserMemories({userId: context.userId,
+            query: retrievalQuery, queryVectorText, queryExtract, limit: retrievalLimit,
+            excludeSourceTurnIds: recentRawTurnIds, budget: userMemoryBudget}));
+        }
+        expectedMemories.clear(); currentMemories.clear();
+        for (const memory of memories) expectedMemories.set(memory.id, memory);
+        for (const memory of this.deps.repos.memories.getMany([...expectedMemories.keys()])) currentMemories.set(memory.id, memory);
+        expectedUsers.clear(); currentUsers.clear();
+        for (const memory of userMemoryOutput.memories) expectedUsers.set(memory.id, memory);
+        for (const memory of this.deps.repos.userMemories.getMany([...expectedUsers.keys()])) currentUsers.set(memory.id, memory);
+        mergedState = merge(); merged = mergedState.result;
+        filteredHits.hits = merged.hits;
+        verifiedHits = mmrRecallHits(filteredHits.hits.filter(validHit), retrievalLimit, tuning.mmrLambda);
+        if (verifiedHits.length < retrievalLimit && prior === verifiedHits.map(hit => hit.id).join("\0") &&
+          priorCandidates === memories.map(memory => `${memory.id}:${memory.version}`).join("\0")) {
+          refillStatuses.push("recall_refill:no_progress"); break;
+        }
+        if (round === 7 && verifiedHits.length < retrievalLimit) refillStatuses.push("recall_refill:work_budget_limited");
+      }
+    }
     hits=verifiedHits;
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
@@ -2209,6 +2246,7 @@ export class RetrievalService {
         ...filteredHits.status,
         ...(!userMemoryRecallEnabled ? ["user_memory_recall:disabled"] : []),
         ...refillStatuses,
+        ...userMemoryOutput.diagnostics.map(route => `recall_refill:user_memory:${route.channel}:${route.stopReason}:${route.uniqueCandidates}:${route.rounds}`),
         ...(retrievalOutput.diagnostics ?? []).map(route => `recall_refill:${route.channel}:${route.stopReason}:${route.uniqueCandidates}:${route.rounds}`),
         ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
         ...(stalePolicyIds.size > 0 ? ["policy:revalidation_required"] : []),
@@ -2249,7 +2287,7 @@ export class RetrievalService {
           mmrDropped: filteredHits.hits.length - beforeRevalidation,
           contextBudgetDropped: contextPacket.droppedDueToBudget.length,
           injectedCount: hits.filter(hit => (hit.memberMemoryIds ?? [hit.id]).some(id => sourceMemoryIds.includes(id))).length,
-          concurrentChangeDropped: beforeRevalidation - verifiedHits.length,
+          concurrentChangeDropped,
           ranked: merged.hits.length,
           droppedByThreshold: retrieval.debug.droppedByThreshold,
           topRelevance: retrieval.debug.topRelevance,
@@ -2326,58 +2364,108 @@ export class RetrievalService {
     queryExtract: RetrievalQueryExtract | null;
     limit: number;
     excludeSourceTurnIds?: ReadonlySet<string>;
-  }): Promise<{ hits: RecallHit[]; memories: UserMemoryRecord[] }> {
-    if (input.limit <= 0) return { hits: [], memories: [] };
+    budget?: {deadlineAt: number; rows: number};
+  }): Promise<{ hits: RecallHit[]; memories: UserMemoryRecord[]; diagnostics: RecallRouteDiagnostic[] }> {
+    const diagnostics: RecallRouteDiagnostic[] = [];
+    if (input.limit <= 0) return { hits: [], memories: [], diagnostics };
     const compiled = compileRetrievalQuery(input.query, input.queryExtract, {
       domain: this.retrievalTuningConfig().domain
     });
-    const active = this.deps.repos.userMemories.listActive(input.userId);
-    if (active.length === 0) return { hits: [], memories: [] };
-    const excludedCount = active.filter((memory) =>
-      input.excludeSourceTurnIds?.has(memory.sourceTurnId)
-    ).length;
-    const routeLimit = input.limit + excludedCount;
-    const queryVector = active.some((memory) => memory.embedding?.length)
-      ? await this.queryVector(input.queryVectorText)
-      : undefined;
-    let take=Math.min(routeLimit, active.length, 10_000);
-    let memories: UserMemoryRecord[]=[];
-    let injectableMemories: UserMemoryRecord[]=[];
-    let bestScoreById=new Map<string, number>();
-    for (let round=0; round<16; round++) {
-      const routeHits = [
-      ...this.deps.repos.userMemories.searchFtsIds(
-        input.userId,
-        compiled.ftsMatch,
-        take
-      ),
-      ...this.deps.repos.userMemories.searchPatternIds(
-        input.userId,
-        compiled.patternTerms,
-        take
-      ),
-      ...(queryVector
-        ? this.deps.repos.userMemories.searchVectorIds(input.userId, queryVector, take)
-        : [])
-    ];
-      bestScoreById=new Map<string, number>();
-      for (const hit of routeHits) bestScoreById.set(hit.id, Math.max(bestScoreById.get(hit.id) ?? 0, hit.score));
-      memories=this.deps.repos.userMemories.getMany([...bestScoreById.keys()]).sort((left,right)=>
-        (bestScoreById.get(right.id) ?? 0)-(bestScoreById.get(left.id) ?? 0) ||
-        right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
-      const seen=new Set<string>();
-      injectableMemories=memories.filter(memory=>{
-        if(input.excludeSourceTurnIds?.has(memory.sourceTurnId)) return false;
-        // Only equivalent expressions of the same captured turn fold; equal text on different turns stays independent.
-        const key=memory.sourceTurnId ? JSON.stringify([memory.sourceTurnId,memory.content,[...memory.memoryTypes].sort()]) : `id:${memory.id}`;
-        if(seen.has(key))return false;
-        seen.add(key);return true;
-      }).slice(0,input.limit);
-      if(injectableMemories.length>=input.limit || take>=active.length || take>=10_000 || routeHits.length===0) break;
-      take=Math.min(active.length,10_000,Math.max(take+1,take*2));
-      await yieldToIO();
+    const repo = this.deps.repos.userMemories;
+    const queryVector = repo.hasRecallVectors(input.userId) ? await this.queryVector(input.queryVectorText) : undefined;
+    const candidates = new Map<string, UserMemoryRecord>();
+    const bestScoreById = new Map<string, number>();
+    const budget = input.budget ?? {deadlineAt: Date.now() + 5_000, rows: 0};
+    for (const channel of ["fts", "pattern", "vec"] as const) {
+      if ((channel === "fts" && !compiled.ftsMatch) || (channel === "pattern" && !compiled.patternTerms.length) ||
+        (channel === "vec" && !queryVector?.length)) continue;
+      const started = Date.now();
+      const diagnostic: RecallRouteDiagnostic = {channel, rounds: 0, rawHits: 0, duplicateHits: 0,
+        unknownIdentityCount: 0, metadataRows: 0, uniqueCandidates: 0, stopReason: "scope_exhausted"};
+      diagnostics.push(diagnostic);
+      const excluded = new Set<string>();
+      const expressions = new Map<string, {sourceTurnId: string; content: string; memoryTypes: string[]}>();
+      const accepted = new Map<string, {memory: UserMemoryRecord; score: number}>();
+      // Recent turns remain maintenance evidence for confirmation/correction, even
+      // though they must not consume injectable recall quota. Keep that old contract.
+      if (input.excludeSourceTurnIds?.size && budget.rows < 10_000 && Date.now() < budget.deadlineAt) {
+        const cap = Math.min(input.limit, 256, 10_000 - budget.rows);
+        const options = {includedSourceTurnIds: [...input.excludeSourceTurnIds], strict: true,
+          windowLimit: Math.min(2000, 10_000 - budget.rows),
+          onWindow: (ids: string[]) => { budget.rows += ids.length; }};
+        try {
+          const hits = channel === "fts" ? repo.searchFtsIds(input.userId, compiled.ftsMatch, cap, options)
+            : channel === "pattern" ? repo.searchPatternIds(input.userId, compiled.patternTerms, cap, options)
+            : repo.searchVectorIds(input.userId, queryVector!, cap, undefined, options);
+          if (channel !== "vec") budget.rows += hits.length;
+          for (const memory of repo.getMany(hits.map(hit => hit.id))) if (memory.status === "active") {
+            candidates.set(memory.id, memory);
+            const score = hits.find(hit => hit.id === memory.id)?.score ?? 0;
+            bestScoreById.set(memory.id, Math.max(bestScoreById.get(memory.id) ?? 0, score));
+          }
+        } catch {
+          diagnostics.push({...diagnostic, channel: `${channel}:maintenance`, stopReason: "error"});
+        }
+      }
+      for (let round = 0; round < 128; round++) {
+        if (Date.now() >= budget.deadlineAt) { diagnostic.stopReason = "deadline"; break; }
+        if (budget.rows >= 10_000) { diagnostic.stopReason = "work_budget_limited"; break; }
+        const take = Math.max(1, Math.min(256, input.limit, 10_000 - budget.rows));
+        let window: string[] | undefined;
+        let hasMore = false;
+        const options = {excludedIds: [...excluded], excludedExpressions: [...expressions.values()],
+          excludedSourceTurnIds: [...(input.excludeSourceTurnIds ?? [])], strict: true, windowLimit: Math.min(2000, 10_000 - budget.rows),
+          onWindow: (ids: string[], more: boolean) => { window = ids; hasMore = more; }};
+        let batch;
+        try {
+          batch = channel === "fts" ? repo.searchFtsIds(input.userId, compiled.ftsMatch, take + 1, options)
+            : channel === "pattern" ? repo.searchPatternIds(input.userId, compiled.patternTerms, take + 1, options)
+            : repo.searchVectorIds(input.userId, queryVector!, take, undefined, options);
+        } catch { diagnostic.stopReason = "error"; break; }
+        diagnostic.rounds++;
+        if (!window) hasMore = batch.length > take;
+        // A full ranked batch can leave lower scoring hits inside this same window.
+        // Only discard the entire window after all of its positive hits were returned.
+        const scanned = window && batch.length < take ? window : batch.slice(0, take).map(hit => hit.id);
+        budget.rows += window?.length ?? scanned.length;
+        diagnostic.rawHits += batch.slice(0, take).length;
+        diagnostic.metadataRows += window?.length ?? 0;
+        const before = excluded.size;
+        const hitRows = new Map(repo.getMany(batch.slice(0, take).map(hit => hit.id)).map(memory => [memory.id, memory]));
+        for (const hit of batch.slice(0, take)) {
+          const memory = hitRows.get(hit.id);
+          if (!memory || memory.status !== "active" || input.excludeSourceTurnIds?.has(memory.sourceTurnId)) continue;
+          const expression = {sourceTurnId: memory.sourceTurnId, content: memory.content, memoryTypes: [...memory.memoryTypes].sort()};
+          const key = memory.sourceTurnId ? JSON.stringify(expression) : `id:${memory.id}`;
+          if (accepted.has(key)) { diagnostic.duplicateHits++; continue; }
+          accepted.set(key, {memory, score: channel === "vec" ? hit.score : 1 / (accepted.size + 1)});
+          if (memory.sourceTurnId) expressions.set(key, expression);
+        }
+        for (const id of scanned) excluded.add(id);
+        if (accepted.size >= input.limit) { diagnostic.stopReason = "target_met"; break; }
+        if (!hasMore) { diagnostic.stopReason = "scope_exhausted"; break; }
+        if (excluded.size === before) { diagnostic.stopReason = "no_progress"; break; }
+        if (round === 127) diagnostic.stopReason = "work_budget_limited";
+        else await yieldToIO();
+      }
+      diagnostic.uniqueCandidates = accepted.size;
+      diagnostic.durationMs = Date.now() - started;
+      for (const {memory, score} of accepted.values()) {
+        candidates.set(memory.id, memory);
+        bestScoreById.set(memory.id, Math.max(bestScoreById.get(memory.id) ?? 0, score));
+      }
     }
-    return {memories,hits:injectableMemories.map(memory=>userMemoryRecallHit(memory,bestScoreById.get(memory.id) ?? 0))};
+    const memories = [...candidates.values()].sort((left, right) =>
+      (bestScoreById.get(right.id) ?? 0) - (bestScoreById.get(left.id) ?? 0) ||
+      right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
+    const seen = new Set<string>();
+    const injectable = memories.filter(memory => {
+      if (input.excludeSourceTurnIds?.has(memory.sourceTurnId)) return false;
+      const key = memory.sourceTurnId ? JSON.stringify([memory.sourceTurnId, memory.content, [...memory.memoryTypes].sort()]) : `id:${memory.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    }).slice(0, input.limit);
+    return {memories, hits: injectable.map(memory => userMemoryRecallHit(memory, bestScoreById.get(memory.id) ?? 0)), diagnostics};
   }
 
   private async retrieveSearchMemories(input: {

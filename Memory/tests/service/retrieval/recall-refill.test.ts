@@ -1,13 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sha256Hex } from "../../../src/contracts/index.js";
+import { stableHash } from "../../../src/utils/id.js";
+import { RetrievalService } from "../../../src/service/retrieval/retrieval-service.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { compileRetrievalQuery } from "../../../src/algorithm/plugin-algorithms.js";
 import { IndexedCandidatePool } from "../../../src/service/retrieval/indexed-candidate-pool.js";
 import { deduplicateCrossAccountMemoryCandidates } from "../../../src/service/retrieval/cross-account-candidate-dedup.js";
-import type { MemoryRow } from "../../../src/types.js";
+import type { MemoryRow, UserMemoryRecord, RecallHit } from "../../../src/types.js";
 import { createFailingLlm, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 
 const services = createMemoryServiceFixture();
@@ -119,10 +122,10 @@ describe("recall source groups and quota refill", () => {
     expect(result.memories).toHaveLength(5);
   });
 
-  it("repository exclusion stays inside owner, tag and time constraints", () => {
+  it("repository exclusion stays inside tag and time constraints", () => {
     const {repos}=fixture();
     repos.memories.insert(memory("a"));
-    repos.memories.insert(memory("b", "b", {userId:"owner-b"}));
+    repos.memories.insert(memory("b", "b", {userId:"owner-b",createdAt:"2026-09-01T00:00:00.000Z"}));
     repos.memories.insert(memory("c", "c", {tags:["private"]}));
     const filter={userId:"owner-a",tags:["python"],createdAtGte:"2026-10-20",createdAtLt:"2026-10-21",excludedIds:["a"]};
     expect(repos.memories.searchPatternIds(["specialterm"],filter,20)).toEqual([]);
@@ -191,7 +194,7 @@ describe("recall source groups and quota refill", () => {
     expect(result.memories.some(row=>row.info.turn_id==="repeated")).toBe(false);
   });
 
-  it("never uses another owner's capture as provenance and leaves lifecycle state unchanged", () => {
+  it("uses exact capture links across owners without changing lifecycle state", () => {
     const {repos}=fixture();
     const a=memory("a","repeated",{info:{turn_id:"repeated"}});
     const b=memory("b","repeated",{info:{turn_id:"repeated"}});
@@ -205,7 +208,9 @@ describe("recall source groups and quota refill", () => {
     const result=deduplicateCrossAccountMemoryCandidates({repos,memories:[a,b],preferredUserId:"owner-b"});
     expect(result.memories).toHaveLength(1);
     const foreign={...b,userId:"owner-c"};
-    expect(deduplicateCrossAccountMemoryCandidates({repos,memories:[a,foreign]}).memories).toHaveLength(2);
+    expect(deduplicateCrossAccountMemoryCandidates({repos,memories:[a,foreign]}).memories).toHaveLength(1);
+    const unrelated=memory("unlinked","repeated",{info:{turn_id:"repeated"}});
+    expect(deduplicateCrossAccountMemoryCandidates({repos,memories:[a,unrelated]}).memories).toHaveLength(2);
     expect(repos.db.prepare("SELECT * FROM source_turn_captures ORDER BY user_id").all()).toEqual(before);
   });
 
@@ -305,18 +310,26 @@ describe("recall source groups and quota refill", () => {
   it("uses the source-turn index and preserves rows and rowids when an existing library gains the index", () => {
     const {repos,db,root}=fixture();
     repos.memories.insert(memory("a"));
+    repos.db.prepare(`INSERT INTO source_turn_captures(user_id,source,profile_id,namespace_key,conversation_id,turn_id,
+      content_hash,response_json,started_at,completed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run("legacy-owner","codex","default","original-scope","conversation","a","hash",JSON.stringify({result:{l1MemoryIds:["a"]}}),"at","at","at");
     const before=snapshot(repos);
+    const capturesBefore=repos.db.prepare("SELECT rowid,* FROM source_turn_captures").all();
     repos.db.exec("DROP INDEX idx_memories_recall_turn");
+    repos.db.exec("DROP INDEX idx_source_turn_captures_recall_turn");
     db.close();fixtures.pop();
     const reopened=new MemoryDb({path:join(root,"memory.sqlite")});fixtures.push({root,db:reopened});
     const restored=new Repositories(reopened.db);
     expect(snapshot(restored)).toEqual(before);
+    expect(restored.db.prepare("SELECT rowid,* FROM source_turn_captures").all()).toEqual(capturesBefore);
     const plan=restored.db.prepare(`EXPLAIN QUERY PLAN SELECT * FROM memories WHERE deleted_at IS NULL AND
       COALESCE(json_extract(info_json,'$.turn_id'),json_extract(properties_json,'$.internal_info.trace.turn_id'))=? ORDER BY id`).all("a");
     expect(JSON.stringify(plan)).toContain("idx_memories_recall_turn");
+    expect(JSON.stringify(restored.db.prepare("EXPLAIN QUERY PLAN SELECT * FROM source_turn_captures WHERE turn_id=?").all("a")))
+      .toContain("idx_source_turn_captures_recall_turn");
   });
 
-  it("refills User Memory after same-turn duplicate expressions without exposing another owner", async () => {
+  it("refills User Memory after same-turn duplicate expressions without exposing archived rows", async () => {
     const config={...LEGACY_TEST_CONFIG,algorithm:{...LEGACY_TEST_CONFIG.algorithm,enableUserMemoryRecall:true,
       retrieval:{...LEGACY_TEST_CONFIG.algorithm.retrieval,relativeThresholdFloor:0,minRecallScore:0,llmFilterEnabled:false,mmrLambda:1}}};
     const {service}=services.createTestService({config,llm:createFailingLlm()});
@@ -326,13 +339,14 @@ describe("recall source groups and quota refill", () => {
       status:"active",createdAt:"2026-10-20T00:00:00.000Z",updatedAt:"2026-10-20T00:00:00.000Z"});
     for(let i=0;i<35;i++)insert(`000-copy-${i}`,"shared-raw");
     for(let i=0;i<25;i++)insert(`zzz-other-${i}`,`raw-${i}`);
-    insert("hidden-owner","hidden-raw","owner-b");
+    insert("archived-row","hidden-raw");
+    repos.db.prepare("UPDATE user_memories SET status='archived' WHERE id='archived-row'").run();
     vi.spyOn(repos.userMemories,"searchPatternIds").mockReturnValue([]);
     const before=repos.db.prepare("SELECT rowid,* FROM user_memories ORDER BY id").all();
     const result=await service.search({namespace:{userId:"owner-a",source:"codex",profileId:"default"},query:"python specialterm",layers:["L1"],limit:20,contextBudget:30000});
     expect(result.hits).toHaveLength(20);
     expect(new Set(result.hits.map(hit=>hit.sourceTurnId)).size).toBe(20);
-    expect(JSON.stringify(result)).not.toContain("hidden-owner");
+    expect(JSON.stringify(result)).not.toContain("archived-row");
     expect(repos.db.prepare("SELECT rowid,* FROM user_memories ORDER BY id").all()).toEqual(before);
   });
 
@@ -390,4 +404,136 @@ describe("recall source groups and quota refill", () => {
     expect(stats.llmFilter.dropped).toBe(0);
     expect(stats.llmFilter.kept).toBe(1);
   });
+  it.each(["same", "same-tenant", "host", "tenant", "forged", "edited", "conflict"] as const)("verifies historical namespace aliases with %s evidence", scenario => {
+    const {repos}=fixture();
+    const rows: MemoryRow[]=[];
+    for (let i=0;i<2;i++) {
+      const owner=`legacy-${i}`;
+      const host=scenario === "host" ? `host-${i}` : "host";
+      const uri="file:///tmp/recall-workspace";
+      const workspace=sha256Hex(`${owner}\0local\0${host}\0${uri}`);
+      const project=scenario === "forged" ? `unverified-${i}` : `ws_${workspace}`;
+      const tenant=scenario === "tenant" ? `tenant-${i}` : scenario === "same-tenant" ? "same-tenant" : null;
+      const namespace=stableHash({tenantId:tenant,projectId:project,workspaceId:workspace});
+      repos.db.prepare(`INSERT INTO sessions(id,user_id,project_id,source,profile_id,workspace_id,meta_json,opened_at,last_seen_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(`session-${i}`,owner,project,"codex","default",workspace,
+          JSON.stringify({workspace_uri:scenario === "edited" ? "file:///tmp/changed" : uri,workspace_host_id:host}),"at","at","at");
+      const row=memory(`copy-${i}`,"same-native-turn",{userId:"__memmy_device_memory__",info:{turn_id:"same-native-turn",tenant_id:tenant}});
+      repos.memories.insert(row);rows.push(row);
+      repos.db.prepare(`INSERT INTO source_turn_captures(user_id,source,profile_id,namespace_key,conversation_id,turn_id,
+        content_hash,response_json,started_at,completed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(owner,"codex","default",namespace,"native-conversation","same-native-turn","hash",
+          JSON.stringify({result:{l1MemoryIds:[row.id]}}),"at","at","at");
+    }
+    if(scenario === "conflict") repos.db.prepare(`INSERT INTO source_turn_captures
+      (user_id,source,profile_id,namespace_key,conversation_id,turn_id,content_hash,response_json,raw_turn_id,started_at,completed_at,created_at)
+      SELECT 'third-owner',source,profile_id,'conflicting-scope',conversation_id,turn_id,content_hash,response_json,
+        raw_turn_id,started_at,completed_at,created_at FROM source_turn_captures WHERE user_id='legacy-0'`).run();
+    const tables=["memories","source_turn_captures","sessions"];
+    const snapshotAll=()=>tables.map(table=>repos.db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all());
+    const before=snapshotAll();
+    const result=deduplicateCrossAccountMemoryCandidates({repos,memories:rows});
+    expect(result.memories).toHaveLength(scenario === "same" || scenario === "same-tenant" ? 1 : 2);
+    expect(snapshotAll()).toEqual(before);
+  });
+
+  it.each(["fts","pattern","vec"] as const)("refills User Memory beyond 2,000 expressions using %s", async route => {
+    const {repos}=fixture();
+    const insert=(id:string,turn:string,content="python specialterm py",types:UserMemoryRecord["memoryTypes"]=["User Fact"])=>
+      repos.userMemories.insert({id,userId:"owner-a",sourceTurnId:turn,sourceTurnRefs:[turn],memoryTypes:types,content,
+        normalizedUserTextHash:id,status:"active",createdAt:"2026-10-20",updatedAt:"2026-10-20",embedding:route === "vec" ? (turn === "same-turn" ? [1,0] : [0.9,0.1]) : undefined});
+    repos.db.transaction(()=>{
+      for(let i=0;i<2005;i++)insert(`z-copy-${i}`,"same-turn");
+      for(let i=0;i<20;i++)insert(`a-other-${i}`,`other-${i}`);
+      insert("different-fact","same-turn","python specialterm py other fact");
+      insert("different-type","same-turn","python specialterm py",["User Directive"]);
+    })();
+    if(route !== "fts") vi.spyOn(repos.userMemories,"searchFtsIds").mockReturnValue([]);
+    if(route !== "pattern") vi.spyOn(repos.userMemories,"searchPatternIds").mockReturnValue([]);
+    const engine=new RetrievalService({repos,config:LEGACY_TEST_CONFIG} as never) as unknown as {
+      retrieveUserMemories(input:unknown):Promise<{hits:RecallHit[];diagnostics:Array<{stopReason:string}>}>;
+      queryVector(input:string):Promise<number[]>;
+    };
+    vi.spyOn(engine,"queryVector").mockResolvedValue([1,0]);
+    const before=repos.db.prepare("SELECT rowid,* FROM user_memories ORDER BY id").all();
+    expect(repos.userMemories.listActive("owner-a")).toHaveLength(2000);
+    const result=await engine.retrieveUserMemories({userId:"owner-a",query:"py specialterm",queryVectorText:"python specialterm",queryExtract:null,limit:30});
+    expect(result.hits).toHaveLength(23);
+    expect(result.hits.filter(hit=>hit.sourceTurnId === "same-turn")).toHaveLength(3);
+    expect(result.diagnostics.every(item=>item.stopReason === "scope_exhausted")).toBe(true);
+    expect(repos.db.prepare("SELECT rowid,* FROM user_memories ORDER BY id").all()).toEqual(before);
+  });
+
+  it("continues vector scanning past a full incompatible User Memory window", async () => {
+    const {repos}=fixture();
+    repos.db.transaction(()=>{
+      for(let i=0;i<2025;i++)repos.userMemories.insert({id:`${i<20 ? "a-valid" : "z-invalid"}-${i}`,userId:"owner-a",
+        sourceTurnId:`turn-${i}`,sourceTurnRefs:[],memoryTypes:["User Fact"],content:"unrelated",normalizedUserTextHash:`${i}`,
+        status:"active",createdAt:"at",updatedAt:"at",embedding:i<20 ? [1,0] : [1,0,0]});
+    })();
+    const engine=new RetrievalService({repos,config:LEGACY_TEST_CONFIG} as never) as unknown as {
+      retrieveUserMemories(input:unknown):Promise<{hits:RecallHit[];diagnostics:Array<{stopReason:string;rounds:number}>}>;
+      queryVector(input:string):Promise<number[]>;
+    };
+    vi.spyOn(engine,"queryVector").mockResolvedValue([1,0]);
+    const result=await engine.retrieveUserMemories({userId:"owner-a",query:"python specialterm",queryVectorText:"python specialterm",queryExtract:null,limit:20});
+    expect(result.hits).toHaveLength(20);
+    expect(result.hits.every(hit=>hit.id.startsWith("a-valid"))).toBe(true);
+    expect(result.diagnostics.find(item=>item.stopReason === "target_met")?.rounds).toBeGreaterThan(1);
+  });
+
+  it.each(["reserve", "refill"] as const)("replaces a concurrently deleted hit from %s without another model call", async mode => {
+    const config={...LEGACY_TEST_CONFIG,algorithm:{...LEGACY_TEST_CONFIG.algorithm,
+      retrieval:{...LEGACY_TEST_CONFIG.algorithm.retrieval,relativeThresholdFloor:0,minRecallScore:0,llmFilterEnabled:false,mmrLambda:1}}};
+    const {service}=services.createTestService({config,llm:createFailingLlm()});
+    const repo=(service as unknown as {repos:Repositories}).repos;
+    repo.memories.insert(memory("first"));repo.memories.insert(memory("second"));repo.memories.insert(memory("third"));
+    const retrieval=(service as unknown as {retrieval:{filterRecallHits(query:string,hits:RecallHit[]):Promise<{hits:RecallHit[];status:string[]}>}}).retrieval;
+    let deleted="";
+    const filter=vi.spyOn(retrieval,"filterRecallHits").mockImplementation(async (_query,hits)=>{
+      deleted=hits[0]!.id;repo.memories.softDelete(deleted);
+      await Promise.resolve();
+      return {hits:mode === "reserve" ? hits : hits.slice(0,1),status:["llm_filter:disabled"]};
+    });
+    const search=vi.spyOn(repo.memories,"searchFtsIds");
+    const result=await service.search({namespace:{userId:"owner-a",source:"codex",profileId:"default"},query:"python specialterm",layers:["L1"],limit:1});
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]?.id).not.toBe(deleted);
+    expect(result.sourceMemoryIds).not.toContain(deleted);
+    expect(filter).toHaveBeenCalledTimes(1);
+    expect(result.status).toContain("recall_refill:concurrent_change");
+    if(mode === "refill")expect(search.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it.each(["error","no_progress"] as const)("reports User Memory %s independently of a healthy route", async mode=>{
+    const {repos}=fixture();
+    repos.userMemories.insert({id:"user",userId:"owner-a",sourceTurnId:"raw",sourceTurnRefs:[],memoryTypes:["User Fact"],
+      content:"py specialterm",normalizedUserTextHash:"hash",status:"active",createdAt:"at",updatedAt:"at"});
+    vi.spyOn(repos.userMemories,"searchFtsIds").mockImplementation((_user,_query,limit)=>{
+      if(mode === "error") throw new Error("fixture FTS failure");
+      return Array.from({length:limit},()=>({id:"user",score:1,channel:"fts" as const}));
+    });
+    const engine=new RetrievalService({repos,config:LEGACY_TEST_CONFIG} as never) as unknown as {
+      retrieveUserMemories(input:unknown):Promise<{hits:RecallHit[];diagnostics:Array<{channel:string;stopReason:string}>}>;
+    };
+    const result=await engine.retrieveUserMemories({userId:"owner-a",query:"py specialterm",queryVectorText:"py specialterm",queryExtract:null,limit:20});
+    expect(result.hits.map(hit=>hit.id)).toEqual(["user"]);
+    expect(result.diagnostics.find(item=>item.channel === "fts")?.stopReason).toBe(mode);
+    expect(result.diagnostics.find(item=>item.channel === "pattern")?.stopReason).toBe("scope_exhausted");
+  });
+
+  it("reads a frozen raw-turn origin across owners and ignores a mismatched raw turn",()=>{
+    const {repos}=fixture();
+    repos.db.prepare(`INSERT INTO sessions(id,user_id,source,profile_id,opened_at,last_seen_at,updated_at) VALUES (?,?,?,?,?,?,?)`)
+      .run("raw-session","old-owner","codex","default","at","at","at");
+    const origin=memory("origin").info.native_origin_v1;
+    repos.db.prepare(`INSERT INTO raw_turns(id,session_id,turn_id,user_id,message_payload_json,created_at) VALUES (?,?,?,?,?,?)`)
+      .run("raw-origin","raw-session","same-turn","old-owner",JSON.stringify({native_origin_v1:origin}),"at");
+    const make=(id:string,turn="same-turn")=>memory(id,turn,{userId:"__memmy_device_memory__",info:{turn_id:turn,raw_turn_id:"raw-origin"}});
+    const before=repos.db.prepare("SELECT rowid,* FROM raw_turns").all();
+    expect(deduplicateCrossAccountMemoryCandidates({repos,memories:[make("a"),make("b")]}).memories).toHaveLength(1);
+    expect(deduplicateCrossAccountMemoryCandidates({repos,memories:[make("a"),make("b","another-turn")]}).memories).toHaveLength(2);
+    expect(repos.db.prepare("SELECT rowid,* FROM raw_turns").all()).toEqual(before);
+  });
+
 });

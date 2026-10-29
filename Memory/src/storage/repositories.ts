@@ -454,6 +454,16 @@ export interface MemoryVectorSearchOptions {
   onWindow?: (ids: string[], hasMore: boolean) => void;
 }
 
+export interface UserMemoryRecallOptions {
+  excludedIds?: readonly string[];
+  excludedSourceTurnIds?: readonly string[];
+  includedSourceTurnIds?: readonly string[];
+  excludedExpressions?: Array<{sourceTurnId: string; content: string; memoryTypes: string[]}>;
+  strict?: boolean;
+  windowLimit?: number;
+  onWindow?: (ids: string[], hasMore: boolean) => void;
+}
+
 export interface EmbeddingRetryRecord extends SchedulingMetadata {
   id: string;
   targetKind: EmbeddingRetryTargetKind;
@@ -589,6 +599,10 @@ export class MemoryRepository {
     private readonly db: Database.Database,
     private readonly vectors: SqliteVecStore
   ) {}
+
+  private memoryWhere(filter: MemoryFilter) {
+    return buildMemoryWhere(filter);
+  }
 
   insert(memory: MemoryRow): MemoryRow {
     const prepared = prepareMemoryForStorage(memory);
@@ -1182,7 +1196,7 @@ export class MemoryRepository {
   }
 
   recallSourceCandidates(turnId: string, filter: MemoryFilter, limit = 10_000, stepIndex?: number): MemoryRow[] {
-    const built = buildMemoryWhere(filter);
+    const built = this.memoryWhere(filter);
     const rows = this.db.prepare(`SELECT memories.* FROM memories WHERE ${built.where}
       AND COALESCE(json_extract(info_json,'$.turn_id'),json_extract(properties_json,'$.internal_info.trace.turn_id'))=?
       ${stepIndex === undefined ? "" : "AND json_extract(properties_json,'$.internal_info.trace.step_index')=?"}
@@ -1601,12 +1615,51 @@ export class UserMemoryRepository {
     return ids.map((id) => byId.get(id)).filter((item): item is UserMemoryRecord => Boolean(item));
   }
 
-  listActive(userId: string, limit = 2000): UserMemoryRecord[] {
+  private activeWhere(userId: string, options: UserMemoryRecallOptions = {}) {
+    const clauses = ["user_memories.user_id = ?", "user_memories.status = 'active'", "user_memories.deleted_at IS NULL"];
+    const params: SqlValue[] = [userId];
+    if (options.excludedIds?.length) {
+      clauses.push("user_memories.id NOT IN (SELECT value FROM json_each(?))");
+      params.push(toJson(options.excludedIds));
+    }
+    if (options.excludedSourceTurnIds?.length) {
+      clauses.push("user_memories.source_turn_id NOT IN (SELECT value FROM json_each(?))");
+      params.push(toJson(options.excludedSourceTurnIds));
+    }
+    if (options.includedSourceTurnIds) {
+      clauses.push("user_memories.source_turn_id IN (SELECT value FROM json_each(?))");
+      params.push(toJson(options.includedSourceTurnIds));
+    }
+    if (options.excludedExpressions?.length) {
+      clauses.push(`NOT EXISTS (SELECT 1 FROM json_each(?) AS expression
+        WHERE json_extract(expression.value,'$.sourceTurnId') = user_memories.source_turn_id
+          AND json_extract(expression.value,'$.content') = user_memories.content
+          AND json_extract(expression.value,'$.memoryTypes') =
+            (SELECT json_group_array(value) FROM (SELECT value FROM json_each(user_memories.memory_types_json) ORDER BY value)))`);
+      params.push(toJson(options.excludedExpressions.map(item => ({...item, memoryTypes: [...item.memoryTypes].sort()}))));
+    }
+    return {where: clauses.join(" AND "), params};
+  }
+
+  countActive(userId: string): number {
+    const built = this.activeWhere(userId);
+    return (this.db.prepare(`SELECT count(*) AS count FROM user_memories WHERE ${built.where}`)
+      .get(...built.params) as {count: number}).count;
+  }
+
+  hasRecallVectors(userId: string): boolean {
+    const built = this.activeWhere(userId);
+    return Boolean(this.db.prepare(`SELECT 1 FROM user_memories WHERE ${built.where}
+      AND json_array_length(embedding_json) > 0 LIMIT 1`).get(...built.params));
+  }
+
+  listActive(userId: string, limit = 2000, options: UserMemoryRecallOptions = {}): UserMemoryRecord[] {
+    const built = this.activeWhere(userId, options);
     return (this.db.prepare(
       `SELECT * FROM user_memories
-       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+       WHERE ${built.where}
        ORDER BY updated_at DESC, id DESC LIMIT ?`
-    ).all(userId, limit) as UserMemorySqlRow[]).map(userMemoryFromSql);
+    ).all(...built.params, limit) as UserMemorySqlRow[]).map(userMemoryFromSql);
   }
 
   listForPanel(input: {
@@ -1722,41 +1775,46 @@ export class UserMemoryRepository {
     }) : undefined;
   }
 
-  searchFtsIds(userId: string, ftsMatch: string | undefined | null, limit: number): MemorySearchIdHit[] {
+  searchFtsIds(userId: string, ftsMatch: string | undefined | null, limit: number, options: UserMemoryRecallOptions = {}): MemorySearchIdHit[] {
     if (!ftsMatch || limit <= 0) return [];
+    const built = this.activeWhere(userId, options);
     try {
       const rows = this.db.prepare(
         `SELECT user_memories.id AS id
          FROM user_memories_fts
          JOIN user_memories ON user_memories.id = user_memories_fts.id
-         WHERE user_memories.user_id = ?
-           AND user_memories.status = 'active'
-           AND user_memories.deleted_at IS NULL
+         WHERE ${built.where}
            AND user_memories_fts MATCH ?
          ORDER BY rank LIMIT ?`
-      ).all(userId, ftsMatch, limit) as Array<{ id: string }>;
+      ).all(...built.params, ftsMatch, limit) as Array<{ id: string }>;
       return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "fts" }));
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       return [];
     }
   }
 
-  searchPatternIds(userId: string, terms: readonly string[], limit: number): MemorySearchIdHit[] {
+  searchPatternIds(userId: string, terms: readonly string[], limit: number, options: UserMemoryRecallOptions = {}): MemorySearchIdHit[] {
     const normalized = terms.map((term) => term.trim().toLowerCase()).filter(Boolean).slice(0, 16);
     if (normalized.length === 0 || limit <= 0) return [];
     const clauses = normalized.map(() => `lower(content) LIKE ? ESCAPE '\\'`);
+    const built = this.activeWhere(userId, options);
     const rows = this.db.prepare(
       `SELECT id FROM user_memories
-       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+       WHERE ${built.where}
          AND (${clauses.join(" OR ")})
        ORDER BY updated_at DESC, id DESC LIMIT ?`
-    ).all(userId, ...normalized.map((term) => `%${escapeLikePattern(term)}%`), limit) as Array<{ id: string }>;
+    ).all(...built.params, ...normalized.map((term) => `%${escapeLikePattern(term)}%`), limit) as Array<{ id: string }>;
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
   }
 
-  searchVectorIds(userId: string, query: readonly number[], limit: number, identity = vectorEmbeddingIdentity(query)): MemorySearchIdHit[] {
+  searchVectorIds(userId: string, query: readonly number[], limit: number, identity = vectorEmbeddingIdentity(query), options: UserMemoryRecallOptions = {}): MemorySearchIdHit[] {
     if (query.length === 0 || limit <= 0) return [];
-    return this.listActive(userId)
+    const cap = Math.max(1, Math.min(2000, options.windowLimit ?? 2000));
+    const rows = this.listActive(userId, cap + 1, options);
+    const window = rows.slice(0, cap);
+    options.onWindow?.(window.map(row => row.id), rows.length > cap);
+    return window
       .flatMap((memory) => memory.embedding?.length === query.length && (!identity || sameEmbeddingIdentity(memory, identity))
         ? [{ id: memory.id, score: cosineVectors(query, memory.embedding), channel: "vec" as const }]
         : [])
