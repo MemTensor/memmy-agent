@@ -4,8 +4,8 @@
  * Usage: tsx scripts/texlive/smoke-install.ts RELEASE_DIR CACHE_DIR OUTPUT_ENV_JSON VERIFIED_FIXTURE_DIR
  */
 import { createReadStream } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { resolve, basename } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { resolve, basename, dirname } from "node:path";
 import { Readable } from "node:stream";
 import { createTexliveRuntimeInstaller, resolveTexliveRuntime } from "../../App/backend/src/adapters/outbound/plugin-runtime/texlive-installer.js";
 const [release, cache, output, fixtures] = process.argv.slice(2);
@@ -31,6 +31,7 @@ const offline = createTexliveRuntimeInstaller({ cacheRoot: resolve(cache), catal
   fetchFn: (async () => { throw new Error("offline cache reuse unexpectedly requested network"); }) as typeof fetch });
 await resolveTexliveRuntime(process.platform, offline);
 if (downloads !== 1) throw new Error(`Expected one archive download, got ${downloads}`);
+await mkdir(dirname(resolve(output)), { recursive: true });
 await writeFile(resolve(output), JSON.stringify({ ...runtime.environment,
   PATH: [...runtime.pathEntries, process.env.PATH].join(process.platform === "win32" ? ";" : ":") }, null, 2));
 console.log(`Native ${target} installation, package/font probe, and offline reuse passed.`);
@@ -39,7 +40,7 @@ console.log(`Native ${target} installation, package/font probe, and offline reus
 // Exclude provisioned TeX from PATH, so helper binaries cannot fall back to it.
 const { execFile } = await import("node:child_process");
 const { promisify } = await import("node:util");
-const { cp, mkdir } = await import("node:fs/promises");
+const { cp } = await import("node:fs/promises");
 const run = promisify(execFile);
 const fixtureRoot = resolve(fixtures);
 const qa = resolve(output + ".qa"); await mkdir(qa, { recursive: true });
@@ -52,9 +53,13 @@ for (const language of ["zh-CN", "en"]) {
   const directory = resolve(qa, language);
   await cp(resolve(fixtureRoot, language), directory, { recursive: true });
   for (let pass = 0; pass < 2; pass++) {
-    try { await run(engine, ["-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "review.tex"], { cwd: directory, env: cleanEnv, timeout: 120000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }); }
+    try { await run(engine, ["-no-pdf", "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "review.tex"], { cwd: directory, env: cleanEnv, timeout: 120000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }); }
     catch (error) { console.error((error as { stdout?: string }).stdout); throw error; }
   }
+  // Match the plugin: avoid XeTeX's internal shell, which splits installation
+  // paths such as macOS Application Support. execFile keeps both paths intact.
+  await run(resolve(runtime.pathEntries[0]!, process.platform === "win32" ? "xdvipdfmx.exe" : "xdvipdfmx"),
+    ["-q", "-E", "-o", "review.pdf", "review.xdv"], { cwd: directory, env: cleanEnv, timeout: 120000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
   const pdf = await readFile(resolve(directory, "review.pdf"));
   if (pdf.subarray(0, 5).toString() !== "%PDF-") throw new Error(`Invalid ${language} PDF`);
   const log = await readFile(resolve(directory, "review.log"), "utf8");
