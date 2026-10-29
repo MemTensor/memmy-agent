@@ -62,6 +62,11 @@ const statements = [
     ON memories (content_hash, memory_layer)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
+  // Read-only recall grouping needs the original turn, never a historical row rewrite.
+  `CREATE INDEX IF NOT EXISTS idx_memories_recall_turn
+    ON memories (COALESCE(json_extract(info_json,'$.turn_id'),
+      json_extract(properties_json,'$.internal_info.trace.turn_id')), id)
+    WHERE deleted_at IS NULL`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,

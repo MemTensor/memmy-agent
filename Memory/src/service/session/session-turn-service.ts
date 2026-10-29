@@ -3340,18 +3340,21 @@ export class SessionTurnService {
       : undefined;
     const query = buildRepairSuggestionQuery(input);
     const repairLayers = retrievalLayersForMode("decision_repair");
-    const loadedCandidates = this.deps.repos.memories.list(
-      {
-        memoryLayer: repairLayers,
-        status: ["activated", "resolving"]
-      },
-      500
-    ).filter((memory) => this.deps.isMemoryReadyForRetrieval(memory));
-    const candidates = deduplicateCrossAccountMemoryCandidates({
-      memories: loadedCandidates,
-      repos: this.deps.repos,
-      preferredUserId: session.userId
-    }).memories;
+    const filter = {memoryLayer: repairLayers, status: ["activated", "resolving"] as MemoryRow["status"][]};
+    const excluded = new Set<string>();
+    let candidates: MemoryRow[] = [];
+    const deadline = Date.now() + 5_000;
+    while (candidates.length < 500 && excluded.size < 10_000 && Date.now() < deadline) {
+      const batch = this.deps.repos.memories.list({...filter, excludedIds: [...excluded]}, Math.min(500,10_000-excluded.size));
+      const fresh = batch.filter(memory => !excluded.has(memory.id));
+      if (!fresh.length) break;
+      for (const memory of fresh) excluded.add(memory.id);
+      candidates = deduplicateCrossAccountMemoryCandidates({
+        memories: [...candidates,...fresh.filter(memory => this.deps.isMemoryReadyForRetrieval(memory))],
+        repos: this.deps.repos
+      }).memories;
+      if (batch.length < Math.min(500,10_000-(excluded.size-fresh.length))) break;
+    }
     const retrieval = retrievePluginMemories({
       query,
       queryVector: await this.deps.queryVector(query),
@@ -3361,7 +3364,11 @@ export class SessionTurnService {
       limit: 5,
       config: this.deps.retrievalTuningConfig()
     });
-    const retrievedMemories = this.deps.repos.memories.getMany(retrieval.hits.map((hit) => hit.id));
+    const expected = new Map(candidates.map(memory => [memory.id,memory]));
+    const revision = (memory: MemoryRow) => JSON.stringify([memory.userId,memory.version,memory.memoryValue,memory.info,memory.properties,memory.tags]);
+    const retrievedMemories = this.deps.repos.memories.getMany(retrieval.hits.map((hit) => hit.id))
+      .filter(memory => expected.has(memory.id) && (memory.status === "activated" || memory.status === "resolving") &&
+        revision(memory) === revision(expected.get(memory.id)!));
     const policyMemories = retrievedMemories.filter((memory) => memory.memoryLayer === "L2");
     const retrievedMemoryById = new Map(retrievedMemories.map((memory) => [memory.id, memory]));
     const policyGuidance = policyMemories.flatMap((memory) => {
@@ -3374,7 +3381,7 @@ export class SessionTurnService {
       ].filter((item): item is string => Boolean(item));
     });
     const retrievalGuidance = retrieval.hits
-      .filter((hit) => !policyMemories.some((memory) => memory.id === hit.id))
+      .filter((hit) => retrievedMemoryById.has(hit.id) && !policyMemories.some((memory) => memory.id === hit.id))
       .map((hit) => {
         const memory = retrievedMemoryById.get(hit.id);
         const trace = memory ? traceMetaFromMemory(memory) : null;
