@@ -7,6 +7,7 @@ import {
   resolveObservedWindowDragExclusionSelector,
   resolveWindowDragExclusionSelector,
   THREAD_DRAG_EXCLUSION_SELECTOR,
+  TOOLS_DRAG_EXCLUSION_SELECTOR,
   WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR,
   WindowDragRegion
 } from "../window-drag-region.js";
@@ -21,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("WindowDragRegion", () => {
-  it("enables the dynamic exclusion only on the knowledge route", () => {
+  it("selects the interactive control exclusions for each route", () => {
     expect(resolveWindowDragExclusionSelector("/knowledge")).toBe(
       KNOWLEDGE_DRAG_EXCLUSION_SELECTOR
     );
@@ -29,12 +30,41 @@ describe("WindowDragRegion", () => {
       THREAD_DRAG_EXCLUSION_SELECTOR
     );
     expect(resolveWindowDragExclusionSelector("/settings")).toBeUndefined();
+    expect(resolveWindowDragExclusionSelector("/tools")).toBe(TOOLS_DRAG_EXCLUSION_SELECTOR);
     expect(resolveObservedWindowDragExclusionSelector(undefined)).toBe(
       WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR
     );
     expect(resolveObservedWindowDragExclusionSelector(THREAD_DRAG_EXCLUSION_SELECTOR)).toBe(
       `${THREAD_DRAG_EXCLUSION_SELECTOR}, ${WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR}`
     );
+  });
+
+  it("keeps the entire tools tab strip clickable across window resizing", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const tabs = document.createElement("div");
+    tabs.dataset.windowDragExclusion = "tools-tabs";
+    let width = 330;
+    tabs.getBoundingClientRect = () => ({
+      x: 288, y: 24, left: 288, top: 24, right: 288 + width,
+      bottom: 60, width, height: 36, toJSON: () => undefined
+    });
+    document.body.append(tabs);
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<WindowDragRegion dynamicExclusionSelector={resolveWindowDragExclusionSelector("/tools")} />);
+    });
+    const exclusion = () => container.querySelector<HTMLElement>(".window-drag-exclusion--dynamic");
+    expect(exclusion()?.style.top).toBe("24px");
+    expect(exclusion()?.style.height).toBe("36px");
+    expect(exclusion()?.style.width).toBe("330px");
+    width = 480;
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(exclusion()?.style.width).toBe("480px");
   });
 
   it("mirrors every knowledge control group as a root-level no-drag exclusion", async () => {

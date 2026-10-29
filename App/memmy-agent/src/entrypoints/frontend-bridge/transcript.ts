@@ -20,6 +20,8 @@ type AugmentAssistantText = (text: string) => string;
 type TranscriptMediaKind = "image" | "video" | "file";
 
 export interface ReplayTranscriptOptions {
+  /** Runtime truth for cards after a gateway restart; does not reorder or settle other messages. */
+  isQuestionPending?: (requestId: string) => boolean;
   augmentUserMedia?: AugmentUserMedia | null;
   augmentAssistantMedia?: AugmentAssistantMedia | null;
   augmentAssistantText?: AugmentAssistantText | null;
@@ -1304,6 +1306,24 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       continue;
     }
 
+    if (ev === "agent_question_response") {
+      const requestId = stringValue(rec.request_id);
+      if (!requestId || !Array.isArray(rec.answers)) continue;
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const candidate = messages[index];
+        const ui = isDict(candidate.agent_ui) ? candidate.agent_ui : null;
+        const card = ui && isDict(ui.questionCard) ? ui.questionCard : null;
+        if (stringValue(card?.requestId) !== requestId) continue;
+        messages[index] = {
+          ...candidate,
+          questionResponse: { requestId, answers: rec.answers, ...(rec.cancelled === true ? { cancelled: true } : {}) },
+          ...(rec.cancelled === true ? { questionInterrupted: true } : {}),
+        };
+        break;
+      }
+      continue;
+    }
+
     if (ev === "file_edit") {
       if (Array.isArray(rec.edits)) upsertFileEdits(rec.edits.filter(isDict), rec, idx);
       continue;
@@ -1493,10 +1513,12 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       const content = typeof rec.text === "string" ? rec.text : "";
       const media = normalizeAssistantMediaAttachments(rec, augmentAssistantMedia);
       const structuredModelError = modelError(rec.model_error);
-      const hasAssistantPayload = Boolean(content.trim() || media.length || structuredModelError);
+      const agentUi = rec.agent_ui;
+      const hasAssistantPayload = Boolean(content.trim() || media.length || structuredModelError || agentUi != null);
       const extra: Dict = { content };
       if (media.length) extra.media = media;
       if (structuredModelError) extra.model_error = structuredModelError;
+      if (agentUi != null) extra.agent_ui = agentUi;
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) extra.latencyMs = Math.trunc(rec.latency_ms);
       if (isCronProactiveRecord(rec)) {
         if (!hasAssistantPayload) continue;
@@ -1506,6 +1528,13 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         // Preserve the live identity when hydrating history so reconnecting
         // clients can deduplicate the delivery without notifying again.
         extra.metadata = { ...rec.metadata, replayed: true };
+        closedAnswerMessageId = null;
+        bufferMessageId = null;
+        bufferParts = [];
+        absorbComplete(extra, rec, idx);
+        continue;
+      }
+      if (agentUi != null) {
         closedAnswerMessageId = null;
         bufferMessageId = null;
         bufferParts = [];
@@ -1576,6 +1605,14 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       && !closedReplayTurnIds.has(out.turnId);
     if (out.kind !== "context_compaction" && !belongsToOpenIdentifiedTurn) delete out.isStreaming;
     if (!belongsToOpenIdentifiedTurn) delete out.reasoningStreaming;
+    const card = isDict(out.agent_ui) && isDict(out.agent_ui.questionCard) ? out.agent_ui.questionCard : null;
+    if (card && !out.questionResponse && (
+      (typeof out.turnId === "string" && closedReplayTurnIds.has(out.turnId))
+      || (typeof card.requestId === "string" && options.isQuestionPending?.(card.requestId) === false)
+    )) {
+      out.questionInterrupted = true;
+      delete out.isStreaming;
+    }
     return out;
   });
 }

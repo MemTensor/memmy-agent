@@ -8,21 +8,27 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { AgentChatMessage } from "../../state/agent-chat-slice.js";
 import {
   AgentThreadPanel,
+  PLUGIN_RECORDING_TAB_ID,
   THREAD_PANEL_FULLSCREEN_BODY_CLASS,
   THREAD_PANEL_WIDTH_STORAGE_KEY,
   useAgentThreadPanel,
   type AgentThreadPanelController,
 } from "../agent-thread-panel.js";
-import { THREAD_TEXT_PREVIEW_MAX_BYTES, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
+import { THREAD_TEXT_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
+import type { RecordingPanelSession } from "../interview-recording-panel.js";
 import { requestBrowserNewTab, takePendingBrowserNewTab } from "../browser-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const LAYOUT_WIDTH = 1248;
+let layoutWidth = LAYOUT_WIDTH;
 
 type HarnessProps = {
   messages: AgentChatMessage[]; context: ThreadPreviewContext; workspaceRoot?: string | null;
   scopeKey?: string; keepMounted?: boolean; onController?: (controller: AgentThreadPanelController) => void;
+  onRecordingVisibleChange?: (visible: boolean) => void;
+  pluginRecordingSession?: RecordingPanelSession | null;
+  onClosePluginRecording?: () => void;
 };
 function Harness(props: HarnessProps) {
   const layoutRef = useRef<HTMLDivElement | null>(null);
@@ -39,6 +45,9 @@ function Harness(props: HarnessProps) {
           messages={props.messages}
           workspaceRoot={props.workspaceRoot ?? null}
           previewContext={props.context}
+          onRecordingVisibleChange={props.onRecordingVisibleChange}
+          pluginRecordingSession={props.pluginRecordingSession}
+          onClosePluginRecording={props.onClosePluginRecording}
         />
       ) : null}
     </div>
@@ -78,6 +87,7 @@ describe("AgentThreadPanel", () => {
   let root: Root;
 
   beforeEach(() => {
+    layoutWidth = LAYOUT_WIDTH;
     const values = new Map<string, string>();
     Object.defineProperty(window, "localStorage", {
       configurable: true,
@@ -91,7 +101,7 @@ describe("AgentThreadPanel", () => {
       },
     });
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      const width = this.dataset.testid === "layout" ? LAYOUT_WIDTH : 32;
+      const width = this.dataset.testid === "layout" ? layoutWidth : 32;
       return { width, height: 32, top: 0, left: 0, right: width, bottom: 32, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
     });
     container = document.createElement("div");
@@ -118,6 +128,35 @@ describe("AgentThreadPanel", () => {
     });
     if (open) act(() => byTestId("open-panel").click());
   }
+
+  it("covers the chat on a narrow workspace instead of leaving composer controls exposed", () => {
+    layoutWidth = 620;
+    let panel!: AgentThreadPanelController;
+    render({ messages: [], context: emptyContext(), onController: (value) => { panel = value; } });
+    expect(panel.overlay).toBe(true);
+    expect(panel.width).toBe(620);
+    expect(panel.offset).toBe(0);
+    expect(container.querySelector(".thread-panel--overlay")).not.toBeNull();
+    expect(container.querySelector(".thread-panel__sash")).toBeNull();
+  });
+
+  it("opens a plugin interview beside file previews in the same task tab strip", () => {
+    layoutWidth = 620;
+    let panel!: AgentThreadPanelController;
+    const session: RecordingPanelSession = {
+      title: "访谈录音", status: "idle", elapsedMs: 0, lines: [], transcript: null, audioUrl: null,
+      onPause: vi.fn(), onResume: vi.fn(), onFinish: vi.fn(), onClose: vi.fn()
+    };
+    render({ messages: [], context: emptyContext(), pluginRecordingSession: session,
+      onController: (value) => { panel = value; } });
+    act(() => panel.openTab({ id: PLUGIN_RECORDING_TAB_ID, type: "recording", name: "录音" }));
+    expect(tabTitles()).toEqual(["录音"]);
+    expect(container.querySelector(".thread-panel__main .workspace-artifact-preview-pane--embedded")).not.toBeNull();
+    expect(container.querySelector(".thread-panel__main .sidebar-resize-handle")).toBeNull();
+
+    act(() => panel.openTab({ id: "file:/repo/notes.md", type: "file", name: "notes.md", path: "/repo/notes.md" }));
+    expect(tabTitles()).toEqual(["录音", "notes.md"]);
+  });
 
   it('keeps user tabs mounted while switching and opens an Agent page in a separate tab', () => {
     render({ messages: [], context: emptyContext() });
@@ -160,7 +199,7 @@ describe("AgentThreadPanel", () => {
   it('keeps a browser tab beside the file tab in the same strip', async () => {
     render({
       messages: [
-        { id: "a1", role: "assistant", content: "Wrote [notes](/work/notes.md).", media: [{ kind: "file", path: "/work/report.pdf", name: "report.pdf" }] },
+        { id: "a1", role: "assistant", content: "Wrote [notes](/work/notes.md).", media: [{ kind: "file", path: "/work/report.pdf", name: "report.pdf" }, { kind: "file", path: "/work/notes.md", name: "notes.md" }] },
       ],
       context: { ...emptyContext(), artifactClient: artifactClient(), fetchFn: textFetch({ "/work/notes.md": "# Release notes\n\nAll good." }) },
     });
@@ -178,6 +217,21 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelector('.thread-preview__document')?.textContent).toContain('Release notes');
     expect(strip?.querySelector('[data-browser-tab]')?.getAttribute('aria-selected')).toBe('false');
     expect(strip?.querySelector('[data-thread-tab-id^="file:"]')?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('reports recording visibility when its tab opens, loses focus, and closes', () => {
+    let panel!: AgentThreadPanelController;
+    const visible = vi.fn();
+    render({ messages: [], context: emptyContext(), keepMounted: true,
+      onController: (controller) => { panel = controller; }, onRecordingVisibleChange: visible });
+    act(() => panel.openTab({ id: "recording:main", type: "recording", name: "录音" }));
+    expect(visible).toHaveBeenLastCalledWith(true);
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    expect(visible).toHaveBeenLastCalledWith(false);
+    act(() => document.querySelector<HTMLElement>('[data-thread-tab-id="recording:main"]')!.click());
+    expect(visible).toHaveBeenLastCalledWith(true);
+    act(() => panel.close());
+    expect(visible).toHaveBeenLastCalledWith(false);
   });
 
   it('opens a requested page without leaving the placeholder new tab when the browser mounts later', () => {
@@ -401,7 +455,7 @@ describe("AgentThreadPanel", () => {
     let panel!: AgentThreadPanelController;
     const selected = vi.fn();
     Object.assign(window, { memmy: { selectEmbeddedBrowserTab: selected } });
-    const props = { messages: [{ id: 'a1', role: 'assistant' as const, content: 'Wrote [notes](/work/notes.md).' }],
+    const props = { messages: [{ id: 'a1', role: 'assistant' as const, content: 'Wrote [notes](/work/notes.md).', media: [{ kind: 'file' as const, path: '/work/notes.md', name: 'notes.md' }] }],
       context: { ...emptyContext(), artifactClient: artifactClient(), fetchFn: textFetch({ '/work/notes.md': 'draft preview' }) },
       keepMounted: true, onController: (controller: AgentThreadPanelController) => { panel = controller; } };
     render({ ...props, scopeKey: 'draft-1' });
@@ -431,7 +485,7 @@ describe("AgentThreadPanel", () => {
 
   it('cancels an old chat close timer and closes its overview portal when switching chats', async () => {
     let panel!: AgentThreadPanelController;
-    const props = { messages: [{ id: 'a1', role: 'assistant' as const, content: 'Wrote [notes](/work/notes.md).' }],
+    const props = { messages: [{ id: 'a1', role: 'assistant' as const, content: 'Wrote [notes](/work/notes.md).', media: [{ kind: 'file' as const, path: '/work/notes.md', name: 'notes.md' }] }],
       context: { ...emptyContext(), artifactClient: artifactClient(), fetchFn: textFetch({ '/work/notes.md': 'preview' }) },
       keepMounted: true, onController: (controller: AgentThreadPanelController) => { panel = controller; } };
     render({ ...props, scopeKey: 'old-chat' });
@@ -453,7 +507,7 @@ describe("AgentThreadPanel", () => {
     const client = artifactClient();
     render({
       messages: [
-        { id: "a1", role: "assistant", content: "Wrote [notes](/work/notes.md).", media: [{ kind: "file", path: "/work/report.pdf", name: "report.pdf" }] },
+        { id: "a1", role: "assistant", content: "Wrote [notes](/work/notes.md).", media: [{ kind: "file", path: "/work/report.pdf", name: "report.pdf" }, { kind: "file", path: "/work/notes.md", name: "notes.md" }] },
       ],
       context: { ...emptyContext(), artifactClient: client, fetchFn: textFetch({ "/work/notes.md": "# Release notes\n\nAll good." }) },
     });
@@ -490,17 +544,17 @@ describe("AgentThreadPanel", () => {
     expect(offset()).toBe(0);
   });
 
-  it("downloads a URL-only PPTX from the artifact side panel without changing chat preview routing", async () => {
+  it("downloads a URL-only PPTX when its supported Office preview exceeds the read limit", async () => {
     const saveFile = vi.fn(async () => ({ canceled: false as const, filePath: "/tmp/deck.pptx", bytes: 4 }));
     Object.defineProperty(window, "memmy", { configurable: true, value: { saveFile } });
     render({
       messages: [{ id: "a1", role: "assistant", content: "附件已生成。", media: [
         { kind: "file", url: "https://fixture.test/deck.pptx", name: "deck.pptx" },
       ] }],
-      context: emptyContext(),
+      context: { ...emptyContext(), fetchFn: vi.fn(async () => new Response("", { headers: { "content-length": String(THREAD_OFFICE_PREVIEW_MAX_BYTES + 1) } })) as typeof fetch },
     });
     await act(async () => clickText(".thread-overview-item", "deck.pptx"));
-    expect(document.querySelector(".thread-preview")?.textContent).toContain("暂不支持在侧栏中预览此格式");
+    expect(document.querySelector(".thread-preview")?.textContent).toContain("文件较大，暂不在侧栏中预览");
     await act(async () => {
       document.querySelector<HTMLButtonElement>('[aria-label="下载文件"]')!.click();
       await Promise.resolve();

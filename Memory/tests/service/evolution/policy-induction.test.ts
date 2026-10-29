@@ -36,6 +36,33 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / policy induction", () => {
+  it("lets the event loop serve foreground work while an induction bucket is skipped", async () => {
+    const { db, service } = createTestService();
+    const userId = "induction-fairness";
+    const session = service.openSession({ namespace: { source: "codex", profileId: "fairness", userId }, workspaceId: "fairness" });
+    const completed = await service.completeTurn("fairness-turn", {
+      sessionId: session.sessionId,
+      episodeId: "fairness-episode",
+      query: "Run the focused tests",
+      answer: "The focused tests passed."
+    });
+    makeTraceEligibleForL2(db, completed.l1MemoryId);
+    db.db.prepare("UPDATE evolution_jobs SET status = 'succeeded'").run();
+    const at = new Date().toISOString();
+    db.db.prepare(`INSERT INTO evolution_jobs (
+      id, job_type, status, user_id, session_id, episode_id, target_memory_id,
+      payload_json, attempts, max_attempts, created_at, updated_at
+    ) VALUES (?, 'l2_induction', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`)
+      .run("fairness-job", userId, session.sessionId, completed.episodeId, completed.l1MemoryId, at, at);
+    let foregroundRan = false;
+    const foreground = setImmediate(() => { foregroundRan = true; });
+    try {
+      const result = await service.runWorkerOnce(1);
+      expect(result.succeeded).toBe(1);
+      expect(foregroundRan).toBe(true);
+    } finally { clearImmediate(foreground); }
+  });
+
   it("[BC-08] keeps task-linked feedback in both branches and activates its candidate Policy only after new successful evidence", async () => {
     const { db, service } = createTestService({
       llm: createBc08SummaryLlm(),

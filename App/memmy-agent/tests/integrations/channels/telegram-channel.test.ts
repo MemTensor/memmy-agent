@@ -11,6 +11,7 @@ const grammyMock = vi.hoisted(() => {
       this.handlers.set(event, handler);
       return this;
     });
+    this.init = vi.fn(async () => undefined);
     this.start = vi.fn(async () => undefined);
     this.stop = vi.fn(async () => undefined);
     this.api = {
@@ -86,6 +87,29 @@ describe("Telegram channel", () => {
     expect(channel.botUsername).toBe("memmy_bot");
     await channel.stop();
     expect(grammyMock.instances[0].stop).toHaveBeenCalled();
+  });
+
+  it("fails channel start when Telegram init rejects, without leaving an unhandled rejection", async () => {
+    function FailingBot(this: any) {
+      this.on = vi.fn();
+      this.init = vi.fn(async () => {
+        throw new Error("Call to 'getMe' failed! (404: Not Found)");
+      });
+      this.start = vi.fn(async () => undefined);
+      this.stop = vi.fn(async () => undefined);
+      this.api = {
+        getMe: vi.fn(),
+        setMyCommands: vi.fn(),
+      };
+      grammyMock.instances.push(this);
+    }
+    grammyMock.Bot.mockImplementation(FailingBot);
+    const channel = new TelegramChannel({ token: "bad-token", allowFrom: ["*"] }, new MessageBus());
+
+    await expect(channel.start()).rejects.toThrow(/getMe/);
+    expect(grammyMock.instances[0].init).toHaveBeenCalled();
+    expect(grammyMock.instances[0].start).not.toHaveBeenCalled();
+    expect(channel.botUserId).toBeNull();
   });
 
   it("renders markdown for Telegram HTML output", () => {

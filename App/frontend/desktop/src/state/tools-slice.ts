@@ -49,12 +49,30 @@ export function toolsReducer(state: ToolsState = initialToolsState, action: Tool
     case "tools/closeModal":
       return { ...state, modal: { kind: "closed" } };
     case "tools/connectionsUpdated":
+      if (state.status === "ready" && state.loadError === null && sameConnections(state.connections, action.connections)) return state;
       return { ...state, status: "ready", connections: action.connections, loadError: null };
     case "tools/connectionFailure":
       return { ...state, loadError: action.message };
     default:
       return state;
   }
+}
+
+function sameConnections(left: IntegrationConnection[], right: IntegrationConnection[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((connection, index) => {
+    const next = right[index];
+    return next !== undefined
+      && connection.id === next.id
+      && connection.toolkit === next.toolkit
+      && connection.status === next.status
+      && connection.surface === next.surface
+      && connection.createdAt === next.createdAt
+      && connection.accountEmail === next.accountEmail
+      && connection.workspace === next.workspace
+      && connection.username === next.username
+      && connection.lastError === next.lastError;
+  });
 }
 
 /** Handles select connection for integration. */

@@ -1157,6 +1157,26 @@ export class GoalRuntime {
     });
   }
 
+  async reorderInboxEntries(
+    sessionKey: string,
+    orderedIds: readonly string[],
+    queuedAtById: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    await this.mutate(sessionKey, (session) => {
+      const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
+      const entries = new Map(inbox.filter((entry) => entry.turnId === null && orderedIds.includes(String(entry.metadata.client_request_id)))
+        .map((entry) => [String(entry.metadata.client_request_id), entry]));
+      let next = 0;
+      session.metadata[GOAL_TURN_INBOX_KEY] = inbox.map((entry) => {
+        if (entry.turnId !== null || !entries.has(String(entry.metadata.client_request_id))) return entry;
+        const id = orderedIds[next++]!;
+        const selected = entries.get(id)!;
+        return { ...selected, metadata: { ...selected.metadata, queued_at: queuedAtById.get(id)! } };
+      });
+      return { value: undefined };
+    });
+  }
+
   async consumeInboxEntry(sessionKey: string, entryId: string, turnId: string): Promise<GoalTurnInboxEntry> {
     return this.mutate(sessionKey, (session) => {
       const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);

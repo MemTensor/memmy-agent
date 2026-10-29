@@ -16,6 +16,7 @@ import {
   type AgentTaskStateCoordinator
 } from "./app/agent-runtime-bridge.js";
 import { AppProviders, useApiClients } from "./app/providers.js";
+import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
@@ -73,6 +74,7 @@ function RuntimeApp() {
   const scanStateRef = useRef(state.agentSources);
   scanStateRef.current = state.agentSources;
   const { clients, setClients } = useApiClients();
+  const { receive: receivePluginEvent, reconcilePendingCalls } = usePluginUi();
   useComputerHistoryTrayIndicator(clients?.memmyAgent ?? null);
   useComputerHistoryModelSync({
     client: clients?.memmyAgent ?? null,
@@ -310,6 +312,14 @@ function RuntimeApp() {
           const succeeded = completion.succeeded ?? scanResults.every((result) => (result.errorCount ?? result.errors.length) === 0 && result.errors.length === 0);
           handleScanCompletion({ ...completion, succeeded, completedAt: parsed.timestamp }, clients.agentSources, scanResults);
         });
+        events.addEventListener("plugin.capability_event", (event) => {
+          const parsed = parseSseEvent(event);
+          if (parsed?.type === "plugin.capability_event") receivePluginEvent(parsed.payload);
+        });
+        events.addEventListener("plugin.capability_snapshot", (event) => {
+          const parsed = parseSseEvent(event);
+          if (parsed?.type === "plugin.capability_snapshot") reconcilePendingCalls(parsed.payload.calls);
+        });
         events.onerror = () => dispatch(appActions.eventStatusChanged("reconnecting"));
       } catch (error) {
         if (!isActive) {
@@ -326,7 +336,7 @@ function RuntimeApp() {
       isActive = false;
       events?.close();
     };
-  }, [bootKey, dispatch, setClients]);
+  }, [bootKey, dispatch, receivePluginEvent, reconcilePendingCalls, setClients]);
 
   return (
     <UpdateCoordinatorProvider>

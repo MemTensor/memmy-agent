@@ -4,10 +4,10 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { AgentArtifactClient } from "../agent-message-content.js";
-import { readPreviewResponse, THREAD_PDF_PREVIEW_MAX_BYTES, ThreadTabPreview } from "../agent-thread-panel-preview.js";
+import { readPreviewResponse, THREAD_PDF_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, ThreadTabPreview } from "../agent-thread-panel-preview.js";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let cleanup: (() => void) | undefined;
-afterEach(() => { cleanup?.(); document.body.replaceChildren(); Reflect.deleteProperty(window, "memmy"); });
+afterEach(() => { cleanup?.(); vi.useRealTimers(); document.body.replaceChildren(); Reflect.deleteProperty(window, "memmy"); });
 async function mount(fetchFn: typeof fetch, options: {
   name?: string; path?: string; url?: string; workspaceRoot?: string; artifactClient?: AgentArtifactClient | null;
 } = {}) {
@@ -16,7 +16,8 @@ async function mount(fetchFn: typeof fetch, options: {
   await act(async () => {
     root.render(<I18nProvider language="zh-CN"><ThreadTabPreview tab={{id:"preview",type:"file",name:options.name ?? "raw.json",path:options.path,url:options.url ?? "https://fixture.test/raw.json"}}
       context={{artifactClient:options.artifactClient ?? null,agentClient:null,sessionScope:null,environment:null,workspaceRoot:options.workspaceRoot ?? null,fetchFn}} /></I18nProvider>);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(10);
+    else await new Promise(resolve => setTimeout(resolve, 10));
   });
   return container;
 }
@@ -76,7 +77,9 @@ describe("raw text side panel", () => {
   });
 
   it.each(["bytes */12", "bytes */", null])("rejects 416 with nonempty or missing length metadata %s", async (contentRange) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const container = await mount(vi.fn(async () => new Response(null,{status:416,headers:contentRange ? {"content-range":contentRange} : {}})) as typeof fetch);
+    await act(async () => { await vi.runAllTimersAsync(); });
     expect(container.textContent).toContain("文件已移动、删除或无法访问");
     expect(container.querySelector(".thread-preview__code")).toBeNull();
     expect(container.querySelector("textarea")).toBeNull();
@@ -104,7 +107,9 @@ describe("raw text side panel", () => {
     expect(container.textContent).not.toContain('9007199254740992');
   });
   it("reports a removed file instead of rendering a fake preview", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const container = await mount(vi.fn(async () => new Response('not found',{status:404})) as typeof fetch);
+    await act(async () => { await vi.runAllTimersAsync(); });
     expect(container.textContent).toContain('文件已移动、删除或无法访问');
     expect(container.querySelector('pre')).toBeNull();
   });
@@ -162,6 +167,21 @@ describe("bounded attachment previews", () => {
     } as unknown as Response));
     const container = await mount(fetchFn as typeof fetch, { name: "large.pdf" });
     expect(container.textContent).toContain("文件较大，暂不在侧栏中预览");
+    expect(getReader).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each(["docx", "xlsx", "pptx"])("bounds .%s Office reads while keeping download available", async (extension) => {
+    const cancel = vi.fn(async () => undefined);
+    const getReader = vi.fn();
+    const fetchFn = vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({ "content-length": String(THREAD_OFFICE_PREVIEW_MAX_BYTES + 1) }),
+      body: { cancel, getReader },
+    } as unknown as Response));
+    const container = await mount(fetchFn as typeof fetch, { name: `large.${extension}` });
+    expect(container.textContent).toContain("文件较大，暂不在侧栏中预览");
+    expect(container.querySelector('[aria-label="下载文件"]')).not.toBeNull();
     expect(getReader).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
   });

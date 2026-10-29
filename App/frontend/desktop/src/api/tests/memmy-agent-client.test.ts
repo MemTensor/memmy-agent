@@ -752,6 +752,20 @@ describe("memmy-agent client", () => {
     ]);
   });
 
+  it("renews recording playback without a chat session", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      expect(url.pathname).toBe("/api/webui/recordings/resolve");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({ path: "/workspace/recordings/interview.webm" });
+      return json({ media_url: "/api/media/ws/signed/audio" });
+    });
+    const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
+    await expect(client.resolveRecording("/workspace/recordings/interview.webm"))
+      .resolves.toBe("http://127.0.0.1:18980/api/media/ws/signed/audio");
+  });
+
   it("uploads agent attachments as multipart and normalizes returned signed URLs", async () => {
     const calls: Array<{ path: string; init?: RequestInit }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2133,6 +2147,27 @@ describe("memmy-agent client", () => {
       revision: 8
     });
     await expect(removal).resolves.toEqual({ outcome: "already_dequeued", revision: 8 });
+  });
+
+  it("sends the full queue order with the current revision", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const orderedIds = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+    connection.reorderQueuedMessages("chat-reorder", orderedIds, 7, 1);
+    expect(JSON.parse(sockets[0]!.sent.at(-1)!)).toMatchObject({
+      type: "queue_reorder", chat_id: "chat-reorder", ordered_ids: orderedIds,
+      expected_revision: 7, request_id: expect.any(String),
+    });
   });
 
   it("sends one queue-steer control and terminates the original queued attempt", async () => {

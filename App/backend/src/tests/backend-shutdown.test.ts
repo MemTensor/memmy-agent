@@ -47,10 +47,12 @@ function connections() {
 function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ saved: true })) {
   const progressBus = createProgressBus();
   const unsubscribers: ReturnType<typeof vi.fn>[] = [];
+  const subscribedEvents: string[] = [];
   const services = {
     bootstrap: { async getBootstrap() { throw new Error("unused"); } },
     integrations: { executeRouterTool },
     progressBus: { ...progressBus, on: ((...args: Parameters<typeof progressBus.on>) => {
+      subscribedEvents.push(args[0]);
       const unsubscribe = vi.fn(progressBus.on(...args)); unsubscribers.push(unsubscribe); return unsubscribe;
     }) }
   } as unknown as BackendServices;
@@ -58,7 +60,7 @@ function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, exec
     permissionManager: { verifyRuntimeToken } as PermissionManager,
     composioMcpToken: "shutdown-test-mcp", services, heartbeatIntervalMs: 60_000,
   });
-  return { app, unsubscribers };
+  return { app, unsubscribers, subscribedEvents };
 }
 async function listen(app: FastifyInstance) { return app.listen({ host: "127.0.0.1", port: 0 }); }
 
@@ -84,7 +86,7 @@ describe("local backend graceful shutdown", () => {
   });
 
   it("unsubscribes each SSE listener once while preserving an in-flight ordinary request", async () => {
-    const { app, unsubscribers } = api();
+    const { app, unsubscribers, subscribedEvents } = api();
     const clients = connections(); const started = deferred(); const release = deferred();
     let writeFinished = false; let shutdown: Promise<void> | undefined;
     app.get("/shutdown-write", async () => { started.resolve(); await release.promise; writeFinished = true; return { saved: true }; });
@@ -102,14 +104,15 @@ describe("local backend graceful shutdown", () => {
       expect(JSON.parse(await clients.body(response))).toEqual({ saved: true });
       expect(await settlesWithin(shutdown)).toBe(true);
       expect(writeFinished).toBe(true);
-      expect(unsubscribers).toHaveLength(2);
+      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event"]);
+      expect(unsubscribers).toHaveLength(3);
       for (const unsubscribe of unsubscribers) expect(unsubscribe).toHaveBeenCalledOnce();
     } finally { release.resolve(); clients.destroy(); await (shutdown ?? app.close()); }
   });
 
   it("also ends an event stream whose authentication was already in flight when closing started", async () => {
     const entered = deferred(); const authorize = deferred();
-    const { app, unsubscribers } = api(async () => { entered.resolve(); await authorize.promise; return true; });
+    const { app, unsubscribers, subscribedEvents } = api(async () => { entered.resolve(); await authorize.promise; return true; });
     const clients = connections(); const base = await listen(app); let shutdown: Promise<void> | undefined;
     try {
       const stream = clients.open(`${base}/api/events?token=test-token`);
@@ -119,7 +122,8 @@ describe("local backend graceful shutdown", () => {
       authorize.resolve();
       expect((await stream).statusCode).toBe(200);
       expect(await settlesWithin(shutdown)).toBe(true);
-      expect(unsubscribers).toHaveLength(2);
+      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event"]);
+      expect(unsubscribers).toHaveLength(3);
       for (const unsubscribe of unsubscribers) expect(unsubscribe).toHaveBeenCalledOnce();
     } finally { authorize.resolve(); clients.destroy(); await (shutdown ?? app.close()); }
   });

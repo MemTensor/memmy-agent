@@ -7,6 +7,7 @@ import {
   type AgentSourceExecutor
 } from "../agent-source/runtime.js";
 import {
+  EmbeddingInferenceInputSchema,
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -80,6 +81,7 @@ export const API_ROUTES = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
+  "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
   "POST /api/v1/evidence/sync",
@@ -849,6 +851,12 @@ async function routeRequest(
         ),
       (result) => ({ hit_count: hitCountFromSearchResponse(result) }),
     ));
+  }
+
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    requireMemoryRead(principal);
+    const request = EmbeddingInferenceInputSchema.parse(body);
+    return service.embedTexts(request.texts, request.role);
   }
 
   const recallEvidence = match(path, /^\/api\/v1\/memory\/recalls\/([^/]+)$/);
