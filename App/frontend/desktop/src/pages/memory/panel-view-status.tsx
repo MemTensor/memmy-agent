@@ -1,3 +1,5 @@
+import { MemoryStateBox } from "./memory-state-box.js";
+import { Button } from "../../components/button.js";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { usePanelPoll } from "./use-panel-poll.js";
@@ -90,8 +92,8 @@ export function PanelViewGate(props: { status: ReturnType<typeof usePanelViewSta
   const { t } = useTranslation();
   return <>
     {props.status.checking && <div role="status">
-      {props.status.connectionError ?? t("common.loading")}
-      {props.status.connectionError && <button type="button" onClick={props.status.retry}>{t("app.error.retry")}</button>}
+      <MemoryStateBox message={props.status.connectionError ?? t("common.loading")} tone={props.status.connectionError ? "error" : undefined} />
+      {props.status.connectionError && <Button type="button" size="sm" onClick={props.status.retry}>{t("app.error.retry")}</Button>}
     </div>}
     <div hidden={props.status.checking}>{props.children}</div>
   </>;

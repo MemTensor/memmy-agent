@@ -138,6 +138,29 @@ describe("HttpMemoryClient", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it.each(["caller", "deadline"] as const)("classifies %s cancellation while reading a response body", async cause => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started=resolve; });
+    let calls=0;
+    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",token:"synthetic",timeoutMs:cause === "deadline" ? 30 : 1000,maxRetries:3}, {
+      fetchImpl:(async (_url,init)=>{
+        calls++;
+        return {ok:true,json:()=>new Promise((_resolve,reject)=>{
+          const fail=()=>reject(new DOMException("body aborted", "AbortError"));
+          init!.signal!.addEventListener("abort",fail,{once:true});
+          started();
+          if(init!.signal!.aborted) fail();
+        })} as Response;
+      }) as typeof fetch
+    });
+    const pending=client.panelTaskCheck("synthetic",{signal:controller.signal}).catch(error=>error);
+    await ready;
+    if(cause === "caller") controller.abort();
+    expect(await pending).toMatchObject({code:"memory_layer_unavailable",message:cause === "caller" ? "memory layer request cancelled" : "memory layer timeout"});
+    expect(calls).toBe(1);
+  });
+
   it("propagates a cancelled panel subscription to fetch without retrying", async () => {
     const controller = new AbortController();
     let started!: () => void;
@@ -155,7 +178,7 @@ describe("HttpMemoryClient", () => {
     const result = client.panelTaskCheck("task", {signal:controller.signal}).catch(error => error);
     await ready;
     controller.abort();
-    await result;
+    expect(await result).toMatchObject({message:"memory layer request cancelled"});
     expect(observed?.aborted).toBe(true);
     expect(calls).toBe(1);
   });

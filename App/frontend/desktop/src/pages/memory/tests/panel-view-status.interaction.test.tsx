@@ -39,6 +39,8 @@ describe("retained page authorization", () => {
       await act(async () => rejectCheck(new ApiRequestError("access revoked", 403)));
       expect(container.textContent).not.toContain("private cached content");
       expect(container.textContent).toContain("access revoked");
+      expect(container.querySelector(".memory-state-box--error")).not.toBeNull();
+      expect(container.querySelector(".button-secondary")).not.toBeNull();
       expect(container.querySelector("button")).not.toBeNull();
       checkPanelView.mockResolvedValueOnce({ updated: false });
       await act(async () => container.querySelector("button")!.click());

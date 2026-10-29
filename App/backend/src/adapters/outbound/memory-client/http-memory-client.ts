@@ -108,10 +108,14 @@ export function createHttpMemoryClient(
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal ?? requestOptions.context?.signal)
-        });
+        }, requestOptions.signal ?? requestOptions.context?.signal);
 
         if (response.ok) {
-          return response.json();
+          try {
+            return await response.json();
+          } catch (error) {
+            throw mappedAbortError(error, requestOptions.signal ?? requestOptions.context?.signal) ?? error;
+          }
         }
 
         // Older protocol-1 services expose scanning only to Viewer. Their health
@@ -364,17 +368,22 @@ function combineAbortSignals(primary: AbortSignal, secondary: AbortSignal | unde
 async function fetchWithMappedNetworkErrors(
   fetchImpl: typeof fetch,
   url: string,
-  init: RequestInit
+  init: RequestInit,
+  callerSignal?: AbortSignal
 ): Promise<Response> {
   try {
     return await fetchImpl(url, init);
   } catch (error) {
-    if (isTimeoutError(error)) {
-      throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer timeout", error);
-    }
-
-    throw new MemoryLayerNetworkError(error);
+    throw mappedAbortError(error, callerSignal) ?? new MemoryLayerNetworkError(error);
   }
+}
+
+function mappedAbortError(error: unknown, callerSignal?: AbortSignal): MemoryLayerError | undefined {
+  if (callerSignal?.aborted)
+    return new MemoryLayerError("memory_layer_unavailable", 503, "memory layer request cancelled", error);
+  if (isTimeoutError(error))
+    return new MemoryLayerError("memory_layer_unavailable", 503, "memory layer timeout", error);
+  return undefined;
 }
 
 /**

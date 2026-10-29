@@ -137,6 +137,7 @@ afterAll(() => {
 });
 
 describe("legacy selection diagnostics and current execution safety", () => {
+  // These cases seed 10,000 real SQLite rows; keep all assertions under parallel suite load.
   it("leaves runnable reflection and embedding retry untouched across 50 full import rounds", async () => {
     const h = harness();
     h.db.db.transaction(() => {
@@ -176,7 +177,7 @@ describe("legacy selection diagnostics and current execution safety", () => {
       reflectionDirectClaimControl: true,
       nativeTaskControl: "starts first, then fills remaining execution opportunities", elapsedMs: Math.round(performance.now() - start)
     });
-  });
+  }, 20_000);
 
   it("runs a due embedding retry with free capacity (control)", async () => {
     const h = harness();
@@ -196,7 +197,7 @@ describe("legacy selection diagnostics and current execution safety", () => {
     const leased = h.repos.runtime.leaseQueuedJobs(4, 60, undefined, true);
     expect(leased.map((j) => j.id)).toEqual(["normal-reflection"]);
     record("startup_repair_priority_control", { startupBacklog: 10_000, firstClaim: "reflection", leased: 1 });
-  });
+  }, 20_000);
 
   it("keeps an onboarding first report ahead of native and imported summaries (control)", () => {
     const h = harness();

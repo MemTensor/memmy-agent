@@ -6,7 +6,7 @@ import { PanelItemsInputSchema, PanelTasksInputSchema } from "@memmy/local-api-c
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
-import { runtimeContextFromRequest } from "../../../../../services/runtime-context.js";
+import { cancellableRuntimeContextFromRequest as panelRequestContext } from "../../../../../services/runtime-context.js";
 import type { AgentRuntimeRouteDeps } from "./index.js";
 
 export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
@@ -92,19 +92,4 @@ function queryValues(rawUrl: string | undefined, name: string): string[] | undef
     .map((value) => value.trim())
     .filter(Boolean);
   return values.length > 0 ? values : undefined;
-}
-
-/** A disconnected renderer must release its Memory reader subscription too. */
-function panelRequestContext(request: FastifyRequest, reply: FastifyReply, timeZone?: string) {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  const cleanup = () => {
-    request.raw.off("aborted", abort);
-    reply.raw.off("close", abort);
-  };
-  request.raw.once("aborted", abort);
-  reply.raw.once("close", abort);
-  reply.raw.once("finish", cleanup);
-  if (request.raw.aborted || reply.raw.destroyed) abort();
-  return { ...runtimeContextFromRequest(request, timeZone), signal: controller.signal };
 }

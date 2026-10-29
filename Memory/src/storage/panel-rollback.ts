@@ -12,6 +12,7 @@ export function rollbackPanelSchema(db: Database.Database): void {
   if (version !== PANEL_SCHEMA_VERSION) throw new Error(`Panel rollback supports schema ${PANEL_SCHEMA_VERSION}, received ${version}`);
   db.transaction(() => {
     for (const name of [
+      "idx_memories_panel_observation_pending",
       "idx_memories_panel_created",
       "idx_memories_panel_status_created",
       "idx_user_memories_panel_updated",

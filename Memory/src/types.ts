@@ -191,6 +191,8 @@ export interface MemoryFilter {
   conversationId?: string;
   agentId?: string;
   excludedAgentIds?: string[];
+  /** Panel producer filtering only; ordinary ownership/retrieval filters keep their semantics. */
+  panelSource?: boolean;
   appId?: string;
   createdAtGte?: IsoTime;
   createdAtLt?: IsoTime;

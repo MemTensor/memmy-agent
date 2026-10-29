@@ -982,8 +982,9 @@ export class MemoryRepository {
                 memory_layer,
                 created_at,
                 updated_at,
-                ${memoryDisplayedSourceSql("json_extract(info_json, '$.source')")} AS info_source,
-                json_extract(properties_json, '$.internal_info.source') AS internal_source
+                ${memoryDisplayedSourceSql("CASE WHEN json_type(info_json, '$.source')='text' THEN json_extract(info_json, '$.source') END")} AS info_source,
+                CASE WHEN json_type(properties_json, '$.internal_info.source')='text'
+                  THEN json_extract(properties_json, '$.internal_info.source') END AS internal_source
          FROM memories
          WHERE deleted_at IS NULL`
       )
@@ -7626,7 +7627,9 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
     // The namespace owner remains Memmy; the panel filters by the producer it
     // displays, including History records written by the old HTTP envelope.
-    const displayedSource = memoryDisplayedSourceSql("agent_id");
+    const displayedSource = memoryDisplayedSourceSql(filter.panelSource
+      ? "panel_source(CASE WHEN json_type(info_json, '$.source')='text' THEN json_extract(info_json, '$.source') END, CASE WHEN json_type(properties_json, '$.internal_info.source')='text' THEN json_extract(properties_json, '$.internal_info.source') END, session_id, conversation_id, agent_id, app_id)"
+      : "agent_id");
     if (value?.trim()) {
       const match = agentIdMatchClause(displayedSource, value);
       clauses.push(match.sql);

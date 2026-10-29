@@ -8,6 +8,44 @@ import { migrate, SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "../../src/storage/
 import { Repositories } from "../../src/storage/repositories.js";
 
 describe("panel index migration", () => {
+  it("indexes only pending observations, preserving order and membership across writes and v14 reopen", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-observation-index-"));
+    const path = join(root, "memory.sqlite");
+    let db = new MemoryDb({path});
+    try {
+      const insert=db.db.prepare(`INSERT INTO memories(id,timeline,user_id,memory_value,memory_layer,status,properties_json,created_at,updated_at,deleted_at)
+        VALUES(?, 'synthetic', 'local', 'body', ?, ?, ?, '2026-10-29', '2026-10-29', ?)`);
+      const add=(id:string, schema?:number, status="activated", deleted:string|null=null, kind="observed_activity", layer="L1") => insert.run(id,layer,status,JSON.stringify({internal_info:{memory_kind:kind,external_evidence:{source:"computer_history"},...(schema===undefined?{}:{observation_memory:{schema_version:schema}})}}),deleted);
+      for(let i=0;i<131;i++) add(`pending-${String(i).padStart(3,"0")}`);
+      for(let i=0;i<200;i++) add(`processed-${i}`,1);
+      add("deleted",0,"activated","2026-10-29");add("archived",0,"archived");add("resolving",0,"resolving");add("trace",0,"activated",null,"trace");add("other-layer",0,"activated",null,"observed_activity","L2");
+      const sql=`SELECT id FROM memories WHERE deleted_at IS NULL AND status='activated' AND memory_layer='L1'
+        AND json_extract(properties_json,'$.internal_info.memory_kind')='observed_activity'
+        AND json_type(properties_json,'$.internal_info.external_evidence')='object'
+        AND COALESCE(json_extract(properties_json,'$.internal_info.observation_memory.schema_version'),0)<1
+        ORDER BY created_at DESC,id DESC LIMIT ?`;
+      const ids=()=>db.db.prepare(sql).pluck().all(100);
+      const before=ids();expect(before).toHaveLength(100);
+      db.db.exec("DROP INDEX idx_memories_panel_observation_pending");
+      expect(ids()).toEqual(before);
+      db.close();db=new MemoryDb({path}); // An already-v14 library also installs the additive index.
+      const plan=db.db.prepare("EXPLAIN QUERY PLAN "+sql).all(100) as {detail:string}[];
+      expect(plan.some(row=>row.detail.includes("idx_memories_panel_observation_pending"))).toBe(true);
+      expect(plan.some(row=>row.detail.includes("TEMP B-TREE"))).toBe(false);
+      expect(ids()).toEqual(before);
+      db.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.observation_memory.schema_version',1) WHERE id=?").run(before[0]);
+      expect(ids()).not.toContain(before[0]);
+      db.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.observation_memory.schema_version',0) WHERE id='processed-0'").run();
+      expect(ids()).toContain("processed-0");
+      db.db.prepare("UPDATE memories SET deleted_at='2026-10-29' WHERE id='processed-0'").run();
+      expect(ids()).not.toContain("processed-0");
+      rollbackPanelSchema(db.db);
+      expect(db.db.prepare("SELECT 1 FROM sqlite_master WHERE name='idx_memories_panel_observation_pending'").get()).toBeUndefined();
+      expect(ids()).not.toContain("processed-0");
+      migrate(db.db);expect(ids()).not.toContain("processed-0");
+    } finally { if(db.db.open) db.close();rmSync(root,{recursive:true,force:true}); }
+  });
+
   it("upgrades and rolls back v13 panel objects without changing queue claims or retry counters", () => {
     const root = mkdtempSync(join(tmpdir(), "panel-queue-v13-"));
     const path = join(root,"memory.sqlite");

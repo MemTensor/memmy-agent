@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { panelSourceForStatsRow } from "../utils/panel-source.js";
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -35,6 +36,13 @@ export class MemoryDb {
       throw new Error(`sqlite-vec version mismatch: expected v${SQLITE_VEC_VERSION}, got ${loadedVersion}`);
     }
     try {
+      this.db.function("panel_source", { deterministic: true }, (infoSource, internalSource, sessionId, conversationId, agentId, appId) => panelSourceForStatsRow({
+        infoSource, internalSource,
+        sessionId: typeof sessionId === "string" ? sessionId : undefined,
+        conversationId: typeof conversationId === "string" ? conversationId : undefined,
+        agentId: typeof agentId === "string" ? agentId : undefined,
+        appId: typeof appId === "string" ? appId : undefined
+      }));
       this.configure(options.readonly ?? false);
       if (!options.readonly) {
         this.createPreMigrationBackup();
