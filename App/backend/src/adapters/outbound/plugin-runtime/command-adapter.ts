@@ -122,7 +122,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         options.pluginDataRoot,
         runtimeDependencies.readRoots,
         runtimeDependencies.executableRoots,
-        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT
+        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT,
+        runtimeDependencies.officeRendererResolved === true
       )
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
@@ -489,7 +490,8 @@ export async function buildPluginSandboxLaunch(
   pluginDataRoot?: string,
   runtimeReadRoots: readonly string[] = [],
   runtimeExecutableRoots: readonly string[] = [],
-  runtimeWritableRoot?: string
+  runtimeWritableRoot?: string,
+  officeRendererResolved = false
 ): Promise<SandboxLaunch> {
   const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
   const runtimeRoot = interpreter === "node" ? (platform === "win32" ? dirname(runtimeCommand) : resolve(dirname(runtimeCommand), "..")) : null;
@@ -523,7 +525,7 @@ export async function buildPluginSandboxLaunch(
     const ipcRoot = await resolvePluginDataPath(context, pluginDataRoot);
     return {
       command: "/usr/bin/sandbox-exec",
-      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot), "--", runtimeCommand, ...runtimeArgs],
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot, context.plugin.id, officeRendererResolved), "--", runtimeCommand, ...runtimeArgs],
       cwd
     };
   }
@@ -538,6 +540,8 @@ export interface ResolvedCommandRuntimeDependencies {
   readRoots: string[];
   executableRoots: string[];
   environment: Record<string, string>;
+  /** Host-only proof of an executable renderer inside an approved Office root. */
+  officeRendererResolved?: boolean;
 }
 
 /** Resolve only Host-approved runtimes; plugin manifests cannot inject arbitrary executable roots. */
@@ -554,6 +558,7 @@ export async function resolveCommandRuntimeDependencies(
     resolved.readRoots.push(...office.readRoots);
     resolved.executableRoots.push(...office.executableRoots);
     Object.assign(resolved.environment, office.environment);
+    if (office.officeRendererResolved === true) resolved.officeRendererResolved = true;
   }
   if (dependencies.includes("texlive")) {
     const tex = await resolveTexliveRuntime(platform, texliveInstaller);
@@ -597,6 +602,9 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
       if (!binary) continue;
       const canonical = await realpath(binary);
       tools[name] = canonical;
+      if (platform === "darwin" && name === "soffice") {
+        result.officeRendererResolved = await verifiedOfficeRenderer(root, canonical);
+      }
       // Homebrew's bin symlinks resolve inside Cellar. The Host-approved root
       // includes associated dylibs, fonts and shared resources as well.
       result.readRoots.push(root);
@@ -609,12 +617,26 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
     Object.assign(tools, installed.tools);
     result.readRoots.push(installed.root); result.executableRoots.push(installed.root);
     result.pathEntries.push(...Object.values(installed.tools).map(file => dirname(file)));
+    if (platform === "darwin" && installed.tools.soffice) {
+      result.officeRendererResolved = await verifiedOfficeRenderer(installed.root, installed.tools.soffice);
+    }
   }
   result.readRoots = [...new Set(result.readRoots)];
   result.executableRoots = [...new Set(result.executableRoots)];
   result.pathEntries = [...new Set(result.pathEntries)];
   result.environment.MEMMY_OFFICE_TOOLS = JSON.stringify(tools);
   return result;
+}
+
+async function verifiedOfficeRenderer(root: string, renderer: string): Promise<boolean> {
+  try {
+    const binary = await canonicalDescendant(await realpath(root), renderer);
+    if (!(await lstat(binary)).isFile()) return false;
+    await access(binary, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
@@ -699,7 +721,9 @@ function seatbeltProfile(
   runtimeRoot: string | null,
   runtimeReadRoots: readonly string[],
   runtimeExecutableRoots: readonly string[],
-  ipcRoot: string | null
+  ipcRoot: string | null,
+  pluginId: string,
+  officeRendererResolved: boolean
 ): string {
   const readPaths = [
     root,
@@ -727,6 +751,11 @@ function seatbeltProfile(
     `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""}${runtimeExecutableRoots.map((path) => ` ${seatbeltSubpath(path)}`).join("")})`,
     `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
   ];
+  // Aqua initializes these services even for headless conversion. The grant
+  // applies only to Office's sandbox after the Host verifies its renderer.
+  if (pluginId === "office" && officeRendererResolved === true) clauses.push(
+    '(allow mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.windowserver.active"))'
+  );
   if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
   if (ipcRoot) clauses.push(
     "(allow system-socket (socket-domain AF_UNIX))",

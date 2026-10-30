@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -70,6 +70,115 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
+    "limits macOS renderer services to Host-provisioned Office while preserving file and network boundaries", async () => {
+      const data = realpathSync(mkdtempSync("/private/tmp/memmy-office-mach-"));
+      const sentinel = join(data, "host-only.txt");
+      writeFileSync(sentinel, "owned boundary fixture\n");
+      const unix = createServer(socket => socket.end());
+      const tcp = createServer(socket => socket.end());
+      await new Promise<void>(ok => unix.listen(join(data, "host.sock"), ok));
+      await new Promise<void>(ok => tcp.listen(0, "127.0.0.1", ok));
+      try {
+        const baseContext = context();
+        const executable = join(root!, "runtime/plugin");
+        execFileSync("/usr/bin/clang", ["-x", "c", "-o", executable, "-"], { input: String.raw`
+          #include <sys/socket.h>
+          #include <sys/un.h>
+          #include <netinet/in.h>
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <unistd.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <errno.h>
+          static int lookup(const char *name) {
+            mach_port_t port = MACH_PORT_NULL;
+            kern_return_t result = bootstrap_look_up(bootstrap_port, name, &port);
+            if (result != KERN_SUCCESS || port == MACH_PORT_NULL) return 0;
+            mach_port_deallocate(mach_task_self(), port);
+            return 1;
+          }
+          int main(int argc, char **argv) {
+            if (argc != 5 || chdir(argv[1]) != 0) return 2;
+            int launch = lookup("com.apple.coreservices.launchservicesd");
+            int window = lookup("com.apple.windowserver.active");
+            struct sockaddr_un own = {0}; own.sun_family = AF_UNIX; strcpy(own.sun_path, "inside.sock");
+            int a = socket(AF_UNIX, SOCK_STREAM, 0);
+            int bound = bind(a, (struct sockaddr *)&own, sizeof(own)) == 0;
+            struct sockaddr_un other = {0}; other.sun_family = AF_UNIX; strcpy(other.sun_path, argv[2]);
+            int b = socket(AF_UNIX, SOCK_STREAM, 0);
+            int external = connect(b, (struct sockaddr *)&other, sizeof(other)) == 0;
+            struct sockaddr_in remote = {0}; remote.sin_family = AF_INET;
+            remote.sin_addr.s_addr = htonl(0x7f000001); remote.sin_port = htons((unsigned short)atoi(argv[4]));
+            int c = socket(AF_INET, SOCK_STREAM, 0);
+            int network = connect(c, (struct sockaddr *)&remote, sizeof(remote)) == 0;
+            errno = 0; FILE *read = fopen(argv[3], "r"); int read_error = errno;
+            if (read) fclose(read);
+            errno = 0; FILE *write = fopen(argv[3], "a"); int write_error = errno;
+            if (write) fclose(write);
+            printf("{\"launchServices\":%s,\"windowServer\":%s,\"bound\":%s,\"external\":%s,\"network\":%s,\"readOutside\":%s,\"writeOutside\":%s,\"readErrno\":%d,\"writeErrno\":%d}\n",
+              launch ? "true" : "false", window ? "true" : "false", bound ? "true" : "false",
+              external ? "true" : "false", network ? "true" : "false", read ? "true" : "false", write ? "true" : "false", read_error, write_error);
+            close(a); close(b); close(c); return 0;
+          }` });
+        const fixtureRoot = realpathSync(root!);
+        const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"]
+          .map(name => [name, realpathSync(executable)]));
+        const ensure = vi.fn(async () => ({ root: fixtureRoot, version: "test-renderer", tools }));
+        vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+        const cases = [
+          { name: "office", id: "office", provisioned: true, allowed: true },
+          { name: "ordinary", id: "com.example.command", provisioned: true, allowed: false },
+          { name: "forged-env", id: "office", provisioned: false, allowed: false }
+        ];
+        for (const testCase of cases) {
+          const pluginContext = structuredClone(baseContext);
+          pluginContext.plugin.id = testCase.id;
+          pluginContext.plugin.manifest.id = testCase.id;
+          const permission = { type: "host-service" as const, services: ["plugin-data"] };
+          pluginContext.plugin.manifest.permissions = [permission];
+          pluginContext.plugin.approvedPermissions = [permission];
+          const dataRoot = join(data, testCase.name);
+          pluginContext.plugin.manifest.runtime.config = {
+            command: "runtime/plugin",
+            args: [join(dataRoot, testCase.id), join(data, "host.sock"), sentinel, String((tcp.address() as { port: number }).port)],
+            runtimeDependencies: testCase.provisioned ? ["office"] : [],
+            env: testCase.provisioned ? {} : { MEMMY_OFFICE_TOOLS: JSON.stringify(tools), MEMMY_OFFICE_RENDERER_RESOLVED: "1" },
+            ...(!testCase.provisioned ? { officeRendererResolved: true } : {})
+          };
+          const adapter = createCommandPluginAdapter({ pluginDataRoot: dataRoot, officeRuntimeInstaller: { ensure } });
+          const session = await adapter.activate(pluginContext);
+          try {
+            const profile = (session as typeof session & { launch: { args: string[] } }).launch.args[1] ?? "";
+            const services = [...profile.matchAll(/\(global-name\s+"([^"]+)"\)/gu)].map(match => match[1]);
+            expect(services, testCase.name).toEqual(testCase.allowed
+              ? ["com.apple.coreservices.launchservicesd", "com.apple.windowserver.active"] : []);
+            expect(profile).not.toMatch(/global-name-prefix|local-name|xpc-service-name|system-graphics|\(allow\s+mach-lookup\s*\)/u);
+            const events = await collect(adapter.invoke(session, {
+              callId: testCase.name, pluginId: testCase.id, capabilityId: "run", conversationId: "test", input: {}
+            }));
+            expect(events).toHaveLength(1);
+            expect(events[0]?.type).toBe("result");
+            const output = (events[0] as Extract<CapabilityEvent, { type: "result" }>).output as Record<string, unknown>;
+            expect(output, testCase.name).toMatchObject({
+              launchServices: testCase.allowed, windowServer: testCase.allowed,
+              bound: true, external: false, network: false, readOutside: false, writeOutside: false
+            });
+            expect([1, 13], `${testCase.name} read errno`).toContain(output.readErrno);
+            expect([1, 13], `${testCase.name} write errno`).toContain(output.writeErrno);
+          } finally { await adapter.deactivate(session); }
+        }
+        expect(ensure).toHaveBeenCalledTimes(2);
+        expect(readFileSync(sentinel, "utf8")).toBe("owned boundary fixture\n");
+      } finally {
+        await Promise.all([new Promise<void>(ok => unix.close(() => ok())), new Promise<void>(ok => tcp.close(() => ok()))]);
+        rmSync(data, { recursive: true, force: true });
+      }
+    }, 30000
+  );
+
   it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
     "allows private plugin IPC while denying sockets outside plugin-data and loopback TCP", async () => {
       const data = realpathSync(mkdtempSync("/private/tmp/memmy-ipc-"));
@@ -512,6 +621,21 @@ describe("CommandPluginAdapter", () => {
     const isolatedEnv = JSON.parse(Buffer.from(launcherEnv.MEMMY_SANDBOX_CHILD_ENV!, "base64").toString("utf8"));
     expect(isolatedEnv.COR_PROFILER_PATH).toBe("untrusted.dll");
     expect(isolatedEnv.LOCALAPPDATA).toBe("untrusted-profile");
+  });
+
+  it.runIf(process.platform === "darwin")("does not authorize macOS services for an unverified Office renderer", async () => {
+    context(); vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const installed = join(root!, "installed"); mkdirSync(installed);
+    const external = join(root!, "outside-renderer"); writeFileSync(external, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const escaped = join(installed, "escaped-renderer"); symlinkSync(external, escaped);
+    const nonExecutable = join(installed, "non-executable"); writeFileSync(nonExecutable, "fixture", { mode: 0o644 });
+    const directory = join(installed, "directory"); mkdirSync(directory);
+    for (const soffice of [external, escaped, nonExecutable, directory]) {
+      const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"].map(name => [name, soffice]));
+      const ensure = vi.fn(async () => ({ root: installed, version: "unverified", tools }));
+      const dependencies = await resolveCommandRuntimeDependencies(["office"], "darwin", { ensure });
+      expect(dependencies.officeRendererResolved, soffice).not.toBe(true);
+    }
   });
 
   it("injects only the Host-installed portable Office tools into the runtime", async () => {
