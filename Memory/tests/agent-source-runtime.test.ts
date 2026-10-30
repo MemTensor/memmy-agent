@@ -1,7 +1,9 @@
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { setImmediate as yieldToIO, setTimeout as waitForIO } from "node:timers/promises";
 import { join } from "node:path";
-import { setTimeout as waitForIO } from "node:timers/promises";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAgentSourceExecutor,
@@ -139,7 +141,7 @@ describe("standalone Agent source executor", () => {
       .mockImplementationOnce(async () => { await first; return true; })
       .mockImplementationOnce(async () => { await second; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
@@ -151,9 +153,17 @@ describe("standalone Agent source executor", () => {
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(1));
       const cancellation = executor.cancelScan();
+      let secondCancellationSettled = false;
+      const repeatedCancellation = executor.cancelScan().then(result => {
+        secondCancellationSettled = true;
+        return result;
+      });
+      await Promise.resolve();
+      expect(secondCancellationSettled).toBe(false);
       await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Canceling");
       finishFirst();
       await cancellation;
+      expect((await repeatedCancellation).outcome).toBe("applied");
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
       let completed = false;
@@ -180,7 +190,7 @@ describe("standalone Agent source executor", () => {
     };
     const addMemory = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([adapter]),
     });
@@ -211,7 +221,7 @@ describe("standalone Agent source executor", () => {
     const detection = new Promise<void>((done) => { finishDetection = done; });
     const detect = vi.fn(async () => { await detection; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath,
       initialScanDelayMs: 0,
       sourceRegistry: createSourceRegistry([{
@@ -258,7 +268,7 @@ describe("standalone Agent source executor", () => {
       .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
-    const service = { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -367,7 +377,7 @@ describe("standalone Agent source executor", () => {
       }
     });
     const executor = createAgentSourceExecutor({
-      service: { addMemory, clearAllData: clearMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       statePath,
       scanStoreDirectory,
@@ -434,7 +444,7 @@ describe("standalone Agent source executor", () => {
     const clearingMemory = new Promise<typeof cleared>((resolve) => { finishClear = resolve; });
     const clearMemory = vi.fn(() => clearingMemory);
     const executor = createAgentSourceExecutor({
-      service: { addMemory, clearAllData: clearMemory } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
@@ -505,7 +515,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -551,7 +561,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -603,7 +613,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(),
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -624,7 +634,7 @@ describe("standalone Agent source executor", () => {
   });
 
   it("owns startup and recurring scans in the Memory process", async () => {
-    // Control scheduling deadlines while adapter/filesystem event-loop work stays real.
+    // Keep deadline control separate from adapter/filesystem I/O and scan checkpoints.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
@@ -637,6 +647,13 @@ describe("standalone Agent source executor", () => {
       ""
     ].join("\n"));
     let sequence = 0;
+    const io = [0, 1].map(() => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      const ready = new Promise<void>((resolve) => { release = resolve; });
+      return { started, ready, entered: () => entered(), release: () => release() };
+    });
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -650,6 +667,9 @@ describe("standalone Agent source executor", () => {
       }),
       async *scan() {
         sequence += 1;
+        const pending = io[sequence - 1];
+        pending?.entered();
+        await pending?.ready;
         yield {
           messageId: `user-${sequence}`,
           sourceId: "fixture-agent",
@@ -678,7 +698,7 @@ describe("standalone Agent source executor", () => {
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
       configPath,
       statePath: join(root, "agent-sources.json"),
       sourceRegistry: createSourceRegistry([adapter]),
@@ -687,25 +707,55 @@ describe("standalone Agent source executor", () => {
       scheduleWorker
     });
 
+    let pendingCompletion: Promise<void> | undefined;
+    let sentinel: number | ReturnType<typeof setTimeout> | undefined;
     try {
+      const beforeStartup = executor.scanStatus().jobId;
       executor.startAutomation();
       await vi.advanceTimersByTimeAsync(9);
+      expect(sequence).toBe(0);
+      expect(executor.scanStatus().jobId).toBe(beforeStartup);
       expect(addMemory).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
-      await waitForFakeTimerScan(executor);
+      await io[0]!.started;
+      const deadlineElapsed = vi.fn();
+      sentinel = setTimeout(deadlineElapsed, 1);
+      pendingCompletion = waitForAutomaticScanCompletion(executor, beforeStartup);
+      void pendingCompletion.catch(() => {});
+      await yieldToIO();
+      await yieldToIO();
+      expect(deadlineElapsed).not.toHaveBeenCalled();
+      expect(addMemory).not.toHaveBeenCalled();
+      clearTimeout(sentinel);
+      sentinel = undefined;
+      io[0]!.release();
+      await pendingCompletion;
+      pendingCompletion = undefined;
       expect(addMemory).toHaveBeenCalledTimes(1);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(1);
 
+      const beforeRecurring = executor.scanStatus().jobId;
       await vi.advanceTimersByTimeAsync(99);
+      expect(sequence).toBe(1);
+      expect(executor.scanStatus().jobId).toBe(beforeRecurring);
       expect(addMemory).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1);
-      await waitForFakeTimerScan(executor);
+      await io[1]!.started;
+      expect(addMemory).toHaveBeenCalledTimes(1);
+      pendingCompletion = waitForAutomaticScanCompletion(executor, beforeRecurring);
+      void pendingCompletion.catch(() => {});
+      io[1]!.release();
+      await pendingCompletion;
+      pendingCompletion = undefined;
       expect(addMemory).toHaveBeenCalledTimes(2);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(2);
     } finally {
+      if (sentinel !== undefined) clearTimeout(sentinel);
+      for (const pending of io) pending.release();
+      await pendingCompletion?.catch(() => {});
       await executor.dispose();
     }
   });
@@ -715,7 +765,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -751,7 +801,7 @@ describe("standalone Agent source executor", () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(() => {
           throw new Error("write failed");
         }),
@@ -781,7 +831,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -808,7 +858,7 @@ describe("standalone Agent source executor", () => {
       completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
     ];
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -846,7 +896,7 @@ describe("standalone Agent source executor", () => {
     writeFileSync(skillPath, "---\nname: sample-skill\nversion: 1\n---\n\nUse the sample procedure.\n");
     vi.stubEnv("CODEX_HOME", codexRoot);
     const addMemory = vi.fn(() => ({ id: "skill-memory-1" }));
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory,
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
@@ -885,7 +935,7 @@ describe("standalone Agent source executor", () => {
     }
     vi.stubEnv("CODEX_HOME", codexRoot);
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn((input: { sourceSkillId?: string }) => {
         if (input.sourceSkillId === "duplicate-skill") return { id: "dup", duplicate: true, status: "activated" };
         if (input.sourceSkillId === "deleted-skill") return { id: "gone", status: "deleted" };
@@ -943,7 +993,7 @@ describe("standalone Agent source executor", () => {
       detect: async () => true,
       async *scan() {}
     };
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn(),
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
@@ -1124,15 +1174,20 @@ function fixtureMessage(
   } as const;
 }
 
-async function waitForFakeTimerScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (!executor.scanStatus().running) return;
-    // Filesystem promises need real event-loop time. Advancing the fake clock
-    // alone races disk IO and can also trigger the next scheduled scan.
-    await waitForIO(10);
-    await vi.advanceTimersByTimeAsync(0);
+async function waitForAutomaticScanCompletion(
+  executor: ReturnType<typeof createAgentSourceExecutor>,
+  previousJobId: string | null
+): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  for (;;) {
+    const status = executor.scanStatus();
+    if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
+      expect(status.error).toBeNull();
+      return;
+    }
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
+    await yieldToIO();
   }
-  throw new Error("automatic scan did not complete");
 }
 
 function tempRoot(): string {

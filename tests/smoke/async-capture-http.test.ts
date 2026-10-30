@@ -39,6 +39,12 @@ describe("async capture through the real Backend HTTP client", () => {
       expect(result.jobs.map(job => job.jobType)).toEqual(expect.arrayContaining(["episode_assignment", "episode_finalize"]));
       await client.runWorker({ limit: 30 });
       const failedJobType = failedOperation === "episode.select.v1" ? "episode_assignment" : "trace_summary";
+      // Advance the persisted retry deadline rather than waiting for real backoff timers.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        db.db.prepare("UPDATE evolution_jobs SET available_at=? WHERE job_type=? AND status='failed'")
+          .run(new Date(Date.now() - 1).toISOString(), failedJobType);
+        await client.runWorker({ limit: 30 });
+      }
       await expect.poll(() => db.db.prepare("SELECT status FROM evolution_jobs WHERE job_type=?").get(failedJobType))
         .toEqual({ status: "dead_letter" });
       const completedIndependentCalls = successfulIndependentCalls;

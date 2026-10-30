@@ -1,7 +1,9 @@
+import { Repositories } from "../../../src/storage/repositories.js";
 import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type LlmClient, type LlmCompletionOptions, type LlmMessage } from "../../../src/index.js";
+import { DEFAULT_MEMMY_CONFIG } from "../../../src/index.js";
 import {
   createCapturingEmbedder,
   createMemoryServiceFixture,
@@ -286,7 +288,8 @@ describe("MemoryService / evolution / span big turn", () => {
       text.includes("定位构建失败的根本原因") &&
       text.includes("确认失败来自版本冲突")
     )).toBe(true);
-    const l1Items = service.panelItems({ namespace, layer: "L1" }).items;
+    expect(service.panelItems({ namespace, layer: "L1" }).items.some(item => item.kind === "span")).toBe(false);
+    const l1Items = storedL1Items(db);
     expect(l1Items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ title: "定位构建失败的根本原因" }),
@@ -504,13 +507,14 @@ describe("MemoryService / evolution / span big turn", () => {
     await runWorkerRounds(service, 8);
 
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(1);
-    expect(service.panelItems({ namespace, layer: "L1" }).items.filter(
+    expect(storedL1Items(db).filter(
       (item) => item.kind === "span"
     )).toEqual([]);
     db.close();
   });
 
   it("stores only the successful model result after a failed attempt", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const llm = createSpanBigTurnLlm(calls, [
       {
@@ -572,7 +576,13 @@ describe("MemoryService / evolution / span big turn", () => {
     vi.setSystemTime(Date.now() + 31_000);
     await runWorkerRounds(service, 8);
 
-    const spans = service.panelItems({ namespace, layer: "L1" }).items.filter(
+    const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+      WHERE job_type = 'span_big_turn' AND status = 'failed'`).get() as { available_at: string };
+    expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+    vi.setSystemTime(Date.parse(retry.available_at));
+    await runWorkerRounds(service, 8);
+
+    const spans = storedL1Items(db).filter(
       (item) => item.kind === "span"
     );
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(2);
@@ -644,7 +654,7 @@ describe("MemoryService / evolution / span big turn", () => {
     await runWorkerRounds(service, 8);
 
       expect(calls.some((call) => call.options.operation === "span.big_turn.v1")).toBe(false);
-      expect(service.panelItems({ namespace, layer: "L1" }).items.some(
+      expect(storedL1Items(db).some(
         (item) => item.kind === "span"
       )).toBe(false);
       db.close();
@@ -652,6 +662,7 @@ describe("MemoryService / evolution / span big turn", () => {
   });
 
   it("rejects overlapping spans without storing partial results", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const llm = createSpanBigTurnLlm(calls, {
       shouldSplit: true,
@@ -709,10 +720,18 @@ describe("MemoryService / evolution / span big turn", () => {
     });
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + 31_000);
-    await runWorkerRounds(service, 8);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await runWorkerRounds(service, 8);
+      if (attempt < 2) {
+        const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+          WHERE job_type = 'span_big_turn' AND status = 'failed'`).get() as { available_at: string };
+        expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+        vi.setSystemTime(Date.parse(retry.available_at));
+      }
+    }
 
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(3);
-    expect(service.panelItems({ namespace, layer: "L1" }).items.some(
+    expect(storedL1Items(db).some(
       (item) => item.kind === "span"
     )).toBe(false);
     expect(service.panelJobs({ userId: namespace.userId }).items).toEqual(
@@ -727,3 +746,8 @@ describe("MemoryService / evolution / span big turn", () => {
     db.close();
   });
 });
+
+function storedL1Items(db: { db: ConstructorParameters<typeof Repositories>[0] }) {
+  const repos = new Repositories(db.db);
+  return repos.memories.list({ memoryLayer: "L1" }).map(memory => repos.memories.toListItem(memory));
+}

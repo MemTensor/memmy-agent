@@ -4,7 +4,7 @@ import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type Age
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
 import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
-import type { AgentSourceScanCompletion, AgentSourceScanProgress, AppAction, EventConnectionStatus } from "./app-actions.js";
+import type { AgentSourceScanCompletion, AgentSourceScanProgress, AppAction, EventConnectionStatus, RecordingSidebarStatus } from "./app-actions.js";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState } from "./agent-chat-slice.js";
 import { initialToolsState, toolsReducer, type ToolsAction, type ToolsState } from "./tools-slice.js";
 
@@ -21,6 +21,10 @@ export interface NavigationState {
   history: AppRoutePath[];
   preferredMode: PreferredMode | null;
   windowVisible: boolean;
+  recordingRequestId: number;
+  recordingHandledId: number;
+  recordingRequestAction: "open" | "control" | "finish" | null;
+  recordingStatus: RecordingSidebarStatus;
 }
 
 /** Contract for agent sources state. */
@@ -133,7 +137,11 @@ export function createInitialAppState(windowVisible = true): AppState {
       currentPath: "/welcome",
       history: ["/welcome"],
       preferredMode: null,
-      windowVisible
+      windowVisible,
+      recordingRequestId: 0,
+      recordingHandledId: 0,
+      recordingRequestAction: null,
+      recordingStatus: "idle"
     },
     agentSources: {
       memoryServiceRestarting: false,
@@ -221,6 +229,31 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           history: state.navigation.currentPath === action.path ? state.navigation.history : [...state.navigation.history, action.path]
         },
         agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: state.navigation.windowVisible && isAgentChatViewPath(action.path) })
+      };
+    case "recording/openRequested":
+    case "recording/controlRequested":
+    case "recording/finishRequested":
+      return {
+        ...state,
+        navigation: {
+          ...state.navigation,
+          currentPath: "/main",
+          history: state.navigation.currentPath === "/main" ? state.navigation.history : [...state.navigation.history, "/main"],
+          recordingRequestId: state.navigation.recordingRequestId + 1,
+          recordingRequestAction: action.type === "recording/openRequested" ? "open"
+            : action.type === "recording/finishRequested" ? "finish" : "control"
+        },
+        agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: state.navigation.windowVisible })
+      };
+    case "recording/requestHandled":
+      return action.requestId <= state.navigation.recordingHandledId ? state : {
+        ...state,
+        navigation: { ...state.navigation, recordingHandledId: action.requestId }
+      };
+    case "recording/statusChanged":
+      return state.navigation.recordingStatus === action.status ? state : {
+        ...state,
+        navigation: { ...state.navigation, recordingStatus: action.status }
       };
     case "window/visibilityChanged":
       if (state.navigation.windowVisible === action.visible) return state;
@@ -535,10 +568,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           agent: agentReducer(state.agent, action as AgentAction)
         };
       }
-      return {
-        ...state,
-        tools: toolsReducer(state.tools, action as ToolsAction)
-      };
+      {
+        const tools = toolsReducer(state.tools, action as ToolsAction);
+        return tools === state.tools ? state : { ...state, tools };
+      }
   }
 }
 

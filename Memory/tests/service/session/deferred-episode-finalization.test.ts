@@ -100,6 +100,7 @@ describe("resume all deferred Episode finalization after Session attribution dra
     service.closeSession(sessionId);
     context.failSelection(recovery === "selection-failure");
     if (recovery !== "normal") {
+      if (recovery === "leased-restart") db.db.prepare("UPDATE evolution_jobs SET available_at='2100-01-01T00:00:00.000Z' WHERE job_type='episode_assignment' AND json_extract(payload_json,'$.rawTurnId')=?").run(saved[2]!.rawTurnId);
       for (let i = 0; i < 12 && !repos.runtime.getRawTurn(saved[1]!.rawTurnId)?.episodeId; i++) await service.runWorkerOnce(30);
       expect(repos.runtime.getRawTurn(saved[1]!.rawTurnId)?.episodeId).toBeTruthy();
       expect(repos.runtime.getRawTurn(saved[2]!.rawTurnId)?.episodeId).toBeUndefined();
@@ -110,7 +111,10 @@ describe("resume all deferred Episode finalization after Session attribution dra
         expect(db.db.prepare("SELECT status FROM evolution_jobs WHERE job_type='episode_assignment' AND json_extract(payload_json,'$.rawTurnId')=?")
           .get(saved[2]!.rawTurnId)).toEqual({ status: "dead_letter" });
       } else {
+        db.db.prepare("UPDATE evolution_jobs SET available_at=NULL WHERE job_type='episode_assignment' AND json_extract(payload_json,'$.rawTurnId')=?").run(saved[2]!.rawTurnId);
         expect(repos.runtime.leaseQueuedJobs(30, 60).some(job => job.jobType === "episode_assignment")).toBe(true);
+        // The previous process is gone; recover only once its leases expire.
+        vi.setSystemTime(Date.now() + 60_001);
       }
       context.failSelection(false);
       service = fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }), llm, config });

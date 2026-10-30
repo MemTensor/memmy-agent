@@ -323,6 +323,89 @@ describe("AgentRunner hooks", () => {
     expect(endings).toEqual([false]);
   });
 
+  it("ends each stream once when a final response continues the plan", async () => {
+    const endings: boolean[] = [];
+    const streamed: string[] = [];
+    let calls = 0;
+    const provider = {
+      chatStreamWithRetry: vi.fn(async ({ onContentDelta }: any) => {
+        const content = ++calls === 1 ? "premature handoff" : "done";
+        await onContentDelta(content);
+        return new LLMResponse({ content });
+      }),
+    };
+    class StreamingHook extends AgentHook {
+      override wantsStreaming(): boolean {
+        return true;
+      }
+      override async onStream(_context: AgentHookContext, delta: string): Promise<void> {
+        streamed.push(delta);
+      }
+      override async onStreamEnd(_context: AgentHookContext, { resuming = false }: { resuming?: boolean } = {}): Promise<void> {
+        endings.push(resuming);
+      }
+    }
+    const continuation = vi.fn(({ finalContent }: { finalContent: string }) =>
+      finalContent === "premature handoff" ? "Continue the unfinished plan." : null);
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "Finish the plan." }],
+      hook: new StreamingHook(),
+      maxIterations: 2,
+      finalResponseContinuation: continuation,
+    }));
+
+    expect(result.finalContent).toBe("done");
+    expect(result.stopReason).toBe("completed");
+    expect(provider.chatStreamWithRetry).toHaveBeenCalledTimes(2);
+    expect(streamed).toEqual(["premature handoff", "done"]);
+    expect(endings).toEqual([true, false]);
+  });
+
+  it("reserves plan continuation budget for candidates accepted by beforeFinalize", async () => {
+    const requests: any[][] = [];
+    const responses = ["rejected draft", "accepted handoff", "done"];
+    const provider = {
+      chatWithRetry: vi.fn(async ({ messages }: any) => {
+        requests.push(structuredClone(messages));
+        return new LLMResponse({ content: responses[requests.length - 1] });
+      }),
+    };
+    class VerificationHook extends AgentHook {
+      override requiresBufferedLlmContent(): boolean {
+        return true;
+      }
+      override async beforeFinalize(_context: AgentHookContext, candidate: string) {
+        return candidate === "rejected draft"
+          ? [{ role: "user" as const, content: "Verify the draft before answering." }]
+          : [];
+      }
+    }
+    let correctionsRemaining = 1;
+    const continuation = vi.fn(({ finalContent }: { finalContent: string }) => {
+      if (finalContent === "done" || correctionsRemaining === 0) return null;
+      correctionsRemaining -= 1;
+      return "Continue the unfinished plan.";
+    });
+
+    const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "Finish the plan." }],
+      hook: new VerificationHook(),
+      maxIterations: 3,
+      finalResponseContinuation: continuation,
+    }));
+
+    expect(result.finalContent).toBe("done");
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(3);
+    expect(continuation.mock.calls.map(([{ finalContent }]) => finalContent))
+      .toEqual(["accepted handoff", "done"]);
+    expect(correctionsRemaining).toBe(0);
+    expect(requests[2]?.some((message) =>
+      message.role === "system" && message.content === "Continue the unfinished plan."))
+      .toBe(true);
+    expect(result.messages.some((message) => message.content === "rejected draft")).toBe(false);
+  });
+
   it("passes cached token usage to hook context", async () => {
     const capturedUsage: Record<string, any>[] = [];
     class UsageHook extends AgentHook {

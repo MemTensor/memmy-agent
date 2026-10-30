@@ -68,7 +68,9 @@ function writeRealReactFixture({ duplicate = false, catchRenderError = false } =
   return root;
 }
 
-describe('production renderer bootstrap guard', () => {
+// The child probe has its own 15-second deadline; allow it to finish and report
+// the expected rejection before the outer test times out on a busy build host.
+describe('production renderer bootstrap guard', { timeout: 20_000 }, () => {
   it.each(['darwin', 'win32'])('executes real production React startup with one shared dispatcher on %s', platform => {
     const result = verify(writeRealReactFixture(), platform);
     expect(result.status).toBe(0);

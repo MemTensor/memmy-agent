@@ -99,6 +99,7 @@ describe("AgentRuntimeBridge", () => {
     expect(isAgentRuntimeBridgeRoute("/settings")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/memory")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/memory-sources")).toBe(true);
+    expect(isAgentRuntimeBridgeRoute("/plugin")).toBe(true);
 
     expect(isAgentRuntimeBridgeRoute("/pet")).toBe(true);
     expect(isAgentRuntimeBridgeRoute("/welcome")).toBe(false);

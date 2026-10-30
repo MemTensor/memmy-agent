@@ -15,6 +15,7 @@ describe("packaged renderer static server", () => {
     const root = await mkdtemp(join(tmpdir(), "memmy-renderer-static-"));
     await writeFile(join(root, "index.html"), "<!doctype html><title>Memmy</title>", "utf8");
     await writeFile(join(root, "app.js"), "console.log('memmy');", "utf8");
+    await writeFile(join(root, "pdf.worker.min.mjs"), "export default 1;", "utf8");
 
     const server = await startPackagedRendererStaticServer({
       rootDirectory: root,
@@ -33,5 +34,9 @@ describe("packaged renderer static server", () => {
     const assetResponse = await fetch(`${server.baseUrl}/app.js`);
     expect(assetResponse.status).toBe(200);
     expect(await assetResponse.text()).toContain("memmy");
+
+    const workerResponse = await fetch(`${server.baseUrl}/pdf.worker.min.mjs`);
+    expect(workerResponse.status).toBe(200);
+    expect(workerResponse.headers.get("content-type")).toContain("text/javascript");
   });
 });

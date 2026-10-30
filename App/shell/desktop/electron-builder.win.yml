@@ -14,6 +14,7 @@ files:
   - "!**/node_modules/sqlite-vec-{darwin,linux}-*{,/**}"
   - "!**/node_modules/sqlite-vec-windows-arm64{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pdf{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
   - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
@@ -33,7 +34,9 @@ files:
   - "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
 
 asar: true
+npmRebuild: false
 asarUnpack:
+  - "**/plugin-runtime/windows/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/win/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/wechat/read_messages.py"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/wechat_identity.py"
@@ -77,6 +80,10 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
+  - from: dist/bundled-plugins
+    to: bundled-plugins
+    filter:
+      - "**/*"
   - from: build/icon.ico
     to: icon.ico
 
@@ -90,6 +97,11 @@ win:
   signAndEditExecutable: true
   signExecutable: true
   forceCodeSigning: true
+  # electron-builder's generated NSIS elevate helper is not used by this
+  # per-user installer and can intermittently make SimplySign's signtool
+  # launcher fail with spawn EPERM on the second edition build.
+  signExts:
+    - "!elevate.exe"
   signtoolOptions:
     signingHashAlgorithms:
       - sha256

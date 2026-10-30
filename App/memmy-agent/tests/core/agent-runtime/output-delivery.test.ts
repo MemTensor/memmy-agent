@@ -88,6 +88,36 @@ async function run(responses: LLMResponse[], delivery: OutputDelivery, maxIterat
 }
 
 describe("OutputDelivery", () => {
+  it("keeps final-response continuation and output verification active in the same run", async () => {
+    const delivery = new OutputDelivery({}, workspace);
+    await delivery.declare(["report.md"]);
+    await fs.writeFile(path.join(workspace, "report.md"), "initial");
+    let continued = false;
+    const continuation = vi.fn(() => {
+      if (continued) return null;
+      continued = true;
+      return "Perform the final audit before replying";
+    });
+    const provider = new ScriptedProvider([
+      reply("Initial draft"),
+      call("exec", { command: "rm report.md" }),
+      reply("All done"),
+      call("write_file", { path: "report.md", content: "audited", output_paths: ["report.md"] }),
+      reply("Audited and delivered"),
+    ]);
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      provider, tools: registry(), workspace, outputLocation: delivery, maxIterations: 8,
+      finalResponseContinuation: continuation,
+      messages: [{ role: "user", content: "Create and audit the report" }],
+    }));
+    expect(result.stopReason).toBe("completed");
+    expect(result.finalContent).toBe("Audited and delivered");
+    expect(await fs.readFile(path.join(workspace, "report.md"), "utf8")).toBe("audited");
+    expect(JSON.stringify(provider.requests)).toContain("Perform the final audit");
+    expect(JSON.stringify(provider.requests)).toContain(DELIVERY_NOT_CONFIRMED);
+    expect(continuation).toHaveBeenCalledTimes(2);
+  });
+
   it("checks the registered paths, including names with brackets, not the reply text", async () => {
     const delivery = new OutputDelivery({}, workspace);
     expect(await delivery.declare(["report (final).pdf", "data[1].xlsx"])).toBeNull();

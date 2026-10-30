@@ -1,0 +1,97 @@
+name: Office plugin
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/office-plugin.yml"
+      - "plugins/office/**"
+      - "App/memmy-agent/src/skills/docx/**"
+      - "App/memmy-agent/src/skills/pdf/**"
+      - "App/memmy-agent/src/skills/pptx/**"
+      - "App/memmy-agent/src/skills/xlsx/**"
+      - "App/backend/src/adapters/outbound/plugin-runtime/**"
+      - "App/backend/src/adapters/inbound/local-api/routes/plugin-mcp.ts"
+      - "App/backend/src/tests/office-plugin-e2e.test.ts"
+      - "scripts/test-office-plugin-e2e.mjs"
+      - "App/shell/desktop/electron-builder*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Provision release-build inputs on macOS
+        if: runner.os == 'macOS'
+        run: |
+          node plugins/office/scripts/provision-macos.mjs
+          brew install poppler
+      - name: Provision release-build inputs on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install libreoffice-fresh --version=26.2.6 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'LibreOffice installation failed' }
+          $archive = Join-Path $env:RUNNER_TEMP 'poppler.zip'
+          Invoke-WebRequest 'https://github.com/oschwartz10612/poppler-windows/releases/download/v26.09.0-0/Release-26.09.0-0.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '7a6f256a0ddf7536182246a5733331bf4677cbcc34f4663774947ad34556c8d0') {
+            # The exact upstream digest is pinned; never continue with an unchecked download.
+            throw 'Poppler archive integrity check failed'
+          }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'poppler'
+          Expand-Archive $archive $unpacked
+          $root = Get-ChildItem $unpacked -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'Library/bin/pdfinfo.exe') } | Select-Object -First 1
+          if (!$root) { throw 'Poppler portable layout not found' }
+          "OFFICE_BUILD_POPPLER=$($root.FullName)" >> $env:GITHUB_ENV
+      - name: Install plugin build dependencies
+        run: npm ci --prefix plugins/office
+      - name: Prepare and smoke-test portable renderer
+        run: node plugins/office/scripts/prepare-runtime.mjs "$RUNNER_TEMP/office-runtime-tree"
+      - name: Install build dependencies
+        run: |
+          npm ci
+          npm install --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
+          npm run build -w @memmy/local-api-contracts
+          npm run build -w @memmy/knowledge
+          npm run build -w @memmy/agent-source-core
+          npm run build -w @memmy/migrations
+      - name: Build portable runtime archive
+        run: |
+          TARGET=$(node -p 'process.platform + "-" + process.arch')
+          node plugins/office/scripts/package-runtime.mjs --root "$RUNNER_TEMP/office-runtime-tree" --destination plugins/office/release --target "$TARGET" --version "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --tools "$RUNNER_TEMP/office-runtime-tree/runtime-tools.json" --set-default
+      - name: Verify runtime and permission boundaries
+        run: |
+          npm --prefix plugins/office run build
+          npm run typecheck -w @memmy/backend
+          if [ "$RUNNER_OS" = macOS ]; then npm --prefix plugins/office test; fi
+      - name: Cold install and run four-format end-to-end validation
+        env:
+          OFFICE_E2E_MANAGED_RUNTIME: "1"
+          MEMMY_PLUGIN_SANDBOX_TRACE: "1"
+          OFFICE_E2E_QA_DIR: ${{ runner.temp }}/office-qa
+          OFFICE_E2E_REPORT: ${{ runner.temp }}/office-e2e.json
+        run: npm run test:office-plugin:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: office-package-and-validation-${{ matrix.os }}
+          path: |
+            plugins/office/release/
+            ${{ runner.temp }}/office-qa/
+            ${{ runner.temp }}/office-e2e.json

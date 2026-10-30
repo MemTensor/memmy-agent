@@ -1,0 +1,29 @@
+
+
+.sidebar-shell--windows-titlebar .memory-page-main .app-frame-page-content,
+.sidebar-shell--windows-titlebar .settings-page > .app-frame-page-content,
+.sidebar-shell--windows-titlebar .app-frame-main .tools-page-content {
+  padding-top: var(--app-frame-menu-padding-top);
+}
+
+/* Compensate the inset adjustment so the catalog stays at its former height. */
+.tools-page-content > .extension-catalog-content {
+  margin-top: 8px;
+}
+
+.tools-icon-grid {
+  display: grid;
+  align-items: stretch;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+}
+
+.tools-icon-grid > .integration-card {
+  height: 100%;
+}
+
+@media (min-width: 640px) {
+  .tools-icon-grid {
+    gap: 12px;
+  }
+}

@@ -14,6 +14,7 @@ import {
 import { resolveDefaultRuntimeConfigPath, writeRuntimeConfigFile } from "./infrastructure/cli-binary/index.js";
 import {
   createMemmyConfigWriter,
+  readBundledPluginPreferences,
   readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
@@ -24,7 +25,12 @@ import {
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
-import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
+import type { PluginService } from "./services/plugin-service.js";
+import {
+  resolveCloudClientConfig,
+  resolvePluginRegistryBaseUrl,
+  type CloudClientConfig
+} from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
   syncRuntimeConfigForStartup,
@@ -32,6 +38,18 @@ import {
 } from "./services/runtime-config-sync-service.js";
 import { loadCloudServiceEnv } from "./load-env.js";
 import type { MemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/index.js";
+import {
+  createCompositePluginRegistry,
+  createHttpPluginRegistry,
+  loadBundledPluginCatalog,
+  type BundledPluginCatalog,
+  type PluginRegistry
+} from "./adapters/outbound/plugin-registry/index.js";
+import {
+  reconcileBundledPlugins,
+  suppressBundledPlugins
+} from "./services/bundled-plugin-bootstrap-service.js";
+import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -63,6 +81,8 @@ export interface CreateLocalBackendOptions {
   accountChannel?: AccountChannel;
   /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
+  /** Directory containing immutable `*.release.json` files and their MPP archives. */
+  bundledPluginDirectory?: string;
   /** Skip only the startup MCP reload when the caller will start the Agent after bridge config is written. */
   skipAgentMcpReload?: boolean;
 }
@@ -84,6 +104,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
+  let pluginService: PluginService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -101,9 +122,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     await ensureMemoryScanPreferences(
       memmyConfigPath,
-      appStateStore.repositories.bootstrap.getScanPreferences()
+      appStateStore.repositories.bootstrap.getScanPreferences(),
+      appStateStore.repositories.bootstrap.getOnboardingState().scanPermission
     );
     const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
+    // Recover a permission save interrupted between config publication and DB update.
+    const scanPermission = scanPreferencesStore.getScanPermission();
+    if (scanPermission !== undefined && scanPermission !== appStateStore.repositories.bootstrap.getOnboardingState().scanPermission) {
+      appStateStore.repositories.bootstrap.updateOnboarding({ scanPermission });
+    }
 
     const permissionManager = createPermissionManager({
       appStateStore,
@@ -136,6 +163,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         pluginDirectories: options.agentAdapterPluginDirectories
       });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
+    const bundledCatalog = await tryLoadBundledPluginCatalog(
+      options.bundledPluginDirectory ?? process.env.MEMMY_BUNDLED_PLUGINS_DIR
+    );
+    const bundledPreferences = bundledCatalog
+      ? await readBundledPluginPreferences(
+          memmyConfigPath,
+          bundledCatalog.managedPluginIds
+        )
+      : {};
     const services = createBackendServices({
       appStateStore,
       agentAdapterRegistry,
@@ -148,8 +184,61 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
-      memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
+      memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
+      pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry, (): Record<string, string> => {
+        const cloudUuid = appStateStore.repositories.accountSession.getCloudUuid();
+        return cloudUuid ? { authorization: `Bearer ${cloudUuid}` } : {};
+      }),
+      trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
+    pluginService = services.plugins;
+    if (bundledCatalog) {
+      const failures = await suppressBundledPlugins({
+        plugins: services.plugins,
+        releases: bundledCatalog.releases,
+        managedPluginIds: bundledCatalog.managedPluginIds,
+        enabledById: Object.fromEntries(
+          bundledCatalog.managedPluginIds.map((pluginId) => [
+            pluginId,
+            bundledPreferences?.[pluginId]?.enabled !== false
+          ])
+        )
+      });
+      for (const failure of failures) {
+        console.warn(
+          `Suppressed bundled plugin deactivation failed for ${failure.pluginId}: ${failure.message}`
+        );
+      }
+    }
+    await services.plugins.restoreActive();
+    if (bundledCatalog && bundledPreferences) {
+      const failures = await reconcileBundledPlugins({
+        plugins: services.plugins,
+        releases: bundledCatalog.releases,
+        userUninstalledIds: new Set(appStateStore.repositories.plugins.listUserUninstalledIds()),
+        enabledById: Object.fromEntries(
+          bundledCatalog.releases.map((release) => [
+            release.id,
+            bundledPreferences[release.id]?.enabled !== false
+          ])
+        )
+      });
+      for (const failure of failures) {
+        console.warn(`Bundled plugin bootstrap failed for ${failure.pluginId}: ${failure.message}`);
+      }
+    }
+    // Runs on every launch so an entitled plugin missing after an upgrade is reinstalled.
+    const reconcileEntitlements = async () => {
+      const failures = await reconcileEntitledPlugins({
+        plugins: services.plugins,
+        userUninstalledIds: new Set(appStateStore.repositories.plugins.listUserUninstalledIds()),
+        entitlements: appStateStore.repositories.accountSession.getEntitlements()
+      });
+      for (const failure of failures) {
+        console.warn(`Entitled plugin reconciliation failed for ${failure.pluginId}: ${failure.message}`);
+      }
+    };
+    await reconcileEntitlements();
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     await removeLegacyKnowledgeCredentials(memmyConfigPath);
@@ -168,6 +257,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
+      pluginCapabilitiesChanged: () => reloadAgentMcp(options.memmyAgentAdminClient)
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
 
@@ -182,6 +272,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
+    });
+    await memmyConfigWriter.patchMcpServerConfig("plugins", {
+      type: "streamableHttp",
+      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+      headers: { "x-memmy-mcp-token": composioMcpToken },
+      // Interaction capabilities can legitimately wait while the user reads a
+      // long card or leaves the app in the background. Non-interactive command
+      // work remains bounded by the plugin runtime's own timeout.
+      toolTimeout: 7 * 24 * 60 * 60
     });
     const memmyAgentAdminClient = options.memmyAgentAdminClient;
     if (memmyAgentAdminClient && !options.skipAgentMcpReload) {
@@ -204,6 +303,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
     const boundServer = server;
+    const boundPluginService = services.plugins;
     return {
       runtimeConfig,
       getAppSettings() {
@@ -213,14 +313,52 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        await boundServer.close();
-        appStateStore.close();
+        try {
+          await boundServer.close();
+        } finally {
+          await boundPluginService.shutdown();
+          appStateStore.close();
+        }
       }
     };
   } catch (error) {
     await server?.close().catch(() => undefined);
+    await pluginService?.shutdown();
     appStateStore.close();
     throw error;
+  }
+}
+
+function configuredPluginRegistry(
+  env: NodeJS.ProcessEnv,
+  bundledRegistry?: PluginRegistry,
+  authHeaders?: () => Record<string, string>
+): PluginRegistry | undefined {
+  const baseUrl = resolvePluginRegistryBaseUrl(env);
+  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders }) : undefined;
+  // Explicit remote distribution must never fall back to a locally bundled package.
+  if (env.MEMMY_PLUGIN_REGISTRY_URL?.trim()) return remoteRegistry;
+  return bundledRegistry ? createCompositePluginRegistry(bundledRegistry, remoteRegistry) : remoteRegistry;
+}
+
+async function tryLoadBundledPluginCatalog(directory: string | undefined): Promise<BundledPluginCatalog | null> {
+  const normalized = directory?.trim();
+  if (!normalized) return null;
+  try {
+    return await loadBundledPluginCatalog(normalized);
+  } catch (error) {
+    console.warn(`Bundled plugins are unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+async function reloadAgentMcp(client: MemmyAgentAdminClient | undefined): Promise<void> {
+  if (!client) return;
+  try {
+    const result = await client.reloadMcpConfig();
+    if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+  } catch (error) {
+    console.warn(`Agent MCP reload unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

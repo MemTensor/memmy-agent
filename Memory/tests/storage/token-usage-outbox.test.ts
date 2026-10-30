@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryDb } from "../../src/index.js";
+import { MemoryDb, SCHEMA_MIGRATION_ID, SCHEMA_VERSION } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import { TokenUsageOutbox } from "../../src/storage/token-usage-outbox.js";
 
@@ -64,8 +64,8 @@ describe("token usage outbox", () => {
 
     const upgraded = new MemoryDb({ path: dbPath });
     expect(upgraded.schemaVersion()).toMatchObject({
-      version: 10,
-      lastMigrationId: "010_pending_episode_assignment"
+      version: SCHEMA_VERSION,
+      lastMigrationId: SCHEMA_MIGRATION_ID
     });
     expect(upgraded.db.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "memory-keep" });
     expect(upgraded.db.prepare(
@@ -75,7 +75,7 @@ describe("token usage outbox", () => {
     upgraded.close();
 
     const reopened = new MemoryDb({ path: dbPath });
-    expect(reopened.schemaVersion().version).toBe(10);
+    expect(reopened.schemaVersion().version).toBe(SCHEMA_VERSION);
     expect(reopened.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 1 });
     reopened.close();
   });

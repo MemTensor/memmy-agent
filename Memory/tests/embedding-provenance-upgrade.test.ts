@@ -252,7 +252,9 @@ describe("one-time upgrade repair", () => {
       }
       return texts.map(() => vector());
     };
-    await service.runWorkerOnce();
+    // Limit the first drain to the stale input so continuous refill cannot also
+    // finish its replacement before the intermediate-state assertion.
+    await service.runWorkerOnce(1);
     expect(service.embeddingMaintenanceProgress()).toMatchObject({ done: false, updated: 0 });
     await service.runWorkerOnce();
     expect(service.embeddingMaintenanceProgress()).toMatchObject({ done: true, updated: 1 });

@@ -2,7 +2,8 @@ import { assignedEpisodeId } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSourceExecutor } from "../../src/agent-source/runtime.js";
 import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
@@ -21,6 +22,7 @@ import {
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
+  runWorkerRoundsWithDueRetries,
   setRawTurnActivityAt
 } from "../fixtures/memory-service-fixture.js";
 
@@ -112,6 +114,31 @@ async function runUntilSummaryIndexed(
 }
 
 describe("MemoryService / REST contract", () => {
+
+  it("exposes the current embedding model through a read-scoped inference endpoint", async () => {
+    const seenTexts: string[] = [];
+    const seenRoles: Array<"query" | "document" | undefined> = [];
+    const { db, service } = createTestService({ embedder: createCapturingEmbedder(seenTexts, seenRoles) });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/models/embedding/infer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ texts: ["section", "evidence"], role: "document" })
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        embeddings: [[1, 0, 0], [0, 1, 0]],
+        model: { provider: "local", model: "capturing-test-embedding", mode: "local", dimension: 3 }
+      });
+      expect(seenTexts).toEqual(["section", "evidence"]);
+      expect(seenRoles).toEqual(["document", "document"]);
+    });
+    db.close();
+  });
 
   it("deduplicates Agent source Skills by stable identity and content hash", async () => {
     const { db, service } = createTestService();
@@ -402,7 +429,7 @@ describe("MemoryService / REST contract", () => {
     });
     const namespace = { source: "hermes", profileId: "default", userId: "http-retry-user" };
     const added = addAgentSourceImport(service, namespace, "retry through HTTP", "http-retry");
-    await runWorkerRounds(service, 3, 1);
+    await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
 
     const server = createMemoryHttpServer({ service });
@@ -1044,6 +1071,9 @@ describe("MemoryService / REST contract", () => {
     expect(repos.runtime.getPendingJob(interruptedMemory.id, "embedding")?.jobType).toBe("embedding");
     const [interruptedJob] = repos.runtime.leaseQueuedJobs(1, 600, [interruptedMemory.id]);
     expect(interruptedJob?.jobType).toBe("embedding");
+    // Startup recovery must wait for expiry rather than revoke a valid owner.
+    db.db.prepare("UPDATE evolution_jobs SET leased_until = ? WHERE id = ?")
+      .run(new Date(Date.now() - 1_000).toISOString(), interruptedJob!.id);
 
     const failedMemory = addAgentSourceImport(
       service,
@@ -1132,8 +1162,10 @@ describe("MemoryService / REST contract", () => {
       config: DEFAULT_MEMMY_CONFIG,
       configLoader: () => ({ config: accountRuntimeConfig() })
     });
+    const reconcileScanPermission = vi.fn(async () => {});
     const server = createMemoryHttpServer({
       service,
+      agentSourceExecutor: { reconcileScanPermission, dispose: async () => {} } as unknown as AgentSourceExecutor,
       auth: {
         scopedApiKeys: {
           "admin-token": {
@@ -1178,6 +1210,7 @@ describe("MemoryService / REST contract", () => {
     const result = await client.reloadConfig({ reason: "profile_switched" });
 
     expect(readerResponse.status).toBe(403);
+    expect(reconcileScanPermission).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       changed: true,
       requiresRestart: false,

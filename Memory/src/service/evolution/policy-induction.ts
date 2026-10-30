@@ -1,3 +1,4 @@
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   L2_INDUCTION_PROMPT,
@@ -144,6 +145,9 @@ export class PolicyInductionEngine {
     );
 
     for (const signature of signatures) {
+      // A restored candidate pool can contain thousands of synchronous skips.
+      // Let health, foreground requests and shutdown run between buckets.
+      await yieldToEventLoop();
       const bucket = uniq(
         pendingCandidates
           .filter((candidate) => candidate.candidateKey === signature)

@@ -17,6 +17,7 @@ import type {
   MemmyAgentWebuiThread,
   MemmyAgentWsEvent,
   AgentGoalState,
+  AgentTaskPlanState,
   AgentGoalControlAction,
   WebuiSessionTarget,
   WebuiQueuedMessage,
@@ -27,6 +28,7 @@ import {
   chatIdToSessionKey,
   isCronProactiveMessage,
   isAgentGoalState,
+  isAgentTaskPlanState,
   isAgentGoalStatus,
   parseAgentTurnSource,
   parseMemmyAgentModelSelection
@@ -84,7 +86,7 @@ export interface AgentRecoveryChatRequest {
  */
 export type AgentMessageKind = "message" | "trace" | "narration" | "context_compaction";
 export type AgentCompactionStatus = "running" | "done" | "error";
-export type AgentChatMediaKind = "image" | "video" | "file";
+export type AgentChatMediaKind = "image" | "video" | "audio" | "file";
 export type AgentChatMediaAttachment = {
   kind: AgentChatMediaKind;
   url?: string;
@@ -128,6 +130,9 @@ export interface AgentChatMessage {
   traces?: string[];
   toolEvents?: AgentToolProgressEvent[];
   fileEdits?: AgentFileEdit[];
+  agentUi?: unknown;
+  questionResponse?: unknown;
+  questionInterrupted?: boolean;
   activitySegmentId?: string;
   compactionId?: string;
   compactionStatus?: AgentCompactionStatus;
@@ -252,6 +257,8 @@ export interface AgentState {
   proactiveNotifications: Array<{ deliveryId: string; chatId: string; content: string }>;
   goalStatesByChatId: Record<string, AgentGoalState>;
   goalState: AgentGoalState | null;
+  taskPlanStatesByChatId: Record<string, AgentTaskPlanState>;
+  taskPlanState: AgentTaskPlanState | null;
   goalRunClockByChatId: Record<string, AgentGoalRunClock | null>;
   goalMutationPendingByChatId: Record<string, {
     requestId: string;
@@ -425,6 +432,8 @@ export const initialAgentState: AgentState = {
   proactiveNotifications: [],
   goalStatesByChatId: {},
   goalState: null,
+  taskPlanStatesByChatId: {},
+  taskPlanState: null,
   goalRunClockByChatId: {},
   goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
@@ -1467,6 +1476,7 @@ function enterBlankDraft(state: AgentState, newChatRequestId: number): AgentStat
     isSending: false,
     isLoadingHistory: false,
     goalState: null,
+    taskPlanState: null,
     blankDraftActive: true,
     chatSelectionEpoch: state.chatSelectionEpoch + 1,
     newChatRequestId
@@ -1875,7 +1885,11 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
-  const messages = shouldKeepCurrent
+  const richerOpenSnapshot = !historyTurnClosed && (chatBusy || hasLiveStream)
+    && snapshot.length > currentMessages.length && currentMessages.length > 0;
+  const messages = richerOpenSnapshot
+    ? mergeOpenTurnHistory(snapshot, reconcileQueueSteerPendingMessages(currentMessages, snapshot, activeTurnId, false))
+    : shouldKeepCurrent
     ? mergeProactiveHistory(reconcileQueueSteerPendingMessages(
         currentMessages,
         snapshot,
@@ -1966,7 +1980,11 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
-  const messages = shouldKeepCurrent
+  const richerOpenSnapshot = !hydrateTurnClosed && (chatBusy || hasLiveStream)
+    && snapshot.length > currentMessages.length && currentMessages.length > 0;
+  const messages = richerOpenSnapshot
+    ? mergeOpenTurnHistory(snapshot, reconcileQueueSteerPendingMessages(currentMessages, snapshot, activeTurnId, false))
+    : shouldKeepCurrent
     ? mergeProactiveHistory(reconcileQueueSteerPendingMessages(
         currentMessages,
         snapshot,
@@ -2057,6 +2075,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
       chatSelectionEpoch: cachedState.blankDraftActive ? cachedState.chatSelectionEpoch + 1 : cachedState.chatSelectionEpoch,
       blankDraftActive: false,
       goalState: cachedState.goalStatesByChatId[chatId] ?? cachedState.goalState,
+      taskPlanState: cachedState.taskPlanStatesByChatId[chatId] ?? cachedState.taskPlanState,
       isSending: isChatBusy(cachedState, chatId)
     });
   }
@@ -2069,6 +2088,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
     currentSessionKey: sessionKey,
     messages: cachedState.messagesByChatId[chatId] ?? [],
     goalState: cachedState.goalStatesByChatId[chatId] ?? null,
+    taskPlanState: cachedState.taskPlanStatesByChatId[chatId] ?? null,
     isSending: isChatBusy(cachedState, chatId),
     blankDraftActive: false
   });
@@ -2517,6 +2537,70 @@ function isStaleThreadSnapshot(currentMessages: AgentChatMessage[], snapshot: Ag
   return snapshot.every((message, index) => messagesEquivalent(message, currentMessages[index]));
 }
 
+/** Restore older persisted steps while retaining output that arrived after the read began. */
+function mergeOpenTurnHistory(snapshot: AgentChatMessage[], current: AgentChatMessage[]): AgentChatMessage[] {
+  const merged = [...snapshot];
+  let lastMatchedCurrent = -1;
+  for (let index = current.length - 1; index >= 0; index -= 1) {
+    if (lastOpenTurnStepMatch(merged, current[index]!) >= 0) {
+      lastMatchedCurrent = index;
+      break;
+    }
+  }
+  for (const message of current.slice(Math.max(0, lastMatchedCurrent))) {
+    const match = lastOpenTurnStepMatch(merged, message);
+    if (match < 0) {
+      merged.push(message);
+      continue;
+    }
+    const saved = merged[match]!;
+    if (message.role === "assistant") {
+      merged[match] = {
+        ...saved,
+        ...(message.content.length > saved.content.length ? { content: message.content, isStreaming: message.isStreaming } : {}),
+        ...((message.reasoning?.length ?? 0) > (saved.reasoning?.length ?? 0)
+          ? { reasoning: message.reasoning, reasoningStreaming: message.reasoningStreaming, isStreaming: message.isStreaming }
+          : {}),
+      };
+    } else if (message.role === "tool") {
+      merged[match] = {
+        ...saved,
+        ...(message.toolEvents?.length ? { toolEvents: mergeToolProgressEvents(saved.toolEvents, message.toolEvents) } : {}),
+        ...(message.fileEdits?.length ? { fileEdits: mergeFileEdits(saved.fileEdits, message.fileEdits) } : {}),
+      };
+    }
+  }
+  return mergeProactiveHistory(merged, current);
+}
+
+function lastOpenTurnStepMatch(messages: AgentChatMessage[], target: AgentChatMessage): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (sameOpenTurnStep(messages[index]!, target)) return index;
+  }
+  return -1;
+}
+
+function sameOpenTurnStep(left: AgentChatMessage, right: AgentChatMessage): boolean {
+  if (left.role !== right.role || left.kind !== right.kind
+    || (left.turnId && right.turnId && left.turnId !== right.turnId)) return false;
+  if (left.proactiveDeliveryId || right.proactiveDeliveryId) {
+    return Boolean(left.proactiveDeliveryId && left.proactiveDeliveryId === right.proactiveDeliveryId);
+  }
+  if (left.role === "user") return left.clientRequestId && right.clientRequestId
+    ? left.clientRequestId === right.clientRequestId : left.content === right.content;
+  if (left.role === "tool") {
+    const leftCalls = new Set([...(left.toolEvents ?? []).map((event) => event.call_id), ...(left.fileEdits ?? []).map((edit) => edit.call_id)].filter(Boolean));
+    return [...(right.toolEvents ?? []).map((event) => event.call_id), ...(right.fileEdits ?? []).map((edit) => edit.call_id)]
+      .some((callId) => Boolean(callId && leftCalls.has(callId)))
+      || Boolean(left.content && left.content === right.content);
+  }
+  const leftText = left.reasoning || left.content;
+  const rightText = right.reasoning || right.content;
+  return Boolean(leftText && rightText && (leftText === rightText
+    || (Math.min(leftText.length, rightText.length) >= 16
+      && (leftText.startsWith(rightText) || rightText.startsWith(leftText)))));
+}
+
 function stoppedMessagePayloadEquivalent(left: AgentChatMessage, right: AgentChatMessage | undefined): boolean {
   if (!right) return false;
   return left.role === right.role
@@ -2527,7 +2611,9 @@ function stoppedMessagePayloadEquivalent(left: AgentChatMessage, right: AgentCha
     && JSON.stringify(left.media ?? []) === JSON.stringify(right.media ?? [])
     && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
     && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
-    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? []);
+    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? [])
+    && JSON.stringify(left.agentUi ?? null) === JSON.stringify(right.agentUi ?? null)
+    && JSON.stringify(left.questionResponse ?? null) === JSON.stringify(right.questionResponse ?? null);
 }
 
 function isSnapshotMissingLatestUserMessage(currentMessages: AgentChatMessage[], snapshot: AgentChatMessage[]): boolean {
@@ -2566,6 +2652,8 @@ function messagesEquivalent(left: AgentChatMessage, right: AgentChatMessage | un
     && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
     && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
     && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? [])
+    && JSON.stringify(left.agentUi ?? null) === JSON.stringify(right.agentUi ?? null)
+    && JSON.stringify(left.questionResponse ?? null) === JSON.stringify(right.questionResponse ?? null)
     && left.activitySegmentId === right.activitySegmentId;
 }
 
@@ -2827,6 +2915,16 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       );
     case "message_queue_snapshot":
       return applyQueueSnapshot(state, event);
+    case "queue_reorder_result":
+      return event.ok === false && event.chat_id
+        ? setOperationError(state, "chat", {
+            id: `queue-reorder-${event.request_id ?? Date.now()}`,
+            source: "queue",
+            message: "home.queue.reorderFailed",
+            chatId: event.chat_id,
+            createdAt: Date.now(),
+          })
+        : state;
     case "queue_remove_result": {
       if (
         (event.outcome !== "removed" && event.outcome !== "already_dequeued")
@@ -2919,6 +3017,8 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       return updateRunStatus(state, event);
     case "goal_state":
       return updateGoalState(state, event.chat_id, event.goal_state);
+    case "task_plan_state":
+      return updateTaskPlanState(state, event.chat_id, event.task_plan_state);
     case "turn_end":
       return event.chat_id
         ? endTurn(state, event.chat_id, event.latency_ms, eventTurnId(event), event)
@@ -3024,6 +3124,8 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
             ? setSuppressAssistantStreamUntilTurnEnd(nextState, chatId, true)
             : nextState;
         }
+      case "agent_question_response":
+        return applyAgentQuestionResponse(activeState, event);
       case "file_edit":
         return appendFileEditTrace(activeState, event);
       case "context_compaction":
@@ -3037,6 +3139,7 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
 function isChatContentEvent(event: string): boolean {
   return [
     "user",
+    "agent_question_response",
     "delta",
     "stream_end",
     "reasoning_delta",
@@ -3046,6 +3149,30 @@ function isChatContentEvent(event: string): boolean {
     "context_compaction",
     "retry_wait"
   ].includes(event);
+}
+
+function agentQuestionRequestId(agentUi: unknown): string | null {
+  if (!agentUi || typeof agentUi !== "object" || Array.isArray(agentUi)) return null;
+  const card = (agentUi as Record<string, unknown>).questionCard;
+  if (!card || typeof card !== "object" || Array.isArray(card)) return null;
+  const requestId = (card as Record<string, unknown>).requestId;
+  return typeof requestId === "string" && requestId.trim() ? requestId.trim() : null;
+}
+
+function applyAgentQuestionResponse(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const requestId = typeof event.request_id === "string" ? event.request_id.trim() : "";
+  if (!requestId || !Array.isArray(event.answers)) return state;
+  const index = state.messages.findIndex(
+    (message) => agentQuestionRequestId(message.agentUi) === requestId,
+  );
+  if (index < 0) return state;
+  const messages = [...state.messages];
+  messages[index] = {
+    ...messages[index]!,
+    questionResponse: { requestId, answers: event.answers, ...(event.cancelled === true ? { cancelled: true } : {}) },
+    ...(event.cancelled === true ? { questionInterrupted: true } : {}),
+  };
+  return syncCurrentMessages({ ...state, messages });
 }
 
 function appendExternalUserMessage(
@@ -3125,7 +3252,8 @@ function withScopedChatMessages(
     messages: state.messagesByChatId[chatId] ?? [],
     isSending: isChatBusy(state, chatId),
     blankDraftActive: false,
-    goalState: state.goalStatesByChatId[chatId] ?? null
+    goalState: state.goalStatesByChatId[chatId] ?? null,
+    taskPlanState: state.taskPlanStatesByChatId[chatId] ?? null
   };
   const reduced = reducer(scopedState);
   const messagesByChatId = {
@@ -3144,7 +3272,8 @@ function withScopedChatMessages(
         || chatHasLiveStream({ ...reduced, currentChatId: state.currentChatId, messages: state.messages, messagesByChatId }, currentChatId)
       : false,
     blankDraftActive: state.blankDraftActive,
-    goalState: currentChatId ? reduced.goalStatesByChatId[currentChatId] ?? null : null
+    goalState: currentChatId ? reduced.goalStatesByChatId[currentChatId] ?? null : null,
+    taskPlanState: currentChatId ? reduced.taskPlanStatesByChatId[currentChatId] ?? null : null
   };
   return deriveTasks(nextState);
 }
@@ -3930,9 +4059,10 @@ function fileEditsShareActivity(left: AgentFileEdit, right: AgentFileEdit): bool
 
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff"]);
 const VIDEO_ATTACHMENT_EXTENSIONS = new Set([".mp4", ".webm", ".mov", ".m4v"]);
+const AUDIO_ATTACHMENT_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"]);
 
 function isAgentChatMediaKind(value: unknown): value is AgentChatMediaKind {
-  return value === "image" || value === "video" || value === "file";
+  return value === "image" || value === "video" || value === "audio" || value === "file";
 }
 
 function extensionOf(value: string | undefined): string {
@@ -3943,12 +4073,18 @@ function extensionOf(value: string | undefined): string {
 }
 
 function inferMediaKind(media: { url?: string; name?: string; kind?: AgentChatMediaKind; path?: string }): AgentChatMediaKind {
+  // Older threads stored Memmy's audio-only recording as video because .webm
+  // was classified by extension. Correct those saved messages on hydration.
+  const displayName = (media.name || media.path?.split(/[\\/]/).pop() || "").toLowerCase();
+  if (/^录音-\d{4}-\d{2}-\d{2}t[\d-]+z\.webm$/u.test(displayName)) return "audio";
   if (isAgentChatMediaKind(media.kind)) return media.kind;
   if (media.url?.startsWith("data:image/")) return "image";
   if (media.url?.startsWith("data:video/")) return "video";
+  if (media.url?.startsWith("data:audio/")) return "audio";
   const ext = extensionOf(media.name) || extensionOf(media.path) || extensionOf(media.url);
   if (IMAGE_ATTACHMENT_EXTENSIONS.has(ext)) return "image";
   if (VIDEO_ATTACHMENT_EXTENSIONS.has(ext)) return "video";
+  if (AUDIO_ATTACHMENT_EXTENSIONS.has(ext)) return "audio";
   return "file";
 }
 
@@ -4146,8 +4282,9 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
   const text = typeof event.text === "string" ? event.text : typeof event.content === "string" ? event.content : "";
   const media = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : undefined;
   const modelError = normalizeModelError(event.model_error);
+  const agentUi = event.agent_ui;
   const messages = [...state.messages];
-  const forceNewAssistant = isCronProactiveEvent(event);
+  const forceNewAssistant = isCronProactiveEvent(event) || agentUi != null;
   const lastIndex = latestMessageIndexForTurn(messages, turnId);
   const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   let closedActivity = false;
@@ -4186,12 +4323,13 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       content: modelError ? text : text || target.content,
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
+      ...(agentUi != null ? { agentUi } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {}),
       ...(turnId ? { turnId } : {}),
       isStreaming: true
     };
   } else {
-    if (!text.trim() && !media?.length && !modelError) {
+    if (!text.trim() && !media?.length && !modelError && agentUi == null) {
       return closedActivity ? syncCurrentMessages({ ...state, messages }) : state;
     }
     const next: AgentChatMessage = {
@@ -4202,6 +4340,7 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       createdAt: Date.now(),
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
+      ...(agentUi != null ? { agentUi } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {})
     };
     messages.push(next);
@@ -4749,6 +4888,7 @@ function hasLoadedMessagePayload(message: AgentChatMessage): boolean {
     || message.reasoning?.trim()
     || message.media?.length
     || message.traces?.length
+    || message.toolEvents?.length
     || message.fileEdits?.length
   );
 }
@@ -4765,6 +4905,23 @@ function updateGoalState(state: AgentState, chatId: string | null | undefined, r
     goalStatesByChatId: { ...state.goalStatesByChatId, [chatId]: goalState },
     goalState: chatId === state.currentChatId ? goalState : state.goalState,
     goalRunClockByChatId
+  };
+}
+
+function updateTaskPlanState(
+  state: AgentState,
+  chatId: string | null | undefined,
+  rawTaskPlanState: unknown,
+): AgentState {
+  if (!chatId || !isAgentTaskPlanState(rawTaskPlanState)) return state;
+  const taskPlanState: AgentTaskPlanState = rawTaskPlanState;
+  return {
+    ...state,
+    taskPlanStatesByChatId: {
+      ...state.taskPlanStatesByChatId,
+      [chatId]: taskPlanState,
+    },
+    taskPlanState: chatId === state.currentChatId ? taskPlanState : state.taskPlanState,
   };
 }
 
@@ -4831,6 +4988,8 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
         : undefined;
     const fileEdits = Array.isArray(message.fileEdits) ? normalizeFileEdits(message.fileEdits) : undefined;
     const modelError = normalizeModelError(message.modelError ?? message.model_error);
+    const agentUi = message.agentUi ?? message.agent_ui;
+    const questionResponse = message.questionResponse ?? message.question_response;
     const deliveryId = proactiveDeliveryId(message.metadata)
       ?? (typeof message.proactiveDeliveryId === "string" ? message.proactiveDeliveryId : null);
     const isProactive = (isRecord(message.metadata) && message.metadata.proactiveDelivery === "cron")
@@ -4858,6 +5017,9 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
       ...(kind !== "context_compaction" && Array.isArray(message.traces) ? { traces: message.traces.map(String) } : {}),
       ...(kind !== "context_compaction" && rawToolEvents ? { toolEvents: normalizeToolProgressEvents(rawToolEvents) } : {}),
       ...(kind !== "context_compaction" && fileEdits?.length ? { fileEdits } : {}),
+      ...(kind !== "context_compaction" && agentUi != null ? { agentUi } : {}),
+      ...(kind !== "context_compaction" && questionResponse != null ? { questionResponse } : {}),
+      ...(message.questionInterrupted === true ? { questionInterrupted: true } : {}),
       ...(kind !== "context_compaction" && typeof message.activitySegmentId === "string" ? { activitySegmentId: message.activitySegmentId } : {}),
       ...(kind === "context_compaction" ? { compactionId, compactionStatus } : {}),
       ...(createdAt == null ? {} : { createdAt }),

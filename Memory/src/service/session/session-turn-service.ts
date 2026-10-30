@@ -537,7 +537,7 @@ export class SessionTurnService {
     return this.deps.llm.isConfigured() ? undefined : this.ensureEpisode(session);
   }
 
-  queueAssignment(raw: RawTurnRecord, turnJudge = false, requestedEpisodeId = raw.episodeId): EvolutionJobRecord[] {
+  queueAssignment(raw: RawTurnRecord, turnJudge = false, requestedEpisodeId = raw.episodeId, captureOrigin?: "agent_source_scan"): EvolutionJobRecord[] {
     if (!this.deps.llm.isConfigured()) return [];
     const at = nowIso();
     const generation = stableHash({ user: raw.userText, assistant: raw.assistantText, tools: raw.toolResults, turnJudge });
@@ -547,7 +547,7 @@ export class SessionTurnService {
     } });
     return (["episode_assignment", "episode_finalize"] as const).map(jobType => this.deps.enqueueJob({
       jobType, userId: raw.userId, sessionId: raw.sessionId,
-      dedupeKey: `${jobType}:${raw.id}:${generation}`, payload: { rawTurnId: raw.id, turnAt: raw.createdAt, generation }, createdAt: at
+      dedupeKey: `${jobType}:${raw.id}:${generation}`, payload: { rawTurnId: raw.id, turnAt: raw.createdAt, generation, ...(captureOrigin ? { captureOrigin } : {}) }, createdAt: at
     }));
   }
 
@@ -1709,7 +1709,8 @@ export class SessionTurnService {
         throw new MemoryServiceError("forbidden", "source_raw_turn_scope_conflict");
       }
       const result = this.completeTurn(identity.turnId, { ...normalized, sessionId: session.id,
-        ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn);
+        ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn, undefined,
+        allowsLegacyHistoryCapture(request) ? "agent_source_scan" : undefined);
       if (gapEpisode) this.deps.repos.runtime.orderEpisodeTurnsBySourceTime(gapEpisode.id);
       const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
         ? { status: "stored", result }
@@ -1791,7 +1792,7 @@ export class SessionTurnService {
     const result = this.completeTurn(sourceTurn.turnId, {
       ...withoutEpisode,
       sessionId: opened.sessionId
-    }, sourceTurn);
+    }, sourceTurn, undefined, allowsLegacyHistoryCapture(request) ? "agent_source_scan" : undefined);
     const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
       ? { status: "stored", result }
       : { status: "rejected", reason: "capture_policy", result };
@@ -1952,7 +1953,8 @@ export class SessionTurnService {
     turnId: string,
     request: TurnCompleteRequest & Record<string, unknown>,
     sourceTurn?: SourceTurnIdentity,
-    acceptedAt?: string
+    acceptedAt?: string,
+    captureOrigin?: "agent_source_scan"
   ): CompleteTurnResponse {
     request = sanitizeTurnCompleteRequest(request);
     if (request.status === "cancelled") {
@@ -2303,7 +2305,7 @@ export class SessionTurnService {
       const l1MemoryIds: string[] = [];
       const captureClaimByRawTurnId = new Map<string, boolean>();
       let changeSeq = 0;
-      const jobs: EvolutionJobRecord[] = [...route.jobs, ...userMemoryCapture.jobs, ...this.queueAssignment(rawTurn, this.deps.config.algorithm.session.turnJudge && this.deps.llm.isConfigured(), request.episodeId)];
+      const jobs: EvolutionJobRecord[] = [...route.jobs, ...userMemoryCapture.jobs, ...this.queueAssignment(rawTurn, this.deps.config.algorithm.session.turnJudge && this.deps.llm.isConfigured(), request.episodeId, captureOrigin)];
 
       for (const step of capturedSteps) {
         const stepRawTurnId = step.rawTurnId ?? rawTurn.id;
@@ -2364,6 +2366,8 @@ export class SessionTurnService {
             },
             error_signatures: step.errorSignatures,
             ...observation.internal,
+            // Scheduling provenance is separate from the native capture pipeline.
+            ...(captureOrigin ? { capture_origin: captureOrigin } : {}),
             trace: {
               key: step.key,
               ts: step.ts,

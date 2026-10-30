@@ -37,6 +37,7 @@ export interface ModelConnection {
   protocol: ModelEndpointProtocol;
   region: string;
   apiKeyMasked: string;
+  inheritProviderDefaults?: boolean;
   models: string[];
   modelEntries: ModelConnectionModel[];
   modelCapabilities: Record<string, ModelCapability>;
@@ -86,6 +87,7 @@ export interface ModelConnectionInput {
   endpointId?: string;
   endpoint: string;
   protocol?: ModelEndpointProtocol;
+  inheritProviderDefaults?: boolean;
   region?: string;
   apiKey?: string;
   apiKeyMasked?: string;
@@ -112,6 +114,7 @@ export interface ByokPresetInput {
   endpointId?: string;
   endpoint: string;
   protocol: ModelEndpointProtocol;
+  inheritProviderDefaults?: boolean;
   apiKey?: string;
   apiKeyMasked?: string;
   model: string;
@@ -258,6 +261,7 @@ export function upsertByokPreset(
       endpointId: newId("endpoint"),
       apiBase,
       protocol: input.protocol,
+      ...(input.inheritProviderDefaults !== undefined ? { inheritProviderDefaults: input.inheritProviderDefaults } : {}),
       hasApiKey: Boolean(input.apiKey),
       apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
       apiKey: input.apiKey ?? ""
@@ -268,6 +272,7 @@ export function upsertByokPreset(
     endpoint.apiKeyMasked = maskApiKey(input.apiKey);
     endpoint.hasApiKey = true;
   }
+  if (input.inheritProviderDefaults !== undefined) endpoint.inheritProviderDefaults = input.inheritProviderDefaults;
   const existing = provider.models.find((item) => (
     item.source === "byok"
     && item.endpointId === endpoint!.endpointId
@@ -352,6 +357,12 @@ export function getTaskModelCandidates(workspace: ModelWorkspace, mode: ModelWor
   const order = workspace.catalog.modelAssignments[mode].agent.candidates;
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   return order.map((id) => byId.get(id)).filter((candidate): candidate is ModelCandidate => Boolean(candidate));
+}
+
+/** Official Memmy Agent model used by plugins that cannot switch to a custom model. */
+export function officialPlatformAgentCandidate(candidates: readonly ModelCandidate[]): ModelCandidate | undefined {
+  return candidates.find((candidate) => candidate.source === "platform" && candidate.available && candidate.model === "agent_chat")
+    ?? candidates.find((candidate) => candidate.source === "platform" && candidate.available);
 }
 
 export function resolveModelSelection(
@@ -473,10 +484,13 @@ export function upsertModelConnection(
     next.providers.push(provider);
   }
 
+  const inheritProviderDefaults = input.inheritProviderDefaults
+    ?? (existingConnection?.provider === providerId ? existingConnection.inheritProviderDefaults : undefined);
   provider.endpoints.push({
     endpointId,
     apiBase: endpoint,
     protocol,
+    ...(inheritProviderDefaults !== undefined ? { inheritProviderDefaults } : {}),
     hasApiKey: Boolean(input.apiKey || input.apiKeyMasked),
     apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
     apiKey: input.apiKey ?? "",
@@ -689,7 +703,8 @@ function createSpace(catalog: ModelConfigView, mode: ModelWorkspaceMode): ModelW
       endpoint: endpoint.apiBase,
       protocol: endpoint.protocol,
       region: endpoint.region ?? "",
-      apiKeyMasked: endpoint.apiKeyMasked || provider.apiKeyMasked,
+      apiKeyMasked: endpoint.apiKeyMasked || (endpoint.inheritProviderDefaults === false ? "" : provider.apiKeyMasked),
+      ...(endpoint.inheritProviderDefaults !== undefined ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
       models: models.map((model) => model.model),
       modelEntries: models.map((model) => ({
         presetId: model.presetId,
@@ -742,6 +757,7 @@ function endpointInput(endpoint: ModelConfigView["providers"][number]["endpoints
     endpointId: endpoint.endpointId,
     apiBase: endpoint.apiBase,
     protocol: endpoint.protocol,
+    ...(endpoint.inheritProviderDefaults !== undefined ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
     ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
     ...(endpoint.region ? { region: endpoint.region } : {})
   };

@@ -1,0 +1,92 @@
+{
+  "date": "2026-10-24",
+  "branch": "test-memory-queue-v1.2.6",
+  "target": "upstream/v1.2.6",
+  "sourceCommit": "f0c8070796b496d79feb410b251035efa02b5ce9",
+  "desktopVersion": "1.2.3",
+  "memoryVersion": "2.1.6",
+  "memoryBuildId": "3142a05c95b56fdd39a81b07ca2f8ac6a08cb8198f239a1229b0ed8c08de7547",
+  "scope": "reserve one global logical worker slot for interactive tasks; keep other admission layers",
+  "globalLimit": 4,
+  "backgroundLimit": 3,
+  "interactiveReservedSlots": 1,
+  "singleSlotFallback": "global=1 implies background=1, reserved=0 to preserve progress",
+  "secondFullQueueCensusGapChanged": false,
+  "rootTests": "passed",
+  "lint": "passed",
+  "typecheck": "passed",
+  "memoryFirstPass": 2171,
+  "memorySecondPass": 2172,
+  "memorySkippedEach": 1,
+  "backendPassed": 992,
+  "frontendPassed": 2505,
+  "desktopPassed": 1287,
+  "desktopSkipped": 126,
+  "agentTuiPassed": 5,
+  "additionalFocusedTestsPassed": 50,
+  "pushed": false,
+  "prCreated": false,
+  "packageSha256": "48f29997b55dd0ae226030eaf9d425dd97081b27fb015cefa823c37ac19c04f8",
+  "packagingSeconds": 255,
+  "packageVerified": true,
+  "packageIdentity": {
+    "memoryJavaScriptModulesCompared": 230,
+    "mismatches": [],
+    "criticalModuleSha256": {
+      "service/worker/worker-concurrency.js": "a3ac16417242aa45ef566e6cf8bedaec5ac0a64ffd42db192dd0adf4cbdea0cc",
+      "service/worker/worker-observability.js": "3bc3006c8cb386dbbaa9ae61cf1f61883903ddc4f7fa6f24c2d665422c80f3eb",
+      "service/worker/worker-runner.js": "107087ad0ee970436585636158ab1e30b88124e1d4cca0d04fa08ee365cdab7e",
+      "service/worker/worker-work-requirements.js": "c551ae8a14b77d84b9d29c10b7dfe3be8f8fafaaba11bbbeeff4ee37953aeafe"
+    },
+    "manifest": {
+      "version": "2.1.6",
+      "buildId": "3142a05c95b56fdd39a81b07ca2f8ac6a08cb8198f239a1229b0ed8c08de7547",
+      "schemaVersion": 13,
+      "protocolVersion": 1,
+      "target": "darwin-arm64",
+      "entrypoint": "dist/src/server/index.js",
+      "viewer": "dist/viewer/index.html"
+    }
+  },
+  "installedQueueProbe": {
+    "backlog": 10000,
+    "backgroundLeased": 3,
+    "untouchedQueued": 9997,
+    "interactiveStartWaitMs": {
+      "native": 6.95920799999999,
+      "onboarding": 6.6293329999998605
+    },
+    "basis": "installed compiled queue and real SQLite; business/model work replaced by controlled gates"
+  },
+  "installedAppSmoke": {
+    "success": true,
+    "profile": "isolated temporary HOME copied to persistent evidence",
+    "verification": "automated installed app startup/render/health/normal quit/relaunch; no manual UI operation",
+    "launches": [
+      {
+        "launch": 1,
+        "healthyMs": 1200.63925,
+        "quitMs": 140.1231670000002,
+        "rendered": true,
+        "exit": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "launch": 2,
+        "healthyMs": 1192.0469999999996,
+        "quitMs": 116.80191700000069,
+        "rendered": true,
+        "exit": {
+          "code": 0,
+          "signal": null
+        }
+      }
+    ]
+  },
+  "postPackageFocusedTestsPassed": 65,
+  "developmentNodeNativeRestored": true,
+  "manualAuthenticatedUIBusinessTestPerformed": false,
+  "realCloudOrLMStudioLoadTestPerformed": false
+}

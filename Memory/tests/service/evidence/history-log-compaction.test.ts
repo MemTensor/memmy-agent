@@ -6,7 +6,7 @@ import { Repositories, type ChangeLogRecord } from "../../../src/storage/reposit
 import type { MemoryRow } from "../../../src/types.js";
 import { isRecord } from "../../../src/utils/json.js";
 import { observationMemoryState } from "../../../src/service/observation-memory-state.js";
-import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
+import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds, runWorkerRoundsWithDueRetries } from "../../fixtures/memory-service-fixture.js";
 
 const { createTestService, cleanup } = createMemoryServiceFixture();
 afterEach(cleanup);
@@ -122,7 +122,7 @@ describe("History change-log compaction", () => {
     const priorSemantic = historySnapshots(updatedLogs, synced.id)
       .find((snapshot) => observationMemoryState(snapshot)?.status === "processed")!;
     expect(priorSemantic.memoryValue).toBe(processed.memoryValue);
-    await runWorkerRounds(service, 3);
+    await runWorkerRoundsWithDueRetries(service, db, [synced.id], 3);
     expect(service.memoryProcessingStatus([synced.id]).items[0]).toMatchObject({ state: "failed", stage: "summary" });
     invalid = false;
     expect(service.retryMemoryProcessing(synced.id, { namespace }).job?.jobType).toBe("observation_extract");
@@ -140,7 +140,7 @@ describe("History change-log compaction", () => {
     const first = createTestService({ llm: model((input) => ({ keep: true, title: "Ungrounded result", summary: "Unsupported completion",
       items: [{ category: "progress", text: "Unsupported completion", evidence_quote: "Not present in the source.", source_memory_id: input.sources[0]!.id }] })) });
     const source = first.service.syncExternalEvidence(evidence);
-    await runWorkerRounds(first.service, 3);
+    await runWorkerRoundsWithDueRetries(first.service, first.db, [source.id], 3);
     expect(first.service.memoryProcessingStatus([source.id]).items[0]?.state).toBe("failed");
     const repos = new Repositories(first.db.db), current = repos.memories.get(source.id)!;
     const oldChange = repos.runtime.listChanges(undefined, 1000).find((change) => change.memoryId === source.id)!;

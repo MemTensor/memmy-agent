@@ -22,7 +22,12 @@ export function convertMessages(messages: Record<string, any>[]): [string, Recor
   };
   for (const [idx, msg] of messages.entries()) {
     if (msg.role === "system") {
-      instructions = String(msg.content ?? "");
+      instructions = Array.isArray(msg.content)
+        ? msg.content
+          .filter((block) => block?.type === "text" || block?.type === "input_text")
+          .map((block) => String(block.text ?? ""))
+          .join("\n\n")
+        : String(msg.content ?? "");
     } else if (msg.role === "user") {
       items.push(convertUserMessage(msg.content));
     } else if (msg.role === "assistant") {

@@ -49,6 +49,12 @@ describe("L2 to Skill durable recovery", () => {
         queueSkillCrystallizationJobForTest(db, { id: "extract", userId, sessionId: session.sessionId,
           episodeId: assignedEpisodeId(service, complete), policyId: "policy" });
         const run = () => service.runWorkerOnce(1, { targetMemoryIds: ["policy"] });
+        const retryWhenDue = async () => {
+          // v1.2.7 persists backoff; advance only this test job, not the production policy.
+          db.db.prepare("UPDATE evolution_jobs SET available_at = ? WHERE id = 'extract' AND status = 'failed' AND blocked_reason IS NULL")
+            .run(new Date().toISOString());
+          await run();
+        };
         const job = () => db.db.prepare("SELECT status, attempts, last_error FROM evolution_jobs WHERE id = 'extract'").get() as { status: string; attempts: number; last_error: string };
         const skills = () => db.db.prepare("SELECT id FROM memories WHERE memory_layer = 'Skill'").all();
         await run();
@@ -61,8 +67,10 @@ describe("L2 to Skill durable recovery", () => {
         expect(job()).toMatchObject({ status: "failed", attempts: 1 });
         expect(job().last_error).toBeTruthy();
         expect(db.db.prepare("SELECT id FROM memories WHERE id = ?").get(complete.l1MemoryId)).toBeTruthy();
+        await run();
+        expect(job()).toMatchObject({ status: "failed", attempts: 1 });
         if (scenario === "exhausted") {
-          await run(); await run();
+          await retryWhenDue(); await retryWhenDue();
           expect(job()).toMatchObject({ status: "dead_letter", attempts: 3 });
           expect(skills()).toHaveLength(0);
           expect(calls).toBe(3);
@@ -71,13 +79,13 @@ describe("L2 to Skill durable recovery", () => {
           return;
         }
         recovering = true;
-        await run();
+        await retryWhenDue();
         expect(job()).toMatchObject({ status: "succeeded", attempts: 2 });
         expect(skills()).toHaveLength(1);
         expect(calls).toBe(scenario === "unconfigured" ? 1 : 2);
         await run();
         expect(skills()).toHaveLength(1);
-      } finally { db.close(); }
+      } finally { await service.stop(); db.close(); }
     }
   );
 });

@@ -23,7 +23,11 @@ describe("embedding maintenance current failures", () => {
     }
     await service.rebuildEmbeddings("repair");
     call.mockRejectedValue(new Error("embedding provider unavailable"));
-    for (let attempt = 0; attempt < 6; attempt++) await service.runWorkerOnce(10);
+    // Make retries due explicitly; consecutive immediate drains preserve backoff.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      db.db.prepare("UPDATE evolution_jobs SET available_at=NULL WHERE status='failed'").run();
+      await service.runWorkerOnce(10);
+    }
     expect(db.db.prepare("SELECT attempts,status FROM evolution_jobs WHERE job_type='user_memory_embedding'").all())
       .toEqual([{ attempts: 6, status: "dead_letter" }, { attempts: 6, status: "dead_letter" }]);
     call.mockResolvedValue([1, 0, 0]);
@@ -57,7 +61,11 @@ describe("embedding maintenance current failures", () => {
     expect(changed).toMatchObject({ missing: 1, retryQueue: { failed: 0 } });
     await service.rebuildEmbeddings("repair");
     call.mockRejectedValue(new Error("new content still fails"));
-    for (let attempt = 0; attempt < 6; attempt++) await service.runWorkerOnce(10);
+    // Make retries due explicitly; consecutive immediate drains preserve backoff.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      db.db.prepare("UPDATE evolution_jobs SET available_at=NULL WHERE status='failed'").run();
+      await service.runWorkerOnce(10);
+    }
     expect(await service.embeddingMaintenanceStats()).toMatchObject({ missing: 1, retryQueue: { failed: 1 } });
   });
 

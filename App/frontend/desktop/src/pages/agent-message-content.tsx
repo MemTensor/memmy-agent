@@ -10,6 +10,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { MemmyAgentClient, ResolvedAgentArtifact } from "../api/memmy-agent-client.js";
+import { FileTypeIcon } from "../components/file-type-icon.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { normalizeBrowserAddress, readBrowserPreferences, requestBrowserOpen } from "./browser-panel.js";
 import { writeSettingsBrowserExtensionFocus, writeSettingsExcelConnectionFocus } from "./settings-nav.js";
@@ -18,6 +19,11 @@ export type AgentArtifactClient = {
   resolveArtifact(path: string): ReturnType<MemmyAgentClient["resolveArtifact"]>;
   revealArtifact(path: string): Promise<void>;
   openArtifact(path: string): Promise<void>;
+  /**
+   * Prefer in-app workspace preview when the path belongs to the active
+   * workspace. Returns true when the preview panel handled the open.
+   */
+  previewArtifact?: (path: string) => Promise<boolean>;
 };
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
@@ -38,6 +44,7 @@ interface AgentMessageContentProps {
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
+  deliveredFiles?: ReadonlyArray<{ kind: string; name?: string; path?: string }>;
   deferRender?: boolean;
   deferredRevealDelayMs?: number;
   className?: string;
@@ -51,6 +58,62 @@ const BARE_LOCAL_PATH_RE = /(^|[\s([{（【:：])((?:~\/|\/|[A-Za-z]:[\\/])[^\s<
 const APP_RELATIVE_URL_PATH_RE = /^\/(?:api|assets|static)(?:\/|$)/i;
 const LONG_TEXT_WRAP_CLASS = "break-words [overflow-wrap:anywhere]";
 const LIST_ITEM_BLOCK_TAGS = new Set(["p", "pre", "blockquote", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
+
+function linkDeliveredFileMentions(
+  children: ReactNode,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+  artifactClient: AgentArtifactClient | null | undefined,
+  onPreviewFile: InAppFilePreviewHandler | undefined,
+  isStreaming: boolean | undefined,
+): ReactNode {
+  if (!artifactClient) return children;
+  const files = (deliveredFiles ?? []).flatMap((file) => {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) return [];
+    const name = basename(file.name?.trim() || path);
+    return name ? [{ name, path }] : [];
+  }).sort((left, right) => right.name.length - left.name.length);
+  if (!files.length) return children;
+
+  let key = 0;
+  return Children.toArray(children).flatMap((child) => {
+    if (typeof child !== "string") return [child];
+    const parts: ReactNode[] = [];
+    let cursor = 0;
+    while (cursor < child.length) {
+      let match: { name: string; path: string; index: number } | null = null;
+      for (const file of files) {
+        let index = child.indexOf(file.name, cursor);
+        while (index >= 0 && (
+          /[\w.-]/u.test(child[index - 1] ?? "") || /[\w.-]/u.test(child[index + file.name.length] ?? "")
+        )) index = child.indexOf(file.name, index + 1);
+        if (index >= 0 && (!match || index < match.index || index === match.index && file.name.length > match.name.length)) {
+          match = { ...file, index };
+        }
+      }
+      if (!match) break;
+      if (match.index > cursor) parts.push(child.slice(cursor, match.index));
+      parts.push(<FileReferenceChip key={`delivered-file-${key++}`} path={match.path} label={match.name} variant="link" isStreaming={isStreaming} artifactClient={artifactClient} onPreviewFile={onPreviewFile} />);
+      cursor = match.index + match.name.length;
+    }
+    if (!parts.length) return [child];
+    if (cursor < child.length) parts.push(child.slice(cursor));
+    return parts;
+  });
+}
+
+function findDeliveredFileForInlineCode(
+  code: string,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+): { path: string } | null {
+  for (const file of deliveredFiles ?? []) {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) continue;
+    const name = basename(file.name?.trim() || path);
+    if (code === name || code === basename(path) || code === path) return { path };
+  }
+  return null;
+}
 
 function listItemElementTag(node: ReactNode): string | null {
   if (!isValidElement(node)) {
@@ -146,7 +209,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
-        return <FileReferenceChip path={localPath} label={children} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        return <FileReferenceChip path={localPath} label={children} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
       }
       if (isMailtoHref(href)) {
         return <MailtoLink href={href?.trim() ?? ""}>{children}</MailtoLink>;
@@ -205,16 +268,22 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
       const isInline = !language && !raw.includes("\n");
       if (isInline) {
+        const deliveredFile = props.artifactClient ? findDeliveredFileForInlineCode(code, props.deliveredFiles) : null;
+        if (deliveredFile) {
+          return <FileReferenceChip path={deliveredFile.path} label={code} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        }
         const localPath = cleanPathToken(code);
         if (isLikelyLocalFilePath(localPath)) {
-          return <FileReferenceChip path={localPath} label={localPath} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+          return <FileReferenceChip path={localPath} label={localPath} variant="link" verifiedOnly={Boolean(props.artifactClient)} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
         }
         return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
       }
       return <CodeBlock code={code} language={language} highlight={!props.isStreaming} />;
     },
     p({ children }) {
-      return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>{withBareLocalFileReferences(children, props)}</p>;
+      return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>
+        {linkDeliveredFileMentions(withBareLocalFileReferences(children, props), props.deliveredFiles, props.artifactClient, props.onPreviewFile, props.isStreaming)}
+      </p>;
     },
     li({ children, className }) {
       return <li className={className}>{withListItemLead(withBareLocalFileReferences(children, props))}</li>;
@@ -246,7 +315,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     td({ children, style }) {
       return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{withBareLocalFileReferences(children, props)}</td>;
     }
-  }), [props.artifactClient, props.isStreaming, props.onPreviewFile]);
+  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -483,6 +552,7 @@ function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, ne
     && previous.isStreaming === next.isStreaming
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
+    && previous.deliveredFiles === next.deliveredFiles
     && previous.deferRender === next.deferRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.className === next.className
@@ -702,12 +772,13 @@ function FileReferenceChip(props: {
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
   preferPreview?: boolean;
+  variant?: "chip" | "link";
+  verifiedOnly?: boolean;
 }) {
   const [resolved, setResolved] = useState<ResolvedAgentArtifact | null>(null);
   const [failed, setFailed] = useState(false);
   const [actionState, setActionState] = useState<"idle" | "working" | "error">("idle");
   const [copiedTarget, setCopiedTarget] = useState<AttachmentCopyTarget | null>(null);
-  const { t } = useTranslation();
   const cleanPath = cleanPathToken(props.path);
 
   useEffect(() => {
@@ -719,6 +790,7 @@ function FileReferenceChip(props: {
         cancelled = true;
       };
     }
+    setResolved(null);
     setFailed(false);
     void props.artifactClient.resolveArtifact(cleanPath)
       .then((artifact) => {
@@ -738,7 +810,7 @@ function FileReferenceChip(props: {
   }, [cleanPath, props.artifactClient, props.isStreaming]);
 
   const handleAttachmentAction = async () => {
-    if (actionState === "working") return;
+    if (props.isStreaming || actionState === "working") return;
     setActionState("working");
     setCopiedTarget(null);
     if (!resolved) {
@@ -767,11 +839,11 @@ function FileReferenceChip(props: {
         <button
           type="button"
           onClick={() => void handleAttachmentAction()}
-          disabled={actionState === "working"}
+        disabled={props.isStreaming || actionState === "working"}
           className="block max-w-full cursor-pointer text-left disabled:cursor-wait disabled:opacity-70"
         >
           <img src={resolved.media_url} alt={resolved.name} className="agent-message-content__preview-image" />
-          <span className="mt-1 inline-flex items-center gap-1 text-xs text-text-ink/45"><ImageIcon size={12} />{actionState === "working" ? t("agent.attachment.opening") : resolved.name}</span>
+          <span className="mt-1 inline-flex items-center gap-1 text-xs text-text-ink/45"><ImageIcon size={12} />{resolved.name}</span>
         </button>
         {actionState === "error" ? (
           <AttachmentActionError path={resolved.path} url={resolved.media_url} copiedTarget={copiedTarget} onCopy={(target, value) => void handleCopy(target, value)} />
@@ -784,18 +856,27 @@ function FileReferenceChip(props: {
     return <video src={resolved.media_url} controls className="my-3 max-h-80 max-w-full rounded-card border border-border-stone/30" />;
   }
 
+  if (props.verifiedOnly && !resolved) {
+    return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{props.label ?? cleanPath}</code>;
+  }
+
   const label = props.label ?? resolved?.name ?? basename(cleanPath);
+  const displayLabel = props.variant === "link" && typeof label === "string" && isLikelyLocalPath(label)
+    ? basename(label)
+    : label;
   return (
     <>
       <button
         type="button"
         title={cleanPath}
         onClick={() => void handleAttachmentAction()}
-        disabled={actionState === "working" || (!resolved && !failed)}
-        className={`agent-message-content__file-chip inline-flex max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-tag border px-2 py-1 align-baseline text-xs disabled:cursor-wait disabled:opacity-70 ${failed || actionState === "error" ? "border-status-error/30 bg-status-error/5 text-status-error" : "border-border-stone/40 bg-canvas-oat/70 text-text-ink/65 hover:text-action-sky"}`}
+        disabled={props.isStreaming || actionState === "working" || (!resolved && !failed)}
+        className={props.variant === "link"
+          ? `agent-message-content__file-chip agent-message-content__file-link${failed || actionState === "error" ? " agent-message-content__file-link--error" : ""}`
+          : `agent-message-content__file-chip inline-flex max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-tag border px-2 py-1 align-baseline text-xs disabled:cursor-wait disabled:opacity-70 ${failed || actionState === "error" ? "border-status-error/30 bg-status-error/5 text-status-error" : "border-border-stone/40 bg-canvas-oat/70 text-text-ink/65 hover:text-action-sky"}`}
       >
-        <FileText size={12} className="shrink-0" />
-        <span className="min-w-0 truncate">{actionState === "working" ? t("agent.attachment.opening") : label}</span>
+        {props.variant === "link" ? null : <FileTypeIcon name={resolved?.name ?? cleanPath} surface="inline" />}
+        <span className={props.variant === "link" ? LONG_TEXT_WRAP_CLASS : "min-w-0 truncate"}>{displayLabel}</span>
       </button>
       {actionState === "error" ? (
         <AttachmentActionError path={resolved?.path ?? cleanPath} url={resolved?.media_url} copiedTarget={copiedTarget} onCopy={(target, value) => void handleCopy(target, value)} />
@@ -835,6 +916,15 @@ export async function runAttachmentAction(input: {
       ...(actionUrl ? { url: actionUrl } : {}),
     });
     if (handled) return "opened";
+  }
+  if (actionPath && input.artifactClient?.previewArtifact) {
+    try {
+      if (await input.artifactClient.previewArtifact(actionPath)) {
+        return "opened";
+      }
+    } catch {
+      // Continue to system open / reveal / download fallbacks.
+    }
   }
 
   if (actionPath && input.artifactClient) {
@@ -1063,12 +1153,15 @@ export function localArtifactPathFromHref(href: string | undefined): string | nu
       return null;
     }
   }
-  return isLikelyLocalPath(value) ? cleanPathToken(value) : null;
+  const decoded = decodeUriComponentSafely(value);
+  return isLikelyLocalPath(decoded) ? cleanPathToken(decoded) : null;
 }
 
 function isLikelyLocalPath(value: string): boolean {
   if (!value || isDirectMediaUrl(value) || APP_RELATIVE_URL_PATH_RE.test(value)) return false;
-  if (/^[A-Za-z]:[\\/]/.test(value)) return true;
+  if (/^[a-z]:[\\/]/i.test(value) || value.startsWith("\\\\")) {
+    return true;
+  }
   if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   return value.includes("/") && (value.startsWith("/") || value.startsWith("~/") || /^[A-Za-z0-9_.@+-]+\//.test(value));
 }

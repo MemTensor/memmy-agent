@@ -379,6 +379,7 @@ export class AgentDefaults extends Base {
   maxToolIterations = 200;
   maxConcurrentSubagents = 1;
   maxToolResultChars = 16_000;
+  toolResultCompressionEnabled = false;
   providerRetryMode = "standard";
   toolHintMaxLength = 40;
   reasoningEffort: string | null = null;
@@ -388,7 +389,7 @@ export class AgentDefaults extends Base {
   unifiedSession = false;
   disabledSkills: string[] = [];
   sessionTtlMinutes = 0;
-  maxMessages = 120;
+  maxMessages = 80;
   consolidationRatio = 0.5;
   dream: DreamConfig;
 
@@ -414,6 +415,8 @@ export class AgentDefaults extends Base {
       this.maxConcurrentSubagents,
     );
     this.maxToolResultChars = pick(init, ["maxToolResultChars"], this.maxToolResultChars);
+    this.toolResultCompressionEnabled = pick(init, ["toolResultCompressionEnabled"], false);
+    if (typeof this.toolResultCompressionEnabled !== "boolean") throw new ValueError("toolResultCompressionEnabled must be a boolean");
     this.providerRetryMode = pick(init, ["providerRetryMode"], this.providerRetryMode);
     this.toolHintMaxLength = pick(init, ["toolHintMaxLength"], this.toolHintMaxLength);
     this.reasoningEffort = pick(init, ["reasoningEffort"], null);
@@ -423,7 +426,7 @@ export class AgentDefaults extends Base {
     this.unifiedSession = pick(init, ["unifiedSession"], false);
     this.disabledSkills = assertStringArray("disabledSkills", pick(init, ["disabledSkills"], []));
     this.sessionTtlMinutes = pick(init, ["idleCompactAfterMinutes", "sessionTtlMinutes"], 0);
-    this.maxMessages = pick(init, ["maxMessages"], 120);
+    this.maxMessages = pick(init, ["maxMessages"], 80);
     assertIntRange("maxMessages", this.maxMessages, 0);
     this.consolidationRatio = pick(init, ["consolidationRatio"], 0.5);
     assertIntRange("maxConcurrentSubagents", this.maxConcurrentSubagents, 1);
@@ -451,6 +454,7 @@ export class AgentDefaults extends Base {
       maxToolIterations: this.maxToolIterations,
       maxConcurrentSubagents: this.maxConcurrentSubagents,
       maxToolResultChars: this.maxToolResultChars,
+      toolResultCompressionEnabled: this.toolResultCompressionEnabled,
       providerRetryMode: this.providerRetryMode,
       toolHintMaxLength: this.toolHintMaxLength,
       reasoningEffort: this.reasoningEffort,
@@ -617,6 +621,7 @@ export class ProviderConfig extends Base {
 export class ModelEndpointConfig extends Base {
   apiBase: string;
   protocol: ModelEndpointProtocol;
+  inheritProviderDefaults?: boolean;
   apiKey: string | null;
   extraHeaders: Dict<string> | null;
   extraBody: Dict | null;
@@ -632,6 +637,8 @@ export class ModelEndpointConfig extends Base {
     super(init);
     this.apiBase = assertRequiredString("provider endpoint apiBase", init.apiBase);
     this.protocol = assertOneOf("provider endpoint protocol", init.protocol, ENDPOINT_PROTOCOLS);
+    this.inheritProviderDefaults = init.inheritProviderDefaults === undefined ? undefined
+      : assertBoolean("provider endpoint inheritProviderDefaults", init.inheritProviderDefaults);
     this.apiKey = pick(init, ["apiKey"], null);
     this.extraHeaders = pick(init, ["extraHeaders"], null);
     this.extraBody = pick(init, ["extraBody"], null);
@@ -642,6 +649,7 @@ export class ModelEndpointConfig extends Base {
   override toObject(): Dict {
     return omitUndefined({
       ...this,
+      inheritProviderDefaults: this.inheritProviderDefaults,
       apiKey: this.apiKey ?? undefined,
       extraHeaders: this.extraHeaders ?? undefined,
       extraBody: this.extraBody ?? undefined,
@@ -1452,7 +1460,10 @@ export class Config extends Base {
     model: string | null = null,
     opts: { preset?: ModelPresetConfig | null } = {},
   ): string | null {
-    return this.getProvider(model, opts)?.apiKey ?? null;
+    const preset = opts.preset ?? this.resolvePreset();
+    const provider = this.getProvider(model, { preset });
+    const endpoint = provider?.endpoints[preset.endpoint];
+    return endpoint?.inheritProviderDefaults === false ? endpoint.apiKey || null : provider?.apiKey ?? null;
   }
 
   getApiBase(

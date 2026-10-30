@@ -52,12 +52,11 @@ function providerInit(
 ): any {
   const endpoint = exactEndpoint(config, providerConfig, preset);
   const protocol = endpoint?.protocol;
+  const effective = endpointOptions(providerConfig, endpoint);
   return {
-    apiKey: endpoint?.apiKey ?? providerConfig?.apiKey ?? null,
+    ...effective,
     apiBase: endpoint?.apiBase ?? config.getApiBase(model, { preset }),
     defaultModel: model,
-    extraHeaders: mergedRecord(providerConfig?.extraHeaders, endpoint?.extraHeaders),
-    extraBody: mergedRecord(providerConfig?.extraBody, endpoint?.extraBody),
     apiType: protocol === "openai-responses"
       ? "responses"
       : protocol === "openai-chat-completions" ? "chatCompletions" : "auto",
@@ -70,6 +69,16 @@ function mergedRecord(
   overrides: Record<string, any> | null | undefined,
 ): Record<string, any> {
   return { ...(defaults ?? {}), ...(overrides ?? {}) };
+}
+
+function endpointOptions(provider: ProviderConfig | null, endpoint: ProviderConfig["endpoints"][string] | null) {
+  const independent = endpoint?.inheritProviderDefaults === false;
+  return {
+    apiKey: independent ? endpoint.apiKey || null : endpoint?.apiKey ?? provider?.apiKey ?? null,
+    extraHeaders: mergedRecord(independent ? null : provider?.extraHeaders, endpoint?.extraHeaders),
+    extraBody: mergedRecord(independent ? null : provider?.extraBody, endpoint?.extraBody),
+    inheritProviderDefaults: !independent,
+  };
 }
 
 function backendForCustomProtocol(protocol: string | undefined): ProviderSpec["backend"] {
@@ -116,7 +125,7 @@ function makeProviderCore(
       throw new ValueError("Azure OpenAI requires apiKey and apiBase in config.");
     }
   } else if (opts.validateCredentials !== false && backend === "openai_compat" && !model.startsWith("bedrock/")) {
-    const exempt = Boolean(spec?.isOauth || spec?.isLocal || spec?.isDirect);
+    const exempt = Boolean(spec?.isOauth || spec?.isLocal || spec?.isDirect || init.inheritProviderDefaults === false);
     if (!init.apiKey && !exempt) {
       throw new ValueError(`No API key configured for provider '${providerName}'.`);
     }
@@ -200,14 +209,15 @@ export function providerSignature(
   const fallbackSignature = (fallback: ModelPresetConfig): any[] => {
     const fallbackProvider = config.getProvider(fallback.model, { preset: fallback });
     const fallbackEndpoint = exactEndpoint(config, fallbackProvider, fallback);
+    const effective = endpointOptions(fallbackProvider, fallbackEndpoint);
     return [
       fallback.model,
       fallback.provider,
       config.getProviderName(fallback.model, { preset: fallback }),
-      fallbackEndpoint?.apiKey ?? config.getApiKey(fallback.model, { preset: fallback }),
+      effective.apiKey,
       fallbackEndpoint?.apiBase ?? config.getApiBase(fallback.model, { preset: fallback }),
-      mergedRecord(fallbackProvider?.extraHeaders, fallbackEndpoint?.extraHeaders),
-      mergedRecord(fallbackProvider?.extraBody, fallbackEndpoint?.extraBody),
+      effective.extraHeaders,
+      effective.extraBody,
       fallbackEndpoint?.protocol ?? fallbackProvider?.apiType ?? "auto",
       (fallbackProvider as any)?.region ?? null,
       (fallbackProvider as any)?.profile ?? null,
@@ -215,18 +225,20 @@ export function providerSignature(
       fallback.temperature,
       fallback.reasoningEffort,
       fallback.contextWindowTokens,
+      ...(!effective.inheritProviderDefaults ? [false] : []),
     ];
   };
   const endpoint = exactEndpoint(config, providerConfig, resolved);
+  const effective = endpointOptions(providerConfig, endpoint);
 
   return [
     resolved.model,
     resolved.provider,
     config.getProviderName(resolved.model, { preset: resolved }),
-    endpoint?.apiKey ?? config.getApiKey(resolved.model, { preset: resolved }),
+    effective.apiKey,
     endpoint?.apiBase ?? config.getApiBase(resolved.model, { preset: resolved }),
-    mergedRecord(providerConfig?.extraHeaders, endpoint?.extraHeaders),
-    mergedRecord(providerConfig?.extraBody, endpoint?.extraBody),
+    effective.extraHeaders,
+    effective.extraBody,
     endpoint?.protocol ?? providerConfig?.apiType ?? "auto",
     (providerConfig as any)?.region ?? null,
     (providerConfig as any)?.profile ?? null,
@@ -234,6 +246,7 @@ export function providerSignature(
     resolved.temperature,
     resolved.reasoningEffort,
     resolved.contextWindowTokens,
+    ...(!effective.inheritProviderDefaults ? [false] : []),
     fallbackPresets.map(fallbackSignature),
   ];
 }

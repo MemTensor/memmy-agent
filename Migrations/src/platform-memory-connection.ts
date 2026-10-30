@@ -30,10 +30,21 @@ export function isPlatformMemoryConnection(
   capability: string,
   connection: RuntimeConfigDocument,
 ): boolean {
+  if (connection.inheritProviderDefaults === false) return false;
   if (!MODELS[capability] || connection.model !== MODELS[capability]) return false;
-  if (connection.sourceProvider === "memmy_account" || connection.provider === "memmy_account") return true;
-  if (!["openai", "openai_compatible"].includes(String(connection.provider))) return false;
+  const protocol = connection.protocol;
+  const compatibleProtocol = capability === "embedding" ? "openai-embeddings" : "openai-chat-completions";
+  if (protocol !== undefined && protocol !== "memmy-account" && protocol !== compatibleProtocol) return false;
+  // Editing a projected platform connection can leave either source marker
+  // behind. Only its effective connection, not that marker, proves identity.
+  if (!["openai", "openai_compatible", "memmy_account"].includes(String(connection.provider))) return false;
   const account = record(record(config.providers).memmy_account);
+  const activeUserId = record(config.app).userId;
+  const activeOwner = typeof activeUserId === "string" ? activeUserId.trim() : "";
+  const providerOwner = typeof account.ownerAccountId === "string" ? account.ownerAccountId.trim() : "";
+  // Legacy files may omit ownership, but an explicit different owner must
+  // never authorize discarding the current user's connection.
+  if (activeOwner && providerOwner && activeOwner !== providerOwner) return false;
   const key = connection.apiKey;
   if (typeof key !== "string" || !key.trim()) return false;
   const endpoints = Object.values(record(account.endpoints));

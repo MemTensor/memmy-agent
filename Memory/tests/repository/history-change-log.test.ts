@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MemoryDb } from "../../src/storage/db.js";
 import { Repositories } from "../../src/storage/repositories.js";
+import { withJobLeaseGuard } from "../../src/storage/job-lease-context.js";
 import { compactHistoryChangeJson, compactHistoryChangePayload } from "../../src/storage/history-change-snapshot.js";
 import { sha256Hex } from "../../src/contracts/memory-canonical-json.js";
 import type { MemoryRow } from "../../src/types.js";
@@ -23,6 +24,34 @@ function history(state: "pending" | "processed" | "skipped" | undefined = "pendi
 }
 
 describe("History change log storage", () => {
+  it("lets independently scheduled History compaction finish after its originating task completes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-history-compaction-lease-"));
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    try {
+      const repos = new Repositories(db.db);
+      // Complete the initial empty startup pass so it cannot mask the pass
+      // deliberately scheduled from an active task context below.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const current = new Date().toISOString();
+      repos.runtime.enqueueJob({ id: "history-maintenance-origin", jobType: "reflection", status: "queued",
+        userId: "user", payload: {}, attempts: 0, maxAttempts: 3, createdAt: current, updatedAt: current });
+      const [claim] = repos.runtime.leaseQueuedJobs(1);
+      const raw = JSON.stringify(history());
+      db.db.prepare(`INSERT INTO memory_change_log
+        (memory_id, user_id, change_type, after_json, source, created_at)
+        VALUES ('observation_test', 'user', 'updated', ?, 'legacy', ?)`).run(raw, at);
+      withJobLeaseGuard(claim!, () => repos.runtime.isJobLeaseHeld(claim!), () => new Repositories(db.db));
+      expect(repos.runtime.completeJob(claim!.id, undefined, claim)?.status).toBe("succeeded");
+      await waitUntil(() => !(db.db.prepare("SELECT after_json FROM memory_change_log").get() as { after_json: string })
+        .after_json.includes('"source_content":'));
+      expect((db.db.prepare("SELECT after_json FROM memory_change_log").get() as { after_json: string })
+        .after_json).toBe(JSON.stringify(compactHistoryChangePayload(history())));
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("omits input copies without mutating the current snapshot and records exact UTF-8 evidence", () => {
     const original = history();
     const before = JSON.stringify(original);

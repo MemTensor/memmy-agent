@@ -4,10 +4,36 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MemoryDb } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
+import { JobLeaseLostError, withJobLeaseGuard } from "../../src/storage/job-lease-context.js";
 
 const LOG_RETENTION_LIMIT = 10_000;
 
 describe("runtime log retention", () => {
+  it("prunes task-generated logs after the originating task completes while still rejecting stale business writes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-log-retention-lease-"));
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    try {
+      const runtime = new Repositories(db.db).runtime;
+      seedChangeLogs(db, LOG_RETENTION_LIMIT);
+      const at = new Date().toISOString();
+      runtime.enqueueJob({ id: "log-job", jobType: "reflection", status: "queued", userId: "user",
+        payload: {}, attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+      const [claim] = runtime.leaseQueuedJobs(1);
+      const append = () => runtime.appendChange({ memoryId: "job-memory", userId: "user",
+        changeType: "test", source: "worker", createdAt: isoAt(LOG_RETENTION_LIMIT) });
+      withJobLeaseGuard(claim!, () => runtime.isJobLeaseHeld(claim!), append);
+      expect(countRows(db, "memory_change_log")).toBe(LOG_RETENTION_LIMIT + 1);
+      expect(runtime.completeJob(claim!.id, undefined, claim)?.status).toBe("succeeded");
+      await waitForRowCount(db, "memory_change_log", LOG_RETENTION_LIMIT);
+      expect(db.db.prepare("SELECT seq FROM memory_change_log WHERE seq = 1").get()).toBeUndefined();
+      expect(() => withJobLeaseGuard(claim!, () => runtime.isJobLeaseHeld(claim!), append)).toThrow(JobLeaseLostError);
+      expect(countRows(db, "memory_change_log")).toBe(LOG_RETENTION_LIMIT);
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps only the latest 10000 rows in log tables and leaves other tables untouched", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-log-retention-"));
     try {

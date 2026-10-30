@@ -703,6 +703,7 @@ describe("repository sqlite schema contract", () => {
         DROP TABLE l3_world_model_scopes;
         DROP INDEX uq_evolution_jobs_l3_immutable_dedupe;
         DROP INDEX uq_evolution_jobs_scope_seq;
+        DROP TRIGGER evolution_jobs_policy_dirty;
         ALTER TABLE evolution_jobs DROP COLUMN scope_key;
         ALTER TABLE evolution_jobs DROP COLUMN scope_seq;
         DELETE FROM schema_migrations;

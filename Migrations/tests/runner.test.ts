@@ -117,9 +117,10 @@ describe("migration runner", () => {
       "v1.1.9/0002-rename-memmy-computer-use-mcp",
       "v1.2.4/0001-remove-platform-memory-duplicates",
       "v1.2.4/0002-remove-reintroduced-platform-memory-duplicates",
+      "v1.2.6/0001-preserve-independent-memory-connections",
     ]);
     expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
-    expect(first.results).toEqual({ scanned: 10, changed: 4, ignored: 6 });
+    expect(first.results).toEqual({ scanned: 11, changed: 4, ignored: 7 });
     expect(second).toEqual({
       applied: [],
       skipped: [
@@ -134,6 +135,7 @@ describe("migration runner", () => {
         "v1.1.9/0002-rename-memmy-computer-use-mcp",
         "v1.2.4/0001-remove-platform-memory-duplicates",
         "v1.2.4/0002-remove-reintroduced-platform-memory-duplicates",
+        "v1.2.6/0001-preserve-independent-memory-connections",
       ],
       deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
       results: { scanned: 0, changed: 0, ignored: 0 },
@@ -234,6 +236,12 @@ describe("migration runner", () => {
           type: "runtime-config",
           key: runtimeConfigTargetKey(configPath),
         },
+      },
+      {
+        id: "v1.2.6/0001-preserve-independent-memory-connections",
+        introducedIn: "1.2.6",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: { type: "runtime-config", key: runtimeConfigTargetKey(configPath) },
       },
     ]);
   });

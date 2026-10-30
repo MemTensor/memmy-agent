@@ -1,5 +1,5 @@
 import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import {
   captureJob,
@@ -13,7 +13,7 @@ import {
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
 
-afterEach(cleanup);
+afterEach(async () => { vi.useRealTimers(); await cleanup(); });
 
 describe("turn.judge.v1 capture (switch on)", () => {
   it("keeps the capture-only decision while the switch is off", async () => {
@@ -61,10 +61,10 @@ describe("turn.judge.v1 capture (switch on)", () => {
     const session = openSession(service, "turn-judge-cutoff");
     (await service.completeTurn("t1", { sessionId: session.sessionId, query: "第一轮：写部署脚本", answer: "第一轮回答：脚本在此。" }));
     await service.runWorkerOnce(20);
-    (await service.completeTurn("t2", { sessionId: session.sessionId, query: "第二轮：加上回滚", answer: "第二轮回答。" }));
+    const secondTurn = await service.completeTurn("t2", { sessionId: session.sessionId, query: "第二轮：加上回滚", answer: "第二轮回答。" });
     (await service.completeTurn("t3", { sessionId: session.sessionId, query: "第三轮：再加日志", answer: "第三轮回答。" }));
-    // Judgments of one session run in turn order: the third waits for the second.
-    await service.runWorkerOnce(20);
+    // A targeted one-job budget exposes the intermediate ordering boundary.
+    await service.runWorkerOnce(1, { targetMemoryIds: [secondTurn.l1MemoryId] });
     expect(judgeCalls.map((call) => call.user.slice(0, 3))).toEqual(["第一轮", "第二轮"]);
     await service.runWorkerOnce(20);
 
@@ -152,6 +152,9 @@ describe("turn.judge.v1 capture (switch on)", () => {
     const turn = (await service.completeTurn("t1", { sessionId: session.sessionId, query: "帮我写一个部署脚本", answer: "好的。" }));
     await service.runWorkerOnce(20);
     (await service.completeTurn("t2", { sessionId: session.sessionId, query: "另一轮", answer: "好的。" }));
+    const retry = db.db.prepare("SELECT available_at FROM evolution_jobs WHERE job_type='trace_summary' AND target_memory_id=?").get(turn.l1MemoryId) as { available_at: string };
+    expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(retry.available_at));
     await service.runWorkerOnce(20);
 
     const firstTurnCalls = judgeCalls.filter((call) => call.user.startsWith("帮我"));
@@ -247,6 +250,9 @@ describe("turn.judge.v1 capture (switch on)", () => {
       toolResults: [{ toolCallId: "call-1", output: "MemTotal: 32GB", success: true }]
     }));
     await service.runWorkerOnce(20);
+    const retry = db.db.prepare("SELECT available_at FROM evolution_jobs WHERE job_type='trace_summary' AND target_memory_id=?").get(turn.l1MemoryId) as { available_at: string };
+    expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.parse(retry.available_at));
     await service.runWorkerOnce(20);
 
     expect(judgeCalls).toHaveLength(2);

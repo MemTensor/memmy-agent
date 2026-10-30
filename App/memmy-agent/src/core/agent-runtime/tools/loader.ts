@@ -1,3 +1,4 @@
+import { managedExecutionRequired } from "../managed-execution.js";
 import { DesktopScreenCaptureTool } from '../../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { ToolContext } from "./context.js";
 import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
 import { AgentSourceTool } from "./agent-source.js";
+import { AskQuestionTool } from "./ask-question.js";
 import { CronTool } from "./cron.js";
 import { ComputerHistoryTool } from "../../../tools/computer-history/mac/computer-history.js";
 import {
@@ -18,6 +20,7 @@ import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
 import { ImageGenerationTool } from "./image-generation.js";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
+import { CreateTaskPlanTool, GetTaskPlanTool, UpdateTaskPlanTool } from "./task-plan.js";
 import { MessageTool } from "./message.js";
 import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
@@ -52,11 +55,13 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   ExcelLiveTool,
   AgentSourceTool,
   ApplyPatchTool,
+  AskQuestionTool,
   ComputerHistoryTool,
   ComputerHistoryStatusTool,
   ComputerHistoryGetSettingsTool,
   ComputerHistoryUpdateSettingsTool,
   CreateGoalTool,
+  CreateTaskPlanTool,
   CronTool,
   EditFileTool,
   ExecTool,
@@ -66,6 +71,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   ListDirTool,
   ListExecSessionsTool,
   GetGoalTool,
+  GetTaskPlanTool,
   MessageTool,
   ReadFileTool,
   SetOutputDirectoryTool,
@@ -73,6 +79,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   WebFetchTool,
   WebSearchTool,
   UpdateGoalTool,
+  UpdateTaskPlanTool,
   WriteFileTool,
   WriteStdinTool,
   ...BROWSER_TOOL_CLASSES,
@@ -224,6 +231,8 @@ export class ToolLoader {
   }
 
   discoverPlugins(): ToolClass[] {
+    // Workspace code cannot run before its file/process permissions have been checked.
+    if (managedExecutionRequired()) return [];
     const out: ToolClass[] = [];
     const seenPackages = new Set<string>();
     for (const nodeModules of nearestNodeModulesRoots(this.workspace)) {

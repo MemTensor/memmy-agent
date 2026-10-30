@@ -525,20 +525,12 @@ NODE
 
 prune_better_sqlite3_build_artifacts() {
   local module_dir="$1"
-  local native_file="$module_dir/build/Release/better_sqlite3.node"
+  local target_cpu="$2"
 
-  if [ ! -f "$native_file" ]; then
-    return
+  rm -rf "$module_dir/build" "$module_dir/deps" "$module_dir/src"
+  if [ -d "$module_dir/prebuilds" ]; then
+    find "$module_dir/prebuilds" -mindepth 1 -type f ! -name "darwin-$target_cpu.node" -delete
   fi
-
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  mkdir -p "$tmp_dir/build/Release"
-  cp "$native_file" "$tmp_dir/build/Release/better_sqlite3.node"
-  rm -rf "$module_dir/build" "$module_dir/deps"
-  mkdir -p "$module_dir/build/Release"
-  cp "$tmp_dir/build/Release/better_sqlite3.node" "$native_file"
-  rm -rf "$tmp_dir"
 }
 
 prune_onnxruntime_native_artifacts() {
@@ -696,7 +688,7 @@ verify_desktop_native_deployment_target() {
 verify_mac_memory_native_artifacts() {
   local target_cpu="$1"
 
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"
   require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
   require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
@@ -851,7 +843,7 @@ PY
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
   fi
-  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/prebuilds/darwin-$target_cpu.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
@@ -928,7 +920,7 @@ prune_mac_runtime_artifacts() {
   rm -f "$RUNTIME_DIR/memmy-agent/dist/skills/README.md"
 
   while IFS= read -r module_dir; do
-    prune_better_sqlite3_build_artifacts "$module_dir"
+    prune_better_sqlite3_build_artifacts "$module_dir" "$TARGET_CPU"
   done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
 
   while IFS= read -r napi_dir; do
@@ -1049,14 +1041,6 @@ package_step_start "Resolve Memory runtime lockfile"
 npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Install Memory runtime production dependencies"
 npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"
-package_step_start "Rebuild Memory native modules for Electron"
-ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
-node_modules/.bin/electron-rebuild \
-  -f \
-  -v "$ELECTRON_VERSION" \
-  -a "$TARGET_CPU" \
-  -w better-sqlite3 \
-  -m "$RUNTIME_DIR/memory"
 package_step_start "Install memmy-agent runtime production dependencies"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
@@ -1153,13 +1137,6 @@ package_step_start "Verify memmy-agent runtime exports"
     if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
   '
 )
-package_step_start "Rebuild memmy-agent native modules for Electron"
-node_modules/.bin/electron-rebuild \
-  -f \
-  -v "$ELECTRON_VERSION" \
-  -a "$TARGET_CPU" \
-  -w better-sqlite3 \
-  -m "$RUNTIME_DIR/memmy-agent"
 package_step_start "Create CLI launchers"
 create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/src/cli/index.js" resource
 create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"
@@ -1173,6 +1150,9 @@ package_step_start "Verify packaged runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_DIR"
+package_step_start "Prepare legacy plugin migration state"
+node "$ROOT_DIR/scripts/internal/shared/prepare-plugin-migration-state.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins"
 package_step_start "Prepare bundled embedding model"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"

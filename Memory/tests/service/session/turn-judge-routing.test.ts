@@ -68,7 +68,13 @@ function jobsOf(db: Db, jobType: string, episodeId?: string): Array<Record<strin
 }
 
 async function settle(service: ReturnType<typeof createTestService>["service"], rounds = 4): Promise<void> {
-  for (let round = 0; round < rounds; round += 1) await service.runWorkerOnce(30);
+  for (let round = 0; round < rounds; round += 1) {
+    const result = await service.runWorkerOnce(30);
+    if (!result.leased) {
+      const row = service["repos"].db.prepare("SELECT MIN(available_at) AS at FROM evolution_jobs WHERE status='failed' AND failure_count < max_attempts AND blocked_reason IS NULL").get() as { at: string | null };
+      if (row.at) { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Math.max(Date.now(), Date.parse(row.at))); }
+    }
+  }
 }
 
 describe("turn.judge.v1 routing (switch on)", () => {
@@ -488,7 +494,7 @@ describe("representative feedback for the reward fallback", () => {
     const jobs = repo.runtime.leaseQueuedJobs(10, 60, undefined, false, ["trace_summary"]);
     expect(jobs.map(job => job.targetMemoryId)).toEqual([second.l1MemoryId]);
     expect(repo.runtime.leaseQueuedJobs(10, 60, [third.l1MemoryId], false, ["trace_summary"])).toEqual([]);
-    repo.runtime.failJob(jobs[0]!.id, "transient model failure");
+    repo.runtime.failJob(jobs[0]!.id, "transient model failure", new Date().toISOString(), false, jobs[0]);
     expect(repo.runtime.leaseQueuedJobs(10, 60, [third.l1MemoryId], false, ["trace_summary"])).toEqual([]);
     repo.runtime.requeueFailedJobs();
     await settle(service, 8);

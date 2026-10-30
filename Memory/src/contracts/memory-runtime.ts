@@ -158,7 +158,9 @@ export type RecallEvidenceOutput = z.infer<typeof RecallEvidenceOutputSchema>;
 export const MemoryMetricsSchema = z.object({
   value: z.number().optional(),
   alpha: z.number().optional(),
-  reflectionDone: z.boolean()
+  reflectionDone: z.boolean(),
+  valuePending: z.boolean().optional(),
+  alphaPending: z.boolean().optional()
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 
@@ -494,6 +496,22 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
+
+/** Generate vectors with the embedding model currently owned by the Memory runtime. */
+export const EmbeddingInferenceInputSchema = z.object({
+  texts: z.array(z.string().min(1).max(16_000)).min(1).max(256),
+  role: z.enum(["query", "document"]).default("document")
+}).superRefine((input, context) => {
+  const totalCharacters = input.texts.reduce((sum, text) => sum + text.length, 0);
+  if (totalCharacters > 200_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["texts"],
+      message: "Total embedding input exceeds 200000 characters"
+    });
+  }
+});
+export type EmbeddingInferenceInput = z.input<typeof EmbeddingInferenceInputSchema>;
 
 /** Schema for default search output. */
 export const DefaultSearchOutputSchema = z.object({

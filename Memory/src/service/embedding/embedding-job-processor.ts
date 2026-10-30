@@ -339,10 +339,7 @@ export class EmbeddingJobProcessor {
       attemptCount: item.job.attempts,
       source: "worker.embedding",
       sourceHash: item.sourceHash,
-      allowedProcessingStates: ["embedding_pending", "embedding"],
-      finalize: (_saved, hadProcessing, at) => {
-        if (hadProcessing) this.deps.repos.runtime.completeJob(item.job.id, at);
-      }
+      allowedProcessingStates: ["embedding_pending", "embedding"]
     });
   }
 

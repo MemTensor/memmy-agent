@@ -128,6 +128,7 @@ export interface AgentSourceExecutor {
     installType?: "manual" | "auto_inject"
   ): Promise<unknown>;
   startAutomation(): void;
+  reconcileScanPermission?(): Promise<void>;
   dispose(): void | Promise<void>;
 }
 
@@ -194,6 +195,9 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let progressBeforePause: ScanProgress | null = null;
   let resumePausedScan: (() => void) | undefined;
   let disposed = false;
+  let cancellationCompletion: Promise<ScanControlResult> | undefined;
+  let lastPermissionCheck = 0;
+  let automationGeneration = 0;
   let canceling = false;
   let clearing = false;
   let automationStarted = false;
@@ -251,7 +255,22 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     return { executorAvailable: true, sources };
   }
 
+  function canScan(): boolean {
+    const permission = loadMemmyConfig(configPath).config.agentAccess.scanPermission;
+    return permission === undefined || permission === "scan_only" || permission === "scan_and_write_skill";
+  }
+
+  async function reconcileScanPermission(): Promise<void> {
+    if (canScan()) return;
+    automationGeneration += 1;
+    const automation = activeAutomation;
+    await cancelScan();
+    // Already-started installation must settle before acknowledging revocation.
+    await automation;
+  }
+
   async function startScan(input: unknown): Promise<{ accepted: true; jobId: string; attemptId?: string; attemptStartedAt?: string; version?: ScanVersion }> {
+    if (!canScan()) throw new MemoryServiceError("forbidden", "Agent source scanning is not authorized");
     if (clearing) throw new MemoryServiceError("conflict", "Clearing Memory data; try again after it completes");
     if (canceling) throw new MemoryServiceError("conflict", "Canceling the previous scan");
     if (disposed) throw new MemoryServiceError("conflict", "Agent source executor is shutting down");
@@ -311,7 +330,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     progressBeforePause = null;
     const controller = new AbortController();
     scanAbortController = controller;
-    const activeScan = runScan(request, controller.signal, jobId).then(() => {
+    const sourceIds = request.sourceId === "all"
+      ? registry.list().map(adapter => adapter.descriptor.sourceId) : [request.sourceId];
+    const activeScan = options.service.withAgentSourceScanPermit(sourceIds, controller.signal,
+      () => runScan(request, controller.signal, jobId)).then(() => {
       if (scan.jobId !== jobId || controller.signal.aborted) return;
       setScan({ ...scan, running: false, completedAt: scan.completedAt ?? new Date().toISOString() });
       logger.info("scan.completed", { jobId, sourceId: request.sourceId });
@@ -584,6 +606,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
 
   async function cancelScan(input: ScanControlInput = {}): Promise<ScanControlResult> {
     if (!matchesScanExecution(scan, input.expectedExecution) || (input.expectedVersion && (!scan.version || compareScanVersions(scan.version, input.expectedVersion) !== 0))) return controlResult("conflict");
+    if (cancellationCompletion) return cancellationCompletion;
     if (scan.completedAt) return controlResult("already_terminal");
     const controller = scanAbortController;
     if (!controller && !scanPaused && scan.progress?.phase !== "stopped") return controlResult("already_terminal");
@@ -596,7 +619,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (jobId) canceledScanJobs.add(jobId);
     resumePausedScan?.();
     resumePausedScan = undefined;
-    try {
+    const completion = (async (): Promise<ScanControlResult> => {
       await Promise.all([...activeScans]);
       if (jobId) {
         const path = join(scanStoreDirectory, `${jobId}.sqlite`);
@@ -607,7 +630,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       progressBeforePause = null;
       logger.info("scan.canceled", { jobId, sourceId });
       return controlResult("applied");
+    })();
+    cancellationCompletion = completion;
+    try {
+      return await completion;
     } finally {
+      if (cancellationCompletion === completion) cancellationCompletion = undefined;
       canceling = false;
     }
   }
@@ -639,6 +667,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let unitsSinceYield = 0;
   let lastYieldAt = performance.now();
   async function waitWhilePaused(signal: AbortSignal): Promise<void> {
+    if (performance.now() - lastPermissionCheck >= 16) {
+      lastPermissionCheck = performance.now();
+      if (!canScan()) {
+        // Abort synchronously, but never await our own active writer.
+        void cancelScan().catch(error => logger.warn("scan.cancel_failed", memoryErrorFields(error)));
+      }
+    }
     if (++unitsSinceYield >= 100 || performance.now() - lastYieldAt >= 16) {
       await yieldEventLoop();
       unitsSinceYield = 0;
@@ -665,18 +700,22 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     sourceId: string,
     kind: "plugin" | "skill",
     method: "POST" | "DELETE",
-    installType: "manual" | "auto_inject" = "manual"
+    installType: "manual" | "auto_inject" = "manual",
+    isAutomaticInstallAllowed?: () => boolean
   ): Promise<unknown> {
+    if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const adapter = registry.require(sourceId);
     if (!(await adapter.detect())) {
       throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
     }
+    if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
     if (method === "POST") {
       if (!(await target.resolveRootDirectory())) {
         throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
       if (kind === "plugin") {
         if (!target.installPlugin) {
           throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
@@ -721,8 +760,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   }
 
   async function runAutomation(startup: boolean): Promise<void> {
-    if (disposed || clearing || scan.running || scanPaused || scan.progress?.phase === "stopped") return;
+    if (disposed || clearing || canceling || scan.running || scanPaused || scan.progress?.phase === "stopped") return;
+
     const config = loadMemmyConfig(configPath).config.agentAccess;
+    if (!canScan()) return;
+    const generation = automationGeneration;
+    const isCurrent = () => !disposed && !clearing && generation === automationGeneration && canScan();
+    const canInstall = () => isCurrent() && loadMemmyConfig(configPath).config.agentAccess.autoInjectSkill;
     // Refresh an existing connection even when automatic *new* connections are
     // disabled. Explicit removal remains authoritative.
     const refreshTarget = integrationRegistry.get("opencode");
@@ -733,8 +777,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         try {
           if (!(await refreshTarget.isInstalledHookCurrent())) {
             const latestState = await readState();
-            if (!disposed && !clearing && !latestState.sources.opencode?.autoInjectSuppressed) {
-              await mutateConnection("opencode", "plugin", "POST", "auto_inject");
+            if (isCurrent() && !latestState.sources.opencode?.autoInjectSuppressed) {
+              await mutateConnection("opencode", "plugin", "POST", "auto_inject", isCurrent);
               const installedState = await readState();
               if (installedState.sources.opencode?.autoInjectSuppressed) {
                 await mutateConnection("opencode", "plugin", "DELETE", "auto_inject");
@@ -746,26 +790,29 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         }
       }
     }
+
     if (config.autoInjectSkill) {
       const state = await readState();
       const discovered = await list();
       for (const source of discovered.sources) {
-        if (disposed || clearing) return;
+        if (!canInstall()) return;
         if (!source.available || source.status !== "not_connected" || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
         try {
           const kind = agentConnectionKind(source.sourceId);
-          await mutateConnection(source.sourceId, kind, "POST", "auto_inject");
+          await mutateConnection(source.sourceId, kind, "POST", "auto_inject", canInstall);
           const currentState = await readState();
           if (currentState.sources[source.sourceId]?.autoInjectSuppressed === true) {
             await mutateConnection(source.sourceId, kind, "DELETE", "auto_inject");
           }
+
         } catch (error) {
           logger.warn("connection.auto_install_failed", { sourceId: source.sourceId, ...memoryErrorFields(error) });
         }
       }
     }
-    const enabled = startup ? config.autoScanKnownAgents : config.watchFileChanges;
-    if (enabled && !disposed && !clearing) await startScan({ sourceId: "all" });
+    const current = loadMemmyConfig(configPath).config.agentAccess;
+    const enabled = startup ? current.autoScanKnownAgents : current.watchFileChanges;
+    if (enabled && isCurrent()) await startScan({ sourceId: "all" });
   }
 
   async function clearAllData(): Promise<ReturnType<MemoryService["clearAllData"]>> {
@@ -817,6 +864,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         );
       }
     }
+
   }
 
   return {
@@ -828,6 +876,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     cancelScan,
     scanResults,
     mutateConnection,
+    reconcileScanPermission,
     startAutomation() {
       automationStarted = true;
       if (scanTimer || disposed) return;

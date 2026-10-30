@@ -1,4 +1,8 @@
+import { executeManagedTool, emitManagedToolEvent, managedExecutionRequired, ManagedExecutionError } from "./managed-execution.js";
 import { requestTiming } from "../../utils/request-timing.js";
+import { collectPrivateSkillRefs, normalizePrivateSkillRefs, projectPrivateSkillInstructions } from "./private-plugin-skills.js";
+import type { PluginSkillRef } from "@memmy/local-api-contracts";
+import { withMemmyMemoryTurnContext, withMemmyMemoryPrompt, projectMemmyMemoryPrompt, type MemmyMemoryTurnContext } from "../../memmy-memory/protocol.js";
 import crypto from "node:crypto";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
 import path from "node:path";
@@ -11,6 +15,7 @@ import {
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
+import { MessageTool } from "./tools/message.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
 import { withToolExecutionRequestContext } from "./tools/context.js";
@@ -143,6 +148,10 @@ type PendingImageBatch = {
 };
 
 export class AgentRunSpec {
+  privateSkillRefs: PluginSkillRef[];
+  privateSkillRequestStarted = false;
+  privateSkillPromptTokens = 0;
+  onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
   messages: Record<string, any>[];
   initialMessages: Record<string, any>[];
   tools?: ToolRegistry | any;
@@ -153,6 +162,9 @@ export class AgentRunSpec {
   temperature: number | null;
   reasoningEffort?: string | null;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
+  memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
+  memoryTurnContext: MemmyMemoryTurnContext | null = null;
   toolResultMaxCharsByName: ToolResultMaxCharsByName;
   failOnToolError: boolean;
   concurrentTools: boolean;
@@ -181,8 +193,11 @@ export class AgentRunSpec {
   onMaxFinalizationStarting?: (() => void) | null;
   currentTurnMessageStartIndex?: number | null;
   beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+  finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
 
   constructor(init: {
+    privateSkillRefs?: unknown;
+    onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
     messages?: Record<string, any>[];
     initialMessages?: Record<string, any>[];
     provider?: LLMProvider;
@@ -193,6 +208,8 @@ export class AgentRunSpec {
     temperature?: number | null;
     reasoningEffort?: string | null;
     maxToolResultChars?: number;
+    toolResultCompressionEnabled?: boolean;
+    memoryContextCallback?: (turnId: string, content: Record<string, any>[]) => void;
     toolResultMaxCharsByName?: ToolResultMaxCharsByName;
     failOnToolError?: boolean;
     concurrentTools?: boolean;
@@ -221,7 +238,10 @@ export class AgentRunSpec {
     onMaxFinalizationStarting?: (() => void) | null;
     currentTurnMessageStartIndex?: number | null;
     beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+    finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
   } = {}) {
+    this.privateSkillRefs = normalizePrivateSkillRefs(init.privateSkillRefs);
+    this.onPrivateSkillRefsChanged = init.onPrivateSkillRefsChanged;
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
     this.tools = init.tools;
@@ -231,6 +251,8 @@ export class AgentRunSpec {
     this.temperature = init.temperature ?? 0.7;
     this.reasoningEffort = init.reasoningEffort ?? null;
     this.maxToolResultChars = init.maxToolResultChars ?? 100_000;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? false;
+    this.memoryContextCallback = init.memoryContextCallback;
     this.toolResultMaxCharsByName = init.toolResultMaxCharsByName ?? {};
     this.failOnToolError = init.failOnToolError ?? false;
     this.concurrentTools = init.concurrentTools ?? false;
@@ -259,6 +281,7 @@ export class AgentRunSpec {
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
     this.currentTurnMessageStartIndex = init.currentTurnMessageStartIndex ?? null;
     this.beforeFollowupModelRequest = init.beforeFollowupModelRequest ?? null;
+    this.finalResponseContinuation = init.finalResponseContinuation ?? null;
   }
 }
 
@@ -334,6 +357,8 @@ export class AgentRunner {
         && injection.role === "user"
         && messages.at(-1)?.role === "user"
         && injection.webui_queue_steer_origin !== true
+        && !injection.memmy_prompt
+        && !messages.at(-1)?.memmy_prompt
       ) {
         const merged = { ...messages.at(-1)! };
         merged.content = AgentRunner.mergeMessageContent(merged.content, injection.content);
@@ -373,6 +398,7 @@ export class AgentRunner {
             ? { webui_request_digest: item.webui_request_digest }
             : {}),
           ...(typeof item.turn_id === "string" ? { turn_id: item.turn_id } : {}),
+          ...(item.internal_context ? { internal_context: item.internal_context } : {}),
           ...(item.turn_source ? { turn_source: structuredClone(item.turn_source) } : {}),
           ...(item.webui_queue_steer_origin === true
             ? { webui_queue_steer_origin: true }
@@ -386,7 +412,9 @@ export class AgentRunner {
         if (text.trim()) messages.push({ role: "user", content: text });
       }
     }
-    return messages.slice(0, MAX_INJECTIONS_PER_TURN);
+    return messages.slice(0, MAX_INJECTIONS_PER_TURN).map((message) => withMemmyMemoryPrompt(
+      message, spec.memoryTurnContext, message.internal_context ? "runtime_notification" : "user_followup",
+    ));
   }
 
   private async tryDrainInjections(
@@ -430,6 +458,8 @@ export class AgentRunner {
         delete providerMessage.webui_request_digest;
         delete providerMessage.turn_id;
         delete providerMessage.turn_source;
+        delete providerMessage.memmy_prompt;
+        delete providerMessage.internal_context;
         delete providerMessage.webui_queue_steer_origin;
         delete providerMessage.webui_queue_steer_recovery;
         delete providerMessage[OUTPUT_FEEDBACK_KEY];
@@ -840,6 +870,27 @@ export class AgentRunner {
     const tools = options.toolsOverride === undefined
       ? this.toolDefinitions(spec)
       : options.toolsOverride;
+    try {
+      const previousRefs = JSON.stringify(spec.privateSkillRefs);
+      const publicMessages = messages;
+      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted);
+      if (spec.privateSkillRefs.length) {
+        const privateMessage = messages[0];
+        spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
+        // Reserve private context without ever exposing it to transcript compaction or checkpoints.
+        messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
+          toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
+        })];
+      }
+      spec.privateSkillRequestStarted = true;
+      if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
+    } catch {
+      return new LLMResponse({ content: "Private plugin instructions could not be loaded. Sign in, check connectivity and plugin version, then resume the task. No plugin work was started by this model request.",
+        finishReason: "error", errorKind: "invalid_request", errorCode: "plugin_skill_load_failed", errorShouldRetry: false });
+    }
+    // Keep runtime scope metadata intact while reserving private skill context.
+    // Project once after trimming so the real user request remains the anchor.
+    messages = withMemmyMemoryTurnContext(messages, spec.memoryTurnContext);
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);
@@ -990,7 +1041,10 @@ export class AgentRunner {
     context: AgentHookContext,
     imageTextState: TurnImageTextState,
   ): Promise<LLMResponse> {
-    const retryMessages = [...messages, buildFinalizationRetryMessage()];
+    const retryMessages = [...messages];
+    AgentRunner.appendInjectedMessages(retryMessages, [withMemmyMemoryPrompt(
+      buildFinalizationRetryMessage(), spec.memoryTurnContext, "empty_recovery",
+    )]);
     return this.requestModelWithImagePolicy(spec, retryMessages, hook, context, imageTextState, {
       toolsOverride: null,
       forceNonStreaming: true,
@@ -1040,6 +1094,7 @@ export class AgentRunner {
         content = converted;
       }
     }
+    if (!spec.toolResultCompressionEnabled) return content;
     const maxChars = resolveToolResultMaxChars(name, spec.maxToolResultChars, spec.toolResultMaxCharsByName);
     try {
       content = maybePersistToolResult(
@@ -1082,6 +1137,8 @@ export class AgentRunner {
         }
       }
     }
+    for (const item of out) emitManagedToolEvent({ type: "tool_result", callId: item.call.id, name: item.call.name,
+      output: item.result, ok: item.event.status !== "error", ...(item.event.executionError ? { error: item.event.executionError } : {}) });
     return out;
   }
 
@@ -1095,6 +1152,17 @@ export class AgentRunner {
     if (spec.abortSignal?.aborted) {
       const event = { name: call.name, status: "error", detail: "task cancelled" };
       return { call, result: "Error: task cancelled", event, error: spec.failOnToolError ? createAbortError() : null };
+    }
+    if (managedExecutionRequired()) {
+      try {
+        const authorized = await executeManagedTool(call.name, call.arguments, spec.abortSignal, call.id);
+        return { call, result: authorized.result, event: { name: call.name, status: "ok" } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Managed runtime execution failed";
+        return { call, result: `Error: ${message}`, event: { name: call.name, status: "error", detail: message,
+          ...(error instanceof ManagedExecutionError ? { executionError: error.detail } : {}) },
+          error: spec.failOnToolError ? error : null };
+      }
     }
     const repeatedLookup = repeatedExternalLookupError(call.name, call.arguments, externalLookupCounts);
     if (repeatedLookup) {
@@ -1194,6 +1262,9 @@ export class AgentRunner {
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
+        uiToolCallId: getOrCreateUiToolCallId(call),
+        sessionKey: spec.sessionKey ?? null,
+        modelPreset: spec.actualModelContext?.presetId ?? null,
         stopTurn: (message) => { stopTurn ??= message; },
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {
@@ -1244,6 +1315,8 @@ export class AgentRunner {
       const result = preparedText?.content === raw ? raw : this.normalizeToolResult(spec, call.id, call.name, raw);
       if (preparedText?.displayText !== undefined) event.display_text = preparedText.displayText;
       if (outputFile) event.output_file = outputFile;
+      const messageTool = spec.tools?.get?.("message");
+      if (messageTool instanceof MessageTool) messageTool.observePluginToolResult(call.name, raw);
       if (stopTurn) event.status = "error";
       await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [result], toolEvents: [event] }), call, result);
       return { call, result, event, error, ...(stopTurn ? { stopTurn } : {}) };
@@ -1418,7 +1491,7 @@ export class AgentRunner {
     let prepared = this.applyToolResultBudget(spec, messages);
     prepared = AgentRunner.dropOrphanToolResults(prepared);
     prepared = AgentRunner.backfillMissingToolResults(prepared);
-    prepared = AgentRunner.microcompact(prepared);
+    if (spec.toolResultCompressionEnabled) prepared = AgentRunner.microcompact(prepared);
     return prepared;
   }
 
@@ -1427,7 +1500,9 @@ export class AgentRunner {
     messages: Record<string, any>[],
     options: PrepareMessagesOptions,
   ): number {
-    const prepared = this.prepareMessagesBeforeSnip(spec, messages);
+    const prepared = withMemmyMemoryTurnContext(
+      this.prepareMessagesBeforeSnip(spec, messages), spec.memoryTurnContext,
+    );
     const estimateResult = estimatePromptTokensChain(
       spec.provider ?? this.provider,
       spec.model ?? null,
@@ -1506,7 +1581,7 @@ export class AgentRunner {
     const estimateResult = estimatePromptTokensChain(
       spec.provider ?? this.provider,
       spec.model ?? null,
-      messages,
+      withMemmyMemoryTurnContext(messages, spec.memoryTurnContext),
       options.toolsForRequest ?? [],
     );
     const estimate = Array.isArray(estimateResult) ? estimateResult[0] : estimateResult;
@@ -1518,7 +1593,7 @@ export class AgentRunner {
       const result = estimatePromptTokensChain(
         spec.provider ?? this.provider,
         spec.model ?? null,
-        candidate,
+        withMemmyMemoryTurnContext(candidate, spec.memoryTurnContext),
         options.toolsForRequest ?? [],
       );
       return Array.isArray(result) ? result[0] : result;
@@ -1527,9 +1602,20 @@ export class AgentRunner {
       const tokens = count(candidate);
       return Number.isFinite(tokens) && tokens <= budget;
     };
-    const latestUserIndex = rest.findLastIndex((message) => message.role === "user");
-    const anchor = latestUserIndex >= 0 ? [rest[latestUserIndex]] : [];
-    const currentTurn = rest.slice(latestUserIndex + 1);
+    const isCurrentRequest = (message: Record<string, any>): boolean => Boolean(spec.memoryTurnContext
+      && message.role === "user"
+      && message.memmy_prompt?.turnId === spec.memoryTurnContext.turnId
+      && ["user_request", "user_followup"].includes(message.memmy_prompt.kind));
+    const currentRequestIndex = rest.findIndex(isCurrentRequest);
+    const latestUserIndex = rest.findLastIndex((message) => message.role === "user"
+      && message.internal_context !== "runtime_notification"
+      && message.internal_context !== "memmy_internal_prompt"
+      && (!message.memmy_prompt || ["user_request", "user_followup"].includes(message.memmy_prompt.kind)));
+    // A steer supplements the current request. Keep its original constraints
+    // even when large intervening tool outputs prevent replaying the full turn.
+    const anchorIndex = currentRequestIndex >= 0 ? currentRequestIndex : latestUserIndex;
+    const anchor = anchorIndex >= 0 ? [rest[anchorIndex]] : [];
+    const currentTurn = rest.slice(anchorIndex + 1);
     // An assistant tool-call message and all of its results form one exchange.
     // Cutting between them can lose the latest observation or invent a backfill.
     const exchanges: Record<string, any>[][] = [];
@@ -1542,6 +1628,9 @@ export class AgentRunner {
     }
     const retained = new Set<number>();
     if (exchanges.length) retained.add(exchanges.length - 1);
+    exchanges.forEach((exchange, index) => {
+      if (exchange.some(isCurrentRequest)) retained.add(index);
+    });
     const latestImage = exchanges.findLastIndex((exchange) => exchange.some((message) => (
       Array.isArray(message.content) && message.content.some((block: any) => block?.type === "image_url")
     )));
@@ -1561,7 +1650,7 @@ export class AgentRunner {
       ...anchor,
       ...exchanges.flatMap((exchange, index) => retained.has(index) ? exchange : []),
     ];
-    // Preserve the current request, final exchange and newest screenshot even if
+    // Preserve all current user requests, final exchange and newest screenshot even if
     // they cannot fit. The final request guard then returns a local error.
     const ensureLegalStart = (candidate: Record<string, any>[]): Record<string, any>[] => {
       const firstNonSystem = candidate.findIndex((message) => message.role !== "system");
@@ -1580,8 +1669,8 @@ export class AgentRunner {
     }
     // Recover older context only at whole user-turn boundaries, after keeping
     // as much of the current turn as fits.
-    if (latestUserIndex > 0) {
-      const previous = rest.slice(0, latestUserIndex);
+    if (anchorIndex > 0) {
+      const previous = rest.slice(0, anchorIndex);
       let end = previous.length;
       while (end > 0) {
         let start = end - 1;
@@ -1642,12 +1731,15 @@ export class AgentRunner {
 
   async run(spec: AgentRunSpec): Promise<AgentRunResult> {
     spec.turnId ??= crypto.randomUUID();
+    spec.memoryTurnContext = null;
     spec.provider ??= this.provider;
     if (!spec.provider) throw new Error("AgentRunSpec.provider is required");
     const hook = spec.hook ?? new AgentHook();
     const requiresBufferedLlmContent = hook.requiresBufferedLlmContent();
     const streamsHookContent = hook.wantsStreaming() && !requiresBufferedLlmContent;
     const messages = [...spec.initialMessages];
+    if (!spec.privateSkillRefs.length) spec.privateSkillRefs = collectPrivateSkillRefs(messages);
+    spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     const toolCalls: any[] = [];
     const toolEvents: Record<string, any>[] = [];
     const toolsUsed: string[] = [];
@@ -1694,7 +1786,7 @@ export class AgentRunner {
             requestKind: "iteration",
             iteration,
             toolsForRequest,
-            reservedPromptTokens: 0,
+            reservedPromptTokens: spec.privateSkillPromptTokens,
           },
         );
         if (spec.abortSignal?.aborted) {
@@ -1711,13 +1803,14 @@ export class AgentRunner {
       let requestMessages = messages;
       if (requestOnlyInjections.length) {
         requestMessages = messages.map((message) => ({ ...message }));
-        AgentRunner.appendInjectedMessages(requestMessages, requestOnlyInjections);
+        AgentRunner.appendInjectedMessages(requestMessages, requestOnlyInjections.map((message) =>
+          withMemmyMemoryPrompt(message, spec.memoryTurnContext, "hook_continuation")));
         console.info("AgentHook.beforeIteration injected request-only content:", requestOnlyInjections);
       }
       let messagesForModel = this.withOutputInstruction(spec, this.modelContextMessages(requestMessages, modelContextProjection));
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
         toolsForRequest,
-        reservedPromptTokens: 0,
+        reservedPromptTokens: spec.privateSkillPromptTokens,
       });
       messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
 
@@ -1807,6 +1900,9 @@ export class AgentRunner {
           toolEvents.push(item.event);
           const toolMessage = { role: "tool", tool_call_id: item.call.id, name: item.call.name, content: item.result };
           messages.push(toolMessage);
+          const previousRefs = JSON.stringify(spec.privateSkillRefs);
+          spec.privateSkillRefs = collectPrivateSkillRefs([toolMessage], spec.privateSkillRefs);
+          if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
           completed.push(toolMessage);
         }
         context.toolResults = executed.map((item) => item.result);
@@ -1916,7 +2012,7 @@ export class AgentRunner {
             thinkingBlocks: response.thinkingBlocks,
             finishReason: response.finishReason,
           }));
-          messages.push(buildLengthRecoveryMessage());
+          messages.push(withMemmyMemoryPrompt(buildLengthRecoveryMessage(), spec.memoryTurnContext, "length_recovery"));
           await hook.afterIteration(context);
           continue;
         }
@@ -2018,14 +2114,22 @@ export class AgentRunner {
           await hook.onStreamEnd(context, { resuming: true });
         }
         messages.push({ ...(assistant ?? buildAssistantMessage(clean)), [OUTPUT_FEEDBACK_KEY]: true });
-        messages.push({ role: "user", content: deliveryProblem, [OUTPUT_FEEDBACK_KEY]: true });
+        messages.push(withMemmyMemoryPrompt(
+          { role: "user", content: deliveryProblem, [OUTPUT_FEEDBACK_KEY]: true }, spec.memoryTurnContext, "delivery_retry",
+        ));
         await hook.afterIteration(context);
         continue;
       }
+      const deliveryContinuation = spec.finalResponseContinuation?.({ finalContent: clean as string, messages });
       if (streamsHookContent) {
-        await hook.onStreamEnd(context, { resuming: false });
+        await hook.onStreamEnd(context, { resuming: Boolean(deliveryContinuation) });
       }
       messages.push(assistant ?? buildAssistantMessage(clean));
+      if (deliveryContinuation) {
+        messages.push({ role: "system", content: deliveryContinuation });
+        await hook.afterIteration(context);
+        continue;
+      }
       await this.emitCheckpoint(spec, {
         phase: "finalResponse",
         iteration,
@@ -2052,10 +2156,11 @@ export class AgentRunner {
         });
       if (spec.maxIterationsFinalPrompt && !hookContinuationExhausted) {
         spec.onMaxFinalizationStarting?.();
-        const reservedPromptTokens = estimateMessageTokens({
+        const finalPrompt = withMemmyMemoryPrompt({
           role: "user",
           content: spec.maxIterationsFinalPrompt,
-        });
+        }, spec.memoryTurnContext, "max_iterations");
+        const reservedPromptTokens = estimateMessageTokens(projectMemmyMemoryPrompt(finalPrompt)) + spec.privateSkillPromptTokens;
         if (!spec.abortSignal?.aborted) {
           modelContextProjection = await this.updateProjectionBeforeFollowup(
             spec,
@@ -2079,10 +2184,7 @@ export class AgentRunner {
             toolsForRequest: null,
             reservedPromptTokens,
           }).map((message) => ({ ...message }));
-          AgentRunner.appendInjectedMessages(preparedMessages, [{
-            role: "user",
-            content: spec.maxIterationsFinalPrompt,
-          }]);
+          AgentRunner.appendInjectedMessages(preparedMessages, [finalPrompt]);
           const requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
           const context = new AgentHookContext({
             spec,

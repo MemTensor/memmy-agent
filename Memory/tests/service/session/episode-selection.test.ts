@@ -181,7 +181,7 @@ describe("episode selection before creation", () => {
     expect(repos.runtime.getRawTurn(accepted.rawTurnId)?.userText).toBe(request.query);
     expect(repos.runtime.listEpisodesForSession(session.sessionId)).toEqual([]);
     llm.completeJson = complete;
-    db.db.prepare("UPDATE evolution_jobs SET status='queued',attempts=0,leased_until=NULL WHERE status IN ('failed','dead_letter')").run();
+    db.db.prepare("UPDATE evolution_jobs SET status='queued',attempts=0,failure_count=0,available_at=NULL,blocked_reason=NULL,leased_until=NULL,lease_owner=NULL,lease_token=NULL WHERE status IN ('failed','dead_letter')").run();
     await settle(service);
     const first = await service.completeTurn("x", request);
     const retry = await service.completeTurn("x", request);

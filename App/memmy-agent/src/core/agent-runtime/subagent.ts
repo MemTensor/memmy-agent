@@ -1,3 +1,4 @@
+import { agentTaskActivity } from "./task-activity.js";
 import path from "node:path";
 import type { OutputDelivery } from "./tools/output-location.js";
 import { performance } from "node:perf_hooks";
@@ -119,6 +120,7 @@ type SubagentManagerInit = {
   maxConcurrent?: number;
   maxConcurrentSubagents?: number;
   maxToolResultChars?: number;
+  toolResultCompressionEnabled?: boolean;
   llmWallTimeoutForSession?: (sessionKey?: string | null) => number | null;
   lifecycleHook?: (() => AgentHook | null) | null;
   computerUseTools?: (() => readonly Tool[]) | null;
@@ -142,6 +144,7 @@ export class SubagentManager {
   restrictToWorkspace: boolean;
   disabledSkills: Set<string>;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
   maxIterations: number;
   maxConcurrent: number;
   maxConcurrentSubagents: number;
@@ -168,6 +171,7 @@ export class SubagentManager {
     this.restrictToWorkspace = init.restrictToWorkspace ?? false;
     this.disabledSkills = new Set(init.disabledSkills ?? []);
     this.maxToolResultChars = init.maxToolResultChars ?? defaults.maxToolResultChars;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? defaults.toolResultCompressionEnabled;
     this.maxIterations = init.maxIterations ?? defaults.maxToolIterations;
     this.maxConcurrent = init.maxConcurrent ?? init.maxConcurrentSubagents ?? defaults.maxConcurrentSubagents;
     this.maxConcurrentSubagents = this.maxConcurrent;
@@ -364,7 +368,11 @@ export class SubagentManager {
     return `Subagent [${displayLabel}] started (id: ${taskId}). I'll notify you when it completes.`;
   }
 
-  async runSubagent(
+  async runSubagent(...args: Parameters<SubagentManager["runSubagentTask"]>): Promise<void> {
+    return agentTaskActivity.run(() => this.runSubagentTask(...args));
+  }
+
+  private async runSubagentTask(
     taskId: string,
     task: string,
     label: string,
@@ -424,6 +432,7 @@ export class SubagentManager {
         temperature: temperature ?? undefined,
         maxIterations: this.maxIterations,
         maxToolResultChars: this.maxToolResultChars,
+        toolResultCompressionEnabled: this.toolResultCompressionEnabled,
         maxIterationsMessage: "The subagent reached its iteration limit before completing the task; its report may be incomplete.",
         maxIterationsFinalPrompt: readTemplate("agent/subagent-max-iterations-final-response.md").trim(),
         errorMessage: null,

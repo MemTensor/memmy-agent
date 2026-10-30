@@ -1,16 +1,22 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_MEMMY_CONFIG, MemoryDb, SCHEMA_VERSION } from "../../../src/index.js";
 import { insertActiveSkillMemoryForTest } from "../../fixtures/evolution-fixture.js";
+import { WorkerConcurrencyController } from "../../../src/service/worker/worker-concurrency.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import { createTurnJudgeLlm, turnJudgeConfig } from "./turn-judge-llm.js";
 const fixture = createMemoryServiceFixture();
-afterEach(fixture.cleanup);
+afterEach(async () => { vi.useRealTimers(); await fixture.cleanup(); });
 
 async function drain(service: ReturnType<typeof fixture.createTestService>["service"], limit = 8) {
   for (let i = 0; i < limit; i++) {
     const result = await service.runWorkerOnce(30);
-    if (!result.leased) break;
+    if (!result.leased) {
+      const row = service["repos"].db.prepare("SELECT MIN(available_at) AS at FROM evolution_jobs WHERE status='failed' AND failure_count < max_attempts AND blocked_reason IS NULL").get() as { at: string | null };
+      if (!row.at) break;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Math.max(Date.now(), Date.parse(row.at)));
+    }
   }
 }
 
@@ -209,7 +215,7 @@ describe("raw-first independent L1 and Episode processing", () => {
       if (options.operation === "episode.select.v1") { entered(); await blocked; }
       return complete(messages, options);
     };
-    const { service, db } = fixture.createTestService({ llm, config: turnJudgeConfig() });
+    const { service, db } = fixture.createTestService({ llm, config: turnJudgeConfig(), concurrency: new WorkerConcurrencyController({ localModelConcurrency: 2 }, {}) });
     const { sessionId } = service.openSession({});
     const result = await service.completeTurn("parallel", { sessionId, query: "Capture concurrently", answer: "Verified result" });
     const running = service.runWorkerOnce(30);
@@ -327,6 +333,7 @@ describe("raw-first independent L1 and Episode processing", () => {
     const repos = new Repositories(db.db);
     const leases = repos.runtime.leaseQueuedJobs(30, 60);
     expect(leases.some(j => j.jobType === "episode_assignment")).toBe(true);
+    db.db.prepare("UPDATE evolution_jobs SET leased_until=? WHERE status='leased'").run(new Date(Date.now() - 1).toISOString());
     const restored = fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }), llm, config });
     restored.reconcileWorkerStartup(); await drain(restored);
     expect(db.db.prepare("SELECT id,created_at,user_text,assistant_text FROM raw_turns").get()).toEqual(before);
@@ -361,7 +368,7 @@ describe("raw-first independent L1 and Episode processing", () => {
     }
     db.db.exec("DELETE FROM schema_migrations; INSERT INTO schema_migrations(id,version,applied_at,checksum) VALUES('009_token_usage_outbox',9,'2026-01-01','old')");
     const upgraded = new MemoryDb({ path: db.path });
-    expect(upgraded.schemaVersion().version).toBe(10);
+    expect(upgraded.schemaVersion().version).toBe(SCHEMA_VERSION);
     expect(upgraded.db.prepare("SELECT rowid,id,user_text FROM raw_turns").get()).toEqual({ rowid: 77, id: old.rawTurnId, user_text: "Existing original" });
     expect(upgraded.db.pragma("foreign_key_check")).toEqual([]);
     for (const table of ["raw_turns", "skill_trials"]) expect((upgraded.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number }>).find(c => c.name === "episode_id")?.notnull).toBe(0);

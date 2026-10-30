@@ -315,6 +315,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
     expect(runtime.markEmbeddingRetrySucceededClaimed(original.id, {
       workerId: "worker-a",
       leaseUntil: 10_000,
+      leaseToken: claimed!.leaseToken!,
       now: 3_000
     })).toMatchObject({ status: "succeeded" });
     expect(runtime.claimDueEmbeddingRetries({
@@ -336,11 +337,12 @@ describe("v1.2.6 embedding retry reproduction", () => {
       "UPDATE embedding_retry_queue SET status = 'in_progress', claimed_by = NULL, lease_until = NULL WHERE id = ?"
     ).run(retry.id);
     expect(runtime.nextWorkerRunAt()).toBe(1_000);
-    expect(runtime.claimDueEmbeddingRetries({
+    const claims = runtime.claimDueEmbeddingRetries({
       now: 2_000, workerId: "worker-b", leaseUntil: 10_000, limit: 1
-    })).toMatchObject([{ id: retry.id, claimedBy: "worker-b", leaseUntil: 10_000 }]);
+    });
+    expect(claims).toMatchObject([{ id: retry.id, claimedBy: "worker-b", leaseUntil: 10_000 }]);
     expect(runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
-      workerId: "worker-b", leaseUntil: 10_000, now: 3_000
+      workerId: "worker-b", leaseUntil: 10_000, leaseToken: claims[0]!.leaseToken!, now: 3_000
     })).toMatchObject({ status: "succeeded" });
   });
 
@@ -359,7 +361,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
       "UPDATE embedding_retry_queue SET status = 'in_progress', claimed_by = ?, lease_until = ? WHERE id = ?"
     ).run("worker-a", 10_000, active.id);
     db.db.prepare(
-      "UPDATE embedding_retry_queue SET status = 'in_progress', claimed_by = ?, lease_until = ? WHERE id = ?"
+      "UPDATE embedding_retry_queue SET status = 'in_progress', claimed_by = ?, lease_until = ?, lease_token = 'expired-lease' WHERE id = ?"
     ).run("worker-old", 1_500, expired.id);
 
     expect(runtime.embeddingRetryQueueStats(2_000)).toEqual({
@@ -369,7 +371,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
       now: 2_000, workerId: "worker-b", leaseUntil: 12_000, limit: 2
     })).toMatchObject([{ id: expired.id, claimedBy: "worker-b" }]);
     expect(runtime.markEmbeddingRetrySucceededClaimed(expired.id, {
-      workerId: "worker-old", leaseUntil: 1_500, now: 3_000
+      workerId: "worker-old", leaseUntil: 1_500, leaseToken: "expired-lease", now: 3_000
     })).toBeUndefined();
     expect(runtime.embeddingRetryQueueStats(2_000)).toEqual({
       pending: 0, active: 2, stale: 0, failed: 0

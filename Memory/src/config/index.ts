@@ -110,6 +110,8 @@ export interface StorageConfig {
 }
 
 export interface AgentAccessConfig {
+  /** Desktop authorization. Absent for standalone CLI installations. */
+  scanPermission?: "unset" | "none" | "scan_only" | "scan_and_write_skill";
   autoScanKnownAgents: boolean;
   watchFileChanges: boolean;
   autoInjectSkill: boolean;
@@ -118,6 +120,8 @@ export interface AgentAccessConfig {
 export interface AlgorithmConfig {
   enableMemoryAdd: boolean;
   enableMemorySearch: boolean;
+  /** Controls agent-facing User Memory recall; capture and management remain available. */
+  enableUserMemoryRecall: boolean;
   enableQueryRewrite: boolean;
   capture: {
     maxTextChars: number;
@@ -389,6 +393,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   algorithm: {
     enableMemoryAdd: true,
     enableMemorySearch: true,
+    enableUserMemoryRecall: false,
     enableQueryRewrite: false,
     capture: {
       maxTextChars: 4_000,
@@ -655,6 +660,7 @@ function configFromEnv(): Record<string, unknown> {
     algorithm: compactRecord({
       enableMemoryAdd: booleanEnv("MEMMY_ENABLE_MEMORY_ADD"),
       enableMemorySearch: booleanEnv("MEMMY_ENABLE_MEMORY_SEARCH"),
+      enableUserMemoryRecall: booleanEnv("MEMMY_ENABLE_USER_MEMORY_RECALL"),
       enableQueryRewrite: booleanEnv("MEMMY_ENABLE_QUERY_REWRITE"),
       retrieval: compactRecord({
         readOnlyInjectionProfile:
@@ -844,6 +850,10 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
 
 function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
   return {
+    ...(input.scanPermission !== undefined ? {
+      scanPermission: input.scanPermission === "scan_only" || input.scanPermission === "scan_and_write_skill"
+        ? input.scanPermission : input.scanPermission === "none" ? "none" : "unset"
+    } : {}),
     autoScanKnownAgents: booleanValue(
       input.autoScanKnownAgents,
       DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
@@ -1171,6 +1181,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   return {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
     enableMemorySearch: booleanValue(input.enableMemorySearch, DEFAULT_MEMMY_CONFIG.algorithm.enableMemorySearch),
+    enableUserMemoryRecall: booleanValue(input.enableUserMemoryRecall, DEFAULT_MEMMY_CONFIG.algorithm.enableUserMemoryRecall),
     enableQueryRewrite: booleanValue(input.enableQueryRewrite, DEFAULT_MEMMY_CONFIG.algorithm.enableQueryRewrite),
     capture: {
       maxTextChars: numberValue(capture.maxTextChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxTextChars),

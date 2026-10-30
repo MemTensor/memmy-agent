@@ -81,7 +81,12 @@ describe("MemoryService / session / idle sweep", () => {
        WHERE episode_id = ?
          AND job_type = 'reflection'`
     ).get(assignedEpisodeId(service, idleTurn)) as { status: string; payload_json: string } | undefined;
-    expect(reflection?.status).toBe("queued");
+    // Continuous admission can finish the reflection produced by idle close in
+    // the same drain, rather than leaving it for a later timer round.
+    expect(reflection?.status).toBe("succeeded");
+    expect(run.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "reflection", status: "succeeded" })
+    ]));
     expect(JSON.parse(reflection!.payload_json)).toMatchObject({
       trigger: "idle_timeout",
       targetKind: "episode"

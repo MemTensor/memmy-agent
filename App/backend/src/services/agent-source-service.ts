@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { memoryScanUnavailable } from "../adapters/outbound/memory-client/errors.js";
 import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
 import {
-  setImmediate as yieldToEventLoop,
   setTimeout as waitForWorkerProgress
 } from "node:timers/promises";
 import type {
@@ -43,12 +42,10 @@ import {
 export type { ScanProgress } from "@memmy/agent-source-readers/adapters/types";
 
 const SCAN_MESSAGE_YIELD_INTERVAL = 100;
-const IMPORT_WORKER_BATCH_SIZE = 1;
 const IMPORT_PROCESSING_COHORT_SIZE = 100;
-// A targeted run leases one job so the timeout never depends on queue ordering.
-// One summary can make three content attempts, each with four 180s HTTP attempts
-// and backoff; keep a safety margin without replaying the worker request.
-const IMPORT_WORKER_TIMEOUT_MS = 2_400_000;
+// Allow a slow summary and its provider retries to finish without mistaking a
+// quiet shared queue for completion. The producer never leases tasks itself.
+const IMPORT_PROCESSING_TIMEOUT_MS = 2_400_000;
 const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 /** Contract for agent source service. */
 export interface AgentSourceService {
@@ -58,9 +55,9 @@ export interface AgentSourceService {
   syncManaged(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   updateManaged(sourceId: string, input: ManagedAgentSourceUpdateInput): Promise<AgentSourceView>;
   remove(sourceId: string): Promise<void>;
-  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">): Promise<void>;
+  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">, beforeInstall?: () => void): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput, beforeInstall?: () => void): Promise<void>;
   uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
@@ -83,7 +80,7 @@ export interface CreateAgentSourceServiceOptions {
   sourceRegistry: SourceRegistry;
   agentSourceRepository: AgentSourceRepository;
   ingestionService: IngestionService;
-  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker" | "agentSources">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "agentSources">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
   memoryAddAnalytics?: Pick<
@@ -241,7 +238,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       options.agentSourceRepository.removeSource(sourceId);
     },
 
-    async installSkill(sourceId, action = {}) {
+    async installSkill(sourceId, action = {}, beforeInstall) {
       const startedAt = Date.now();
       const installType = normalizePluginInstallType(action.installType);
       const statusBefore = readSourceStatus(options, sourceId);
@@ -249,7 +246,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       const builtin = readSourceBuiltin(options, sourceId);
       try {
         await ensureSourceAvailable(options, sourceId);
-        await options.skillDistributionService.install(sourceId);
+        beforeInstall?.();
+        await (beforeInstall ? options.skillDistributionService.install(sourceId, beforeInstall) : options.skillDistributionService.install(sourceId));
         ensureSourceExists(options, sourceId);
         if (installType === "auto_inject") {
           options.agentSourceRepository.setStatus(sourceId, "skill_installed");
@@ -313,14 +311,15 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       }
     },
 
-    async installPlugin(sourceId, action = {}) {
+    async installPlugin(sourceId, action = {}, beforeInstall) {
       const startedAt = Date.now();
       const installType = normalizePluginInstallType(action.installType);
       const statusBefore = readSourceStatus(options, sourceId);
       const permission = await readScanPermission(options);
       try {
         await ensureSourceAvailable(options, sourceId);
-        await options.skillDistributionService.installPlugin(sourceId);
+        beforeInstall?.();
+        await (beforeInstall ? options.skillDistributionService.installPlugin(sourceId, beforeInstall) : options.skillDistributionService.installPlugin(sourceId));
         ensureSourceExists(options, sourceId);
         if (installType === "auto_inject") {
           options.agentSourceRepository.setStatus(sourceId, "plugin_installed");
@@ -519,46 +518,24 @@ async function processPendingImportSummaries(
 
     while (pendingMemoryIds.size > 0) {
       scanOptions.signal?.throwIfAborted();
-      const targets = [...pendingMemoryIds];
-      const workerOutcome = options.memoryClient.runWorker({
-        limit: IMPORT_WORKER_BATCH_SIZE,
-        targetMemoryIds: targets,
-        priorityCohortOnly: true,
-        signal: scanOptions.signal,
-        timeoutMs: IMPORT_WORKER_TIMEOUT_MS
-      }).then((result) => ({ kind: "worker" as const, result }));
-      let result: Awaited<ReturnType<MemoryClient["runWorker"]>> | undefined;
-
-      while (!result) {
-        const outcome = await Promise.race([
-          workerOutcome,
-          waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal })
-            .then(() => ({ kind: "poll" as const }))
-        ]);
-        if (outcome.kind === "worker") result = outcome.result;
-        const previousPending = pendingMemoryIds.size;
-        await reconcileImportProcessing(options.memoryClient, pendingMemoryIds, failures);
-        if (pendingMemoryIds.size < previousPending) lastProgressAt = Date.now();
-        emitProgress(scanOptions, {
-          sourceId: progressSourceId,
-          phase: "summarize",
-          current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
-          total: ownedMemoryIds.length,
-          message: "Summarizing and indexing latest memories"
-        });
-        if (pendingMemoryIds.size === 0 && !result) {
-          result = (await workerOutcome).result;
-        }
-      }
-
+      const previousPending = pendingMemoryIds.size;
+      await reconcileImportProcessing(options.memoryClient, pendingMemoryIds, failures);
+      scanOptions.signal?.throwIfAborted();
+      if (pendingMemoryIds.size < previousPending) lastProgressAt = Date.now();
+      emitProgress(scanOptions, {
+        sourceId: progressSourceId,
+        phase: "summarize",
+        current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
+        total: ownedMemoryIds.length,
+        message: "Summarizing and indexing latest memories"
+      });
       if (pendingMemoryIds.size === 0) break;
-      if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
+      if (Date.now() - lastProgressAt >= IMPORT_PROCESSING_TIMEOUT_MS) {
         throw new Error(`Timed out waiting for ${pendingMemoryIds.size} imported memories to finish indexing`);
       }
-      if (result.leased === 0 && result.embeddingRetries.leased === 0) {
-        await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
-      }
-      await yieldToEventLoop();
+      // enqueueImportSummaries wakes the shared scheduler, including existing
+      // pending jobs. Observe durable target state rather than starting a drain.
+      await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
     }
     completedMemoryCount += cohort.length;
   }

@@ -1,14 +1,22 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { get_encoding } from "tiktoken";
-import { DEFAULT_MEMMY_CONFIG, type LlmClient } from "../../../src/index.js";
+import { DEFAULT_MEMMY_CONFIG, type LlmClient, type MemoryDb } from "../../../src/index.js";
 import type { LlmMessage, LlmCompletionOptions } from "../../../src/model/types.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { observationMemoryState } from "../../../src/service/observation-memory-state.js";
 import { prepareObservationExtractionInput } from "../../../src/service/evidence/observation-memory-pipeline.js";
-import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
+import { addAgentSourceImport, createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+function advanceToMemoryRetry(db: MemoryDb, memoryId: string): void {
+  const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+    WHERE target_memory_id = ? AND status = 'failed' AND available_at IS NOT NULL LIMIT 1`)
+    .get(memoryId) as { available_at: string } | undefined;
+  expect(retry).toBeDefined();
+  vi.setSystemTime(Date.parse(retry!.available_at));
+}
 const namespace = { source: "memmy", profileId: "default", userId: "history-user" };
 const evidence = {
   action: "upsert" as const, source: "computer_history", namespace,
@@ -202,8 +210,9 @@ describe("History meaningful-memory processing", () => {
   });
 
   it("reports a queued first attempt as waiting and only a recorded failure as an automatic retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     let available = false;
-    const { service } = createTestService({ llm: model((input) => {
+    const { service, db } = createTestService({ llm: model((input) => {
       if (!available) throw new Error("429 temporarily rate limited");
       return semantic(input);
     }) });
@@ -214,18 +223,20 @@ describe("History meaningful-memory processing", () => {
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({ state: "summary_pending",
       errorCode: "transient_provider_error", autoRetryScheduled: true });
     available = true;
+    expect((await service.runWorkerOnce(1)).leased).toBe(0);
+    advanceToMemoryRetry(db, row.id);
     await runWorkerRounds(service, 2);
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({ state: "ready", autoRetryScheduled: false });
   });
 
   it("extracts a fresh History window before an older Agent-history backlog", async () => {
     const { service, db } = createTestService({ llm: model() });
-    const session = service.openSession({ namespace: { ...namespace, source: "cursor" } });
-    const backlog = await Promise.all(Array.from({ length: 3 }, async (_value, index) => (await service.completeTurn(`cursor-backfill-${index}`, {
-      sessionId: session.sessionId, query: `Old Cursor question ${index}`, answer: `Old Cursor answer ${index}`
-    })).l1MemoryId));
-    const backdate = db.db.prepare("UPDATE memories SET created_at = ? WHERE id = ?");
-    backlog.forEach((id, index) => backdate.run(`2026-08-18T0${index}:00:00.000Z`, id));
+    const backlog = Array.from({ length: 3 }, (_value, index) => addAgentSourceImport(
+      service, { ...namespace, source: "cursor" }, `Old Cursor question ${index}`, `cursor-backfill-${index}`,
+      `2026-08-18T0${index}:00:00.000Z`
+    ).id);
+    const backlogPolicies = db.db.prepare("SELECT queue_lane FROM evolution_jobs WHERE target_memory_id IN (?, ?, ?)").all(...backlog);
+    expect(backlogPolicies).toEqual(Array.from({ length: 3 }, () => ({ queue_lane: "import" })));
     const history = service.syncExternalEvidence(evidence);
     const run = await service.runWorkerOnce(1, { priorityCohortOnly: true });
     expect(run.jobs).toEqual([expect.objectContaining({ jobType: "observation_extract", targetMemoryId: history.id })]);
@@ -260,13 +271,17 @@ describe("History meaningful-memory processing", () => {
   });
 
   it("rejects ungrounded output, then retries through the observation processor", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     let valid = false;
-    const { service } = createTestService({ llm: model((input) => valid ? semantic(input) : {
+    const { service, db } = createTestService({ llm: model((input) => valid ? semantic(input) : {
       keep: true, title: "Invented result", summary: "Purchase is complete",
       items: [{ category: "progress", text: "The purchase is complete.", source_memory_id: input.sources[0]!.id, evidence_quote: "The purchase is complete." }]
     }) });
     const row = service.syncExternalEvidence(evidence);
-    await runWorkerRounds(service, 3);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await runWorkerRounds(service, 1);
+      if (attempt < 2) advanceToMemoryRetry(db, row.id);
+    }
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({ state: "failed", stage: "summary" });
     valid = true;
     expect(service.retryMemoryProcessing(row.id, { namespace }).job?.jobType).toBe("observation_extract");
@@ -362,12 +377,19 @@ describe("History meaningful-memory processing", () => {
     const oldEmbedding = service.runWorkerOnce(1);
     await started;
     service.syncExternalEvidence({ ...evidence, revision: "2026-10-09T10:12:00.000Z", content: `${evidence.content} Extra window switch.` });
-    await service.runWorkerOnce(1);
+    const newerSummary = service.runWorkerOnce(1);
+    try {
+      // A second generation can be queued while the old embedding is in flight,
+      // but it cannot create a second worker drain outside the shared boundary.
+      expect(service.memoryProcessingStatus([row.id]).items[0]?.state).toBe("summary_pending");
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE target_memory_id = ? AND job_type = 'embedding'").get(row.id)).toEqual({ n: 1 });
+    } finally { release(); await oldEmbedding; }
+    expect(["summary_pending", "summarizing"]).toContain(service.memoryProcessingStatus([row.id]).items[0]?.state);
+    await newerSummary;
     const jobs = db.db.prepare("SELECT id, status FROM evolution_jobs WHERE target_memory_id = ? AND job_type = 'embedding'").all(row.id) as Array<{ id: string; status: string }>;
     expect(jobs).toHaveLength(2);
     expect(new Set(jobs.map((job) => job.id)).size).toBe(2);
     const newerJob = jobs.find((job) => job.status === "queued")!;
-    release(); await oldEmbedding;
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({ state: "embedding_pending", activeJobId: newerJob.id });
     await service.runWorkerOnce(1);
     expect(service.memoryProcessingStatus([row.id]).items[0]?.state).toBe("ready");
@@ -474,13 +496,20 @@ describe("History meaningful-memory processing", () => {
 
   it.each(["model_unconfigured", "automatic_retry", "failed"] as const)(
     "does not hide a source %s behind normal Skill processing", async (state) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
       const configured = state !== "model_unconfigured";
-      const { service } = createTestService({ llm: { ...model(() => { throw new Error("429 temporarily rate limited"); }),
+      const { service, db } = createTestService({ llm: { ...model(() => { throw new Error("429 temporarily rate limited"); }),
         isConfigured: () => configured } });
       const first = service.syncExternalEvidence(evidence);
       const secondId = "2026-10-09T10-10-00-10min-summary";
       service.syncExternalEvidence({ ...evidence, sourceRecordId: secondId });
-      if (state !== "model_unconfigured") await runWorkerRounds(service, state === "failed" ? 3 : 1);
+      if (state !== "model_unconfigured") {
+        const attempts = state === "failed" ? 3 : 1;
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          await runWorkerRounds(service, 1);
+          if (attempt < attempts - 1) advanceToMemoryRetry(db, first.id);
+        }
+      }
       expect(service.memoryProcessingStatus([first.id]).items[0]).toMatchObject(state === "model_unconfigured"
         ? { state: "summary_pending", errorCode: "summary_model_unconfigured", retryAction: "open_settings" }
         : state === "automatic_retry" ? { state: "summary_pending", errorCode: "transient_provider_error" }
@@ -493,13 +522,14 @@ describe("History meaningful-memory processing", () => {
   );
 
   it("generates the Skill after retrying a failed source without re-uploading ready sources", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     let available = false;
     let skillCalls = 0;
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const wait = new Promise<void>((resolve) => { release = resolve; });
-    const { service } = createTestService({ llm: model(async (input) => {
+    const { service, db } = createTestService({ llm: model(async (input) => {
       if (input.sources[0]!.content.includes("WINDOW_SWITCH_ONLY_SENTINEL")) {
         if (!available) throw new Error("observation extraction item is not grounded in its source");
         entered();
@@ -516,7 +546,10 @@ describe("History meaningful-memory processing", () => {
     const second = service.syncExternalEvidence({ ...evidence, sourceRecordId: secondId,
       content: evidence.content.replace("WINDOW_SWITCH_ONLY_SENTINEL", "") });
     const suggestion = skillSuggestion(secondId);
-    await runWorkerRounds(service, 3);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await runWorkerRounds(service, 1);
+      if (attempt < 2) advanceToMemoryRetry(db, first.id);
+    }
     expect(service.memoryProcessingStatus([first.id, second.id]).items).toEqual([
       expect.objectContaining({ state: "failed", errorCode: "processing_failed", attemptCount: 3 }),
       expect.objectContaining({ state: "ready" })

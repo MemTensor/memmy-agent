@@ -79,10 +79,13 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
     const timer = setTimeout(() => finish(new Error('Native Computer Use agent shutdown timed out')), AGENT_STOP_TIMEOUT_MS);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
+      if (finished) return;
       connected = true;
       socket.write(JSON.stringify({ kind: 'agentInfo' }) + '\n');
     });
     socket.on('data', chunk => {
+      // Destruction is asynchronous: late events must never restart the handshake.
+      if (finished) return;
       buffered += chunk;
       if (buffered.length > 8192) { finish(new Error('Unexpected native agent lifecycle response')); return; }
       let end: number;

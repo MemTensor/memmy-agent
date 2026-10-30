@@ -10,7 +10,7 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { TaskBusProvider } from "../../lib/task-bus.js";
 import { AppStateProvider } from "../../state/app-state.js";
 import { initialToolsState, toolsReducer } from "../../state/tools-slice.js";
-import { loadConnectionsForPage, shouldLoadConnectionsForPage, ToolsPage, ToolsPageView } from "../tools-page.js";
+import { loadConnectionsForPage, shouldLoadConnectionsForPage, ToolsPage, ToolsPageView, type ToolsSection, type ConnectionCatalogFilter } from "../tools-page.js";
 
 describe("ToolsPageView", () => {
   it("只读取连接记录，工具网格使用本地静态目录", async () => {
@@ -59,31 +59,50 @@ describe("ToolsPageView", () => {
       </AppProviders>
     );
 
-    expect(html).toContain("工具连接");
+    expect(html).toContain("连接与工具");
+    expect(html).toContain("GitHub");
+    expect(html).toContain("应用工具");
+    expect(html).toContain("聊天渠道");
+    expect(html).toContain("任务插件");
+    expect(html).toMatch(/role="tablist"[^>]+data-window-drag-exclusion="tools-tabs"/);
+    expect(html).toMatch(/id="tools-tab-connections"[^>]+aria-selected="true"/);
+    expect(html.indexOf('id="tools-tab-connections"')).toBeLessThan(html.indexOf('id="tools-tab-channels"'));
+    expect(html.indexOf('id="tools-tab-channels"')).toBeLessThan(html.indexOf('id="tools-tab-plugins"'));
   });
 
-  it("渲染渠道 5 项和 managed 全表", () => {
+  it("应用工具和聊天渠道分别呈现独立目录", () => {
     const html = renderView(initialToolsState);
+    const channelsHtml = renderView(initialToolsState, { section: "channels" });
     const catalog = getAllIntegrationMeta();
 
     expect(catalog.filter((item) => item.isChannel)).toHaveLength(6);
     expect(catalog.filter((item) => !item.isChannel)).toHaveLength(117);
-    expect(html).toContain("Telegram");
-    expect(html).toContain("WeChat");
+    expect(html).not.toContain("Telegram");
+    expect(html).not.toContain("WeChat");
     expect(html).toContain("GitHub");
+    expect(channelsHtml).toContain("Telegram");
+    expect(channelsHtml).toContain("WeChat");
+    expect(channelsHtml).not.toContain("GitHub");
+    expect(channelsHtml).toContain('data-surface="channel"');
+    expect(channelsHtml).not.toContain('data-surface="integration"');
+    expect(html).toContain('data-surface="integration"');
+    expect(html).not.toContain('data-surface="channel"');
     expect(html).not.toContain("Strava");
-    expect(html).toContain("integration-card-channel");
-    expect(html).toContain("integration-card-integration");
     expect(html).not.toContain("ToolDetailDrawer");
     expect(html).not.toContain("modal-right");
   });
 
-  it("保留 Memmy v2.0 页面骨架，工具卡片使用自动填充的紧凑 icon 网格", () => {
+  it("保留页面骨架，三个分类共用紧凑目录的布局", () => {
     const html = renderView(initialToolsState);
 
-    expect(html).toContain("app-frame-page-content h-full overflow-y-auto py-6");
+    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -8px)');
+    expect(html).toContain('class="app-frame-page-content h-full overflow-y-auto tools-page-content"');
+    expect(html).toContain('style="padding-bottom:24px"');
     expect(html).toContain('data-tour-anchor="product-tour-tools-content"');
-    expect(html).toContain("tools-icon-grid");
+    expect(html).toContain("plugin-marketplace-grid");
+    expect(html).toContain("extension-catalog-heading");
+    expect(html).toContain('alt="Memmy"');
+    expect(html).toContain("extension-catalog-toolbar");
     expect(html).not.toContain("w-full max-w-3xl space-y-4");
     expect(html).not.toContain("grid grid-cols-4 gap-3 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7");
     expect(html).not.toContain("rounded-2xl border border-border-stone/35 bg-background-paper p-3 shadow-sm ring-1 ring-black/5");
@@ -101,6 +120,29 @@ describe("ToolsPageView", () => {
 
     expect(html).toContain("GitHub");
     expect(html).not.toContain("Airtable");
+  });
+
+  it("渠道搜索仅匹配渠道，同名应用工具的已连接状态不会串入", () => {
+    const state = toolsReducer(initialToolsState, {
+      type: "tools/loadSuccess",
+      connections: [{ id: "discord-tool", toolkit: "discord", surface: "integration", status: "ACTIVE" }]
+    });
+    const channelSearch = renderView(state, { section: "channels", search: "discord" });
+    expect(channelSearch).toContain("Discord");
+    expect(channelSearch).not.toContain("Telegram");
+    const connectedChannels = renderView(state, { section: "channels", connectionFilter: "connected" });
+    expect(connectedChannels).not.toContain('data-surface="channel"');
+    const connectedTools = renderView(state, { connectionFilter: "connected" });
+    expect(connectedTools).toContain("Discord");
+    expect(connectedTools).not.toContain("Airtable");
+  });
+
+  it("任务插件分类只呈现插件目录，不混入连接列表", () => {
+    const html = renderView(initialToolsState, { section: "plugins" });
+    expect(html).toContain("Plugin catalog fixture");
+    expect(html).not.toContain("GitHub");
+    expect(html).not.toContain("Telegram");
+    expect(html).not.toContain("extension-catalog-heading");
   });
 
   it("ready 后不按 Cloud 能力清单过滤本地静态工具", () => {
@@ -189,7 +231,7 @@ describe("ToolsPageView", () => {
 
 function renderView(
   tools: ReturnType<typeof toolsReducer>,
-  options: { search?: string; client?: IntegrationsClient | null; channelsClient?: ChannelsClient | null } = {}
+  options: { search?: string; section?: ToolsSection; connectionFilter?: ConnectionCatalogFilter; client?: IntegrationsClient | null; channelsClient?: ChannelsClient | null } = {}
 ): string {
   return renderToString(
     <TaskBusProvider>
@@ -200,6 +242,9 @@ function renderView(
             client={options.client === undefined ? createClient([]) : (options.client ?? undefined)}
             channelsClient={options.channelsClient === undefined ? createChannelsClient([]) : (options.channelsClient ?? undefined)}
             search={options.search}
+            section={options.section}
+            connectionFilter={options.connectionFilter}
+            marketplace={<div>Plugin catalog fixture</div>}
             onSearchChange={() => undefined}
             onCategoryChange={() => undefined}
             onOpenIntegration={() => undefined}

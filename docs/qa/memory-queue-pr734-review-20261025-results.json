@@ -1,0 +1,116 @@
+{
+  "package": {
+    "dmgSha256": "c8ede3c1d60db3be43114d19d1dd810710b286b045c3f87644c9e64d061b30d8",
+    "dmgBytes": 369761935,
+    "manifest": {
+      "version": "2.1.7",
+      "buildId": "481c97f14693f31626bb645abb7d082bec7e70598c546bf7cdc5fc8d1be0a3db",
+      "schemaVersion": 13,
+      "protocolVersion": 1,
+      "target": "darwin-arm64",
+      "entrypoint": "dist/src/server/index.js",
+      "viewer": "dist/viewer/index.html"
+    },
+    "comparedMemoryModules": 233,
+    "mismatches": [],
+    "timestamp": "2026-10-25T23:17:54.444688"
+  },
+  "reviewChecks": [
+    {
+      "name": "issue1-summary-vector-recall-idempotence",
+      "budget": 1,
+      "passed": true,
+      "completedJobs": 4
+    },
+    {
+      "name": "issue1-summary-vector-recall-idempotence",
+      "budget": 20,
+      "passed": true,
+      "completedJobs": 4
+    },
+    {
+      "name": "issue2-unrelated-wakeup-deep-scan",
+      "aging": false,
+      "blocked": 20000,
+      "releases": 312,
+      "passed": true
+    },
+    {
+      "name": "issue2-unrelated-wakeup-deep-scan",
+      "aging": true,
+      "blocked": 20000,
+      "releases": 312,
+      "passed": true
+    },
+    {
+      "name": "issue3-fixed-budget-backlog",
+      "backlog": 1000,
+      "completed": 1000,
+      "elapsedMs": 2327.1269580000007,
+      "policyMs": 44.6108679999943,
+      "policyCalls": 1000,
+      "passed": true
+    },
+    {
+      "name": "issue3-fixed-budget-backlog",
+      "backlog": 10000,
+      "completed": 1000,
+      "elapsedMs": 2439.965833,
+      "policyMs": 43.595891999984815,
+      "policyCalls": 1000,
+      "passed": true
+    },
+    {
+      "name": "issue3-fixed-budget-backlog",
+      "backlog": 50000,
+      "completed": 1000,
+      "elapsedMs": 2417.9618749999972,
+      "policyMs": 43.45605299999079,
+      "policyCalls": 1000,
+      "passed": true
+    },
+    {
+      "name": "issue3-promotion-and-new-cycle",
+      "passed": true
+    }
+  ],
+  "reservation": {
+    "success": true,
+    "backlog": 10000,
+    "backgroundLeased": 3,
+    "untouchedQueued": 9997,
+    "interactiveStartWaitMs": {
+      "native": 2.824041999999963,
+      "onboarding": 4.509667000000036
+    }
+  },
+  "app": {
+    "success": true,
+    "launches": [
+      {
+        "launch": 1,
+        "healthyMs": 3056.313709,
+        "quitMs": 616.2351250000002,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "rendered": true
+      },
+      {
+        "launch": 2,
+        "healthyMs": 1472.2649999999994,
+        "quitMs": 159.74070800000027,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "rendered": true
+      }
+    ]
+  },
+  "upgradePassed": true,
+  "postPackageTests": 166,
+  "sourceUnchangedByPackaging": true,
+  "prUpdated": false
+}
