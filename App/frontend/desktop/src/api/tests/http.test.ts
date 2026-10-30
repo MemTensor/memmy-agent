@@ -10,6 +10,14 @@ const runtimeConfig = {
 };
 
 describe("requestJson", () => {
+  it.each([["17", 17], ["0", 0], ["-1", null], ["NaN", null], ["1.5", null], ["", null]] as const)("reads retry-after %s safely", async (header, expected) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code: "rate_limited", message: "retry later", requestId: "req-1" }
+    }), { status: 429, headers: { "retry-after": header } })));
+    await expect(requestJson({ config: runtimeConfig, path: "/api/account/send-code", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({ status: 429, retryAfterSec: expected });
+  });
+
   it("preserves a plugin entitlement denial instead of turning it into an unknown error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       error: { code: "plugin_entitlement_required", message: "Plugin grant missing", requestId: "plugin-test" }
