@@ -92,7 +92,9 @@ const ProjectsResponseSchema = z.object({
   projects: z.array(ProjectSchema),
   /** 旧后端没有待审核列表时省略；空数组表示当前没有申请。 */
   applications: z.array(ApplicationSchema).optional(),
-  decisions: z.array(DecisionSchema).optional()
+  decisions: z.array(DecisionSchema).optional(),
+  /** 每个账号可创建的在线项目数上限；旧后端不返回，桌面端就不提前提示额度。 */
+  maxOwnedProjects: z.number().optional()
 });
 const CreateProjectResponseSchema = z.object({ project: ProjectSchema, localDirectory: z.string().optional() });
 const ProjectSessionsResponseSchema = z.object({
@@ -234,6 +236,8 @@ export interface CollabClient {
     applications?: CollabApplication[];
     /** 后台没实现审核结果（旧版本）时不填字段，申请人侧就不提示。 */
     decisions?: CollabApplicationDecision[];
+    /** 本人还能创建多少个在线项目，由后端给出上限；旧后端不返回。 */
+    maxOwnedProjects?: number;
   }>;
   /** Creates the cloud project and returns the directory its tasks run in, absent on a backend without it. */
   createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory?: string }>;
@@ -323,11 +327,15 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         status: item.status,
         decidedAt: item.decidedAt ?? null
       }));
-      if (!result.applications) return { projects: result.projects, ...(decisions ? { decisions } : {}) };
+      // 旧后端没有申请列表时也就不带额度，两个字段都不填。
+      if (!result.applications) {
+        return { projects: result.projects, ...(decisions ? { decisions } : {}) };
+      }
       return {
         projects: result.projects,
         applications: result.applications.map((item) => ({ projectId: item.projectId, projectName: item.projectName })),
-        ...(decisions ? { decisions } : {})
+        ...(decisions ? { decisions } : {}),
+        ...(result.maxOwnedProjects === undefined ? {} : { maxOwnedProjects: result.maxOwnedProjects })
       };
     },
 

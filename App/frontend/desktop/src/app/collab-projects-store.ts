@@ -32,6 +32,11 @@ export interface CollabProjectsSnapshot {
    * 看板顶部的一次性提示文案（已本地化）：例如新建项目时勾了共享但云端不可用。看板显示几秒后自行清除。
    */
   notice: string | null;
+  /**
+   * 每个账号可创建的在线项目数上限，由云端随列表一起给出；旧后端不返回时为 null，
+   * 新建弹窗就不提前提示额度。
+   */
+  maxOwnedProjects: number | null;
 }
 
 let snapshot: CollabProjectsSnapshot = {
@@ -44,7 +49,8 @@ let snapshot: CollabProjectsSnapshot = {
   createPending: false,
   taskPickerFor: null,
   tourFor: null,
-  notice: null
+  notice: null,
+  maxOwnedProjects: null
 };
 const listeners = new Set<() => void>();
 
@@ -112,14 +118,17 @@ export async function loadCollabProjects(client: CollabClient): Promise<void> {
       // 后台还没有审核结果这一列时保留上一次的值，免得一次刷新把待提示的结果冲掉。
       // 结果不按「已加入」过滤：通过的那一条正是靠它给一次提示，提示过之后就记在本机不再弹。
       const decisions = listed.decisions ?? snapshot.decisions;
+      // 额度随列表一起回来；这一次没拿到时保留上一次的值，免得弹窗上一会提示一会不提示。
+      const maxOwnedProjects = listed.maxOwnedProjects ?? snapshot.maxOwnedProjects;
       // 一个字段都没变（切回窗口、轮询带来的重读）就不写：侧栏与看板不必跟着重画一遍。
       const unchanged = snapshot.projects !== null
         && snapshot.error === null
         && sameRecords(snapshot.projects, listed.projects)
         && sameRecords(snapshot.applications, applications)
-        && sameRecords(snapshot.decisions, decisions);
+        && sameRecords(snapshot.decisions, decisions)
+        && snapshot.maxOwnedProjects === maxOwnedProjects;
       if (unchanged) return;
-      update({ projects: listed.projects, applications, decisions, loading: false, error: null });
+      update({ projects: listed.projects, applications, decisions, loading: false, error: null, maxOwnedProjects });
     } catch (cause) {
       // 云端不可用时保留已有列表：项目就在本机，云端只决定能不能看共享内容。
       update({ loading: false, error: messageOf(cause) });
@@ -235,7 +244,8 @@ export function resetCollabProjectsStore(): void {
     createPending: false,
     taskPickerFor: null,
     tourFor: null,
-    notice: null
+    notice: null,
+    maxOwnedProjects: null
   };
   listeners.clear();
 }
@@ -249,8 +259,9 @@ function normalizeProjectList(
     projects: CollabProject[];
     applications?: CollabApplication[];
     decisions?: CollabApplicationDecision[];
+    maxOwnedProjects?: number;
   } | CollabProject[]
-): { projects: CollabProject[]; applications?: CollabApplication[]; decisions?: CollabApplicationDecision[] } {
+): { projects: CollabProject[]; applications?: CollabApplication[]; decisions?: CollabApplicationDecision[]; maxOwnedProjects?: number } {
   if (Array.isArray(listed)) return { projects: listed };
   return listed;
 }

@@ -212,6 +212,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.modelSelector.unavailable",
   "home.project.desktopRequired",
   "collab.share.failed",
+  "collab.create.shareQuotaExceeded",
   "home.queue.removeFailed",
   "home.queue.editBlocked",
   "home.queue.steerFailed",

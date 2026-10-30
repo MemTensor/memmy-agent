@@ -2051,6 +2051,15 @@ export function AppFrame(props: AppFrameProps) {
             message: "collab.create.shareFailed"
           })));
         }}
+        onShareLimitReached={(limit) => {
+          // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
+          console.warn(`Project created without sharing: owned project limit ${limit} reached`);
+          showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
+          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+            source: "sidebar",
+            message: "collab.create.shareQuotaExceeded"
+          })));
+        }}
         onBound={(projectId, localProjectId) => markCollabProjectBound(projectId, localProjectId)}
         onBindFailed={(reason) => {
           // The project exists; only its local record is missing, so the reason is logged rather than shown raw.

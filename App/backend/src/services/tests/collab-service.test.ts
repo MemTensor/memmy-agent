@@ -624,6 +624,28 @@ describe("collab service", () => {
     expect(await service(older).listProjects()).toEqual({ projects: [] });
   });
 
+  it("tells the desktop apart when the account already owns as many projects as allowed", async () => {
+    const { fetcher } = fakeFetch({
+      "POST /api/collab/projects": () => new Response(JSON.stringify({
+        code: 41004,
+        message: "每人最多创建 5 个在线项目，停止共享后可再创建",
+        data: null
+      }), { status: 409 })
+    });
+    // 数量上限不是服务故障：桌面端据此把项目留在本机并说明原因，不再提示「稍后重试」。
+    await expect(service(fetcher).createProject("第六个")).rejects.toMatchObject({
+      code: "collab_quota_exceeded",
+      message: "每人最多创建 5 个在线项目，停止共享后可再创建"
+    });
+  });
+
+  it("passes the owned-project limit through, so the dialog need not hardcode it", async () => {
+    const { fetcher } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [], applications: [], decisions: [], maxOwnedProjects: 5 } })
+    });
+    expect(await service(fetcher).listProjects()).toMatchObject({ maxOwnedProjects: 5 });
+  });
+
   it("passes reviewed applications through, and drops statuses it cannot read", async () => {
     const { fetcher } = fakeFetch({
       "GET /api/collab/projects": () => ({

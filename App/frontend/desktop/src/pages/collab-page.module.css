@@ -1513,6 +1513,13 @@
   line-height: 1.6;
 }
 
+/* 额度提示：这次仍会建成本机项目，只是共享不会开始，用次级文字色，不当成错误 */
+.settingsRowQuota {
+  color: var(--collab-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* 本机目录这类路径用等宽字，长短一眼可比 */
 .settingsRowPath {
   overflow: hidden;

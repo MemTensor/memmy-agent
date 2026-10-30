@@ -1,7 +1,12 @@
 import { Cloud, Folder, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createHttpCollabClient, type CollabClient, type CollabProject } from "../api/collab-client.js";
-import { requestCollabTour } from "../app/collab-projects-store.js";
+import { ApiRequestError } from "../api/http.js";
+import {
+  getCollabProjectsSnapshot,
+  requestCollabTour,
+  subscribeCollabProjects
+} from "../app/collab-projects-store.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -25,6 +30,11 @@ export function CollabCreateProjectDialog(props: {
   onBindFailed: (reason: string) => void;
   /** The local project exists but sharing did not start; it opens without sharing. */
   onShareFailed: (reason: string) => void;
+  /**
+   * 共享没开起来是因为本人可创建的协作项目数已达上限（传入上限值）。
+   * 与「服务不可用」分开：项目照建在本机，要说明的是额度，不是稍后重试。
+   */
+  onShareLimitReached?: (limit: number) => void;
   /** Switches the same dialog to joining a shared project; both entries live in one place now. */
   onJoinProject?: () => void;
 }) {
@@ -47,6 +57,7 @@ export function CreateProjectModal(props: {
   onBound: (projectId: string, localProjectId: string) => void;
   onBindFailed: (reason: string) => void;
   onShareFailed: (reason: string) => void;
+  onShareLimitReached?: (limit: number) => void;
   onJoinProject?: () => void;
 }) {
   const { t } = useTranslation();
@@ -61,6 +72,13 @@ export function CreateProjectModal(props: {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const trimmed = name.trim();
   const valid = trimmed.length > 0 && Array.from(trimmed).length <= MAX_PROJECT_NAME_CHARS;
+  /**
+   * 本人名下的协作项目有几个、最多能有几个：达到上限时先说清这次只建在本机。
+   * 上限由云端随列表给出，所以数字不在前端写死。
+   */
+  const projectsStore = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  const ownedCount = (projectsStore.projects ?? []).filter((project) => project.role === "owner").length;
+  const ownedLimit = projectsStore.maxOwnedProjects;
 
   useEffect(() => {
     if (props.open) {
@@ -131,7 +149,12 @@ export function CreateProjectModal(props: {
       }
     } catch (cause) {
       // The project exists locally; only sharing did not start, and the board can retry it.
-      props.onShareFailed(messageOf(cause));
+      // 数量上限不是服务故障：同样把项目留在本机，但提示要说清是额度用完，不是稍后重试。
+      if (isQuotaExceeded(cause) && ownedLimit !== null) {
+        props.onShareLimitReached?.(ownedLimit);
+      } else {
+        props.onShareFailed(messageOf(cause));
+      }
     } finally {
       setBusy(false);
     }
@@ -220,6 +243,12 @@ export function CreateProjectModal(props: {
           <div className={styles.settingsRowText}>
             <div className={styles.settingsRowTitle}>{t("collab.create.share")}</div>
             <div className={styles.settingsRowDesc}>{t("collab.create.shareHint")}</div>
+            {/* 已达上限时先说清：仍然可以建，只是这次只建在本机 */}
+            {share && ownedLimit !== null && ownedCount >= ownedLimit ? (
+              <div className={styles.settingsRowQuota}>
+                {t("collab.create.shareQuotaHint", { limit: ownedLimit })}
+              </div>
+            ) : null}
           </div>
           <div className={styles.settingsRowControl}>
             <button
@@ -241,4 +270,9 @@ export function CreateProjectModal(props: {
 function messageOf(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
   return raw.startsWith("[") || raw.startsWith("{") ? "" : raw;
+}
+
+/** 本机后端把云端的数量上限错误码单独映射出来，桌面端据此区分「额度用完」与「服务不可用」。 */
+function isQuotaExceeded(cause: unknown): boolean {
+  return cause instanceof ApiRequestError && cause.code === "collab_quota_exceeded";
 }

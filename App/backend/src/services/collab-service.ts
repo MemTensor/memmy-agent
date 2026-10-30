@@ -436,6 +436,8 @@ export interface CollabService {
     applications?: CollabApplication[];
     /** 旧云端没有这一列：字段缺省表示读不到结果，桌面端就不提示。 */
     decisions?: CollabApplicationDecision[];
+    /** 每个账号可创建的在线项目数上限，旧云端不返回；桌面端据此在新建时先说明「只能建成本机项目」。 */
+    maxOwnedProjects?: number;
   }>;
   /**
    * Creates the cloud project and prepares the directory its tasks run in: the person's chosen folder, or a
@@ -693,9 +695,12 @@ export function createCollabCloudRequest(
     }
     const payload = record(await response.json().catch(() => ({})));
     if (!response.ok || (typeof payload.code === "number" && payload.code !== 0)) {
+      const cloudCode = typeof payload.code === "number" && payload.code !== 0 ? payload.code : null;
       // The cloud reports some failures with an empty message; the code is what makes them diagnosable.
-      const code = typeof payload.code === "number" && payload.code !== 0 ? `云端返回错误码 ${payload.code}` : "";
-      throw new CollabError(errorCode(response.status), text(payload.message) || code || "协作项目请求未完成");
+      const code = cloudCode === null ? "" : `云端返回错误码 ${cloudCode}`;
+      // 数量上限要能被界面单独解释（「这次只建了本机项目」），所以不看 HTTP 状态，直接按云端错误码对应。
+      const mapped = cloudCode === null ? undefined : LOCAL_CODE_BY_CLOUD_CODE[cloudCode];
+      throw new CollabError(mapped ?? errorCode(response.status), text(payload.message) || code || "协作项目请求未完成");
     }
     return record(payload.data);
   };
@@ -1472,7 +1477,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return {
         projects: bound,
         applications: list(data.applications).map(toApplication),
-        ...(decisions ? { decisions } : {})
+        ...(decisions ? { decisions } : {}),
+        ...(typeof data.maxOwnedProjects === "number" ? { maxOwnedProjects: data.maxOwnedProjects } : {})
       };
     },
 
@@ -2591,6 +2597,15 @@ function summarizeSteps(steps: readonly string[]): string {
   for (const step of steps) counts.set(step, (counts.get(step) ?? 0) + 1);
   return [...counts.entries()].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join("、");
 }
+
+/**
+ * 云端错误码 → 本机错误码。只有界面需要单独解释的才列出来，其余按 HTTP 状态归类就够。
+ * 例如在线项目数量达到上限时要先把项目建在本机并说明原因，不能当成服务故障去提示「稍后重试」。
+ */
+const LOCAL_CODE_BY_CLOUD_CODE: Readonly<Record<number, ApiErrorCode>> = Object.freeze({
+  /** 云端 ErrorCode.COLLAB_QUOTA：每人可创建的在线项目数量达到上限。 */
+  41004: "collab_quota_exceeded"
+});
 
 function errorCode(status: number): ApiErrorCode {
   if (status === 400 || status === 413) return "invalid_argument";

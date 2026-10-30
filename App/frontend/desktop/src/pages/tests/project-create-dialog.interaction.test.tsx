@@ -7,7 +7,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCollabProjectsSnapshot, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
+import {
+  getCollabProjectsSnapshot,
+  loadCollabProjects,
+  resetCollabProjectsStore
+} from "../../app/collab-projects-store.js";
+import { ApiRequestError } from "../../api/http.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CreateProjectModal } from "../collab-create-project-dialog.js";
 
@@ -42,6 +47,8 @@ describe("new project dialog", () => {
   let container: HTMLDivElement;
   let root: Root;
   const onCreated = vi.fn();
+  const onShareFailed = vi.fn();
+  const onShareLimitReached = vi.fn();
 
   function collab() {
     return {
@@ -74,7 +81,8 @@ describe("new project dialog", () => {
             onShared={vi.fn()}
             onBound={vi.fn()}
             onBindFailed={vi.fn()}
-            onShareFailed={vi.fn()}
+            onShareFailed={onShareFailed}
+            onShareLimitReached={onShareLimitReached}
           />
         </I18nProvider>
       );
@@ -176,6 +184,67 @@ describe("new project dialog", () => {
     expect(mocks.bindLocalProject).toHaveBeenCalledWith("cloud-1", "local-1");
     // A brand-new project has no sessions yet, so nothing is asked and nothing pops up over the board.
     expect(getCollabProjectsSnapshot().taskPickerFor).toBeNull();
+    expect(onCreated).toHaveBeenCalledWith("local-1");
+  });
+
+  /** 本机已经拥有 `count` 个协作项目，云端给出的上限是 `limit`。 */
+  async function seedOwnedProjects(count: number, limit: number): Promise<void> {
+    const projects = Array.from({ length: count }, (_, index) => ({
+      id: `cloud-${index}`,
+      name: `demo ${index}`,
+      role: "owner",
+      memberCount: 1,
+      sessionCount: 0,
+      createdAt: null,
+      localProjectId: `local-${index}`
+    }));
+    await act(async () => {
+      await loadCollabProjects({
+        listProjects: async () => ({ projects, applications: [], decisions: [], maxOwnedProjects: limit })
+      } as never);
+    });
+  }
+
+  it("says up front that this project stays on this computer once the account is at its limit", async () => {
+    await seedOwnedProjects(5, 5);
+    await act(async () => {
+      shareSwitch().click();
+    });
+    await flush();
+
+    // 上限由云端给出（这里是 5），弹窗不写死数字，只在开启共享时就说明这次只会建在本机。
+    expect(document.body.textContent).toContain("协作项目数已达上限（5 个）");
+  });
+
+  it("keeps the project local and reports the limit instead of a service outage", async () => {
+    await seedOwnedProjects(5, 5);
+    mocks.createProject.mockRejectedValueOnce(
+      new ApiRequestError("每人最多创建 5 个在线项目，停止共享后可再创建", 409, "collab_quota_exceeded")
+    );
+    await act(async () => type(nameInput(), "第六个"));
+    await act(async () => {
+      shareSwitch().click();
+    });
+    await act(async () => submitButton().click());
+    await flush();
+
+    // 本机项目照建；失败原因是额度，不该走「服务暂时不可用」那条提示。
+    expect(onCreated).toHaveBeenCalledWith("local-1");
+    expect(onShareLimitReached).toHaveBeenCalledWith(5);
+    expect(onShareFailed).not.toHaveBeenCalled();
+  });
+
+  it("leaves other sharing failures to the generic notice", async () => {
+    mocks.createProject.mockRejectedValueOnce(new ApiRequestError("暂时无法连接 Memmy 云端，请稍后重试。", 503));
+    await act(async () => type(nameInput(), "demo"));
+    await act(async () => {
+      shareSwitch().click();
+    });
+    await act(async () => submitButton().click());
+    await flush();
+
+    expect(onShareFailed).toHaveBeenCalledWith("暂时无法连接 Memmy 云端，请稍后重试。");
+    expect(onShareLimitReached).not.toHaveBeenCalled();
     expect(onCreated).toHaveBeenCalledWith("local-1");
   });
 });
