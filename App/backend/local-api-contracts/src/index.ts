@@ -1845,6 +1845,7 @@ export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
 
+export * from "./computer-recordings.js";
 /** Memory owns scan execution; desktop translates this state into its existing events. */
 export const MemoryAgentSourceScanStateSchema = z.object({
     version: ScanVersionSchema.optional(),

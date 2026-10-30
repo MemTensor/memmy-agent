@@ -59,7 +59,8 @@ export async function ensureNativeHistoryHelper(source: string, cacheDirectory: 
   try {
     const output = path.join(temporary, name);
     const sources = entrypoint ? [source, entrypoint] : [source];
-    await execFileAsync("swiftc", ["-O", "-o", output, ...sources], { timeout: 120_000 });
+    await execFileAsync("swiftc", ["-O", "-o", output, ...sources,
+      ...(name === "task-recorder" ? ["-Xlinker", "-weak_framework", "-Xlinker", "ScreenCaptureKit"] : [])], { timeout: 120_000 });
     fs.renameSync(output, cachedBinary);
     return cachedBinary;
   } catch (error) {

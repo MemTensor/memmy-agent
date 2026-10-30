@@ -1,0 +1,2 @@
+# Git Bash packaging scripts must remain executable after a Windows checkout.
+*.sh text eol=lf

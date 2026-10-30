@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { browserHistoryConfiguration, connectBrowserHistoryBridge } from "../../../src/tools/computer-history/browser-history-bridge.js";
-import type { BrowserHistoryCaptureIntent, BrowserHistoryTrustedContext } from "../../../src/tools/computer-history/browser-semantic-history.js";
+import { prepareBrowserHistoryEvent, type BrowserHistoryCaptureIntent, type BrowserHistoryTrustedContext } from "../../../src/tools/computer-history/browser-semantic-history.js";
 import { DEFAULT_OBSERVATION_SETTINGS } from "../../../src/tools/computer-history/mac/observation-settings.js";
+import { windowsScopeRule } from "../../../src/tools/computer-history/win/unified-settings.js";
 
 const context: BrowserHistoryTrustedContext = { connectionId: "connection-1", browser: "chrome", tabId: 2, windowId: 1,
   url: "https://work.test/form", frameUrl: "https://frame.test/form", documentId: "document-1", privateBrowsing: false, protected: false };
@@ -10,6 +11,24 @@ const capture = (): BrowserHistoryCaptureIntent => ({ enabled: true, generation:
 afterEach(() => vi.useRealTimers());
 
 describe("passive browser History bridge authorization", () => {
+  it("honors Windows executable exclusions when the extension cannot identify its executable path", () => {
+    const intent = capture(), now = Date.now();
+    const event = { version: 1, eventId: "event-1", observedAt: now, generation: intent.generation,
+      documentId: context.documentId, action: "click" };
+    intent.settings!.observation.rules = [windowsScopeRule("C:\\Private\\chrome.exe", "do_not_observe")];
+    expect(browserHistoryConfiguration(intent, context, now, "win32").enabled).toBe(false);
+    expect(prepareBrowserHistoryEvent(event, context, intent, now, "win32")).toBeNull();
+    // An unrelated application's path restriction must not disable this browser.
+    intent.settings!.observation.rules = [windowsScopeRule("C:\\Private\\Code.exe", "do_not_observe")];
+    expect(browserHistoryConfiguration(intent, context, now, "win32").enabled).toBe(true);
+    expect(prepareBrowserHistoryEvent(event, context, intent, now, "win32")).not.toBeNull();
+    // A path-specific allow cannot authorize a browser with an unknown path.
+    intent.settings!.observation.defaultApplicationBehavior = "do_not_observe";
+    intent.settings!.observation.rules = [windowsScopeRule("C:\\Allowed\\chrome.exe", "observe")];
+    expect(browserHistoryConfiguration(intent, context, now, "win32").enabled).toBe(false);
+    expect(prepareBrowserHistoryEvent(event, context, intent, now, "win32")).toBeNull();
+  });
+
   it.each(["darwin", "win32"] as const)("applies the existing %s app and frame/site policy before issuing a short lease", platform => {
     const intent = capture(), now = Date.now();
     expect(browserHistoryConfiguration(intent, context, now, platform)).toEqual({ enabled: true, generation: "recording-1", captureText: true, expiresAt: now + 1500 });

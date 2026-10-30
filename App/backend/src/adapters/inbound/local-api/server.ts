@@ -185,9 +185,8 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   app.get<{ Querystring: EventsQuerystring }>("/api/events", async (request, reply) => {
     // EventSource cannot reliably carry custom headers, so the SSE channel validates the same runtime token via a query parameter.
     const { token } = request.query;
-    if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
+    const authorized = token && await options.permissionManager.verifyRuntimeToken(token);
+    if (!authorized) return reply.code(401).send({ error: "unauthorized" });
 
     startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus, registerEventStream);
   });

@@ -1910,7 +1910,8 @@ describe("spawnNodeService 落盘与 env 注入", () => {
 
     await stopManagedChild(managed);
 
-    expect(managed.exitDescription).toBe("signal SIGKILL");
+    expect(managed.exitDescription).toBe(process.platform === "win32" ? "code 1" : "signal SIGKILL");
+    expect(() => process.kill(managed.process.pid!, 0)).toThrow();
   });
 });
 

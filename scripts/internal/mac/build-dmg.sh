@@ -729,7 +729,7 @@ verify_computer_history_helpers() {
     echo "Standalone Computer History recorder must not be packaged: $helper_dir/human-recorder" >&2
     exit 1
   fi
-  for helper in app-icon; do
+  for helper in app-icon task-recorder; do
     require_packaged_runtime_file "$helper_dir/$helper"
     if [ ! -x "$helper_dir/$helper" ]; then
       echo "Computer History helper is not executable: $helper_dir/$helper" >&2

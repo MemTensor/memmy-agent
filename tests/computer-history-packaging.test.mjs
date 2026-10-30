@@ -43,7 +43,7 @@ async function packagedFixture(filename) {
     ["wechat/native/arm64/MemmyWeChatPermissionProbe.dylib", "inert precompiled probe fixture"],
     ["wechat/native/arm64/MemmyWeChatPrivateStorage.dylib", "inert precompiled bridge fixture"],
     ["../wechat_identity.py", "# Shared identity fixture"],
-    ...["human-recorder", "app-icon"].flatMap((name) => [
+    ...["human-recorder", "app-icon", "task-recorder"].flatMap((name) => [
       [`${name}.swift`, "// Source must never be compiled by the packaged application"],
       [`native/${process.arch}/${name}`, "#!/bin/sh\nprintf 'native-helper-ok'\n"],
     ]),
@@ -80,9 +80,9 @@ async function packagedFixture(filename) {
   return { root, archive };
 }
 
-it.each(["electron-builder.yml", "electron-builder.unsigned.yml"])("%s puts both History executables on disk outside ASAR", async (filename) => {
+it.each(["electron-builder.yml", "electron-builder.unsigned.yml"])("%s puts History and task recording executables on disk outside ASAR", async (filename) => {
   const { archive } = await packagedFixture(filename);
-  for (const name of ["human-recorder", "app-icon"]) {
+  for (const name of ["human-recorder", "app-icon", "task-recorder"]) {
     const binary = join(`${archive}.unpacked`, prefix, "native", process.arch, name);
     expect(existsSync(binary)).toBe(true);
     if (process.platform !== "win32") expect(lstatSync(binary).mode & 0o111).not.toBe(0);
@@ -108,7 +108,7 @@ it.runIf(process.platform === "darwin")("Electron resolves and executes both pac
     const { execFileSync } = require('node:child_process');
     const { ensureNativeHistoryHelper } = require(${JSON.stringify(join(archive, prefix, "native-helper.js"))});
     (async () => {
-      for (const name of ['human-recorder', 'app-icon']) {
+      for (const name of ['human-recorder', 'app-icon', 'task-recorder']) {
         const binary = await ensureNativeHistoryHelper(path.join(${JSON.stringify(join(archive, prefix))}, name + '.swift'), name);
         if (!binary.includes('app.asar.unpacked')) throw new Error('Not an unpacked path');
         console.log(execFileSync(binary, [], { encoding: 'utf8' }));
@@ -120,7 +120,7 @@ it.runIf(process.platform === "darwin")("Electron resolves and executes both pac
     encoding: "utf8", timeout: 30_000,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", HOME: root, PATH: join(root, "no-tools") },
   });
-  expect(stdout.trim().split("\n")).toEqual(["native-helper-ok", "native-helper-ok"]);
+  expect(stdout.trim().split("\n")).toEqual(["native-helper-ok", "native-helper-ok", "native-helper-ok"]);
 });
 
 it.each(["electron-builder.win.yml", "electron-builder.win.unsigned.yml"])("%s unpacks the Windows 11 observer next to app.asar", async (filename) => {

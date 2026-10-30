@@ -70,7 +70,7 @@ export interface ManagedRuntimeServices {
   sendComputerUseSurfaceAction(action: ComputerUseSurfaceAction): boolean;
   clearBrowserData(): Promise<void>;
   close(options?: { stopMemory?: boolean }): Promise<void>;
-  terminateSync(options?: { stopMemory?: boolean }): void;
+  terminateSync(options?: { stopMemory?: boolean; timeoutMs?: number }): void;
 }
 
 export interface StartPackagedRuntimeServicesOptions {
@@ -150,7 +150,7 @@ export interface ManagedChild {
 
 export interface PackagedBrowserPreparation {
   completion: Promise<boolean>;
-  stop(): void;
+  stop(deadline?: number): void;
 }
 
 interface ServiceLogOptions {
@@ -382,19 +382,22 @@ export async function startManagedRuntimeServices(
         await stopManagedChildrenForDesktopExit(children, closeOptions.stopMemory === true);
       },
       terminateSync(terminateOptions = {}) {
+        const deadline = Date.now() + Math.max(0, terminateOptions.timeoutMs ?? 2_000);
         closing = true;
         stopMemoryOnClose = terminateOptions.stopMemory === true;
+        // Prioritize the recorder's owning tree; all synchronous commands share a budget.
+        gatewaySupervisor.terminateSync(deadline);
+        terminateManagedChildrenForDesktopExit(children, terminateOptions.stopMemory === true, deadline);
         stopBrowserPreparation();
         if (terminateOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
           runBundledMemoryCliSync(
             options.offlineMemoryRuntimeDirectory,
             runtimeConfig,
             options,
-            ["stop", "--home", dirname(runtimeConfig.configPath)]
+            ["stop", "--home", dirname(runtimeConfig.configPath)],
+            deadline
           );
         }
-        gatewaySupervisor.terminateSync();
-        terminateManagedChildrenForDesktopExit(children, terminateOptions.stopMemory === true);
       }
     };
   } catch (error) {
@@ -787,9 +790,9 @@ export function startPackagedBrowserPreparation(
     logWriter.close();
     resolveCompletion(ready);
   };
-  const stop = (): void => {
+  const stop = (deadline?: number): void => {
     if (settled) return;
-    if (child) terminateProcessTreeSync(child);
+    if (child) terminateProcessTreeSync(child, deadline);
     finish(false);
   };
   const preparation = { completion, stop };
@@ -1343,8 +1346,11 @@ function runBundledMemoryCliSync(
   runtimeDirectory: string,
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
-  commandArgs: string[]
+  commandArgs: string[],
+  deadline: number
 ): void {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return;
   const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
   if (!existsSync(cliEntry)) return;
   try {
@@ -1357,7 +1363,8 @@ function runBundledMemoryCliSync(
         MEMMY_CONFIG: runtimeConfig.configPath
       },
       stdio: "ignore",
-      timeout: 6_000,
+      timeout: remainingMs,
+      killSignal: "SIGKILL",
       windowsHide: true
     });
   } catch (error) {
@@ -1820,14 +1827,14 @@ export class AgentGatewaySupervisor {
     }
   }
 
-  terminateSync(): void {
+  terminateSync(deadline?: number): void {
     this.stopping = true;
     this.resolveReadyWaiters();
     this.clearTimers();
     const child = this.ownedChild;
     this.ownedChild = null;
     if (child) {
-      terminateManagedChildrenSync([child]);
+      terminateManagedChildrenSync([child], deadline);
       this.removeChild(child);
       child.logWriter?.close();
     }
@@ -2793,25 +2800,29 @@ function memoryAuthHeaders(token: string): Record<string, string> {
  *
  * @param children List of managed child processes.
  */
-function terminateManagedChildrenSync(children: ManagedChild[]): void {
+function terminateManagedChildrenSync(children: ManagedChild[], deadline = Date.now() + 2_000): void {
   for (const child of children) {
-    terminateProcessTreeSync(child.process);
+    terminateProcessTreeSync(child.process, deadline);
   }
 }
 
 export function terminateManagedChildrenForDesktopExit(
   children: ManagedChild[],
-  stopMemory: boolean
+  stopMemory: boolean,
+  deadline?: number
 ): void {
-  terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
+  terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit), deadline);
 }
 
-function terminateProcessTreeSync(child: ChildProcess): void {
+function terminateProcessTreeSync(child: ChildProcess, deadline = Date.now() + 2_000): void {
   if (child.exitCode != null || child.signalCode != null) return;
   const pid = child.pid;
-  if (process.platform === "win32" && pid !== undefined) {
+  const remainingMs = deadline - Date.now();
+  if (process.platform === "win32" && pid !== undefined && remainingMs > 0) {
     try {
-      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+        stdio: "ignore", timeout: remainingMs, killSignal: "SIGKILL", windowsHide: true
+      });
       return;
     } catch {
       // Fall through to the direct-child fallback if taskkill cannot inspect the process tree.
@@ -2842,14 +2853,7 @@ export async function stopManagedChild(child: ManagedChild): Promise<void> {
   // Memmy.exe, causing EADDRINUSE on the next launch and blocking silent updates from installing.
   // Use taskkill /T to kill the entire process tree.
   if (process.platform === "win32") {
-    const pid = child.process.pid;
-    if (pid !== undefined) {
-      try {
-        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
-      } catch {
-        // The process may already have exited or we may lack permission; ignore.
-      }
-    }
+    terminateProcessTreeSync(child.process);
     await waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS);
     return;
   }

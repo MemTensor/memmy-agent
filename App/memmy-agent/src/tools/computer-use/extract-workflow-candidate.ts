@@ -9,7 +9,7 @@ import {
   loadRecords,
   reusableHumanActions,
   type JsonRecord,
-} from "../computer-history/mac/summarize-history.js";
+} from "../computer-history/core/summarize-history.js";
 
 interface CandidateArgs {
   file?: string;
@@ -79,6 +79,8 @@ export function renderWorkflowCandidate({ file, records, title, sourceHistoryId 
     `# Workflow Candidate：${resolvedTitle}`,
     "",
     "This is a machine-facing candidate derived from the raw operation event stream. It is not executed automatically; the Agent must generate or select a gated Workflow before using Computer Use.",
+    ...(events.some((event) => event.details?.source === "low_level_hook" && event.details?.injected === true)
+      ? ["Input marked injected may have originated from software. Confirm its intended purpose with the current task before replaying."] : []),
     "",
     "## Semantic steps",
     "",

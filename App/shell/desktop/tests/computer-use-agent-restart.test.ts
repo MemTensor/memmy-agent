@@ -286,7 +286,9 @@ describe.skipIf(hostPlatform === 'win32')('Computer Use cleanup for a complete d
 
   it.each(['timeout', 'close'] as const)('ignores late socket events after %s and clears the shutdown deadline', async completion => {
     const f = fixture();
-    processRows = [row(f, 900_001, f.socket('a'.repeat(16)))];
+    const socketPath = f.socket('a'.repeat(16));
+    await agent(socketPath, () => {});
+    processRows = [row(f, 900_001, socketPath)];
     const socket = Object.assign(new EventEmitter(), {
       setEncoding: vi.fn(), write: vi.fn(), destroy: vi.fn(),
     });
