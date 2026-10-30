@@ -20,7 +20,10 @@ const mocks = vi.hoisted(() => ({
   getLinks: vi.fn(),
   listProjectTasks: vi.fn(),
   readSessionDetail: vi.fn(),
-  listMembers: vi.fn()
+  listMembers: vi.fn(),
+  /** 侧栏/看板用的本机任务列表与 dispatch：点开本人任务时要落到会话页。 */
+  tasks: [] as Array<{ sessionKey: string; projectId: string | null; title: string; archived?: boolean; updatedAt?: string }>,
+  dispatch: vi.fn()
 }));
 
 vi.mock("../../api/collab-client.js", async (importOriginal) => {
@@ -42,10 +45,10 @@ vi.mock("../../state/app-state.js", () => ({
     state: {
       agent: {
         projects: [{ id: "local-1", name: "Memmy 开发", rootPath: "/Users/me/Memmy", pinned: false, createdAt: "2026-10-21T03:00:00.000Z" }],
-        tasks: []
+        tasks: mocks.tasks
       }
     },
-    dispatch: vi.fn()
+    dispatch: mocks.dispatch
   })
 }));
 
@@ -106,6 +109,7 @@ describe("collab task list", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.tasks = [];
     resetCollabProjectsStore();
     mocks.listProjects.mockResolvedValue([CLOUD_PROJECT]);
     mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: SESSIONS, total: SESSIONS.length });
@@ -230,6 +234,25 @@ describe("collab task list", () => {
     await act(async () => button("取消全选")!.click());
     expect(checks.every((check) => !check.checked)).toBe(true);
     expect(button("全选本页")).toBeTruthy();
+  });
+
+  it("opens the member's own Memmy task in its conversation page instead of the read-only panel", async () => {
+    // 本人在 Memmy 里建的任务正文就在本机：点开直接进会话页，不必先给一个只读面板。
+    const own = { ...SESSIONS[1]!, source: "memmy", conversationId: "chat-7" };
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [own], total: 1 });
+    mocks.tasks = [{ sessionKey: "websocket:chat-7", projectId: "local-1", title: own.title }];
+    await renderBoard();
+
+    const title = Array.from(document.querySelectorAll<HTMLElement>("span"))
+      .find((element) => element.textContent?.trim() === own.title);
+    expect(title, "列表应显示这条任务").toBeTruthy();
+    await act(async () => title!.click());
+    await flush();
+
+    expect(mocks.readSessionDetail).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-collab-reader]")).toBeNull();
+    // 没有可用的 Agent 客户端时只切页面，但切换确实发生了。
+    expect(mocks.dispatch).toHaveBeenCalled();
   });
 
   it("opens someone else's session as a floating panel, not a dialog", async () => {

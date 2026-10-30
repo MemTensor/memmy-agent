@@ -29,8 +29,9 @@ const USAGE = [
   "  memmy-project session search <keywords> [--member <name>] [--project <project name>] [--since 30d] [--limit <n>]",
   "  memmy-project session read <link|id|id#turn> [--turns <from>-<to> | --around <turn> | --find \"<sentence>\" | --all]",
   "  memmy-project session add [--project <project name>] [--hint \"<sentence>\"]",
+  "  memmy-project session share [--project <project name>] [--off]",
   "",
-  "Finds and reads sessions of your shared Memmy projects, and adds the current one to a project. Memmy must be running."
+  "Finds and reads sessions of your shared Memmy projects, and shares the current one to a project. Memmy must be running."
 ].join("\n");
 
 export interface MemmyProjectDeps {
@@ -140,6 +141,22 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
     });
     return typeof result.text === "string" ? result.text : "";
   }
+  if (action === "share") {
+    if (rest.length) throw new Error("session share 不接受额外参数，用 --project 指定项目名称");
+    // 只有在 Memmy 自己的任务里才知道这条任务的会话 id：exec 把当前会话写进环境变量。
+    const conversationId = (deps.env ?? process.env).MEMMY_TASK_ID?.trim() ?? "";
+    if (!conversationId) {
+      throw new Error("只能在 Memmy 的任务里使用 session share；其他 Agent 中用 memmy-project session add 把当前会话加入项目。");
+    }
+    const project = optionString(parsed, "project")?.trim();
+    const off = parsed.options.off === true || parsed.options.off === "true";
+    const result = await localApi(deps, "POST", "/api/collab/sessions/share", {
+      conversationId,
+      shared: !off,
+      ...(project ? { project } : {})
+    });
+    return typeof result.text === "string" ? result.text : "";
+  }
   if (action === "search") {
     // Memmy turns the words into keywords, merges a session shared to several projects and applies --since.
     const params = new URLSearchParams({ q: rest.join(" ").trim() });
@@ -162,6 +179,9 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
  * current task can be added without guessing among others in the directory.
  */
 export function runningConversation(env: NodeJS.ProcessEnv): { sourceId: string; conversationId: string } | undefined {
+  // Memmy 自己的任务：exec 把当前会话写进 MEMMY_TASK_ID，加入 / 共享都按这一条走。
+  const memmy = env.MEMMY_TASK_ID?.trim();
+  if (memmy) return { sourceId: "memmy", conversationId: memmy };
   const cursor = env.CURSOR_CONVERSATION_ID?.trim();
   if (cursor) return { sourceId: "cursor", conversationId: cursor };
   const claude = env.CLAUDE_SESSION_ID?.trim() || env.CLAUDE_CODE_SESSION_ID?.trim();

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Clock5, PanelRight, Search, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Clock5, Folder, PanelRight, Search, X } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import { collectConversationPrompts } from "./agent-thread-panel-model.js";
@@ -15,6 +15,15 @@ const POPOVER_OFFSET = 4;
 type AgentThreadToolbarProps = {
   title: string;
   titleTrailing?: ReactNode;
+  /**
+   * 任务属于某个项目时的面包屑：`项目 / 项目名 / 任务标题`，和右侧操作同一行。
+   * 普通任务不传，标题照原样显示。
+   */
+  projectCrumb?: {
+    /** 项目名，点击回到项目看板。 */
+    name: string;
+    onOpen: () => void;
+  } | null;
   messages: AgentChatMessage[];
   panelOpen: boolean;
   onOpenPanel: () => void;
@@ -88,10 +97,28 @@ export function AgentThreadToolbar(props: AgentThreadToolbarProps) {
 
   return (
     <div className="thread-toolbar">
-      <h1 className="agent-conversation-title" title={props.title}>
-        <span className="agent-conversation-title__text">{props.title}</span>
-        {props.titleTrailing}
-      </h1>
+      {props.projectCrumb ? (
+        <div className="agent-conversation-crumbs" data-window-drag-exclusion="thread-conversation-crumbs">
+          <span className="agent-conversation-crumbs__root">
+            <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
+            {t("home.crumbs.root")}
+          </span>
+          <span className="agent-conversation-crumbs__sep" aria-hidden="true">/</span>
+          <button type="button" className="agent-conversation-crumbs__project" title={props.projectCrumb.name} onClick={props.projectCrumb.onOpen}>
+            {props.projectCrumb.name}
+          </button>
+          <span className="agent-conversation-crumbs__sep" aria-hidden="true">/</span>
+          <h1 className="agent-conversation-title" title={props.title}>
+            <span className="agent-conversation-title__text">{props.title}</span>
+            {props.titleTrailing}
+          </h1>
+        </div>
+      ) : (
+        <h1 className="agent-conversation-title" title={props.title}>
+          <span className="agent-conversation-title__text">{props.title}</span>
+          {props.titleTrailing}
+        </h1>
+      )}
       <div className="thread-toolbar__actions" data-window-drag-exclusion="thread-toolbar-actions">
         {searchOpen ? (
           <div className="thread-search" role="search">

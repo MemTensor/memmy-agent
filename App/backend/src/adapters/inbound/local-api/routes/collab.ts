@@ -104,6 +104,14 @@ const ProjectTasksSchema = z.object({
   /** Conversation ids of the project's Memmy sessions that members may read. */
   included: z.array(ConversationIdSchema).max(500)
 }).strict();
+/** 一条任务的共享开关。 */
+const TaskSharingSchema = z.object({ shared: z.boolean() }).strict();
+/** 在 Memmy 的任务里用 `memmy-project session share` 开启/关闭这条任务的共享。 */
+const ShareCurrentTaskSchema = z.object({
+  conversationId: ConversationIdSchema,
+  shared: z.boolean(),
+  project: z.string().trim().min(1).max(100).optional()
+}).strict();
 /**
  * Cloud account IDs are numeric snowflake ids, 19 digits for accounts created by the assignment strategy (`agent_user.id`).
  * The upper bound matches a signed 64-bit column, so real accounts are never rejected by this local check.
@@ -181,6 +189,25 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
     const projectId = ProjectIdSchema.parse((request.params as { projectId: string }).projectId);
     const input = ProjectTasksSchema.parse(request.body ?? {});
     return reply.send(await options.collab.saveProjectTasks(projectId, input.included));
+  }));
+
+  // 一条 Memmy 任务的共享开关：默认关闭，开启才上传，关闭会删掉云端副本。
+  app.get<{ Params: { projectId: string; conversationId: string } }>("/api/collab/projects/:projectId/tasks/:conversationId/sharing", guard, withErrorEnvelope(async (request, reply) => {
+    const params = request.params as { projectId: string; conversationId: string };
+    return reply.send(await options.collab.getTaskSharing(
+      ProjectIdSchema.parse(params.projectId),
+      ConversationIdSchema.parse(params.conversationId)
+    ));
+  }));
+
+  app.put<{ Params: { projectId: string; conversationId: string } }>("/api/collab/projects/:projectId/tasks/:conversationId/sharing", guard, withErrorEnvelope(async (request, reply) => {
+    const params = request.params as { projectId: string; conversationId: string };
+    const input = TaskSharingSchema.parse(request.body ?? {});
+    return reply.send(await options.collab.setTaskSharing(
+      ProjectIdSchema.parse(params.projectId),
+      ConversationIdSchema.parse(params.conversationId),
+      input.shared
+    ));
   }));
 
   app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/links", guard, withErrorEnvelope(async (request, reply) =>
@@ -331,6 +358,16 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
       ...(input.hint === undefined ? {} : { hint: input.hint }),
       ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
       ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId })
+    }));
+  }));
+
+  // One Memmy task shares or stops sharing itself with its own project. The reply is the text `session share` prints.
+  app.post("/api/collab/sessions/share", guard, withErrorEnvelope(async (request, reply) => {
+    const input = ShareCurrentTaskSchema.parse(request.body ?? {});
+    return reply.send(await options.collab.shareCurrentTask({
+      conversationId: input.conversationId,
+      shared: input.shared,
+      ...(input.project === undefined ? {} : { project: input.project })
     }));
   }));
 }

@@ -44,6 +44,11 @@ const ProjectSessionSchema = z.object({
   lastActiveAt: z.string().nullable(),
   /** 单任务超出容量上限时只保留最近轮次，只有详情接口带这个标记。 */
   trimmed: z.boolean().nullish().transform((value) => value ?? false),
+  /**
+   * 本人在这台电脑上用 Memmy 建的这条任务的对话 id；别人的、或别的 Agent 的任务为 null。
+   * 看板据此把点开落到会话页。
+   */
+  conversationId: z.string().nullish().transform((value) => value ?? null),
   link: z.string(),
   shareText: z.string()
 });
@@ -128,6 +133,12 @@ const ProjectTaskSchema = z.object({
   synced: z.boolean()
 });
 const ProjectTasksResponseSchema = z.object({ tasks: z.array(ProjectTaskSchema) });
+/** 一条 Memmy 任务的共享状态；`started` 是这次排进上传队列的任务数。 */
+const TaskSharingSchema = z.object({
+  shared: z.boolean(),
+  synced: z.boolean(),
+  started: z.number().nullish().transform((value) => value ?? 0)
+});
 const OkResponseSchema = z.object({ ok: z.literal(true) });
 const RoleSchema = z.enum(["owner", "admin", "member"]);
 const JoinModeSchema = z.enum(["direct", "approval"]);
@@ -206,6 +217,7 @@ export interface CollabSessionPage {
 export type CollabSyncProgress = z.infer<typeof SyncProgressSchema>;
 /** A Memmy session of this project's local folder, and whether the project includes it. */
 export type CollabProjectTask = z.infer<typeof ProjectTaskSchema>;
+export type CollabTaskSharing = z.infer<typeof TaskSharingSchema>;
 export type CollabRole = z.infer<typeof RoleSchema>;
 export type CollabJoinMode = z.infer<typeof JoinModeSchema>;
 export type CollabMember = z.infer<typeof MemberSchema>;
@@ -265,6 +277,10 @@ export interface CollabClient {
   listProjectTasks(projectId: string): Promise<CollabProjectTask[]>;
   /** Keeps only the listed sessions in the project and queues what is missing. */
   saveProjectTasks(projectId: string, included: readonly string[]): Promise<CollabSyncResult>;
+  /** 一条 Memmy 任务在这个项目里是否共享；输入框旁的开关据此显示当前状态。 */
+  taskSharing(projectId: string, conversationId: string): Promise<CollabTaskSharing>;
+  /** 开关共享：开启后排队上传，关闭会把云端副本一并删掉，本机任务保留。 */
+  setTaskSharing(projectId: string, conversationId: string, shared: boolean): Promise<CollabTaskSharing>;
   getSyncProgress(projectId: string): Promise<CollabSyncProgress>;
   removeSession(projectId: string, sessionId: string): Promise<void>;
   /**
@@ -457,6 +473,24 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         path: `/api/collab/projects/${encodeURIComponent(projectId)}/tasks`,
         schema: SyncResponseSchema,
         body: { included },
+        init: { method: "PUT" }
+      });
+    },
+
+    async taskSharing(projectId, conversationId) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(conversationId)}/sharing`,
+        schema: TaskSharingSchema
+      });
+    },
+
+    async setTaskSharing(projectId, conversationId, shared) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(conversationId)}/sharing`,
+        schema: TaskSharingSchema,
+        body: { shared },
         init: { method: "PUT" }
       });
     },

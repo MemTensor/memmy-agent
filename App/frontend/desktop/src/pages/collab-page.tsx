@@ -34,6 +34,7 @@ import {
 } from "../app/collab-projects-store.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
+import { sessionKeyToChatId } from "../api/memmy-agent-client.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-composer-state.js";
 import type { AgentTaskView, ComposerMention } from "../state/agent-chat-slice.js";
@@ -843,6 +844,22 @@ const CollabBoard = memo(function CollabBoard(props: {
     }
   }
 
+  /**
+   * 点开一条任务。本人在这台电脑上用 Memmy 建的任务直接进会话页——正文就在本机，没必要先给一个只读面板；
+   * 别人的任务、以及其他 Agent 的任务仍用只读面板读云端副本。
+   */
+  function openRow(session: CollabProjectSession) {
+    const chatId = session.conversationId;
+    const task = chatId
+      ? tasks.find((candidate) => candidate.sessionKey && sessionKeyToChatId(candidate.sessionKey) === chatId) ?? null
+      : null;
+    if (task && dispatch) {
+      void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task });
+      return;
+    }
+    void openSession(session);
+  }
+
   async function copyLink(session: CollabProjectSession) {
     try {
       await navigator.clipboard.writeText(session.shareText);
@@ -1227,7 +1244,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                               className={`${styles.row} ${selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${selected.has(session.id) ? styles.rowSelected : ""}`}
                               onClick={() => {
                                 if (!selecting) {
-                                  void openSession(session);
+                                  openRow(session);
                                   return;
                                 }
                                 // 选择模式下点击整行就是勾选；他人的任务不可选。
@@ -1491,7 +1508,6 @@ const CollabBoard = memo(function CollabBoard(props: {
       <SessionReaderPanel
         session={reading}
         loading={readingId !== null}
-        memberCount={shared?.memberCount ?? null}
         onClose={() => setReading(null)}
         onCopy={(session) => void copyLink(session)}
       />
@@ -2172,8 +2188,6 @@ function ProjectBoardSettingsDialog(props: {
 function SessionReaderPanel(props: {
   session: { session: CollabProjectSession; turns: CollabSessionTurn[] } | null;
   loading: boolean;
-  /** 项目成员数：读任务的地方说明这条任务对谁可见，比在每行重复同一句更合适。 */
-  memberCount: number | null;
   onClose: () => void;
   onCopy: (session: CollabProjectSession) => void;
 }) {
@@ -2243,12 +2257,6 @@ function SessionReaderPanel(props: {
             <h2 id={titleId} className={styles.readerTitle}>{data.session.title}</h2>
             <div className={styles.readerHeadMeta}>
               <span>{[name, when].filter(Boolean).join(" · ")}</span>
-              {data.session.mine && props.memberCount ? (
-                <span className={styles.readerSync}>
-                  <Cloud size={12} aria-hidden="true" />
-                  {t("collab.reader.visibleTo", { count: String(props.memberCount) })}
-                </span>
-              ) : null}
               {data.session.mine ? null : <span className={styles.readerBadge}>{t("collab.reader.readOnly")}</span>}
             </div>
           </div>

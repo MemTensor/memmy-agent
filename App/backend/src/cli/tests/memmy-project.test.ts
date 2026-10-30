@@ -239,6 +239,30 @@ describe("memmy-project", () => {
     expect(await run(["help"], { runtimeConfigPath })).toContain("memmy-project session add");
   });
 
+  it("shares the running Memmy task from the inside, and refuses outside Memmy", async () => {
+    const requests: Array<{ path: string; body: unknown }> = [];
+    const fetcher = (async (input: string | URL, init?: RequestInit) => {
+      requests.push({ path: new URL(input).pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify({ text: "已把当前任务「部署记录」共享给协作项目「Memmy 开发」，2 位成员可以查看与引用；之后的对话也会继续更新。" }));
+    }) as typeof fetch;
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    // exec 把当前会话写进 MEMMY_TASK_ID，命令据此认出这一条任务。
+    const shared = await run(["session", "share"], { fetch: fetcher, runtimeConfigPath, env: { MEMMY_TASK_ID: "chat-1" } });
+    expect(shared).toContain("已把当前任务「部署记录」共享给协作项目");
+    expect(requests).toEqual([{ path: "/api/collab/sessions/share", body: { conversationId: "chat-1", shared: true } }]);
+
+    await run(["session", "share", "--off", "--project", "Memmy 开发"], { fetch: fetcher, runtimeConfigPath, env: { MEMMY_TASK_ID: "chat-1" } });
+    expect(requests[1]).toEqual({
+      path: "/api/collab/sessions/share",
+      body: { conversationId: "chat-1", shared: false, project: "Memmy 开发" }
+    });
+
+    // 在其他 Agent 里没有这条命令：那边用 session add。
+    await expect(run(["session", "share"], { fetch: fetcher, runtimeConfigPath, env: {} }))
+      .rejects.toThrow(/只能在 Memmy 的任务里使用 session share/u);
+  });
+
   it("puts the turn number into a found result and quotes the match under it", async () => {
     const fetcher = (async () => new Response(JSON.stringify({
       sessions: [{

@@ -933,6 +933,50 @@ body.memmy-window-fullscreen {
   color: var(--color-action-sky-hover);
 }
 
+/*
+ * 任务级共享开关（输入框左侧）：默认关闭，打开后这条任务才进项目。
+ * 沿用薄荷绿的强调色，只用一个淡底与描边把状态说清楚。
+ */
+.composer-share-chip {
+  display: inline-flex;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 78%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
+}
+
+.composer-share-chip:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-canvas-oat) 60%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+}
+
+.composer-share-chip--on {
+  border-color: color-mix(in srgb, var(--color-action-sky) 42%, transparent);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.composer-share-chip--on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.composer-share-chip:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .composer-action-submit {
   display: inline-flex;
   width: 32px;
@@ -2289,6 +2333,71 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   --im-channel-title-icon-size: var(--codex-leading-base);
   margin-left: 6px;
 }
+
+/*
+ * 项目任务的面包屑：项目 / 项目名 / 任务标题，和右侧操作同处顶栏一行。
+ * 整行登记为拖拽排除区（`data-window-drag-exclusion="thread-toolbar"`），否则顶部那条原生
+ * 拖拽带会吃掉中间区域的点击，项目名点不动。
+ */
+.agent-conversation-crumbs {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 24px;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.agent-conversation-crumbs__root {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.agent-conversation-crumbs__sep {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--color-text-ink) 22%, transparent);
+}
+
+.agent-conversation-crumbs__project {
+  max-width: 220px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--duration-fast);
+}
+
+.agent-conversation-crumbs__project:hover {
+  color: color-mix(in srgb, var(--color-text-ink) 80%, transparent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* 标题在面包屑里只占自己需要的宽度，别把右侧操作推走 */
+.agent-conversation-crumbs .agent-conversation-title {
+  flex: 0 1 auto;
+}
+
 
 .agent-environment-toggle,
 .agent-environment-panel__actions button {

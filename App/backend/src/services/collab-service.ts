@@ -191,6 +191,11 @@ export interface CollabProjectSession {
   link: string;
   /** What「复制链接」puts on the clipboard. */
   shareText: string;
+  /**
+   * 本人在这台电脑上用 Memmy 建的这条任务的对话 id（= 会话文件名里的 chatId），其他成员的任务、
+   * 其他 Agent 的任务都是 null。看板据此把「点开」落到真正的会话页，而不是只给只读面板。
+   */
+  conversationId?: string | null;
 }
 
 export interface SessionListOptions {
@@ -357,6 +362,12 @@ interface StoredLinks extends CollabLinks {
   accountId: string;
   /** The local Memmy project bound to this online project, once the person created it. */
   localProjectId: string | null;
+  /**
+   * Memmy tasks the person chose to share with the project, by conversation id. Sharing is per task and off by
+   * default: a task of the bound project reaches the cloud only when it is listed here, or was uploaded before
+   * this list existed (`synced`).
+   */
+  sharedSessions: string[];
   /** Memmy tasks deleted from the project, so the next sync does not upload them again. */
   removedSessions: string[];
   /** Where this project's tasks run when the person picked no folder; named after the project. */
@@ -477,6 +488,18 @@ export interface CollabService {
    * out of the project, both from the cloud and from later uploads.
    */
   saveProjectTasks(projectId: string, included: readonly string[]): Promise<CollabSyncResult>;
+  /** 一条 Memmy 任务在本项目里是否共享；输入框旁的开关据此显示当前状态。 */
+  getTaskSharing(projectId: string, conversationId: string): Promise<TaskSharing>;
+  /**
+   * 开启或关闭一条 Memmy 任务的共享。开启后排队上传（任务刚建、还没有轮次时等第一条消息），
+   * 关闭会把云端副本一并删掉，本机任务保留。
+   */
+  setTaskSharing(projectId: string, conversationId: string, shared: boolean): Promise<TaskSharing & { started: number }>;
+  /**
+   * 把正在进行的这条 Memmy 任务共享给它所在的协作项目，供 `memmy-project session share` 使用。
+   * 项目尚未开启共享、或任务不属于任何项目时，只返回要告诉用户的话。
+   */
+  shareCurrentTask(input: { conversationId: string; shared: boolean; project?: string }): Promise<{ text: string }>;
   /**
    * Deletes the project in the cloud and drops this computer's binding. The local project is kept, so the tasks
    * that ran in it stay on this computer.
@@ -580,6 +603,12 @@ export interface ProjectTaskSession {
   /** Included in the project, so it is (or will be) on the board. */
   included: boolean;
   /** Already uploaded at least once. */
+  synced: boolean;
+}
+
+/** 一条 Memmy 任务在该项目里的共享状态；`synced` 表示云端已经有它的副本。 */
+export interface TaskSharing {
+  shared: boolean;
   synced: boolean;
 }
 
@@ -712,7 +741,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     const stored = await readLinks(projectId, account.accountId);
     return {
       project: { ...toProject(data.project), localProjectId: stored.localProjectId },
-      ...pageOf(list(data.sessions).map(withLink), options)
+      ...pageOf(list(data.sessions).map((raw) => withLocalConversation(stored, withLink(raw))), options)
     };
   }
 
@@ -765,16 +794,78 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     return run;
   }
 
-  /** Uploads covered sessions that were never uploaded or changed since; a failure is retried by the next sync. */
-  /** The sessions this project still has to upload: in its scope, not deleted, and changed since the last upload. */
+  /**
+   * 一条 Memmy 任务是否共享给了这个项目：本人手动开启的、或这一版之前已经上传过的，都算。
+   * 删除过的任务不再共享，哪怕它之前上传过。
+   */
+  function isTaskShared(stored: StoredLinks, conversationId: string): boolean {
+    if (stored.removedSessions.includes(conversationId)) return false;
+    return stored.sharedSessions.includes(conversationId)
+      || Boolean(stored.synced[sessionKey({ sourceId: MEMMY_SOURCE_ID, conversationId })]);
+  }
+
+  /** 一条任务在项目里的共享状态，给输入框旁的开关读。 */
+  function taskSharingOf(stored: StoredLinks, conversationId: string): TaskSharing {
+    return {
+      shared: isTaskShared(stored, conversationId),
+      synced: Boolean(stored.synced[sessionKey({ sourceId: MEMMY_SOURCE_ID, conversationId })])
+    };
+  }
+
+  /**
+   * 开启或关闭一条 Memmy 任务的共享。开启只改本机的名单并排队上传：任务刚建、还没有任何轮次时
+   * 文件还不存在，等下一条消息写进来，下一次同步会把它传上去。关闭会顺手删掉云端副本。
+   */
+  function applyTaskSharing(
+    projectId: string,
+    accountId: string,
+    conversationId: string,
+    shared: boolean
+  ): Promise<TaskSharing & { started: number }> {
+    return exclusive(async () => {
+      const stored = await readLinks(projectId, accountId);
+      const tasks = await projectTaskSessions(stored);
+      const key = sessionKey({ sourceId: MEMMY_SOURCE_ID, conversationId });
+      if (!tasks.some((task) => task.conversationId === conversationId)) {
+        // 刚建的任务还没有会话文件：本机项目对得上就接受，写入名单后等第一条消息上车。
+        const records = await readSessionRecords(join(agentSessionsDir, `websocket_${conversationId}.jsonl`));
+        if (records || !stored.localProjectId) {
+          throw new CollabError("not_found", "这个项目里没有这条任务");
+        }
+      }
+
+      if (shared) {
+        if (!stored.sharedSessions.includes(conversationId)) stored.sharedSessions.push(conversationId);
+        stored.removedSessions = stored.removedSessions.filter((id) => id !== conversationId);
+        const pending = sessionsToUpload(stored, tasks);
+        await writeLinks(stored);
+        if (!pending.length) return { ...taskSharingOf(stored, conversationId), started: 0 };
+        syncProgress.set(projectId, { running: true, total: pending.length, completed: 0, failed: 0 });
+        enqueueUpload(projectId, () => runUpload(projectId, accountId));
+        return { ...taskSharingOf(stored, conversationId), started: pending.length };
+      }
+
+      stored.sharedSessions = stored.sharedSessions.filter((id) => id !== conversationId);
+      const synced = stored.synced[key];
+      if (synced) {
+        await deleteCloudSession(projectId, synced.cloudSessionId, createListingReader(projectId));
+        delete stored.synced[key];
+        // 记住这次取消，否则下一次同步会把它当成共享中的任务重新传上去。
+        if (!stored.removedSessions.includes(conversationId)) stored.removedSessions.push(conversationId);
+      }
+      await writeLinks(stored);
+      return { ...taskSharingOf(stored, conversationId), started: 0 };
+    });
+  }
+
   /**
    * 要上传的任务：在本项目范围内、且首次上传或内容变了的那几条。只取最近交互的前 20 条，
-   * 更早的传上去也会被云端清理掉。
+   * 更早的传上去也会被云端清理掉。Memmy 自己的任务还要本人开启共享，未开启的只留在本机。
    */
   function sessionsToUpload(stored: StoredLinks, local: readonly LocalAgentSession[]): LocalAgentSession[] {
     const covered = linkedSessionKeys(stored, linkCandidates(stored, local));
     const inScope = local.filter((session) => session.sourceId === MEMMY_SOURCE_ID
-      ? !stored.removedSessions.includes(session.conversationId)
+      ? isTaskShared(stored, session.conversationId)
       : covered.has(sessionKey(session)));
     return inScope
       .sort((left, right) => (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0))
@@ -1063,7 +1154,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     // Links saved by another account on this computer are not this person's.
     return stored && stored.projectId === projectId && stored.accountId === accountId
       ? stored
-      : { projectId, accountId, localProjectId: null, removedSessions: [], workingDirectory: null, directoryChosen: false, groups: [], sessions: [], synced: {} };
+      : { projectId, accountId, localProjectId: null, sharedSessions: [], removedSessions: [], workingDirectory: null, directoryChosen: false, groups: [], sessions: [], synced: {} };
   }
 
   async function readAllLinks(accountId: string): Promise<StoredLinks[]> {
@@ -1098,6 +1189,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     stored.groups = [];
     stored.sessions = [];
     stored.synced = {};
+    stored.sharedSessions = [];
     stored.removedSessions = [];
     await exclusive(() => writeLinks(stored)).catch((error: unknown) => {
       console.warn(`Project links not cleared after ${reason}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1240,6 +1332,16 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       link,
       shareText: `【Memmy】${title} ${link}`
     };
+  }
+
+  /**
+   * 本人 Memmy 任务的对话 id：云端不返回来源会话 id，但本机 links.json 记着每个云端副本对应的会话，
+   * 按云端 id 反查一次就够了。其他成员或其他 Agent 的任务保持 null。
+   */
+  function withLocalConversation(stored: StoredLinks, session: CollabProjectSession): CollabProjectSession {
+    if (!session.mine || session.source !== MEMMY_SOURCE_ID) return session;
+    const entry = Object.entries(stored.synced).find(([, synced]) => synced.cloudSessionId === session.id);
+    return entry ? { ...session, conversationId: parseSessionKey(entry[0]).conversationId } : session;
   }
 
   /**
@@ -1520,6 +1622,17 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return syncProgress.get(projectId) ?? { running: false, total: 0, completed: 0, failed: 0 };
     },
 
+    async getTaskSharing(projectId, conversationId) {
+      const account = requireAccount();
+      const stored = await readLinks(projectId, account.accountId);
+      return taskSharingOf(stored, conversationId);
+    },
+
+    setTaskSharing(projectId, conversationId, shared) {
+      const account = requireAccount();
+      return applyTaskSharing(projectId, account.accountId, conversationId, shared);
+    },
+
     async listProjectTasks(projectId) {
       const account = requireAccount();
       const stored = await readLinks(projectId, account.accountId);
@@ -1533,8 +1646,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
             lastQuestion: task.lastQuestion,
             updatedAt: task.updatedAt,
             turnCount: task.turnCount,
-            // A session that was deleted from the board stays out until the person adds it back here.
-            included: !stored.removedSessions.includes(task.conversationId),
+            // 本人开启过共享、或这一版之前已上传过的任务才算在内；新任务默认不共享。
+            included: isTaskShared(stored, task.conversationId),
             synced: Boolean(stored.synced[sessionKey(task)])
           }))
       };
@@ -1568,6 +1681,10 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         }
 
         stored.removedSessions = nextRemovedSessions;
+        // The selection is the shared list itself: what is checked here is what the project holds.
+        stored.sharedSessions = tasks
+          .filter((task) => keep.has(task.conversationId))
+          .map((task) => task.conversationId);
         // Saved before any upload, so closing the board or the app never loses the choice.
         const pending = sessionsToUpload(stored, tasks);
         await writeLinks(stored);
@@ -1837,6 +1954,14 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     },
 
     async addCurrentSession(input) {
+      // Memmy 自己的任务没有外部 Agent 的会话记录，加入项目就是共享它：走同一条开关键路。
+      if (input.sourceId?.trim() === MEMMY_SOURCE_ID && input.conversationId?.trim()) {
+        return this.shareCurrentTask({
+          conversationId: input.conversationId.trim(),
+          shared: true,
+          ...(input.project?.trim() ? { project: input.project.trim() } : {})
+        });
+      }
       const { projects } = await this.listProjects();
       if (!projects.length) return { text: formatNoProjects() };
       const hint = input.hint?.trim() ?? "";
@@ -1880,6 +2005,55 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         sessions: [...stored.sessions, { sourceId: session.sourceId, conversationId: session.conversationId }]
       });
       return { text: formatAdded(session, matched.project.name, (saved.started ?? 0) > 0 || saved.uploaded > 0) };
+    },
+
+    async shareCurrentTask(input) {
+      const account = requireAccount();
+      const records = await readSessionRecords(join(agentSessionsDir, `websocket_${input.conversationId}.jsonl`));
+      if (!records) {
+        return { text: "找不到当前这条任务，还没有共享。Memmy 还没有读到正在进行的这个对话，确认 Memmy 已打开；若刚开始，先再聊一轮后重试。" };
+      }
+      if (!records.projectId) {
+        return { text: "当前任务不属于任何项目，没有共享。先在 Memmy 的侧栏选择一个项目，在那里新建任务。" };
+      }
+      const bound = (await readAllLinks(account.accountId))
+        .filter((stored) => stored.localProjectId === records.projectId);
+      if (!bound.length) {
+        return { text: `当前任务所在的项目还没有开启协作共享，没有共享。在 Memmy 中打开该项目并开启「与成员共享」后重试。` };
+      }
+      const named = input.project?.trim() ?? "";
+      const { projects } = await this.listProjects();
+      const namedMatches = named ? bound.filter((stored) => projects.find((project) => project.id === stored.projectId)?.name === named) : bound;
+      if (named && !namedMatches.length) {
+        const names = bound
+          .map((stored) => projects.find((project) => project.id === stored.projectId)?.name ?? stored.projectId)
+          .join("、");
+        return { text: `没有名为「${named}」的协作项目，当前任务属于：${names}。向用户确认后重试。` };
+      }
+      if (namedMatches.length > 1) {
+        const names = namedMatches
+          .map((stored) => projects.find((project) => project.id === stored.projectId)?.name ?? stored.projectId)
+          .join("、");
+        return { text: `当前任务关联了多个协作项目：${names}。请用户选择后加上 --project <完整名称> 重试。` };
+      }
+      const stored = namedMatches[0]!;
+      const name = projects.find((project) => project.id === stored.projectId)?.name ?? "";
+      const members = projects.find((project) => project.id === stored.projectId)?.memberCount ?? 0;
+      const before = await readLinks(stored.projectId, account.accountId);
+      const wasShared = isTaskShared(before, input.conversationId);
+      if (wasShared === input.shared) {
+        return {
+          text: input.shared
+            ? `当前任务「${records.title}」已经在协作项目「${name}」中共享。`
+            : `当前任务「${records.title}」没有在协作项目「${name}」中共享。`
+        };
+      }
+      await applyTaskSharing(stored.projectId, account.accountId, input.conversationId, input.shared);
+      return {
+        text: input.shared
+          ? `已把当前任务「${records.title}」共享给协作项目「${name}」，${members} 位成员可以查看与引用；之后的对话也会继续更新。`
+          : `已停止共享当前任务「${records.title}」：协作项目「${name}」的成员不再看到它，本机任务保留。`
+      };
     }
   };
 }
@@ -2232,6 +2406,7 @@ function parseStoredLinks(content: string): StoredLinks | null {
     projectId,
     accountId,
     localProjectId: nullableText(raw.localProjectId),
+    sharedSessions: list(raw.sharedSessions).filter((id): id is string => typeof id === "string"),
     removedSessions: list(raw.removedSessions).filter((id): id is string => typeof id === "string"),
     workingDirectory: nullableText(raw.workingDirectory),
     directoryChosen: raw.directoryChosen === true,

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -518,6 +518,43 @@ describe("collab service", () => {
     expect(pageOf(list, {}).total).toBe(2);
   });
 
+  it("names the local conversation of a member's own Memmy task in the board listing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const { fetcher } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 2, sessionCount: 0, createdAt: null }] } }),
+      "GET /api/collab/projects/p-9/sessions": () => ({
+        code: 0,
+        data: {
+          project: { id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 2, sessionCount: 2, createdAt: null },
+          sessions: [
+            { id: "id-task-a", projectId: "p-9", projectName: "Memmy 开发", title: "本人的任务", memberName: "林晓", mine: true, source: "memmy", turnCount: 2, lastActiveAt: null },
+            { id: "id-cloud-1", projectId: "p-9", projectName: "Memmy 开发", title: "别人的任务", memberName: "陈墨", mine: false, source: "claude_code", turnCount: 2, lastActiveAt: null }
+          ]
+        }
+      })
+    });
+    const projectsDir = join(root, "projects");
+    const svc = service(fetcher, { projectsDir, agentSessionsDir: join(root, "workspace", "sessions") });
+    await svc.bindLocalProject("p-9", "local-9");
+    // 本机记录着每个云端副本对应的会话：看板据此把本人的任务点开成会话页。
+    const path = join(projectsDir, "p-9", "links.json");
+    const links = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({
+      ...links,
+      sharedSessions: ["task-a"],
+      synced: { [sessionKey({ sourceId: "memmy", conversationId: "task-a" })]: { cloudSessionId: "id-task-a", updatedAt: "2026-10-22T05:00:01.000Z", groupId: null, title: "本人的任务" } }
+    }), "utf8");
+
+    const page = await svc.listSessions("p-9");
+    expect(page.sessions).toMatchObject([
+      { id: "id-task-a", conversationId: "task-a" },
+      // 别人的任务没有本机会话可开，按只读面板读云端副本。
+      { id: "id-cloud-1" }
+    ]);
+    expect(page.sessions[1]!.conversationId).toBeUndefined();
+  });
+
   it("creates a cloud project with a managed working directory when none was chosen", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
     roots.push(root);
@@ -609,7 +646,7 @@ describe("collab service", () => {
     ]);
   });
 
-  it("uploads the bound project's own Memmy tasks, which need no session link", async () => {
+  it("uploads a bound project's own Memmy task once the person shares it, and nothing else", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
     roots.push(root);
     const agentSessions = join(root, "workspace", "sessions");
@@ -633,7 +670,11 @@ describe("collab service", () => {
 
     await svc.bindLocalProject("p-9", "local-9");
     calls.length = 0;
-    expect(await svc.syncLinkedSessions()).toEqual({ uploaded: 1, removed: 0, failed: 0 });
+    // 新建任务默认只在本机：没有开启共享之前，任何同步都不会把它传上去。
+    expect(await svc.syncLinkedSessions()).toEqual({ uploaded: 0, removed: 0, failed: 0 });
+
+    expect(await svc.setTaskSharing("p-9", "task-1", true)).toMatchObject({ shared: true, started: 1 });
+    await waitForUploads(svc, "p-9");
 
     const upload = calls.find((call) => call.method === "PUT")!.body as { sessions: Array<{ source: string; title: string; turns: Array<{ question: string; reply: string; steps: string[] }> }> };
     expect(upload.sessions[0]).toMatchObject({ source: "memmy", title: "部署记录" });
@@ -675,6 +716,8 @@ describe("collab service", () => {
     const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
     await svc.bindLocalProject("p-9", "local-9");
     await svc.bindLocalProject("p-8", "local-8");
+    setSharedSessions(join(root, "projects"), "p-9", ["task-a"]);
+    setSharedSessions(join(root, "projects"), "p-8", ["task-b"]);
     calls.length = 0;
 
     // Opening one board must not spend time (or uploads) on the other project.
@@ -708,10 +751,10 @@ describe("collab service", () => {
     const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
 
     await svc.bindLocalProject("p-9", "local-9");
-    // Nothing is excluded before the person chooses, so both sessions count as included.
+    // 新任务默认不共享：什么都没勾之前，两条都只在本机。
     expect((await svc.listProjectTasks("p-9")).tasks).toMatchObject([
-      { conversationId: "task-a", title: "要分享的会话", included: true, synced: false },
-      { conversationId: "task-b", title: "只留本机的会话", included: true, synced: false }
+      { conversationId: "task-a", title: "要分享的会话", included: false, synced: false },
+      { conversationId: "task-b", title: "只留本机的会话", included: false, synced: false }
     ]);
 
     calls.length = 0;
@@ -733,6 +776,121 @@ describe("collab service", () => {
     expect((await svc.listProjectTasks("p-9")).tasks.every((task) => !task.included)).toBe(true);
   });
 
+  it("shares one task on demand and stops sharing it, deleting the cloud copy", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const agentSessions = join(root, "workspace", "sessions");
+    mkdirSync(agentSessions, { recursive: true });
+    for (const id of ["task-a", "task-b"] as const) {
+      writeMemmyTask(agentSessions, id, "local-9", `${id} 的会话`, [
+        { role: "user", content: "问题", timestamp: "2026-10-22T05:00:00.000Z" },
+        { role: "assistant", content: "回答", timestamp: "2026-10-22T05:00:01.000Z" }
+      ]);
+    }
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 2, sessionCount: 0, createdAt: null }] } }),
+      "PUT /api/collab/projects/p-9/sessions": (call) => {
+        const upload = (call.body as { sessions: Array<{ sourceSessionId: string }> }).sessions[0]!;
+        return { code: 0, data: { sessions: [{ id: `id-${upload.sourceSessionId}` }] } };
+      },
+      "DELETE /api/collab/projects/p-9/sessions/id-task-a": () => ({ code: 0, data: null })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
+    await svc.bindLocalProject("p-9", "local-9");
+
+    expect(await svc.getTaskSharing("p-9", "task-a")).toEqual({ shared: false, synced: false });
+    expect(await svc.setTaskSharing("p-9", "task-a", true)).toMatchObject({ shared: true, started: 1 });
+    await waitForUploads(svc, "p-9");
+    expect(uploadedIds(calls)).toEqual(["task-a"]);
+    expect(await svc.getTaskSharing("p-9", "task-a")).toEqual({ shared: true, synced: true });
+    // 另一条没有开启共享，仍然只在本机。
+    expect((await svc.listProjectTasks("p-9")).tasks).toMatchObject([
+      { conversationId: "task-a", included: true, synced: true },
+      { conversationId: "task-b", included: false, synced: false }
+    ]);
+
+    calls.length = 0;
+    expect(await svc.setTaskSharing("p-9", "task-a", false)).toMatchObject({ shared: false, synced: false });
+    expect(calls.some((call) => call.method === "DELETE" && call.url.endsWith("/sessions/id-task-a"))).toBe(true);
+    // 停止共享之后，下一次同步不会把它当成共享中的任务重新传上去。
+    calls.length = 0;
+    expect(await svc.syncProjectTasks("p-9")).toEqual({ uploaded: 0, removed: 0, failed: 0 });
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
+  });
+
+  it("keeps a task uploaded before the shared list existed shared", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const agentSessions = join(root, "workspace", "sessions");
+    mkdirSync(agentSessions, { recursive: true });
+    writeMemmyTask(agentSessions, "task-a", "local-9", "旧版本传过的会话", [
+      { role: "user", content: "问题", timestamp: "2026-10-22T05:00:00.000Z" },
+      { role: "assistant", content: "回答", timestamp: "2026-10-22T05:00:01.000Z" }
+    ]);
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 1, sessionCount: 0, createdAt: null }] } })
+    });
+    const projectsDir = join(root, "projects");
+    const svc = service(fetcher, { projectsDir, agentSessionsDir: agentSessions });
+    await svc.bindLocalProject("p-9", "local-9");
+    // 这一版之前上传过的任务没有出现在名单里，但云端已经有副本：按共享处理，不需要重新勾一次。
+    const path = join(projectsDir, "p-9", "links.json");
+    const links = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify({
+      ...links,
+      sharedSessions: [],
+      synced: { [sessionKey({ sourceId: "memmy", conversationId: "task-a" })]: { cloudSessionId: "id-task-a", updatedAt: "2026-10-22T05:00:01.000Z", groupId: null, title: "旧版本传过的会话" } }
+    }), "utf8");
+
+    expect(await svc.getTaskSharing("p-9", "task-a")).toEqual({ shared: true, synced: true });
+    expect((await svc.listProjectTasks("p-9")).tasks).toMatchObject([{ conversationId: "task-a", included: true, synced: true }]);
+    calls.length = 0;
+    expect(await svc.syncProjectTasks("p-9")).toEqual({ uploaded: 0, removed: 0, failed: 0 });
+  });
+
+  it("shares the running task from inside it, the way the agent command does", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const agentSessions = join(root, "workspace", "sessions");
+    mkdirSync(agentSessions, { recursive: true });
+    writeMemmyTask(agentSessions, "task-a", "local-9", "这段对话", [
+      { role: "user", content: "问题", timestamp: "2026-10-22T05:00:00.000Z" },
+      { role: "assistant", content: "回答", timestamp: "2026-10-22T05:00:01.000Z" }
+    ]);
+    writeMemmyTask(agentSessions, "task-other", "local-other", "别的项目", [
+      { role: "user", content: "问题", timestamp: "2026-10-22T05:00:00.000Z" }
+    ]);
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 3, sessionCount: 0, createdAt: null }] } }),
+      "PUT /api/collab/projects/p-9/sessions": (call) => {
+        const upload = (call.body as { sessions: Array<{ sourceSessionId: string }> }).sessions[0]!;
+        return { code: 0, data: { sessions: [{ id: `id-${upload.sourceSessionId}` }] } };
+      },
+      "DELETE /api/collab/projects/p-9/sessions/id-task-a": () => ({ code: 0, data: null })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
+    await svc.bindLocalProject("p-9", "local-9");
+
+    const shared = await svc.shareCurrentTask({ conversationId: "task-a", shared: true });
+    expect(shared.text).toContain("已把当前任务「这段对话」共享给协作项目「Memmy 开发」");
+    expect(shared.text).toContain("3 位成员");
+    await waitForUploads(svc, "p-9");
+    expect(uploadedIds(calls)).toEqual(["task-a"]);
+
+    // 再说一次不重复操作，也不重复上传。
+    calls.length = 0;
+    expect((await svc.shareCurrentTask({ conversationId: "task-a", shared: true })).text).toContain("已经在协作项目「Memmy 开发」中共享");
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
+
+    expect((await svc.shareCurrentTask({ conversationId: "task-a", shared: false })).text).toContain("已停止共享当前任务");
+    // 在 Memmy 里「加入项目」就是共享这一条：session add 拿到 memmy 身份时也走这里。
+    expect((await svc.addCurrentSession({ sourceId: "memmy", conversationId: "task-a" })).text)
+      .toContain("已把当前任务「这段对话」共享给协作项目「Memmy 开发」");
+    await waitForUploads(svc, "p-9");
+    // 不属于任何协作项目的任务说清原因，不改去加入别的项目。
+    expect((await svc.shareCurrentTask({ conversationId: "task-other", shared: true })).text).toContain("还没有开启协作共享");
+  });
+
   it("syncs a board opening from Memmy tasks alone, without asking the Memory service", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
     roots.push(root);
@@ -752,6 +910,7 @@ describe("collab service", () => {
     const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
 
     await svc.bindLocalProject("p-9", "local-9");
+    setSharedSessions(join(root, "projects"), "p-9", ["task-9"]);
     calls.length = 0;
     expect(await svc.syncProjectTasks()).toEqual({ uploaded: 1, removed: 0, failed: 0 });
     expect(calls.some((call) => call.url.includes("/agent-sessions/"))).toBe(false);
@@ -1361,6 +1520,15 @@ function writeMemmyTask(
     metadata: { webui: true, webuiProjectId: projectId, webuiWorkspaceCwd: "/tmp/project", title }
   }, ...records];
   writeFileSync(join(directory, `websocket_${id}.jsonl`), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+}
+
+/**
+ * 直接改写本机的共享名单。开关自己的上传会干扰「谁该被上传」的断言，这些用例只改名单、再由同步上传。
+ */
+function setSharedSessions(projectsDir: string, projectId: string, ids: readonly string[]): void {
+  const path = join(projectsDir, projectId, "links.json");
+  const links = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  writeFileSync(path, JSON.stringify({ ...links, sharedSessions: [...ids] }), "utf8");
 }
 
 /** Waits until a queued association finishes uploading, so a test can assert what reached the cloud. */

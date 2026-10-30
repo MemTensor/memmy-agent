@@ -5,7 +5,9 @@ import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
 import { ComposerInlineEditor, caretAtTextStart } from "./composer-inline-editor.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
-import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { CollabShareToggle } from "./collab-share-toggle.js";
+import { getCollabProjectsSnapshot, selectCollabProject, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { setShareIntent, takeShareIntent } from "../app/collab-share-intent.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -209,6 +211,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
   "home.project.desktopRequired",
+  "collab.share.failed",
   "home.queue.removeFailed",
   "home.queue.editBlocked",
   "home.queue.steerFailed",
@@ -1049,6 +1052,45 @@ export function HomePage() {
   const mentionEmptyLabel = mentionEmpty.key === "home.mention.empty"
     ? t("home.mention.empty", mentionEmpty.values)
     : t("home.mention.noProject");
+  /**
+   * 输入框旁的共享开关：只在这条任务（或草稿）所属的项目已经开启协作共享时出现。
+   * 新建任务时它先记在草稿上，发出第一条消息后由新会话接手（见 `onChatResolved`）。
+   */
+  const sharedOnlineProject = useMemo(() => {
+    if (!composerLocalProjectId) return null;
+    return (collabProjects.projects ?? []).find((project) => project.localProjectId === composerLocalProjectId) ?? null;
+  }, [composerLocalProjectId, collabProjects]);
+  const shareToggle = sharedOnlineProject && collabClient ? (
+    <CollabShareToggle
+      collab={collabClient}
+      projectId={sharedOnlineProject.id}
+      conversationId={state.agent.currentChatId}
+      draftScopeKey={chatScopeKey}
+      onError={() => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "collab.share.failed",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })))}
+    />
+  ) : null;
+  /**
+   * 标题栏的面包屑只在项目任务上出现：项目 / 项目名 / 任务标题。
+   * 普通任务（不属于任何项目）保持原来的单行标题；是否共享由输入框旁的开关自己说，这里不再重复。
+   */
+  const activeSessionProject = useMemo(() => {
+    const projectId = state.agent.currentSessionKey
+      ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+      : null;
+    if (!projectId) return null;
+    return state.agent.projects.find((project) => project.id === projectId) ?? null;
+  }, [state.agent.currentSessionKey, state.agent.projects, state.agent.sessions]);
+  const projectCrumb = activeSessionProject ? {
+    name: activeSessionProject.name,
+    onOpen: () => {
+      selectCollabProject(activeSessionProject.id);
+      dispatch(appActions.navigate("/collab"));
+    }
+  } : null;
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1952,6 +1994,16 @@ export function HomePage() {
             clientRequestId,
             resolvedConversationModel.candidateId
           ));
+          // 新建任务时打开了「共享给成员」：会话一建立就共享，之后以本机记录为准。
+          // 即使随后的发送失败，也只是共享了一条空任务，不影响别的任务。
+          if (takeShareIntent(sendScopeKey)) {
+            const online = (getCollabProjectsSnapshot().projects ?? [])
+              .find((project) => project.localProjectId === composerLocalProjectId) ?? null;
+            if (online && collabClient) {
+              setShareIntent(chatId, true);
+              void collabClient.setTaskSharing(online.id, chatId, true).catch(() => setShareIntent(chatId, false));
+            }
+          }
         },
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
@@ -3001,6 +3053,7 @@ export function HomePage() {
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
           titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          projectCrumb={projectCrumb}
           messages={state.agent.messages}
           panelOpen={threadPanel.phase === "open"}
           onOpenPanel={threadPanel.open}
@@ -3157,6 +3210,7 @@ export function HomePage() {
                   onSelect={selectDraftTarget}
                   onChooseOther={() => void selectOtherProjectFolder()}
                 />
+                {shareToggle}
                 <AgentWorkspaceContext
                   snapshot={workspaceEnvironment.data?.snapshot ?? null}
                   branches={workspaceEnvironment.data?.branches ?? []}
@@ -3345,6 +3399,7 @@ export function HomePage() {
                             onRemove={clearSelectedComposerCommand}
                           />
                         ) : null}
+                        {shareToggle}
                       </div>
                       <div className="composer-actions">
                         <AgentModelSelector
