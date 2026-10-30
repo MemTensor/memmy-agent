@@ -753,7 +753,9 @@ export function EmbeddingMaintenancePanel() {
 
   const controller = useRef<AbortController | null>(null);
   const showProgress = (r: EmbeddingMaintenanceRunResult) => {
-    setStats(r.statsAfter);
+    // `statsAfter` describes this run's own targets, not machine-wide health.
+    // Machine-wide counters come from the periodic /embeddings/maintenance
+    // refresh, which must not be driven by a progress poll.
     setStatus({
       kind: r.error || r.failed > 0 ? "error" : r.done ? "ok" : "muted",
       text: r.error || t(r.done ? "settings.embedding.rebuild.done" : "settings.embedding.rebuild.progress", {

@@ -27,6 +27,7 @@ it("runs relocated Memory entries without staging, retaining resources and exact
     console.log(JSON.stringify([value, sqlite, readFileSync(new URL('./message%20%231.txt', import.meta.url), 'utf8')]));`);
   await put("package/dist/src/server/message #1.txt", "asset");
   await put("package/dist/src/server/storage-startup-worker.js", `console.log('startup-worker');`);
+  await put("package/dist/src/service/embedding/embedding-maintenance-reader-worker.js", `console.log('maintenance-reader-worker');`);
   await put("package/dist/src/cli/index.js", `import value from 'demo'; console.log(value);`);
   await put("package/node_modules/demo/package.json", JSON.stringify({ name: "demo", main: "index.cjs" }));
   await put("package/node_modules/demo/index.cjs", `module.exports = require('glob');`);
@@ -49,6 +50,7 @@ it("runs relocated Memory entries without staging, retaining resources and exact
   const run = (entry: string) => execFileSync(process.execPath, [path.join(relocated, "package/dist/src", entry)], { encoding: "utf8" }).trim();
   expect(JSON.parse(run("server/index.js"))).toEqual(["nested-version", "external-dependency", "asset"]);
   expect(run("server/storage-startup-worker.js")).toBe("startup-worker");
+  expect(run("service/embedding/embedding-maintenance-reader-worker.js")).toBe("maintenance-reader-worker");
   expect(run("cli/index.js")).toBe("nested-version");
   await expect(readFile(path.join(relocated, "package/node_modules/better-sqlite3/build/Release/better_sqlite3.node"), "utf8")).resolves.toBe("native-fixture");
   for (const file of ["src/server.ts", "node_modules/unused/index.js", "node_modules/demo/index.cjs", "dist/src/server/index.js.map"]) {

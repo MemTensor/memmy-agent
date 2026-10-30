@@ -1,20 +1,20 @@
 import type { Embedder } from "../../model/types.js";
-import { embeddingIdentity, sameEmbeddingIdentity, type EmbeddingIdentity } from "../../model/embedding-identity.js";
-import { kindFromMemory, type EmbeddingRetryVectorField, type Repositories } from "../../storage/repositories.js";
-import type { EmbeddingMaintenanceEntry } from "../../storage/sqlite-vec-store.js";
+import { embeddingIdentity, type EmbeddingIdentity } from "../../model/embedding-identity.js";
+import type { EmbeddingRetryVectorField, Repositories } from "../../storage/repositories.js";
 import type { MemoryRow, UserMemoryRecord } from "../../types.js";
 import { newId } from "../../utils/id.js";
 import { MemoryServiceError } from "../../utils/error.js";
-import { embeddingTextForMemory, traceSummaryEmbeddingText, traceActionEmbeddingText } from "./embedding-pipeline.js";
-import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js";
+import { EmbeddingMaintenanceReader } from "./embedding-maintenance-reader.js";
+import {
+  maintenanceText,
+  targetKey,
+  type EmbeddingMaintenanceReaderStats,
+  type EmbeddingMaintenanceReaderTarget,
+  type EmbeddingMaintenanceTargetProgress
+} from "./embedding-maintenance-reader-query.js";
 
 type Mode = "repair" | "rebuild";
-type Health = "ready" | "missing" | "dimMismatch" | "modelMismatch" | "contentMismatch";
-interface Target {
-  id: string;
-  kind: "memory" | "user_memory";
-  vectorField?: EmbeddingRetryVectorField;
-  jobId?: string;
+interface Target extends EmbeddingMaintenanceReaderTarget {
   result?: "updated" | "failed";
 }
 interface Run {
@@ -31,20 +31,15 @@ interface Run {
   completedAt?: string;
   nextAttemptAt?: number;
 }
+interface CachedStats {
+  stats: EmbeddingMaintenanceStats;
+  readAt: string;
+  final: boolean;
+}
 export const EMBEDDING_PROVENANCE_UPGRADE_KEY = "embedding-provenance-upgrade:v1";
 const UPGRADE_RETRY_MS = 5 * 60_000;
-export interface EmbeddingMaintenanceStats {
-  dimension: number;
-  available: boolean;
-  totalSlots: number;
-  ready: number;
-  missing: number;
-  dimMismatch: number;
-  modelMismatch: number;
-  needsRepair: number;
-  contentMismatch?: number;
+export interface EmbeddingMaintenanceStats extends EmbeddingMaintenanceReaderStats {
   dimensionError?: string;
-  retryQueue?: { pending: number; active: number; stale: number; failed: number };
 }
 export interface EmbeddingMaintenanceRunResult {
   runId: string;
@@ -63,70 +58,49 @@ export interface EmbeddingMaintenanceRunResult {
 }
 interface Dependencies {
   repos: Repositories;
+  reader: EmbeddingMaintenanceReader;
   embedder: Embedder;
   userId: string;
-  currentWork?(dimension: number): { retryQueue: { pending: number; active: number; stale: number; failed: number }; outdatedVectors: Set<string> };
   enqueueMemory(memory: MemoryRow, text: string, at: string, vectorField?: EmbeddingRetryVectorField): string;
   enqueueUserMemory(memory: UserMemoryRecord, at: string): string;
 }
 
-/** Snapshot the selected targets once, then report durable worker outcomes cumulatively. */
+/** Snapshot selected targets once, then report durable worker outcomes cumulatively. */
 export class EmbeddingMaintenance {
   constructor(private readonly deps: Dependencies) {}
 
   private get key(): string { return `embedding-maintenance:${this.deps.userId}`; }
+  private statsKey(runId: string): string { return `embedding-maintenance-stats:${this.deps.userId}:${runId}`; }
 
-  private entries(): EmbeddingMaintenanceEntry[] {
-    return [...this.deps.repos.vectors.maintenanceEntries(),
-      ...this.deps.repos.userMemories.embeddingMaintenanceEntries(this.deps.userId)];
+  async stats(dimension?: number): Promise<EmbeddingMaintenanceStats> {
+    return (await this.deps.reader.readStats(this.statsRequest(dimension))).stats;
   }
 
-  private snapshot(knownDimension?: number) {
-    const entries = this.entries();
-    const identity = embeddingIdentity(this.deps.embedder.config);
-    const dimensions = new Map<number, number>();
-    for (const entry of entries) {
-      if (entry.dimension > 0 && sameEmbeddingIdentity(entry, identity)) {
-        dimensions.set(entry.dimension, (dimensions.get(entry.dimension) ?? 0) + 1);
-      }
+  async start(mode: Mode, dimension?: number): Promise<EmbeddingMaintenanceRunResult> {
+    const previousRun = this.manualRun();
+    if (previousRun && !previousRun.completedAt) {
+      const previous = await this.progress(previousRun.runId);
+      if (previous && !previous.done) return previous;
     }
-    const requested = this.deps.embedder.config.extraBody?.dimensions;
-    // A model we have never used has an unknown dimension; old models cannot define it.
-    const dimension = knownDimension ?? (typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0
-      ? requested
-      : identity.provider === "local" && identity.model === "Xenova/all-MiniLM-L6-v2"
-        ? 384
-        : [...dimensions].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? 0);
-    const work = this.deps.currentWork?.(dimension);
-    const health = (entry: EmbeddingMaintenanceEntry): Health => {
-      if (entry.dimension <= 0) return "missing";
-      if (!sameEmbeddingIdentity(entry, identity)) return "modelMismatch";
-      if (dimension > 0 && entry.dimension !== dimension) return "dimMismatch";
-      return work?.outdatedVectors.has(targetKey(entry)) ? "contentMismatch" : "ready";
-    };
-    const stats: EmbeddingMaintenanceStats = {
-      dimension, available: this.deps.embedder.status().configured, totalSlots: entries.length,
-      ready: 0, missing: 0, dimMismatch: 0, modelMismatch: 0, contentMismatch: 0, needsRepair: 0,
-      ...(work ? { retryQueue: work.retryQueue } : {})
-    };
-    for (const entry of entries) { const state = health(entry); stats[state] = (stats[state] ?? 0) + 1; }
-    stats.needsRepair = stats.missing + stats.dimMismatch + stats.modelMismatch + (stats.contentMismatch ?? 0);
-    return { entries, identity, health, stats };
-  }
-
-  stats(dimension?: number): EmbeddingMaintenanceStats { return this.snapshot(dimension).stats; }
-
-  start(mode: Mode, dimension?: number): EmbeddingMaintenanceRunResult {
-    const snapshot = this.snapshot(dimension);
+    const snapshot = await this.deps.reader.readStats(this.statsRequest(dimension, undefined, true));
     if (!snapshot.stats.available) throw new MemoryServiceError("invalid_argument", "Embedding model is unavailable");
-    const previous = this.progress();
-    if (previous && !previous.done) return previous;
     const at = new Date().toISOString();
-    const run: Run = { runId: newId("embedding_maintenance"), mode, identity: snapshot.identity, dimension, createdAt: at, targets: [] };
-    // The snapshot and enqueue are one transaction: another poll never observes a partial run.
+    const run: Run = {
+      runId: newId("embedding_maintenance"), mode,
+      identity: embeddingIdentity(this.deps.embedder.config),
+      dimension: snapshot.stats.dimension, createdAt: at, targets: []
+    };
+    let concurrentRun: Run | undefined;
+    let initialStates: EmbeddingMaintenanceTargetProgress[] = [];
+    let initialStats = this.emptyStats(run.dimension);
     this.deps.repos.transaction(() => {
+      const current = this.manualRun();
+      if (current && !current.completedAt) {
+        concurrentRun = current;
+        return;
+      }
       for (const entry of snapshot.entries) {
-        if (mode === "repair" && snapshot.health(entry) === "ready") continue;
+        if (mode === "repair" && snapshot.health[targetKey(entry)] === "ready") continue;
         const target: Target = { id: entry.id, kind: entry.kind, vectorField: entry.vectorField };
         if (entry.kind === "memory") {
           const memory = this.deps.repos.memories.get(entry.id);
@@ -138,74 +112,90 @@ export class EmbeddingMaintenance {
         if (!target.jobId) target.result = "failed";
         run.targets.push(target);
       }
+      if (run.targets.every(target => Boolean(target.result))) run.completedAt = at;
+      initialStates = run.targets.map(target => ({
+        key: targetKey(target),
+        health: snapshot.health[targetKey(target)] ?? "missing",
+        sourceCurrent: true,
+        succeeded: target.result === "updated",
+        terminalFailure: target.result === "failed",
+        retrying: false
+      }));
+      initialStats = this.scopedStatsFor(run, initialStates);
       this.deps.repos.runtime.setKv(this.key, run, at);
+      this.cacheStats(run, initialStats, snapshot.readAt, Boolean(run.completedAt));
     });
-    return this.progress(run.runId)!;
+    if (concurrentRun) return (await this.progress(concurrentRun.runId))!;
+    return this.result(run, initialStates, initialStats);
   }
 
   /** One upgrade, only existing action vectors and feedback-derived L2 vectors. */
   async resumeUpgrade(): Promise<void> {
-    let run = this.deps.repos.runtime.getKv(EMBEDDING_PROVENANCE_UPGRADE_KEY)?.value as Run | undefined;
-    if (run?.completedAt) return;
+    let run = this.upgradeRun();
+    if (run?.completedAt || (run?.nextAttemptAt && run.nextAttemptAt > Date.now())) return;
     const at = new Date().toISOString();
     const identity = embeddingIdentity(this.deps.embedder.config);
-    const identityChanged = run && (run.identity.provider !== identity.provider || run.identity.model !== identity.model);
-    if (run && !identityChanged) this.refresh(run);
-    if (run?.completedAt || (run?.nextAttemptAt && run.nextAttemptAt > Date.now())) return;
-    const eligible = this.entries().filter(entry => {
-      if (entry.kind !== "memory" || entry.dimension <= 0) return false;
-      if (entry.vectorField === "vec_action") return true;
-      const memory = this.deps.repos.memories.get(entry.id);
-      const internal = memory?.properties.internal_info;
-      return memory?.memoryLayer === "L2" && (internal?.source === "feedback.experience.v1" ||
-        internal?.plugin_algorithm === "feedback.experience.v1");
-    });
-    run ??= { runId: newId("embedding_upgrade"), mode: "repair", purpose: "upgrade", identity,
-      createdAt: at, targets: [], initialized: false,
-      candidates: eligible.map(entry => ({ id: entry.id, kind: entry.kind, vectorField: entry.vectorField })) };
-    // Persist the initial scope before any model request; failures/restarts cannot widen it.
-    this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run, at);
-    const candidates = eligible.filter(entry => (run.candidates ?? run.targets).some(target => targetKey(target) === targetKey(entry)));
-    if (!run.initialized && !run.candidates?.length) {
-      run.initialized = true;
-      this.refresh(run);
-      return;
-    }
     try {
+      const identityChanged = run && (run.identity.provider !== identity.provider || run.identity.model !== identity.model);
+      if (run && !identityChanged) {
+        const targetSnapshot = await this.readTargets(run.targets, run.identity, run.dimension ?? 0);
+        const current = this.upgradeRun();
+        if (!current || !sameRunReadScope(run, current)) return;
+        run = current;
+        this.refresh(run, targetSnapshot);
+      }
+      if (run?.completedAt) return;
+
+      if (!run) {
+        run = {
+          runId: newId("embedding_upgrade"), mode: "repair", purpose: "upgrade", identity,
+          createdAt: at, targets: [], initialized: false
+        };
+        this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run, at);
+      }
+      if (!run.initialized && !run.candidates && run.targets.length === 0) {
+        const eligible = await this.deps.reader.readUpgradeCandidates();
+        run.candidates = eligible.map(entry => ({ id: entry.id, kind: entry.kind, vectorField: entry.vectorField }));
+        this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run, at);
+      }
+      const candidates = run.candidates ?? run.targets;
+      if (!run.initialized && candidates.length === 0) {
+        run.initialized = true;
+        this.refresh(run, []);
+        return;
+      }
       if (!this.deps.embedder.status().configured) throw new Error("Embedding model is unavailable; upgrade repair is pending.");
       if (!run.initialized || identityChanged) {
         const requested = this.deps.embedder.config.extraBody?.dimensions;
-        // Confirm unknown dimensions with this model, never infer them from legacy vectors.
         const dimension = typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0 ? requested
           : identity.provider === "local" && identity.model === "Xenova/all-MiniLM-L6-v2" ? 384
           : candidates.length || run.targets.length ? (await this.deps.embedder.embedOne("embedding compatibility check", "query")).length : 0;
         if ((candidates.length || run.targets.length) && !dimension) throw new Error("Embedding dimension is unavailable");
         const current = embeddingIdentity(this.deps.embedder.config);
-        if (current.provider !== identity.provider || current.model !== identity.model) throw new Error("Embedding model changed while planning upgrade repair");
+        if (current.provider !== identity.provider || current.model !== identity.model) {
+          throw new Error("Embedding model changed while planning upgrade repair");
+        }
         run.identity = identity;
         run.dimension = dimension;
-        const { health } = this.snapshot(dimension);
+        const targetSnapshot = await this.readTargets(candidates, identity, dimension);
+        const byKey = new Map(targetSnapshot.map(target => [target.key, target]));
         if (!run.initialized) {
-          run.targets = candidates.filter(entry => health(entry) !== "ready").map(entry => ({
-            id: entry.id, kind: entry.kind, vectorField: entry.vectorField
-          }));
+          run.targets = candidates.filter(target => byKey.get(targetKey(target))?.health !== "ready").map(target => ({ ...target }));
           run.initialized = true;
         } else {
-          // Model changes may invalidate completed targets, but never widen the original target set.
           for (const target of run.targets) {
-            const entry = candidates.find(candidate => targetKey(candidate) === targetKey(target));
-            target.result = entry && health(entry) === "ready" ? "updated" : undefined;
+            const state = byKey.get(targetKey(target));
+            target.result = state?.health === "ready" ? "updated" : undefined;
           }
         }
       }
       run.error = undefined;
       run.nextAttemptAt = undefined;
       this.deps.repos.transaction(() => {
-        for (const target of run.targets) {
+        for (const target of run!.targets) {
           if (target.result === "updated") continue;
           const job = target.jobId ? this.deps.repos.runtime.getEmbeddingRetry(target.jobId) : undefined;
           if (!target.result && job && ["pending", "in_progress"].includes(job.status)) continue;
-          // Terminal failures remain observable until the durable retry deadline.
           const memory = this.deps.repos.memories.get(target.id);
           if (!memory) { target.result = "failed"; continue; }
           target.jobId = this.deps.enqueueMemory(memory, maintenanceText(memory, target.vectorField), at, target.vectorField);
@@ -213,38 +203,78 @@ export class EmbeddingMaintenance {
         }
         this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run, at);
       });
-      this.refresh(run);
+      if (run.targets.length === 0) this.refresh(run, []);
     } catch (error) {
+      run ??= {
+        runId: newId("embedding_upgrade"), mode: "repair", purpose: "upgrade", identity,
+        createdAt: at, targets: [], initialized: false
+      };
       run.error = error instanceof Error ? error.message : String(error);
       run.nextAttemptAt = Date.now() + UPGRADE_RETRY_MS;
       this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run, at);
     }
   }
 
-  progress(runId?: string): EmbeddingMaintenanceRunResult | null {
-    const manual = this.deps.repos.runtime.getKv(this.key)?.value as Run | undefined;
-    const upgrade = this.deps.repos.runtime.getKv(EMBEDDING_PROVENANCE_UPGRADE_KEY)?.value as Run | undefined;
-    const run = runId
-      ? [manual, upgrade].find(candidate => candidate?.runId === runId)
-      : upgrade && !upgrade.completedAt ? upgrade : manual ?? upgrade;
+  private recordUpgradeReadFailure(run: Run, error: unknown): EmbeddingMaintenanceRunResult {
+    run.error = error instanceof Error ? error.message : String(error);
+    run.nextAttemptAt = Date.now() + UPGRADE_RETRY_MS;
+    this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run);
+    return this.result(run, []);
+  }
+
+  async progress(runId?: string): Promise<EmbeddingMaintenanceRunResult | null> {
+    const run = this.selectRun(runId);
     if (runId && !run) throw new MemoryServiceError("not_found", "Embedding maintenance run not found");
-    return run ? this.refresh(run) : null;
+    if (!run) return null;
+    const cached = this.cachedStats(run);
+    if (run.completedAt && cached?.final) return this.result(run, [], cached.stats);
+    // Read only this run's fixed targets. `statsAfter` comes from that scoped
+    // read; the global counters are a separate, discardable panel read. Doing
+    // both here made every progress poll pay for a whole-table scan.
+    // Health is judged against the identity in effect now, so a model switch
+    // still surfaces as modelMismatch instead of looking ready.
+    const targets = await this.readTargets(
+      run.targets, embeddingIdentity(this.deps.embedder.config), run.dimension ?? 0
+    );
+    const current = this.selectRun(runId);
+    if (!current || !sameRunReadScope(run, current)) {
+      return this.result(run, [], this.scopedStatsFor(run, targets));
+    }
+    return this.refresh(current, targets, this.scopedStatsFor(current, targets));
   }
 
   nextUpgradeAttemptAt(): number | undefined {
-    const run = this.deps.repos.runtime.getKv(EMBEDDING_PROVENANCE_UPGRADE_KEY)?.value as Run | undefined;
+    const run = this.upgradeRun();
     return run && !run.completedAt ? run.nextAttemptAt : undefined;
   }
 
-  upgradeProgress(): EmbeddingMaintenanceRunResult | null {
-    const run = this.deps.repos.runtime.getKv(EMBEDDING_PROVENANCE_UPGRADE_KEY)?.value as Run | undefined;
-    return run ? this.refresh(run) : null;
+  async upgradeProgress(): Promise<EmbeddingMaintenanceRunResult | null> {
+    const run = this.upgradeRun();
+    if (!run) return null;
+    if (run.completedAt) return this.result(run, [], this.cachedStats(run)?.stats);
+    try {
+      const targets = await this.readTargets(run.targets, run.identity, run.dimension ?? 0);
+      const current = this.upgradeRun();
+      if (!current || !sameRunReadScope(run, current)) return this.result(run, []);
+      return this.refresh(current, targets);
+    } catch (error) {
+      const current = this.upgradeRun();
+      return current && sameRunReadScope(run, current)
+        ? this.recordUpgradeReadFailure(current, error)
+        : this.result(run, []);
+    }
   }
 
-  private refresh(run: Run): EmbeddingMaintenanceRunResult {
-    const { entries, health, identity, stats } = this.snapshot(run.dimension);
+  private refresh(
+    run: Run,
+    targetStates: EmbeddingMaintenanceTargetProgress[],
+    stats?: EmbeddingMaintenanceStats,
+    readAt = new Date().toISOString()
+  ): EmbeddingMaintenanceRunResult {
+    const identity = embeddingIdentity(this.deps.embedder.config);
     let changed = false;
-    if (!run.completedAt && (run.purpose === "upgrade" || run.targets.some((target) => !target.result)) && (run.identity.provider !== identity.provider || run.identity.model !== identity.model)) {
+    if (!run.completedAt && (run.purpose === "upgrade" || run.targets.some(target => !target.result)) &&
+        (run.identity.provider !== identity.provider || run.identity.model !== identity.model)) {
       if (!run.error) {
         run.error = run.purpose === "upgrade"
           ? "Embedding model changed; automatic upgrade repair will resume with the selected model."
@@ -252,63 +282,146 @@ export class EmbeddingMaintenance {
         changed = true;
       }
     }
-    const byId = new Map(entries.map((entry) => [targetKey(entry), entry]));
-    let retrying = 0;
+    const byKey = new Map(targetStates.map(state => [state.key, state]));
     for (const target of run.targets) {
+      const state = byKey.get(targetKey(target));
       if (target.result || run.error) continue;
-      const job = target.kind === "memory"
-        ? this.deps.repos.runtime.getEmbeddingRetry(target.jobId!)
-        : this.deps.repos.runtime.getJob(target.jobId!);
-      const terminalFailure = !job || job.status === "dead_letter" ||
-        (job.status === "failed" && (target.kind === "memory" || job.attempts >= job.maxAttempts));
-      if (terminalFailure || job?.status === "succeeded") {
-        const entry = target.vectorField ? byId.get(targetKey(target))
-          : entries.find(item => item.kind === target.kind && item.id === target.id && item.vectorField !== "vec_action");
-        target.result = !terminalFailure && entry && health(entry) === "ready" ? "updated" : "failed";
+      if (!state || state.terminalFailure || state.succeeded) {
+        target.result = state?.succeeded && state.sourceCurrent && state.health === "ready" ? "updated" : "failed";
         changed = true;
-      } else if (job && job.attempts > 0 && job.lastError) {
-        retrying += 1;
       }
     }
-    if (run.purpose === "upgrade" && run.initialized && !run.completedAt && !run.error &&
-        run.targets.every(target => target.result === "updated" &&
-          byId.has(targetKey(target)) && health(byId.get(targetKey(target))!) === "ready")) {
+    const manualDone = !run.purpose && (Boolean(run.error) || run.targets.every(target => Boolean(target.result)));
+    const upgradeDone = run.purpose === "upgrade" && run.initialized && !run.error &&
+      run.targets.every(target => {
+        const state = byKey.get(targetKey(target));
+        return target.result === "updated" && state?.sourceCurrent && state.health === "ready";
+      });
+    if (!run.completedAt && (manualDone || upgradeDone)) {
       run.completedAt = new Date().toISOString();
       changed = true;
     }
     if (changed) this.deps.repos.runtime.setKv(run.purpose === "upgrade" ? EMBEDDING_PROVENANCE_UPGRADE_KEY : this.key, run);
-    if (run.purpose === "upgrade" && !run.completedAt && (run.error || run.targets.some(target => target.result === "failed")) && !run.nextAttemptAt) {
+    if (run.purpose === "upgrade" && !run.completedAt &&
+        (run.error || run.targets.some(target => target.result === "failed")) && !run.nextAttemptAt) {
       run.nextAttemptAt = Date.now() + UPGRADE_RETRY_MS;
       this.deps.repos.runtime.setKv(EMBEDDING_PROVENANCE_UPGRADE_KEY, run);
     }
-    const updated = run.targets.filter((target) => target.result === "updated").length;
-    const failed = run.targets.filter((target) => target.result === "failed").length;
+    if (stats) this.cacheStats(run, stats, readAt, Boolean(run.completedAt));
+    return this.result(run, targetStates, stats);
+  }
+
+  /**
+   * Statistics scoped to one run's fixed targets. `statsAfter` describes the run,
+   * never machine-wide health, so it must come from the same read the run used.
+   */
+  private scopedStatsFor(run: Run, targets: readonly EmbeddingMaintenanceTargetProgress[]): EmbeddingMaintenanceStats {
+    const stats: EmbeddingMaintenanceStats = {
+      dimension: run.dimension ?? 0,
+      available: this.deps.embedder.status().configured,
+      totalSlots: targets.length,
+      ready: 0, missing: 0, dimMismatch: 0, modelMismatch: 0, contentMismatch: 0, needsRepair: 0,
+      retryQueue: { pending: 0, active: 0, stale: 0, failed: 0 }
+    };
+    for (const target of targets) {
+      stats[target.health] = (stats[target.health] ?? 0) + 1;
+      if (target.succeeded) continue;
+      if (target.terminalFailure) stats.retryQueue!.failed += 1;
+      else stats.retryQueue!.pending += 1;
+    }
+    stats.needsRepair = stats.missing + stats.dimMismatch + stats.modelMismatch + (stats.contentMismatch ?? 0);
+    return stats;
+  }
+
+  private result(
+    run: Run,
+    targetStates: EmbeddingMaintenanceTargetProgress[],
+    stats?: EmbeddingMaintenanceStats
+  ): EmbeddingMaintenanceRunResult {
+    const updated = run.targets.filter(target => target.result === "updated").length;
+    const failed = run.targets.filter(target => target.result === "failed").length;
     const pending = run.targets.length - updated - failed;
+    const byKey = new Map(targetStates.map(state => [state.key, state]));
+    const retrying = run.targets.filter(target => !target.result && byKey.get(targetKey(target))?.retrying).length;
     return {
       runId: run.runId, mode: run.mode, accepted: true,
-      enqueued: run.targets.filter((target) => target.jobId).length,
+      enqueued: run.targets.filter(target => target.jobId).length,
       processed: updated + failed, updated, failed, pending, retrying,
-      done: run.purpose === "upgrade" ? Boolean(run.completedAt) : pending === 0 || Boolean(run.error), statsAfter: stats,
+      done: Boolean(run.completedAt) || (!run.purpose && (pending === 0 || Boolean(run.error))),
+      statsAfter: stats ?? this.cachedStats(run)?.stats ?? this.emptyStats(run.dimension),
       serverTime: new Date().toISOString(), ...(run.error ? { error: run.error } : {})
+    };
+  }
+
+  private statsRequest(knownDimension?: number, targets?: Target[], includePlan = false) {
+    const identity = embeddingIdentity(this.deps.embedder.config);
+    const requested = this.deps.embedder.config.extraBody?.dimensions;
+    return {
+      userId: this.deps.userId, identity,
+      available: this.deps.embedder.status().configured,
+      ...(knownDimension === undefined ? {} : { knownDimension }),
+      ...(typeof requested === "number" ? { requestedDimension: requested } : {}),
+      ...(includePlan ? { includePlan: true } : {}),
+      ...(targets ? { targets: targets.map(target => ({
+        id: target.id, kind: target.kind, vectorField: target.vectorField, jobId: target.jobId
+      })) } : {})
+    };
+  }
+
+  private async readTargets(targets: Target[], identity: EmbeddingIdentity, dimension: number) {
+    return (await this.deps.reader.readTargets({
+      userId: this.deps.userId, identity, dimension,
+      targets: targets.map(target => ({
+        id: target.id, kind: target.kind, vectorField: target.vectorField, jobId: target.jobId
+      }))
+    })).targets;
+  }
+
+  private selectRun(runId?: string): Run | undefined {
+    const manual = this.manualRun();
+    const upgrade = this.upgradeRun();
+    return runId
+      ? [manual, upgrade].find(candidate => candidate?.runId === runId)
+      : upgrade && !upgrade.completedAt ? upgrade : manual ?? upgrade;
+  }
+
+  private manualRun(): Run | undefined {
+    return this.deps.repos.runtime.getKv(this.key)?.value as Run | undefined;
+  }
+
+  private upgradeRun(): Run | undefined {
+    return this.deps.repos.runtime.getKv(EMBEDDING_PROVENANCE_UPGRADE_KEY)?.value as Run | undefined;
+  }
+
+  private cacheStats(run: Run, stats: EmbeddingMaintenanceStats, readAt: string, final: boolean): void {
+    this.deps.repos.runtime.setKv(this.statsKey(run.runId), { stats, readAt, final } satisfies CachedStats, readAt);
+  }
+
+  private cachedStats(run: Run): CachedStats | undefined {
+    return this.deps.repos.runtime.getKv(this.statsKey(run.runId))?.value as CachedStats | undefined;
+  }
+
+  private emptyStats(dimension = 0): EmbeddingMaintenanceStats {
+    return {
+      dimension, available: this.deps.embedder.status().configured,
+      totalSlots: 0, ready: 0, missing: 0, dimMismatch: 0, modelMismatch: 0,
+      contentMismatch: 0, needsRepair: 0,
+      retryQueue: { pending: 0, active: 0, stale: 0, failed: 0 }
     };
   }
 }
 
-function targetKey(target: Pick<Target, "kind" | "id" | "vectorField">): string {
-  return `${target.kind}:${target.id}:${target.vectorField ?? "vec"}`;
-}
-
-function maintenanceText(memory: MemoryRow, vectorField?: EmbeddingRetryVectorField): string {
-  if (vectorField === "vec_action") return traceActionEmbeddingText(memory);
-  if (memory.memoryLayer === "L1" && kindFromMemory(memory) === "work_memory") {
-    const internal = memory.properties.internal_info;
-    return canonicalWorkMemoryText(
-      typeof internal.work_topic === "string" ? internal.work_topic : "Work requirements",
-      typeof internal.requirement === "string" ? internal.requirement : "",
-      typeof internal.reason === "string" ? internal.reason : ""
-    );
-  }
-  return memory.memoryLayer === "L1"
-    ? traceSummaryEmbeddingText(memory) ?? embeddingTextForMemory(memory)
-    : embeddingTextForMemory(memory);
+function sameRunReadScope(expected: Run, current: Run): boolean {
+  return expected.runId === current.runId &&
+    expected.createdAt === current.createdAt &&
+    expected.identity.provider === current.identity.provider &&
+    expected.identity.model === current.identity.model &&
+    expected.dimension === current.dimension &&
+    expected.initialized === current.initialized &&
+    expected.targets.length === current.targets.length &&
+    expected.targets.every((target, index) => {
+      const other = current.targets[index];
+      if (!other) return false;
+      return targetKey(target) === targetKey(other) && target.jobId === other.jobId;
+    });
 }
