@@ -210,11 +210,11 @@ describe("stored memory -> panel/detail -> rendered trace title", () => {
     expect(detailFromMemory(stored).body).toContain(input);
   });
 
-  it("refreshes existing log summaries to empty without replacing missing records or span goals", () => {
+  it("refreshes existing log summaries to empty without replacing missing records or span goals", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "review-log" } });
-    const completed = service.completeTurn("preview-log-turn", { sessionId: session.sessionId, query: request, answer: "完成。" });
+    const completed = await service.completeTurn("preview-log-turn", { sessionId: session.sessionId, query: request, answer: "完成。" });
     const storedLog = db.db.prepare("SELECT output_json FROM api_logs WHERE tool_name = 'memory_add'").get() as { output_json: string };
     expect(JSON.parse(storedLog.output_json).details[0].summary).toBe("");
     const row = repos.memories.get(completed.l1MemoryId)!;

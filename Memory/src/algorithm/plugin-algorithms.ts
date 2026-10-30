@@ -1518,16 +1518,40 @@ Rules:
 - Each guidance line ≤200 chars; ≤5 per array.`,
 } as const;
 
+/** L2-only compatibility; the direct Episode/trace prompts keep their existing contract. */
+export const L2_SKILL_CRYSTALLIZE_PROMPT = {
+  ...SKILL_CRYSTALLIZE_PROMPT,
+  version: 7,
+  system: SKILL_CRYSTALLIZE_PROMPT.system + `
+
+L2 compatibility:
+- POLICY.lesson_type may be principle, local_procedure, check, troubleshooting, or absent for legacy policies. POLICY.content_revision identifies its current content, not success evidence.
+- Use principle as decision guidance/preconditions; local_procedure as supported steps; check as acceptance/verification criteria; troubleshooting as supported diagnostic/recovery branches.
+- Preserve the current policy's applicable conditions and boundaries. Do not turn every principle or check into an invented workflow. Actual actions and tools must remain grounded in EVIDENCE.
+- A revised policy supersedes the old wording; old successful episodes do not prove the revised steps worked. Never restore a corrected rule merely because it appears in historical evidence or EXISTING_SKILL_SNAPSHOT.
+- If the supplied evidence cannot justify a callable workflow consistent with the current policy, return {"skip":true} instead of inventing steps.`
+} as const;
+
 export const SKILL_REBUILD_PROMPT = {
   id: "skill.rebuild",
-  version: 3,
+  version: 6,
   description:
     "Update an existing SOP skill from new evidence while preserving stable identity and controlling rewrite scope.",
   system: `You update an existing SOP skill.
 
+L2 compatibility:
+- POLICY.lesson_type may be principle, local_procedure, check, troubleshooting, or absent for legacy policies. POLICY.content_revision identifies its current content, not success evidence.
+- Use principle as decision guidance/preconditions; local_procedure as supported steps; check as acceptance/verification criteria; troubleshooting as supported diagnostic/recovery branches.
+- Preserve the current policy's applicable conditions and boundaries. Do not turn every principle or check into an invented workflow. Actual actions and tools must remain grounded in EVIDENCE.
+- A revised policy supersedes the old wording; old successful episodes do not prove the revised steps worked. Never restore a corrected rule merely because it appears in historical evidence or EXISTING_SKILL_SNAPSHOT.
+- If the supplied evidence cannot justify a callable workflow consistent with the current policy, return {"skip":true} instead of inventing steps.
+
+
 Input adds:
 - EXISTING_SKILL_SNAPSHOT: current summary, retrieval_blurb, step titles, decision_guidance.
 - INCREMENTAL_EVIDENCE: new traces since last version (canonical, deduped).
+- REVISION_EVIDENCE (optional): the actual L1 corrections/failures/verified repairs behind the current L2 revision. This is separate from historical EVIDENCE and does not establish overall workflow success. Use its explicitly supported corrections, limits, and verified actions to replace obsolete steps. Do not require old EVIDENCE to already contain the corrected workflow; do not promote an attempted or proposed repair to a verified one. EVIDENCE_TOOLS includes tools observed in either evidence set. Return skip only when these inputs together cannot ground a usable revision.
+- REPLACE_POLICY_STEPS (boolean): when true, return the complete revised workflow and updated descriptive fields, not a patch to append. Remove obsolete steps supported by POLICY, even if their titles differ from your new steps. Retain still-valid steps; preserve independently supported steps from other source policies in EXISTING_SKILL_SNAPSHOT. Do not leave contradictory old instructions in summaries, examples, preconditions, or guidance.
 - REBUILD_LEVEL:
   - L0: only improve retrieval_blurb and summary; keep steps identical in substance.
   - L1: surgical edits — adjust guidance and at most 1-2 steps using INCREMENTAL_EVIDENCE.

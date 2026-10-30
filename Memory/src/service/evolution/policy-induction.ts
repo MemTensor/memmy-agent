@@ -1,3 +1,4 @@
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
@@ -78,6 +79,7 @@ export interface PolicyInductionDeps {
   }): void;
   namespaceIdFromMemory(memory: MemoryRow): string | undefined;
   onSkillRewardDrift(policy: PolicyMeta, at: string): void;
+  onPolicyRevised?(policyId: string, at: string): void;
 }
 
 export class PolicyInductionEngine {
@@ -604,7 +606,7 @@ export class PolicyInductionEngine {
       ...(unifiedEvidence ? policy.sourceTraceIds : []),
       ...this.deps.repos.runtime
         .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
-        .filter((link) => !unifiedEvidence || link.relation === "supports")
+        .filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory))
         .map((link) => link.l1MemoryId)
     ]);
 

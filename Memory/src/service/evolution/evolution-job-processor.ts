@@ -1,3 +1,4 @@
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
   skillMetaFromMemory,
@@ -130,7 +131,8 @@ export class EvolutionJobProcessor {
       enqueueJob: deps.enqueueJob,
       enqueueChange: deps.repos.runtime.appendChange.bind(deps.repos.runtime),
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
-      onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill)
+      onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill),
+      onPolicyRevised: this.skill.suspendForPolicyRevision.bind(this.skill)
     });
     this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
@@ -322,7 +324,7 @@ export class EvolutionJobProcessor {
           userId: memory.userId,
           l1MemoryId: trace.id,
           l2MemoryId: policy.id,
-          relation: "supports",
+          relation: l2SupportRelation(memory),
           strength: 1,
           createdAt: at
         });
@@ -364,7 +366,7 @@ export class EvolutionJobProcessor {
         const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
           l2MemoryId: policy.id,
           limit: 1000
-        }).filter((link) => !unifiedEvidence || link.relation === "supports").map((link) => link.l1MemoryId));
+        }).filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory)).map((link) => link.l1MemoryId));
         const candidateTraceIds = Array.from(new Set([
           ...policy.sourceTraceIds,
           ...linkedTraceIds

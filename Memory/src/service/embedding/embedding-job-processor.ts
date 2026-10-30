@@ -310,6 +310,8 @@ export class EmbeddingJobProcessor {
       throw new Error(`embedding target not found: ${item.memory.id}`);
     }
     if (!processingJobMatchesMemory(item.job, current)) return;
+    // L2 text may have been revised while this embedding request was in flight.
+    if (current.memoryLayer === "L2" && embeddingTextForMemory(current) !== item.text) return;
     if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) return;
     this.persistEmbeddingVector({
       memoryId: current.id,

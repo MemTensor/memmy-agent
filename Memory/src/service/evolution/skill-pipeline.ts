@@ -1,5 +1,6 @@
+import { l2ContentRevision } from "./l2-content-revision.js";
 import {
-  SKILL_CRYSTALLIZE_PROMPT,
+  L2_SKILL_CRYSTALLIZE_PROMPT,
   SKILL_REBUILD_PROMPT,
   buildSkillDraft,
   cosine,
@@ -32,7 +33,7 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type SkillMeta = NonNullable<ReturnType<typeof skillMetaFromMemory>>;
 type SkillDraft = NonNullable<ReturnType<typeof buildSkillDraft>>;
-type SkillEnhancementResult = { ok: true; draft: SkillDraft } | { ok: false; reason: string };
+type SkillEnhancementResult = { ok: true; draft: SkillDraft } | { ok: false; reason: string; error?: unknown };
 type SkillRebuildLevel = "L0" | "L1" | "L2";
 
 const SKILL_REFUSAL_PREFIXES = [
@@ -61,6 +62,35 @@ export interface SkillPipelineDeps {
 export class SkillPipeline {
  private readonly skillCrystallizationRuns=new Map<string,number>();
  constructor(private readonly deps:SkillPipelineDeps){}
+
+  /** A revised source invalidates derived content, but never deletes its steps or provenance. */
+  suspendForPolicyRevision(policyId: string, at: string): void {
+    const source = this.deps.repos.memories.get(policyId);
+    if (!source) return;
+    const memories: MemoryRow[] = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = this.deps.repos.memories.list({ memoryLayer: "Skill", userId: source.userId }, 500, offset);
+      memories.push(...page);
+      if (page.length < 500) break;
+    }
+    for (const memory of memories) {
+      const skill = skillMetaFromMemory(memory);
+      if (!skill?.sourcePolicyIds.includes(policyId) || skill.status === "archived" || isReadOnlySkillMemory(memory)) continue;
+      const internal = memory.properties.internal_info;
+      const data = isRecord(internal.skill) ? internal.skill : {};
+      const pending = isRecord(data.pending_policy_revisions) ? data.pending_policy_revisions : {};
+      const fields = { status: "suspended", content_revised_at: at, pending_policy_revisions: { ...pending, [policyId]: l2ContentRevision(source) } };
+      const saved = this.deps.repos.memories.updateIfVersion({ ...memory, status: "archived", updatedAt: at,
+        info: { ...memory.info, ...fields }, properties: { ...memory.properties,
+          status: "archived", internal_info: { ...internal, ...fields, skill: { ...data, ...fields } } } }, memory.version);
+      this.deps.repos.runtime.appendChange({ memoryId: saved.id, namespaceId: this.deps.namespaceIdFromMemory(saved),
+        kind: "skill", op: "updated", entityId: saved.id, userId: saved.userId, changeType: "skill_policy_revised",
+        before: memory, after: saved, source: "worker.l2_revision", createdAt: at });
+      this.deps.enqueueJob({ jobType: "skill_crystallization", userId: source.userId, targetMemoryId: source.id,
+        sessionId: source.sessionId, dedupeKey: `skill.policy-revision:${source.id}:${l2ContentRevision(source)}:${memory.id}`,
+        payload: { reason: "l2.content_revised", skillId: memory.id, contentRevision: l2ContentRevision(source) }, createdAt: at });
+    }
+  }
 
   invalidatePolicySource(policyId: string, at: string): void {
     const affected = this.deps.repos.memories
@@ -193,7 +223,94 @@ export class SkillPipeline {
     }
   }
 
+  /** Repair existing text immediately, without claiming the revised workflow has succeeded. */
+  private async reviseDependentSkill(job: EvolutionJobRecord): Promise<void> {
+    const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+    const policy = source ? policyMetaFromMemory(source) : null;
+    const row = typeof job.payload.skillId === "string" ? this.deps.repos.memories.get(job.payload.skillId) : undefined;
+    const existing = row ? skillMetaFromMemory(row) : null;
+    if (!policy || !row || !existing || source!.userId !== job.userId || row.userId !== job.userId
+      || isReadOnlySkillMemory(row) || !existing.sourcePolicyIds.includes(policy.id)
+      || l2ContentRevision(source!) !== job.payload.contentRevision) return;
+    const data = isRecord(row.properties.internal_info.skill) ? row.properties.internal_info.skill : {};
+    const pending = isRecord(data.pending_policy_revisions) ? data.pending_policy_revisions : {};
+    if (pending[policy.id] !== job.payload.contentRevision || storedSkillPolicyContentHash(row, policy.id) === skillPolicyContentHash(policy)) return;
+    const historicalIds = uniq([...existing.evidenceAnchorIds, ...stringArray(data.revision_historical_anchor_ids)]);
+    const historicalRows = this.deps.repos.memories.getMany(historicalIds);
+    const evidence = historicalRows
+      .filter((memory) => !memory.deletedAt && ["activated", "resolving"].includes(memory.status))
+      .map((memory) => this.deps.traceMeta(memory))
+      .filter((trace): trace is TraceMeta => Boolean(trace && trace.userId === job.userId
+        && trace.userText !== "[REDACTED]" && trace.agentText !== "[REDACTED]"
+        && (!trace.episodeId || !this.isFailureEpisodeForSkillEvidence(trace.episodeId))))
+      .map((trace) => this.capSkillEvidenceTrace(trace));
+    // The revised policy is a summary, not a substitute for its correction evidence.
+    // Failure/correction traces justify edits without becoming successful workflow anchors.
+    const revisionRows = this.deps.repos.memories.getMany(policy.sourceTraceIds)
+      .filter((memory) => memory.userId === job.userId && !memory.deletedAt && ["activated", "resolving"].includes(memory.status));
+    const revisionEvidence = revisionRows.map((memory) => this.deps.traceMeta(memory))
+      .filter((trace): trace is TraceMeta => Boolean(trace && trace.userText !== "[REDACTED]" && trace.agentText !== "[REDACTED]"))
+      .map((trace) => this.capSkillEvidenceTrace(trace));
+    const validationEvidence = [...new Map([...evidence, ...revisionEvidence].map((trace) => [trace.id, trace])).values()];
+    const evidenceVersions = new Map([...historicalRows, ...revisionRows]
+      .filter((memory) => validationEvidence.some((trace) => trace.id === memory.id)).map((memory) => [memory.id, memory.version]));
+    const fallback: SkillDraft = { key: row.memoryKey ?? row.id, name: existing.name, status: "candidate", eta: 0,
+      support: 0, gain: 0, sourcePolicyIds: existing.sourcePolicyIds, sourceWorldModelIds: existing.sourceWorldModelIds,
+      sourceTraceIds: policy.sourceTraceIds, evidenceAnchorIds: [], invocationGuide: existing.invocationGuide,
+      procedureJson: skillProcedureJsonFromMemory(row), trialsAttempted: 0, trialsPassed: 0, successRate: 0,
+      betaPosterior: { alpha: 1, beta: 1, mean: 0.5 }, vec: null, tags: row.tags };
+    const result = await this.enhanceSkillDraft(policy, fallback, evidence, [], existing, revisionEvidence);
+    if (!result.ok) {
+      // A deliberate lack-of-evidence result remains suspended; transport/format failures retry normally.
+      if (result.reason === "insufficient_workflow_evidence") {
+        this.deps.repos.runtime.appendChange({ memoryId: row.id, namespaceId: this.deps.namespaceIdFromMemory(row),
+          kind: "skill", op: "skipped", entityId: row.id, userId: row.userId, changeType: "skill_revision_skipped",
+          after: { policyId: policy.id, contentRevision: l2ContentRevision(source!), reason: result.reason },
+          source: "worker.l2_revision", createdAt: nowIso() });
+        return;
+      }
+      throw result.error ?? new Error(`skill revision: ${result.reason}`);
+    }
+    const verdict = verifySkillDraft({ draft: result.draft, evidenceTraces: validationEvidence });
+    if (!verdict.ok) throw new Error(`skill revision: verification failed (${verdict.reason})`);
+    const at = nowIso();
+    this.deps.repos.transaction(() => {
+      for (const [id, version] of evidenceVersions) {
+        const memory = this.deps.repos.memories.get(id);
+        if (!memory || memory.deletedAt || memory.version !== version || !["activated", "resolving"].includes(memory.status)) {
+          throw new Error("skill revision: historical evidence changed during generation");
+        }
+      }
+      const current = this.deps.repos.memories.get(policy.id);
+      if (!current || current.deletedAt || current.status === "archived" || current.version !== source!.version
+        || skillPolicyContentHash(policyMetaFromMemory(current)!) !== skillPolicyContentHash(policy)) {
+        throw new Error("skill revision: source changed during generation");
+      }
+      const hashes = { ...storedSkillPolicyContentHashes(row), [policy.id]: skillPolicyContentHash(policy) };
+      const fields = { status: "suspended", invocation_guide: result.draft.invocationGuide,
+        procedure_json: attachSkillStepPolicySources(result.draft.procedureJson, row, policy.id),
+        policy_content_hashes: hashes, policy_content_hash: skillPolicyContentHash(policy),
+        trials_attempted: 0, trials_passed: 0, success_rate: 0, beta_posterior: { alpha: 1, beta: 1, mean: 0.5 },
+        eta: 0, support: 0, gain: 0, evidence_anchor_ids: [], revision_historical_anchor_ids: historicalIds, verification: verdict };
+      const saved = this.deps.repos.memories.updateIfVersion({ ...row, status: "archived",
+        memoryValue: result.draft.invocationGuide, updatedAt: at, info: { ...row.info, status: "suspended", eta: 0 },
+        properties: { ...row.properties, status: "archived", internal_info: { ...row.properties.internal_info, ...fields,
+          skill: { ...data, ...fields } } } }, row.version);
+      this.deps.repos.memories.deleteVector(saved.id, "vec");
+      this.deps.repos.runtime.appendChange({ memoryId: saved.id, namespaceId: this.deps.namespaceIdFromMemory(saved),
+        kind: "skill", op: "updated", entityId: saved.id, userId: saved.userId, changeType: "skill_revision_applied",
+        before: row, after: saved, source: "worker.l2_revision", createdAt: at });
+      // Re-entry to ordinary crystallization still requires active L2 and success evidence.
+      if (policyIsEligibleForDownstream(policy)) this.deps.enqueueJob({ jobType: "skill_crystallization",
+        userId: saved.userId, targetMemoryId: policy.id, payload: { skillId: saved.id, reason: "l2.revision_validated" }, createdAt: at });
+    });
+  }
+
   async crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
+    if (job.payload.reason === "l2.content_revised") {
+      await this.reviseDependentSkill(job);
+      return;
+    }
     const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     const userId = source?.userId ?? job.userId;
     const at = nowIso();
@@ -254,7 +371,15 @@ export class SkillPipeline {
         targetSkillId,
         job.payload.reason !== "policy.skill_fanout"
       );
-      if (this.isSkillCrystallizationInCooldown(policy, at)) {
+      const pendingRevisions = existingSkill && isRecord(existingSkill.memory.properties.internal_info.skill)
+        ? existingSkill.memory.properties.internal_info.skill.pending_policy_revisions : undefined;
+      if (isRecord(pendingRevisions) && Object.keys(pendingRevisions).some((id) => {
+        const row = this.deps.repos.memories.get(id);
+        const meta = row ? policyMetaFromMemory(row) : null;
+        return !meta || !policyIsEligibleForDownstream(meta)
+          || (id !== policy.id && storedSkillPolicyContentHash(existingSkill!.memory, id) !== skillPolicyContentHash(meta));
+      })) continue;
+      if (this.isSkillCrystallizationInCooldown(policy, at, existingSkill?.id)) {
         logEvolutionDecision(job, "skill_crystallization", "cooldown", {
           policyId: policy.id,
           existingSkillId: existingSkill?.id
@@ -277,7 +402,7 @@ export class SkillPipeline {
         });
         continue;
       }
-      this.markSkillCrystallizationRun(policy, at);
+      const evidenceVersions = new Map(evidenceTraces.map((trace) => [trace.id, trace.memory.version]));
       const fallbackDraft = buildSkillDraft({
         policy,
         existing: existingSkill,
@@ -285,7 +410,7 @@ export class SkillPipeline {
         minSupport: this.deps.config.algorithm.skill.minSupport,
         minGain: this.deps.config.algorithm.skill.minGain
       });
-      const enhancement = fallbackDraft
+      const enhancement: SkillEnhancementResult = fallbackDraft
         ? await this.enhanceSkillDraft(policy, fallbackDraft, evidenceTraces, counterExamples, existingSkill)
         : { ok: false, reason: "not-eligible" } as const;
       if (!enhancement.ok) {
@@ -306,9 +431,24 @@ export class SkillPipeline {
           source: "worker.skill_crystallization.v7",
           createdAt: at
         });
+        if (enhancement.reason.startsWith("llm-failed:")) {
+          throw enhancement.error ?? new Error(enhancement.reason);
+        }
         continue;
       }
-      const draft = enhancement.draft;
+      const currentPolicyMemory = this.deps.repos.memories.get(policy.id);
+      const currentPolicy = currentPolicyMemory ? policyMetaFromMemory(currentPolicyMemory) : null;
+      if (!currentPolicy || !policyIsEligibleForDownstream(currentPolicy)
+        || skillPolicyContentHash(currentPolicy) !== skillPolicyContentHash(policy)) {
+        throw new Error("skill source changed during generation; retry current policy");
+      }
+      if (existingSkill && this.deps.repos.memories.get(existingSkill.id)?.version !== existingSkill.memory.version) {
+        throw new Error("skill changed during generation; retry current skill");
+      }
+      // A content change requires new validation; historical trials cannot validate new steps.
+      const sourceChanged = existingSkill && storedSkillPolicyContentHash(existingSkill.memory, policy.id) !== skillPolicyContentHash(policy);
+      const draft = sourceChanged ? { ...enhancement.draft, trialsAttempted: 0, trialsPassed: 0,
+        successRate: 0, betaPosterior: { alpha: 1, beta: 1, mean: 0.5 }, evidenceAnchorIds: [], vec: null } : enhancement.draft;
       const verdict = verifySkillDraft({ draft, evidenceTraces });
       if (!verdict.ok) {
         logEvolutionDecision(job, "skill_crystallization", "verification_failed", {
@@ -327,7 +467,7 @@ export class SkillPipeline {
           source: "worker.skill_crystallization.v7",
           createdAt: at
         });
-        continue;
+        throw new Error(`skill verification failed: ${verdict.reason}`);
       }
       const evidenceAnchorIds = evidenceTraces.map((trace) => trace.id).slice(0, 10);
       const verifiedDraft: SkillDraft = {
@@ -384,6 +524,7 @@ export class SkillPipeline {
           policy_content_hash: skillPolicyContentHash(policy),
           policy_content_hashes: policyContentHashes,
           skill: {
+            ...(existingSkill && isRecord(existingSkill.memory.properties.internal_info.skill) ? { content_revised_at: existingSkill.memory.properties.internal_info.skill.content_revised_at } : {}),
             name: verifiedDraft.name,
             eta: verifiedDraft.eta,
             status: verifiedDraft.status,
@@ -406,7 +547,26 @@ export class SkillPipeline {
         },
         createdAt: at
       });
-      const upsert = this.deps.upsertEvolutionMemory(skill);
+      const upsert = this.deps.repos.transaction(() => {
+        const current = this.deps.repos.memories.get(policy.id);
+        const meta = current ? policyMetaFromMemory(current) : null;
+        if (!current || current.deletedAt || !["activated", "resolving"].includes(current.status)
+          || !meta || !policyIsEligibleForDownstream(meta) || skillPolicyContentHash(meta) !== skillPolicyContentHash(policy)) {
+          throw new Error("skill source changed during generation; retry current policy");
+        }
+        for (const [id, version] of evidenceVersions) {
+          const trace = this.deps.repos.memories.get(id);
+          if (!trace || trace.deletedAt || trace.version !== version || !["activated", "resolving"].includes(trace.status)) {
+            throw new Error("skill evidence changed during generation; retry current evidence");
+          }
+        }
+        return existingSkill
+          ? { memory: this.deps.repos.memories.updateIfVersion({ ...skill, createdAt: existingSkill.memory.createdAt,
+                version: existingSkill.memory.version }, existingSkill.memory.version),
+              created: false, previous: existingSkill.memory }
+          : this.deps.upsertEvolutionMemory(skill);
+      });
+      this.markSkillCrystallizationRun(policy, at, upsert.memory.id);
       for (const episodeId of uniq(evidenceTraces.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id)))) {
         this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "Skill", upsert.memory.id, at);
       }
@@ -607,25 +767,25 @@ export class SkillPipeline {
     return skillMetaFromMemory(saved);
   }
 
-private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolean {
+private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string, skillId?: string): boolean {
     const cooldownMs = this.deps.config.algorithm.skill.cooldownMs;
     if (cooldownMs <= 0) return false;
-    const lastRunAt = this.skillCrystallizationRuns.get(this.skillCrystallizationCooldownKey(policy));
+    const lastRunAt = this.skillCrystallizationRuns.get(this.skillCrystallizationCooldownKey(policy, skillId));
     if (!lastRunAt) return false;
     const now = Date.parse(at);
     if (!Number.isFinite(now)) return false;
     return now - lastRunAt < cooldownMs;
   }
 
-private markSkillCrystallizationRun(policy: PolicyMeta, at: string): void {
+private markSkillCrystallizationRun(policy: PolicyMeta, at: string, skillId?: string): void {
     if (this.deps.config.algorithm.skill.cooldownMs <= 0) return;
     const now = Date.parse(at);
     if (!Number.isFinite(now)) return;
-    this.skillCrystallizationRuns.set(this.skillCrystallizationCooldownKey(policy), now);
+    this.skillCrystallizationRuns.set(this.skillCrystallizationCooldownKey(policy, skillId), now);
   }
 
-private skillCrystallizationCooldownKey(policy: PolicyMeta): string {
-    return policy.id;
+private skillCrystallizationCooldownKey(policy: PolicyMeta, skillId?: string): string {
+    return `${policy.id}:${l2ContentRevision(policy.memory)}:${skillId ?? "new"}`;
   }
 
 private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
@@ -634,7 +794,7 @@ private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
     const failureEpisodeIds = new Set(
       policy.sourceEpisodeIds.filter((episodeId) => this.isFailureEpisodeForSkillEvidence(episodeId))
     );
-    if (episodeIds.size > 0) {
+    if (episodeIds.size > 0 && l2ContentRevision(policy.memory) === 1) {
       const candidates = this.deps.repos.memories
         .list({ memoryLayer: "L1", status: "activated" }, 1000)
         .map((memory) => this.deps.traceMeta(memory))
@@ -717,6 +877,8 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
           skill.sourcePolicyIds.includes(policy.id))
       );
     for (const skill of skills) {
+      const raw = skill.memory.properties.internal_info.skill;
+      if (isRecord(raw) && raw.status === "suspended" && isRecord(raw.pending_policy_revisions)) continue;
       const startedAt = performance.now();
       const eta = skillEtaAfterRewardDrift({
         currentEta: skill.eta,
@@ -773,13 +935,17 @@ private async enhanceSkillDraft(
     fallback: SkillDraft,
     evidenceTraces: TraceMeta[],
     counterExamples: TraceMeta[],
-    existingSkill?: NonNullable<ReturnType<typeof skillMetaFromMemory>> | null
+    existingSkill?: NonNullable<ReturnType<typeof skillMetaFromMemory>> | null,
+    revisionEvidence: TraceMeta[] = []
   ): Promise<SkillEnhancementResult> {
-    if (!this.deps.config.algorithm.skill.useLlm || !this.deps.skillLlm.isConfigured()) {
+    if (!this.deps.config.algorithm.skill.useLlm) {
       return { ok: false, reason: "llm_disabled" };
     }
+    if (!this.deps.skillLlm.isConfigured()) {
+      return { ok: false, reason: "llm-failed: configured skill model unavailable" };
+    }
     try {
-      const evidenceTools = Array.from(extractToolNamesFromTraces(evidenceTraces));
+      const evidenceTools = Array.from(extractToolNamesFromTraces([...evidenceTraces, ...revisionEvidence]));
       const existingSkillNames = this.deps.repos.memories
         .list({ memoryLayer: "Skill", status: ["activated", "resolving"] }, 1000)
         .map(skillMetaFromMemory)
@@ -797,8 +963,12 @@ private async enhanceSkillDraft(
         steeredLanguage
       );
       const rebuild = existingSkill ? skillRebuildPlan(policy, existingSkill, evidenceTraces) : null;
-      const prompt = rebuild ? SKILL_REBUILD_PROMPT : SKILL_CRYSTALLIZE_PROMPT;
+      const replacesPolicySteps = Boolean(existingSkill?.sourcePolicyIds.includes(policy.id)
+        && l2ContentRevision(policy.memory) > 1
+        && storedSkillPolicyContentHash(existingSkill.memory, policy.id) !== skillPolicyContentHash(policy));
+      const prompt = rebuild ? SKILL_REBUILD_PROMPT : L2_SKILL_CRYSTALLIZE_PROMPT;
       const result = await this.deps.skillLlm.completeJson<{
+        skip?: unknown;
         name?: unknown;
         retrieval_blurb?: unknown;
         retrievalBlurb?: unknown;
@@ -832,6 +1002,8 @@ private async enhanceSkillDraft(
           content: JSON.stringify({
             policy: {
               id: policy.id,
+              lesson_type: policy.lessonType ?? null,
+              content_revision: isRecord(policy.memory.properties.internal_info.policy) ? policy.memory.properties.internal_info.policy.content_revision ?? 1 : 1,
               title: policy.title,
               trigger: policy.trigger,
               procedure: policy.procedure,
@@ -840,6 +1012,14 @@ private async enhanceSkillDraft(
               support: policy.support,
               gain: policy.gain
             },
+            ...(revisionEvidence.length ? {
+              evidence_role: "historical workflow context; not proof that revised steps succeeded",
+              revision_evidence: revisionEvidence.slice(0, this.deps.config.algorithm.skill.evidenceLimit).map((trace) => ({
+                id: trace.id, episodeId: trace.episodeId, user: trace.userText, agent: trace.agentText,
+                summary: trace.summary, reflection: trace.reflection, value: trace.value,
+                role: "grounds the current L2 revision; not a successful execution anchor"
+              }))
+            } : {}),
             evidence: evidenceTraces.slice(0, this.deps.config.algorithm.skill.evidenceLimit).map((trace) => ({
               id: trace.id,
               episodeId: trace.episodeId,
@@ -892,6 +1072,7 @@ private async enhanceSkillDraft(
                     tags: trace.tags
                   })),
                   rebuild_level: rebuild.level,
+                  replace_policy_steps: replacesPolicySteps,
                   repair_rename_allowed: false
                 }
               : {}),
@@ -908,6 +1089,7 @@ private async enhanceSkillDraft(
         thinkingMode: "enabled",
         temperature: 0.2
       });
+      if (result.skip === true) return { ok: false, reason: "insufficient_workflow_evidence" };
       if (detectSkillModelRefusal(result)) {
         return { ok: false, reason: "llm-refusal" };
       }
@@ -921,7 +1103,8 @@ private async enhanceSkillDraft(
             skillProcedureJsonFromMemory(existingSkill?.memory),
             llmProcedureJson,
             rebuild.level,
-            stringArray(result.changed_sections ?? result.changedSections)
+            stringArray(result.changed_sections ?? result.changedSections),
+            replacesPolicySteps ? policy.id : undefined
           )
         : llmProcedureJson;
       const skillName = rebuild
@@ -945,7 +1128,7 @@ private async enhanceSkillDraft(
         }
       };
     } catch (error) {
-      return { ok: false, reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}` };
+      return { ok: false, reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}`, error };
     }
   }
 }
@@ -1126,6 +1309,8 @@ function skillRebuildPlan(
       trigger_context: procedure.triggerContext,
       summary: procedure.summary,
       step_titles: skillStepsFromProcedure(procedure).map((step) => step.title),
+      steps: procedure.steps,
+      preconditions: procedure.preconditions,
       decision_guidance: procedure.decisionGuidance ?? { preference: [], antiPattern: [] },
       policy_content_hash: previousPolicyHash
     }
@@ -1134,6 +1319,8 @@ function skillRebuildPlan(
 
 function skillPolicyContentHash(policy: PolicyMeta): string {
   return stableHash({
+    lessonType: policy.lessonType ?? null,
+    contentRevision: isRecord(policy.memory.properties.internal_info.policy) ? policy.memory.properties.internal_info.policy.content_revision ?? 1 : 1,
     title: policy.title,
     trigger: policy.trigger,
     procedure: policy.procedure,
@@ -1184,10 +1371,21 @@ function mergeSkillRebuildProcedureJson(
   existing: Record<string, unknown>,
   draft: Record<string, unknown>,
   level: SkillRebuildLevel,
-  changedSections: string[]
+  changedSections: string[],
+  revisedPolicyId?: string
 ): Record<string, unknown> {
   if (Object.keys(existing).length === 0) {
     return draft;
+  }
+  if (revisedPolicyId) {
+    // A semantic revision replaces its old steps even when the model changes their
+    // titles. Only explicitly unrelated policy steps survive an omitted step.
+    const independentSteps = Array.isArray(existing.steps) ? existing.steps.filter((step) => {
+      if (!isRecord(step)) return false;
+      const sources = stringArray(step.supportingPolicyIds ?? step.supporting_policy_ids);
+      return sources.length > 0 && !sources.includes(revisedPolicyId);
+    }) : [];
+    return { ...draft, steps: mergeSkillSteps(independentSteps, draft.steps) };
   }
   const allowed = skillRebuildAllowedSections(level, changedSections);
   const mergeField = (field: string): unknown =>

@@ -1559,7 +1559,7 @@ function createSkillRebuildLlm(): LlmClient {
       options: { operation: string }
     ): Promise<T> {
       if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
-      if (options.operation === "skill.rebuild.v3") {
+      if (options.operation === "skill.rebuild.v6") {
         return {
           name: "pytest_retry_workflow",
           retrieval_blurb: "Use for pytest failures that require inspection, a focused retry, and verification.",

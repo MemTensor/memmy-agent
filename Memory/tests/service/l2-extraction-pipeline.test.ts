@@ -50,8 +50,9 @@ describe("unified L2 extraction persistence", () => {
   let config = structuredClone(DEFAULT_MEMMY_CONFIG);
   const job = (): EvolutionJobRecord => ({ id: "job", jobType: "l2_induction", userId: "u", episodeId: "e",
     targetMemoryId: "l1", payload: {}, status: "leased", attempts: 1, maxAttempts: 3, createdAt: AT, updatedAt: AT });
-  function pipeline() {
+  function pipeline(onPolicyRevised?: (policyId: string, at: string) => void) {
     return new UnifiedL2ExtractionPipeline({ repos, config, nowIso: () => AT,
+      onPolicyRevised,
       skillLlm: { isConfigured: () => configured, completeJson: respond } as unknown as LlmClient,
       embedder: { config: { provider: "local", model: "fixture", batchSize: 16 }, embed } as unknown as Embedder,
       namespaceIdFromMemory: () => undefined,
@@ -115,16 +116,55 @@ describe("unified L2 extraction persistence", () => {
     expect(packed.content).toBe(trace.summary);
   });
 
-  it("compares legacy negative full content and stores refute as pending without changing status", async () => {
+  it("revises legacy full content in place and resets evidence and lifecycle", async () => {
     admit(); const old = row("old", "L2"); repos.memories.insert(old);
     const other = row("other", "L2"); other.info.project_id = "other-project"; repos.memories.insert(other);
-    respond.mockImplementation(async () => ({ operations: [{ operation: "refute", l1_ids: ["l1"], target_l2: { id: "old", version: 1 } }] }));
+    respond.mockImplementation(async () => ({ operations: [{ operation: "revise", l1_ids: ["l1"], target_l2: { id: "old", version: 1 }, revised_l2: lesson }] }));
     await pipeline().induce(job());
     expect(l2ComparisonText(old)).toContain("Full verification");
     expect(embed.mock.calls.flatMap((call) => call[0]).join(" ")).toContain("Full exclusions");
     expect(JSON.parse(respond.mock.calls[0]![0][2].content).HISTORICAL_L2_CANDIDATES.map((target: { id: string }) => target.id)).toEqual(["old"]);
+    expect(repos.memories.get("old")!.version).toBe(2);
+    expect(repos.memories.get("old")!.properties.internal_info.policy).toMatchObject({
+      content_revision: 2, status: "candidate", procedure: lesson.content, skill_eligible: false, successful_source_trace_ids: [] });
+    expect(repos.runtime.listTracePolicyLinks({ l1MemoryId: "l1" })[0]!.relation).toBe("supports:r2");
+  });
+
+  it("keeps old content and candidates pending when revision vectors fail", async () => {
+    admit(); repos.memories.insert(row("old", "L2"));
+    respond.mockImplementation(async () => {
+      embed.mockRejectedValue(new Error("embedding unavailable"));
+      return { operations: [{ operation: "revise", l1_ids: ["l1"], target_l2: { id: "old", version: 1 }, revised_l2: lesson }] };
+    });
+    await expect(pipeline().induce(job())).rejects.toThrow("embedding unavailable");
     expect(repos.memories.get("old")!.version).toBe(1);
-    expect(repos.runtime.listTracePolicyLinks({ l1MemoryId: "l1" })[0]!.relation).toBe("refutes_pending");
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+  });
+
+  it("rejects a target changed while preparing revision vectors", async () => {
+    admit(); repos.memories.insert(row("old", "L2"));
+    respond.mockImplementation(async () => {
+      embed.mockImplementationOnce(async (texts: string[]) => {
+        const target = repos.memories.get("old")!;
+        repos.memories.update({ ...target, memoryValue: "Concurrent edit" });
+        return texts.map(() => [1, 0]);
+      });
+      return { operations: [{ operation: "revise", l1_ids: ["l1"], target_l2: { id: "old", version: 1 }, revised_l2: lesson }] };
+    });
+    await expect(pipeline().induce(job())).rejects.toThrow("target changed");
+    expect(repos.memories.get("old")!.memoryValue).toBe("Concurrent edit");
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+  });
+
+  it("rejects unchanged revisions rather than consuming the evidence", async () => {
+    admit(); const old = row("old", "L2");
+    (old.properties.internal_info.policy as Record<string, unknown>).lesson_type = "check";
+    repos.memories.insert(old);
+    respond.mockResolvedValue({ operations: [{ operation: "revise", l1_ids: ["l1"], target_l2: { id: "old", version: 1 },
+      revised_l2: { type: "check", title: "Totals", applicability: "Export", content: "Full procedure including unrounded totals", verification: "Full verification", exclusions: "Full exclusions" } }] });
+    await expect(pipeline().induce(job())).rejects.toThrow("unchanged content");
+    expect(respond).toHaveBeenCalledTimes(3);
+    expect(repos.memories.get("old")!.version).toBe(1);
   });
 
   it("bounds auxiliary evidence for both embedding and extraction without changing stored evidence", async () => {
@@ -177,6 +217,42 @@ describe("unified L2 extraction persistence", () => {
     await pipeline().induce(job());
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
     expect(repos.memories.get(fallback.id)!.info.generation_method).toBe("model_confirmed");
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+  });
+
+  it.each(["transport", "invalid-contract", "embedding"])("recovers pending ordinary evidence after %s failure without fabricated fallback", async (failure) => {
+    const source = row("l1");
+    (source.properties.internal_info.trace as Record<string, unknown>).value = 1;
+    repos.memories.insert(source);
+    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: source.id, route: "ordinary", at: AT });
+    if (failure === "transport") respond.mockRejectedValue(new Error("provider unavailable"));
+    if (failure === "invalid-contract") respond.mockResolvedValue({ operations: [{ operation: "ignore", l1_ids: ["unknown"] }] });
+    if (failure === "embedding") embed.mockRejectedValue(new Error("embedding unavailable"));
+    await expect(pipeline().induce(job())).rejects.toThrow();
+    expect(respond).toHaveBeenCalledTimes(failure === "invalid-contract" ? 3 : failure === "embedding" ? 0 : 1);
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    respond.mockResolvedValue({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
+    embed.mockImplementation(async (texts: string[]) => texts.map(() => [1, 0]));
+    await pipeline().induce(job());
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    await pipeline().induce(job());
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
+  });
+
+  it("rolls back L2 text, links and candidate consumption if dependent Skill scheduling fails", async () => {
+    admit();
+    repos.memories.insert(row("old", "L2"));
+    respond.mockResolvedValue({ operations: [{ operation: "revise", l1_ids: ["l1"],
+      target_l2: { id: "old", version: 1 }, revised_l2: lesson }] });
+    await expect(pipeline(() => { throw new Error("dependent job enqueue failed"); }).induce(job()))
+      .rejects.toThrow("dependent job enqueue failed");
+    expect(repos.memories.get("old")).toMatchObject({ version: 1, memoryValue: row("old", "L2").memoryValue });
+    expect(repos.runtime.listTracePolicyLinks({ l2MemoryId: "old", limit: 100 })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    await pipeline().induce(job());
+    expect(repos.memories.get("old")!.info.content_revision).toBe(2);
     expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
   });
 

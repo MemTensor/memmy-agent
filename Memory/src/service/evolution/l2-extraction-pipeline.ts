@@ -1,3 +1,5 @@
+import { l2SupportRelation, revisedL2Memory } from "./l2-content-revision.js";
+import { embeddingTextForMemory, updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import { createHash, randomUUID } from "node:crypto";
 import { languageSteeringLine, packL2TraceContext, policyMetaFromMemory, steeredPromptLanguage, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
@@ -23,6 +25,7 @@ export interface UnifiedL2ExtractionDeps {
   upsertEvolutionMemory(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   namespaceIdFromMemory(memory: MemoryRow): string | undefined;
+  onPolicyRevised?(policyId: string, at: string): void;
   recomputePolicyStats?(policyId: string, at: string): MemoryRow | undefined;
 }
 
@@ -31,7 +34,7 @@ type SourceRecord = ReturnType<typeof l1ExtractionRecord>;
 type Batch = { sources: L2Candidate[]; records: SourceRecord[]; targets: HistoricalL2[] };
 const LEASE_MS = 15 * 60_000;
 const MAX_L1_PER_BATCH = 5;
-const SOURCE = "worker.l2_extraction.v1";
+const SOURCE = "worker.l2_extraction.v2";
 
 /** Exact hashing: stableHash intentionally truncates long strings and cannot version full evidence. */
 function digest(value: unknown): string {
@@ -295,7 +298,7 @@ export class UnifiedL2ExtractionPipeline {
 
   private async extractBatch(job: EvolutionJobRecord, scope: string, batch: Batch, renew: () => void): Promise<void> {
     const input = this.batchInput(batch);
-    const snapshotKey = `l2.extract.snapshot.v1:${digest({ scope, input })}`;
+    const snapshotKey = `l2.extract.snapshot.v2:${digest({ scope, input })}`;
     const snapshot = this.deps.repos.runtime.getKv(snapshotKey)?.value;
     if (isRecord(snapshot) && snapshot.status === "committed") return;
     const at = this.now();
@@ -315,17 +318,30 @@ export class UnifiedL2ExtractionPipeline {
         }))) },
         { role: "user", content: input }
       ], {
-        operation: "l2.extraction.v1", thinkingMode: "disabled", temperature: 0.1,
+        operation: "l2.extraction.v2", thinkingMode: "disabled", temperature: 0.1,
         maxTokens: this.deps.config.algorithm.l2Induction.maxOutputTokens,
         retryTokenCeiling: this.deps.config.algorithm.l2Induction.maxOutputTokens, requireCompleteJson: true
       });
       try {
-        operations = validateL2ExtractionResult(response, batch.sources.map((source) => source.sourceMemoryId), targetVersions);
+        const result = validateL2ExtractionResult(response, batch.sources.map((source) => source.sourceMemoryId), targetVersions);
+        for (const operation of result) {
+          if (operation.operation !== "revise") continue;
+          const target = batch.targets.find((target) => target.id === operation.target_l2.id)!;
+          if (["type", "title", "applicability", "content", "verification", "exclusions"].every((key) =>
+            String(target[key as keyof typeof target] ?? "").trim() === operation.revised_l2[key as keyof NewL2Lesson])) {
+            throw new Error("l2 revision: unchanged content");
+          }
+        }
+        operations = result;
         break;
       } catch (error) { invalid = error; }
     }
     if (!operations) throw invalid ?? new Error("l2 extraction: model output validation failed");
     const validated = operations;
+    const revisions = new Map<string, MemoryRow>();
+    for (const operation of validated) {
+      if (operation.operation === "revise") revisions.set(operation.target_l2.id, await this.prepareRevision(operation, batch.sources, at, renew));
+    }
     this.deps.repos.transaction(() => {
       renew();
       this.assertSourcesCurrent(batch.sources);
@@ -335,12 +351,46 @@ export class UnifiedL2ExtractionPipeline {
           throw new Error(`l2 extraction: target changed during extraction: ${target.id}`);
         }
       }
-      for (const operation of validated) this.applyOperation(operation, batch.sources, at);
+      // Supports in this response refer to the old content; record them before revision resets its statistics.
+      for (const operation of validated.filter((operation) => operation.operation !== "revise")) this.applyOperation(operation, batch.sources, at);
+      for (const operation of validated.filter((operation) => operation.operation === "revise")) this.applyOperation(operation, batch.sources, at, revisions.get(operation.target_l2.id));
       this.reconcileFallbacks(batch, validated, at);
       markL2CandidatesProcessed(this.deps.repos, batch.sources, validated, at);
       this.deps.repos.runtime.setKv(snapshotKey, { status: "committed", jobId: job.id, scope,
         input: JSON.parse(input), operations: validated, createdAt: at, committedAt: this.now() }, this.now());
     });
+  }
+
+  private async prepareRevision(operation: Extract<L2ExtractionOperation, { operation: "revise" }>, sources: L2Candidate[], at: string, renew: () => void): Promise<MemoryRow> {
+    const current = this.deps.repos.memories.get(operation.target_l2.id);
+    if (!current || current.version !== operation.target_l2.version) throw new Error("l2 revision: stale target");
+    const record = l2ComparisonRecord(current);
+    const lesson = operation.revised_l2;
+    if (["type", "title", "applicability", "content", "verification", "exclusions"].every((key) =>
+      String(record[key as keyof typeof record] ?? "").trim() === lesson[key as keyof NewL2Lesson])) {
+      throw new Error("l2 revision: unchanged content");
+    }
+    const evidence = sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId));
+    const updated = revisedL2Memory(current, lesson, operation.l1_ids,
+      evidence.flatMap((source) => source.episodeId ? [source.episodeId] : []), at);
+    updated.properties.internal_info.source_versions = Object.fromEntries(evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]));
+    await this.vectors([l2ComparisonText(updated)], "document", renew);
+    // Use the same role/text as the existing retrieval embedding worker, not comparison text.
+    const [vector] = await this.vectors([embeddingTextForMemory(updated)], "query", renew);
+    return updateMemoryVectorField(updated, "vec", vector!, { ...embeddingIdentity(this.deps.embedder.config), updatedAt: at });
+  }
+
+  private applyRevision(updated: MemoryRow, operation: Extract<L2ExtractionOperation, { operation: "revise" }>, sources: L2Candidate[], at: string): void {
+    const previous = this.deps.repos.memories.get(updated.id)!;
+    const saved = this.deps.repos.memories.updateIfVersion(updated, operation.target_l2.version);
+    // appendChange retains before/after content and evidence under existing history retention.
+    for (const source of sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId))) {
+      this.deps.repos.runtime.insertTracePolicyLink({ userId: saved.userId, l1MemoryId: source.sourceMemoryId,
+        l2MemoryId: saved.id, relation: l2SupportRelation(saved), createdAt: at });
+      if (source.episodeId) this.deps.repos.runtime.appendEpisodeDerivedMemory(source.episodeId, "L2", saved.id, at);
+    }
+    this.appendChange(saved, previous, "unified_l2_revised", at);
+    this.deps.onPolicyRevised?.(saved.id, at);
   }
 
   private assertSourcesCurrent(sources: L2Candidate[]): void {
@@ -357,21 +407,26 @@ export class UnifiedL2ExtractionPipeline {
     }
   }
 
-  private applyOperation(operation: L2ExtractionOperation, sources: L2Candidate[], at: string): void {
+  private applyOperation(operation: L2ExtractionOperation, sources: L2Candidate[], at: string, revision?: MemoryRow): void {
     const evidence = sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId));
-    const key = `l2.extract.operation.v1:${digest({ operation, sources: evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]) })}`;
+    const key = `l2.extract.operation.v2:${digest({ operation, sources: evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]) })}`;
     if (this.deps.repos.runtime.getKv(key)) return;
-    if (operation.operation === "create") {
+    if (operation.operation === "revise") {
+      if (!revision) throw new Error("l2 revision: prepared vectors required");
+      const current = this.deps.repos.memories.get(revision.id)!;
+      // Sources and the complete target snapshot were checked at transaction entry.
+      // Only same-transaction support/statistics writes may have advanced the row version.
+      this.applyRevision({ ...revision, version: current.version }, { ...operation, target_l2: { id: current.id, version: current.version } }, sources, at);
+    } else if (operation.operation === "create") {
       this.createLesson(operation.new_l2, evidence, key, at, false);
-    } else if (operation.operation === "support" || operation.operation === "refute") {
+    } else if (operation.operation === "support") {
       const target = this.deps.repos.memories.get(operation.target_l2.id)!;
       for (const source of evidence) {
         this.deps.repos.runtime.insertTracePolicyLink({ userId: source.userId, l1MemoryId: source.sourceMemoryId,
-          l2MemoryId: target.id, relation: operation.operation === "support" ? "supports" : "refutes_pending", strength: 1, createdAt: at });
+          l2MemoryId: target.id, relation: l2SupportRelation(target), strength: 1, createdAt: at });
         if (source.episodeId) this.deps.repos.runtime.appendEpisodeDerivedMemory(source.episodeId, "L2", target.id, at);
       }
       if (operation.operation === "support") this.addSupport(target, evidence, at);
-      // Refutation is deliberately just a pending relation, never a lifecycle/gain change.
     }
     this.deps.repos.runtime.setKv(key, { operation, committedAt: at }, at);
   }
@@ -412,7 +467,7 @@ export class UnifiedL2ExtractionPipeline {
       if (validL2(existing) && added.length) {
         for (const candidate of added) {
           this.deps.repos.runtime.insertTracePolicyLink({ userId: source.userId, l1MemoryId: candidate.sourceMemoryId,
-            l2MemoryId: existing.id, relation: "supports", createdAt: at });
+            l2MemoryId: existing.id, relation: l2SupportRelation(existing), createdAt: at });
           if (candidate.episodeId) this.deps.repos.runtime.appendEpisodeDerivedMemory(candidate.episodeId, "L2", existing.id, at);
         }
         this.addSupport(existing, added, at);
@@ -425,7 +480,7 @@ export class UnifiedL2ExtractionPipeline {
     const successfulIds = sources.filter(ordinarySuccess).map((candidate) => candidate.sourceMemoryId);
     const specialIds = sources.filter((candidate) => candidate.routes.some((route) => route !== "ordinary")).map((candidate) => candidate.sourceMemoryId);
     const confidenceCaps = signals.flatMap((signal) => typeof signal.confidenceCap === "number" ? [signal.confidenceCap] : []);
-    const fields = { schema_version: 2, lesson_type: lesson.type, support: episodeIds.length, gain: 0, raw_gain: 0,
+    const fields = { schema_version: 2, content_revision: 1, lesson_type: lesson.type, support: episodeIds.length, gain: 0, raw_gain: 0,
       status: "candidate", source_memory_ids: traceIds, source_l1_memory_ids: traceIds,
       source_trace_ids: traceIds, source_episode_ids: episodeIds, source_feedback_ids: feedbackIds, source_repair_ids: repairIds,
       successful_source_trace_ids: successfulIds, special_source_trace_ids: specialIds,
@@ -447,7 +502,7 @@ export class UnifiedL2ExtractionPipeline {
       value: [`# ${lesson.title}`, `Applicability: ${lesson.applicability}`, `Content: ${lesson.content}`,
         `Verification: ${lesson.verification}`, `Exclusions: ${lesson.exclusions}`].join("\n\n"),
       tags: ["policy", "unified-l2", lesson.type], info: fields,
-      internal: { ...fields, source: SOURCE, plugin_algorithm: "l2.extraction.v1", rule_fallback: fallback,
+      internal: { ...fields, source: SOURCE, plugin_algorithm: "l2.extraction.v2", rule_fallback: fallback,
         operation_key: operationKey, source_versions: Object.fromEntries(sources.map((candidate) => [candidate.sourceMemoryId, candidate.sourceVersion])),
         policy: { ...fields, title: lesson.title, trigger: lesson.applicability, procedure: lesson.content,
           verification: lesson.verification, boundary: lesson.exclusions } }, createdAt: at

@@ -27,6 +27,19 @@ describe("unified L2 evidence lifecycle", () => {
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); });
 
+  it("does not reimport old support links when recomputing a revised policy", () => {
+    repos.memories.insert(memory("old", "L1", { value: 1, episode_id: "old-e" }));
+    repos.memories.insert(memory("new", "L1", { value: -1, episode_id: "new-e" }));
+    repos.memories.insert(memory("policy", "L2", { schema_version: 2, content_revision: 2, lesson_type: "principle", status: "candidate",
+      source_trace_ids: ["new"], special_source_trace_ids: ["new"], successful_source_trace_ids: [], generation_method: "model",
+      experience_type: "repair_instruction", evidence_polarity: "neutral", skill_eligible: false }));
+    repos.runtime.insertTracePolicyLink({ userId: "u", l1MemoryId: "old", l2MemoryId: "policy", relation: "supports" });
+    repos.runtime.insertTracePolicyLink({ userId: "u", l1MemoryId: "new", l2MemoryId: "policy", relation: "supports:r2" });
+    const updated = engine.recomputePolicyStats("policy", AT)!;
+    expect(policyMetaFromMemory(updated)?.sourceTraceIds).toEqual(["new"]);
+    expect(policyMetaFromMemory(updated)?.skillEligible).toBe(false);
+  });
+
   it("moves all pending ordinary sources of the current Episode into the unified pool", async () => {
     for (const id of ["one", "two", "foreign"]) {
       repos.memories.insert(memory(id, "L1", { value: 1, episode_id: id === "foreign" ? "other" : "e" }));

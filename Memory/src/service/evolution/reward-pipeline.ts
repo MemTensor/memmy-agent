@@ -1,3 +1,4 @@
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   REWARD_R_HUMAN_PROMPT,
   backpropagateTraces,
@@ -305,7 +306,10 @@ export class RewardPipeline {
       }
       if (this.deps.config.algorithm.l2Induction.mode === "unified" && savedTrace) {
         for (const policyId of new Set(this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: saved.id, limit: 10000 })
-          .filter((link) => link.relation === "supports").map((link) => link.l2MemoryId))) {
+          .filter((link) => {
+            const target = this.deps.repos.memories.get(link.l2MemoryId);
+            return target && link.relation === l2SupportRelation(target);
+          }).map((link) => link.l2MemoryId))) {
           this.deps.recomputePolicyStats(policyId, at, savedTrace.episodeId);
         }
       }

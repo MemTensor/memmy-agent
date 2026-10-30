@@ -601,7 +601,11 @@ export class MemoryRepository {
     return this.updateRow(memory, false);
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
+  updateIfVersion(memory: MemoryRow, expectedVersion: number): MemoryRow {
+    return this.db.transaction(() => this.updateRow(memory, true, expectedVersion))();
+  }
+
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
     const existing = this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
@@ -609,9 +613,9 @@ export class MemoryRepository {
     const prepared = prepareMemoryForStorage(memory);
     const updated = {
       ...prepared.memory,
-      version: bumpVersion ? memory.version + 1 : existing.version
+      version: bumpVersion ? (expectedVersion ?? memory.version) + 1 : existing.version
     };
-    this.db
+    const write = this.db
       .prepare(
         `UPDATE memories
          SET timeline = @timeline,
@@ -633,9 +637,10 @@ export class MemoryRepository {
              version = @version,
              updated_at = @updatedAt,
              deleted_at = @deletedAt
-         WHERE id = @id`
+         WHERE id = @id AND (@expectedVersion IS NULL OR version = @expectedVersion)`
       )
-      .run(memoryToSql(updated));
+      .run({ ...memoryToSql(updated), expectedVersion: expectedVersion ?? null });
+    if (write.changes !== 1) throw new Error(`memory version changed: ${memory.id}`);
     const mergedVectors = mergeMemoryVectors(
       attachedMemoryVectorEntries(existing),
       prepared.vectorUpdates
