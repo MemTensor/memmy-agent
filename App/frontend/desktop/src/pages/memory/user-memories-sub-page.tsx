@@ -37,15 +37,18 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
   const [selected, setSelected] = useState<MemoryListItem | null>(null);
   const [detailStatus, setDetailStatus] = useState<RemoteData<null> | null>(null);
   const detailGeneration = useRef(0);
-  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
-  function closeDetail() { detailGeneration.current++; setSelected(null); setDetailStatus(null); }
+  const detailAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbort.current?.abort(); }, [props.client]);
+  function closeDetail() { detailGeneration.current++; detailAbort.current?.abort(); setSelected(null); setDetailStatus(null); }
   async function openDetail(item: MemoryListItem) {
     const generation = ++detailGeneration.current;
+    detailAbort.current?.abort();
+    const controller = new AbortController(); detailAbort.current = controller;
     setSelected(item); setDetailStatus(null);
     if (!item.metadata?.fullContentAvailable || !props.client) return;
     setDetailStatus({status: "loading"});
     try {
-      const result = await readMemoryPanelDetail(props.client,item.id);
+      const result = await readMemoryPanelDetail(props.client,item.id,controller.signal);
       if (generation !== detailGeneration.current) return;
       setSelected({...result.item, summary: result.item.body}); setDetailStatus(null);
     } catch (error) { if (generation === detailGeneration.current) setDetailStatus({status: "error", message: toErrorMessage(error)}); }
@@ -196,7 +199,6 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.userMemories.content")}</h5>
                 {detailStatus ? <MemoryStateBox message={detailStatus.status === "error" ? detailStatus.message : t("common.loading")} /> : <div className="memory-detail-text">{selected.summary}</div>}
-                {detailStatus?.status === "error" && <button type="button" onClick={() => void openDetail(selected)}>{t("memory.tasks.loadContent")}</button>}
               </section>
               <section className="memory-detail-card">
                 <h5 className="memory-detail-card__label">{t("memory.memories.meta")}</h5>

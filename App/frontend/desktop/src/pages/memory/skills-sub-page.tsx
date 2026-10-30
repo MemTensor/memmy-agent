@@ -4,7 +4,7 @@ import { canPreservePanelResult } from "./panel-view-status.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
@@ -810,21 +810,22 @@ function PagedSkillTimeline(props:{client:MemoryRuntimeClient;skillId:string}) {
     void load();
     return () => { generation.current++; };
   }, [props.client,props.skillId]);
-  return <>{(logs.length > 0 || legacy !== undefined || (!busy && !error)) && <SkillTimelineSection entries={legacy??skillTimelineFromLogs(logs,props.skillId)} />}
-    {busy&&<MemoryStateBox message={t("common.loading")} />}
-    {error&&<p role="alert">{error}</p>}
-    {(cursor||error)&&<button type="button" disabled={busy} onClick={()=>void load(cursor)}>{t("memory.tasks.loadContent")}</button>}
-  </>;
+  return <SkillTimelineSection entries={legacy??skillTimelineFromLogs(logs,props.skillId)} showEmpty={!busy&&!error}
+    footer={<>
+      {busy&&<MemoryStateBox message={t("common.loading")} />}
+      {error&&<p role="alert">{error}</p>}
+      {(cursor||error)&&<button className="memory-skill-editor__button" type="button" disabled={busy} onClick={()=>void load(cursor)}>{t("memory.tasks.loadContent")}</button>}
+    </>} />;
 }
 
-function SkillTimelineSection(props: { entries: SkillTimelineEntry[] }) {
+function SkillTimelineSection(props: { entries: SkillTimelineEntry[]; showEmpty?:boolean; footer?:ReactNode }) {
   const { t } = useTranslation();
 
   return (
     <section className="memory-detail-card">
       <h5 className="memory-detail-card__label">{t("memory.skills.evolutionTimeline")}</h5>
       {props.entries.length === 0 ? (
-        <div className="memory-policy-empty">{t("memory.skills.evolutionTimeline.empty")}</div>
+        props.showEmpty !== false ? <div className="memory-policy-empty">{t("memory.skills.evolutionTimeline.empty")}</div> : null
       ) : (
         <div className="memory-skill-timeline">
           {props.entries.map((entry, index) => (
@@ -848,6 +849,7 @@ function SkillTimelineSection(props: { entries: SkillTimelineEntry[] }) {
           ))}
         </div>
       )}
+      {props.footer}
     </section>
   );
 }

@@ -398,12 +398,13 @@ interface AddDetail {
 
 function ExpandedLog(props:{client?:MemoryRuntimeClient|null;log:MemoryApiLog}) {
   const [data,setData]=useState(props.log.detailAvailable ? undefined : props.log);
-  const [error,setError]=useState<string>();const [retry,setRetry]=useState(0);const {t}=useTranslation();
-  useEffect(()=>{let active=true;
-    if(props.log.detailAvailable&&props.client?.getPanelLogDetail) void props.client.getPanelLogDetail(props.log.id).then(result=>{if(active)setData(result.log);}).catch(error=>{if(active)setError(toErrorMessage(error));});
-    return()=>{active=false;};
-  },[props.client,props.log.id,retry]);
-  if(error)return <div role="alert">{error}<button type="button" onClick={()=>{setError(undefined);setRetry(value=>value+1);}}>{t("memory.tasks.loadContent")}</button></div>;
+  const [error,setError]=useState<string>();const {t}=useTranslation();
+  useEffect(()=>{let active=true;const controller=new AbortController();
+    setError(undefined);setData(props.log.detailAvailable ? undefined : props.log);
+    if(props.log.detailAvailable&&props.client?.getPanelLogDetail) void props.client.getPanelLogDetail(props.log.id,controller.signal).then(result=>{if(active)setData(result.log);}).catch(error=>{if(active)setError(toErrorMessage(error));});
+    return()=>{active=false;controller.abort();};
+  },[props.client,props.log.id]);
+  if(error)return <div role="alert">{error}</div>;
   return data?<LogDetail log={data} input={parseJson(data.inputJson)} output={parseJson(data.outputJson)} />:<StateBox message={t("common.loading")} />;
 }
 

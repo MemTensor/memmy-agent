@@ -106,7 +106,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
 export interface MemoryRuntimeClient {
   prefetchPanel?(section:string,signal:AbortSignal):Promise<boolean | void>;
   listPanelLogs?(input:PanelLogsInput):Promise<PanelLogsOutput>;
-  getPanelLogDetail?(id:number):Promise<PanelLogDetailOutput>;
+  getPanelLogDetail?(id:number,signal?:AbortSignal):Promise<PanelLogDetailOutput>;
   getPanelStats?():Promise<PanelStatsOutput>;
   getPanelOverviewStats?():Promise<PanelOverviewStatsOutput>;
   resetPanelView?(section?:string):void;
@@ -162,7 +162,7 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return true;
     },
     listPanelLogs:input=>panelQueue.request(`panel:logs:${JSON.stringify(input)}`,signal=>requestJson({config,path:"/api/v1/panel/logs",schema:PanelLogsOutputSchema,body:input,init:{signal}})),
-    getPanelLogDetail:id=>panelQueue.request(`panel:log:${id}`,signal=>requestJson({config,path:`/api/v1/panel/logs/${id}`,schema:PanelLogDetailOutputSchema,init:{signal}})),
+    getPanelLogDetail:(id,callerSignal)=>panelQueue.request(`panel:log:${id}`,signal=>requestJson({config,path:`/api/v1/panel/logs/${id}`,schema:PanelLogDetailOutputSchema,init:{signal}}),callerSignal),
     getPanelStats:()=>panelQueue.request("panel:stats",signal=>requestJson({config,path:"/api/v1/panel/stats",schema:PanelStatsOutputSchema,init:{signal}})),
     getPanelOverviewStats:()=>panelQueue.request("panel:overview-stats",signal=>requestJson({config,path:"/api/v1/panel/overview-stats",schema:PanelOverviewStatsOutputSchema,init:{signal}})),
     resetPanelView: section => { if (!section) panelQueue.clear(); browse.reset(section); },

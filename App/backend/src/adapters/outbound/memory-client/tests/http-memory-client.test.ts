@@ -12,6 +12,16 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it.each(["timeout", "503"])("recovers a transient log detail %s without a frontend retry", async failure => {
+    let calls=0;
+    const output={log:{id:1,toolName:"memory_search",inputJson:"{}",outputJson:"{}",durationMs:1,success:true,calledAt:"2026-10-30T00:00:00Z"},serverTime:"2026-10-30T00:00:00Z"};
+    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:2},{fetchImpl:(async()=>{
+      if(++calls===1){if(failure==="timeout")throw new DOMException("timed out","TimeoutError");return new Response("{}",{status:503});}
+      return new Response(JSON.stringify(output));
+    }) as typeof fetch});
+    expect(await client.panelLogDetail!(1)).toEqual(output);expect(calls).toBe(2);
+  });
+
   it.each(["recover", "exhaust", "cancel", 401, 403, 404, 409] as const)("restores bounded panel detail recovery without retrying invalidation (%s)", async scenario => {
     vi.useFakeTimers();
     let calls = 0;

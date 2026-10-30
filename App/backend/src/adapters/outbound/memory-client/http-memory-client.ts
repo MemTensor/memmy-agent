@@ -317,7 +317,7 @@ export function createHttpMemoryClient(
     },
 
     async panelLogs(input,context) {return request("POST","panelLogs",PanelLogsOutputSchema,{body:input,context,maxRetries:0});},
-    async panelLogDetail(id,context) {return request("GET","panelLogDetail",PanelLogDetailOutputSchema,{params:{id:String(id)},context,maxRetries:0});},
+    async panelLogDetail(id,context) {return request("GET","panelLogDetail",PanelLogDetailOutputSchema,{params:{id:String(id)},context});},
     async panelStats(context) {return request("GET","panelStats",PanelStatsOutputSchema,{context,maxRetries:0});},
     async panelOverviewStats(context) {return request("GET","panelOverviewStats",PanelOverviewStatsOutputSchema,{context,maxRetries:0});},
     async panelBrowse(input,context) {
