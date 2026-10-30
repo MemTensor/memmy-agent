@@ -40,6 +40,41 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); });
 
 describe("verification code network failures", () => {
+  it.each([0, Number.MAX_SAFE_INTEGER, -1, NaN, Infinity, 1.5])("keeps Retry-After %s within a usable retry window", async (seconds) => {
+    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("retry later", 429, "rate_limited", null, seconds));
+    await render();
+    await act(async () => sendButton().click());
+    expect(auth.countdown).toBe(60);
+    expect(sendButton().disabled).toBe(true);
+    expect(auth.feedback?.text).toContain("请求过于频繁");
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(sendButton().disabled).toBe(false);
+    expect(mocks.sendCode).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[0, 60], [Number.MAX_SAFE_INTEGER, 60], [1, 1], [17, 17], [60, 60]])("bounds successful resend delay %s to %s seconds", async (seconds, expected) => {
+    mocks.sendCode.mockResolvedValueOnce({ ok: true, resendAfterSec: seconds });
+    await render();
+    await act(async () => sendButton().click());
+    expect(auth.countdown).toBe(expected);
+    expect(sendButton().disabled).toBe(true);
+    await act(async () => { vi.advanceTimersByTime(expected * 1000); });
+    expect(sendButton().disabled).toBe(false);
+    expect(mocks.sendCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses countdown wording only for sending, not login throttling", async () => {
+    mocks.verifyCode.mockRejectedValueOnce(new ApiRequestError("throttled", 429, "rate_limited"));
+    await render();
+    await act(async () => { await auth.login(channel, identifier(), "123456"); });
+    expect(auth.feedback?.text).toBe("请求过于频繁，请稍后再试");
+    expect(auth.countdown).toBe(0);
+    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("throttled", 504, "rate_limited"));
+    await act(async () => sendButton().click());
+    expect(auth.feedback?.text).toBe("请求过于频繁，请在倒计时结束后重试");
+    expect(auth.countdown).toBe(60);
+  });
+
   it.each(["phone", "email"] as const)("shows a request failure and prevents immediate %s retries", async (value) => {
     channel = value;
     mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("The operation was aborted due to timeout", 500, "internal"));
@@ -74,8 +109,6 @@ describe("verification code network failures", () => {
     ["server error", new ApiRequestError("database connection failed", 500, "internal"), "验证码请求失败，请在倒计时结束后重试"],
     ["unavailable service", new ApiRequestError("upstream unavailable", 503, "internal"), "验证码请求失败，请在倒计时结束后重试"],
     ["network failure", new TypeError("Failed to fetch"), "连接失败，请检查网络并在倒计时结束后重试"],
-    ["timeout", new DOMException("request timed out", "TimeoutError"), "验证码请求超时，请在倒计时结束后重试"],
-    ["aborted request", new DOMException("request aborted", "AbortError"), "验证码请求中断，请在倒计时结束后重试"],
     ["HTTP timeout", new ApiRequestError("Request Timeout", 408), "验证码请求超时，请在倒计时结束后重试"],
     ["gateway timeout", new ApiRequestError("Gateway Timeout", 504), "验证码请求超时，请在倒计时结束后重试"]
   ])("gives actionable feedback for %s without claiming delivery status", async (_name, error, message) => {

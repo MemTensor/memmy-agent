@@ -19,6 +19,24 @@ const invalidCodeBackendMarkers = [
 
 type AuthTranslate = (key: MessageKey, values?: MessageValues) => string;
 
+type AuthRequestFailure = "rateLimited" | "timeout" | "connection" | "server";
+const codeRequestFailureKeys: Record<AuthRequestFailure, MessageKey> = {
+  rateLimited: "login.codeRequestRateLimited",
+  timeout: "login.codeRequestTimeout",
+  connection: "login.codeConnectionFailed",
+  server: "login.codeRequestFailed"
+};
+
+function classifyAuthRequestFailure(error: unknown): AuthRequestFailure | null {
+  if (error instanceof ApiRequestError) {
+    if (error.code === "rate_limited" || error.status === 429) return "rateLimited";
+    if (error.status === 408 || error.status === 504) return "timeout";
+    if (error.status >= 500) return "server";
+  }
+  if (error instanceof TypeError) return "connection";
+  return null;
+}
+
 export type AuthIdentifierValidationReason = "required" | "invalidEmail" | "invalidPhone";
 
 export type AuthIdentifierValidationResult =
@@ -95,12 +113,13 @@ export function resolveAuthErrorMessage(
   }
 
   const normalized = rawMessage.trim().toLowerCase();
+  const failure = classifyAuthRequestFailure(error);
 
-  if (error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429)) {
+  if (failure === "rateLimited") {
     return t("login.error.rateLimited");
   }
 
-  if (error instanceof ApiRequestError && [408, 504].includes(error.status)) {
+  if (failure === "timeout") {
     return t("login.error.requestTimeout");
   }
 
@@ -165,8 +184,13 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   }, [updateCountdown]);
 
   function startCountdown(seconds: number) {
-    resendAllowedAtRef.current = Date.now() + seconds * 1000;
-    setCountdown(seconds);
+    // The local API's resend window is at most 60 seconds. Preserve a valid
+    // remaining delay; use the normal window for invalid/zero values.
+    const delay = Number.isSafeInteger(seconds) && seconds > 0
+      ? Math.min(seconds, fallbackResendSeconds)
+      : fallbackResendSeconds;
+    resendAllowedAtRef.current = Date.now() + delay * 1000;
+    setCountdown(delay);
 
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -227,33 +251,23 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      startCountdown(result.resendAfterSec > 0 ? result.resendAfterSec : fallbackResendSeconds);
+      startCountdown(result.resendAfterSec);
     } catch (error) {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      const rateLimited = error instanceof ApiRequestError && (error.code === "rate_limited" || error.status === 429);
-      const timedOut = (error instanceof ApiRequestError && [408, 504].includes(error.status))
-        || (error instanceof Error && error.name === "TimeoutError");
-      const interrupted = error instanceof Error && error.name === "AbortError";
-      const connectionFailed = error instanceof TypeError;
-      const serverFailed = error instanceof ApiRequestError && error.status >= 500;
-      const requestFailed = timedOut || interrupted || connectionFailed || serverFailed;
+      const failure = classifyAuthRequestFailure(error);
       // Failed requests still need a retry buffer to avoid duplicate sends and throttling.
-      if (rateLimited || requestFailed) {
+      if (failure !== null) {
         startCountdown(error instanceof ApiRequestError ? error.retryAfterSec ?? fallbackResendSeconds : fallbackResendSeconds);
       }
-      const requestFailureKey: MessageKey = timedOut ? "login.codeRequestTimeout"
-        : interrupted ? "login.codeRequestInterrupted"
-          : connectionFailed ? "login.codeConnectionFailed"
-            : "login.codeRequestFailed";
       const failureFeedback: AuthCodeFeedback = {
-        text: requestFailed && !rateLimited
-          ? t(requestFailureKey)
+        text: failure !== null
+          ? t(codeRequestFailureKeys[failure])
           : resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"),
         tone: "error"
       };
-      cooldownFeedbackRef.current = rateLimited || requestFailed ? failureFeedback : null;
+      cooldownFeedbackRef.current = failure !== null ? failureFeedback : null;
       setFeedback(failureFeedback);
       updateCountdown();
     } finally {

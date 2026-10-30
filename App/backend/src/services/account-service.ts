@@ -105,6 +105,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         });
       }
     } catch (error) {
+      // A failed response does not prove delivery failed. Keep the resend window
+      // to avoid sending another code while the first one may still arrive.
       const failure = toVerificationRequestError(error, RESEND_WINDOW_MS / 1000);
       if (!failure) throw error;
       failedCodeRetryAt.set(key, now().getTime() + RESEND_WINDOW_MS);
@@ -113,7 +115,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
     // Record only cloud-confirmed success, not a failed attempt or handset delivery.
     options.accountSessionRepository.markCodeSent(key, now().toISOString());
-    return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
+    return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: RESEND_WINDOW_MS / 1000 });
   }
 
   return {
@@ -420,7 +422,8 @@ function isUnauthorized(error: unknown): boolean {
 /** Handles to code key. */
 function toCodeKey(input: SendCodeInput): string {
   const address = input.channel === "email" ? requireAddress(input.email, "email") : requireAddress(input.phoneNumber, "phoneNumber");
-  return `${input.channel}:${address}`;
+  // Match the persisted throttle identity without altering the cloud payload.
+  return `${input.channel}:${address.trim().toLowerCase()}`;
 }
 
 /**

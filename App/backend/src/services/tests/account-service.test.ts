@@ -28,6 +28,56 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("coalesces pending email sends across identifier casing", async () => {
+    let finish!: () => void;
+    let calls = 0;
+    const delivery = new Promise<void>((resolve) => { finish = resolve; });
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendEmailCode() { calls += 1; await delivery; }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+    const first = service.sendCode({ channel: "email", email: "Test@Example.com", locale: "en" });
+    const second = service.sendCode({ channel: "email", email: "test@example.com", locale: "en" });
+    finish();
+    await Promise.all([first, second]);
+    expect(calls).toBe(1);
+  });
+
+  it("preserves the remaining failure wait when email casing changes", async () => {
+    let time = Date.parse("2026-10-30T00:00:00Z");
+    let calls = 0;
+    let marks = 0;
+    const service = createAccountService({
+      now: () => new Date(time),
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendEmailCode() {
+          calls += 1;
+          if (calls === 1) throw new TypeError("fetch failed");
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        markCodeSent() { marks += 1; }
+      }
+    });
+    await expect(service.sendCode({ channel: "email", email: "Test@Example.com", locale: "en" }))
+      .rejects.toMatchObject({ status: 500, retryAfterSec: 60 });
+    time += 43_000;
+    await expect(service.sendCode({ channel: "email", email: "test@example.com", locale: "en" }))
+      .rejects.toMatchObject({ status: 429, retryAfterSec: 17 });
+    expect(calls).toBe(1);
+    expect(marks).toBe(0);
+    time += 17_000;
+    await expect(service.sendCode({ channel: "email", email: "TEST@example.com", locale: "en" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls).toBe(2);
+    expect(marks).toBe(1);
+  });
+
   it("shares one pending code delivery for the same address", async () => {
     let finish!: () => void;
     let calls = 0;

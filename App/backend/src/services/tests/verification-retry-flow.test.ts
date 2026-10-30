@@ -29,7 +29,8 @@ describe("verification retry HTTP flow", () => {
       const first = await app.inject({ method: "POST", url: "/send" });
       expect(first.statusCode).toBe(504);
       expect(first.headers["retry-after"]).toBe("60");
-      expect(first.headers["access-control-expose-headers"]).toBe("Retry-After");
+      // Browser exposure is owned/tested by the local API's CORS entry layer.
+      expect(first.headers["access-control-expose-headers"]).toBeUndefined();
       expect(first.json()).toMatchObject({ error: { code: "internal" } });
       expect(markCodeSent).not.toHaveBeenCalled();
       time += 43_000;

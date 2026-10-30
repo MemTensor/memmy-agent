@@ -15,9 +15,15 @@ export function toVerificationRequestError(error: unknown, retryAfterSec?: numbe
   if (code === "invalid_argument" || code === "unauthorized" || code === "forbidden") return null;
   const status = error instanceof Error ? (error as { status?: unknown }).status : undefined;
   const timeout = error instanceof Error && (error.name === "TimeoutError" || status === 408 || status === 504);
+  let httpStatus: 429 | 500 | 504 = 500;
+  if (code === "rate_limited" || status === 429) {
+    httpStatus = 429;
+  } else if (timeout) {
+    httpStatus = 504;
+  }
   return new VerificationRequestError(
     error instanceof Error ? error.message : "Verification request failed",
-    code === "rate_limited" || status === 429 ? 429 : timeout ? 504 : 500,
+    httpStatus,
     retryAfterSec
   );
 }

@@ -95,7 +95,6 @@ export function withErrorEnvelope<Reply>(
       const envelope = toErrorEnvelope(error);
       if (envelope.retryAfterSec !== undefined) {
         reply.header("Retry-After", String(envelope.retryAfterSec));
-        reply.header("Access-Control-Expose-Headers", "Retry-After");
       }
       return reply.code(envelope.status).send({
         error: {
