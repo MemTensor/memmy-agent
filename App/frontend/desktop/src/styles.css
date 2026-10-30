@@ -15201,6 +15201,18 @@ body.memmy-platform-windows :is(
 /* Share the recording confirmation's shell, type scale and footer. */
 .ch__permission-dialog:focus { outline: none; }
 .ch__permission-dialog .confirm-dialog__footer { padding-top: 12px; }
+.ch__windows-settings .ch__windows-settings-body { flex: 1 1 auto; overflow-y: auto; }
+.ch__windows-settings .modal-header, .ch__windows-settings .modal-footer { flex: 0 0 auto; }
+.ch__windows-settings-body > p { flex: 0 0 auto; margin: 0 0 12px; font-size: 13px; line-height: 1.6; }
+.ch__windows-scope { display: grid; gap: 8px; font-size: 13px; }
+.ch__windows-scope select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-settings-body input[type="search"] { width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-applications { flex: 0 0 auto; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.ch__windows-application { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; font-size: 13px; }
+.ch__windows-application > input { flex: 0 0 auto; margin-top: 3px; }
+.ch__windows-application > span { min-width: 0; }
+.ch__windows-application-state { margin-left: 8px; font-size: 12px; }
+.ch__windows-application-path { display: block; overflow-wrap: anywhere; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 60%, transparent); }
 .ch__permission-description { margin: 0; }
 .ch__permission-list { display: grid; gap: 4px; margin: 16px 0 8px; }
 .ch__permission-row { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 4px 0; }
@@ -15356,3 +15368,30 @@ body.memmy-platform-windows :is(
 .memmy-browser-history-entry__main span { color: var(--color-text-secondary, #777); font-size: 12px; }
 .memmy-browser-history-entry__source { flex: none; color: var(--color-text-secondary, #777); font-size: 12px; line-height: 1.4; white-space: nowrap; }
 .memmy-browser-history-entry__delete { flex: none; }
+
+.ch__windows-settings .ch__windows-settings-body { flex: 1 1 auto; overflow-y: auto; }
+.ch__windows-settings .modal-header, .ch__windows-settings .modal-footer { flex: 0 0 auto; }
+.ch__windows-settings-body > p { flex: 0 0 auto; margin: 0 0 12px; font-size: 13px; line-height: 1.6; }
+.ch__windows-scope { display: grid; gap: 8px; font-size: 13px; }
+.ch__windows-scope select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-settings-body input[type="search"] { width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-applications { flex: 0 0 auto; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.ch__windows-application { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; font-size: 13px; }
+.ch__windows-application > input { flex: 0 0 auto; margin-top: 3px; }
+.ch__windows-application > span { min-width: 0; }
+.ch__windows-application-state { margin-left: 8px; font-size: 12px; }
+.ch__windows-application-path { display: block; overflow-wrap: anywhere; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 60%, transparent); }
+.recording-bar--activity {
+  min-height: 56px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+}
+.recording-bar--activity .recording-bar__clock {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-ink);
+}
+.recording-bar--activity .recording-bar__title { display: inline-flex; align-items: center; gap: 6px; }
+.recording-bar__indicator { width: 7px; height: 7px; flex: none; border-radius: 50%; background: currentColor; opacity: .4; }
+.recording-bar--activity.recording-bar--live .recording-bar__indicator { color: var(--color-status-error); opacity: 1; }
+.recording-bar__goal { min-width: 0; flex: 1 1 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 65%, transparent); }

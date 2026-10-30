@@ -11,6 +11,9 @@ export type PluginArtifactDescriptor = {
 export interface PluginRelease {
   manifest: PluginManifest;
   artifact?: PluginArtifactDescriptor;
+  /** Set by a configured trusted registry, never read from plugin.json. */
+  nativeExecutionAllowed?: boolean;
+  registryOrigin?: string;
 }
 
 export interface PluginRegistry {

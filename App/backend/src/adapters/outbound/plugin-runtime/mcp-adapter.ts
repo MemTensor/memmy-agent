@@ -10,14 +10,19 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   assertNetworkPermission,
   assertSafeStaticHeaders,
   callTimeoutMs,
   resolveSecretHeaders
 } from "./shared.js";
-import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
-import { buildPluginSandboxLaunch, resolvePluginEnvironment } from "./command-adapter.js";
+import type { PluginAdapter, PluginRuntimeContext, PluginSession, PluginHostServiceInvoker } from "./types.js";
+import { buildDirectLaunch, buildPluginSandboxLaunch, resolvePluginEnvironment } from "./command-adapter.js";
+
+const HostRequestSchema = z.object({ method: z.literal("memmy/host-service"),
+  params: z.object({ service: z.string().min(1), input: z.unknown(), callId: z.string().optional() }) });
 
 const McpSharedConfigSchema = z.object({
   capabilityTools: z.record(z.string(), z.string().min(1)).default({}),
@@ -35,17 +40,23 @@ const McpStdioConfigSchema = McpSharedConfigSchema.extend({
   args: z.array(z.string()).default([]),
   cwd: z.string().default("."),
   env: z.record(z.string(), z.string()).default({}),
-  secretEnv: z.record(z.string(), z.string().min(1)).default({})
+  secretEnv: z.record(z.string(), z.string().min(1)).default({}),
+  interpreter: z.enum(["direct", "node"]).default("direct"),
+  sandbox: z.enum(["required", "none"]).default("required"),
+  shutdownTool: z.string().min(1).optional()
 });
 const McpRuntimeConfigSchema = z.discriminatedUnion("transport", [McpRemoteConfigSchema, McpStdioConfigSchema]);
 type McpRuntimeConfig = z.infer<typeof McpRuntimeConfigSchema>;
 
 interface McpClientLike {
+  onclose?: () => void;
+  setRequestHandler?(schema: typeof HostRequestSchema,
+    handler: (request: z.infer<typeof HostRequestSchema>) => Promise<{ result: unknown }>): void;
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
   listTools(): Promise<{ tools: Array<{ name: string }> }>;
   callTool(
-    params: { name: string; arguments: Record<string, unknown> },
+    params: { name: string; arguments: Record<string, unknown>; _meta?: Record<string, unknown> },
     resultSchema?: undefined,
     options?: { signal?: AbortSignal; timeout?: number; onprogress?: (progress: McpProgress) => void }
   ): Promise<unknown>;
@@ -62,6 +73,8 @@ interface McpPluginSession extends PluginSession {
   config: McpRuntimeConfig;
   capabilityTools: Record<string, string>;
   controllers: Map<string, AbortController>;
+  calls: Map<string, CapabilityCall>;
+  closing: boolean;
 }
 
 export interface CreateMcpPluginAdapterOptions {
@@ -72,11 +85,15 @@ export interface CreateMcpPluginAdapterOptions {
     context: PluginRuntimeContext
   ) => unknown | Promise<unknown>;
   platform?: NodeJS.Platform;
+  pluginDataRoot?: string;
+  /** Host policy, separate from registry claims and manifest permissions. */
+  trustedNativeOrigins?: readonly string[];
+  hostServices?: PluginHostServiceInvoker;
+  onExit?: (pluginId: string, expected: boolean) => void;
 }
 
 export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = {}): PluginAdapter {
   const createClient = options.createClient ?? (() => new Client({ name: "memmy-plugin-host", version: "1.0.0" }) as McpClientLike);
-  const createTransport = options.createTransport ?? defaultTransport;
   const platform = options.platform ?? process.platform;
 
   return {
@@ -88,11 +105,13 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
 
     async activate(context) {
       const config = validateMcpConfig(context.plugin.manifest.runtime, context.rootPath, platform);
+      const native = config.transport === "stdio" && config.sandbox === "none";
+      if (native && !nativeApproved(context, options.trustedNativeOrigins ?? [])) throw Object.assign(new Error("Native execution requires a trusted official release and approved native-execution permission"), { code: "plugin_permission_denied" });
       const headers = config.transport === "stdio"
         ? {}
         : resolveSecretHeaders(config.headers, config.secretHeaders, context.secrets, "MCP");
       if (config.transport === "stdio") {
-        if (context.plugin.manifest.permissions.some((permission) => permission.type === "network")) {
+        if (!native && context.plugin.manifest.permissions.some((permission) => permission.type === "network")) {
           throw Object.assign(new Error("Local MCP plugins cannot request network access; use remote MCP"), {
             code: "plugin_permission_denied"
           });
@@ -103,8 +122,42 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
         assertNetworkPermission(context, url.hostname);
       }
       const client = createClient();
+      const session: McpPluginSession = { pluginId: context.plugin.id, client, config, capabilityTools: {}, controllers: new Map(), calls: new Map(), closing: false };
+      const approved = new Set(context.plugin.approvedPermissions.flatMap(p => p.type === "host-service" ? p.services : []));
+      const hostControllers = new Set<AbortController>();
+      const abortActivation = () => {
+        session.closing = true;
+        for (const controller of hostControllers) controller.abort();
+        void client.close().catch(() => undefined);
+      };
+      context.signal?.throwIfAborted();
+      context.signal?.addEventListener("abort", abortActivation, { once: true });
+      client.setRequestHandler?.(HostRequestSchema, async request => {
+        if (!approved.has(request.params.service) || !options.hostServices) throw new Error("Host service permission denied");
+        const controller = new AbortController(); hostControllers.add(controller);
+        const parentCall = request.params.callId ? session.calls.get(request.params.callId) : undefined;
+        if (request.params.service === "event-sessions" && (request.params.input as { action?: unknown })?.action !== "configuration" && !parentCall) {
+          hostControllers.delete(controller); throw new Error("Event sessions require an active conversation capability call");
+        }
+        const parentSignal = parentCall ? session.controllers.get(parentCall.callId)?.signal : undefined;
+        const abort = () => controller.abort(parentSignal?.reason);
+        if (parentSignal?.aborted) abort(); else parentSignal?.addEventListener("abort", abort, { once: true });
+        try {
+          return { result: await options.hostServices.invoke({ pluginId: context.plugin.id,
+            callId: parentCall?.callId ?? "plugin-lifecycle", conversationId: parentCall?.conversationId ?? `plugin:${context.plugin.id}`,
+            ...(parentCall?.modelPreset ? { modelPreset: parentCall.modelPreset } : {}),
+            service: request.params.service, input: request.params.input, signal: controller.signal }) };
+        } finally { parentSignal?.removeEventListener("abort", abort); hostControllers.delete(controller); }
+      });
+      client.onclose = () => {
+        for (const c of hostControllers) c.abort();
+        for (const c of session.controllers.values()) c.abort();
+        options.onExit?.(context.plugin.id, session.closing);
+      };
       try {
-        await client.connect(await createTransport(config, headers, context));
+        await client.connect(await (options.createTransport
+          ? options.createTransport(config, headers, context)
+          : defaultTransport(config, headers, context, options.pluginDataRoot, options.trustedNativeOrigins ?? [])));
         const available = new Set((await client.listTools()).tools.map((tool) => tool.name));
         const capabilityTools = Object.fromEntries(context.plugin.manifest.capabilities.map((capability) => [
           capability.id,
@@ -112,16 +165,15 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
         ]));
         const missing = Object.values(capabilityTools).filter((tool) => !available.has(tool));
         if (missing.length) throw new Error(`MCP tools not found: ${missing.join(", ")}`);
-        return {
-          pluginId: context.plugin.id,
-          client,
-          config,
-          capabilityTools,
-          controllers: new Map()
-        } satisfies McpPluginSession;
+        session.capabilityTools = capabilityTools;
+        context.signal?.throwIfAborted();
+        return session;
       } catch (error) {
+        session.closing = true;
         await client.close().catch(() => undefined);
         throw error;
+      } finally {
+        context.signal?.removeEventListener("abort", abortActivation);
       }
     },
 
@@ -131,13 +183,14 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
       if (!toolName) throw new Error(`MCP capability is not mapped: ${call.capabilityId}`);
       const controller = new AbortController();
       session.controllers.set(call.callId, controller);
+      session.calls.set(call.callId, call);
       const progress: CapabilityEvent[] = [];
       let wake: (() => void) | null = null;
       let settled = false;
       let result: unknown;
       let failure: unknown;
       const request = session.client.callTool(
-        { name: toolName, arguments: asArguments(call.input) },
+        { name: toolName, arguments: asArguments(call.input), ...(options.hostServices ? { _meta: { "memmy/call-id": call.callId, "memmy/conversation-id": call.conversationId } } : {}) },
         undefined,
         {
           signal: controller.signal,
@@ -179,6 +232,7 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
         yield* mcpResultEvents(result);
       } finally {
         session.controllers.delete(call.callId);
+        session.calls.delete(call.callId);
       }
     },
 
@@ -188,8 +242,12 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
 
     async deactivate(rawSession) {
       const session = asMcpSession(rawSession);
+      session.closing = true;
       for (const controller of session.controllers.values()) controller.abort(new Error("Plugin disabled"));
       session.controllers.clear();
+      if (session.config.transport === "stdio" && session.config.shutdownTool) {
+        await session.client.callTool({ name: session.config.shutdownTool, arguments: {} }, undefined, { timeout: 15_000 }).catch(() => undefined);
+      }
       await session.client.close();
     }
   };
@@ -204,7 +262,7 @@ function validateMcpConfig(
   const config = McpRuntimeConfigSchema.parse(runtime.config ?? {});
   if (config.transport === "stdio") {
     if (!rootPath) throw new Error("Local MCP plugin requires an installed artifact");
-    if (platform !== "darwin" && platform !== "linux") throw new Error(`Local MCP plugins are unsupported on ${platform}`);
+    if (config.sandbox !== "none" && platform !== "darwin" && platform !== "linux") throw new Error(`Sandboxed local MCP plugins are unsupported on ${platform}`);
   } else {
     assertSafeStaticHeaders(config.headers, "MCP");
   }
@@ -214,13 +272,28 @@ function validateMcpConfig(
 async function defaultTransport(
   config: McpRuntimeConfig,
   headers: Record<string, string>,
-  context: PluginRuntimeContext
+  context: PluginRuntimeContext,
+  pluginDataRoot?: string, trustedNativeOrigins: readonly string[] = []
 ): Promise<unknown> {
   if (config.transport === "stdio") {
-    const launch = await buildPluginSandboxLaunch(context, config);
+    const launch = config.sandbox === "none" ? await buildDirectLaunch(context, config) : await buildPluginSandboxLaunch(context, config);
+    const env = resolvePluginEnvironment(config.env, config.secretEnv, context.secrets);
+    if (config.interpreter === "node") env.ELECTRON_RUN_AS_NODE = "1";
+    if (nativeApproved(context, trustedNativeOrigins)) {
+      // Only platform paths are inherited. Tokens, API keys and the Host's
+      // general-purpose local API credentials never enter the plugin process.
+      for (const name of ["SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramFiles", "ProgramFiles(x86)"]) {
+        if (process.env[name]) env[name] = process.env[name]!;
+      }
+    }
+    env.MEMMY_PLUGIN_ID = context.plugin.id;
+    if (pluginDataRoot && context.plugin.approvedPermissions.some(p => p.type === "host-service" && p.services.includes("plugin-data"))) {
+      env.MEMMY_PLUGIN_DATA_DIR = join(pluginDataRoot, context.plugin.id);
+      await mkdir(env.MEMMY_PLUGIN_DATA_DIR, { recursive: true, mode: 0o700 });
+    }
     return new StdioClientTransport({
       ...launch,
-      env: resolvePluginEnvironment(config.env, config.secretEnv, context.secrets),
+      env,
       stderr: "ignore"
     });
   }
@@ -237,6 +310,12 @@ async function defaultTransport(
   return new StreamableHTTPClientTransport(url, { requestInit, fetch: rejectRedirects });
 }
 
+function nativeApproved(context: PluginRuntimeContext, trustedOrigins: readonly string[] = []): boolean {
+  return context.plugin.nativeExecutionAllowed === true && !!context.plugin.registryOrigin && trustedOrigins.includes(context.plugin.registryOrigin)
+    && /^[a-f0-9]{64}$/i.test(context.plugin.artifactHash ?? "")
+    && context.plugin.approvedPermissions.some(p => p.type === "host-service" && p.services.includes("native-execution"));
+}
+
 async function* mcpResultEvents(value: unknown): AsyncIterable<CapabilityEvent> {
   const result = value as {
     isError?: boolean;
@@ -248,9 +327,13 @@ async function* mcpResultEvents(value: unknown): AsyncIterable<CapabilityEvent> 
     return;
   }
   const structured = result?.structuredContent;
-  if (structured && typeof structured === "object" && Array.isArray((structured as { events?: unknown }).events)) {
-    for (const event of (structured as { events: unknown[] }).events) yield CapabilityEventSchema.parse(event);
-    return;
+  if (structured && typeof structured === "object") {
+    const output = structured as { schema?: unknown; events?: unknown };
+    if (Array.isArray(output.events) && (output.schema === "memmy.capability-events/v1"
+      || (output.events.length > 0 && output.events.every(event => CapabilityEventSchema.safeParse(event).success)))) {
+      for (const event of output.events) yield CapabilityEventSchema.parse(event);
+      return;
+    }
   }
   if (structured !== undefined) {
     yield { type: "result", output: structured };

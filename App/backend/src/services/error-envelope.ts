@@ -1,42 +1,11 @@
 /** Error envelope module. */
 import { ZodError } from "zod";
+import { ApiErrorCodeSchema, type ApiErrorCode } from "@memmy/local-api-contracts";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../adapters/outbound/memory-client/index.js";
 import type { FastifyReply, FastifyRequest, RouteHandlerMethod } from "fastify";
 
-export const API_ERROR_CODES = [
-  "invalid_argument",
-  "unauthorized",
-  "forbidden",
-  "not_found",
-  "conflict",
-  "rate_limited",
-  "internal",
-  "memory_layer_unavailable",
-  "memory_scan_upgrade_required",
-  "missing_idempotency_key",
-  "idempotency_body_mismatch",
-  "scan_not_permitted",
-  "memory_recall_not_permitted",
-  "skill_write_not_permitted",
-  "agent_source_unavailable",
-  "composio_not_configured",
-  "toolkit_unsupported",
-  "model_config_changed",
-  "config_write_busy",
-  "account_model_preset_conflict",
-  "plugin_invalid",
-  "plugin_incompatible",
-  "plugin_adapter_unsupported",
-  "plugin_permission_denied",
-  "plugin_entitlement_required",
-  "plugin_activation_failed",
-  "plugin_runtime_error",
-  "plugin_timeout",
-  "plugin_unavailable",
-  "plugin_interaction_invalid"
-] as const;
-
-export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
+export const API_ERROR_CODES = ApiErrorCodeSchema.options;
+export type { ApiErrorCode } from "@memmy/local-api-contracts";
 
 export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Object.freeze({
   invalid_argument: 400,
@@ -164,7 +133,7 @@ function extractRequestId(request: FastifyRequest): string {
 
   const headerValue = request.headers["x-request-id"] ?? request.headers["x-requestid"];
   const header = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  return typeof header === "string" && header.length > 0 ? header : "unknown";
+  return typeof header === "string" && header.length > 0 ? header : request.id;
 }
 
 /** Checks is api error code. */

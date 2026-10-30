@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
-  root = mkdtempSync(join(tmpdir(), "memmy-command-plugin-"));
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "memmy-command-plugin-")));
   mkdirSync(join(root, "runtime"));
   writeFileSync(join(root, "runtime/plugin"), "test");
   chmodSync(join(root, "runtime/plugin"), 0o755);
@@ -69,6 +69,8 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
   return events;
 }
 
+// Protocol fixtures supply their own launcher and pin a supported sandbox platform.
+// Native Windows admission remains covered by the sandbox policy cases below.
 describe("CommandPluginAdapter", () => {
   it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
     "allows private plugin IPC while denying sockets outside plugin-data and loopback TCP", async () => {
@@ -133,6 +135,7 @@ describe("CommandPluginAdapter", () => {
   it("maps a sandboxed command JSON response", async () => {
     let childEnvironment: Record<string, string> | undefined;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       spawnFn: ((command, args, options) => {
         childEnvironment = options?.env as Record<string, string>;
         return spawn(command, args, options as Parameters<typeof spawn>[2]) as ReturnType<typeof spawn>;
@@ -161,6 +164,7 @@ describe("CommandPluginAdapter", () => {
 
   it("streams NDJSON events", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", `console.log(JSON.stringify({type:'progress',current:1,total:1})); console.log(JSON.stringify({type:'result',output:{ok:true}}))`, ...config.args],
@@ -183,6 +187,7 @@ describe("CommandPluginAdapter", () => {
 
   it("does not consume the command timeout while an interaction waits for the user", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", `
@@ -229,6 +234,7 @@ describe("CommandPluginAdapter", () => {
 
   it("brokers approved Host-service requests over the private NDJSON channel", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}:${call.modelPreset}` }) },
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
@@ -262,6 +268,7 @@ describe("CommandPluginAdapter", () => {
     let inFlight = 0;
     let peak = 0;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: {
         invoke: async () => {
           inFlight += 1;
@@ -304,10 +311,35 @@ describe("CommandPluginAdapter", () => {
     expect(peak).toBeGreaterThan(1);
   });
 
+  it("returns a broken stdin as a call error without an uncaught stream error", async () => {
+    let child: ChildProcessWithoutNullStreams | undefined;
+    const adapter = createCommandPluginAdapter({
+      platform: "linux",
+      spawnFn: ((command, args, options) => {
+        child = spawn(command, args, options) as ChildProcessWithoutNullStreams;
+        return child;
+      }) as typeof spawn,
+      buildLaunch: async () => ({ command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], cwd: root! })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const session = await adapter.activate(pluginContext);
+    const pending = collect(adapter.invoke(session, { callId: "pipe-error", pluginId: pluginContext.plugin.id,
+      capabilityId: "run", conversationId: "conversation-1", input: {} }));
+    void pending.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(child).toBeDefined());
+      const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      expect(() => child!.stdin.emit("error", error)).not.toThrow();
+      await expect(pending).rejects.toBe(error);
+    } finally { await adapter.deactivate(session); }
+  });
+
   it("aborts in-flight Host services when a command-plugin run is cancelled", async () => {
     const started = Promise.withResolvers<void>();
     let hostSignal: AbortSignal | undefined;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: {
         invoke: async (call) => {
           hostSignal = call.signal;
@@ -374,6 +406,7 @@ describe("CommandPluginAdapter", () => {
   it("denies unapproved Host-service requests without invoking the service", async () => {
     const invoke = vi.fn();
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: { invoke },
       buildLaunch: async () => ({
         command: process.execPath,
@@ -395,9 +428,10 @@ describe("CommandPluginAdapter", () => {
   it("allows only command-plugin network hosts approved by the host policy", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [{ type: "network", hosts: ["example.com"] }];
-    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/not in the host allowlist/);
+    await expect(createCommandPluginAdapter({ platform: "linux" }).activate(pluginContext)).rejects.toThrow(/not in the host allowlist/);
     let networkEnabled = false;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       allowedNetworkHosts: ["example.com"],
       buildLaunch: async (_context, _config, enabled) => {
         networkEnabled = enabled;
@@ -412,7 +446,7 @@ describe("CommandPluginAdapter", () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [];
     pluginContext.plugin.manifest.runtime.config = { command: "../outside" };
-    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/relative/);
+    await expect(createCommandPluginAdapter({ platform: "linux" }).activate(pluginContext)).rejects.toThrow(/relative/);
   });
 
   it("runs non-executable JavaScript artifacts with the host Node interpreter", async () => {
@@ -425,8 +459,8 @@ describe("CommandPluginAdapter", () => {
       cwd: "."
     }, "darwin");
     const separator = launch.args.indexOf("--");
-    expect(launch.args[separator + 1]).toBe(realpathSync(process.execPath));
-    expect(launch.args.slice(separator + 2)).toEqual([realpathSync(join(root!, "runtime/plugin")), "--flag"]);
+    expect(launch.args[separator + 1]).toBe(realpathSync.native(process.execPath));
+    expect(launch.args.slice(separator + 2)).toEqual([realpathSync.native(join(root!, "runtime/plugin")), "--flag"]);
   });
 
   it("prepends only Host-resolved runtime paths to the plugin environment", () => {
@@ -559,7 +593,7 @@ describe("CommandPluginAdapter", () => {
       });
 
       expect(command).not.toMatch(/sandbox-exec|bwrap/u);
-      expect(command).toContain("runtime/plugin");
+      expect(command).toContain(join("runtime", "plugin"));
     });
 
     it("keeps the sandbox on when the account does not hold the entitlement", async () => {

@@ -18,13 +18,22 @@ mkdir -p "$OUTPUT_DIR"
 # former independent recorder binary with a second permission identity.
 rm -f "$OUTPUT_DIR/human-recorder"
 
-for helper in app-icon; do
+build_helper() {
+  local helper="$1"
+  shift
   xcrun --sdk macosx swiftc -O \
     -sdk "$SDK_PATH" -target "$SWIFT_CPU-apple-macos11.0" \
     -module-cache-path "$BUILD_DIR/modules" \
-    -o "$BUILD_DIR/$helper" "$HELPER_DIR/$helper.swift"
+    -o "$BUILD_DIR/$helper" "$HELPER_DIR/$helper.swift" "$@"
   lipo "$BUILD_DIR/$helper" -verify_arch "$SWIFT_CPU"
   install -m 755 "$BUILD_DIR/$helper" "$OUTPUT_DIR/$helper"
+}
+for helper in app-icon task-recorder; do
+  if [ "$helper" = task-recorder ]; then
+    build_helper "$helper" -Xlinker -weak_framework -Xlinker ScreenCaptureKit
+  else
+    build_helper "$helper"
+  fi
 done
 
 # The optional Apple silicon WeChat connection copies these libraries into its

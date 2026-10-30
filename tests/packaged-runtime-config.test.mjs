@@ -254,7 +254,7 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
     const buildScript = readFileSync(join(
       dirname(fileURLToPath(import.meta.url)),
       "..", "scripts", "internal", "mac", "build-dmg.sh",
-    ), "utf8");
+    ), "utf8").replaceAll("\r\n", "\n");
     writeFixtureJson(join(memoryDir, "package.json"), {
       version: "2.1.1",
       dependencies: { "@memmy/agent-source-core": "0.0.0", zod: "4.4.3" },
@@ -309,7 +309,8 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
     expect(stageEnd).toBeGreaterThan(stageStart);
     const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
       encoding: "utf8",
-      env: { ...process.env, ROOT_DIR: root, RUNTIME_DIR: runtimeDir, MEMORY_DIR: memoryDir, AGENT_DIR: join(root, "App", "memmy-agent") },
+      env: { ...process.env, ROOT_DIR: root.replaceAll("\\", "/"), RUNTIME_DIR: runtimeDir.replaceAll("\\", "/"),
+        MEMORY_DIR: memoryDir.replaceAll("\\", "/"), AGENT_DIR: join(root, "App", "memmy-agent").replaceAll("\\", "/") },
     });
     expect(staged.status, staged.stderr).toBe(0);
     expect(existsSync(join(runtimeDir, "memory", "AgentSourceCore", "package.json"))).toBe(true);
@@ -457,6 +458,22 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
       encoding: "utf8",
     });
     expect(good.status, good.stderr).toBe(0);
+
+    const historyPrefix = "dist/runtime/memmy-agent/dist/tools/computer-history/win/";
+    const missingHelper = await createAsarFixture(root, "missing-history-helper", "1.0.8");
+    rmSync(join(`${missingHelper}.unpacked`, historyPrefix, "memmy-history-recorder.exe"));
+    const missing = spawnSync(process.execPath, [verifier, ...verifierArgs(missingHelper, "1.0.8")], { encoding: "utf8" });
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain("memmy-history-recorder.exe");
+    for (const [name, extra, expectedError] of [
+      ["invalid-history-pe", [`${historyPrefix}memmy-history-recorder.exe`, "not an executable"], "x64 PE executable"],
+      ["history-test-sources", [`${historyPrefix}native/tests/fixture.cpp`, "test source"], "native build/test sources"],
+    ]) {
+      const invalid = await createAsarFixture(root, name, "1.0.8", false, true, [extra]);
+      const result = spawnSync(process.execPath, [verifier, ...verifierArgs(invalid, "1.0.8")], { encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(expectedError);
+    }
 
     const missingAgentSourceCoreAsar = await createAsarFixture(
       root,
@@ -709,7 +726,7 @@ await import(pathToFileURL(process.argv[1]).href);
         dirname(fileURLToPath(import.meta.url)),
         "..", "App", "shell", "desktop", configName,
       ), "utf8");
-      expect(config).toContain([
+      expect(config.replaceAll("\r\n", "\n")).toContain([
         "  - from: dist/runtime/memory/node_modules",
         "    to: memory-runtime/node_modules",
         "    filter:",
@@ -767,6 +784,12 @@ async function createAsarFixture(
   mkdirSync(dirname(knowledge), { recursive: true });
   writeFileSync(knowledge, "export {};\n");
   if (platform === "win32") {
+    const historyRoot = join(source, "dist/runtime/memmy-agent/dist/tools/computer-history/win");
+    mkdirSync(historyRoot, { recursive: true });
+    const pe = Buffer.alloc(128);
+    pe.write("MZ"); pe.writeUInt32LE(64, 60); pe.write("PE\0\0", 64); pe.writeUInt16LE(0x8664, 68);
+    writeFileSync(join(historyRoot, "memmy-history-recorder.exe"), pe);
+    writeFileSync(join(historyRoot, "memmy-history-recorder.NOTICES.md"), "MIT fixture");
     for (const relativePath of [
       "dist/main/computer-use-window-capture.js",
       "dist/runtime/memmy-agent/dist/tools/computer-use/managed-ocu-session.js",

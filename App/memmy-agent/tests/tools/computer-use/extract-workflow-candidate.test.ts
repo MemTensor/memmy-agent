@@ -20,3 +20,16 @@ test("renders a separate semantic Workflow Candidate from human events", async (
   assert.match(markdown, /Add to cart/);
   assert.doesNotMatch(markdown, /812, 406/);
 });
+
+test("Windows hook evidence does not invent a click target or resulting input characters", () => {
+  const application = { id: "windows:fixture", platform: "windows", name: "Fixture.exe" };
+  const markdown = renderWorkflowCandidate({ file: "D:/fixture/events.jsonl", records: [
+    { recordType: "human_event", eventType: "mouse_click", application, details: { source: "low_level_hook", injected: true, x: 812, y: 406 } },
+    { recordType: "human_event", eventType: "text_input", application, details: { source: "low_level_hook", unit: "key_press", pressCount: 1, redacted: true } },
+  ] });
+  assert.ok(markdown);
+  assert.match(markdown, /semantic target and effect were not verified/);
+  assert.match(markdown, /resulting characters are unknown/);
+  assert.match(markdown, /may have originated from software/);
+  assert.doesNotMatch(markdown, /812|406|activate it once/);
+});

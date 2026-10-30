@@ -480,6 +480,17 @@ describe("segment narrative", () => {
     expect(compactEventEvidence([])).toBe("");
     expect(compactEventEvidence(["", "not json"])).toBe("");
   });
+  it("validates durable checkpoint evidence while excluding it from semantic retention and model inputs", () => {
+    const marker = { recordType: "human_event", sequence: 2, eventType: "recording_checkpoint", timestamp: "2026-10-21T00:00:00.000Z",
+      details: { checkpointId: "12345678-1234-1234-1234-123456789abc", nativeSessionId: "a".repeat(32), nativeSequence: 8, captureSequence: 12 } };
+    expect(compactEventEvidence([JSON.stringify(marker)])).toBe("");
+    expect(compactEventEvidence([JSON.stringify(marker)], { purpose: "retention" })).toBe("");
+    expect(() => compactEventEvidence([JSON.stringify({ ...marker, details: {} })], { purpose: "retention" })).toThrow("invalid record");
+    const gap = { ...marker, eventType: "recording_gap", details: { nativeSessionId: "a".repeat(32), nativeSequence: 7,
+      code: "query_unavailable", from: marker.timestamp, through: marker.timestamp } };
+    expect(compactEventEvidence([JSON.stringify(gap)], { purpose: "retention" })).toBe("");
+    expect(() => compactEventEvidence([JSON.stringify({ ...gap, details: {} })], { purpose: "retention" })).toThrow("invalid record");
+  });
 
   it("recovers a label from the enrichment when the click landed on a container", () => {
     const evidence = compactEventEvidence([

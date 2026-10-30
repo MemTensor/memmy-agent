@@ -1,5 +1,6 @@
 /* global chrome */
 "use strict";
+if (typeof importScripts === "function") importScripts("teaching-recorder.js");
 
 // After installation the extension connects to Memmy and operates ordinary
 // http(s) pages. Internal browser pages stay out of reach. Keep BRIDGE_PORTS
@@ -8,7 +9,7 @@ const BRIDGE_PORTS = [47321, 47322, 47323];
 // Memmy updates replace these files in place, but Chrome keeps running the worker script it
 // registered at install, even across browser restarts, until the extension reloads.
 // Must equal "version" in manifest.json.
-const EXTENSION_VERSION = "1.0.12";
+const EXTENSION_VERSION = "1.2.2";
 // Chrome stops an idle MV3 worker about 30 seconds after Memmy goes away, which ends
 // the setTimeout retries. The alarm wakes the worker so it reconnects once Memmy is back.
 const RECONNECT_ALARM = "memmy-reconnect";
@@ -34,7 +35,7 @@ const USER_CANCEL_COOLDOWN_MS = 10_000;
 const USER_CANCELLED_REASON = "你关闭了浏览器顶部的“Memmy 已开始调试此浏览器”提示，Memmy 已停止操作这个网页。需要继续时，在 Memmy 里重新发起请求，或点击浏览器工具栏中的 Memmy 图标选择“重新连接”。";
 const COMMANDS_WITHOUT_DEBUGGER = new Set(["allowOrigin", "tabState", "open", "activate", "playwrightEnd"]);
 // Reported in the handshake so Memmy can tell an outdated installed copy from a slow one.
-const EXTENSION_CAPABILITIES = ["openTab", "playwright", "browserHistory"];
+const EXTENSION_CAPABILITIES = ["openTab", "playwright", "browserHistory", ...(typeof createMemmyTeachingRecorder === "function" ? ["teachingCapture/v2"] : [])];
 const OPEN_TAB_READY_MS = 10_000;
 // Chrome's openerTabId names the tab that was active, not a background tab whose
 // link opened the new tab. A Page.windowOpen is paired with a tab created within
@@ -176,6 +177,28 @@ function recordHistoryInput(tabId, commandId) {
   if (historyInputEvidence.size >= 128 && !historyInputEvidence.has(tabId)) historyInputEvidence.delete(historyInputEvidence.keys().next().value);
   historyInputEvidence.set(tabId, { commandId, at: Date.now() });
 }
+const teachingRecorder = typeof createMemmyTeachingRecorder === "function" ? createMemmyTeachingRecorder({
+  send,
+  protected: tabId => protectedCredentialTabs.has(tabId) || claims.get(tabId)?.credentialProtected === true,
+  command,
+  async attach(tabId) {
+    clearIdleDetach(tabId);
+    const tab = await chrome.tabs.get(tabId);
+    if (/^https?:/.test(tab.url || "")) { await discoverTab(tabId); await ensureAttached(tabId); }
+    else await chrome.debugger.attach({ tabId }, "1.3");
+  },
+  async detach(tabId) {
+    if (tabCommandCounts.get(tabId)) { scheduleIdleDetach(tabId); return; }
+    const claim = claims.get(tabId); if (claim) markDebuggerDetached(claim);
+    await chrome.debugger.detach({ tabId });
+  },
+}) : null;
+chrome.runtime.onConnect?.addListener(port => {
+  if (port.name === "memmy-teaching/v2") {
+    if (teachingRecorder) void teachingRecorder.connectPage(port);
+    else port.disconnect();
+  }
+});
 
 function pageOrigin(url) {
   const parsed = new URL(url);
@@ -310,6 +333,7 @@ async function connect() {
 
 function connectPort(port) {
   if (socket) {
+    teachingRecorder?.disconnect();
     const previous = socket;
     socket = null;
     ready = null;
@@ -342,7 +366,7 @@ function connectPort(port) {
       ws.send(JSON.stringify({ type: "hello", browser: browserName(), extensionVersion: EXTENSION_VERSION, capabilities: EXTENSION_CAPABILITIES }));
     });
     ws.addEventListener("message", event => {
-      if (socket !== ws) return;
+      if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (socketHealth?.socket === ws) {
@@ -366,6 +390,9 @@ function connectPort(port) {
         resolve();
       } else if (browserHistory?.receive(message)) {
         // History configuration is metadata-only and never attaches a debugger.
+      } else if (message.type === "teaching_command" && teachingRecorder && typeof message.id === "string") {
+        void teachingRecorder.handle(message).then(result => send({ type: "response", id: message.id, ok: true, result }),
+          error => send({ type: "response", id: message.id, ok: false, error: String(error?.message || error) }));
       } else if (message.type === "command") {
         void handleCommand(message);
       } else if (message.type === "refresh_tabs" && typeof message.id === "string") {
@@ -388,6 +415,7 @@ function connectPort(port) {
         historyInputEvidence.clear();
         clearTimeout(socketHealth?.probeTimer);
         socketHealth = null;
+        teachingRecorder?.disconnect();
         socket = null;
         ready = null;
         for (const tabId of [...claims.keys()]) void unclaim(tabId, false);
@@ -773,7 +801,7 @@ function scheduleIdleDetach(tabId) {
     idleDetachTimers.delete(tabId);
     void queueDebuggerTask(tabId, async () => {
       const current = claims.get(tabId);
-      if (!current?.attached || tabCommandCounts.get(tabId)) return;
+      if (!current?.attached || tabCommandCounts.get(tabId) || teachingRecorder?.owns(tabId)) return;
       markDebuggerDetached(current);
       await chrome.debugger.detach({ tabId }).catch(() => undefined);
     });
@@ -1918,29 +1946,82 @@ async function snapshot(tabId) {
   }).filter(node => node.ref || node.name || node.value).slice(0, 3000);
 }
 
-async function targetObject(tabId, ref) {
-  const target = String(ref || "");
-  if (target.length > 500) throw new Error("Element target is too long");
-  const match = /^ax-(\d+)$/.exec(target);
-  let object;
-  if (match) {
-    ({ object } = await command(tabId, "DOM.resolveNode", { backendNodeId: Number(match[1]) }));
-  } else {
-    const expression = `(() => { const matches = document.querySelectorAll(${JSON.stringify(target)}); return matches.length === 1 ? matches[0] : null; })()`;
-    ({ result: object } = await command(tabId, "Runtime.evaluate", { expression }));
+function actionResult(response, message) {
+  if (response.exceptionDetails) {
+    const detail = response.exceptionDetails.exception?.description || response.exceptionDetails.text;
+    throw new Error(message + (detail ? ": " + String(detail).split("\n")[0] : ""));
   }
-  if (!object?.objectId) throw new Error("Element is no longer available; take a new snapshot");
+  return response.result;
+}
+
+async function releaseObject(tabId, objectId) {
+  if (objectId) await command(tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+}
+
+async function targetObject(tabId, ref) {
+  const target = String(ref ?? "").trim();
+  if (!target || target.length > 500) throw new Error("Invalid browser element target");
+  const match = /^(?:ax-(\d+)|\[ax-(\d+)\])$/.exec(target);
+  const backendNodeId = match ? Number(match[1] ?? match[2]) : undefined;
+  if (match && (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0)) throw new Error("Invalid browser element reference");
+  const nth = /^(.*?)\s*>>\s*nth=(\d+)$/.exec(target);
+  const locator = nth ? nth[1].trim() : target;
+  const index = nth ? Number(nth[2]) : null;
+  if (index !== null && (!Number.isSafeInteger(index) || index > 3000)) throw new Error("Invalid browser element index");
+  const text = locator.startsWith("text=") ? locator.slice(5) : null;
+  const hasText = /^(.*):has-text\(("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\)$/.exec(locator);
+  let filterText = text;
+  if (hasText) {
+    try { filterText = hasText[2].startsWith('"') ? JSON.parse(hasText[2]) : hasText[2].slice(1, -1).replace(/\\'/g, "'"); }
+    catch { throw new Error("Invalid browser text locator"); }
+  }
+  const selector = text !== null ? "*" : hasText ? hasText[1] : locator;
+  const expression = `(() => {
+    const normalize = value => String(value ?? '').replace(/\\s+/g, ' ').trim();
+    const text = ${JSON.stringify(filterText)};
+    let found = [...document.querySelectorAll(${JSON.stringify(selector)})];
+    if (text !== null) {
+      const wanted = normalize(text); if (!wanted) throw Error('Text locator is empty');
+      found = found.filter(el => normalize(el.textContent).includes(wanted));
+      ${text !== null ? "found = found.filter(el => !found.some(child => child !== el && el.contains(child)));" : ""}
+      found = found.filter(el => { const style = el.ownerDocument.defaultView.getComputedStyle(el);
+        return el.getClientRects().length && style.visibility !== 'hidden' && style.display !== 'none'; });
+    }
+    if (${JSON.stringify(index)} !== null) {
+      if (!found[${JSON.stringify(index)}]) throw Error('Element is no longer available');
+      return found[${JSON.stringify(index)}];
+    }
+    if (found.length > 1) throw Error('Browser element target is ambiguous; choose an exact reference or nth index');
+    return found[0] ?? null;
+  })()`;
+  const response = match
+    ? await command(tabId, "DOM.resolveNode", { backendNodeId })
+    : await command(tabId, "Runtime.evaluate", { expression });
+  let object;
+  try { object = match ? response.object : actionResult(response, "Browser element locator failed"); }
+  catch (error) {
+    for (const objectId of new Set([response.result?.objectId, response.exceptionDetails?.exception?.objectId])) {
+      await releaseObject(tabId, objectId);
+    }
+    throw error;
+  }
+  if (!object?.objectId || (object.subtype && object.subtype !== "node")) {
+    await releaseObject(tabId, object?.objectId);
+    throw new Error("Element is no longer available; take a new snapshot");
+  }
   return object.objectId;
 }
 
-async function click(tabId, args) {
+async function click(tabId, args, resolvedObjectId) {
   let x = Number(args.x), y = Number(args.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    const objectId = await targetObject(tabId, args.target || args.ref);
-    const { result } = await command(tabId, "Runtime.callFunctionOn", { objectId,
-      functionDeclaration: "function(){ this.scrollIntoView({block:'center'}); const r=this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; }",
-      returnByValue: true });
-    x = result?.value?.x; y = result?.value?.y;
+    const objectId = resolvedObjectId || await targetObject(tabId, args.target || args.ref);
+    try {
+      const result = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+        functionDeclaration: "function(){ if(!this.isConnected || typeof this.getBoundingClientRect!=='function') throw Error('Element is no longer available'); if(this.disabled || this.matches(':disabled')) throw Error('Element is disabled'); this.scrollIntoView({block:'center',inline:'center'}); const r=this.getBoundingClientRect(), style=this.ownerDocument.defaultView.getComputedStyle(this); if(!r.width || !r.height || style.visibility==='hidden' || style.display==='none') throw Error('Element is not visible'); const x=r.left+r.width/2,y=r.top+r.height/2; const hit=this.getRootNode().elementFromPoint?.(x,y) ?? this.ownerDocument.elementFromPoint(x,y); if(!hit || (hit!==this && !this.contains(hit))) throw Error('Element is covered; take a new snapshot'); return {x,y}; }",
+        returnByValue: true }), "Browser click target failed");
+      x = result?.value?.x; y = result?.value?.y;
+    } finally { if (!resolvedObjectId) await releaseObject(tabId, objectId); }
   }
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Element has no visible click point");
   const button = ["left", "right", "middle"].includes(args.button) ? args.button : "left";
@@ -1967,6 +2048,8 @@ async function navigate(tabId, url) {
 
 // The tab opens in the background beside its source page, so the user's current tab stays in front.
 async function openTab(url, sourceTabId) {
+  if (teachingRecorder?.owns(sourceTabId)) throw Error("End the teaching recording before operating its pages.");
+  if (teachingRecorder?.active() && !Number.isSafeInteger(sourceTabId)) throw Error("Select a non-teaching source tab before opening a page while teaching is recording.");
   const target = new URL(String(url));
   if (!["http:", "https:"].includes(target.protocol)) throw new Error("Only HTTP and HTTPS pages are supported");
   const source = Number.isSafeInteger(sourceTabId) && claims.has(sourceTabId)
@@ -2228,33 +2311,56 @@ async function run(tabId, name, args, commandId) {
     case "reload": await command(tabId, "Page.reload"); return { ok: true };
     case "click": return click(tabId, args);
     case "type": {
-      await click(tabId, args);
-      const text = String(args.text || "");
+      const text = String(args.text ?? "");
       if (text.length > 100000) throw new Error("Text is too long");
       const objectId = await targetObject(tabId, args.target || args.ref);
-      await assertUserIsNotUsingTab(tabId);
-      await command(tabId, "Runtime.callFunctionOn", { objectId,
-        functionDeclaration: "function(){ this.focus(); if(typeof this.select==='function'){this.select();return;} if(this.isContentEditable){const r=document.createRange();r.selectNodeContents(this);const s=window.getSelection();s.removeAllRanges();s.addRange(r);return;} throw Error('Element is not editable'); }" });
-      if (args.slowly) {
-        for (const character of text) {
-          await assertUserIsNotUsingTab(tabId);
-          await command(tabId, "Input.insertText", { text: character });
-        }
-      } else {
+      try {
         await assertUserIsNotUsingTab(tabId);
-        await command(tabId, "Input.insertText", { text });
-      }
-      if (args.submit) await run(tabId, "pressKey", { key: "Enter" });
-      return { ok: true };
+        const editable = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+          functionDeclaration: "function(){ if(!this.isConnected || this.disabled || this.matches(':disabled') || this.readOnly || !this.getClientRects().length) throw Error('Element is not editable'); const style=this.ownerDocument.defaultView.getComputedStyle(this); if(style.visibility==='hidden' || style.display==='none') throw Error('Element is not visible'); if(this.tagName==='INPUT' && !['button','submit','reset','checkbox','radio','file','image','hidden','range','color'].includes(this.type)) return this.type; if(this.tagName==='TEXTAREA' || this.isContentEditable) return 'text'; throw Error('Element is not editable'); }",
+          returnByValue: true }), "Browser editable target failed");
+        if (typeof editable?.value !== "string") throw new Error("Browser editable target could not be verified");
+        if (["date", "datetime-local", "time", "month", "week"].includes(editable.value)) {
+          const filled = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+            functionDeclaration: "function(text){ if(!this.isConnected || this.disabled || this.matches(':disabled') || this.readOnly) throw Error('Element is not editable'); const probe=this.ownerDocument.createElement('input'); probe.type=this.type; probe.value=text; if(probe.value!==text) throw Error('Invalid native date/time value; use the canonical input format'); this.focus(); const setter=Object.getOwnPropertyDescriptor(this.ownerDocument.defaultView.HTMLInputElement.prototype,'value').set; setter.call(this,text); this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); if(this.value!==text || !this.validity.valid) throw Error('Native date/time value was not accepted by the field'); return true; }",
+            arguments: [{ value: text }], returnByValue: true }), "Browser date/time input failed");
+          if (filled?.value !== true) throw new Error("Browser date/time input returned no verified result");
+        } else {
+          await click(tabId, args, objectId);
+          const selected = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+            functionDeclaration: "function(){ if(!this.isConnected || this.disabled || this.matches(':disabled') || this.readOnly) throw Error('Element is not editable'); this.focus(); if(typeof this.select==='function'){this.select();return true;} if(this.isContentEditable){const r=this.ownerDocument.createRange();r.selectNodeContents(this);const s=this.ownerDocument.defaultView.getSelection();s.removeAllRanges();s.addRange(r);return true;} throw Error('Element is not editable'); }",
+            returnByValue: true }), "Browser editable target failed");
+          if (selected?.value !== true) throw new Error("Browser text selection could not be verified");
+          const insert = async value => {
+            await assertUserIsNotUsingTab(tabId);
+            const focused = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+              functionDeclaration: "function(){ if(!this.isConnected || this.disabled || this.readOnly) return false; let node=this; for(let depth=0;depth<64;depth++){const root=node.getRootNode();if(root.activeElement!==node)return false;if(!root.host)return root===this.ownerDocument;node=root.host;}return false; }",
+              returnByValue: true }), "Browser text receiver validation failed");
+            if (focused?.value !== true) throw new Error("Browser text receiver changed; take a new snapshot");
+            await command(tabId, "Input.insertText", { text: value });
+          };
+          if (args.slowly) for (const character of text) await insert(character);
+          else await insert(text);
+        }
+        const verified = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+          functionDeclaration: "function(text){ return this.isConnected && !this.disabled && !this.readOnly && (this.isContentEditable ? this.textContent : this.value)===text; }",
+          arguments: [{ value: text }], returnByValue: true }), "Browser input verification failed");
+        if (verified?.value !== true) throw new Error("Input value does not match the requested text; read the field before continuing");
+        if (args.submit) await run(tabId, "pressKey", { key: "Enter" });
+        return { ok: true };
+      } finally { await releaseObject(tabId, objectId); }
     }
     case "selectOption": {
       const objectId = await targetObject(tabId, args.target || args.ref);
       const values = Array.isArray(args.values) ? args.values.map(String) : [String(args.value || "")];
-      await assertUserIsNotUsingTab(tabId);
-      const { result } = await command(tabId, "Runtime.callFunctionOn", { objectId,
-        functionDeclaration: "function(values){ if(this.tagName!=='SELECT') throw Error('Not a select'); for(const option of this.options) option.selected=values.includes(option.value); this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); return this.value; }",
-        arguments: [{ value: values }], returnByValue: true, awaitPromise: true });
-      return { value: result?.value };
+      try {
+        await assertUserIsNotUsingTab(tabId);
+        const result = actionResult(await command(tabId, "Runtime.callFunctionOn", { objectId,
+          functionDeclaration: "function(values){ if(!this.isConnected || this.disabled || this.matches(':disabled') || this.tagName!=='SELECT') throw Error('Target is not an enabled select'); if(!values.length || (!this.multiple && values.length>1)) throw Error('Invalid select option values'); const options=[...this.options]; if(values.some(value=>!options.some(option=>option.value===value && !option.disabled && !option.matches(':disabled')))) throw Error('Requested select option is unavailable'); for(const option of options) option.selected=values.includes(option.value); this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); const selected=[...this.selectedOptions].map(option=>option.value); if(selected.length!==new Set(values).size || values.some(value=>!selected.includes(value))) throw Error('Select option value was not accepted'); return this.value; }",
+          arguments: [{ value: values }], returnByValue: true, awaitPromise: true }), "Browser select option failed");
+        if (typeof result?.value !== "string") throw new Error("Browser select option returned no verified result");
+        return { value: result.value };
+      } finally { await releaseObject(tabId, objectId); }
     }
     case "pressKey": {
       const key = String(args.key || "");
@@ -2361,6 +2467,7 @@ async function handleCommand(message) {
   clearIdleDetach(tabId);
   tabCommandCounts.set(tabId, (tabCommandCounts.get(tabId) || 0) + 1);
   try {
+    if (teachingRecorder?.owns(tabId)) throw Error("This page is being demonstrated by the user. End teaching recording before running browser commands.");
     if (!COMMANDS_WITHOUT_DEBUGGER.has(message.command)) await ensureAttached(tabId);
     const result = await run(tabId, message.command, message.args || {}, message.id);
     send({ type: "response", id: message.id, ok: true, result });

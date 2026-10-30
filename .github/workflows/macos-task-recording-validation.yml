@@ -1,0 +1,61 @@
+name: macOS task recording validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/macos-task-recording-validation.yml"
+      - "App/memmy-agent/**"
+      - "App/backend/local-api-contracts/**"
+      - "App/frontend/desktop/**"
+      - "App/shell/desktop/**"
+      - "scripts/internal/mac/build-computer-history-helpers.sh"
+      - "scripts/internal/mac/build-dmg.sh"
+      - "scripts/internal/shared/validate-computer-history.mjs"
+      - "tests/computer-history*"
+      - "package*.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    env:
+      MEMMY_LEGAL_CN_BASE_URL: https://memmy.cn
+      MEMMY_LEGAL_INTL_BASE_URL: https://memmy.bot
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix App/memmy-agent
+      - name: Build production native helpers for Apple Silicon and Intel
+        run: |
+          mkdir -p .recording-ci/helpers
+          cp App/memmy-agent/src/tools/computer-history/mac/*.swift .recording-ci/helpers/
+          bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers arm64
+          bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers x64
+      - name: Run native media, macOS lifecycle, UI and packaging checks
+        run: node scripts/internal/shared/validate-computer-history.mjs --report-dir .recording-ci/regression
+      - name: Record validation scope
+        if: ${{ always() }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          This job compiles production helpers for both macOS architectures and runs real AVFoundation H.264 encode/decode, timestamp, color/orientation, sealed-prefix recovery and PNG extraction checks without screen or input permission prompts.
+          OS permission dialogs, real ScreenCaptureKit window visibility, multi-display/DPI transitions, a full 20-minute session and a signed installed application require manual Mac acceptance. The job does not claim those checks passed.
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: macos-task-recording-validation
+          path: .recording-ci/regression/**
+          retention-days: 7
+          if-no-files-found: warn

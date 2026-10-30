@@ -118,6 +118,10 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
     return this.request(`/api/channels/feishu/login/${encodeURIComponent(pollToken)}`, FeishuLoginResponseSchema);
   }
 
+  async invokePluginHostService(pluginId: string, service: string, input: unknown, context?: { dataRoot: string }): Promise<unknown> {
+    return this.request("/api/plugin-host/services", z.unknown(), { method: "POST", body: JSON.stringify({ pluginId, service, input, ...context }) });
+  }
+
   async reloadMcpConfig() {
     return this.request("/api/settings/mcp-presets/reload", McpReloadResponseSchema, {
       method: "POST",

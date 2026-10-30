@@ -67,6 +67,22 @@ describe("package version guard", () => {
       .toThrow(/does not match the requested version/);
   });
 
+  it("accepts CRLF derived files while still rejecting stale versions", () => {
+    const root = fixtureRepo("1.1.8");
+    const script = join(root, "scripts", "sync-project-version.mjs");
+    mkdirSync(dirname(script), { recursive: true });
+    copyFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "sync-project-version.mjs"), script);
+    const synced = spawnSync(process.execPath, [script], { cwd: root, encoding: "utf8" });
+    expect(synced.status, synced.stderr).toBe(0);
+    for (const name of ["package-lock.json", "App/memmy-agent/package.json", "App/backend/src/project-version.ts"]) {
+      const file = join(root, name);
+      writeFileSync(file, readFileSync(file, "utf8").replaceAll("\n", "\r\n"));
+    }
+    expect(spawnSync(process.execPath, [script, "--check"], { cwd: root }).status).toBe(0);
+    writeJson(join(root, "App/memmy-agent/package.json"), { version: "1.1.7" });
+    expect(spawnSync(process.execPath, [script, "--check"], { cwd: root }).status).not.toBe(0);
+  });
+
   it("rejects stale and missing staged runtime metadata", () => {
     const root = fixtureRepo("1.0.8");
     const runtimeRoot = fixtureRuntime(root, "1.0.8");

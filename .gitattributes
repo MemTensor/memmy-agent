@@ -1,0 +1,11 @@
+# Git Bash packaging scripts must remain executable after a Windows checkout.
+*.sh text eol=lf
+# Version synchronization emits LF; keep these generated files unchanged on Windows.
+package-lock.json text eol=lf
+App/memmy-agent/package.json text eol=lf
+App/memmy-agent/package-lock.json text eol=lf
+App/shell/desktop/package.json text eol=lf
+App/backend/src/project-version.ts text eol=lf
+App/native-computer-use/apps/OpenComputerUseLinux/version.go text eol=lf
+App/native-computer-use/apps/OpenComputerUseWindows/version.go text eol=lf
+App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift text eol=lf

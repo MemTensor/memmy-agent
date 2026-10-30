@@ -373,3 +373,21 @@ func TestEmbeddedWorkerHasNoScreenshotOrRawKeyboardConversion(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckpointFlushesTypingBeforeIdleDeadline(t *testing.T) {
+	s := scheduler{}
+	now := time.Now()
+	s.add(action{Kind: "keyboard.keydown", Key: "[typing]", Window: "123", PID: 42}, now)
+	if s.typing == nil {
+		t.Fatal("fixture did not queue typing")
+	}
+	s.flushTyping()
+	a, _, ok := s.next(now)
+	if !ok || a.Kind != "keyboard.keydown" || a.Count != 1 || s.typing != nil {
+		t.Fatal("checkpoint left a pending typing burst")
+	}
+	s.flushTyping()
+	if len(s.pending) != 0 {
+		t.Fatal("repeated checkpoint duplicated an action")
+	}
+}

@@ -3,12 +3,15 @@ import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import Darwin
 
 let emitLock = NSLock()
 // The product runs this recorder inside Memmy Computer Use.app. The CLI keeps
 // stdout output for source builds and standalone diagnostics.
 var historyEventSink: ((String) -> Void)?
 var historySessionId: UInt64 = 0
+var historyNativeSessionId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+var historyNativeSequence: UInt64 = 0
 
 let separatelyAuthorizedSourceBundleIds: Set<String> = ["com.tencent.xinwechat", "com.tencent.wechat"]
 
@@ -17,13 +20,17 @@ func isSeparatelyAuthorizedSource(_ application: [String: Any]) -> Bool {
 }
 
 func emit(_ payload: [String: Any], expectedSession: UInt64? = nil) {
-  guard JSONSerialization.isValidJSONObject(payload),
-        let data = try? JSONSerialization.data(withJSONObject: payload),
-        let line = String(data: data, encoding: .utf8)
-  else { return }
   emitLock.lock()
   defer { emitLock.unlock() }
   if let expectedSession, expectedSession != historySessionId { return }
+  var ordered = payload
+  ordered["nativeSessionId"] = historyNativeSessionId
+  ordered["nativeSequence"] = historyNativeSequence + 1
+  guard JSONSerialization.isValidJSONObject(ordered),
+        let data = try? JSONSerialization.data(withJSONObject: ordered),
+        let line = String(data: data, encoding: .utf8)
+  else { return }
+  historyNativeSequence += 1
   if let historyEventSink {
     historyEventSink(line)
   } else {
@@ -66,7 +73,13 @@ func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool {
 }
 
 func timestamp() -> String {
-  ISO8601DateFormatter().string(from: Date())
+  timestampAt(Date())
+}
+
+func timestampAt(_ date: Date) -> String {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter.string(from: date)
 }
 
 // Diagnostics never carry an app, title, URL, text, or a window identity.
@@ -74,6 +87,7 @@ func timestamp() -> String {
 let diagnosticLock = NSLock()
 var diagnosticLastAt: [String: Date] = [:]
 var diagnosticCounts: [String: Int] = [:]
+var diagnosticPendingAt: [String: Date] = [:]
 let diagnosticQueue = DispatchQueue(label: "human-recorder.diagnostics")
 var pendingDiagnostics: [String: (payload: [String: Any], session: UInt64)] = [:]
 var pendingDiagnosticOrder: [String] = []
@@ -122,11 +136,15 @@ func emitRecorderDiagnostic(code: String, count: Int? = nil, minimumInterval: Ti
   if let expected, expected != recorderSession() { return }
   let now = Date()
   diagnosticLock.lock()
-  if let count { diagnosticCounts[code, default: 0] += count }
+  if let count {
+    diagnosticCounts[code, default: 0] += count
+    diagnosticPendingAt[code] = now
+  }
   if let last = diagnosticLastAt[code], now.timeIntervalSince(last) < minimumInterval {
     diagnosticLock.unlock(); return
   }
   let accumulated = diagnosticCounts.removeValue(forKey: code)
+  diagnosticPendingAt.removeValue(forKey: code)
   diagnosticLastAt[code] = now
   diagnosticLock.unlock()
   var payload: [String: Any] = ["type": "recorder.diagnostic", "timestamp": timestamp(), "code": code]
@@ -135,6 +153,25 @@ func emitRecorderDiagnostic(code: String, count: Int? = nil, minimumInterval: Ti
   // A stalled output sink must not stall the input tap's overflow path. Only
   // one pending content-free payload per diagnostic code is retained.
   queueRecorderDiagnostic(payload, session: session)
+}
+
+// Throttled faults must not remain hidden behind a successful checkpoint.
+// Original observation times preserve the Host's readiness ordering. Pending
+// faults also mark this boundary conservatively partial, including counts
+// that could straddle its timestamp cutoff.
+func flushCheckpointDiagnostics(session: UInt64) -> [String] {
+  diagnosticLock.lock()
+  let counts = diagnosticCounts, times = diagnosticPendingAt
+  let faults: Set<String> = ["observer_unavailable", "observer_notifications_unavailable", "ax_snapshot_budget_exceeded",
+    "enrichment_backlog", "privacy_unknown", "input_monitoring_unavailable"]
+  let waiting = pendingDiagnostics.keys.filter { faults.contains($0) }
+  diagnosticCounts.removeAll(); diagnosticPendingAt.removeAll()
+  diagnosticLock.unlock()
+  for (code, count) in counts {
+    queueRecorderDiagnostic(["type": "recorder.diagnostic", "timestamp": timestampAt(times[code] ?? Date()),
+      "code": code, "count": count], session: session)
+  }
+  return Set(Array(counts.keys) + waiting).sorted()
 }
 
 // AX calls have an individual timeout, but a tree of individually slow calls
@@ -361,8 +398,8 @@ func accessibilityHit(at point: CGPoint, expectedPid: pid_t, expectedWindow: AXU
         let element = elementRef
   else { return nil }
   var pid: pid_t = 0
-  // A click that activates another app (or a minimized private window in the
-  // Dock) must not attach that target's labels to the old foreground app.
+  // A click that activates another app (or a minimized window in the Dock)
+  // must not attach that target's labels to the old foreground app.
   guard AXUIElementGetPid(element, &pid) == .success, pid == expectedPid,
         accessibilityString(element, kAXRoleAttribute as CFString) != "AXDockItem",
         accessibilityString(element, kAXSubroleAttribute as CFString) != "AXMinimizedWindowDockItem",
@@ -529,7 +566,7 @@ let enrichmentQueueKey = DispatchSpecificKey<Bool>()
 // MARK: - Bounded enrichment scheduling
 
 final class HistoryEnrichmentScheduler {
-  private struct Work { let key: String?; let run: () -> Void }
+  private struct Work { let key: String?; let barrier: Bool; let run: () -> Void }
   private let lock = NSLock()
   private let queue: DispatchQueue
   private let limit: Int
@@ -545,8 +582,9 @@ final class HistoryEnrichmentScheduler {
     lock.lock()
     // Replace a queued sampling job with its newest state. Input jobs have no
     // key and preserve their order, including mouse-down/up drag endpoints.
-    if let key, let index = pending.firstIndex(where: { $0.key == key }) {
-      pending[index] = Work(key: key, run: run)
+    let afterBarrier = (pending.lastIndex(where: { $0.barrier }) ?? -1) + 1
+    if let key, let index = pending.indices.dropFirst(afterBarrier).first(where: { pending[$0].key == key }) {
+      pending[index] = Work(key: key, barrier: false, run: run)
       lock.unlock(); return
     }
     var dropped = false
@@ -557,7 +595,7 @@ final class HistoryEnrichmentScheduler {
         lock.unlock(); overflow(); return
       }
     }
-    pending.append(Work(key: key, run: run))
+    pending.append(Work(key: key, barrier: false, run: run))
     let start = !draining
     draining = true
     lock.unlock()
@@ -567,6 +605,19 @@ final class HistoryEnrichmentScheduler {
 
   func cancelPending() {
     lock.lock(); pending.removeAll(); lock.unlock()
+  }
+
+  // Control markers cannot be dropped or replaced by sampling coalescence.
+  // The caller also bounds outstanding requests to sixteen.
+  func checkpoint(_ run: @escaping () -> Void) -> Bool {
+    lock.lock()
+    guard pending.filter({ $0.barrier }).count < 16 else { lock.unlock(); return false }
+    pending.append(Work(key: nil, barrier: true, run: run))
+    let start = !draining
+    draining = true
+    lock.unlock()
+    if start { queue.async { self.drain() } }
+    return true
   }
 
   private func drain() {
@@ -598,121 +649,6 @@ func enqueueEnrichment(key: String? = nil, _ capture: @escaping () -> Void) {
     defer { state.removeObject(forKey: historyWorkSessionKey) }
     withAXReadBudget(1) { capture() }
   }
-}
-
-// MARK: - Browser privacy evidence
-// These caches and the AX sampling clock are owned by enrichmentQueue.
-// A title marker can prove privacy, but an ordinary page title cannot prove
-// normal mode. Use native browser chrome only; never inspect page content or
-// bookmark names for privacy markers, or request Apple Events permission.
-let privateWindowTitleMarkers = [
-  "(incognito)", "(private)", "(inprivate)", "(无痕)", "（无痕）", "无痕模式",
-  "无痕浏览", "隐私浏览", "私密浏览", "(シークレット", "シークレット モード",
-  "(プライベート", "private browsing", "private browsing", "navegação privada",
-  "navigation privée", "navigazione privata", "navegación privada", "inkognito",
-  "incognito", "inprivate", "anonym", "privat", "privé", "privado", "prywat",
-  "privatno", "gizli", "súkrom", "частн", "инкогнито", "приват", "приватний",
-  "개인정보 보호", "시크릿", "プライベート",
-]
-
-func frontWindowIsPrivate(window: AXUIElement, bundleId: String, pageDetected: Bool = false) -> Bool? {
-  guard pageDetected || browserBundleIds.contains(bundleId) else { return false }
-  if let title = accessibilityString(window, kAXTitleAttribute as CFString),
-     privateWindowTitleMarkers.contains(where: { title.lowercased().contains($0.lowercased()) }) { return true }
-
-  let chromiumProfileBrowsers: Set<String> = [
-    "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
-    "com.google.Chrome.canary", "org.chromium.Chromium",
-  ]
-  let privateControlNames = ["incognito", "inprivate", "无痕", "无痕模式", "无痕浏览", "隐私浏览", "私密浏览", "private browsing", "シークレット", "シークレット モード"]
-  let addressNames: Set<String> = ["地址和搜索栏", "address and search bar", "網址和搜尋列", "地址與搜尋列"]
-  let excludedRoles: Set<String> = ["AXWebArea", "AXList", "AXOutline", "AXTable", "AXMenu", "AXRadioButton"]
-  var queue: [(AXUIElement, Int, AXUIElement?)] = [(window, 0, nil)]
-  var visited = 0
-  // Attribute observations are grouped by the actual AXToolbar identity. A
-  // bookmark named You cannot authorize its window because its toolbar has
-  // no browser address/search control. Never infer provenance from its name.
-  var toolbars: [AXUIElement] = []
-  var toolbarAddress: [Bool] = []
-  var toolbarNormal: [Bool] = []
-  var toolbarPrivate: [Bool] = []
-  var toolbarComplete: [Bool] = []
-  let deadline = Date().addingTimeInterval(0.15)
-  while !queue.isEmpty && visited < 120 && Date() < deadline {
-    let (current, queuedDepth, enclosingToolbar) = queue.removeFirst()
-    var depth = queuedDepth
-    visited += 1
-    AXUIElementSetMessagingTimeout(current, 0.03)
-    guard let role = accessibilityString(current, kAXRoleAttribute as CFString) else {
-      if let toolbar = enclosingToolbar,
-         let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
-      continue
-    }
-    // Website controls, page/user lists and tab labels are never mode evidence.
-    if excludedRoles.contains(role) { continue }
-    var toolbar = enclosingToolbar
-    if role == "AXToolbar" {
-      toolbar = current
-      toolbars.append(current)
-      toolbarAddress.append(false); toolbarNormal.append(false); toolbarPrivate.append(false)
-      toolbarComplete.append(true)
-      // Completeness belongs to this native toolbar, independently of the
-      // window's page, bookmarks, or other chrome branches.
-      depth = 0
-    }
-    if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) {
-      // Structural nodes need no labels. Avoid spending the small native AX
-      // budget on unrelated groups before the address/profile controls.
-      let labels = ["AXTextField", "AXComboBox", "AXButton"].contains(role)
-        ? [kAXTitleAttribute, kAXDescriptionAttribute].compactMap {
-            accessibilityString(current, $0 as CFString)?.lowercased()
-          } : []
-      if ["AXTextField", "AXComboBox"].contains(role),
-         labels.contains(where: { addressNames.contains($0) }) { toolbarAddress[index] = true }
-      if role == "AXButton" {
-        if labels.contains(where: { label in privateControlNames.contains(where: { marker in
-          label == marker || label.hasPrefix(marker + " (") || label.hasPrefix(marker + "（")
-        }) }) { toolbarPrivate[index] = true }
-        // Only verified Chrome native profile labels are positive normal-mode
-        // evidence. Named/custom profiles remain unknown rather than guessing.
-        if chromiumProfileBrowsers.contains(bundleId), labels.contains(where: { $0 == "您" || $0 == "you" }) {
-          toolbarNormal[index] = true
-        }
-      }
-    }
-    var childrenRef: CFTypeRef?
-    let result = copyAXAttribute(current, kAXChildrenAttribute as CFString, &childrenRef)
-    if result == .attributeUnsupported || result == .noValue { continue }
-    guard result == .success, let children = childrenRef as? [AXUIElement] else {
-      if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
-      continue
-    }
-    if depth >= 6 {
-      if !children.isEmpty, let toolbar,
-         let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
-      continue
-    }
-    if children.count > 24, let toolbar,
-       let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
-    let next = children.prefix(24).map { ($0, depth + 1, toolbar) }
-    // Finish the actual toolbar before visiting another window branch. A
-    // slow unrelated AX node cannot invalidate an already verified toolbar.
-    if toolbar != nil { queue.insert(contentsOf: next, at: 0) }
-    else { queue.append(contentsOf: next) }
-  }
-  // A deadline/node limit during this toolbar's scan still fails closed.
-  for (_, _, toolbar) in queue {
-    if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
-  }
-  for index in toolbars.indices where toolbarAddress[index] && toolbarPrivate[index] { return true }
-  // SafariWindow?IsSecure alone does not establish browsing mode. Safari and
-  // unsupported/custom-profile windows stay unknown until a normal-mode
-  // signal can be verified. An incomplete candidate-toolbar scan cannot
-  // authorize normal capture.
-  let normalProfile = toolbars.indices.contains {
-    toolbarAddress[$0] && toolbarNormal[$0] && toolbarComplete[$0]
-  }
-  return normalProfile ? false : nil
 }
 
 struct FocusSnapshot {
@@ -771,12 +707,6 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     let bundleId = source["bundleId"] as? String ?? ""
     let context = currentWindow(pid: pid, bundleId: bundleId)
     let window = context.payload
-    guard window["privateBrowsing"] as? Bool != true,
-          window["privateBrowsingUnknown"] as? Bool != true else {
-      if window["privateBrowsingUnknown"] as? Bool == true { emitRecorderDiagnostic(code: "privacy_unknown", count: 1) }
-      resetAXSamplingCache()
-      return
-    }
     if let expectedWindow {
       guard let actualWindow = context.element, CFEqual(expectedWindow, actualWindow),
             window["url"] as? String == expectedUrl else { return }
@@ -787,9 +717,7 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     ]
     // Read the URL from this event's actual window, including same-tab
     // navigation. Never reuse an earlier URL when the lookup fails.
-    if let element = context.element,
-       window["privateBrowsing"] as? Bool != true,
-       window["privateBrowsingUnknown"] as? Bool != true {
+    if let element = context.element {
       let windowKey = "\(pid):\(CFHash(element)):\(window["url"] as? String ?? "")"
       if let ax = axSnapshot(window: element, windowKey: windowKey, deduplicate: kind == "sampling.changed") {
         // Navigation during tree traversal must not attach the new page's
@@ -804,16 +732,14 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     }
     for (key, value) in extra { payload[key] = value }
     // AX reads can yield while another window of the same browser becomes
-    // active, or its privacy evidence changes. PID/URL alone are insufficient.
+    // active. PID/URL alone are insufficient.
     let latest = currentWindow(pid: pid, bundleId: bundleId)
     let sameWindow: Bool
     if let originalWindow = context.element, let latestWindow = latest.element {
       sameWindow = CFEqual(originalWindow, latestWindow)
     } else { sameWindow = context.element == nil && latest.element == nil }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-          sameWindow, latest.payload["url"] as? String == window["url"] as? String,
-          latest.payload["privateBrowsing"] as? Bool != true,
-          latest.payload["privateBrowsingUnknown"] as? Bool != true else {
+          sameWindow, latest.payload["url"] as? String == window["url"] as? String else {
       resetAXSamplingCache()
       return
     }
@@ -832,39 +758,16 @@ func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], ele
   var windowRef: CFTypeRef?
   let knownBrowser = browserBundleIds.contains(bundleId)
   if copyAXAttribute(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
-    // A browser's main window may be a different, normal window while its
-    // private window is foreground. Missing focus cannot authorize that fallback.
-    if knownBrowser {
-      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
-      return (["browser": true, "privateBrowsingUnknown": true], nil)
-    }
     _ = copyAXAttribute(app, kAXMainWindowAttribute as CFString, &windowRef)
   }
   var payload: [String: Any] = [:]
   if knownBrowser { payload["browser"] = true }
-  guard let window = axElement(windowRef) else {
-    if knownBrowser {
-      payload["privateBrowsingUnknown"] = true
-      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
-    }
-    return (payload, nil)
-  }
+  guard let window = axElement(windowRef) else { return (payload, nil) }
   if let title = accessibilityString(window, kAXTitleAttribute as CFString) { payload["title"] = title }
   let pageUrl = knownBrowser ? browserPage(window: window).url : quickPageUrl(window)
   if let pageUrl {
     payload["browser"] = true
     payload["url"] = pageUrl
-  }
-  let treatsAsBrowser = knownBrowser || pageUrl != nil
-  if treatsAsBrowser {
-    // The same AX window may change mode or expose controls only after load.
-    // Revalidate each event; never retain an earlier false classification.
-    if let isPrivate = frontWindowIsPrivate(window: window, bundleId: bundleId, pageDetected: pageUrl != nil) {
-      if isPrivate { payload["privateBrowsing"] = true; resetAXSamplingCache() }
-    } else {
-      payload["privateBrowsingUnknown"] = true
-      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
-    }
   }
   return (payload, window)
 }
@@ -899,8 +802,6 @@ func emitSelectionChanged(_ element: AXUIElement) {
     else { return }
     let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
     guard let window = context.element,
-          context.payload["privateBrowsing"] as? Bool != true,
-          context.payload["privateBrowsingUnknown"] as? Bool != true,
           elementBelongsToWindow(element, window: window, pid: pid),
           accessibilityString(element, kAXRoleAttribute as CFString) != "AXSecureTextField",
           accessibilityString(element, kAXSubroleAttribute as CFString) != "AXSecureTextField"
@@ -924,8 +825,6 @@ func emitSelectionChanged(_ element: AXUIElement) {
     guard !selection.isEmpty, !secureInputActive(),
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
           let latestWindow = latest.element, CFEqual(window, latestWindow),
-          latest.payload["privateBrowsing"] as? Bool != true,
-          latest.payload["privateBrowsingUnknown"] as? Bool != true,
           elementBelongsToWindow(element, window: latestWindow, pid: pid)
     else { return }
     if target.isEmpty { target = ["role": "AXUnknown"] }
@@ -1235,9 +1134,7 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
       var target: [String: Any] = [:]
-      if let window = context.element,
-         context.payload["privateBrowsing"] as? Bool != true,
-         context.payload["privateBrowsingUnknown"] as? Bool != true {
+      if let window = context.element {
         target = resolveTarget(at: point, pid: pid, window: window)
         if type == .leftMouseDown { dragOrigin = (point, target, pid, window, context.payload["url"] as? String) }
       } else if type == .leftMouseDown { dragOrigin = nil }
@@ -1264,9 +1161,7 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
       guard let window = context.element, CFEqual(window, origin.window),
-            context.payload["url"] as? String == origin.url,
-            context.payload["privateBrowsing"] as? Bool != true,
-            context.payload["privateBrowsingUnknown"] as? Bool != true else { return }
+            context.payload["url"] as? String == origin.url else { return }
       let dx = point.x - origin.point.x
       let dy = point.y - origin.point.y
       // Anything under a few points is a click that wobbled, not a drag.
@@ -1293,22 +1188,7 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
       guard !excludesUnconsentedWeChat(application), let pid = application["pid"] as? pid_t,
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
-      guard context.payload["privateBrowsing"] as? Bool != true,
-            context.payload["privateBrowsingUnknown"] as? Bool != true else { return }
-      // Raw keys captured in a private window must not become public merely
-      // because enrichment runs after another window of the same app activates.
-      let browser = context.payload["browser"] as? Bool == true
-      if browser {
-        guard let window = context.element, let element = focus.element,
-              focusSnapshotIsCurrent(focus, pid: pid),
-              elementBelongsToWindow(element, window: window, pid: pid) else { return }
-      }
       let target = keyboardTarget(snapshot: focus, pid: pid, window: context.element)
-      if browser {
-        guard let window = context.element, let element = focus.element,
-              focusSnapshotIsCurrent(focus, pid: pid),
-              elementBelongsToWindow(element, window: window, pid: pid) else { return }
-      }
       guard let classified = classifiedKeyboard(keyCode: keyCode, text: text, modifiers: modifiers, secure: secure),
             let kind = classified["kind"] as? String,
             var keyboard = classified["keyboard"] as? [String: Any]
@@ -1380,12 +1260,14 @@ public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
   }
   emitLock.lock()
   historySessionId &+= 1
+  historyNativeSessionId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  historyNativeSequence = 0
   historyEventSink = output
   emitLock.unlock()
   enrichmentScheduler.cancelPending()
   inputMonitoringWasReady = nil
   diagnosticLock.lock()
-  diagnosticLastAt.removeAll(); diagnosticCounts.removeAll()
+  diagnosticLastAt.removeAll(); diagnosticCounts.removeAll(); diagnosticPendingAt.removeAll()
   pendingDiagnostics.removeAll(); pendingDiagnosticOrder.removeAll()
   diagnosticLock.unlock()
   samplingLock.lock(); lastScrollSampleAt = nil; samplingLock.unlock()
@@ -1452,4 +1334,61 @@ public func stopHistoryRecorder() {
   observedPid = nil
   observedObserver = nil
   axStateLock.unlock()
+}
+
+/// Orders a marker after already accepted enrichment and diagnostic work.
+/// Interval coverage remains the Host's responsibility; this confirms a boundary.
+public func checkpointHistoryRecorder(id: String) {
+  guard UUID(uuidString: id)?.uuidString.lowercased() == id else { return }
+  let session = recorderSession()
+  let accepted = enrichmentScheduler.checkpoint {
+    guard recorderSession() == session else { return }
+    let issues = flushCheckpointDiagnostics(session: session)
+    diagnosticQueue.sync {}
+    emit(["kind": "session.checkpoint", "id": id, "complete": true, "issues": issues], expectedSession: session)
+  }
+  if !accepted {
+    emit(["kind": "session.checkpoint", "id": id, "complete": false], expectedSession: session)
+  }
+}
+
+/// Bounded stdin controls shared by the standalone recorder and app proxy.
+/// Cancelling never closes the caller's stdin. Owned resources close on its queue.
+public final class HistoryControlInput: @unchecked Sendable {
+  private let source: DispatchSourceRead
+  private let descriptor: Int32
+  private let checkpoint: @Sendable (String) -> Void
+  private let end: @Sendable () -> Void
+  private var bytes: [UInt8] = []
+  private var overflow = false
+
+  public init(fileDescriptor: Int32, onCheckpoint: @escaping @Sendable (String) -> Void,
+              onEnd: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void = {}) {
+    descriptor = fileDescriptor; checkpoint = onCheckpoint; end = onEnd
+    source = DispatchSource.makeReadSource(fileDescriptor: fileDescriptor,
+      queue: DispatchQueue(label: "human-recorder.controls"))
+    source.setEventHandler { [weak self] in self?.readControls() }
+    source.setCancelHandler(handler: onClose)
+    source.resume()
+  }
+
+  public func cancel() { source.cancel() }
+  deinit { source.cancel() }
+
+  private func readControls() {
+    let capacity = 4096
+    var input = [UInt8](repeating: 0, count: capacity)
+    let count = Darwin.read(descriptor, &input, capacity)
+    if count < 0 && (errno == EINTR || errno == EAGAIN) { return }
+    guard count > 0 else { end(); source.cancel(); return }
+    for byte in input.prefix(count) {
+      if byte == 10 {
+        if !overflow, let request = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any],
+           request["kind"] as? String == "checkpoint", let id = request["id"] as? String,
+           UUID(uuidString: id)?.uuidString.lowercased() == id { checkpoint(id) }
+        bytes.removeAll(keepingCapacity: true); overflow = false
+      } else if bytes.count >= 512 { overflow = true }
+      else if !overflow { bytes.append(byte) }
+    }
+  }
 }

@@ -88,6 +88,11 @@ func TestADialogThatClosesAfterTheActionIsAResult(t *testing.T) {
 	if !unsent.IsError || unsent.Content[0].Text != "The observed target window is unavailable." {
 		t.Fatalf("unsent unavailable result = %#v", unsent)
 	}
+	available := powerShellErrorResult(&psResponse{TargetWindowUnavailable: true, RequestedWindowID: 345,
+		Error: "The observed target window is unavailable.", AvailableWindows: []observedWindow{{WindowID: 101, Title: "PowerPoint"}}})
+	if !available.IsError || !strings.Contains(available.Content[0].Text, "- window_id=101 PowerPoint") {
+		t.Fatalf("unavailable observation hid the available window IDs = %#v", available)
+	}
 }
 
 func TestAClickThatOpensADialogPointsToItsWindow(t *testing.T) {

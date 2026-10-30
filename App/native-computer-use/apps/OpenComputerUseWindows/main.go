@@ -762,14 +762,16 @@ func powerShellErrorResult(response *psResponse) toolCallResult {
 	}
 	if response.TargetWindowUnavailable {
 		result := textResult(response.Error, true)
+		lines := []string{response.Error}
 		if response.Dispatched {
 			// A dialog or popup closes once its command runs; that is a result.
-			lines := []string{fmt.Sprintf("The action was sent, and window %d then closed, as a dialog or popup does after its command. Do not repeat the action. Call get_app_state with the window_id where its result should appear.", response.RequestedWindowID)}
-			for _, window := range response.AvailableWindows {
-				lines = append(lines, fmt.Sprintf("- window_id=%d %s", window.WindowID, strings.ReplaceAll(window.Title, "\n", " ")))
-			}
-			result = textResult(strings.Join(lines, "\n"), false)
+			lines[0] = fmt.Sprintf("The action was sent, and window %d then closed, as a dialog or popup does after its command. Do not repeat the action. Call get_app_state with the window_id where its result should appear.", response.RequestedWindowID)
+			result.IsError = false
 		}
+		for _, window := range response.AvailableWindows {
+			lines = append(lines, fmt.Sprintf("- window_id=%d %s", window.WindowID, strings.ReplaceAll(window.Title, "\n", " ")))
+		}
+		result.Content[0].Text = strings.Join(lines, "\n")
 		result.Meta = map[string]any{"memmyComputerUse": map[string]any{
 			"targetWindowUnavailable": true, "requestedWindowID": response.RequestedWindowID,
 			"pid": response.PID, "availableWindows": response.AvailableWindows,

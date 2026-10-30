@@ -235,6 +235,11 @@ function BrowserContext($root,[string]$title,[string]$windowId,[int]$processId,[
   return $context
 }
 
+function SnapshotResult($lines,$targets,[bool]$truncated,[int]$failures) {
+  # PowerShell 5.1's @($genericObjectList) binder throws ArgumentException.
+  # Materialize the array explicitly, including empty target lists.
+  return @{text=[string]::Join("`n",$lines);truncated=$truncated;readFailures=$failures;targets=$targets.ToArray()}
+}
 function Snapshot($root,[DateTime]$deadline,$walker=$null) {
   $queue=New-Object System.Collections.Queue;$queue.Enqueue(@{node=$root;secure=$false})
   if ($null -eq $walker) {$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker}
@@ -285,9 +290,7 @@ function Snapshot($root,[DateTime]$deadline,$walker=$null) {
     } catch {$failures++}
   }
   if ($queue.Count -gt 0) {$truncated=$true}
-  # PowerShell 5.1's array-subexpression binder throws for List[object], even
-  # when empty. That discarded every full snapshot while action reads worked.
-  return @{text=[string]::Join("`n",$lines);truncated=$truncated;readFailures=$failures;targets=$targets.ToArray()}
+  return SnapshotResult $lines $targets $truncated $failures
 }
 
 if ($SelfTest) {
@@ -349,6 +352,16 @@ if ($SelfTest) {
     }
   }
   # No AutomationElement, desktop window, hooks or listener is created here.
+  $snapshotLines=New-Object 'System.Collections.Generic.List[string]'
+  [void]$snapshotLines.Add('Public fixture')
+  $snapshotTargets=New-Object 'System.Collections.Generic.List[object]'
+  $emptySnapshot=SnapshotResult $snapshotLines $snapshotTargets $false 0
+  if ($emptySnapshot.text -ne 'Public fixture' -or $emptySnapshot.targets.Count -ne 0) {throw 'Empty snapshot serialization failed'}
+  [void]$snapshotTargets.Add(@{runtimeId='public-button';target=@{role='AXButton';title='Save'}})
+  $serializedSnapshot=SnapshotResult $snapshotLines $snapshotTargets $true 2 | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+  if ($serializedSnapshot.targets.Count -ne 1 -or $serializedSnapshot.targets[0].target.title -ne 'Save' -or -not $serializedSnapshot.truncated -or $serializedSnapshot.readFailures -ne 2) {throw 'Snapshot target serialization failed'}
+  if (-not (PrivateSignal 'Guest') -or -not (PrivateSignal 'InPrivate') -or -not (PrivateSignal '无痕')) {throw 'Private markers failed'}
+  if (PrivateSignal 'Example - Google Chrome') {throw 'Normal title falsely private'}
   if ((Url 'https://user:secret@example.com/path?token=secret#fragment') -ne 'https://example.com/path') {throw 'URL sanitization failed'}
   if (Url 'chrome://settings') {throw 'Non-web URL accepted'}
   if (ConsentAllowed '') {throw 'Missing consent accepted'}

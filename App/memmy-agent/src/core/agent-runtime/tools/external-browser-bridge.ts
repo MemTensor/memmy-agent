@@ -3,6 +3,7 @@ import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { browserHistoryConfiguration, BROWSER_HISTORY_CONFIG_TTL_MS } from "../../../tools/computer-history/browser-history-bridge.js";
 import type { BrowserHistoryCaptureIntent, BrowserHistoryTrustedContext } from "../../../tools/computer-history/browser-semantic-history.js";
+import { redactSensitive } from "../../../tools/computer-history/core/redaction.js";
 
 // Derived from the public key in the packaged MV3 manifest. The private key is
 // not needed to load an unpacked extension and is deliberately not distributed.
@@ -130,6 +131,7 @@ export class ExternalBrowserBridge {
   private browserHistoryIntentProvider: (() => BrowserHistoryCaptureIntent) | null = null;
   private readonly browserHistoryListeners = new Set<(payload: unknown, context: BrowserHistoryTrustedContext) => void>();
   private readonly browserHistoryInputs = new Map<string, { connectionId: string; tabId: number; sentAt: number }>();
+  private readonly teachingListeners = new Map<string, Set<(message: Record<string, unknown>) => void>>();
   private nextId = 1;
   private port = 0;
   private startTask: Promise<{ port: number }> | null = null;
@@ -254,6 +256,39 @@ export class ExternalBrowserBridge {
   listHistoryFocusObservations(): ExternalBrowserHistoryFocus[] {
     return [...this.clients.values()].flatMap(client => client.authorized && client.historyFocus
       ? [{ ...client.historyFocus }] : []);
+  }
+
+  /** Each connection belongs to one extension/profile. Never choose the first profile for teaching. */
+  listTeachingProfiles() {
+    const connected = [...this.clients.entries()].filter(([, client]) => client.authorized && client.browser);
+    return connected.flatMap(([connectionId, client]) => client.authorized && client.browser
+      ? [{ connectionId, browser: client.browser, supported: client.capabilities.has("teachingCapture/v2"),
+        // A single profile needs no inventory. Ambiguous profiles expose only a few chooser labels,
+        // never full navigation URLs, query strings, page values or browsing history.
+        windows: connected.filter(([, other]) => other.browser === client.browser).length < 2 ? []
+          : [...client.claims.values()].sort((a, b) => Number(!!b.active) - Number(!!a.active)).slice(0, 3)
+            .map(tab => ({ tabId: tab.tabId, title: redactSensitive(safeText(tab.title, 160)), url: new URL(tab.url).origin })) }] : []);
+  }
+
+  subscribeTeaching(connectionId: string, sessionId: string, listener: (message: Record<string, unknown>) => void) {
+    const key = `${connectionId}:${sessionId}`, listeners = this.teachingListeners.get(key) ?? new Set();
+    listeners.add(listener); this.teachingListeners.set(key, listeners);
+    return () => { listeners.delete(listener); if (!listeners.size) this.teachingListeners.delete(key); };
+  }
+
+  teachingCommand(connectionId: string, sessionId: string, action: "prepare" | "start" | "checkpoint" | "stop" | "cancel",
+    input: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const client = this.clients.get(connectionId);
+    if (!client?.authorized || client.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("browser_capture_disconnected"));
+    if (!client.capabilities.has("teachingCapture/v2")) return Promise.reject(new Error("Reload the Memmy browser extension to enable teaching capture v2: memmy://settings/browser-extension"));
+    const id = `${connectionId}:${this.nextId++}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error("browser_capture_ack_timeout")); }, action === "stop" ? 5000 : COMMAND_TIMEOUT_MS);
+      timer.unref?.();
+      this.pending.set(id, { resolve: value => resolve(value as Record<string, unknown>), reject, timer, cleanup: () => undefined });
+      try { client.socket.send(JSON.stringify({ type: "teaching_command", id, sessionId, action, input })); }
+      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+    });
   }
 
   /** Rescan existing pages without opening tabs; pages the user stopped return only after the extension's cooldown. */
@@ -531,6 +566,11 @@ export class ExternalBrowserBridge {
           ...(typeof message.sessionId === 'string' ? { sessionId: message.sessionId } : {}),
         };
         for (const listener of this.playwrightListeners.get(`${connectionId}:${tabId}`) ?? []) listener(event);
+      } else if (message.type === "teaching_event" && typeof message.sessionId === "string") {
+        for (const listener of this.teachingListeners.get(`${connectionId}:${message.sessionId}`) ?? []) {
+          // The source owns validation and durable writes. Its failures must not escape a socket callback.
+          try { listener(message); } catch { /* Source records its own terminal failure. */ }
+        }
       } else if (message.type === "history_focus") {
         const now = Date.now();
         if (message.browser !== client.browser || typeof message.focused !== "boolean"
@@ -621,6 +661,10 @@ export class ExternalBrowserBridge {
         browser: client.browser, extensionVersion: client.extensionVersion, closeCode: code }, connectionPort);
       this.clients.delete(connectionId);
       for (const [id, input] of this.browserHistoryInputs) if (input.connectionId === connectionId) this.browserHistoryInputs.delete(id);
+      for (const [key, listeners] of this.teachingListeners) if (key.startsWith(`${connectionId}:`)) {
+        for (const listener of listeners) { try { listener({ kind: "disconnected" }); } catch { /* Isolate source failures. */ } }
+        this.teachingListeners.delete(key);
+      }
       for (const [id, pending] of this.pending) {
         if (!id.startsWith(`${connectionId}:`)) continue;
         clearTimeout(pending.timer);

@@ -25,5 +25,6 @@ export interface MemmyAgentAdminClient {
     appSecret?: string;
     domain?: "feishu" | "lark";
   }>;
+  invokePluginHostService?(pluginId: string, service: string, input: unknown, context?: { dataRoot: string }): Promise<unknown>;
   reloadMcpConfig(): Promise<{ ok: boolean; message: string; requires_restart: boolean }>;
 }

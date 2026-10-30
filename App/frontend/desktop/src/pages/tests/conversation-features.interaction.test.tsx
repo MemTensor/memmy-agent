@@ -12,7 +12,7 @@ import type { AgentChatMessage } from "../../state/agent-chat-slice.js";
 const mocks = vi.hoisted(() => ({
   chatId: null as string | null,
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
-  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
+  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(), draft: vi.fn(),
   openArtifact: vi.fn(() => true),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
@@ -49,10 +49,9 @@ describe("conversation feature integration", () => {
   let features: ReturnType<typeof useConversationFeatures>;
   function Harness() {
     ui = usePluginUi();
-    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
-      onStageFiles: async () => {}, onOpenArtifact: mocks.openArtifact,
-      onSend: mocks.send, onOpenRecording: mocks.openRecording });
-    return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
+    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
+      onStageFiles: async () => {}, onOpenArtifact: mocks.openArtifact, onSend: mocks.send, onOpenRecording: mocks.openRecording });
+    return <>{features.recorders}<header>{features.conversationShortcut}</header><nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = () => root.render(<I18nProvider language="zh-CN"><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
   const button = (name: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === name);
@@ -68,6 +67,27 @@ describe("conversation feature integration", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); localStorage.clear(); });
+
+  it("keeps Teach Mode shortcuts on the Agent skill path across plugin state refreshes", async () => {
+    const teach = { id: "teach-mode", state: "active", manifest: { conversation: {}, capabilities: [], commands: [
+      { command: "/teach", name: "Teach Mode", capabilityId: "teach", agentSkillId: "teach-mode", pinned: true, topbar: true }
+    ] } };
+    mocks.chatId = "teach-chat";
+    mocks.list.mockResolvedValue([teach]);
+    await act(async () => render());
+    await act(async () => container.querySelector<HTMLButtonElement>("header button")!.click());
+    expect(mocks.draft).toHaveBeenLastCalledWith("$teach-mode");
+    await act(async () => button("Teach Mode")!.click());
+    expect(mocks.draft).toHaveBeenCalledTimes(2);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+    expect(features.runCommand("/teach")).toBe(false);
+    expect(features.agentPrompt("/teach copy papers")).toBe("$teach-mode copy papers");
+    mocks.list.mockResolvedValue([{ ...teach, state: "disabled" }]);
+    await act(async () => { window.dispatchEvent(new Event("memmy:plugins-changed")); });
+    expect(container.querySelector("header button")).toBeNull();
+    expect(button("Teach Mode")).toBeUndefined();
+  });
 
   it("keeps legal shortcuts out of empty and unrelated conversations", async () => {
     await act(async () => render());

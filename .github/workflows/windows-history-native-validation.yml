@@ -1,0 +1,93 @@
+name: Windows Computer History validation
+
+on:
+  push:
+    branches:
+      - "pxlin/dev"
+      - "integrate/**"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-history-native-validation.yml"
+      - "scripts/internal/win/history-*.ps1"
+      - "scripts/internal/shared/validate-computer-history.mjs"
+      - "tests/*computer-history*"
+      - "tests/windows-history-workflow.test.ts"
+      - "App/memmy-agent/**"
+      - "App/native-computer-history/**"
+      - "App/frontend/desktop/**"
+      - "App/shell/desktop/**"
+      - "App/backend/local-api-contracts/**"
+      - "Knowledge/**"
+      - "Migrations/**"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.12"
+          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+      - name: Install dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix App/memmy-agent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build native recorder and controlled fixtures
+        run: |
+          ./scripts/internal/win/history-recorder-native.ps1 -Configuration Release -BuildRoot "$env:GITHUB_WORKSPACE/.history-ci/build" -ArtifactsRoot "$env:GITHUB_WORKSPACE/.history-ci/artifacts"
+      - name: Run native tests serially and save results
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $ctest = Join-Path $vsRoot 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/ctest.exe'
+          & $ctest --test-dir .history-ci/build/release --parallel 1 --output-on-failure --output-junit "$env:GITHUB_WORKSPACE/.history-ci/native-results.xml"
+          $testExit = $LASTEXITCODE
+          ./scripts/internal/win/history-validation-report.ps1 -Report .history-ci/native-results.xml -Output .history-ci/native-summary.json
+          if ($testExit -ne 0) { exit $testExit }
+      - name: Run History contracts, UI, packaging and native lifecycle validation
+        env:
+          MEMMY_LEGAL_CN_BASE_URL: https://memmy.cn
+          MEMMY_LEGAL_INTL_BASE_URL: https://memmy.bot
+        run: |
+          node scripts/internal/shared/validate-computer-history.mjs --report-dir "$env:GITHUB_WORKSPACE/.history-ci/regression" --native-bin "$env:GITHUB_WORKSPACE/.history-ci/build/release"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record validation scope
+        if: ${{ always() }}
+        run: |
+          @'
+          Windows History validation covers the native recorder, controlled fixture privacy tests, strict adapter, application settings, UI and packaged collector contracts.
+          Foreground cases unavailable on the runner are explicitly skipped in native-summary.json; skipped cases are not passed. Unit, metadata and CLI tests must run.
+          This job does not install a signed App or validate real application providers, IME, pixel visibility or a model service.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: windows-computer-history-validation-results
+          path: |
+            .history-ci/native-results.xml
+            .history-ci/native-summary.json
+            .history-ci/artifacts/**
+            .history-ci/regression/**
+            .history-ci/build/release/Testing/**
+          if-no-files-found: warn
+          retention-days: 7

@@ -616,7 +616,9 @@ describe("packaged desktop runtime config", () => {
     );
 
     expect(children).toHaveLength(0);
-  });
+    // Windows CPU inspection can consume its 10s OS-query budget before the
+    // delayed health server runs; keep the reuse assertion beyond that budget.
+  }, process.platform === "win32" ? 20_000 : 5_000);
 
   it("reuses a compatible degraded Memory service started by dev-start", async () => {
     const root = await makeTempRoot();
@@ -1144,6 +1146,7 @@ describe("AgentGatewaySupervisor", () => {
       resolveProbe = resolve;
     }));
     const harness = createSupervisorHarness({ probe });
+    let ready = false; void harness.supervisor.ready.then(() => { ready = true; });
     const agentGateway: { startupIssue?: "model_config_invalid" } = {};
     const onStart = vi.fn();
     const onSettled = vi.fn();
@@ -1156,6 +1159,7 @@ describe("AgentGatewaySupervisor", () => {
     const second = start();
     expect(second).toBe(first);
     expect(probe).toHaveBeenCalledTimes(1);
+    expect(ready).toBe(false);
     resolveProbe("ready");
     await expect(first).resolves.toBeNull();
     await expect(start()).resolves.toBeNull();
@@ -1316,6 +1320,7 @@ describe("AgentGatewaySupervisor", () => {
       resolveProbe = resolve;
     }));
     const harness = createSupervisorHarness({ probe });
+    let ready = false; void harness.supervisor.ready.then(() => { ready = true; });
 
     const first = harness.supervisor.ensureStarted();
     const second = harness.supervisor.ensureStarted();
@@ -1326,6 +1331,7 @@ describe("AgentGatewaySupervisor", () => {
     await Promise.all([first, second]);
 
     expect(harness.supervisor.ownership).toBe("external");
+    expect(ready).toBe(true);
     expect(harness.spawn).not.toHaveBeenCalled();
     expect(harness.children).toEqual([]);
   });
@@ -1361,6 +1367,7 @@ describe("AgentGatewaySupervisor", () => {
         emitChildClose(child, 1);
       })
     });
+    let ready = false; void harness.supervisor.ready.then(() => { ready = true; });
 
     await expect(harness.supervisor.ensureStarted()).rejects.toThrow("invalid runtime config");
     harness.supervisor.startRecovery();
@@ -1370,12 +1377,14 @@ describe("AgentGatewaySupervisor", () => {
 
     expect(harness.spawn).toHaveBeenCalledTimes(2);
     expect(harness.supervisor.hasReachedReady).toBe(false);
+    expect(ready).toBe(false);
     await vi.advanceTimersByTimeAsync(999);
     expect(harness.spawn).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
 
     expect(harness.spawn).toHaveBeenCalledTimes(3);
     expect(harness.supervisor.hasReachedReady).toBe(true);
+    expect(ready).toBe(true);
     expect(harness.supervisor.restartTimer).toBeNull();
   });
 
@@ -1910,7 +1919,11 @@ describe("spawnNodeService 落盘与 env 注入", () => {
 
     await stopManagedChild(managed);
 
-    expect(managed.exitDescription).toBe("signal SIGKILL");
+    expect(managed.process.exitCode !== null || managed.process.signalCode !== null).toBe(true);
+    // Windows reports forced termination as exit code 1, while Unix can
+    // report the SIGKILL used after this child's SIGTERM handler refuses exit.
+    expect(managed.exitDescription).toBe(process.platform === "win32" ? "code 1" : "signal SIGKILL");
+    expect(() => process.kill(managed.process.pid!, 0)).toThrow();
   });
 });
 

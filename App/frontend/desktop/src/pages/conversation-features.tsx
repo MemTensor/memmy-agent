@@ -1,4 +1,5 @@
 import { buildPluginCapabilityLabels } from "./plugin-tool-activity.js";
+import { resolveContributionIcon } from "./agent-command-palette.js";
 import { SHARED_ROW_MIN_PANE_WIDTH, SHARED_ROW_PRIMARY_RESERVE } from "./sidebar-resize.js";
 import type { RecordingPanelSession } from "./interview-recording-panel.js";
 import { buildAgentRoutedPluginPrompt, buildLegalDiagnosisContinuation, collectPluginScenarios, pressPinnedPluginCommand, pluginInteractionSignature, reconcileHiddenPluginCalls, PinnedPluginCommandBar, selectConversationPinnedCommands, selectPinnedCommandsForLegalWorkflow, selectOpenPinnedCapabilities } from "./plugin-conversation-controls.js";
@@ -125,7 +126,9 @@ export function useConversationFeatures(options: {
     };
     refresh();
     window.addEventListener("focus", refresh);
-    return () => { active = false; window.removeEventListener("focus", refresh); };
+    window.addEventListener("memmy:plugins-changed", refresh);
+    const timer = setInterval(refresh, 5_000);
+    return () => { active = false; clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("memmy:plugins-changed", refresh); };
   }, [clients?.plugins, state.account.userId]);
 
   const archiveRecording = useCallback((entry: RecordingArchiveEntry) => {
@@ -193,7 +196,8 @@ export function useConversationFeatures(options: {
     if (legalFlowCardOpen && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
     setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(conversationId)!); return next; });
-    if (command.agentSkillId) { latest.current.onDraft(`${command.command} ${args}`); return; }
+    if (command.agentSkillId) { latest.current.onDraft(plugin.manifest.conversation
+      ? `$${command.agentSkillId}${args ? ` ${args}` : ""}` : `${command.command} ${args}`); return; }
     setError(null);
     try {
       await pressPinnedPluginCommand({ calls, pluginId: plugin.id, capabilityId: command.capabilityId,
@@ -280,6 +284,13 @@ export function useConversationFeatures(options: {
     recordingOpen={recordingShortcutOpen(recording.compactOpen, pluginRecording, hiddenRecordings.has(recordingOwner))}
     active={selectOpenPinnedCapabilities(prepared, ui?.dismissedCallIds, pinnedCapabilities, ui?.hiddenCallIds)}
     onRecordingPress={toggleCompactRecording} onPress={({ plugin, command }) => void invoke(plugin, command)} />;
+  const conversationCommand = targets.find(({ plugin, command }) => plugin.manifest.conversation && command.topbar);
+  const ConversationIcon = resolveContributionIcon(conversationCommand?.command.icon);
+  const conversationShortcut = conversationCommand ? <button type="button" className="thread-toolbar__button"
+    aria-label={conversationCommand.command.name} title={conversationCommand.command.name} data-plugin-conversation-toggle
+    onClick={() => void invoke(conversationCommand.plugin, conversationCommand.command)}>
+    <ConversationIcon size={15} aria-hidden="true" />
+  </button> : null;
   const artifactPanel = preview && clients?.plugins ? <PluginArtifactPreviewPanel artifact={preview}
     readArtifact={clients.plugins.readArtifact} onWidthChange={setFeaturePanelWidth}
     sharedRowWidth={options.sharedRowWidth} sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
@@ -311,7 +322,7 @@ export function useConversationFeatures(options: {
       }
     };
   };
-  return { cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
+  return { plugins, conversationShortcut, cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
     pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
     processInteraction,
     capturePendingInputRelease,

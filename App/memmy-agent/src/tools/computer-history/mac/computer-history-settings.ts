@@ -2,6 +2,7 @@ import { Tool } from "../../../core/agent-runtime/tools/base.js";
 import { getComputerHistoryDemoService } from "./computer-history-api.js";
 import type { ComputerHistoryDemoService } from "./computer-history-api.js";
 import { isComputerHistorySupported } from "../platform.js";
+import { collectorGate } from "../core/collector-gate.js";
 import {
   ObservationSettingsError,
   ObservationSettingsStore,
@@ -36,7 +37,7 @@ export class ComputerHistoryStatusTool extends Tool {
   }
 
   static enabled(): boolean {
-    return isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
+    return process.platform === "darwin" && isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
   }
 
   get name(): string { return "computer_history_status"; }
@@ -95,7 +96,7 @@ export class ComputerHistoryGetSettingsTool extends Tool {
   }
 
   static enabled(): boolean {
-    return isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
+    return process.platform === "darwin" && isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
   }
 
   get name(): string { return "computer_history_get_settings"; }
@@ -137,7 +138,7 @@ export class ComputerHistoryUpdateSettingsTool extends Tool {
   }
 
   static enabled(): boolean {
-    return isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
+    return process.platform === "darwin" && isComputerHistorySupported() && process.env.MEMMY_COMPUTER_HISTORY !== "0";
   }
 
   get name(): string { return "computer_history_update_settings"; }
@@ -154,6 +155,7 @@ export class ComputerHistoryUpdateSettingsTool extends Tool {
   get parameters() { return structuredClone(UPDATE_PARAMETERS); }
 
   async execute(params: { settings: unknown }): Promise<string> {
+    if (collectorGate.taskActive) return "Error: stop task recording before changing Computer History settings";
     try {
       const settings = this.store.write(params.settings);
       return JSON.stringify({ status: "ok", settings });

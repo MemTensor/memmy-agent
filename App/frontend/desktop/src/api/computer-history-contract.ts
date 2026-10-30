@@ -4,9 +4,32 @@ export const ComputerHistoryPermissionsSchema = z.object({
   supported: z.boolean(),
   accessibility: z.boolean(),
   inputMonitoring: z.boolean(),
+  platform: z.literal("windows").optional(),
+  ready: z.boolean().optional(),
+  reason: z.enum(["ready", "collector_unavailable", "authorization_required", "no_running_authorized_application", "settings_invalid", "discovery_failed"]).optional(),
 }).strict();
 export type ComputerHistoryPermissions = z.infer<typeof ComputerHistoryPermissionsSchema>;
 export type ComputerHistoryPermission = "accessibility" | "inputMonitoring";
+export function historyPermissionsReady(status?: ComputerHistoryPermissions): boolean {
+  return !!status?.supported && (status.platform === "windows" ? status.ready === true : status.accessibility && status.inputMonitoring);
+}
+const WindowsSelectorSchema = z.object({ controlType: z.enum(["Edit", "Document"]), automationId: z.string() }).strict();
+const WindowsDocumentSelectorSchema = z.union([WindowsSelectorSchema,
+  z.object({ controlType: z.literal("Edit"), automationId: z.literal(""), scope: z.literal("vscode.editor") }).strict(),
+  z.object({ controlType: z.literal("Document"), automationId: z.literal(""), scope: z.literal("word.document") }).strict()]);
+const WindowsAppRuleSchema = z.object({
+  executable: z.string(), searchFields: z.array(WindowsSelectorSchema).optional(), documentRegions: z.array(WindowsDocumentSelectorSchema).optional(),
+  sensitiveAutomationIds: z.array(z.string()).optional(),
+}).strict();
+export const WindowsHistorySettingsSchema = z.object({ version: z.literal(1), applications: z.array(WindowsAppRuleSchema), sensitiveAutomationIds: z.array(z.string()).optional(), deny: z.object({ executables: z.array(z.string()).optional() }).strict().optional(),
+defaultApplicationBehavior: z.enum(["observe", "do_not_observe"]).optional(),
+limits: z.object({ maxDepth: z.number(), maxNodes: z.number(), maxVisited: z.number(), maxTextChars: z.number(),
+  maxNodeTextChars: z.number(), queryBudgetMs: z.number(), workerTimeoutMs: z.number() }).strict().optional() }).strict();
+export const WindowsHistoryConfigurationSchema = z.object({ settings: WindowsHistorySettingsSchema,
+  applications: z.array(z.object({ id: z.string(), name: z.string(), executable: z.string(), running: z.boolean(), supported: z.boolean(), allowed: z.boolean(), rule: WindowsAppRuleSchema.optional() }).strict()),
+  permissions: ComputerHistoryPermissionsSchema }).strict();
+export type WindowsHistoryConfiguration = z.infer<typeof WindowsHistoryConfigurationSchema>;
+export type WindowsHistorySettings = z.infer<typeof WindowsHistorySettingsSchema>;
 
 export const ComputerHistoryWeChatReaderPreparationSchema = z.object({
   ready: z.boolean(),

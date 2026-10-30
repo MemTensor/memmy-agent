@@ -1,5 +1,6 @@
 /** Memmy Plugin Protocol contracts. */
 import { z } from "zod";
+import { PluginConversationSchema } from "./event-capture.js";
 
 export const JsonSchemaSchema = z.record(z.string(), z.unknown());
 export type JsonSchema = z.infer<typeof JsonSchemaSchema>;
@@ -49,6 +50,8 @@ export const PluginCapabilitySchema = z.object({
   inputSchema: JsonSchemaSchema,
   outputSchema: JsonSchemaSchema,
   execution: z.enum(["request", "job"]),
+  /** UI-only management capabilities can opt out of Agent tool discovery. */
+  agentVisible: z.boolean().optional(),
   /** Optional Host-owned execution control performed before invoking this capability. */
   control: PluginCapabilityControlSchema.optional(),
   examples: z.array(z.string().trim().min(1).max(500)).max(20).optional()
@@ -179,11 +182,18 @@ export const PluginManifestSchema = z.object({
   id: PluginIdentifierSchema,
   name: z.string().trim().min(1).max(128),
   version: z.string().trim().min(1).max(64),
+  description: z.string().trim().max(2_000).optional(),
+  platforms: z.array(z.enum(["win32", "darwin", "linux"])).min(1).optional(),
+  requiredHostCapabilities: z.array(z.string().trim().min(1).max(128)).max(32).optional(),
+  minimumHostVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/).optional(),
+  installMode: z.literal("manual").optional(),
+  updateMode: z.enum(["manual", "automatic"]).optional(),
   runtime: PluginRuntimeSchema,
   capabilities: z.array(PluginCapabilitySchema).min(1),
   permissions: z.array(PluginPermissionSchema),
   configSchema: JsonSchemaSchema.optional(),
   skills: z.array(PluginSkillContributionSchema).max(20).optional(),
+  conversation: PluginConversationSchema.optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
   scenarios: z.array(PluginScenarioContributionSchema).max(8).optional(),
   ui: PluginUiSchema.optional(),
@@ -238,6 +248,15 @@ export const PluginManifestSchema = z.object({
     skills.add(skill.id);
   }
   const commands = new Set<string>();
+  if (manifest.conversation) {
+    const contribution = manifest.conversation;
+    for (const id of [contribution.recordingCapabilityId, contribution.skillCapabilityId].filter(Boolean)) {
+      if (!ids.has(id!)) context.addIssue({ code: "custom", path: ["conversation"], message: `Unknown conversation capability: ${id}` });
+    }
+    for (const id of [contribution.recordingSkillId, contribution.creatorSkillId].filter(Boolean)) {
+      if (!skills.has(id!)) context.addIssue({ code: "custom", path: ["conversation"], message: `Unknown conversation skill: ${id}` });
+    }
+  }
   for (const [index, command] of (manifest.commands ?? []).entries()) {
     if (!ids.has(command.capabilityId)) {
       context.addIssue({ code: "custom", path: ["commands", index, "capabilityId"], message: `Unknown command capability id: ${command.capabilityId}` });
@@ -255,6 +274,18 @@ export const PluginManifestSchema = z.object({
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
+export const PluginCatalogItemSchema = z.object({
+  id: PluginIdentifierSchema,
+  name: z.string().min(1),
+  description: z.string(),
+  version: z.string().min(1),
+  platforms: z.array(z.enum(["win32", "darwin", "linux"])),
+  minimumHostVersion: z.string().optional(),
+  installMode: z.literal("manual").default("manual"),
+  updateMode: z.enum(["manual", "automatic"]).default("manual")
+});
+export type PluginCatalogItem = z.infer<typeof PluginCatalogItemSchema>;
 
 export const CapabilityCallSchema = z.object({
   callId: z.string().trim().min(1),
@@ -374,6 +405,8 @@ export const InstalledPluginSchema = z.object({
   manifest: PluginManifestSchema,
   eligibility: PluginEligibilitySchema.optional(),
   state: PluginStateSchema,
+  /** Persisted user choice, independent of current runtime availability. */
+  desiredEnabled: z.boolean().optional(),
   approvedPermissions: z.array(PluginPermissionSchema),
   config: z.record(z.string(), z.unknown()),
   lastError: z.string().nullable(),
@@ -421,12 +454,15 @@ export const InvokePluginCapabilityInputSchema = z.object({
   conversationId: z.string().trim().min(1),
   input: z.unknown(),
   deadline: z.string().datetime().optional(),
-  origin: PluginInvocationOriginSchema.default("agent")
+  origin: PluginInvocationOriginSchema.default("agent"),
+  /** Read-only conversation polling does not contribute chat cards. */
+  background: z.boolean().optional()
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
 export const InvokePluginCapabilityResponseSchema = z.object({
   callId: z.string().trim().min(1),
+  events: z.array(CapabilityEventSchema).optional(),
   event: CapabilityEventSchema
 });
 export type InvokePluginCapabilityResponse = z.infer<typeof InvokePluginCapabilityResponseSchema>;
@@ -453,6 +489,11 @@ export const PluginCapabilityEventPayloadSchema = z.object({
 });
 export type PluginCapabilityEventPayload = z.infer<typeof PluginCapabilityEventPayloadSchema>;
 
+/** Extension capabilities advertised by the production Host and release kit. */
+export const PLUGIN_HOST_CAPABILITIES = [
+  "memmy.mcp-native/v1", "memmy.host-service/v1", "memmy.event-sessions/v1",
+  "memmy.generated-skills/v1", "memmy.conversation/v1", "memmy.event-checkpoints/v1", "memmy.browser-event-sessions/v1"
+] as const;
 export const PluginCatalogEntrySchema = z.object({
   manifest: PluginManifestSchema,
   eligibility: PluginEligibilitySchema,

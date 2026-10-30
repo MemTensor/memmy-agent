@@ -1,3 +1,4 @@
+import { PLUGIN_HOST_CAPABILITIES } from "./plugin-host-capabilities.js";
 import { setTimeout as delay } from "node:timers/promises";
 /** Plugin installation and lifecycle service. */
 import {
@@ -31,6 +32,7 @@ export type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact
 export type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/index.js";
 
 export interface PluginService {
+  isBusy(id: string): boolean;
   list(): InstalledPlugin[];
   catalog(): Promise<PluginCatalogEntry[]>;
   suspend(id: string): Promise<void>;
@@ -63,6 +65,15 @@ export interface CreatePluginServiceOptions {
   /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
   isAuthenticated?: () => boolean;
   isEntitlementGranted?: (entitlement: string) => boolean;
+  platform?: NodeJS.Platform;
+  hostVersion?: string;
+  hasResourceLease?: (id: string) => boolean;
+  releaseResources?: (id: string) => Promise<void>;
+  activateGeneratedSkills?: (id: string) => Promise<void>;
+  /** Resolves only after the real Gateway health/bootstrap check succeeds. */
+  gatewayReady?: Promise<void>;
+  restoreRetryDelaysMs?: readonly number[];
+  onRestored?: () => Promise<unknown>;
   /** Private plugin IDs discoverable through server-issued account entitlements. */
   catalogPluginIds?: () => readonly string[];
   /** Runtime-wide barrier: plugin tools and Skills are shared across Agent turns. */
@@ -73,6 +84,17 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   const skillManager = options.skillManager ?? noopPluginSkillManager;
   const localArtifacts = options.localArtifactService ?? createPluginLocalArtifactService();
   const isEntitlementGranted = options.isEntitlementGranted ?? (() => false);
+  const compatible = (manifest: import("@memmy/local-api-contracts").PluginManifest) => {
+    if (manifest.platforms && !manifest.platforms.includes((options.platform ?? process.platform) as "win32" | "darwin" | "linux")) {
+      throw pluginError("plugin_incompatible", "This plugin does not support this operating system");
+    }
+    if (manifest.minimumHostVersion && (!options.hostVersion || compareVersions(options.hostVersion, manifest.minimumHostVersion) < 0)) {
+      throw pluginError("plugin_incompatible", `Requires Memmy ${manifest.minimumHostVersion} or later`);
+    }
+  };
+  const missingFeatures = (manifest: import("@memmy/local-api-contracts").PluginManifest) =>
+    (manifest.requiredHostCapabilities ?? []).filter(feature => !(PLUGIN_HOST_CAPABILITIES as readonly string[]).includes(feature));
+  const busy = (id: string) => Boolean(options.runtimeHost.isBusy?.(id) || options.hasResourceLease?.(id));
   // Enforced here rather than only in the reconciler so a direct local-API call cannot bypass it.
   const eligibility = (manifest: PluginRecord["manifest"]) => pluginEligibility(manifest, options.isAuthenticated?.() ?? false, isEntitlementGranted);
   const activeCalls = new Map<string, number>();
@@ -100,12 +122,14 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     return plugin;
   };
   const activateContributions = async (plugin: PluginRecord, secrets: Readonly<Record<string, string>>) => {
-    await options.runtimeHost.activate(plugin, secrets);
+    await skillManager.activate(plugin);
     try {
-      await skillManager.activate(plugin);
+      await options.runtimeHost.activate(plugin, secrets);
+      await options.activateGeneratedSkills?.(plugin.id);
     } catch (error) {
       await options.runtimeHost.deactivate(plugin.id).catch(() => undefined);
       await skillManager.deactivate(plugin.id).catch(() => undefined);
+      await options.releaseResources?.(plugin.id).catch(() => undefined);
       throw error;
     }
   };
@@ -116,10 +140,80 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       skillManager.deactivate(pluginId)
     ]);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    await options.releaseResources?.(pluginId);
     if (failure) throw failure.reason;
   };
+  const queues = new Map<string, Promise<unknown>>();
+  const serial = <T>(id: string, operation: () => Promise<T>): Promise<T> => {
+    const next = (queues.get(id) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    queues.set(id, next);
+    void next.finally(() => { if (queues.get(id) === next) queues.delete(id); }).catch(() => undefined);
+    return next;
+  };
+  let gatewayAvailable = !options.gatewayReady;
+  void options.gatewayReady?.then(() => { gatewayAvailable = true; }).catch(() => undefined);
+  const recoveries = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  const wantsEnabled = (plugin: PluginRecord) => plugin.desiredEnabled ?? ["active", "enabling"].includes(plugin.state);
+  const needsGateway = (plugin: PluginRecord) => plugin.manifest.permissions.some(permission => permission.type === "host-service"
+    && permission.services.some(name => ["collector", "recording", "event-sessions", "window-focus"].includes(name)));
+  const cancelRecovery = (id: string) => {
+    const recovery = recoveries.get(id); if (!recovery) return;
+    recovery.controller.abort();
+    // Abort an in-flight MCP handshake as well as a pending retry timer.
+    void options.runtimeHost.deactivate(id).catch(() => undefined);
+  };
+  const restore = (id: string): Promise<void> => {
+    const existing = recoveries.get(id); if (existing) return existing.promise;
+    const controller = new AbortController(), signal = controller.signal;
+    const promise = Promise.resolve().then(async () => {
+      const initial = required(id);
+      if (needsGateway(initial) && options.gatewayReady) {
+        options.repository.setState(id, "enabling");
+        await waitForPluginPromise(options.gatewayReady, signal);
+      }
+      const delays = options.restoreRetryDelaysMs ?? [500, 1_500, 5_000];
+      for (let attempt = 0; !closing && !signal.aborted; attempt++) {
+        try {
+          const restored = await serial(id, async () => {
+            const plugin = options.repository.get(id);
+            if (!plugin || !wantsEnabled(plugin) || signal.aborted || closing) return false;
+            compatible(plugin.manifest);
+            if (missingFeatures(plugin.manifest).length) throw pluginError("plugin_incompatible", "Required Host capabilities are unavailable");
+            assertEntitled(plugin.manifest);
+            if (!hasAllPermissions(plugin)) throw pluginError("plugin_permission_denied", "Plugin permissions have changed");
+            validateConfig(plugin, plugin.config);
+            options.repository.setState(id, "enabling");
+            await activateContributions(plugin, readSecrets(plugin, options.secretStore));
+            const current = options.repository.get(id);
+            if (signal.aborted || closing || !current || !wantsEnabled(current)) {
+              await deactivateContributions(id).catch(() => undefined);
+              if (current && !wantsEnabled(current)) options.repository.setState(id, "disabled");
+              return false;
+            }
+            options.repository.setState(id, "active");
+            return true;
+          });
+          if (restored) await options.onRestored?.().catch(error => console.warn(`Restored plugin tool refresh failed: ${errorMessage(error)}`));
+          return;
+        } catch (error) {
+          if (signal.aborted || closing) return;
+          const current = options.repository.get(id);
+          if (!current || !wantsEnabled(current)) return;
+          options.repository.setState(id, "failed", errorMessage(error));
+          if (!transientPluginConnectionError(error) || attempt >= delays.length) return;
+          await waitForPluginRetry(delays[attempt]!, signal);
+        }
+      }
+    }).catch(error => {
+      if (!signal.aborted && !closing && options.repository.get(id)) options.repository.setState(id, "failed", errorMessage(error));
+    });
+    recoveries.set(id, { controller, promise });
+    void promise.finally(() => { if (recoveries.get(id)?.controller === controller) recoveries.delete(id); });
+    return promise;
+  };
 
-  return {
+  const service: PluginService = {
+    isBusy: busy,
     list() {
       return options.repository.list().map((plugin) => withActivity({ ...publicPlugin(plugin), eligibility: eligibility(plugin.manifest) }));
     },
@@ -147,7 +241,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     get(id) {
-      return withActivity(publicPlugin(required(id)));
+      const plugin = required(id);
+      return withActivity({ ...publicPlugin(plugin), eligibility: eligibility(plugin.manifest) });
     },
 
     async readUi(id, slot) {
@@ -165,6 +260,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     async install(pluginId, version) {
       const release = await options.registry.resolve(pluginId, version);
       const manifest = PluginManifestSchema.parse(release.manifest);
+      compatible(manifest);
+      if (missingFeatures(manifest).length) throw pluginError("plugin_incompatible", `Missing Host capabilities: ${missingFeatures(manifest).join(", ")}`);
       if (manifest.id !== pluginId || (version && manifest.version !== version)) {
         throw pluginError("plugin_invalid", "Registry returned a different plugin release");
       }
@@ -187,6 +284,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         return publicPlugin(options.repository.save({
           manifest,
           state: manifest.permissions.length ? "pending_approval" : "installed",
+          nativeExecutionAllowed: release.nativeExecutionAllowed,
+          registryOrigin: release.registryOrigin,
           ...artifact
         }));
       } catch (error) {
@@ -215,89 +314,103 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
               await new Promise<void>((resolve, reject) => idleWaiters.set(id, { resolve, reject }));
             }
             if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
-            const busy = await options.hasActiveAgentTasks?.(shutdown.signal) ?? false;
+            const agentBusy = await options.hasActiveAgentTasks?.(shutdown.signal) ?? false;
             if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
             // A call can start while the runtime status request is in flight.
-            if (!busy && !activeCalls.get(id)) break;
+            if (!agentBusy && !activeCalls.get(id) && !busy(id)) break;
             await delay(1_000, undefined, { signal: shutdown.signal });
           }
-          entry.status = "installing";
-          const previous = required(id);
-          const release = await options.registry.resolve(id, version);
-          const manifest = PluginManifestSchema.parse(release.manifest);
-          if (manifest.id !== id || (version && manifest.version !== version)) {
-            throw pluginError("plugin_invalid", "Registry returned a different plugin release");
-          }
-          if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
-            throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
-          }
-          assertEntitled(manifest);
-          if (previous.version === manifest.version) {
-            if (!manifestsEqual(previous.manifest, manifest)) {
-              throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
+          return await serial(id, async () => {
+            entry.status = "installing";
+            const previous = required(id);
+            const release = await options.registry.resolve(id, version);
+            const manifest = PluginManifestSchema.parse(release.manifest);
+            compatible(manifest);
+            if (missingFeatures(manifest).length) throw pluginError("plugin_incompatible", `Missing Host capabilities: ${missingFeatures(manifest).join(", ")}`);
+            if (manifest.id !== id || (version && manifest.version !== version)) {
+              throw pluginError("plugin_invalid", "Registry returned a different plugin release");
             }
-            assertReleaseDigest(previous, release.artifact?.sha256);
-            return publicPlugin(previous);
-          }
-
-          const artifact = await options.artifactManager.install({ ...release, manifest });
-          const approvedPermissions = previous.approvedPermissions.filter((approved) =>
-            manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
-          );
-          const pendingApproval = !samePermissions(approvedPermissions, manifest.permissions);
-          const draft: PluginRecord = {
-            ...previous,
-            version: manifest.version,
-            manifest,
-            approvedPermissions,
-            state: pendingApproval ? "pending_approval" : "disabled",
-            ...artifact
-          };
-          try {
-            validateConfig(draft, draft.config);
-            const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
-            if (previous.state === "active") await deactivateContributions(id);
-            let updated = options.repository.save({
-              manifest,
-              state: draft.state,
-              ...artifact
-            });
-            updated = options.repository.setApprovedPermissions(id, approvedPermissions);
-            if (previous.state === "active" && !pendingApproval) {
-              await activateContributions(updated, secrets);
-              updated = options.repository.setState(id, "active");
+            if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
+              throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
             }
-            if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
-            return publicPlugin(updated);
-          } catch (error) {
-            await deactivateContributions(id).catch(() => undefined);
-            let restored = options.repository.save({
-              manifest: previous.manifest,
-              state: previous.state === "active" ? "disabled" : previous.state,
-              artifactHash: previous.artifactHash,
-              rootPath: previous.rootPath
-            });
-            restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
-            restored = options.repository.setConfig(id, previous.config);
-            let rollbackError: unknown;
-            if (previous.state === "active") {
-              try {
-                await activateContributions(restored, readSecrets(restored, options.secretStore));
-                options.repository.setState(id, "active");
-              } catch (restoreError) {
-                rollbackError = restoreError;
-                options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
+            assertEntitled(manifest);
+            if (previous.version === manifest.version) {
+              if (!manifestsEqual(previous.manifest, manifest)) {
+                throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
               }
+              assertReleaseDigest(previous, release.artifact?.sha256);
+              return publicPlugin(previous);
             }
-            if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
-            if (rollbackError) {
-              throw pluginError(
-                "plugin_activation_failed",
-                `Plugin update failed (${errorMessage(error)}) and rollback failed (${errorMessage(rollbackError)})`
-              );
+
+            const artifact = await options.artifactManager.install({ ...release, manifest });
+            if (busy(id)) {
+              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+              throw pluginError("conflict", "Plugin became busy; update deferred");
             }
-            throw error;
-          }
+            const approvedPermissions = previous.approvedPermissions.filter((approved) =>
+              manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
+            );
+            const pendingApproval = !samePermissions(approvedPermissions, manifest.permissions);
+            const draft: PluginRecord = {
+              ...previous,
+              nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
+              version: manifest.version,
+              manifest,
+              approvedPermissions,
+              state: pendingApproval ? "pending_approval" : "disabled",
+              ...artifact
+            };
+            try {
+              validateConfig(draft, draft.config);
+              const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+              if (previous.state === "active") {
+                options.repository.setState(id, "disabling");
+                await deactivateContributions(id);
+              }
+              let updated = options.repository.save({
+                manifest,
+                state: draft.state,
+                nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
+                ...artifact
+              });
+              updated = options.repository.setApprovedPermissions(id, approvedPermissions);
+              if (previous.state === "active" && !pendingApproval) {
+                await activateContributions(updated, secrets);
+                updated = options.repository.setState(id, "active");
+              }
+              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
+              return publicPlugin(updated);
+            } catch (error) {
+              await deactivateContributions(id).catch(() => undefined);
+              let restored = options.repository.save({
+                manifest: previous.manifest,
+                state: previous.state === "active" ? "disabled" : previous.state,
+                artifactHash: previous.artifactHash,
+                rootPath: previous.rootPath,
+                nativeExecutionAllowed: previous.nativeExecutionAllowed, registryOrigin: previous.registryOrigin
+              });
+              restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
+              restored = options.repository.setConfig(id, previous.config);
+              let rollbackError: unknown;
+              if (previous.state === "active") {
+                try {
+                  await activateContributions(restored, readSecrets(restored, options.secretStore));
+                  options.repository.setState(id, "active");
+                } catch (restoreError) {
+                  rollbackError = restoreError;
+                  options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
+                }
+              }
+              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+              if (rollbackError) {
+                throw pluginError(
+                  "plugin_activation_failed",
+                  `Plugin update failed (${errorMessage(error)}) and rollback failed (${errorMessage(rollbackError)})`
+                );
+              }
+              throw error;
+            }
+          });
         } finally {
           updates.delete(id);
           idleWaiters.delete(id);
@@ -347,13 +460,21 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     async enable(id) {
       suspended.delete(id);
       const plugin = required(id);
-      if (plugin.state === "active") return publicPlugin(plugin);
+      compatible(plugin.manifest);
+      if (missingFeatures(plugin.manifest).length) throw pluginError("plugin_incompatible", "Required Host capabilities are unavailable");
       assertEntitled(plugin.manifest);
+      if (plugin.state === "active") return publicPlugin(options.repository.setDesiredEnabled(id, true));
       if (!hasAllPermissions(plugin)) {
         throw pluginError("plugin_permission_denied", "Plugin permissions have not been approved");
       }
       validateConfig(plugin, plugin.config);
       const secrets = readSecrets(plugin, options.secretStore);
+      options.repository.setDesiredEnabled(id, true);
+      if (needsGateway(plugin) && options.gatewayReady && !gatewayAvailable) {
+        const waiting = options.repository.setState(id, "enabling");
+        void restore(id);
+        return publicPlugin(waiting);
+      }
       options.repository.setState(id, "enabling");
       try {
         await activateContributions(plugin, secrets);
@@ -474,17 +595,16 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async restoreActive() {
-      for (const plugin of options.repository.list().filter((candidate) => candidate.state === "active" || candidate.state === "enabling")) {
-        try {
-          if (!eligibility(plugin.manifest).canUse) { options.repository.setState(plugin.id, "disabled"); continue; }
-          assertEntitled(plugin.manifest);
-          if (!hasAllPermissions(plugin)) throw new Error("Plugin permissions have changed");
-          validateConfig(plugin, plugin.config);
-          await activateContributions(plugin, readSecrets(plugin, options.secretStore));
-          if (plugin.state === "enabling") options.repository.setState(plugin.id, "active");
-        } catch (error) {
-          options.repository.setState(plugin.id, "failed", errorMessage(error));
+      if (closing) return;
+      for (const plugin of options.repository.list().filter(plugin => wantsEnabled(plugin) && plugin.state !== "pending_approval")) {
+        if (!eligibility(plugin.manifest).canUse) {
+          options.repository.setState(plugin.id, "disabled");
+          continue;
         }
+        const recovery = restore(plugin.id);
+        // Preserve Windows' first-window optimization. Gateway-backed workers
+        // wait independently; local plugins retain the existing startup flow.
+        if (!(needsGateway(plugin) && options.gatewayReady)) await recovery;
       }
     },
 
@@ -492,12 +612,59 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       closing = true;
       shutdown.abort();
       for (const waiter of idleWaiters.values()) waiter.reject(pluginError("plugin_unavailable", "Plugin host is shutting down"));
+      const restoring = [...recoveries.values()];
+      for (const id of recoveries.keys()) cancelRecovery(id);
+      await Promise.allSettled(restoring.map(job => job.promise));
       options.onSkillContentInvalidated?.();
       await Promise.allSettled(options.repository.list()
         .filter((plugin) => plugin.state === "active" || plugin.state === "enabling")
         .map((plugin) => deactivateContributions(plugin.id)));
     }
   };
+  // Serialize lifecycle mutations per plugin. Internal calls use the unwrapped
+  // service, so uninstall -> disable cannot deadlock against its own queue.
+  return { ...service,
+    install: (id, version) => serial(id, () => service.install(id, version)),
+    update: (id, version) => service.update(id, version),
+    enable: async id => {
+      // A successful restore can still be refreshing the Agent catalog. A
+      // duplicate enable must not tear down that already active worker.
+      if (options.repository.get(id)?.state === "active") return serial(id, () => service.enable(id));
+      const previous = recoveries.get(id); cancelRecovery(id);
+      await previous?.promise;
+      return serial(id, () => service.enable(id));
+    },
+    disable: async id => {
+      options.repository.setDesiredEnabled(id, false); cancelRecovery(id);
+      return serial(id, () => service.disable(id));
+    },
+    uninstall: async id => {
+      options.repository.setDesiredEnabled(id, false); cancelRecovery(id);
+      return serial(id, () => service.uninstall(id));
+    },
+    approvePermissions: (id, permissions) => serial(id, () => service.approvePermissions(id, permissions))
+  };
+}
+
+function transientPluginConnectionError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  if (code && ["plugin_permission_denied", "plugin_entitlement_required", "plugin_invalid", "plugin_incompatible"].includes(code)) return false;
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|fetch failed|socket hang up|connection (?:closed|reset)|\b(?:502|503|504)\b/i.test(errorMessage(error));
+}
+function waitForPluginPromise<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { signal.removeEventListener("abort", abort); reject(signal.reason); };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(value => { signal.removeEventListener("abort", abort); resolve(value); }, error => { signal.removeEventListener("abort", abort); reject(error); });
+  });
+}
+function waitForPluginRetry(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(signal.reason); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms); timer.unref();
+    if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function capabilityTaskId(input: unknown): string | undefined {
@@ -526,8 +693,24 @@ function replacePublishedPaths(value: unknown, paths: ReadonlyMap<string, string
 }
 
 function publicPlugin(plugin: PluginRecord): InstalledPlugin {
-  const { artifactHash: _artifactHash, rootPath: _rootPath, ...result } = plugin;
+  const { artifactHash: _artifactHash, rootPath: _rootPath,
+    nativeExecutionAllowed: _native, registryOrigin: _origin, ...result } = plugin;
   return result;
+}
+
+export function compareVersions(left: string, right: string): number {
+  const split = (value: string) => { const [core, ...suffix] = value.split("-"); return { core: core!.split(".").map(Number), suffix: suffix.join("-") }; };
+  const a = split(left), b = split(right);
+  for (let i = 0; i < 3; i++) { const delta = (a.core[i] ?? 0) - (b.core[i] ?? 0); if (delta) return delta; }
+  if (!a.suffix || !b.suffix) return a.suffix === b.suffix ? 0 : a.suffix ? -1 : 1;
+  const ap = a.suffix.split("."), bp = b.suffix.split(".");
+  for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+    if (ap[i] === bp[i]) continue;
+    if (ap[i] === undefined || bp[i] === undefined) return ap[i] === undefined ? -1 : 1;
+    const an = /^\d+$/.test(ap[i]!), bn = /^\d+$/.test(bp[i]!);
+    return an && bn ? Number(ap[i]) - Number(bp[i]) : an !== bn ? an ? -1 : 1 : ap[i]! < bp[i]! ? -1 : 1;
+  }
+  return 0;
 }
 
 function validateConfig(plugin: PluginRecord, config: Record<string, unknown>): void {

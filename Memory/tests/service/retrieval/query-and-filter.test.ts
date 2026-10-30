@@ -1562,6 +1562,21 @@ describe("MemoryService / retrieval / query and filtering", () => {
     db.close();
   });
 
+  it("bounds turn-start query extraction while retaining the explicit-search budget", async () => {
+    const budgets: Array<{ timeoutMs?: number; maxRetries?: number }> = [];
+    const { db, service } = createTestService({ llm: createQueryExtractCapturingLlm([], budgets) });
+    try {
+      const namespace = { source: "codex", profileId: "jiang", userId: "user-query-extract-budget" };
+      const seeded = await seedQueryExtractHistory(service, namespace);
+      budgets.length = 0;
+      await service.startTurn({ turnId: "turn-query-extract-budget-3", sessionId: seeded.sessionId, query: "那个脚本还是挂" });
+      expect(budgets).toEqual([expect.objectContaining({ timeoutMs: 3000, maxRetries: 0 })]);
+      budgets.length = 0;
+      await service.search({ namespace, sessionId: seeded.sessionId, query: "那个脚本还是挂" });
+      expect(budgets).toEqual([expect.objectContaining({ timeoutMs: 60000, maxRetries: 0 })]);
+    } finally { db.close(); }
+  });
+
   it("sends only the current input to query extract when the session has no history", async () => {
     const extractInputs: string[] = [];
     const { db, service } = createTestService({ llm: createQueryExtractCapturingLlm(extractInputs) });
@@ -1741,7 +1756,7 @@ async function seedQueryExtractHistory(
   };
 }
 
-function createQueryExtractCapturingLlm(extractInputs: string[]): LlmClient {
+function createQueryExtractCapturingLlm(extractInputs: string[], extractOptions: Array<{ timeoutMs?: number; maxRetries?: number }> = []): LlmClient {
   return {
     config: {
       ...LEGACY_TEST_CONFIG.summary,
@@ -1757,13 +1772,14 @@ function createQueryExtractCapturingLlm(extractInputs: string[]): LlmClient {
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
+      options: { operation: string; timeoutMs?: number; maxRetries?: number }
     ): Promise<T> {
       if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "capture.summarize") {
         return acceptedCaptureDecision("query extract history trace", messages) as unknown as T;
       }
       if (options.operation === "retrieval.retrieval.query.extract.v3") {
+        extractOptions.push(options);
         extractInputs.push(messages.find((message) => message.role === "user")?.content ?? "");
         return {
           queryVecText: currentUserInputOf(messages),

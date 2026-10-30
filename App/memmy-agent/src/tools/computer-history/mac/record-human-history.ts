@@ -1,3 +1,6 @@
+import { recorderCheckpoints } from "./recorder-checkpoints.js";
+import { persistMacCheckpoint } from "./persisted-checkpoint.js";
+import { CONTINUOUS_RECORDER_CAPABILITY } from "../core/recorder-rotation.js";
 // Record authorized foreground activity as a local JSONL event stream.
 
 import crypto from "node:crypto";
@@ -550,7 +553,7 @@ export async function run(
       (binary, mode, extra = []) => helperJson(binary, mode, [...command.args, ...extra], command.env));
   const recordingId = `human:${crypto.randomUUID()}`;
   const contextUrl = normalizedContextUrl(args.contextUrl);
-  const output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
+  let output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
   const recordingDir = path.dirname(output);
   const screenshotDir = path.join(recordingDir, "screenshots");
   fs.mkdirSync(recordingDir, { recursive: true, mode: 0o700 });
@@ -558,12 +561,12 @@ export async function run(
   if (fs.existsSync(output)) fs.chmodSync(output, 0o600);
 
   const startedAt = new Date().toISOString();
-  appendJsonLine(output, {
+  const writeMetadata = (file: string, title: string, createdAt: string) => appendJsonLine(file, {
     recordType: "human_history_metadata",
     schemaVersion: 1,
     recordingId,
-    title: args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`,
-    createdAt: startedAt,
+    title,
+    createdAt,
     platform: windows ? "Windows 11" : "macOS",
     display: { width: permissions.mainDisplayWidth, height: permissions.mainDisplayHeight },
     captureText: args.captureText,
@@ -572,8 +575,9 @@ export async function run(
     captureScopeApplications: args.onlyApps,
     ...(contextUrl && shouldObserve(loadObservationSettings(args.observationSettings), { browser: true, url: contextUrl })
       ? { contextUrl } : {}),
-    privacy: "Text is retained from observed applications when enabled, except in password fields. An explicit allow-app narrows text capture. Excluded applications and sites are skipped; credential patterns are redacted.",
+    privacy: "Text is retained from observed applications when enabled and the focused control is known not to be a password field. An explicit allow-app narrows text capture. Application and website observation rules apply; credential patterns are redacted.",
   });
+  writeMetadata(output, args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`, startedAt);
 
   let sequence = 0;
   const failWrite = () => {
@@ -927,8 +931,8 @@ export async function run(
       if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
       // Let the Windows supervisor remove its temporary worker and close its
       // child job before falling back to termination if it cannot respond.
-      if (windows && helper.stdin && !helper.stdin.destroyed) {
-        helper.stdin.end('{"kind":"stop"}\n');
+      if (helper.stdin && !helper.stdin.destroyed) {
+        helper.stdin.end(windows ? '{"kind":"stop"}\n' : undefined);
       } else if (!helper.killed) helper.kill("SIGTERM");
       await Promise.race([
         childClosed,
@@ -950,12 +954,67 @@ export async function run(
   };
 
   if (windows) command.args.push("--wechat-consent", defaultWeChatConsentFile());
-  const helper = spawn(command.binary, command.args, { stdio: [windows ? "pipe" : "ignore", "pipe", "pipe"], windowsHide: true,
+  const helper = spawn(command.binary, command.args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     ...(command.env ? { env: command.env } : {}) });
   helper.stdin?.on("error", () => { /* A closed stop pipe is covered by the child-exit handler. */ });
   if (!helper.stdout || !helper.stderr) throw new Error("history observer pipes are unavailable");
   let helperClosed = false;
   helper.once("close", () => { helperClosed = true; childClosedResolve(); });
+  const checkpoints = !process.stdin.isTTY ? recorderCheckpoints({
+    input: process.stdin,
+    requestNative: (id: string, range?: import("../core/event-capture-source.js").CaptureRange) => {
+      if (!helper.stdin?.writable) throw new Error("native checkpoint unavailable");
+      helper.stdin.write(JSON.stringify({ kind: "checkpoint", id, ...range }) + "\n");
+    },
+    persist: (event, through) => {
+      // Enqueue synchronously at receipt of the marker. Awaiting the mutable
+      // processing tail would include later observations in the saved position.
+      const boundary = processing.then(async () => {
+        await flushKeys();
+        health.flush();
+        if (!windows && event && through) return persistMacCheckpoint({ file: output, event, through, sequence: ++sequence });
+        const fd = fs.openSync(output, "r+");
+        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      });
+      processing = boundary.then(() => undefined, () => { health.report("event_processing_error"); });
+      return boundary;
+    },
+    ...(!windows && !args.screenshots ? { rotate: (command, event, through) => {
+      // Register the handoff at receipt of the native barrier, before any later
+      // observation in the same stdout chunk joins the normalization queue.
+      const boundary = processing.then(async () => {
+        await flushKeys();
+        health.flush();
+        const next = command.eventsFile;
+        if (!path.isAbsolute(next) || path.resolve(next) === output) throw new Error("Invalid recorder output");
+        if (fs.existsSync(next) && (!fs.lstatSync(next).isFile() || fs.lstatSync(next).isSymbolicLink())) {
+          throw new Error("Invalid recorder output");
+        }
+        const durable = persistMacCheckpoint({ file: output, event, through, sequence: ++sequence });
+        const details = { nativeSessionId: durable.watermark.nativeSessionId, collectorContinues: true };
+        fs.mkdirSync(path.dirname(next), { recursive: true, mode: 0o700 });
+        fs.chmodSync(path.dirname(next), 0o700);
+        if (fs.existsSync(next)) fs.chmodSync(next, 0o600);
+        writeMetadata(next, command.title, through);
+        appendJsonLine(output, { recordType: "human_event", sequence: ++sequence, eventType: "recording_stopped",
+          timestamp: through, details: { reason: "segment_rotation", ...details } });
+        const previousFd = fs.openSync(output, "r+");
+        try { fs.fsyncSync(previousFd); } finally { fs.closeSync(previousFd); }
+        appendJsonLine(next, { recordType: "human_event", sequence: ++sequence, eventType: "recording_started",
+          timestamp: through, details });
+        const nextFd = fs.openSync(next, "r+");
+        try { fs.fsyncSync(nextFd); } finally { fs.closeSync(nextFd); }
+        output = next;
+        // Each file needs its own full sanitized snapshot and page context.
+        // Native sampling, input hooks, policy state and the health ledger stay alive.
+        axBaseline = null; lastPageContextUrl = null;
+      });
+      processing = boundary.then(() => undefined, () => { health.report("event_processing_error"); });
+      return boundary;
+    } } : {}),
+    write: line => console.log(line),
+  }) : null;
+  if (checkpoints && !windows && !args.screenshots) console.log(CONTINUOUS_RECORDER_CAPABILITY);
   const lines = readline.createInterface({ input: helper.stdout });
   let queuedWindowsEvents = 0;
   lines.on("line", (line: string) => {
@@ -966,6 +1025,7 @@ export async function run(
         health.report("helper_parse_error");
         return;
       }
+      if (checkpoints?.acknowledge(event)) return;
       if (event.type === "recorder.diagnostic") {
         const signal = nativeRecorderDiagnostic(event);
         if (signal) processing = processing.then(safely(async () => {
@@ -1030,6 +1090,7 @@ export async function run(
     return { output, recordingId, events: sequence };
   } finally {
     // A short session or Stop must still publish the last successful write.
+    checkpoints?.close();
     health.close();
   }
 }

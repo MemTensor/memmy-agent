@@ -10,7 +10,8 @@ const PluginReleaseSchema = z.object({
     // Local registries return an origin-relative authenticated download path.
     url: z.string().url().or(z.string().regex(/^\/(?!\/)/)),
     sha256: z.string().regex(/^[a-f0-9]{64}$/i)
-  }).optional()
+  }).optional(),
+  nativeExecutionAllowed: z.boolean().optional()
 });
 
 export interface CreateHttpPluginRegistryOptions {
@@ -18,6 +19,8 @@ export interface CreateHttpPluginRegistryOptions {
   fetchFn?: typeof fetch;
   /** Supplies account credentials so the registry can gate entitlement-restricted releases. */
   authHeaders?: () => Record<string, string>;
+  /** Native execution is accepted only from an explicitly trusted registry origin. */
+  trustedNativeOrigin?: string;
 }
 
 export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOptions): PluginRegistry {
@@ -61,12 +64,13 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
       if (release.manifest.id !== pluginId || (version && release.manifest.version !== version)) {
         throw Object.assign(new Error("Plugin registry returned a different release"), { code: "plugin_invalid" });
       }
-      if (release.artifact) {
-        const artifactUrl = new URL(release.artifact.url, baseUrl);
-        assertAllowedProtocol(artifactUrl);
-        release.artifact.url = artifactUrl.toString();
-      }
-      return release;
+      if (release.nativeExecutionAllowed === undefined) return release;
+      return { ...release,
+        nativeExecutionAllowed: release.nativeExecutionAllowed
+          && options.trustedNativeOrigin !== undefined
+          && new URL(options.trustedNativeOrigin).origin === baseUrl.origin,
+        registryOrigin: baseUrl.origin
+      };
     }
   };
 }

@@ -52,10 +52,13 @@ afterEach(async () => {
 });
 
 describe("repairing historical six-hour aggregation", () => {
-  it("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+  it.each(["com.tencent.xinWeChat", "win32.weixin", "windows:hashed-application"])
+  ("does not send %s WeChat evidence to the History model after its extra permission is off", async (application) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    vi.spyOn(process, "arch", "get").mockReturnValue("arm64");
     const id = `${instantId(new Date())}-10min-summary`;
     fs.writeFileSync(historyFile(id),
-      '---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["com.tencent.xinWeChat"]\n---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n');
+      `---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["${application}"]\n${application.startsWith("windows:") ? "sensitive_source: personal_wechat\n" : ""}---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n`);
     const model = vi.fn(async () => response());
     const service = serviceAt();
     service.setLlmRuntime(runtime(model));

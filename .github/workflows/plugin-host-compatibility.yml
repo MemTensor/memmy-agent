@@ -1,0 +1,123 @@
+name: Generic plugin Host compatibility
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.12'
+          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+      - run: npm ci --legacy-peer-deps
+      - run: npm --prefix App/memmy-agent ci --legacy-peer-deps
+      - run: npm run typecheck -w @memmy/backend
+      - run: npm run build -w @memmy/desktop-interface
+      - run: npm run typecheck -w @memmy/frontend-desktop
+      - run: npm --prefix App/memmy-agent run build
+      - name: Baseline plugin and account/service compatibility
+        working-directory: App/backend
+        run: npx vitest run src/adapters/outbound/plugin-runtime/tests src/adapters/outbound/plugin-registry/tests src/adapters/outbound/plugin-artifact/tests src/adapters/outbound/plugin-skill/tests src/adapters/outbound/agent-adapter/tests/plugin-loader.test.ts src/adapters/outbound/agent-adapter/tests/plugin-source.test.ts src/services/tests/plugin-service.test.ts src/services/tests/plugin-network-policy.test.ts src/services/tests/plugin-local-artifact-service.test.ts src/services/tests/bundled-plugin-bootstrap-service.test.ts src/services/tests/plugin-model-policy.test.ts src/services/tests/plugin-model-inference-service.test.ts src/services/tests/plugin-asr-service.test.ts src/services/tests/plugin-asset-key-service.test.ts src/services/tests/plugin-entitlement-reconcile-service.test.ts src/services/tests/account-plugin-integration.test.ts src/services/tests/plugin-generated-skills.test.ts src/services/tests/plugin-native-host-services.test.ts src/services/tests/plugin-update-service.test.ts src/infrastructure/app-state-store/tests/plugin-upgrade.test.ts src/infrastructure/app-state-store/tests/plugin-repo.test.ts src/adapters/inbound/local-api/tests/plugin-mcp.test.ts src/adapters/inbound/local-api/tests/plugins-routes.test.ts src/adapters/inbound/local-api/tests/plugin-sse-recovery.test.ts src/tests/plugin-host-e2e.test.ts
+      - name: Shared capture and contribution discovery
+        working-directory: App/memmy-agent
+        run: npx vitest run tests/tools/plugin-host tests/tools/computer-history/shared-event-capture.test.ts tests/tools/computer-history/mac/recorder-checkpoints.test.ts tests/tools/computer-history/mac/persisted-checkpoint.test.ts tests/tools/computer-history/mac/human-recorder-checkpoint-native.test.ts tests/tools/computer-history/win/recorder.test.ts tests/tools/computer-history/win/protocol-normalize.test.ts tests/tools/computer-history/win/product-service.test.ts tests/core/agent-runtime/plugin-skills.test.ts tests/core/agent-runtime/skill-creator-scripts.test.ts tests/core/agent-runtime/mcp-plugin-catalog.test.ts
+      - name: Build native macOS app and verify the shared recorder source
+        if: runner.os == 'macOS'
+        run: |
+          cmp App/memmy-agent/src/tools/computer-history/mac/human-recorder.swift App/native-computer-use/apps/OpenComputerUse/Sources/MemmyComputerHistoryKit/HistoryRecorder.swift
+          swift build --package-path App/native-computer-use
+      - name: macOS normalization and durable boundary pipeline
+        working-directory: App/memmy-agent
+        run: npx vitest run tests/tools/computer-history/mac/record-human-history-checkpoints.test.ts tests/tools/computer-history/mac/computer-history-transitions.test.ts tests/tools/computer-history/mac/recorder-health-forwarding.test.ts
+      - name: Teaching window capture and extension connection identity
+        working-directory: App/memmy-agent
+        run: npx vitest run tests/tools/computer-history/browser-event-capture.test.ts tests/core/agent-runtime/tools/external-browser-bridge.test.ts
+      - name: Browser extension teaching isolation
+        working-directory: App/shell/desktop
+        run: npx vitest run tests/teaching-browser-recorder.test.ts tests/external-browser-extension-packaging.test.ts
+      - name: Deferred Gateway startup and plugin readiness
+        working-directory: App/shell/desktop
+        run: npx vitest run tests/runtime-services.test.ts
+      - name: Baseline plugin UI and conversation controls
+        working-directory: App/frontend/desktop
+        run: npx vitest run src/pages/tests/plugin-conversation-recording.test.tsx src/pages/tests/plugin-store-section.test.tsx src/pages/tests/plugin-capability-host src/pages/tests/plugin-settings-section.interaction.test.tsx src/app/tests/routes.test.ts src/app/tests/plugin-ui-context.test.tsx src/api/tests/plugins-client.test.ts src/lib/tests/plugin-transcription-jobs.test.ts
+      - name: Native observer logic
+        working-directory: App/native-computer-history/apps/OpenComputerHistoryWindows
+        run: go test ./...
+      - name: Windows PowerShell UIA snapshot serialization
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = Get-Content -Raw 'App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1'
+          $worker = Join-Path $env:RUNNER_TEMP 'plugin-history-worker-selftest.ps1'
+          [IO.File]::WriteAllText($worker, $source, [Text.UTF8Encoding]::new($true))
+          $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $probe = & $powershell -NoProfile -NonInteractive -MTA -ExecutionPolicy Bypass -File $worker -SelfTest | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $probe.workerApiCompiled -or -not $probe.pureSelfTest -or $probe.desktopAccess -ne $false) { throw 'UIA worker serialization regression' }
+      - name: Verify source provenance
+        run: node -e "const cp=require('node:child_process');const status=cp.execFileSync('git',['status','--porcelain'],{encoding:'utf8'});if(status.trim()){console.error(status);process.exit(1)}"
+      - name: Build shared native task recorder
+        if: runner.os == 'Windows'
+        run: node scripts/internal/win/build-plugin-native-recorder.mjs "${{ runner.temp }}/plugin-native-recorder.exe"
+      - name: Build independently consumable Host kit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEMMY_HOST_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/plugin-host/build-conformance-kit.mjs "${{ runner.temp }}/host-kit"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-host-conformance-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/plugin-host-conformance-*.zip
+            ${{ runner.temp }}/plugin-host-conformance-*.zip.sha256
+          if-no-files-found: error
+  publish-host-kit:
+    if: github.event_name == 'release'
+    needs: host
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - artifact: ubuntu-latest
+            platform: linux
+          - artifact: windows-latest
+            platform: win32
+          - artifact: macos-latest
+            platform: darwin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin-host-conformance-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/host-kit-input
+      - name: Attach fixed Host kit and SHA-256 to its published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEMMY_HOST_TAG: ${{ github.event.release.tag_name }}
+          MEMMY_HOST_REPOSITORY: ${{ github.repository }}
+          MEMMY_KIT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          artifact_version="${MEMMY_HOST_TAG#v}"
+          artifact_base="plugin-host-conformance-${artifact_version}"
+          artifact_arch="$(python3 -c 'import json,sys,zipfile; d=json.loads(zipfile.ZipFile(sys.argv[1]).read("host-release.json")); assert d["platform"]==sys.argv[2] and d["arch"] in ("arm64","x64"); print(d["arch"])' "${RUNNER_TEMP}/host-kit-input/${artifact_base}.zip" "${MEMMY_KIT_PLATFORM}")"
+          release_asset="${RUNNER_TEMP}/${artifact_base}-${MEMMY_KIT_PLATFORM}-${artifact_arch}.zip"
+          mv "${RUNNER_TEMP}/host-kit-input/${artifact_base}.zip" "${release_asset}"
+          mv "${RUNNER_TEMP}/host-kit-input/${artifact_base}.zip.sha256" "${release_asset}.sha256"
+          gh release upload "${MEMMY_HOST_TAG}" "${release_asset}" "${release_asset}.sha256" --repo "${MEMMY_HOST_REPOSITORY}"

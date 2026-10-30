@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync as readRawFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+
+// Source contracts should behave identically in LF and CRLF checkouts.
+const readFileSync = (path: string, encoding: "utf8") => readRawFileSync(path, encoding).replace(/\r\n/g, "\n");
 
 const mainSourcePath = fileURLToPath(new URL("../src/main/main.ts", import.meta.url));
 const preloadSourcePath = fileURLToPath(new URL("../src/preload/preload.cts", import.meta.url));
@@ -1410,7 +1413,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("async function cleanupBeforeQuit()");
     expect(mainSource).toContain("event.preventDefault()");
     expect(mainSource).toContain("readStopMemoryServiceOnExitSetting()");
-    expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
+    expect(mainSource).toContain("closeRuntimeForQuit(quit)");
+    expect(mainSource).toContain("await services.close({ stopMemory: quit.stopMemory })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");

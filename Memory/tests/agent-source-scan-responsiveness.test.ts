@@ -112,6 +112,7 @@ describe("standalone scan HTTP responsiveness", () => {
       expect(closeObserved).toBe(true);
       expect(existsSync(join(root, "scans", `${jobId}.sqlite`))).toBe(false);
     } finally {
+      await executor.dispose();
       await closeMemoryHttpServer(server);
     }
   }, PHASE_SETUP_TIMEOUT_MS + 2 * HTTP_RESPONSE_TIMEOUT_MS + 1_000);

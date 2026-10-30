@@ -16,6 +16,7 @@ App/memmy-agent/package-lock.json
 sessions/
 artifacts/literature-review-*.json
 .*
+!.gitattributes
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
@@ -24,9 +25,6 @@ artifacts/literature-review-*.json
 .env
 .env.*
 !.env.example
-# Holds the Windows Computer History folder open until it has code: git does
-# not track empty directories, and `.*` above would otherwise drop the marker.
-!App/memmy-agent/src/tools/computer-history/win/.gitkeep
 App/backend/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs
 Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs
 
@@ -34,3 +32,6 @@ Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs
 App/memmy-agent/extra-dependencies/office-rendering/*/bin/
 App/memmy-agent/extra-dependencies/office-rendering/*/native/
 /Mac软件打包/
+
+# Build-only shared native recorder cache.
+/.cache/plugin-native-recorder/
