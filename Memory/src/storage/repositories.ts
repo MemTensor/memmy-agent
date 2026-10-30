@@ -718,6 +718,25 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  /** Read maintenance source fields without materializing vector blobs. */
+  getWithoutVectors(id: string): MemoryRow | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL`)
+      .get(id) as MemorySqlRow | undefined;
+    return row ? memoryFromSql(row) : undefined;
+  }
+
+  /** Batch variant for target progress checks; memory vectors live in a separate table. */
+  getManyWithoutVectors(ids: readonly string[]): MemoryRow[] {
+    if (ids.length === 0) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL
+    `).all(toJson(ids)) as MemorySqlRow[];
+    const byId = new Map(rows.map(row => [row.id, memoryFromSql(row)]));
+    return ids.map(id => byId.get(id)).filter((item): item is MemoryRow => Boolean(item));
+  }
+
   getIncludingDeleted(id: string): MemoryRow | undefined {
     const row = this.db
       .prepare(`SELECT * FROM memories WHERE id = ?`)
@@ -1635,6 +1654,26 @@ export class UserMemoryRepository {
       FROM user_memories WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
       ORDER BY id
     `).all(userId) as EmbeddingMaintenanceEntry[];
+  }
+
+  embeddingMaintenanceEntriesByIds(userId: string, ids: readonly string[]): EmbeddingMaintenanceEntry[] {
+    if (ids.length === 0) return [];
+    return this.db.prepare(`
+      SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
+             embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
+      FROM user_memories
+      WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+        AND id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+      ORDER BY id
+    `).all(userId, JSON.stringify(ids)) as EmbeddingMaintenanceEntry[];
+  }
+
+  embeddingMaintenanceSourcesByIds(ids: readonly string[]): Array<{ id: string; content: string }> {
+    if (ids.length === 0) return [];
+    return this.db.prepare(`
+      SELECT id, content FROM user_memories
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL
+    `).all(toJson(ids)) as Array<{ id: string; content: string }>;
   }
 
   embeddingDimensionCounts(userId: string): {
@@ -3821,6 +3860,15 @@ export class RuntimeRepository {
     return row ? jobFromSql(row) : undefined;
   }
 
+  getJobs(ids: readonly string[]): EvolutionJobRecord[] {
+    if (ids.length === 0) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM evolution_jobs
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+    `).all(toJson(ids)) as SqlJobRow[];
+    return rows.map(jobFromSql);
+  }
+
   getActiveJobByDedupeKey(dedupeKey: string): EvolutionJobRecord | undefined {
     const row = this.db
       .prepare(
@@ -4378,6 +4426,15 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM embedding_retry_queue WHERE id = ?`)
       .get(id) as SqlEmbeddingRetryRow | undefined;
     return row ? embeddingRetryFromSql(row) : undefined;
+  }
+
+  getEmbeddingRetries(ids: readonly string[]): EmbeddingRetryRecord[] {
+    if (ids.length === 0) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM embedding_retry_queue
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+    `).all(toJson(ids)) as SqlEmbeddingRetryRow[];
+    return rows.map(embeddingRetryFromSql);
   }
 
   getEmbeddingRetryByTarget(
