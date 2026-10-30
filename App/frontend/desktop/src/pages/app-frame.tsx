@@ -52,7 +52,7 @@ import { useTaskBus } from "../lib/task-bus.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
-import { agentChatScopeKey } from "../state/agent-composer-state.js";
+import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-composer-state.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
@@ -195,7 +195,6 @@ interface SidebarContextMenuPlacement {
 }
 
 type AgentTaskSort = AppState["agent"]["sidebarState"]["view"]["sort"];
-type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope">;
 
 export interface SidebarAccountLabels {
   brandName: string;
@@ -336,14 +335,8 @@ function resolveProductTourNavAnchor(path: AppRoutePath): string | undefined {
   return undefined;
 }
 
-export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
-  if (agent.blankDraftActive) {
-    return false;
-  }
-  const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
-  return !agent.composerDraftsByScope[draftScopeKey]
-    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
-}
+/* 判断放在 state 里：看板的「继续任务」也要用，但不该为此从页面模块互相引用 */
+export { shouldCreateNewAgentDraft };
 
 /** Sidebar workspace highlight: only when a blank new-task draft targets a project. */
 export function resolveSelectedSidebarProjectId(

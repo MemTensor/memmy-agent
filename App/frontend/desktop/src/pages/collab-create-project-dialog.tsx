@@ -138,6 +138,7 @@ export function CreateProjectModal(props: {
     <Modal
       open={props.open}
       title={t("collab.create.title")}
+      subtitle={t("collab.create.subtitle")}
       onClose={props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
@@ -212,7 +213,7 @@ export function CreateProjectModal(props: {
         <div className={styles.settingsRow}>
           <div className={styles.settingsRowText}>
             <div className={styles.settingsRowTitle}>{t("collab.create.share")}</div>
-            <div className={styles.settingsRowDesc}>{t("collab.settings.shareOffHint")}</div>
+            <div className={styles.settingsRowDesc}>{t("collab.create.shareHint")}</div>
           </div>
           <div className={styles.settingsRowControl}>
             <button

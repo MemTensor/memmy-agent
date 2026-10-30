@@ -591,6 +591,52 @@
   line-height: 1.7;
 }
 
+/* 成员首次进入时的单行提示：浅底内联，不遮列表，也不抢标题 */
+.contextTip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.contextTipIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--collab-accent-deep);
+}
+
+.contextTipText {
+  flex: 1;
+  min-width: 0;
+  color: var(--collab-ink-2);
+}
+
+.contextTipAction {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.contextTipAction:hover {
+  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
+  color: var(--collab-ink-2);
+}
+
 .configKnowledgeList {
   display: flex;
   flex-direction: column;
@@ -845,6 +891,16 @@
   margin-top: 3px;
   color: var(--collab-ter);
   font-size: 12.5px;
+}
+
+/* 本人任务在读时说明它对谁可见：共享状态在阅读处可见，才不用在每一行重复 */
+.readerSync {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--collab-accent-deep);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 /* 「仅供查看」：说明这是别人的任务，只是提示，不用警示色 */

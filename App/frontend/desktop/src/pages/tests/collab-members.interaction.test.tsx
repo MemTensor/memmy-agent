@@ -95,7 +95,7 @@ describe("project members dialog", () => {
       requests: []
     });
     expect(hasText("邀请成员")).toBe(true);
-    expect(hasText("成员加入后，可查看项目中的任务记录，各自的 Agent 可获得成员的工作进展。")).toBe(true);
+    expect(hasText("成员加入后可查看项目中的任务与对话，也可将自身的任务纳入项目；成员的 Agent 均可参考。")).toBe(true);
     expect(hasText("用户A（你）")).toBe(true);
     expect(hasText("获得链接者")).toBe(true);
     expect(button("申请后加入")).toBeTruthy();
@@ -257,7 +257,7 @@ describe("join project dialog", () => {
     await paste(invite);
     expect(hasText("用户A 邀请你加入项目")).toBe(true);
     expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见；本地文件不会上传。")).toBe(true);
-    expect(hasText("你在项目中工作时，Agent 可获得项目成员的工作进展与结论。")).toBe(true);
+    expect(hasText("项目中已有成员同步的任务。在输入框输入 @ 引用任务，Agent 将读取其完整对话。")).toBe(true);
     expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(true);
     expect(button("暂不加入")).toBeTruthy();
 

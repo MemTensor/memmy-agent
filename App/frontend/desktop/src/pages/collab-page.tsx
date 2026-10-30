@@ -1,4 +1,4 @@
-import { BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plus, Quote, RefreshCw, Search, Settings, Trash2, UserPlus, Users, X } from "lucide-react";
+import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plus, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -34,7 +34,9 @@ import {
 } from "../app/collab-projects-store.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
-import type { AgentTaskView } from "../state/agent-chat-slice.js";
+import { agentActions, appActions } from "../state/app-actions.js";
+import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-composer-state.js";
+import type { AgentTaskView, ComposerMention } from "../state/agent-chat-slice.js";
 import { useOptionalAppState, type AppStateContextValue } from "../state/app-state.js";
 import { ApiRequestError } from "../api/http.js";
 import { ProjectKnowledgeDialog, ProjectKnowledgeManageDialog } from "./collab-knowledge-dialog.js";
@@ -319,6 +321,34 @@ function sameSyncProgress(current: CollabSyncProgress | null, next: CollabSyncPr
     && current.failed === next.failed;
 }
 
+/**
+ * 已经看过“成员任务可以用 @ 引用”提示的项目。按项目记：同一个人在不同项目里都需要知道这件事，
+ * 同一个项目看一次就够。读失败（隐私模式、旧数据）当没看过，宁可多提示一次也不报错。
+ */
+const CONTEXT_TIP_STORAGE_KEY = "memmy.collab.contextTipSeen";
+const CONTEXT_TIP_STORAGE_LIMIT = 100;
+
+function readContextTipSeen(): string[] {
+  try {
+    const raw = window.localStorage.getItem(CONTEXT_TIP_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeContextTipSeen(seen: string[]): void {
+  try {
+    window.localStorage.setItem(
+      CONTEXT_TIP_STORAGE_KEY,
+      JSON.stringify(seen.slice(-CONTEXT_TIP_STORAGE_LIMIT))
+    );
+  } catch {
+    // 存不下就只在本次会话里生效，不影响任务列表。
+  }
+}
+
 /** 空值常量：wrapper 每次都要读一遍全局状态，不能每次现造空数组把 memo 冲掉。 */
 const NO_PROJECTS: MemmyAgentProject[] = [];
 const NO_TASKS: AgentTaskView[] = [];
@@ -336,7 +366,42 @@ export function CollabPage() {
   const tasks = appState?.state.agent.tasks ?? NO_TASKS;
   // dispatch 的引用是稳定的，当作 prop 传下去不会把 memo 冲掉。
   const dispatch = appState?.dispatch ?? null;
-  return <CollabBoard dispatch={dispatch} projects={projects} tasks={tasks} />;
+  // 读最新的 agent 状态靠 ref：把它写进依赖会让回调每次都换新，看板就会跟着后台每条流式输出重画。
+  const agentRef = useRef(appState?.state.agent ?? null);
+  agentRef.current = appState?.state.agent ?? null;
+  /**
+   * 继续任务：在同一个项目下开一条新任务，并把被继续的那条任务作为引用带进去。
+   * 步骤与侧栏「＋」一致（新建草稿、指定项目目标、切到对话页），只是多带一个引用片；
+   * 引用沿用 @ 引用的同一套存储，落地后就是一个可移除的引用，由使用者说明要继续做什么。
+   */
+  const onContinueTask = useCallback((projectId: string, mention: ComposerMention | null) => {
+    const agent = agentRef.current;
+    if (!dispatch || !agent) return;
+    const createsDraft = shouldCreateNewAgentDraft(agent);
+    const nextRequestId = createsDraft ? agent.newChatRequestId + 1 : agent.newChatRequestId;
+    const scopeKey = agentChatScopeKey(null, nextRequestId);
+    if (createsDraft) {
+      dispatch(agentActions.newChatRequested());
+    } else if (!agent.blankDraftActive) {
+      dispatch(agentActions.blankDraftReopened());
+    }
+    dispatch(agentActions.draftTargetUpdated(scopeKey, { kind: "project", projectId }));
+    if (mention) {
+      const existing = agent.composerMentionsByScope[scopeKey] ?? [];
+      if (!existing.some((item) => item.id === mention.id)) {
+        dispatch(agentActions.composerMentionsUpdated(scopeKey, [...existing, mention]));
+      }
+    }
+    dispatch(appActions.navigate("/main"));
+  }, [dispatch]);
+  return (
+    <CollabBoard
+      dispatch={dispatch}
+      projects={projects}
+      tasks={tasks}
+      onContinueTask={onContinueTask}
+    />
+  );
 }
 
 /**
@@ -347,8 +412,10 @@ const CollabBoard = memo(function CollabBoard(props: {
   dispatch: AppStateContextValue["dispatch"] | null;
   projects: MemmyAgentProject[];
   tasks: AgentTaskView[];
+  /** 在项目下开一条新任务并带上引用；引用为空时就是普通的「在此项目新建任务」。 */
+  onContinueTask: (projectId: string, mention: ComposerMention | null) => void;
 }) {
-  const { dispatch, projects, tasks } = props;
+  const { dispatch, projects, tasks, onContinueTask } = props;
   const { clients } = useApiClients();
   const { t } = useTranslation();
   const collab = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
@@ -387,6 +454,8 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  /** 成员首次进入时的单行提示：按项目记录已读，同一个项目只出现一次。 */
+  const [contextTipSeen, setContextTipSeen] = useState<string[]>(() => readContextTipSeen());
   /** Upload progress of a queued association; the list grows while it runs. */
   const [progress, setProgress] = useState<CollabSyncProgress | null>(null);
   /** Bumped when an association is queued, so polling starts without waiting for a filter or page change. */
@@ -783,6 +852,34 @@ const CollabBoard = memo(function CollabBoard(props: {
     }
   }
 
+  /**
+   * 继续一条协作任务：把它的全文作为引用带到项目下的新任务里。
+   * 引用文本取不到（网络或权限）时退回任务链接，Agent 仍可凭链接自行读取，不阻断新建。
+   */
+  async function continueSession(session: CollabProjectSession) {
+    // 列表只在有项目时渲染，这里仍取一次 id：闭包里的项目不在这里收窄。
+    const localProjectId = project?.id ?? null;
+    if (!localProjectId) return;
+    let reference = session.shareText;
+    try {
+      const read = collab ? await collab.readReference(session.shareText || session.link) : null;
+      if (read?.text) reference = read.text;
+    } catch {
+      // 保留链接作为引用，下面的新建照常进行。
+    }
+    onContinueTask(localProjectId, { id: session.id, title: session.title, reference });
+  }
+
+  /** 关掉项目内的一次性提示，并记住这个项目已经看过。 */
+  function dismissContextTip(projectId: string) {
+    setContextTipSeen((current) => {
+      if (current.includes(projectId)) return current;
+      const next = [...current, projectId];
+      writeContextTipSeen(next);
+      return next;
+    });
+  }
+
   async function confirmDelete() {
     if (!collab || !sharedId || !deleting) return;
     const session = deleting;
@@ -844,6 +941,12 @@ const CollabBoard = memo(function CollabBoard(props: {
     { value: "me", label: t("collab.filter.you") },
     { value: "others", label: t("collab.filter.others") }
   ];
+
+  // 成员任务数：提示只在有他人的任务时出现，数字也给同一批数据，不加一次请求。
+  const otherSessionCount = (sessions ?? []).filter((session) => !session.mine).length;
+  const showContextTip = project !== null
+    && otherSessionCount > 0
+    && !contextTipSeen.includes(project.id);
 
   const selectableSessions = (page?.sessions ?? []).filter((session) => session.mine);
   const allPageSelected = selectableSessions.length > 0 && selectableSessions.every((session) => selected.has(session.id));
@@ -1059,6 +1162,22 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </div>
                       );
                     })() : null}
+                    {showContextTip ? (
+                      // 只有项目里确实有他人任务时才出现：空项目里这句话没有对象，提示也就没有意义。
+                      <div className={styles.contextTip} role="status">
+                        <span className={styles.contextTipIcon} aria-hidden="true"><AtSign size={13} /></span>
+                        <span className={styles.contextTipText}>
+                          {t("collab.contextTip.text", { count: String(otherSessionCount) })}
+                        </span>
+                        <button
+                          type="button"
+                          className={styles.contextTipAction}
+                          onClick={() => dismissContextTip(project.id)}
+                        >
+                          {t("collab.contextTip.dismiss")}
+                        </button>
+                      </div>
+                    ) : null}
                     {sessions === null ? (
                       <p className={styles.loading}>{t("collab.loading")}</p>
                     ) : sessions.length === 0 && filtering ? (
@@ -1082,9 +1201,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                         <ul className={styles.guideList}>
                           {([
                             { key: "task", icon: <MessageSquarePlus size={15} aria-hidden="true" /> },
-                            { key: "associate", icon: <Link2 size={15} aria-hidden="true" /> },
-                            { key: "quote", icon: <Quote size={15} aria-hidden="true" /> },
-                            { key: "review", icon: <Users size={15} aria-hidden="true" /> }
+                            { key: "associate", icon: <Link2 size={15} aria-hidden="true" /> }
                           ] as const).map((item) => (
                             <li key={item.key} className={styles.guideItem}>
                               <span className={styles.guideIcon} aria-hidden="true">{item.icon}</span>
@@ -1173,6 +1290,10 @@ const CollabBoard = memo(function CollabBoard(props: {
                                     }}
                                   />
                                   <div className={styles.menu} role="menu" onClick={(event) => event.stopPropagation()}>
+                                    {/* 任一行都可用，包括他人的只读任务：只读限制作用于正文，不影响在自己这边开新任务 */}
+                                    <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void continueSession(session); }}>
+                                      {t("collab.session.continue")}
+                                    </button>
                                     <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void copyLink(session); }}>
                                       {t("collab.session.copyLink")}
                                     </button>
@@ -1221,6 +1342,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                       if (!dispatch) return;
                       void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task });
                     }}
+                    // 本机任务没有云端引用可带：新任务就落在同一个项目目录里，正文不搬。
+                    onContinueTask={() => onContinueTask(project.id, null)}
                   />
                 )}
               </div>
@@ -1368,6 +1491,7 @@ const CollabBoard = memo(function CollabBoard(props: {
       <SessionReaderPanel
         session={reading}
         loading={readingId !== null}
+        memberCount={shared?.memberCount ?? null}
         onClose={() => setReading(null)}
         onCopy={(session) => void copyLink(session)}
       />
@@ -1406,8 +1530,11 @@ const CollabBoard = memo(function CollabBoard(props: {
 function LocalProjectSessions(props: {
   tasks: AgentTaskView[];
   onOpenTask: (task: AgentTaskView) => void;
+  /** 在这个项目下开一条新任务：本机任务没有云端引用，新任务只是落在同一个项目里。 */
+  onContinueTask: () => void;
 }) {
   const { t } = useTranslation();
+  const [openMenuKey, setOpenMenuKey] = useState<string | null>(null);
   return (
     <>
       {props.tasks.length === 0 ? (
@@ -1415,20 +1542,62 @@ function LocalProjectSessions(props: {
       ) : (
         // 本机项目没有工具条，列表要自己留出与标题的间距，否则悬停行浮起的外环会贴住项目名。
         <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
-          {props.tasks.map((task) => (
-            <li
-              key={task.sessionKey}
-              className={`${styles.row} ${styles.rowOpenable}`}
-              onClick={() => props.onOpenTask(task)}
-            >
-              <span className={styles.localIcon} aria-hidden="true"><Folder size={15} /></span>
-              <div className={styles.rowText}>
-                <span className={styles.rowTitle}>{task.title}</span>
-                {task.preview ? <span className={styles.rowSummary}>{task.preview}</span> : null}
-              </div>
-              <span className={styles.meta}>{stampLabel(taskStamp(task.updatedAt), t)}</span>
-            </li>
-          ))}
+          {props.tasks.map((task) => {
+            const menuOpen = openMenuKey === task.sessionKey;
+            return (
+              <li
+                key={task.sessionKey}
+                className={`${styles.row} ${styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""}`}
+                onClick={() => props.onOpenTask(task)}
+              >
+                <span className={styles.localIcon} aria-hidden="true"><Folder size={15} /></span>
+                <div className={styles.rowText}>
+                  <span className={styles.rowTitle}>{task.title}</span>
+                  {task.preview ? <span className={styles.rowSummary}>{task.preview}</span> : null}
+                </div>
+                <span className={styles.meta}>{stampLabel(taskStamp(task.updatedAt), t)}</span>
+                <button
+                  type="button"
+                  className={styles.moreButton}
+                  aria-label={t("collab.session.more")}
+                  title={t("collab.session.more")}
+                  aria-expanded={menuOpen}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setOpenMenuKey(menuOpen ? null : task.sessionKey);
+                  }}
+                >
+                  <MoreHorizontal size={15} aria-hidden="true" />
+                </button>
+                {menuOpen ? (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.menuScrim}
+                      aria-label={t("collab.cancel")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenMenuKey(null);
+                      }}
+                    />
+                    <div className={styles.menu} role="menu" onClick={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.menuItem}
+                        onClick={() => {
+                          setOpenMenuKey(null);
+                          props.onContinueTask();
+                        }}
+                      >
+                        {t("collab.session.continue")}
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       )}
     </>
@@ -2003,6 +2172,8 @@ function ProjectBoardSettingsDialog(props: {
 function SessionReaderPanel(props: {
   session: { session: CollabProjectSession; turns: CollabSessionTurn[] } | null;
   loading: boolean;
+  /** 项目成员数：读任务的地方说明这条任务对谁可见，比在每行重复同一句更合适。 */
+  memberCount: number | null;
   onClose: () => void;
   onCopy: (session: CollabProjectSession) => void;
 }) {
@@ -2072,6 +2243,12 @@ function SessionReaderPanel(props: {
             <h2 id={titleId} className={styles.readerTitle}>{data.session.title}</h2>
             <div className={styles.readerHeadMeta}>
               <span>{[name, when].filter(Boolean).join(" · ")}</span>
+              {data.session.mine && props.memberCount ? (
+                <span className={styles.readerSync}>
+                  <Cloud size={12} aria-hidden="true" />
+                  {t("collab.reader.visibleTo", { count: String(props.memberCount) })}
+                </span>
+              ) : null}
               {data.session.mine ? null : <span className={styles.readerBadge}>{t("collab.reader.readOnly")}</span>}
             </div>
           </div>
