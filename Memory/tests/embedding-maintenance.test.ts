@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type Embedder, type MemoryRow } from "../src/index.js";
 import { Repositories } from "../src/storage/repositories.js";
+import { SqliteVecStore } from "../src/storage/sqlite-vec-store.js";
 import { attachMemoryVector } from "../src/storage/memory-vector-state.js";
 import { rememberEmbeddingIdentity } from "../src/model/embedding-identity.js";
 import { buildUserMemory } from "../src/service/user-memory/user-memory.js";
@@ -8,7 +9,7 @@ import { createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js
 import { adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 
 const fixture = createMemoryServiceFixture();
-afterEach(() => fixture.cleanup());
+afterEach(() => { vi.restoreAllMocks(); fixture.cleanup(); });
 const at = "2026-10-01T00:00:00.000Z";
 const identity = { provider: "openai_compatible", model: "current-model" } as const;
 const vector = (dimension = 3) => Array.from({ length: dimension }, (_, i) => i === 0 ? 1 : 0);
@@ -84,10 +85,25 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     const query = rememberEmbeddingIdentity(vector(1024), identity);
     expect(repos.memories.searchVectorIds(query, "vec").map(hit => hit.id)).toEqual(["current"]);
     const run = await service.rebuildEmbeddings("repair");
-    expect(run.enqueued).toBe(4);
+    expect(run).toMatchObject({
+      enqueued: 4,
+      pending: 4,
+      statsAfter: { totalSlots: 4, needsRepair: 4, retryQueue: { pending: 4 } }
+    });
     await service.runWorkerOnce(200);
-    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 4, done: true, statsAfter: { ready: 5, needsRepair: 0 } });
+    // `statsAfter` scopes to this run's own targets; machine-wide health comes
+    // from the separate statistics endpoint.
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 4, done: true, statsAfter: { totalSlots: 4, ready: 4, needsRepair: 0 } });
+    expect(await service.embeddingMaintenanceStats()).toMatchObject({ totalSlots: 5, ready: 5, needsRepair: 0 });
     expect(repos.memories.searchVectorIds(query, "vec")).toHaveLength(5);
+  });
+
+  it("serves the last complete global snapshot while the statistics worker is unavailable", async () => {
+    const { service } = setup();
+    const complete = await service.embeddingMaintenanceStats();
+    vi.spyOn(SqliteVecStore.prototype, "maintenanceEntries")
+      .mockImplementation(() => { throw new Error("synthetic statistics timeout"); });
+    await expect(service.embeddingMaintenanceStats()).resolves.toEqual(complete);
   });
 
   it("counts an existing L1 action independently from its missing summary vector", async () => {

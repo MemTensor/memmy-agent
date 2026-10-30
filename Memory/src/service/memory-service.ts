@@ -838,7 +838,12 @@ export class MemoryService {
     // slots, then keep storage alive through complete foreground business work.
     const modelsStopped = this.modelTasks.stop();
     const requestsStopped = this.concurrency.close();
+    // A display-only scan is safe to recompute and must not keep running while
+    // other accepted work drains during shutdown.
+    this.embeddingMaintenanceReader.cancelDiscardableStats();
     this.stopping = Promise.all([stopped, modelsStopped, requestsStopped]).then(async () => {
+      // Reads that a maintenance run depends on get a bounded grace period before
+      // the worker is terminated, so shutdown cannot hang on a stuck scan.
       await this.embeddingMaintenanceReader.stop();
       this.stopConcurrencyMetrics();
       this.workerMetrics.stop();

@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,6 +23,7 @@ const memoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const execFileAsync = promisify(execFile);
 let compiledDirectory: string;
 let compiledReaderUrl: string;
+let controlledWorkerUrl: URL;
 
 interface CompiledReader {
   readStats(request: {
@@ -35,17 +36,32 @@ interface CompiledReader {
     health: Record<string, unknown>;
     stats: { totalSlots: number; missing: number };
   }>;
+  readTargets(request: {
+    userId: string;
+    identity: typeof identity;
+    dimension: number;
+    targets: unknown[];
+  }): Promise<{ readAt: string; targets: unknown[] }>;
+  readUpgradeCandidates(): Promise<unknown[]>;
   stop(): Promise<void>;
 }
 
-async function createCompiledReader(repos: Repositories, sqlitePath: string): Promise<CompiledReader> {
+async function createCompiledReader(
+  repos: Repositories,
+  sqlitePath: string,
+  options: { statsTimeoutMs?: number; businessTimeoutMs?: number; stopGraceMs?: number; workerUrl?: URL } = {}
+): Promise<CompiledReader> {
   const compiled = await import(compiledReaderUrl) as {
     EmbeddingMaintenanceReader: new (options: {
       repos: Repositories;
       sqlitePath: string;
+      statsTimeoutMs?: number;
+      businessTimeoutMs?: number;
+      stopGraceMs?: number;
+      workerUrl?: URL;
     }) => CompiledReader;
   };
-  return new compiled.EmbeddingMaintenanceReader({ repos, sqlitePath });
+  return new compiled.EmbeddingMaintenanceReader({ repos, sqlitePath, ...options });
 }
 
 beforeAll(async () => {
@@ -63,6 +79,28 @@ beforeAll(async () => {
     });
   }
   compiledReaderUrl = pathToFileURL(join(compiledDirectory, "embedding-maintenance-reader.js")).href;
+  const controlledWorkerPath = join(compiledDirectory, "controlled-reader-worker.js");
+  writeFileSync(controlledWorkerPath, `
+    import { parentPort } from "node:worker_threads";
+    const port = parentPort;
+    const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    port.on("message", message => {
+      if (message.type === "close") { port.close(); return; }
+      const operation = message.operation;
+      if (operation.type === "stats" || operation.type === "upgrade-candidates") block();
+      const result = operation.type === "stats"
+        ? { readAt: new Date().toISOString(), entries: [], health: {}, stats: {
+            dimension: 3, available: true, totalSlots: 0, ready: 0, missing: 0,
+            dimMismatch: 0, modelMismatch: 0, contentMismatch: 0, needsRepair: 0,
+            retryQueue: { pending: 0, active: 0, stale: 0, failed: 0 }
+          } }
+        : operation.type === "targets"
+          ? { readAt: new Date().toISOString(), targets: [] }
+          : [];
+      port.postMessage({ type: "response", id: message.id, result });
+    });
+  `);
+  controlledWorkerUrl = pathToFileURL(controlledWorkerPath);
 });
 
 afterAll(() => {
@@ -179,8 +217,8 @@ describe("embedding maintenance read isolation", () => {
         }
         console.log(JSON.stringify(samples));
       `]);
-      const stopped = reader.stop();
-      await expect(reader.readStats(request)).rejects.toThrow("stopping");
+      // Let the scan finish first: these are display reads, which stop() is
+      // expected to cancel, so their results must be collected before shutdown.
       const [first, second] = await reads;
       const healthSamples = JSON.parse((await healthClient).stdout) as number[];
       const orderedHealth = [...healthSamples].sort((left, right) => left - right);
@@ -193,6 +231,8 @@ describe("embedding maintenance read isolation", () => {
       expect(maxDelayMs).toBeLessThan(200);
       expect(healthP95).toBeLessThan(200);
       expect(Math.max(...healthSamples)).toBeLessThan(500);
+      const stopped = reader.stop();
+      await expect(reader.readStats(request)).rejects.toThrow("stopping");
       await stopped;
     } finally {
       clearInterval(interval);
@@ -217,5 +257,60 @@ describe("embedding maintenance read isolation", () => {
     expect(settled.every(result => result.status === "rejected")).toBe(true);
     await expect(reader.readStats(request)).rejects.toThrow();
     await reader.stop();
+  });
+
+  it("preempts a running discardable scan when fixed-target progress arrives", async () => {
+    const { db } = fixture.createTestService();
+    const reader = await createCompiledReader(new Repositories(db.db), db.path, {
+      workerUrl: controlledWorkerUrl,
+      statsTimeoutMs: 1_000
+    });
+    const stats = reader.readStats({ userId: "local-user", identity, available: true, knownDimension: 3 });
+    void stats.catch(() => undefined);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    const started = performance.now();
+    await expect(reader.readTargets({
+      userId: "local-user", identity, dimension: 3, targets: []
+    })).resolves.toMatchObject({ targets: [] });
+    expect(performance.now() - started).toBeLessThan(200);
+    await expect(stats).rejects.toMatchObject({
+      name: "EmbeddingMaintenanceReaderCancelled",
+      cancelKind: "discardable-stats"
+    });
+    await reader.stop();
+  });
+
+  it("times out a stuck worker, rejects queued work, and enters backoff", async () => {
+    const { db } = fixture.createTestService();
+    const reader = await createCompiledReader(new Repositories(db.db), db.path, {
+      workerUrl: controlledWorkerUrl,
+      statsTimeoutMs: 25
+    });
+    await expect(reader.readStats({
+      userId: "local-user", identity, available: true, knownDimension: 3
+    })).rejects.toThrow("timed out");
+    await expect(reader.readTargets({
+      userId: "local-user", identity, dimension: 3, targets: []
+    })).rejects.toThrow("timed out");
+    await reader.stop();
+  });
+
+  it("settles a required read and waits for its worker to exit during forced stop", async () => {
+    const { db } = fixture.createTestService();
+    const reader = await createCompiledReader(new Repositories(db.db), db.path, {
+      workerUrl: controlledWorkerUrl,
+      businessTimeoutMs: 1_000,
+      stopGraceMs: 25
+    });
+    const required = reader.readUpgradeCandidates();
+    void required.catch(() => undefined);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const stopped = reader.stop();
+    await expect(required).rejects.toMatchObject({
+      name: "EmbeddingMaintenanceReaderCancelled",
+      cancelKind: "business-required"
+    });
+    await expect(stopped).resolves.toBeUndefined();
   });
 });

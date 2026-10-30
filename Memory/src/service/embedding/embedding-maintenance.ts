@@ -91,6 +91,8 @@ export class EmbeddingMaintenance {
       dimension: snapshot.stats.dimension, createdAt: at, targets: []
     };
     let concurrentRun: Run | undefined;
+    let initialStates: EmbeddingMaintenanceTargetProgress[] = [];
+    let initialStats = this.emptyStats(run.dimension);
     this.deps.repos.transaction(() => {
       const current = this.manualRun();
       if (current && !current.completedAt) {
@@ -111,11 +113,20 @@ export class EmbeddingMaintenance {
         run.targets.push(target);
       }
       if (run.targets.every(target => Boolean(target.result))) run.completedAt = at;
+      initialStates = run.targets.map(target => ({
+        key: targetKey(target),
+        health: snapshot.health[targetKey(target)] ?? "missing",
+        sourceCurrent: true,
+        succeeded: target.result === "updated",
+        terminalFailure: target.result === "failed",
+        retrying: false
+      }));
+      initialStats = this.scopedStatsFor(run, initialStates);
       this.deps.repos.runtime.setKv(this.key, run, at);
-      this.cacheStats(run, snapshot.stats, snapshot.readAt, Boolean(run.completedAt));
+      this.cacheStats(run, initialStats, snapshot.readAt, Boolean(run.completedAt));
     });
     if (concurrentRun) return (await this.progress(concurrentRun.runId))!;
-    return this.result(run, [], snapshot.stats);
+    return this.result(run, initialStates, initialStats);
   }
 
   /** One upgrade, only existing action vectors and feedback-derived L2 vectors. */
@@ -217,10 +228,19 @@ export class EmbeddingMaintenance {
     if (!run) return null;
     const cached = this.cachedStats(run);
     if (run.completedAt && cached?.final) return this.result(run, [], cached.stats);
-    const snapshot = await this.deps.reader.readStats(this.statsRequest(run.dimension, run.targets));
+    // Read only this run's fixed targets. `statsAfter` comes from that scoped
+    // read; the global counters are a separate, discardable panel read. Doing
+    // both here made every progress poll pay for a whole-table scan.
+    // Health is judged against the identity in effect now, so a model switch
+    // still surfaces as modelMismatch instead of looking ready.
+    const targets = await this.readTargets(
+      run.targets, embeddingIdentity(this.deps.embedder.config), run.dimension ?? 0
+    );
     const current = this.selectRun(runId);
-    if (!current || !sameRunReadScope(run, current)) return this.result(run, [], snapshot.stats);
-    return this.refresh(current, snapshot.targets ?? [], snapshot.stats, snapshot.readAt);
+    if (!current || !sameRunReadScope(run, current)) {
+      return this.result(run, [], this.scopedStatsFor(run, targets));
+    }
+    return this.refresh(current, targets, this.scopedStatsFor(current, targets));
   }
 
   nextUpgradeAttemptAt(): number | undefined {
@@ -289,6 +309,28 @@ export class EmbeddingMaintenance {
     }
     if (stats) this.cacheStats(run, stats, readAt, Boolean(run.completedAt));
     return this.result(run, targetStates, stats);
+  }
+
+  /**
+   * Statistics scoped to one run's fixed targets. `statsAfter` describes the run,
+   * never machine-wide health, so it must come from the same read the run used.
+   */
+  private scopedStatsFor(run: Run, targets: readonly EmbeddingMaintenanceTargetProgress[]): EmbeddingMaintenanceStats {
+    const stats: EmbeddingMaintenanceStats = {
+      dimension: run.dimension ?? 0,
+      available: this.deps.embedder.status().configured,
+      totalSlots: targets.length,
+      ready: 0, missing: 0, dimMismatch: 0, modelMismatch: 0, contentMismatch: 0, needsRepair: 0,
+      retryQueue: { pending: 0, active: 0, stale: 0, failed: 0 }
+    };
+    for (const target of targets) {
+      stats[target.health] = (stats[target.health] ?? 0) + 1;
+      if (target.succeeded) continue;
+      if (target.terminalFailure) stats.retryQueue!.failed += 1;
+      else stats.retryQueue!.pending += 1;
+    }
+    stats.needsRepair = stats.missing + stats.dimMismatch + stats.modelMismatch + (stats.contentMismatch ?? 0);
+    return stats;
   }
 
   private result(

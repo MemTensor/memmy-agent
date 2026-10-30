@@ -86,7 +86,11 @@ export function readEmbeddingMaintenanceStats(
   repos: Repositories,
   request: EmbeddingMaintenanceReaderStatsRequest
 ): EmbeddingMaintenanceStatsSnapshot {
-  return repos.db.transaction(() => {
+  // Keep every database-dependent value in one SQLite snapshot, then release
+  // the read transaction before folding a potentially large entry list into
+  // counters. That preserves consistency without holding the WAL reader open
+  // during CPU-only work.
+  const snapshot = repos.db.transaction(() => {
     const readAt = new Date().toISOString();
     const entries = [
       ...repos.vectors.maintenanceEntries(),
@@ -94,40 +98,48 @@ export function readEmbeddingMaintenanceStats(
     ];
     const dimension = resolveDimension(entries, request);
     const work = currentEmbeddingMaintenanceState(repos, request.userId, dimension, request.identity, entries);
-    const health: Record<string, EmbeddingMaintenanceHealth> = {};
-    const stats: EmbeddingMaintenanceReaderStats = {
-      dimension,
-      available: request.available,
-      totalSlots: entries.length,
-      ready: 0,
-      missing: 0,
-      dimMismatch: 0,
-      modelMismatch: 0,
-      contentMismatch: 0,
-      needsRepair: 0,
-      retryQueue: work.retryQueue
-    };
-    for (const entry of entries) {
-      const state = healthForEntry(entry, request.identity, dimension, work.outdatedVectors);
-      if (request.includePlan) health[targetKey(entry)] = state;
-      stats[state] = (stats[state] ?? 0) + 1;
-    }
-    stats.needsRepair = stats.missing + stats.dimMismatch + stats.modelMismatch + (stats.contentMismatch ?? 0);
     return {
       readAt,
-      entries: request.includePlan ? entries : [],
-      health,
-      stats,
-      ...(request.targets ? {
-        targets: readTargetProgress(repos, {
+      entries,
+      dimension,
+      work,
+      targets: request.targets
+        ? readTargetProgress(repos, {
           userId: request.userId,
           identity: request.identity,
           dimension,
           targets: request.targets
         })
-      } : {})
+        : undefined
     };
   })();
+
+  const health: Record<string, EmbeddingMaintenanceHealth> = {};
+  const stats: EmbeddingMaintenanceReaderStats = {
+    dimension: snapshot.dimension,
+    available: request.available,
+    totalSlots: snapshot.entries.length,
+    ready: 0,
+    missing: 0,
+    dimMismatch: 0,
+    modelMismatch: 0,
+    contentMismatch: 0,
+    needsRepair: 0,
+    retryQueue: snapshot.work.retryQueue
+  };
+  for (const entry of snapshot.entries) {
+    const state = healthForEntry(entry, request.identity, snapshot.dimension, snapshot.work.outdatedVectors);
+    if (request.includePlan) health[targetKey(entry)] = state;
+    stats[state] = (stats[state] ?? 0) + 1;
+  }
+  stats.needsRepair = stats.missing + stats.dimMismatch + stats.modelMismatch + (stats.contentMismatch ?? 0);
+  return {
+    readAt: snapshot.readAt,
+    entries: request.includePlan ? snapshot.entries : [],
+    health,
+    stats,
+    ...(snapshot.targets ? { targets: snapshot.targets } : {})
+  };
 }
 
 export function readEmbeddingMaintenanceTargets(
@@ -171,13 +183,9 @@ function readTargetProgress(
   // has no successful embedding work behind it is contentMismatch, not ready.
   // Without this the upgrade planner treats stale vectors as done and marks the
   // one-time repair complete while the panel still reports needsRepair.
-  const { outdatedVectors } = currentEmbeddingMaintenanceState(
-    repos,
-    request.userId,
-    request.dimension,
-    request.identity,
-    entries
-  );
+  // Everything below is scoped to these targets: neither the queue scan nor the
+  // history lookup may grow with unrelated retry history on the machine.
+  const outdatedVectors = outdatedTargetsFor(repos, request, entries, memories, userMemories);
   return request.targets.map(target => {
     const entry = byKey.get(targetKey(target));
     const health = entry
@@ -216,6 +224,69 @@ function readTargetProgress(
       retrying
     };
   });
+}
+
+/**
+ * Outdated target keys for a fixed target set, computed from the scoped queue
+ * rows only. Mirrors currentEmbeddingMaintenanceState's per-task rules without
+ * reading any row that belongs to another target.
+ */
+function outdatedTargetsFor(
+  repos: Repositories,
+  request: EmbeddingMaintenanceReaderTargetsRequest,
+  entries: EmbeddingMaintenanceEntry[],
+  memories: Map<string, MemoryRow>,
+  userMemories: Map<string, { content: string; status: string }>
+): Set<string> {
+  const outdated = new Set<string>();
+  const byKey = new Map(entries.map(entry => [targetKey(entry), entry]));
+  const tasks = repos.runtime.embeddingMaintenanceTasksForTargets({
+    memoryIds: request.targets.filter(target => target.kind === "memory").map(target => target.id),
+    userMemoryIds: request.targets.filter(target => target.kind === "user_memory").map(target => target.id)
+  });
+  for (const task of tasks) {
+    const id = task.targetId;
+    let contentHash: string;
+    let sourceTexts: string[];
+    let vectorField = task.vectorField;
+    let entry: EmbeddingMaintenanceEntry | undefined;
+    if (task.userMemory) {
+      const memory = userMemories.get(id);
+      if (!memory || memory.status !== "active") continue;
+      contentHash = stableHash(memory.content);
+      sourceTexts = [memory.content];
+      vectorField = "vec";
+      entry = byKey.get(targetKey({ id, kind: "user_memory", vectorField }));
+    } else {
+      const memory = memories.get(id);
+      if (!memory || memory.status === "deleted" || memory.deletedAt) continue;
+      contentHash = memory.contentHash ?? stableHash(memory.memoryValue);
+      vectorField ??= memory.memoryLayer === "L1" ? "vec_summary" : "vec";
+      entry = byKey.get(targetKey({ id, kind: "memory", vectorField }));
+      sourceTexts = maintenanceSourceTexts(memory, vectorField);
+      if (!sourceTextIsCurrent(memory, vectorField, task.sourceText)) continue;
+    }
+    if (task.contentHash && task.contentHash !== contentHash) continue;
+    if (!entry || request.dimension === 0) continue;
+    if (entry.dimension !== request.dimension) continue;
+    if (!sameEmbeddingIdentity(entry, request.identity)) continue;
+    const completed = repos.runtime.hasSuccessfulEmbeddingWork({
+      targetId: id,
+      userMemory: task.userMemory,
+      vectorField: vectorField ?? "vec",
+      contentHash,
+      sourceTexts,
+      since: task.updatedAt
+    });
+    if (!completed) {
+      outdated.add(targetKey({
+        id,
+        kind: task.userMemory ? "user_memory" : "memory",
+        vectorField
+      }));
+    }
+  }
+  return outdated;
 }
 
 function resolveDimension(
