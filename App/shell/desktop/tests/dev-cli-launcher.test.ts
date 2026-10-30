@@ -203,6 +203,76 @@ fi`;
     }
   }, 15_000);
 
+  it("reinstalls root dependencies when jszip is missing", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+NPM_DEPENDENCY_STAMP="$test_dir/dependency-fingerprint"
+root_dependency_fingerprint > "$NPM_DEPENDENCY_STAMP"
+
+install_calls=0
+dependencies_installed=0
+
+node_can_resolve() {
+  if [[ "$1" == "jszip" ]]; then
+    test "$dependencies_installed" -eq 1
+    return
+  fi
+  return 0
+}
+
+npm() {
+  test "$1" = "install"
+  install_calls=$((install_calls + 1))
+  dependencies_installed=1
+}
+
+ensure_npm_dependencies
+test "$install_calls" -eq 1`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("reinstalls root dependencies when the package lock fingerprint changes", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+NPM_DEPENDENCY_STAMP="$test_dir/dependency-fingerprint"
+printf '%s\n' stale > "$NPM_DEPENDENCY_STAMP"
+
+install_calls=0
+node_can_resolve() { return 0; }
+npm() {
+  test "$1" = "install"
+  install_calls=$((install_calls + 1))
+}
+
+ensure_npm_dependencies
+test "$install_calls" -eq 1
+test "$(cat "$NPM_DEPENDENCY_STAMP")" = "$(root_dependency_fingerprint)"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("resolves Electron through the desktop workspace instead of a fixed node_modules path", () => {
+    const source = readFileSync(devStartPath, "utf8");
+    expect(source).not.toContain('$DESKTOP_DIR/node_modules/electron');
+
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+electron_package_dir="$(resolve_electron_package_dir)"
+test -f "$electron_package_dir/package.json"
+test -f "$electron_package_dir/install.js"
+test "$electron_package_dir" = "$(cd "$DESKTOP_DIR" && node --eval 'const path = require("node:path"); process.stdout.write(path.dirname(require.resolve("electron/package.json")));')"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it("reinstalls memmy-agent dependencies when file validators are missing", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh
