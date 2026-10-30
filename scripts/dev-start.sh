@@ -103,8 +103,14 @@ require_command() {
   fi
 }
 
+# Resolve the way the dev stack will actually load it. Resolving from the
+# caller's current directory reported every dependency missing when the script
+# was started from outside the repository.
 node_can_resolve() {
-  node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  (
+    cd "$ROOT_DIR"
+    node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  )
 }
 
 node_can_resolve_from_dir() {

@@ -167,10 +167,21 @@ function readTargetProgress(
   const userMemories = new Map(repos.userMemories.embeddingMaintenanceSourcesByIds(
     userTargets.map(target => target.id)
   ).map(memory => [memory.id, memory]));
+  // Health must agree with the global statistics: a target whose current content
+  // has no successful embedding work behind it is contentMismatch, not ready.
+  // Without this the upgrade planner treats stale vectors as done and marks the
+  // one-time repair complete while the panel still reports needsRepair.
+  const { outdatedVectors } = currentEmbeddingMaintenanceState(
+    repos,
+    request.userId,
+    request.dimension,
+    request.identity,
+    entries
+  );
   return request.targets.map(target => {
     const entry = byKey.get(targetKey(target));
     const health = entry
-      ? healthForEntry(entry, request.identity, request.dimension)
+      ? healthForEntry(entry, request.identity, request.dimension, outdatedVectors)
       : "missing";
     let sourceCurrent = true;
     let succeeded = false;
@@ -179,7 +190,11 @@ function readTargetProgress(
     if (target.jobId && target.kind === "memory") {
       const job = memoryJobs.get(target.jobId);
       const memory = memories.get(target.id);
-      sourceCurrent = Boolean(job && memory && job.sourceText === maintenanceText(memory, target.vectorField));
+      // Accept any text this target's maintenance would legitimately embed, not
+      // just today's canonical text: a queued retry may carry an older-but-valid
+      // rendering (e.g. the raw memoryValue) and still produce the right vector.
+      // Strict equality here reported successful reused jobs as failures.
+      sourceCurrent = Boolean(job && memory && sourceTextIsCurrent(memory, target.vectorField, job.sourceText));
       succeeded = job?.status === "succeeded";
       terminalFailure = !job || job.status === "failed";
       retrying = Boolean(job && job.attempts > 0 && job.lastError && !succeeded && !terminalFailure);
@@ -270,7 +285,7 @@ function currentEmbeddingMaintenanceState(
       vectorField ??= memory.memoryLayer === "L1" ? "vec_summary" : "vec";
       entry = byKey.get(targetKey({ id, kind: "memory", vectorField }));
       sourceTexts = maintenanceSourceTexts(memory, vectorField);
-      if (task.sourceText && !sourceTexts.includes(task.sourceText)) return retainQueueRow;
+      if (!sourceTextIsCurrent(memory, vectorField, task.sourceText)) return retainQueueRow;
     }
     if (task.contentHash && task.contentHash !== contentHash) return retainQueueRow;
     if (!entry || dimension === 0 || entry.dimension !== dimension || !sameEmbeddingIdentity(entry, identity)) return true;
@@ -291,6 +306,21 @@ function currentEmbeddingMaintenanceState(
   };
   const retryQueue = repos.runtime.embeddingMaintenanceQueueStats(userId, Date.now(), isCurrentWork);
   return { retryQueue, outdatedVectors };
+}
+
+/**
+ * Whether a queued or completed job's source text still describes this memory.
+ * Historical jobs may carry an older-but-valid rendering of the same content, so
+ * every text the target would legitimately embed counts as current.
+ */
+function sourceTextIsCurrent(
+  memory: MemoryRow,
+  vectorField: EmbeddingRetryVectorField | undefined,
+  sourceText: string | undefined
+): boolean {
+  if (!sourceText) return true;
+  return sourceText === maintenanceText(memory, vectorField) ||
+    maintenanceSourceTexts(memory, vectorField).includes(sourceText);
 }
 
 function maintenanceSourceTexts(memory: MemoryRow, vectorField?: EmbeddingRetryVectorField): string[] {

@@ -258,6 +258,42 @@ test "$(cat "$NPM_DEPENDENCY_STAMP")" = "$(root_dependency_fingerprint)"`;
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it("resolves root dependencies from the repository, not the caller's directory", () => {
+    const source = readFileSync(devStartPath, "utf8");
+    // Resolving from wherever the user invoked the script reported every
+    // dependency missing outside the repository; the resolver must pin $ROOT_DIR.
+    const resolver = source.match(/^node_can_resolve\(\) \{[\s\S]*?^\}/mu)?.[0] ?? "";
+    expect(resolver).toContain('cd "$ROOT_DIR"');
+
+    // Run from an unrelated directory with a matching fingerprint: nothing is
+    // missing, so no install may happen.
+    const outside = mkdtempSync(join(tmpdir(), "memmy-dev-outside-"));
+    const stamp = join(outside, "dependency-fingerprint");
+    try {
+      const script = `set -euo pipefail
+source ${JSON.stringify(devStartPath)}
+NPM_DEPENDENCY_STAMP=${JSON.stringify(stamp)}
+root_dependency_fingerprint > "$NPM_DEPENDENCY_STAMP"
+
+install_calls=0
+npm() {
+  install_calls=$((install_calls + 1))
+}
+
+ensure_npm_dependencies
+test "$install_calls" -eq 0`;
+      const result = spawnSync("bash", ["-s"], {
+        cwd: outside,
+        encoding: "utf8",
+        input: script
+      });
+
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+    } finally {
+      rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
   it("resolves Electron through the desktop workspace instead of a fixed node_modules path", () => {
     const source = readFileSync(devStartPath, "utf8");
     expect(source).not.toContain('$DESKTOP_DIR/node_modules/electron');
