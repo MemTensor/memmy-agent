@@ -40,6 +40,7 @@ interface AgentMessageContentProps {
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
+  deliveredFiles?: ReadonlyArray<{ kind: string; name?: string; path?: string }>;
   deferRender?: boolean;
   deferredRevealDelayMs?: number;
   className?: string;
@@ -49,6 +50,62 @@ interface AgentMessageContentProps {
 const TRAILING_PUNCTUATION_RE = /[.,;:!?，。；：！？)）\]]+$/;
 const LONG_TEXT_WRAP_CLASS = "break-words [overflow-wrap:anywhere]";
 const LIST_ITEM_BLOCK_TAGS = new Set(["p", "pre", "blockquote", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
+
+function linkDeliveredFileMentions(
+  children: ReactNode,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+  artifactClient: AgentArtifactClient | null | undefined,
+  onPreviewFile: InAppFilePreviewHandler | undefined,
+  isStreaming: boolean | undefined,
+): ReactNode {
+  if (!artifactClient) return children;
+  const files = (deliveredFiles ?? []).flatMap((file) => {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) return [];
+    const name = basename(file.name?.trim() || path);
+    return name ? [{ name, path }] : [];
+  }).sort((left, right) => right.name.length - left.name.length);
+  if (!files.length) return children;
+
+  let key = 0;
+  return Children.toArray(children).flatMap((child) => {
+    if (typeof child !== "string") return [child];
+    const parts: ReactNode[] = [];
+    let cursor = 0;
+    while (cursor < child.length) {
+      let match: { name: string; path: string; index: number } | null = null;
+      for (const file of files) {
+        let index = child.indexOf(file.name, cursor);
+        while (index >= 0 && (
+          /[\w.-]/u.test(child[index - 1] ?? "") || /[\w.-]/u.test(child[index + file.name.length] ?? "")
+        )) index = child.indexOf(file.name, index + 1);
+        if (index >= 0 && (!match || index < match.index || index === match.index && file.name.length > match.name.length)) {
+          match = { ...file, index };
+        }
+      }
+      if (!match) break;
+      if (match.index > cursor) parts.push(child.slice(cursor, match.index));
+      parts.push(<FileReferenceChip key={`delivered-file-${key++}`} path={match.path} label={match.name} variant="link" isStreaming={isStreaming} artifactClient={artifactClient} onPreviewFile={onPreviewFile} />);
+      cursor = match.index + match.name.length;
+    }
+    if (!parts.length) return [child];
+    if (cursor < child.length) parts.push(child.slice(cursor));
+    return parts;
+  });
+}
+
+function findDeliveredFileForInlineCode(
+  code: string,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+): { path: string } | null {
+  for (const file of deliveredFiles ?? []) {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) continue;
+    const name = basename(file.name?.trim() || path);
+    if (code === name || code === basename(path) || code === path) return { path };
+  }
+  return null;
+}
 
 function listItemElementTag(node: ReactNode): string | null {
   if (!isValidElement(node)) {
@@ -140,8 +197,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     [props.content, props.isStreaming]
   );
   const deferred = useDeferredMarkdownRender(source, Boolean(props.deferRender), Boolean(props.isStreaming), props.deferredRevealDelayMs);
-  const components = useMemo<Components>(() => {
-    return ({
+  const components = useMemo<Components>(() => ({
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
@@ -204,13 +260,20 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
       const isInline = !language && !raw.includes("\n");
       if (isInline) {
+        const deliveredFile = props.artifactClient ? findDeliveredFileForInlineCode(code, props.deliveredFiles) : null;
+        if (deliveredFile) {
+          return <FileReferenceChip path={deliveredFile.path} label={code} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        }
+        if (props.artifactClient && isLikelyLocalPath(code)) {
+          return <FileReferenceChip path={code} label={code} variant="link" verifiedOnly isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        }
         return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
       }
       return <CodeBlock code={code} language={language} highlight={!props.isStreaming} />;
     },
     p({ children }) {
       return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>
-        {children}
+        {linkDeliveredFileMentions(children, props.deliveredFiles, props.artifactClient, props.onPreviewFile, props.isStreaming)}
       </p>;
     },
     li({ children, className }) {
@@ -243,7 +306,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     td({ children, style }) {
       return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</td>;
     }
-  }); }, [props.artifactClient, props.isStreaming, props.onPreviewFile]);
+  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -277,6 +340,7 @@ function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, ne
     && previous.isStreaming === next.isStreaming
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
+    && previous.deliveredFiles === next.deliveredFiles
     && previous.deferRender === next.deferRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.className === next.className

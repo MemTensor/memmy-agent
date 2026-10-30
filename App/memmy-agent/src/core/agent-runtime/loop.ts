@@ -3843,33 +3843,20 @@ export class AgentLoop {
     const activeTools = tools ?? this.tools;
     const deliveryMessageTool = activeTools.get("message");
     let heldDeliveryStream = "";
-    const deferredLegacyAnswers = new Set<string>();
-    let legacyPublishedText = "";
-    const publishStream = async (delta: string) => {
-      await onStream?.(delta);
-      if (!onStreamEnd) legacyPublishedText += delta;
-    };
     const deliveryAwareStream = onStream ? async (delta: string) => {
       if (deliveryMessageTool instanceof MessageTool && deliveryMessageTool.hasPendingPluginFiles()) {
         heldDeliveryStream += delta;
       } else {
         if (heldDeliveryStream) {
-          await publishStream(heldDeliveryStream);
+          await onStream(heldDeliveryStream);
           heldDeliveryStream = "";
         }
-        await publishStream(delta);
+        await onStream(delta);
       }
     } : null;
     const deliveryAwareStreamEnd = onStream || onStreamEnd ? async (options: { resuming?: boolean } = {}) => {
-      // Resumption-aware clients can anchor attachments to the answer already
-      // written. Legacy text-only clients cannot distinguish that draft from a
-      // final delivery claim, so keep it deferred until an actual send succeeds.
       if (heldDeliveryStream) {
-        if (options.resuming && !onStreamEnd) {
-          deferredLegacyAnswers.add(heldDeliveryStream.trim());
-        } else {
-          await publishStream(heldDeliveryStream);
-        }
+        if (!options.resuming) await onStream?.(heldDeliveryStream);
         heldDeliveryStream = "";
       }
       await onStreamEnd?.(options);
@@ -3965,16 +3952,6 @@ export class AgentLoop {
           : null,
       }),
     );
-    const selectedAnswer = result.finalContent ?? result.content;
-    if (onStream && !onStreamEnd && !abortSignal?.aborted
-      && typeof selectedAnswer === "string"
-      && deferredLegacyAnswers.has(selectedAnswer.trim())
-      && !legacyPublishedText.trimEnd().endsWith(selectedAnswer.trim())
-      && deliveryMessageTool instanceof MessageTool
-      && deliveryMessageTool.turnDeliveredMediaPaths().length > 0) {
-      await publishStream(selectedAnswer);
-      result.finalContentStreamed = true;
-    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {

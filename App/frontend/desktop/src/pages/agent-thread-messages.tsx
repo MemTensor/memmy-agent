@@ -169,7 +169,6 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
   const interactionAnchor = processInteraction ? units.reduce((last, unit, index) =>
     unit.type === "activity" && unit.isCurrentTurnActivity ? index : last, -1) : -1;
   const finalAssistantAnswerIndices = useMemo(() => findFinalAssistantAnswerUnitIndices(units, { isSending: props.isSending }), [props.isSending, units]);
-  const lastUserUnitIndex = useMemo(() => findLastUserUnitIndex(units), [units]);
   const recallEvidenceAnchors = useMemo(
     () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
     [props.isSending, units]
@@ -286,7 +285,6 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
             {unit.message.proactiveDelivery === "cron" ? <ProactiveMessageDivider message={unit.message} /> : null}
             <SingleMessage
               message={unit.message}
-              holdDeliveryCards={props.isSending === true && index > lastUserUnitIndex}
               artifactClient={props.artifactClient}
               onPreviewFile={props.onPreviewFile}
               onOpenActivityFile={props.onOpenActivityFile}
@@ -579,8 +577,6 @@ function findRecallEvidenceUserAnchors(
 
 interface SingleMessageProps {
   message: AgentChatMessage;
-  /** The current turn is still running, so an attached file must not flash in before the reply ends. */
-  holdDeliveryCards?: boolean;
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
   onOpenActivityFile?: (file: ActivityPreviewFile) => void;
@@ -722,8 +718,6 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     );
   }
 
-  const replyStillWriting = message.isStreaming === true || message.reasoningStreaming === true;
-  const deliveredMedia = props.holdDeliveryCards || replyStillWriting ? undefined : message.media;
   const isFinalAnswer = props.isFinalAssistantAnswer !== false || props.forceMessageActions === true;
   const assistantCopyReady = isFinalAnswer && isAssistantMessageCopyReady(message);
   const displayedContent = resolveAgentMessageDisplayContent(message, {
@@ -757,8 +751,8 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
               deferRender={props.deferContentRender}
               deferredRevealDelayMs={props.deferredRevealDelayMs}
             />
-            {deliveredMedia?.length ? (
-              <AssistantMediaAttachmentList media={deliveredMedia} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
+            {message.media?.length ? (
+              <AssistantMediaAttachmentList media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
             ) : null}
           </div>
           <MessageBubbleCopyButton text={displayedContent} align="left" available={assistantCopyReady} timestamp={timestamp} />
@@ -1145,7 +1139,6 @@ function formatMessageTimestamp(date: Date): string {
 
 function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMessageProps): boolean {
   return previous.message === next.message
-    && previous.holdDeliveryCards === next.holdDeliveryCards
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
     && previous.onOpenActivityFile === next.onOpenActivityFile

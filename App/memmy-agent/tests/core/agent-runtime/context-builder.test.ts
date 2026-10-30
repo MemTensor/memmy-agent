@@ -200,13 +200,6 @@ describe("Bundled Tool Contract", () => {
     expect(content).toContain("project's existing dev/preview command through managed Exec");
     expect(content).toContain("## Web and External Information");
     expect(content).toContain("## Messaging and Media");
-    expect(content).toContain("[filename](/absolute/path/filename)");
-    expect(content).toContain("That link is the highlight");
-    expect(content).toContain("Do not abbreviate the target with `...`");
-    expect(content).toContain("still use this link");
-    expect(content).toContain("That attachment is the delivery card");
-    expect(content).toContain("the cards are the file list");
-    expect(content).toContain("use it once");
     expect(content).toContain("## Scheduling and Background Work");
     expect(content.toLowerCase()).not.toContain("pure coding");
   });

@@ -14,7 +14,6 @@ import {
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
-import { assistantAnswerBeforeDelivery } from "./artifact-delivery-continuation.js";
 import { MessageTool } from "./tools/message.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
@@ -1787,16 +1786,8 @@ export class AgentRunner {
           pendingToolCalls: response.toolCalls.map((call) => call.toOpenAIToolCall()),
         });
         await hook.beforeExecuteTools(context);
-        const messageTool = spec.tools?.get?.("message");
-        if (messageTool instanceof MessageTool) {
-          messageTool.armAttachToExistingAnswer(Boolean(assistantAnswerBeforeDelivery(messages)));
-        }
         const executed = await withToolExecutionRequestContext(context,
           () => this.executeTools(spec, response.toolCalls, externalLookupCounts, workspaceViolationCounts));
-        // Drain per-batch attachment state even on failure. Nonfatal tool errors
-        // are carried by event.status while the optional item.error stays empty.
-        const attachedWithoutNewText = messageTool instanceof MessageTool
-          && messageTool.consumeAttachedWithoutNewText();
         const completed: Record<string, any>[] = [];
         for (const item of executed) {
           item.call.arguments = redactBrowserAuthArguments(item.call.name, item.call.arguments);
@@ -1875,18 +1866,6 @@ export class AgentRunner {
         });
         emptyContentRetries = 0;
         lengthRecoveries = 0;
-        if (attachedWithoutNewText && executed.every((item) => item.event.status !== "error")) {
-          const answer = assistantAnswerBeforeDelivery(messages);
-          if (answer) {
-            finalContent = answer;
-            finalContentStreamed = true;
-            stopReason = "completed";
-            context.finalContent = finalContent;
-            context.stopReason = stopReason;
-            await hook.afterIteration(context);
-            break;
-          }
-        }
         const [drained, cycles] = await this.tryDrainInjections(spec, messages, null, injectionCycles, { phase: "after tool execution" });
         injectionCycles = cycles;
         if (drained) hadInjections = true;

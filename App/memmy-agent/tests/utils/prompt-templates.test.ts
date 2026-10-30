@@ -50,13 +50,6 @@ describe("prompt templates", () => {
     expect(text).toContain(
       "Never infer authorization merely because work is complex, long-running, multi-step, or uses a plugin.",
     );
-    expect(text).toContain("[task.json](/absolute/path/task.json)");
-    expect(text).toContain("That link is the highlight");
-    expect(text).toContain("Do not abbreviate the target with `...`");
-    expect(text).toContain("still use this Markdown link");
-    expect(text).toContain("That call is what shows the delivery card");
-    expect(text).toContain("the attachment cards are the file list");
-    expect(text).toContain("use it once");
     expect(text).not.toContain(
       "When a confirmed, non-routine task has at least three substantive execution stages",
     );

@@ -14,8 +14,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AudioLines, LockKeyhole, Copy, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
-import { useTranslation } from "../i18n/use-translation.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
+import { useTranslation } from "../i18n/use-translation.js";
 import { ThreadFileIcon } from "./agent-thread-file-icon.js";
 import {
   clampThreadListWidth,
@@ -34,7 +34,6 @@ import {
   THREAD_LIST_DEFAULT_WIDTH,
   THREAD_PANEL_MIN_WIDTH,
   THREAD_PANEL_NARROW_WIDTH,
-  type ThreadArtifact,
   type ThreadPanelTab,
   type ThreadPanelView,
   type ThreadTabState,

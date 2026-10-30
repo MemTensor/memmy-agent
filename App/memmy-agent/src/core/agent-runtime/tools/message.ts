@@ -35,8 +35,6 @@ export class MessageTool extends Tool {
   private turnMedia: string[] = [];
   private recordChannelDelivery = false;
   private pendingPluginFiles = false;
-  private attachToExistingAnswer = false;
-  private attachedWithoutNewText = false;
 
   constructor({
     suppress = false,
@@ -83,7 +81,6 @@ export class MessageTool extends Tool {
       "Use this for reminders, cross-channel delivery, or explicit proactive sends. " +
       "Do not use this for a text-only normal reply in the current chat: answer naturally instead. " +
       "Use the media parameter to attach existing files when sending them. " +
-      "When this turn creates or finishes a file the user should open or download, write the answer first, then attach its absolute path in media and omit content. That attachment is the delivery card on the answer already written. Do not write another reply after it. Do not attach incidental edits or scratch files. " +
       "When generate_image creates images in the current chat, attach the generated artifact paths in media. " +
       "Do not include local file paths in cross-channel delivery text. " +
       "Do NOT use read_file to send files - that only reads content for your own analysis."
@@ -96,7 +93,7 @@ export class MessageTool extends Tool {
       properties: {
         content: {
           type: "string",
-          description: "Message content for proactive or cross-channel delivery. Omit this when attaching files to the answer already written in the current chat. Do not use this for a normal reply in the current chat.",
+          description: "Message content for proactive or cross-channel delivery. Do not use this for a normal reply in the current chat.",
         },
         text: { type: "string" },
         channel: {
@@ -112,7 +109,7 @@ export class MessageTool extends Tool {
           type: "array",
           items: { type: "string" },
           description:
-            "Absolute paths of existing files to attach in this conversation. Use this for a file the user should open or download, and for image paths returned by generate_image. This attachment is the delivery card.",
+            "Optional list of existing file paths to attach. Use artifact paths returned by generate_image here when delivering generated images.",
         },
         buttons: {
           type: "array",
@@ -120,7 +117,7 @@ export class MessageTool extends Tool {
           description: "Optional: inline keyboard buttons as list of rows, each row is list of button labels.",
         },
       },
-      required: [],
+      required: ["content"],
     };
   }
 
@@ -140,19 +137,6 @@ export class MessageTool extends Tool {
     this.sentInTurn = false;
     this.turnMedia = [];
     this.pendingPluginFiles = false;
-    this.attachToExistingAnswer = false;
-    this.attachedWithoutNewText = false;
-  }
-
-  /** The current chat already has its answer, so a media send should not add another bubble. */
-  armAttachToExistingAnswer(active: boolean): void {
-    this.attachToExistingAnswer = active;
-  }
-
-  consumeAttachedWithoutNewText(): boolean {
-    const attached = this.attachedWithoutNewText;
-    this.attachedWithoutNewText = false;
-    return attached;
   }
 
   markPendingPluginFiles(): void {
@@ -222,9 +206,7 @@ export class MessageTool extends Tool {
     const defaultChatId = requestContext?.chatId ?? this.defaultChatId;
     const defaultMessageId = requestContext?.messageId ?? this.defaultMessageId;
     const defaultMetadata = requestContext ? { ...(requestContext.metadata ?? {}) } : { ...this.defaultMetadata };
-    const attachOnly = this.attachToExistingAnswer;
-    this.attachToExistingAnswer = false;
-    let content = stripThink(params.content ?? params.text ?? "");
+    const content = stripThink(params.content ?? params.text ?? "");
     const buttons = params.buttons ?? null;
     if (buttons != null && !validateButtons(buttons)) return "Error: buttons must be a list of list of strings";
 
@@ -246,8 +228,6 @@ export class MessageTool extends Tool {
     const chatId = explicitChatId || defaultChatId;
     const sameTarget = channel === defaultChannel && chatId === defaultChatId;
     const messageId = sameTarget ? (params.message_id ?? params.messageId ?? defaultMessageId) : null;
-    const requestedMedia = params.media ?? [];
-    if (attachOnly && sameTarget && requestedMedia.length > 0) content = "";
 
     if (!channel || !chatId) return "Error: No target channel/chat specified";
     if (!this.sendCallback) return "Error: Message sending not configured";
@@ -297,7 +277,6 @@ export class MessageTool extends Tool {
         if (media.length) {
           this.turnMedia.push(...media.map((item) => (isUrl(item) ? item : path.resolve(item))));
           this.pendingPluginFiles = false;
-          if (attachOnly) this.attachedWithoutNewText = true;
         }
       }
       const mediaInfo = media.length ? ` with ${media.length} attachments` : "";
