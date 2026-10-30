@@ -29,6 +29,7 @@ Runtime metadata uses memmy-agent's own `metadata.memmy` namespace.
 | `github`                  | Work with issues, pull requests, CI runs, and the GitHub API through the `gh` CLI.                                                  |
 | `goal`                    | Manage sustained objectives with explicit goal state and completion.                                                                |
 | `image-generation`        | Generate images and iteratively edit saved image artifacts.                                                                         |
+| `memmy-project`           | Find and read tasks shared in the person's Memmy projects, search a project's knowledge bases, and add the current task to one.      |
 | `skill-creator`           | Create, review, and maintain `memmy-agent` skills.                                                                                  |
 | `summarize`               | Summarize URLs, local files, podcasts, and YouTube videos.                                                                          |
 | `tmux`                    | Remote-control interactive terminal sessions.                                                                                       |
