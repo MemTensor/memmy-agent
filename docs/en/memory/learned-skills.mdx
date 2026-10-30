@@ -1,0 +1,60 @@
+---
+title: View and reuse skills
+description: Read a reusable method, check its source, then edit and use it for the task you have.
+icon: Sparkles
+---
+
+import listScreen from "../../assets/skills-list-full-en.jpg";
+import detailScreen from "../../assets/skills-detail-full-en.jpg";
+import sourceScreen from "../../assets/skills-source-full-en.jpg";
+import candidateScreen from "../../assets/skills-candidate-full.jpg";
+
+A skill saves a method you can repeat. Memmy organizes skills already on this machine, and also summarizes reusable skills from tasks for later work.
+
+## Read the steps and the source
+
+1. Open **Memory → Skills**. Type a keyword and press Enter to search.
+2. Open a skill and read **When to use** and **SKILL.md content**. Confirm the steps fit this task.
+3. If **Source experiences** or **Evidence anchors** are present, choose a number to open the matching record.
+
+<ProductScreenSteps steps={[
+  { label: "Find a skill", src: listScreen, alt: "Full Memmy window showing enabled and candidate skills", caption: "The list shows the name, status, and update time. The skills and sources in the picture are fictional work samples." },
+  { label: "Read the steps", src: detailScreen, alt: "Full Memmy window showing when to use an active skill and its steps", caption: "Scroll the details for when to use it and the steps, then check the sources." },
+  { label: "Check a source", src: sourceScreen, alt: "Full Memmy window opening a memory from a skill source number", caption: "After you choose a source number, compare the original question and reply. Close the details and return to Skills on the left when you are done." }
+]} />
+
+## Reuse it in a task
+
+On later work, Memmy recalls a skill that fits and follows that method.
+
+The `memmy-memory` Skill installed from **Cross-Agent access** lets another AI read and write shared memory. **Skills** is where specific work methods are managed. To connect another AI, open **Memory → Cross-Agent access**, find the tool, and use the install action it offers.
+
+## Edit a Computer History skill
+
+A skill from Computer History may already be enabled, or it may still need review. Read the notice at the top of the details. When **Edit** is shown:
+
+1. Choose **Edit** and change the steps in **Edit Skill content**.
+2. Choose **Save**, then check the change in the body. Saving keeps the source records and uses the edited content for recall.
+3. Choose **Back** if you do not want to save this change.
+
+If it says the sources changed and your edited content was kept, review that content again, then save it as the page asks.
+
+<details>
+<summary>It says candidate, or shows Approve and enable Skill</summary>
+
+A candidate skill needs its steps and sources checked first. If the details show **Approve and enable Skill**, choose it only after the content fits. The status then becomes **Active**.
+
+<ProductScreenshot src={candidateScreen} alt="Full Memmy window showing Approve and enable Skill on a candidate" caption="This is a candidate that still needs confirmation. A Computer History skill may show a different edit-and-save notice. The picture is a placeholder of the Chinese interface." />
+
+</details>
+
+<details>
+<summary>You no longer need this skill</summary>
+
+Open the details, choose **Delete** at the bottom, check it, then choose **Confirm delete**. Choose **Cancel** to keep it.
+
+</details>
+
+## Related
+
+[Computer History](/docs/en/memory/computer-history) · [Other AI memory](/docs/en/memory/sources)

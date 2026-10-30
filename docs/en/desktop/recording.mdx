@@ -1,0 +1,54 @@
+---
+title: Record and transcribe
+description: Record a discussion or upload audio, then turn the transcript into a summary, decisions, and to-dos.
+icon: Mic
+---
+
+import entryScreen from "../../assets/recording-entry-full-en.jpg";
+import listScreen from "../../assets/recording-list-full-en.jpg";
+import liveScreen from "../../assets/recording-live-full-en.jpg";
+import transcriptScreen from "../../assets/recording-transcript-full-en.jpg";
+import attachedScreen from "../../assets/recording-attached-full-en.jpg";
+
+Give Memmy a meeting or a lesson recording. Read the transcript first, then turn it into material you can keep working on. Recording requires a Memmy account.
+
+## Open recording
+
+1. In the left sidebar, choose **Recording** to open the recording list. **Start** on the same row begins recording immediately.
+2. The list shows saved recordings. You can also **Upload recording** or **Start recording**.
+
+<ProductScreenSteps steps={[
+  { label: "1. Open from the sidebar", src: entryScreen, alt: "Full Memmy window with Recording and Start in the left sidebar", caption: "Recording is under Knowledge. Choose the row to open the recording list. Start, on the right of that row, begins recording. The chat in the picture is a sample." },
+  { label: "2. See the recording list", src: listScreen, alt: "Full Memmy window with the recording list in the side panel", caption: "Saved recordings are listed here. Upload recording and Start recording are at the top right." }
+]} />
+
+## Record the discussion and read the transcript
+
+The first time you record, allow the microphone when the system asks. While recording, you can **Pause** and **Continue**. When the discussion ends, choose **Stop and transcribe**. An uploaded audio file goes through transcription too.
+
+When it finishes, choose the title in the recording list. Check speakers, names, numbers, and key decisions. If the original audio is there, play it back. Live text can be incomplete. Use the result after transcription finishes.
+
+<ProductScreenSteps steps={[
+  { label: "While recording", src: liveScreen, alt: "Full Memmy window while recording, with live text, Pause, and Stop and transcribe", caption: "Choose Pause while recording. When the discussion ends, choose Stop and transcribe. The text updates as recognition continues." },
+  { label: "Read the transcript", src: transcriptScreen, alt: "Full Memmy window showing a training discussion transcript by speaker", caption: "After it finishes, read the timed transcript. Add to conversation and Summarise, at the top right, decide what happens next." }
+]} />
+
+## Use the transcript in a task
+
+| Choose | What happens |
+| --- | --- |
+| **Add to conversation** | The transcript is placed in the current task’s input as a TXT attachment. Add your request, then send. |
+| **Summarise** | A new task is created with a summary request and the transcript attached. You can change the request, then send. |
+
+<ProductScreenshot src={attachedScreen} alt="Full Memmy window with a transcript attached to the current task input" caption="After Add to conversation, confirm the transcript attachment is in the input, then say what you want." />
+
+<details>
+<summary>Transcription failed</summary>
+
+If it says **Transcription failed; recording kept**, choose **Retry transcription** beside that recording. If speech transcription is unavailable, check that you are signed in, that the network works, and that a speech-recognition model is configured, then try again.
+
+</details>
+
+## Related
+
+[Chats and tasks](/docs/en/desktop/workbench) · [Use and preview files](/docs/en/desktop/files)

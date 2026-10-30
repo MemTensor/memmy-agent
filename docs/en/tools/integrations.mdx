@@ -1,12 +1,89 @@
 ---
-title: Managed Tool Integrations
+title: Connect an external tool
+description: Connect documents, a calendar, or another service so Memmy can use what you have authorized.
 icon: Puzzle
 ---
 
-The standard integrations on the Tools page come from a managed catalog (Composio), including GitHub, GitLab, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Linear, Jira, Confluence, Figma, Dropbox, Airtable, Trello, Salesforce, HubSpot, Stripe, Zoom, and more.
+In the workbench sidebar, open **Connections & Tools** and choose **App tools** at the top. This is where you connect documents, a calendar, or a collaboration service. What Memmy can use depends on the account and the access you authorize.
 
-## Authorization Flow
+import entryScreen from "../../assets/tools-entry-full-en.jpg";
+import searchScreen from "../../assets/tools-search-full-en.jpg";
+import permissionsScreen from "../../assets/tools-permissions-full-en.jpg";
+import waitingScreen from "../../assets/tools-waiting-full.jpg";
+import manageScreen from "../../assets/tools-manage-full-en.jpg";
 
-1. Click a tool card, review the permission scopes, then click Connect to get an authorization URL.
-2. Complete OAuth in your external browser; the dialog polls every 4 seconds for up to 5 minutes.
-3. Once connected, the tool is exposed to the Agent Runtime through the Composio MCP bridge, and the desktop backend automatically writes `tools.mcpServers.composio`.
+<details>
+<summary>How are app tools, chat channels, and plugins different?</summary>
+
+- **App tools**: let Memmy use an external service inside a task, such as reading pages in a connected Notion workspace.
+- **Chat channels**: send Memmy a task from a messaging app such as Feishu or WeChat.
+- **Plugins**: the tab is **Task plugins**. Memmy provides and maintains them, and installing one adds a complete capability to the current task. The cards show what is available and what each plugin does.
+
+These entries are at the top of **Connections & Tools**. Pick the one for what you are doing now.
+
+</details>
+
+## Connect a service
+
+The steps below use Notion. You can type another service name in the search box instead.
+
+1. In **App tools**, search for `Notion`, then choose the result name or **+** on the right.
+2. Read the connection notes and choose **Connect Notion**.
+3. In the browser that opens, choose the workspace, check the access being requested, and finish authorization.
+4. Back in Memmy, close the window after you see **Connected**. **+** in the list becomes **…**, which manages the connection.
+
+<ProductScreenSteps steps={[
+  { label: "Open Connections & Tools", src: entryScreen, alt: "Full Memmy window showing the App tools catalog in Connections & Tools", caption: "In the workbench sidebar, open Connections & Tools and stay on App tools. The catalog in the picture is a sample." },
+  { label: "Search app tools", src: searchScreen, alt: "Full Memmy window searching Notion in App tools, with a plus button", caption: "Choose App tools at the top, then search for the name. The picture uses a sample account." },
+  { label: "Read the connection notes", src: permissionsScreen, alt: "Full Memmy window showing Notion connection notes and the connect button", caption: "After you choose connect, check the account and the access scope on the browser authorization page." }
+]} />
+
+## Use it in a task
+
+Create a task on the workbench. Name the service, what to look through, and the result you want. For example:
+
+<PromptExample composer={true} prompt="In the connected Notion workspace, find pages whose titles contain “Team training”. List each title and where it lives, ordered by last edited time, and pull out the to-dos that are not finished. Only read those pages. Do not create or change anything." />
+
+Check the page titles, locations, and to-dos in the result. If there is no matching page, it should say so. If it used the wrong workspace, add the correct name and continue.
+
+## View or disconnect
+
+In **App tools**, choose **Connected**, then **…** on the right of the service. The window shows the connection status. When you no longer need it, choose **Disconnect**. The card returns to **+**, and the service leaves the **Connected** list.
+
+<details>
+<summary>See the manage window</summary>
+
+<ProductScreenshot src={manageScreen} alt="Full Memmy window managing Notion, with Connected, Disconnect, and Close" caption="Disconnect stops Memmy from using this connection. The picture is an isolated sample and does not include a real account." />
+
+</details>
+
+## If the connection fails
+
+<details>
+<summary>The browser did not open, or it keeps waiting</summary>
+
+In Memmy’s waiting window, choose **Reopen browser**, finish sign-in and confirmation on the authorization page, then return to Memmy. If the list has not updated, choose the refresh icon at the top right.
+
+<ProductScreenshot src={waitingScreen} alt="Full Memmy window waiting for Notion authorization, with Reopen browser" caption="Authorization happens in the browser. A waiting state does not mean the connection succeeded." />
+
+If it says the connection timed out or the service is temporarily unavailable, close the notice and connect again from the service card later.
+
+</details>
+
+<details>
+<summary>It says connected, but the content is missing</summary>
+
+Confirm you authorized the right account, and check in the original service that this account can open the material. In the question, add the page name, where it lives, or a date range. If it still fails, open the manage window, connect again, and check the authorized scope.
+
+</details>
+
+<details>
+<summary>The service is not in search</summary>
+
+Switch back to **All**, set **Tool category** to **All categories**, clear the search, and look through the catalog. Only services in the current catalog can be connected here.
+
+</details>
+
+## Related
+
+[Connect a chat channel](/docs/en/channels) · [Plugins](/docs/en/plugins/overview)

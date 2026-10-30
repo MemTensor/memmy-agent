@@ -1,34 +1,39 @@
 ---
-title: Main Workbench
+title: Chats and tasks
+description: State the goal, add material, and continue an existing task.
 icon: LayoutDashboard
 ---
 
-`/main` is the full Agent workbench: task list on the left, message stream in the middle, input box at the bottom.
+import attachmentScreen from "../../assets/workbench-attachments-full-en.jpg";
+import modelScreen from "../../assets/workbench-model-full-en.jpg";
 
-## Input & Sending
+On the workbench, create a task and write the result you want. An existing task can be opened from the list on the left so you can add another requirement.
 
-- `Enter` to send, `Shift + Enter` for a new line; IME composition (e.g. Chinese input) is handled correctly.
-- The `+` button adds attachments: up to 4, 10MB each, supporting images and common formats like `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.csv`, `.json`.
-- The microphone button enables voice input (requires an ASR model); transcriptions merge into the input box.
-- While a task is running, the send button becomes a stop button.
+## Send the first request
 
-## Slash Commands
+Say what to do. For example:
 
-Type `/` to open the command panel:
+<PromptExample composer={true} prompt="Help me plan a 30-minute team meeting about our new customer feedback process." />
 
-| Command | Purpose |
-| --- | --- |
-| `/new` | Start a new task |
-| `/stop` | Stop the current task |
-| `/restart` | Re-run the current task |
-| `/status` | Check the Agent's runtime status |
-| `/model` | View the current model configuration |
-| `/goal` | View or manage goal state |
-| `/dream` | Manually trigger memory consolidation |
-| `/dream-log` | View consolidation records |
-| `/dream-restore` | Restore the pre-consolidation state |
-| `/help` | Help |
+Choose **+** at the lower left of the input, then **Upload files** or **Upload folder**. To keep working in one folder, choose **Add project** under **Projects** on the left.
 
-## Task List
+<ProductScreenSteps steps={[
+  { label: "Add material", src: attachmentScreen, alt: "Full Memmy workbench with the add-files menu", caption: "+ is at the lower left of the input. Choose files or a folder, then send the request." },
+  { label: "Choose a model", src: modelScreen, alt: "Full Memmy workbench with the conversation model menu", caption: "The lower right of the input shows the conversation model. Choose the model name to switch, or open Manage custom models from the menu." }
+]} />
 
-Grouped by Pinned, Today, Yesterday, Last 7 Days, Older, and Archived. Supports rename, pin, archive, restore, and delete; running tasks show a spinner, and completed-but-unread tasks show an unread dot. `Cmd/Ctrl + K` opens task search.
+## Use voice, or change the model
+
+**Voice input** turns speech into text. The first time, it needs microphone permission and a working speech-recognition model. For a longer discussion, open **Recording** on the workbench and record or upload audio.
+
+**Conversation model** switches the model for the current task. If the model is unavailable, open **Settings → Model configuration** and check the configuration and quota.
+
+## Find an existing task
+
+The task list on the left can search, rename, pin, and archive. Archive a task you may continue later but do not need right now. Before you delete one, confirm you no longer need it.
+
+Type `/` in the input to see the commands that are available. For an ordinary task, plain language is enough.
+
+## Related
+
+[Use and preview files](/docs/en/desktop/files) · [Record and transcribe](/docs/en/desktop/recording)

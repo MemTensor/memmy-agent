@@ -1,12 +1,89 @@
 ---
-title: 托管工具集成
+title: 连接外部工具
+description: 连接文档、日历等服务，让 Memmy 在任务中使用已授权的内容。
 icon: Puzzle
 ---
 
-工具页的普通集成来自托管目录（Composio），包括 GitHub、GitLab、Gmail、Google Calendar/Docs/Drive/Sheets/Slides、Notion、Slack、Linear、Jira、Confluence、Figma、Dropbox、Airtable、Trello、Salesforce、HubSpot、Stripe、Zoom 等。
+在工作台左侧打开「连接与工具」，选择顶部的「应用工具」。这里可以连接文档、日历和协作服务；能使用哪些内容，取决于你授权的账号和访问范围。
 
-## 授权流程
+import entryScreen from "../../assets/tools-entry-full.jpg";
+import searchScreen from "../../assets/tools-search-full.jpg";
+import permissionsScreen from "../../assets/tools-permissions-full.jpg";
+import waitingScreen from "../../assets/tools-waiting-full.jpg";
+import manageScreen from "../../assets/tools-manage-full.jpg";
 
-1. 点击工具卡片，查看权限范围后点击连接，获取授权 URL。
-2. 在外部浏览器完成 OAuth；弹窗每 4 秒轮询，最长等待 5 分钟。
-3. 连接成功后，工具通过 Composio MCP bridge 暴露给 Agent Runtime，桌面后端自动写入 `tools.mcpServers.composio`。
+<details>
+<summary>应用工具、聊天渠道和插件有什么区别？</summary>
+
+- **应用工具**：让 Memmy 在任务中使用外部服务，例如读取已连接 Notion 中的页面。
+- **聊天渠道**：从飞书、微信等消息应用向 Memmy 发送任务。
+- **插件**：顶部标签是「任务插件」。由 Memmy 提供和维护，把一项完整能力加入当前任务。目录里有哪些、各自做什么，以卡片为准。
+
+这些入口都在「连接与工具」顶部，按本次要做的事选择。
+
+</details>
+
+## 连接一个服务
+
+下面以 Notion 为例。也可以在搜索框输入你要连接的其他服务名称。
+
+1. 在「应用工具」的搜索框输入 `Notion`，点击结果名称或右侧的「+」。
+2. 阅读连接说明，点击「连接 Notion」。
+3. 在打开的浏览器中选择要使用的工作区，核对访问范围并完成授权。
+4. 回到 Memmy，看到「已连接」后关闭窗口。列表中的「+」会变成用于管理连接的「…」。
+
+<ProductScreenSteps steps={[
+  { label: "进入连接与工具", src: entryScreen, alt: "Memmy 完整窗口：连接与工具中的应用工具目录", caption: "在工作台左侧打开「连接与工具」，并停留在顶部的「应用工具」。图中目录为示例。" },
+  { label: "搜索应用工具", src: searchScreen, alt: "Memmy 完整窗口：应用工具中搜索 Notion，右侧显示加号连接入口", caption: "先选择顶部「应用工具」，再搜索名称。截图使用示例账号。" },
+  { label: "查看连接说明", src: permissionsScreen, alt: "Memmy 完整窗口：Notion 的连接说明与连接按钮", caption: "点击连接后，在浏览器授权页核对具体账号和访问范围。" }
+]} />
+
+## 在任务中使用
+
+回到工作台新建任务，写清要使用的服务、查找范围和希望得到的结果。例如：
+
+<PromptExample composer={true} prompt="查看已连接的 Notion 工作区里标题包含「团队培训」的页面，按最后编辑时间列出标题，并摘出每页还没完成的待办。注明页面所在位置；只读取，不创建或修改页面。" />
+
+核对结果中的页面标题、所在位置和待办。没有匹配页面时应说明没有找到；若找错工作区，补充正确名称后继续。
+
+## 查看和断开连接
+
+在「应用工具」中点击「已连接」，再点对应服务右侧的「…」。弹窗会显示连接状态；不再需要时点击「断开连接」。之后卡片恢复为「+」，该服务不再出现在「已连接」列表中。
+
+<details>
+<summary>查看管理窗口</summary>
+
+<ProductScreenshot src={manageScreen} alt="Memmy 完整窗口：管理 Notion 的已连接状态、断开连接与关闭按钮" caption="「断开连接」会停止 Memmy 使用这项连接。截图为隔离示例，不含真实账户数据。" />
+
+</details>
+
+## 连接遇到问题
+
+<details>
+<summary>浏览器没有打开，或一直显示等待</summary>
+
+在 Memmy 的等待窗口中点击「重新打开浏览器」，完成授权页中的登录与确认，再返回 Memmy。列表状态尚未更新时，可点击右上角的刷新图标。
+
+<ProductScreenshot src={waitingScreen} alt="Memmy 完整窗口：等待 Notion 授权完成，提供重新打开浏览器按钮" caption="授权需要在浏览器中完成。等待状态本身不代表连接成功。" />
+
+如果提示连接超时或服务暂不可用，关闭提示，稍后从服务卡片重新连接。
+
+</details>
+
+<details>
+<summary>显示已连接，却找不到需要的内容</summary>
+
+先确认授权的是正确账号，并在原服务中检查该账号能否访问目标资料。提问时补充页面名、所在位置或日期范围；仍然失败时，打开管理窗口重新连接并核对授权范围。
+
+</details>
+
+<details>
+<summary>搜索不到服务</summary>
+
+切回「全部」，把工具类别改为「全部类别」，清空搜索后检查目录。只有当前目录中提供的服务才能通过这里连接。
+
+</details>
+
+## 相关说明
+
+[连接聊天渠道](/docs/channels) · [插件](/docs/plugins/overview)

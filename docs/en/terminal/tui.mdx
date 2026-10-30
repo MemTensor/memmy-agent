@@ -36,7 +36,7 @@ When using the TUI provided by the desktop app, keep the Memmy desktop app runni
 
 ### Option 2: Install only the Memmy CLI
 
-For Linux x64 or arm64 environments that don't need the desktop app. Requires **Node.js 22** or later and a system with `systemd --user` support.
+For Linux x64 or arm64 environments that don't need the desktop app. The installer accepts only Node.js 22.23.4 or newer within 22.x, 24.22.1 or newer within 24.x, or 26.12.1 or newer within 26.x, and the system must support `systemd --user`. Other major versions are rejected.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
@@ -67,7 +67,7 @@ memmy onboard
 memmy status
 ```
 
-- `memmy onboard --defaults` — creates or refreshes the config file and workspace, non-interactively.
+- `memmy onboard --defaults` — creates or refreshes the config file and workspace. It asks no questions when the config does not exist yet, or when the terminal is not interactive. If the config already exists in an interactive terminal, it asks whether to overwrite it with defaults.
 
 - `memmy onboard` — configures models, providers, Gateway, Memory, and tools interactively.
 
@@ -126,7 +126,7 @@ echo "Summarize this project" | memmy agent
 
 ## Sending Tasks
 
-Type after the `❯` prompt and press `Enter` to send. The TUI does not currently support the desktop workbench's `Shift + Enter` newline; `Enter` always submits.
+Type after the `❯` prompt and press `Enter` to send. The TUI does not currently support the workbench's `Shift + Enter` newline; `Enter` always submits.
 
 Long text wraps visually in the terminal, but you cannot insert multiple lines. To send multi-line text, use:
 
@@ -148,7 +148,7 @@ printf 'first line\nsecond line\n' | memmy agent
 
 If the current turn came from the desktop app or another IM channel, the TUI will not take it over; use `Enter` to queue instead.
 
-When there are queued tasks, the interface shows the queue count, a message preview, and the message source.
+When there are queued tasks, the interface shows the queue count, a message preview, and the message source. The preview lists at most 3 messages.
 
 ## Keyboard Controls
 
@@ -168,9 +168,9 @@ Basic controls are the same on macOS, Windows, and Linux; the primary modifier f
 | Delete a character | `Backspace` / `Delete` | `Backspace` / `Delete` | `Backspace` / `Delete` |
 | Stop your own running turn and exit | `Ctrl + C` | `Ctrl + C` | `Ctrl + C` |
 
-On macOS, `⌘` is the Command key; Windows and Linux use `Ctrl` as the primary modifier. `Shift + Enter` never inserts a newline on any platform — it submits the current message.
+On macOS, `⌘` is the Command key; Windows and Linux use `Ctrl` as the primary modifier. `Shift + Enter` never inserts a newline on any platform — it submits the current message. `Backspace` and `Delete` both delete the character before the cursor.
 
-You can also exit by typing any of the following:
+You can also exit by typing any of the following. These commands leave the TUI and do not stop a running turn, including the turn this TUI is running:
 
 ```bash
 exit
@@ -180,7 +180,7 @@ quit
 :q
 ```
 
-If the task is being executed by another channel, `Ctrl + C` only exits the current TUI; it does not stop the task on that channel.
+When the current turn belongs to this TUI, `Ctrl + C` stops that turn and then exits. When another channel owns the turn, `Ctrl + C` only exits the TUI.
 
 ## Slash Commands
 
@@ -204,11 +204,15 @@ If `Enter` only completed the command, press `Enter` again to run it.
 
 - `/stop` appears only when the current turn is being executed by this TUI.
 
+- `/new` is hidden while another channel owns the current turn.
+
 - `/restart` is not shown and cannot be run from the TUI.
 
-- `exit`, `quit`, `/exit`, `/quit`, and `:q` all exit, but only `/quit` appears in the menu.
+- `exit`, `quit`, `/exit`, `/quit`, and `:q` all exit, but only `/quit` appears in the menu. None of them stop a running turn.
 
-- Whether `/history-dag` appears depends on whether the corresponding feature is enabled.
+- Whether `/history-dag` appears depends on `sessionDag.enabled`, which is on by default.
+
+- `/dream`, `/dream-log`, and `/dream-restore` appear only when `fileMemory.enabled` is true. That switch is off by default.
 
 - Up to 8 suggestions are shown initially; keep typing a command prefix to filter down to others.
 
@@ -222,28 +226,31 @@ If `Enter` only completed the command, press `Enter` again to run it.
 | `/history` | none | Show session history |
 | `/history <n>` | number of messages | Show the last `n` history messages |
 | `/history-dag` | none | Show the session history DAG |
-| `/new` | none | Stop the current task and start a new conversation |
+| `/new` | none | Stop the current task and start a new conversation. Hidden from the menu while another channel owns the current turn |
 | `/stop` | none | Stop the turn currently executed by this TUI; does not stop tasks on other channels |
 | `/restart` | none | Not accepted by the TUI; exit and restart the Gateway instead |
 | `/last-compaction` | none | Show the most recent context-compaction summary for this session |
-| `/quit` | none | Exit the TUI without stopping turns running on other channels |
+| `/quit` | none | Exit the TUI without stopping the running turn |
 | `/goal` | none | Show the current persistent goal |
 | `/goal status` | none | Show persistent goal status |
 | `/goal help` | none | Show help for the goal subcommands |
 | `/goal <objective>` | goal text | Shorthand for creating a persistent goal |
 | `/goal create <objective>` | goal text | Create a persistent goal |
-| `/goal pause` | none | Pause the goal |
-| `/goal resume` | none | Resume the goal |
-| `/goal edit <objective>` | new goal text | Edit the goal |
+| `/goal pause` | none | Pause the goal and stop its current turn |
+| `/goal resume` | none | Resume a paused, blocked, or usage-limited goal |
+| `/goal edit <objective>` | new goal text | Edit the goal. An active or completed goal cannot be edited |
 | `/goal budget <n\|none>` | a number or `none` | Set or clear the goal budget |
 | `/goal clear` | none | Clear the goal |
+| `/dream` | none | Consolidate memory now. Shown only when `fileMemory.enabled` is true |
+| `/dream-log` | none | Show what the latest Dream changed |
+| `/dream-restore` | none | Restore memory to the previous Dream snapshot |
 | `/pairing` | none | View or manage channel pairings |
 | `/pairing list` | none | List channel pairing requests |
 | `/pairing approve <code>` | pairing code | Approve a pairing request |
 | `/pairing deny <code>` | pairing code | Deny a pairing request |
-| `/pairing revoke <user_id>` | user ID | Revoke a user's pairing |
+| `/pairing revoke <user_id>` | user ID, or `revoke <channel> <user_id>` | Revoke a user's pairing |
 
-Whether `/history-dag` is available depends on whether the corresponding feature is enabled in your configuration.
+Whether `/history-dag` is available depends on `sessionDag.enabled`. It is on by default.
 
 ## FAQ
 

@@ -1,0 +1,99 @@
+---
+title: Computer History
+description: Turn activity in apps and websites into summaries, so you can resume work, find a file, or keep a flow you just finished as a skill.
+icon: History
+---
+
+import confirmScreen from "../../assets/computer-history-confirm-full-en.jpg";
+import scopeScreen from "../../assets/computer-history-scope-full-en.jpg";
+import permissionScreen from "../../assets/computer-history-permission-full-en.jpg";
+import restartScreen from "../../assets/computer-history-restart-full-en.jpg";
+import runningScreen from "../../assets/computer-history-running-full-en.jpg";
+import feedScreen from "../../assets/computer-history-feed-full-en.jpg";
+import breakOn from "../../assets/history-help-break-on-en.jpg";
+import breakOff from "../../assets/history-help-break-off-en.jpg";
+import fileOn from "../../assets/history-help-file-on-en.jpg";
+import fileOff from "../../assets/history-help-file-off-en.jpg";
+import skillOn from "../../assets/history-help-skill-on-en.jpg";
+import skillOff from "../../assets/history-help-skill-off-en.jpg";
+
+Computer History turns your activity in apps and websites into summaries. Later tasks can pick up where you left off, find a file you just opened, or turn a flow you just finished into a skill.
+
+It records only after you turn it on. You choose which apps and websites contribute, and you can review, pause, or delete the history at any time. It is available on macOS and Windows 11.
+
+## Start recording
+
+1. Open **Memory → Computer History**. The first time, choose **Set up History**. If records already exist, turn on **Enable computer activity recording** on the right.
+2. Read the explanation, choose **Enable recording**, choose which apps and websites to include, then choose **Continue and enable**.
+3. On macOS, if Accessibility is not enabled, choose **Enable** and finish the system permission. If you see **Quit & Reopen**, follow it so the permission takes effect.
+4. Return to the page and confirm it says **Recording**.
+
+The steps below use the macOS window. Switch steps, or enlarge a picture, to see the full window.
+
+<ProductScreenSteps steps={[
+  { label: "Confirm what is recorded", src: confirmScreen, alt: "Full Memmy window asking you to confirm Computer History", caption: "Before it starts, Memmy explains what is recorded, how the model is used, and what clearing removes. Read it, then choose Enable recording." },
+  { label: "Choose the scope", src: scopeScreen, alt: "Full Memmy window for choosing which apps and websites are recorded", caption: "For apps and websites, choose whether to exclude a list or include only that list, then add the sources. The apps and domains in the picture are samples." },
+  { label: "System permission", src: permissionScreen, alt: "Full Memmy window with the macOS Accessibility permission entry", caption: "On the Accessibility row, choose Enable and grant access in System Settings as the app directs." },
+  { label: "Reopen to apply", src: restartScreen, alt: "Full Memmy window asking you to quit and reopen after Accessibility is enabled", caption: "After it says Enabled, choose Quit & Reopen if Memmy still asks you to restart. This applies the new permission." }
+]} />
+
+## What it helps with
+
+<HistoryHelpCompare items={[
+  { title: "Pick up where you left off", body: "After a break, ask what you were doing. You do not have to reconstruct every open app and file.", on: breakOn, off: breakOff, onAlt: "With Computer History, Memmy says you were editing the product-release deck and checking event data in DingTalk.", offAlt: "Without Computer History, the same question asks you which project or app you were using." },
+  { title: "Find a file you just opened", body: "Refer to a file the way you remember it. The record is used to identify the source.", on: fileOn, off: fileOff, onAlt: "With Computer History, Memmy matches the Q4 product release plan opened in DingTalk this morning.", offAlt: "Without Computer History, the same question asks for the document title, the app, or the project." },
+  { title: "Keep a finished flow as a skill", body: "After a task, ask it to compare the recent steps and write a skill you can use next time.", on: skillOn, off: skillOff, onAlt: "With Computer History, Memmy writes a video-upload skill from the recent steps.", offAlt: "Without Computer History, you have to send the steps, tools, and decisions yourself." }
+]} />
+
+## Find the work you just did
+
+After you have used the computer for a while, scroll to the history. Read the summaries by date. Move the pointer over an item and choose the document icon beside the title to open the full record.
+
+<ProductScreenSteps steps={[
+  { label: "Confirm it is recording", src: runningScreen, alt: "Full Memmy window showing Computer History recording", caption: "Recording, and the switch on the right, mean it is recording now. The permission row is where you change apps and websites." },
+  { label: "Read the summaries", src: feedScreen, alt: "Full Memmy window showing Computer History summaries by date", caption: "The apps involved are listed under each summary. After you hover, open, keep, and delete appear beside the title. The content in the picture is fictional." }
+]} />
+
+From the workbench, you can say:
+
+- What was I working on before my last break?
+- What was that planning file I looked at today?
+- I just finished the video upload flow. Let's use this next time.
+
+Once the right material is found, you can ask for a to-do list or a draft of the next step. If the summary is incomplete, add the original file or URL.
+
+## Change what is recorded
+
+On the **Permissions** row, choose **Choose** or the button that shows how many items are selected, such as **3 selected**, and adjust the app and website rules. **Include only these apps** or **Include only these websites** records only the list. **Exclude these apps** or **Exclude these websites** skips the list. New activity follows the saved rules.
+
+Pictures, sound, and content that cannot be read are not recorded in full. Native recording can include a foreground browser’s private window. Add websites you want to skip to the exclude list.
+
+<details>
+<summary>Web history and WeChat chats</summary>
+
+**Enhanced webpage history** uses the browser extension to add web controls and action changes. It shares that extension with computer use, and it follows the Computer History recording settings.
+
+**Allow reading WeChat chats** is a separate switch. Allowing ordinary Computer History does not allow Memmy to read WeChat chat data directly. Read that option’s full explanation first.
+
+</details>
+
+## Pause or delete
+
+Turning the recording switch off stops collection. Existing records stay.
+
+- **Delete one item**: hover the item, choose the trash icon beside the title, and confirm. Stop a segment that is still being recorded before you delete it.
+- **Clear today or everything**: choose **Clear history**, pick **Clear today** or **Clear everything**, and confirm.
+
+Clearing history also deletes the matching memories and related skills. It cannot be undone. If it says deletion is still in progress, wait. A failure is retried automatically.
+
+## No new summary?
+
+Check that the status is **Recording**, that the system permission is in effect, and that the app is inside the recording scope. If there was activity but the summary is still being organized, check again later. If the model is unavailable or the quota is used up, open **Settings → Model configuration**.
+
+## Where is it stored?
+
+Raw records stay on this computer. When a summary is created, the needed content is sent to the model you configured. An online model receives that content. A platform model is processed by the Memmy service.
+
+## Related
+
+[Data and privacy](/docs/en/security/security)

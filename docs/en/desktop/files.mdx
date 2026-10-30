@@ -1,0 +1,55 @@
+---
+title: Use and preview files
+description: Preview a file the task generated, and keep revising it in the original task.
+icon: FileText
+---
+
+import previewScreen from "../../assets/files-preview-full-en.jpg";
+import csvScreen from "../../assets/files-csv-full-en.jpg";
+import overviewScreen from "../../assets/files-overview-full-en.jpg";
+import switchScreen from "../../assets/files-switch-full-en.jpg";
+import treeScreen from "../../assets/files-tree-full-en.jpg";
+
+## Open a generated file
+
+Choose the **file card** under the reply, or a file link in the text. A file that can be previewed opens in the side panel. Several files become several tabs. Choose a tab to switch, and **×** to close the preview.
+
+The same list is shown below as Markdown and CSV:
+
+<ProductFileGuide markdownScreen={previewScreen} csvScreen={csvScreen} />
+
+Two buttons at the top right of the preview are used often:
+
+- **Open with default app**: open the file in an app on this computer.
+- **Show in folder**: reveal the file in the system file manager so you can see where it was saved.
+
+After a full-screen view, choose **Exit full screen** at the top right to return to the chat and side panel.
+
+## See results and the original material
+
+Choose the list icon, **Overview**, at the top left of the side panel. The panel lists **Artifacts** first, so you can reopen files the task delivered.
+
+To browse the project’s original material, open the **Overview** menu in that panel, switch to **Workspace files**, and choose a file name.
+
+<ProductScreenSteps steps={[
+  { label: "See task artifacts", src: overviewScreen, alt: "Full Memmy window showing two artifact files in Overview", caption: "Open the list icon at the top left of the side panel and find Artifacts. These are the files the task delivered." },
+  { label: "Switch the file view", src: switchScreen, alt: "Full Memmy window with Workspace files in the Overview menu", caption: "In the panel, open Overview and choose Workspace files." },
+  { label: "Open the original", src: treeScreen, alt: "Full Memmy window showing the original training notes and generated files under Workspace files", caption: "The current project’s material and results are both here. In the sample, the notes file is the original and the other two are generated." }
+]} />
+
+## Revise the generated file
+
+In the original task, say what to change and whether to overwrite the file or save a new one. For example:
+
+<PromptExample composer={true} prompt="Move the unconfirmed items in “todo-list.md” to the top and turn them into questions that can be sent to the owner. Keep the original to-do list and the source lines. Save the new file as “todo-list-v2.md” and give me the new file link." />
+
+<details>
+<summary>A file will not open, or there is no preview</summary>
+
+- If it says the file was moved, deleted, or cannot be accessed, confirm it is still in the same place, then choose **Retry**.
+- If the format is unsupported or the file is large, choose **Open with default app**.
+- If a generated file still will not open, send the file name and the error in the original task and ask Memmy to check it and generate it again.
+
+</details>
+
+To create a Word, Excel, or PowerPoint file, install the matching plugin from [Plugins](/docs/en/plugins/overview).

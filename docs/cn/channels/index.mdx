@@ -1,19 +1,82 @@
 ---
-title: 消息渠道
+title: 连接聊天渠道
+description: 连接聊天渠道，从常用消息应用向 Memmy 发起任务。
 icon: MessagesSquare
 ---
 
-Memmy 可以接入常用 IM，让你在聊天软件里直接使唤 Agent。已支持：
+在工作台左侧打开「连接与工具」，选择顶部的「聊天渠道」。连接后，就可以在对应消息应用中把任务发给 Memmy。
 
-**Telegram · Discord · iMessage · WeChat · Feishu · DingTalk**
+import listScreen from "../../assets/channels-list-full.jpg";
+import feishuScanScreen from "../../assets/channels-feishu-scan-full.jpg";
+import feishuManualScreen from "../../assets/channels-feishu-manual-full.jpg";
+import dingtalkScreen from "../../assets/channels-dingtalk-full.jpg";
 
-## 连接方式
+## 连接渠道
 
-| 渠道 | 方式 |
+点击渠道名称或右侧的「+」，按弹窗提示完成连接。界面中微信、飞书、钉钉分别显示为 WeChat、Feishu、DingTalk。
+
+<div className="docs-actions-table">
+
+| 渠道 | 连接方式 |
 | --- | --- |
-| WeChat | 扫码登录，弹窗内轮询扫码结果 |
-| Feishu | `appId` + `appSecret` 表单；权限不足时解析缺失 scope 并给出申请链接 |
-| DingTalk | `clientId` + `clientSecret` 表单 |
-| Telegram / Discord / iMessage | 在工具页按弹窗指引连接 |
+| **微信** | 用微信扫描连接二维码。 |
+| **飞书** | 扫码创建并绑定机器人；已有应用时也可手动填写 App ID 和 App Secret。 |
+| **钉钉** | 填写自建应用的 Client ID 和 Client Secret。 |
+| **Telegram** | 填写从 BotFather 获取的 Bot Token。 |
+| **Discord** | 填写自建机器人的 Bot Token。 |
+| **iMessage** | 连接本机 macOS 的「信息」App，并按提示开启系统权限。 |
 
-连接状态每 5 秒自动刷新；已连接渠道可随时断开。渠道配置由本地后端通过 memmy-agent admin client 写入运行时。
+</div>
+
+<ProductScreenshot src={listScreen} alt="Memmy 完整窗口：聊天渠道列表中的 Telegram、Discord、iMessage、微信、飞书和钉钉" caption="这里连接的是接收任务的聊天渠道。「应用工具」中的同名服务用途不同。" />
+
+## 用飞书连接一次
+
+1. 点击「Feishu」卡片，选择「扫码创建并绑定」。
+2. 使用飞书 App 扫描出现的二维码，阅读并确认创建应用与绑定。
+3. 完成后回到 Memmy，必要时点击「我已完成扫码」，等待状态变为「已连接」。
+4. 在飞书中打开对应机器人的聊天，发送一条任务，确认能收到回复。
+
+<ProductScreenshot src={feishuScanScreen} alt="Memmy 完整窗口：飞书的扫码创建并绑定按钮和手动输入凭证入口" caption="点击「扫码创建并绑定」，再用飞书 App 扫码；已有应用时可切换到手动连接。" />
+
+<details>
+<summary>手动填写飞书、钉钉或机器人的凭证</summary>
+
+- **飞书**：点击「已有飞书应用？手动输入 App ID / Secret」，填写凭证后点击「连接 Feishu」。按弹窗提示开通消息收发和卡片相关权限，并创建、发布应用版本。
+- **钉钉**：打开 DingTalk 卡片，填写 Client ID 和 Client Secret，点击「连接 DingTalk」。
+- **Telegram / Discord**：打开对应卡片，填写机器人的 Bot Token，点击连接按钮。
+
+各渠道弹窗都提供凭证获取教程。连接后返回列表确认「已连接」，再向对应机器人发送任务。
+
+<ProductScreenSteps steps={[
+  { label: "飞书凭证", src: feishuManualScreen, alt: "Memmy 完整窗口：飞书手动连接的 App ID、App Secret 及权限说明", caption: "飞书需要 App ID 与 App Secret。仅开通权限而未发布版本，仍可能出现权限不足。" },
+  { label: "钉钉凭证", src: dingtalkScreen, alt: "Memmy 完整窗口：钉钉连接的 Client ID 与 Client Secret 表单", caption: "钉钉需要 Client ID 与 Client Secret。两张截图的凭证字段均留空。" }
+]} />
+
+</details>
+
+<details>
+<summary>连接 iMessage</summary>
+
+iMessage 使用本机 macOS 的「信息」App。连接弹窗提供「打开完全磁盘访问」和「打开自动化」入口，分别用于接收消息、控制「信息」发送消息。按界面提示完成权限设置后，再返回 Memmy 连接。
+
+</details>
+
+## 发一条任务试试
+
+保持运行 Memmy 的电脑在线。在已连接的消息应用里直接给 Memmy 发消息，说明要做什么。若没有收到回复，先确认渠道状态，再查看卡片中的错误提示。
+
+## 管理连接
+
+在「聊天渠道」中点击「已连接」，打开渠道右侧的「…」查看状态。停止使用时，点击弹窗中的「断开连接」。这不会删除工作台里已有的任务和记忆。
+
+<details>
+<summary>飞书显示已连接，但部分功能不可用</summary>
+
+打开飞书渠道的管理窗口，查看是否有「机器人权限不足」提示。按提示补齐权限并创建、发布应用版本，再重新发送任务检查结果。
+
+</details>
+
+## 相关说明
+
+[连接外部工具](/docs/tools/integrations) · [插件](/docs/plugins/overview)
