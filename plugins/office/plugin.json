@@ -2,7 +2,7 @@
   "apiVersion": "memmy/v1",
   "id": "office",
   "name": "Office",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "rules": {
     "distribution": "public",
     "installation": "manual",

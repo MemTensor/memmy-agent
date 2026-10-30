@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,7 +9,8 @@ import {
   buildPluginSandboxLaunch,
   createCommandPluginAdapter,
   resolveCommandRuntimeDependencies,
-  resolvePluginEnvironment
+  resolvePluginEnvironment,
+  selectOfficeCjkFontFiles
 } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
 
@@ -544,6 +545,71 @@ describe("CommandPluginAdapter", () => {
       LANG: "C.UTF-8",
       TEXMFHOME: "/trusted/texmf"
     });
+  });
+
+  it("keeps Host CJK font paths reserved after configured and secret environment injection", () => {
+    const forged = JSON.stringify(["/untrusted/user-font.ttf"]);
+    const trusted = JSON.stringify(["/trusted/system-font.ttc"]);
+    const configured = { MEMMY_OFFICE_CJK_FONTS: forged };
+    const secretEnv = { MEMMY_OFFICE_CJK_FONTS: "forged-fonts" };
+    const secrets = { "forged-fonts": forged };
+    expect(resolvePluginEnvironment(configured, secretEnv, secrets, [], { MEMMY_OFFICE_CJK_FONTS: trusted })
+      .MEMMY_OFFICE_CJK_FONTS).toBe(trusted);
+    expect(resolvePluginEnvironment(configured, secretEnv, secrets).MEMMY_OFFICE_CJK_FONTS).toBe("[]");
+  });
+
+  it("includes Host CJK font paths from the verified managed runtime without adding sandbox roots", async () => {
+    context(); vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const installed = realpathSync(root!);
+    mkdirSync(join(installed, "fonts"));
+    const font = join(installed, "fonts", "NotoSansCJKsc-Regular.otf");
+    writeFileSync(font, "owned font selection fixture");
+    const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"].map(name => [name, join(installed, "runtime/plugin")]));
+    const ensure = vi.fn(async () => ({ root: installed, version: "test-fonts", tools }));
+    const dependencies = await resolveCommandRuntimeDependencies(["office"], "darwin", { ensure });
+    expect(dependencies.environment.MEMMY_OFFICE_CJK_FONTS).toBeTypeOf("string");
+    expect(JSON.parse(dependencies.environment.MEMMY_OFFICE_CJK_FONTS!)).toContain(realpathSync(font));
+    expect(dependencies.readRoots).toEqual([installed]);
+    expect(dependencies.executableRoots).toEqual([installed]);
+  });
+
+  it("selects only canonical readable Host CJK font files inside the approved source", async () => {
+    context();
+    const fixture = realpathSync(root!);
+    const approved = join(fixture, "approved"); mkdirSync(approved);
+    const fonts = join(approved, "fonts"); mkdirSync(fonts);
+    const font = join(fonts, "owned.ttf"); writeFileSync(font, "owned font fixture");
+    const userFonts = join(fixture, "user", "Library", "Fonts"); mkdirSync(userFonts, { recursive: true });
+    writeFileSync(join(userFonts, "User.ttf"), "outside approved roots");
+    symlinkSync(userFonts, join(approved, "escaped"), process.platform === "win32" ? "junction" : "dir");
+    symlinkSync(fonts, join(approved, "alias"), process.platform === "win32" ? "junction" : "dir");
+    mkdirSync(join(approved, "directory.ttf"));
+    writeFileSync(join(approved, "empty.ttf"), "");
+    writeFileSync(join(approved, "oversized.ttf"), ""); truncateSync(join(approved, "oversized.ttf"), 256 * 1024 * 1024 + 1);
+    writeFileSync(join(approved, "not-a-font.txt"), "not a font");
+    const candidates = ["fonts/owned.ttf", "alias/owned.ttf", "escaped/User.ttf", "../user/Library/Fonts/User.ttf",
+      "directory.ttf", "empty.ttf", "oversized.ttf", "not-a-font.txt", "missing.otf"];
+    if (process.platform !== "win32") {
+      writeFileSync(join(approved, "unreadable.ttf"), "unreadable", { mode: 0o000 });
+      candidates.push("unreadable.ttf");
+    }
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates }])).toEqual([realpathSync(font)]);
+    const redirected = join(fixture, "redirected");
+    symlinkSync(approved, redirected, process.platform === "win32" ? "junction" : "dir");
+    expect(await selectOfficeCjkFontFiles([{ root: redirected, candidates: ["fonts/owned.ttf"] }])).toEqual([]);
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates: ["missing.ttf"] }])).toEqual([]);
+  });
+
+  it("caps Host CJK font candidates at sixteen without adding font directories to sandbox grants", async () => {
+    context();
+    const approved = realpathSync(root!);
+    const candidates = Array.from({ length: 20 }, (_, index) => `font-${index}.ttf`);
+    for (const file of candidates) writeFileSync(join(approved, file), "owned font fixture");
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates }]))
+      .toEqual(candidates.slice(0, 16).map(file => realpathSync(join(approved, file))));
+    const dependency = await resolveCommandRuntimeDependencies([]);
+    expect(dependency.readRoots).toEqual([]);
+    expect(resolvePluginEnvironment({}, {}, {}, dependency.pathEntries, dependency.environment).MEMMY_OFFICE_CJK_FONTS).toBe("[]");
   });
 
   it("grants declared TeX Live dependencies read and executable sandbox access on macOS", async () => {

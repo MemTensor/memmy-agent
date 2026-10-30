@@ -25,6 +25,8 @@ import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
+const MAX_OFFICE_CJK_FONTS = 16;
+const MAX_OFFICE_CJK_FONT_BYTES = 256 * 1024 * 1024;
 const CommandRuntimeDependencySchema = z.enum(["texlive", "office"]);
 
 const CommandRuntimeConfigSchema = z.object({
@@ -576,6 +578,7 @@ export async function resolveCommandRuntimeDependencies(
  */
 export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.platform, installer?: OfficeRuntimeInstaller): Promise<ResolvedCommandRuntimeDependencies> {
   const result: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  const fontSources = officeSystemFontSources(platform);
   const override = process.env.MEMMY_PLUGIN_OFFICE_ROOT;
   if (override && !isAbsolute(override)) throw new Error("MEMMY_PLUGIN_OFFICE_ROOT must be absolute");
   const defaults = platform === "darwin"
@@ -620,12 +623,72 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
     if (platform === "darwin" && installed.tools.soffice) {
       result.officeRendererResolved = await verifiedOfficeRenderer(installed.root, installed.tools.soffice);
     }
+    fontSources.push({ root: installed.root, candidates: officeManagedFontCandidates() });
   }
   result.readRoots = [...new Set(result.readRoots)];
   result.executableRoots = [...new Set(result.executableRoots)];
   result.pathEntries = [...new Set(result.pathEntries)];
   result.environment.MEMMY_OFFICE_TOOLS = JSON.stringify(tools);
+  result.environment.MEMMY_OFFICE_CJK_FONTS = JSON.stringify(await selectOfficeCjkFontFiles(fontSources));
   return result;
+}
+
+interface OfficeCjkFontSource {
+  root: string;
+  candidates: readonly string[];
+}
+
+const OFFICE_CJK_FONT_NAMES = [
+  "NotoSansCJKsc-Regular.otf", "NotoSansCJK-Regular.ttc", "NotoSansSC-Regular.otf", "NotoSansSC-Regular.ttf",
+  "NotoSerifCJKsc-Regular.otf", "NotoSerifCJK-Regular.ttc", "SourceHanSansSC-Regular.otf", "SourceHanSerifSC-Regular.otf"
+];
+
+function officeSystemFontSources(platform: NodeJS.Platform): OfficeCjkFontSource[] {
+  if (platform === "darwin") return [
+    { root: "/System/Library/Fonts", candidates: ["Supplemental/Arial Unicode.ttf", "Hiragino Sans GB.ttc", "STHeiti Medium.ttc", "STHeiti Light.ttc", "PingFang.ttc"] },
+    { root: "/Library/Fonts", candidates: ["Arial Unicode.ttf", ...OFFICE_CJK_FONT_NAMES] }
+  ];
+  if (platform === "win32") return [{
+    root: win32.join(process.env.SystemRoot ?? "C:\\Windows", "Fonts"),
+    candidates: ["msyh.ttc", "msyhbd.ttc", "simsun.ttc", "simhei.ttf", "mingliu.ttc", "arialuni.ttf", "meiryo.ttc", "malgun.ttf", ...OFFICE_CJK_FONT_NAMES]
+  }];
+  if (platform === "linux") return [
+    { root: "/usr/share/fonts", candidates: [
+      ...["opentype/noto", "truetype/noto", "opentype/source-han-sans", "truetype"].flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`)),
+      "truetype/wqy/wqy-zenhei.ttc", "truetype/wqy/wqy-microhei.ttc", "truetype/droid/DroidSansFallbackFull.ttf"
+    ] },
+    { root: "/usr/local/share/fonts", candidates: OFFICE_CJK_FONT_NAMES }
+  ];
+  return [];
+}
+
+function officeManagedFontCandidates(): string[] {
+  return ["fonts", "share/fonts", "share/fonts/truetype", "share/fonts/opentype", "share/fonts/opentype/noto",
+    "LibreOffice/share/fonts/truetype", "LibreOffice/share/fonts/opentype", "LibreOffice.app/Contents/Resources/fonts/truetype"]
+    .flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`));
+}
+
+/** Host-internal filesystem selection, exported for owned boundary fixtures; never accepts plugin configuration. */
+export async function selectOfficeCjkFontFiles(sources: readonly OfficeCjkFontSource[]): Promise<string[]> {
+  const fonts = new Set<string>();
+  for (const source of sources) {
+    if (!isAbsolute(source.root)) continue;
+    const root = await realpath(source.root).catch(() => null);
+    // A source root must not redirect the approved grant to a different tree.
+    if (!root || root !== resolve(source.root)) continue;
+    for (const candidate of source.candidates) {
+      if (fonts.size >= MAX_OFFICE_CJK_FONTS) return [...fonts];
+      try {
+        const font = await canonicalDescendant(root, resolve(root, candidate));
+        if (!/\.(?:ttf|ttc|otf)$/i.test(font)) continue;
+        const info = await lstat(font);
+        if (!info.isFile() || info.size === 0 || info.size > MAX_OFFICE_CJK_FONT_BYTES) continue;
+        await access(font, fsConstants.R_OK);
+        fonts.add(font);
+      } catch { /* Missing, unreadable and escaping candidates are not grants. */ }
+    }
+  }
+  return [...fonts];
 }
 
 async function verifiedOfficeRenderer(root: string, renderer: string): Promise<boolean> {
@@ -846,6 +909,8 @@ export function resolvePluginEnvironment(
     if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
     env[name] = value;
   }
+  // Neither manifest env nor secret aliases may replace Host-approved font paths.
+  env.MEMMY_OFFICE_CJK_FONTS = runtimeEnvironment.MEMMY_OFFICE_CJK_FONTS ?? "[]";
   return env;
 }
 

@@ -1,0 +1,19 @@
+{
+  "source": "https://registry.npmjs.org/fontkit/2.0.4",
+  "name": "fontkit",
+  "version": "2.0.4",
+  "license": "MIT",
+  "author": {
+    "name": "Devon Govett",
+    "email": "devongovett@gmail.com"
+  },
+  "repository": {
+    "url": "git://github.com/foliojs/fontkit.git",
+    "type": "git"
+  },
+  "gitHead": "fbf3b9ef21eebd219eb73e666faed573af0fba09",
+  "dist": {
+    "tarball": "https://registry.npmjs.org/fontkit/-/fontkit-2.0.4.tgz",
+    "integrity": "sha512-syetQadaUEDNdxdugga9CpEYVaQIxOwk7GlwZWWZ19//qW4zE5bknOKeMBDYAASwnpaSHKJITRLMF9m1fp3s6g=="
+  }
+}

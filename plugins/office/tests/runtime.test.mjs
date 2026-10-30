@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import JSZip from "jszip";
 import { parseDelimited } from "../src/delimited.mjs";
+import { writeMetadataFont } from "./helpers/cjk-font-fixture.mjs";
 
 const executable = resolve(import.meta.dirname, "../dist/runtime/main.cjs");
 async function environment(t) {
@@ -37,6 +38,45 @@ test("missing runtime is explicit and does not pass rendering", async t => {
   const doc = (await call(data, "office_create", { format: "docx", name: "report.docx", paragraphs: ["Runtime missing"] })).output;
   assert.equal((await call(data, "office_render", { taskId: doc.taskId, file: doc.file })).code, "office_dependency_missing");
   assert.equal((await call(data, "office_deliver", { taskId: doc.taskId, file: doc.file, revision: "fake", reviewedPages: [1], reviewNotes: "fake" })).code, "stale_review");
+});
+
+test("generated Han documents require a Host font before creating DOCX or PDF", async t => {
+  const { data } = await environment(t);
+  for (const format of ["docx", "pdf"]) {
+    const result = await call(data, "office_create", {
+      format, name: `missing-font.${format}`, paragraphs: ["中文内容：文档生成、预览与交付。"]
+    });
+    assert.equal(result.type, "error", JSON.stringify(result));
+    assert.equal(result.code, "office_cjk_font_missing");
+  }
+});
+
+test("generated Han DOCX declares the covering Host face without changing Latin fonts", async t => {
+  const { data, root } = await environment(t);
+  const latin = await writeMetadataFont(join(root, "latin.ttf"), "CJK In Name Only", "Latin");
+  const covering = await writeMetadataFont(join(root, "han.ttf"), "Owned Han Coverage", "中文内容");
+  const result = await call(data, "office_create", { format: "docx", name: "han.docx", title: "中文", paragraphs: ["Latin 内容"] }, {
+    MEMMY_OFFICE_CJK_FONTS: JSON.stringify([latin, covering])
+  });
+  assert.equal(result.type, "result", JSON.stringify(result));
+  const zip = await JSZip.loadAsync(await readFile(join(data, "tasks", result.output.taskId, result.output.file)));
+  const styles = await zip.file("word/styles.xml").async("string");
+  assert.match(styles, /w:eastAsia="Owned Han Coverage"/);
+  for (const name of ["ascii", "hAnsi", "cs"]) assert.match(styles, new RegExp(`w:${name}="Arial"`));
+  const document = await zip.file("word/document.xml").async("string");
+  assert.match(document, /中文/); assert.match(document, /Latin 内容/);
+});
+
+test("generated Han PDF uses the covered source font and still requires a real renderer", async t => {
+  const { data, root } = await environment(t);
+  const covering = await writeMetadataFont(join(root, "han.ttf"), "Owned PDF Han", "中文");
+  const result = await call(data, "office_create", { format: "pdf", name: "han.pdf", paragraphs: ["中文"] }, {
+    MEMMY_OFFICE_CJK_FONTS: JSON.stringify([covering])
+  });
+  assert.equal(result.type, "error"); assert.equal(result.code, "office_dependency_missing");
+  const tasks = await readdir(join(data, "tasks")); assert.equal(tasks.length, 1);
+  const zip = await JSZip.loadAsync(await readFile(join(data, "tasks", tasks[0], "source.docx")));
+  assert.match(await zip.file("word/styles.xml").async("string"), /w:eastAsia="Owned PDF Han"/);
 });
 
 test("exact replacement across Word formatting runs preserves unrelated parts", async t => {
