@@ -21,6 +21,23 @@ describe("UserMemoriesSubPage interaction", () => {
     container.remove();
   });
 
+  it("does not render pagination when there are no user memories", async () => {
+    const client = createMemoryRuntimeClientStub({
+      listPanelItems: vi.fn(async () => panelItemsOutput([]))
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UserMemoriesSubPage client={client} />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.textContent).toContain("暂无用户记忆");
+    expect(container.querySelector(".memory-pagination")).toBeNull();
+  });
+
   it("loads the UserMemory layer and deletes the selected record", async () => {
     const item = {
       id: "user_memory_1",
