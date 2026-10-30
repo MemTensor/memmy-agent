@@ -5835,12 +5835,22 @@ export class L3WorldModelRepository {
   ) {}
 
   getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
-    userId = DEVICE_MEMORY_OWNER;
+    void userId;
+    return this.getOwnedScope(DEVICE_MEMORY_OWNER, projectId);
+  }
+
+  /** Exact persisted ownership, reserved for validated pre-upgrade jobs. */
+  getOwnedScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
     const row = this.db.prepare(
       `SELECT * FROM l3_world_model_scopes
        WHERE user_id = ? AND project_id IS ?`
     ).get(userId, projectId ?? null) as SqlL3WorldModelScopeRow | undefined;
-    return row ? l3WorldModelScopeFromSql(row) : undefined;
+    if (!row) return undefined;
+    const scope = l3WorldModelScopeFromSql(row);
+    if (scope.scopeKey !== l3WorldModelScopeKey(userId, projectId)) {
+      throw new Error("corrupt L3 World Model scope ownership");
+    }
+    return scope;
   }
 
   ensureScope(userId: string, projectId?: string | null, at = nowIso()): L3WorldModelScopeRecord {
@@ -6067,11 +6077,12 @@ export class L3WorldModelRepository {
   }
 
   /** One effective-field rule for model input, context injection and commit checks. */
-  effectiveFields(projectId: string | null): {fields: L3WorldModelFields; memories: MemoryRow[]; revisions: Record<keyof L3WorldModelFields, string>} {
+  effectiveFields(projectId: string | null): {fields: L3WorldModelFields; memories: MemoryRow[]; revisions: Record<keyof L3WorldModelFields, string>; sources: Record<keyof L3WorldModelFields, string[]>} {
     const memories = this.sharedMemories(projectId);
     const canonicalProject = sharedProjectIdentity(this.db, projectId).deviceProjectId;
     const fields = emptyL3WorldModelFields();
     const revisions = {} as Record<keyof L3WorldModelFields, string>;
+    const sources = {} as Record<keyof L3WorldModelFields, string[]>;
     const used = new Map<string, MemoryRow>();
     for (const target of L3_FIELD_NAMES) {
       const property = l3WorldModelFieldProperty(target);
@@ -6091,6 +6102,7 @@ export class L3WorldModelRepository {
         revisions[property] = "unwritten";
       }
       const values: string[] = [];
+      sources[property] = [];
       for (const memory of candidates) {
         const value = fieldsFromL3WorldModelMemory(memory)[property];
         if (value === null) continue;
@@ -6103,11 +6115,12 @@ export class L3WorldModelRepository {
           if (applied?.applied_scan_id !== scanId) continue;
         }
         values.push(value); used.set(memory.id, memory);
+        sources[property].push(memory.id);
       }
       fields[property] = values.length ? values.join("\n\n") : null;
       revisions[property] = sha256Hex(canonicalJson([revisions[property]!, fields[property]]));
     }
-    return {fields, memories: [...used.values()], revisions};
+    return {fields, memories: [...used.values()], revisions, sources};
   }
 
   fields(userId: string, projectId?: string | null): L3WorldModelFields {
@@ -6243,8 +6256,12 @@ export class L3WorldModelRepository {
       const before = this.memories.get(memoryId);
       if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
       validateL3WorldModelMemory(before, scope.userId, scope.projectId);
+      const snapshot = this.effectiveFields(scope.projectId ?? null);
       for (const field of L3_FIELD_NAMES) {
-        if ((scope.projectId == null) === (field === "general_rules_and_safety_constraints")) {
+        const sources = snapshot.sources[l3WorldModelFieldProperty(field)];
+        // Other records and explicit overrides keep their own field state.
+        // Tombstone only a field whose entire effective value is being deleted.
+        if (sources.length === 1 && sources[0] === memoryId) {
           this.recordFieldState(scope.projectId ?? null, field, true, at);
         }
       }
@@ -6700,6 +6717,24 @@ export class ProjectEnvironmentRepository {
     return row ? projectEnvironmentStateFromSql(row) : undefined;
   }
 
+  /** Keep the original job identity; order scans across verified project aliases. */
+  isCurrentScan(userId: string, projectId: string, scanId: string): boolean {
+    if (this.getState(userId, projectId)?.currentScanId !== scanId) return false;
+    const projects = this.l3WorldModels.sharedProjectIds(projectId);
+    const latest = this.db.prepare(`
+      SELECT job.user_id, state.project_id, state.current_scan_id
+      FROM l3_world_model_project_environment_state AS state
+      JOIN evolution_jobs AS job ON job.job_type = 'project_environment_profile'
+        AND job.user_id = state.user_id
+        AND json_extract(job.payload_json, '$.userId') = state.user_id
+        AND json_extract(job.payload_json, '$.projectId') = state.project_id
+        AND json_extract(job.payload_json, '$.scanId') = state.current_scan_id
+      WHERE state.project_id IN (SELECT value FROM json_each(?))
+      ORDER BY job.enqueue_seq DESC, job.created_at DESC, job.id DESC LIMIT 1
+    `).get(toJson(projects)) as {user_id: string; project_id: string; current_scan_id: string} | undefined;
+    return latest?.user_id === userId && latest.project_id === projectId && latest.current_scan_id === scanId;
+  }
+
   requestScan(input: {
     userId: string;
     projectId: string;
@@ -6747,15 +6782,19 @@ export class ProjectEnvironmentRepository {
   }
 
   beginScan(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
-    const result = this.db.prepare(
-      `UPDATE l3_world_model_project_environment_state
-       SET status = 'scanning', last_error = NULL, updated_at = ?
-       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
-    ).run(at, userId, projectId, scanId);
-    return result.changes === 1;
+    return this.db.transaction(() => {
+      if (!this.isCurrentScan(userId, projectId, scanId)) return false;
+      const result = this.db.prepare(
+        `UPDATE l3_world_model_project_environment_state
+         SET status = 'scanning', last_error = NULL, updated_at = ?
+         WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+      ).run(at, userId, projectId, scanId);
+      return result.changes === 1;
+    })();
   }
 
   markSummarizing(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
+    if (!this.isCurrentScan(userId, projectId, scanId)) return false;
     const result = this.db.prepare(
       `UPDATE l3_world_model_project_environment_state
        SET status = 'summarizing', updated_at = ?
@@ -6771,6 +6810,7 @@ export class ProjectEnvironmentRepository {
     projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
     at?: string;
   }): boolean {
+    if (!this.isCurrentScan(input.userId, input.projectId, input.scanId)) return false;
     const at = input.at ?? nowIso();
     const result = this.db.prepare(
       `UPDATE l3_world_model_project_environment_state
@@ -6801,7 +6841,7 @@ export class ProjectEnvironmentRepository {
     return this.db.transaction(() => {
       const at = input.at ?? nowIso();
       const state = this.getState(input.userId, input.projectId);
-      if (!state || state.currentScanId !== input.scanId) return { stale: true };
+      if (!state || !this.isCurrentScan(input.userId, input.projectId, input.scanId)) return { stale: true };
       const snapshot = this.l3WorldModels.effectiveFields(input.projectId);
       const currentProfile = snapshot.fields.projectEnvironmentProfile;
       if (currentProfile !== input.expectedCurrentProfile || (input.expectedCurrentRevision !== undefined && snapshot.revisions.projectEnvironmentProfile !== input.expectedCurrentRevision)) {
@@ -6829,6 +6869,7 @@ export class ProjectEnvironmentRepository {
 
       const emptyNoop = input.operation === "noop" && nextProfile === null;
       const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
+      let published = false;
       if (input.operation !== "noop" || (!emptyNoop && existingMemory &&
           fieldsFromL3WorldModelMemory(existingMemory).projectEnvironmentProfile !== null)) {
         this.l3WorldModels.upsertField({
@@ -6840,7 +6881,12 @@ export class ProjectEnvironmentRepository {
           at,
           source: "project_environment"
         });
+        published = true;
       }
+      // A historical noop keeps the provenance on the unchanged source row.
+      let appliedScanId = state.appliedScanId ?? null;
+      if (published) appliedScanId = input.scanId;
+      if (emptyNoop) appliedScanId = null;
       const result = this.db.prepare(
         `UPDATE l3_world_model_project_environment_state
          SET project_kind = ?, status = 'clean', applied_scan_id = ?, fingerprint = ?,
@@ -6848,13 +6894,27 @@ export class ProjectEnvironmentRepository {
          WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
       ).run(
         input.projectKind,
-        emptyNoop ? null : input.scanId,
+        appliedScanId,
         emptyNoop ? null : input.fingerprint,
         at,
         input.userId,
         input.projectId,
         input.scanId
       );
+      if (published && input.userId !== DEVICE_MEMORY_OWNER) {
+        // New content is device-owned, so its applied-scan evidence must be too.
+        // Do not rewrite the old scope, job, or Memory row to achieve this.
+        this.db.prepare(`INSERT INTO l3_world_model_project_environment_state (
+          user_id, project_id, project_kind, status, current_scan_id,
+          applied_scan_id, fingerprint, last_error, updated_at
+        ) VALUES (?, ?, ?, 'clean', ?, ?, ?, NULL, ?)
+        ON CONFLICT(user_id, project_id) DO UPDATE SET project_kind=excluded.project_kind,
+          status='clean', current_scan_id=excluded.current_scan_id,
+          applied_scan_id=excluded.applied_scan_id, fingerprint=excluded.fingerprint,
+          last_error=NULL, updated_at=excluded.updated_at`)
+          .run(DEVICE_MEMORY_OWNER, input.projectId, input.projectKind, input.scanId,
+            appliedScanId, emptyNoop ? null : input.fingerprint, at);
+      }
       return { stale: result.changes !== 1 };
     })();
   }

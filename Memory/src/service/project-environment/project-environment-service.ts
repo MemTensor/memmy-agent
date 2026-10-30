@@ -67,8 +67,18 @@ export class ProjectEnvironmentService {
     if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     if (!this.deps.repos.projectEnvironments.beginScan(payload.userId, payload.projectId, payload.scanId)) return;
     try {
-      const scope = this.deps.repos.l3WorldModels.getScope(payload.userId, payload.projectId);
+      const stored = this.deps.repos.runtime.getJob(job.id);
+      const session = job.sessionId ? this.deps.repos.runtime.getSession(job.sessionId) : undefined;
+      if (!stored || stored.userId !== job.userId || stored.sessionId !== job.sessionId ||
+          JSON.stringify(stored.payload) !== JSON.stringify(job.payload) ||
+          !session || session.userId !== payload.userId || session.projectId !== payload.projectId) {
+        throw new Error("project_environment_job_scope_mismatch");
+      }
+      const scope = this.deps.repos.l3WorldModels.getOwnedScope(payload.userId, payload.projectId);
       if (!scope?.workspaceUri) throw new Error("project_environment_workspace_uri_missing");
+      if (scope.workspaceUri !== session.meta.workspace_uri) {
+        throw new Error("project_environment_workspace_uri_mismatch");
+      }
       const scan = await scanLocalProject(scope.workspaceUri);
       const classification = classifyProjectInventory(scan.entries);
       const facts = parseDeterministicProjectFacts({
