@@ -350,9 +350,11 @@ export class MemoryService {
     this.concurrency = options.concurrency ?? new WorkerConcurrencyController();
     this.viewerEndpoint = options.viewerEndpoint;
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
+    // Match the repositories' own connection: a pre-built backend owns the file,
+    // and production servers are wired that way rather than with a raw `db`.
     this.embeddingMaintenanceReader = new EmbeddingMaintenanceReader({
       repos: this.repos,
-      sqlitePath: options.db?.path
+      sqlitePath: options.backend?.sqlitePath ?? options.db?.path
     });
     this.workerMetrics = options.observability ?? new WorkerObservability({
       queueSnapshot: (at) => readWorkerQueueMetrics(this.repos.db, at)

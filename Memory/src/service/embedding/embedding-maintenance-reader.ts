@@ -54,7 +54,6 @@ export interface EmbeddingMaintenanceReaderOptions {
  * TypeScript module URL and an in-memory SQLite database cannot be shared.
  */
 export class EmbeddingMaintenanceReader {
-  private readonly workerBacked: boolean;
   private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly pending = new Map<number, PendingRequest>();
   private worker?: Worker;
@@ -63,9 +62,14 @@ export class EmbeddingMaintenanceReader {
   private fatalError?: Error;
   private fatalAt = 0;
   private stopped?: Promise<void>;
+  /** SQLite file this lane reads, when one was threaded through by the caller. */
+  readonly sqlitePath?: string;
+  /** Diagnostic: whether reads run in a worker lane instead of inline on the caller. */
+  readonly workerBacked: boolean;
 
   constructor(private readonly options: EmbeddingMaintenanceReaderOptions) {
     const extension = extname(fileURLToPath(import.meta.url));
+    this.sqlitePath = options.sqlitePath;
     this.workerBacked = Boolean(options.sqlitePath && options.sqlitePath !== ":memory:" && extension === ".js");
   }
 
