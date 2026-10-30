@@ -240,9 +240,10 @@ describe("L3 field cognition storage", () => {
 });
 
 describe("L3 field cognition flag", () => {
-  it("is off by default with a 15-day retention", () => {
-    expect(DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition).toEqual({ enabled: false, inactiveRetentionDays: 15 });
-    expect(isL3FieldCognitionActive(DEFAULT_MEMMY_CONFIG, { backendId: "sqlite-local" }, "local")).toBe(false);
+  it("is on by default with a 15-day retention, on local sqlite storage only", () => {
+    expect(DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition).toEqual({ enabled: true, inactiveRetentionDays: 15 });
+    expect(isL3FieldCognitionActive(DEFAULT_MEMMY_CONFIG, { backendId: "sqlite-local" }, "local")).toBe(true);
+    expect(isL3FieldCognitionActive(DEFAULT_MEMMY_CONFIG, { backendId: "sqlite-local" }, "cloud")).toBe(false);
   });
 
   it("is active only when enabled on local sqlite storage", () => {

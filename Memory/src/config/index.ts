@@ -251,7 +251,7 @@ export interface AlgorithmConfig {
     // saw). Off: after a successful judgment only the small fields stay.
     turnJudgeKeepInput: boolean;
   };
-  /** Itemized machine/project L3; off by default while it is being tested. */
+  /** Itemized machine/project L3; on by default (local SQLite only, see isL3FieldCognitionActive). */
   l3FieldCognition: {
     enabled: boolean;
     inactiveRetentionDays: number;
@@ -519,7 +519,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       turnJudgeKeepInput: false
     },
     l3FieldCognition: {
-      enabled: false,
+      enabled: true,
       inactiveRetentionDays: 15
     },
     retrieval: {
