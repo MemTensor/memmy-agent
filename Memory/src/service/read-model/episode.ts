@@ -8,6 +8,7 @@
  *
  * Intended destination: Memory/src/service/read-model/episode.ts
  */
+import { importedSkillSourceDir, isImportedSkill } from "../../storage/imported-skill.js";
 import { episodeTitleDisplayState } from "../episode-title/episode-title-service.js";
 import type {
   EpisodeRecord,
@@ -249,6 +250,11 @@ export class EpisodeReadModel {
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
     const refs = this.refsForMemory(memory);
     const item = this.deps.memoryDetailWithLayerPayload(detail, memory);
+    // An imported skill whose directory holds scripts or references points
+    // there, so an Agent on the same machine can open them. Output only; the
+    // stored body is the SKILL.md as imported.
+    const sourceDir = isImportedSkill(memory) ? importedSkillSourceDir(memory) : undefined;
+    if (sourceDir && typeof item.body === "string") item.body = `${item.body}\n\nsource dir: ${sourceDir}`;
     if (memory.properties.internal_info.memory_kind === "span") {
       const span = memory.properties.internal_info.span as {
         raw_turn_id: string;

@@ -204,6 +204,8 @@ export interface MemoryFilter {
   memoryKind?: MemoryKind | MemoryKind[];
   workMemoryUserId?: string;
   workMemoryProjectId?: string | null;
+  /** Leaves out skills imported from this Agent (compared after normalizing the Agent id). */
+  excludedImportedSkillSourceAgentId?: string;
 }
 
 export interface RecallHit {

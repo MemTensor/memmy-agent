@@ -592,6 +592,64 @@ export const AddMemoryInputSchema = RuntimeRequestFieldsSchema.extend({
 });
 export type AddMemoryInput = z.infer<typeof AddMemoryInputSchema>;
 
+/** One SKILL.md found in a source Agent's skill directories. */
+export const AgentSkillReconcileSkillSchema = z.object({
+  sourceSkillId: NonEmptyStringSchema,
+  sourceSkillPath: NonEmptyStringSchema,
+  title: NonEmptyStringSchema,
+  content: NonEmptyStringSchema,
+  contentHash: NonEmptyStringSchema,
+  modifiedAt: IsoTimeSchema,
+  version: z.string().optional(),
+  description: z.string().optional(),
+  disableModelInvocation: z.boolean().optional(),
+  allowImplicitInvocation: z.boolean().optional(),
+  hasSupportingFiles: z.boolean().optional()
+});
+
+/** A skill shipped in an enabled plugin of the source Agent; only its identity is sent. */
+export const AgentSkillReconcileRegistrationSchema = z.object({
+  sourceSkillId: NonEmptyStringSchema,
+  sourceSkillPath: NonEmptyStringSchema,
+  name: NonEmptyStringSchema,
+  pluginId: z.string().optional()
+});
+
+/** Definition for agent skill reconcile input: everything one scan found for one source Agent. */
+export const AgentSkillReconcileInputSchema = RuntimeRequestFieldsSchema.extend({
+  sourceAgentId: NonEmptyStringSchema,
+  complete: z.boolean(),
+  disconnected: z.boolean().optional(),
+  skills: z.array(AgentSkillReconcileSkillSchema),
+  registrations: z.array(AgentSkillReconcileRegistrationSchema).optional(),
+  registrationsComplete: z.boolean().optional()
+});
+export type AgentSkillReconcileInput = z.infer<typeof AgentSkillReconcileInputSchema>;
+
+/** Schema for agent skill reconcile output. */
+export const AgentSkillReconcileOutputSchema = z.object({
+  sourceAgentId: NonEmptyStringSchema,
+  skills: z.array(z.object({
+    sourceSkillId: NonEmptyStringSchema,
+    outcome: z.enum(["created", "updated", "unchanged", "deleted_by_user", "failed"]),
+    memoryId: z.string().optional(),
+    error: z.string().optional()
+  })),
+  archived: z.number(),
+  registrations: z.number(),
+  serverTime: IsoTimeSchema
+});
+export type AgentSkillReconcileOutput = z.infer<typeof AgentSkillReconcileOutputSchema>;
+
+/** Schema for skill archive and reactivate output. */
+export const SkillArchiveStateOutputSchema = z.object({
+  ok: z.literal(true),
+  id: NonEmptyStringSchema,
+  status: MemoryStatusSchema,
+  serverTime: IsoTimeSchema
+});
+export type SkillArchiveStateOutput = z.infer<typeof SkillArchiveStateOutputSchema>;
+
 /** Schema for add memory output. */
 export const AddMemoryOutputSchema = z.object({
   id: NonEmptyStringSchema,

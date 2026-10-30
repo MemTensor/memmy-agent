@@ -62,6 +62,9 @@ export class SqliteVecStore {
         ON v.memory_id = m.id
         AND v.vector_field = CASE WHEN m.memory_layer = 'L1' THEN 'vec_summary' ELSE 'vec' END
       WHERE m.deleted_at IS NULL AND m.status != 'deleted'
+        -- Imported skills keep a vector only while they can be recalled.
+        AND NOT (m.memory_layer = 'Skill' AND COALESCE(json_extract(m.properties_json, '$.internal_info.read_only'), 0) = 1
+          AND (m.status = 'archived' OR trim(m.memory_value) = ''))
       UNION ALL
       SELECT m.id AS id, 'memory' AS kind, 'vec_action' AS vectorField, v.embedding_dim AS dimension,
              v.embedding_model AS embeddingModel, v.embedding_provider AS embeddingProvider

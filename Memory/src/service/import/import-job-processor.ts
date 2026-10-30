@@ -18,6 +18,7 @@ import { clip, firstLine } from "../../utils/text.js";
 import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import { isObservationMemory, observationJobPayload } from "../observation-memory-state.js";
 import { externalSkillJobPayload } from "../evidence/history-skill-policy.js";
+import { importedSkillInfoFields, importedSkillInternalFields } from "./memory-import-pipeline.js";
 
 
 
@@ -217,51 +218,20 @@ export class ImportJobProcessor {
         source: request.source ?? "manual",
         turn_id: request.turnId,
         time_zone: request.timeZone,
-        ...(readOnlySkill ? {
-          name: title,
-          eta: 0.5,
-          support: 1,
-          gain: 0,
-          skill_status: "active",
-          source_memory_ids: []
-        } : {})
+        ...(readOnlySkill ? importedSkillInfoFields(title) : {})
       },
       internal: {
         source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId, time_zone: request.timeZone,
-        ...(readOnlySkill ? {
-          read_only: true,
-          source_agent_id: sourceAgentId,
-          source_skill_id: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined,
-          source_skill_path: request.sourceSkillPath?.trim() || undefined,
-          source_skill_version: request.sourceSkillVersion?.trim() || undefined,
-          source_content_hash: request.sourceContentHash?.trim() || stableHash(request.content),
-          imported_at: receivedAt,
-          name: title,
-          invocation_guide: request.content,
-          procedure_json: { summary: request.content },
-          eta: 0.5,
-          support: 1,
-          gain: 0,
-          source_policy_ids: [],
-          source_world_model_ids: [],
-          evidence_anchor_ids: [],
-          skill: {
-            name: title,
-            eta: 0.5,
-            status: "active",
-            support: 1,
-            gain: 0,
-            source_policy_ids: [],
-            source_world_model_ids: [],
-            evidence_anchor_ids: [],
-            invocation_guide: request.content,
-            procedure_json: { summary: request.content },
-            trials_attempted: 0,
-            trials_passed: 0,
-            success_rate: 0,
-            beta_posterior: { alpha: 1, beta: 1, mean: 0.5 }
-          }
-        } : {}),
+        ...(readOnlySkill ? importedSkillInternalFields({
+          sourceAgentId: sourceAgentId!,
+          sourceSkillId: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined,
+          sourceSkillPath: request.sourceSkillPath?.trim() || undefined,
+          sourceSkillVersion: request.sourceSkillVersion?.trim() || undefined,
+          sourceContentHash: request.sourceContentHash?.trim() || stableHash(request.content),
+          importedAt: receivedAt,
+          title,
+          content: request.content
+        }) : {}),
         ...(importTrace ? { plugin_algorithm: "memory.add.import_async.v2", trace: importTrace } : {})
       },
       createdAt: at

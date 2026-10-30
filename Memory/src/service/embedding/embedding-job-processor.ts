@@ -1,3 +1,4 @@
+import { importedSkillMayEmbed, isImportedSkill } from "../../storage/imported-skill.js";
 import type { EpisodeSelectionContext } from "../session/episode-selection.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
 import { isRecord } from "../../utils/json.js";
@@ -255,9 +256,13 @@ export class EmbeddingJobProcessor {
     const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     if (!memory) {
       if (job.targetMemoryId && this.isRejectedCaptureTarget(job.targetMemoryId)) return null;
+      // A deleted imported skill has nothing left to embed.
+      const deleted = job.targetMemoryId ? this.deps.repos.memories.getIncludingDeleted(job.targetMemoryId) : undefined;
+      if (deleted && isImportedSkill(deleted)) return null;
       throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
+    if (!importedSkillMayEmbed(memory)) return null;
 
     if (isObservationMemory(memory)) {
       if (!isObservationMemoryProcessed(memory)) return null;

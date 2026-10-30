@@ -1,3 +1,4 @@
+import { importedSkillDescription, importedSkillSourceDir, isImportedSkill } from "../../storage/imported-skill.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -845,6 +846,10 @@ function renderInjectedSnippet(
     const name = skill?.name || hit.title || "Skill";
     const guide = skill?.invocationGuide || hit.snippet;
     const summaryChars = options.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS;
+    // Imported skills describe themselves in their frontmatter; their guide
+    // starts with that raw frontmatter, so it is not used as the description.
+    const importedDescription = memory && isImportedSkill(memory) ? importedSkillDescription(memory) : undefined;
+    const sourceDir = memory && isImportedSkill(memory) ? importedSkillSourceDir(memory) : undefined;
     if (options.skillInjectionMode === "full") {
       const fullMax = options.skillFullMaxChars ?? MEMORY_PACKET_SKILL_FULL_MAX_CHARS;
       return {
@@ -858,7 +863,8 @@ function renderInjectedSnippet(
           "",
           ...labeledInjectedBlock("Name", name),
           "",
-          ...labeledInjectedBlock("Guide", clipSkillGuide(guide.trim() || "(not provided)", fullMax))
+          ...labeledInjectedBlock("Guide", clipSkillGuide(guide.trim() || "(not provided)", fullMax)),
+          ...(sourceDir ? ["", `source dir: ${sourceDir}`] : [])
         ].join("\n")
       };
     }
@@ -870,7 +876,9 @@ function renderInjectedSnippet(
       "",
       ...labeledInjectedBlock("Name", name),
       "",
-      ...labeledInjectedBlock("Description", firstLineSummary(guide, summaryChars) || "(not provided)")
+      ...labeledInjectedBlock("Description",
+        (importedDescription ? clipSkillDescription(importedDescription, summaryChars) : firstLineSummary(guide, summaryChars))
+          || "(not provided)")
     ];
     return {
       refKind: "skill",
@@ -2822,4 +2830,9 @@ export class RetrievalService {
       serverTime: nowIso()
     });
   }
+}
+
+function clipSkillDescription(description: string, maxChars: number): string {
+  const text = description.replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 1))}…` : text;
 }

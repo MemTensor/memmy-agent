@@ -7,6 +7,8 @@ import type { ConversationCheckpoint, ConversationMessage, MessageCursor, Prepar
 
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
+/** Skill import results are keyed "skills" or "skill:<path or id>". */
+const SKILL_RESULT = "(conversation_id = 'skills' OR conversation_id LIKE 'skill:%')";
 
 /** Undefined denotes a legacy job which did not retain the request mode. */
 export function readScanRequestedMode(db: InstanceType<typeof Database>): "initial_subset" | "incremental" | "full" | null | undefined {
@@ -21,6 +23,10 @@ export interface MemoryAgentSourceScanStore extends ScanStore { readonly path: s
   saveRequestedMode(mode: "initial_subset" | "incremental" | "full" | null): void;
   beginAttempt(attemptId: string, startedAt?: string): void;
   resolveItem(sourceId: string, conversationId: string, itemKey: string): void;
+  /** Skills are re-read in full by every scan, so their earlier errors are cleared first. */
+  resolveSkillErrors(sourceId: string): void;
+  /** Unresolved errors of conversations, leaving out skill import errors. */
+  conversationErrorCount(sourceId: string): number;
   saveResult(result: ScanStoredResult & { itemKey?: string }): void;
   checkpointPage(sourceId: string, afterConversationId?: string): ConversationCheckpoint[];
   unresolvedSourceIds(): string[];
@@ -93,6 +99,12 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     },
     resolveItem(sourceId, conversationId, itemKey) {
       db.prepare("UPDATE scan_results SET active=0 WHERE source_id=? AND conversation_id=? AND item_key=? AND error IS NOT NULL AND active=1").run(sourceId, conversationId, itemKey);
+    },
+    resolveSkillErrors(sourceId) {
+      db.prepare(`UPDATE scan_results SET active=0 WHERE source_id=? AND error IS NOT NULL AND active=1 AND ${SKILL_RESULT}`).run(sourceId);
+    },
+    conversationErrorCount(sourceId) {
+      return (db.prepare(`SELECT COUNT(*) AS count FROM scan_results WHERE source_id=? AND error IS NOT NULL AND active=1 AND NOT ${SKILL_RESULT}`).get(sourceId) as { count: number }).count;
     },
     stage(message) {
       const bytes = Buffer.byteLength(JSON.stringify(message));

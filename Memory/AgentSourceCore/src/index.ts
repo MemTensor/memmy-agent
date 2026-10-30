@@ -331,3 +331,4 @@ function hashMetaString(meta: Readonly<Record<string, unknown>>, key: string): s
   const value = meta[key];
   return typeof value === "string" ? value : undefined;
 }
+export * from "./skill-inventory.js";

@@ -310,6 +310,53 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("reconciles an Agent's skills over HTTP, including identity-only registrations and version rollback", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const namespace = { source: "claude_code", profileId: "default", userId: "reconcile-http-user" };
+      const post = async (body: Record<string, unknown>) => {
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ namespace, ...body })
+        });
+        expect(response.status).toBe(200);
+        return await response.json() as { skills: Array<{ sourceSkillId: string; outcome: string; memoryId?: string }> };
+      };
+      const version = (content: string) => ({
+        sourceSkillId: "openai-docs",
+        sourceSkillPath: "/home/me/.codex/skills/.system/openai-docs/SKILL.md",
+        title: "openai-docs",
+        content,
+        contentHash: sha256Hex(content),
+        modifiedAt: "2026-10-01T00:00:00.000Z",
+        unknownField: "dropped"
+      });
+      const registrations = [{ sourceSkillId: "plugin:x@m/brainstorming", sourceSkillPath: "/p/SKILL.md", name: "brainstorming" }];
+
+      const first = await post({ sourceAgentId: "codex", complete: true, skills: [version("A")], registrations, registrationsComplete: true });
+      await post({ sourceAgentId: "codex", complete: true, skills: [version("B")], registrations, registrationsComplete: true });
+      const back = await post({ sourceAgentId: "codex", complete: true, skills: [version("A")], registrations, registrationsComplete: true });
+
+      expect(back.skills[0]).toMatchObject({ outcome: "updated", memoryId: first.skills[0]?.memoryId });
+      const active = db.db.prepare(
+        `SELECT memory_value FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = 'openai-docs' AND status = 'activated'`
+      ).all();
+      expect(active).toEqual([{ memory_value: "A" }]);
+      expect(db.db.prepare(
+        `SELECT status, memory_value FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = 'plugin:x@m/brainstorming'`
+      ).all()).toEqual([{ status: "archived", memory_value: "" }]);
+      expect(db.db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE properties_json LIKE '%unknownField%'`).get()).toEqual({ n: 0 });
+    });
+    db.close();
+  });
+
   it("serves the REST health endpoint", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });

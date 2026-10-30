@@ -283,3 +283,66 @@ function isToolCallPayload(value: unknown): value is ToolCallPayload {
 }
 
 function uniq(values: string[]): string[] { return [...new Set(values)]; }
+
+/** `info` fields of a Skill imported from another Agent. */
+export function importedSkillInfoFields(title: string): Record<string, unknown> {
+  return {
+    name: title,
+    eta: 0.5,
+    support: 1,
+    gain: 0,
+    skill_status: "active",
+    source_memory_ids: []
+  };
+}
+
+/** `internal_info` fields of a Skill imported from another Agent. */
+export function importedSkillInternalFields(input: {
+  sourceAgentId: string;
+  sourceSkillId?: string;
+  sourceSkillPath?: string;
+  sourceSkillVersion?: string;
+  sourceContentHash: string;
+  importedAt: string;
+  title: string;
+  content: string;
+  skillStatus?: "active" | "archived";
+  /** Short text recall indexes instead of the whole SKILL.md. */
+  retrievalBlurb?: string;
+}): Record<string, unknown> {
+  const procedure = { summary: input.content, ...(input.retrievalBlurb ? { retrievalBlurb: input.retrievalBlurb } : {}) };
+  return {
+    read_only: true,
+    source_agent_id: input.sourceAgentId,
+    source_skill_id: input.sourceSkillId,
+    source_skill_path: input.sourceSkillPath,
+    source_skill_version: input.sourceSkillVersion,
+    source_content_hash: input.sourceContentHash,
+    imported_at: input.importedAt,
+    name: input.title,
+    invocation_guide: input.content,
+    procedure_json: procedure,
+    eta: 0.5,
+    support: 1,
+    gain: 0,
+    source_policy_ids: [],
+    source_world_model_ids: [],
+    evidence_anchor_ids: [],
+    skill: {
+      name: input.title,
+      eta: 0.5,
+      status: input.skillStatus ?? "active",
+      support: 1,
+      gain: 0,
+      source_policy_ids: [],
+      source_world_model_ids: [],
+      evidence_anchor_ids: [],
+      invocation_guide: input.content,
+      procedure_json: procedure,
+      trials_attempted: 0,
+      trials_passed: 0,
+      success_rate: 0,
+      beta_posterior: { alpha: 1, beta: 1, mean: 0.5 }
+    }
+  };
+}

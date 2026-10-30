@@ -1,5 +1,5 @@
 import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { setImmediate as yieldToIO, setTimeout as waitForIO } from "node:timers/promises";
 import { join } from "node:path";
@@ -497,9 +497,8 @@ describe("standalone Agent source executor", () => {
       "---\nname: release-check\nversion: 1.0.0\n---\nVerify release evidence.\n",
       "utf8"
     );
-    const addMemory = vi.fn(({ layer }: { layer: string }) => ({
-      id: layer === "Skill" ? "skill-memory" : "trace-memory"
-    }));
+    const addMemory = vi.fn(() => ({ id: "trace-memory" }));
+    const reconcileAgentSkills = fakeReconcile();
     const resolveAgentSkillRoot = vi.fn(() => skillRoot);
     const adapter: SourceAdapter = {
       descriptor: {
@@ -517,6 +516,8 @@ describe("standalone Agent source executor", () => {
     const executor = createAgentSourceExecutor({
       service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
+        agentSkillsDisconnected: () => false,
+        reconcileAgentSkills,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
@@ -529,11 +530,15 @@ describe("standalone Agent source executor", () => {
     await waitForScan(executor);
 
     expect(resolveAgentSkillRoot).toHaveBeenCalledWith("cursor");
-    expect(addMemory).toHaveBeenCalledTimes(2);
-    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
-      layer: "Skill",
-      sourceSkillId: "release-check",
-      sourceSkillPath: join(skillRoot, "skills", "release-check", "SKILL.md")
+    expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(reconcileAgentSkills).toHaveBeenCalledWith(expect.objectContaining({
+      sourceAgentId: "cursor",
+      complete: true,
+      skills: [expect.objectContaining({
+        sourceSkillId: "release-check",
+        version: "1.0.0",
+        sourceSkillPath: join(skillRoot, "skills", "release-check", "SKILL.md")
+      })]
     }));
   });
 
@@ -895,9 +900,11 @@ describe("standalone Agent source executor", () => {
     mkdirSync(join(skillPath, ".."), { recursive: true });
     writeFileSync(skillPath, "---\nname: sample-skill\nversion: 1\n---\n\nUse the sample procedure.\n");
     vi.stubEnv("CODEX_HOME", codexRoot);
-    const addMemory = vi.fn(() => ({ id: "skill-memory-1" }));
+    vi.stubEnv("HOME", root);
+    const reconcileAgentSkills = fakeReconcile();
     const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
-      addMemory,
+      agentSkillsDisconnected: () => false,
+      reconcileAgentSkills,
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
     const adapter: SourceAdapter = {
@@ -915,14 +922,259 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "codex" });
     await waitForScan(executor);
 
-    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
-      layer: "Skill",
-      source: "codex",
+    expect(reconcileAgentSkills).toHaveBeenCalledWith(expect.objectContaining({
       sourceAgentId: "codex",
-      sourceSkillId: "sample",
-      sourceSkillPath: skillPath,
-      title: "sample-skill"
+      complete: true,
+      disconnected: false,
+      skills: [expect.objectContaining({ sourceSkillId: "sample", sourceSkillPath: skillPath, title: "sample-skill", version: "1" })]
     }));
+  });
+
+  it("keeps an Agent disconnected from the desktop App until it is connected again", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    mkdirSync(join(codexRoot, "skills", "sample"), { recursive: true });
+    writeFileSync(join(codexRoot, "skills", "sample", "SKILL.md"), "---\nname: sample-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    const reconcileAgentSkills = fakeReconcile();
+    // The App archived the skills as disconnected when the user removed the connection.
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
+      agentSkillsDisconnected: (sourceId: string) => sourceId === "codex",
+      reconcileAgentSkills,
+      enqueuePendingImportSummaries: vi.fn()
+    } as unknown as MemoryService;
+    let installed = false;
+    const integrationRegistry = createSkillTargetRegistry([{
+      targetId: "codex", displayName: "Codex", async resolveRootDirectory() { return codexRoot; },
+      async install() {}, async uninstall() {}, async isInstalled() { return installed; }
+    }]);
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      integrationRegistry,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+        detect: async () => true,
+        async *scan() {}
+      }])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(reconcileAgentSkills).toHaveBeenLastCalledWith(expect.objectContaining({ sourceAgentId: "codex", disconnected: true }));
+
+    installed = true;
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(reconcileAgentSkills).toHaveBeenLastCalledWith(expect.objectContaining({ sourceAgentId: "codex", disconnected: false }));
+    await executor.dispose();
+  });
+
+  it("shares the skills again when an Agent disconnected here is connected from the desktop App", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    mkdirSync(join(codexRoot, "skills", "sample"), { recursive: true });
+    writeFileSync(join(codexRoot, "skills", "sample", "SKILL.md"), "---\nname: sample-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    const statePath = join(root, "agent-sources.json");
+    // Disconnected through Memory; the App later installs the integration again.
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: { codex: {
+      status: "not_connected", autoInjectSuppressed: true, messageCount: 0, lastScannedAt: null, latestSeenAt: null
+    } } }));
+    const reconcileAgentSkills = fakeReconcile();
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
+      agentSkillsDisconnected: () => true,
+      reconcileAgentSkills,
+      enqueuePendingImportSummaries: vi.fn()
+    } as unknown as MemoryService;
+    let installed = false;
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath,
+      integrationRegistry: createSkillTargetRegistry([{
+        targetId: "codex", displayName: "Codex", async resolveRootDirectory() { return codexRoot; },
+        async install() {}, async uninstall() {}, async isInstalled() { return installed; }
+      }]),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+        detect: async () => true,
+        async *scan() {}
+      }])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(reconcileAgentSkills).toHaveBeenLastCalledWith(expect.objectContaining({ disconnected: true }));
+
+    installed = true;
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(reconcileAgentSkills).toHaveBeenLastCalledWith(expect.objectContaining({ disconnected: false }));
+    await executor.dispose();
+  });
+
+  it("imports symlinked skill directories with multi-line frontmatter like the App importer", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    const sharedSkill = join(root, "shared", "memory-systems");
+    mkdirSync(sharedSkill, { recursive: true });
+    writeFileSync(join(sharedSkill, "SKILL.md"), "---\nname: memory-systems\ndescription: >\n  Design memory\n  for agents.\n---\n\nBody\n");
+    mkdirSync(join(codexRoot, "skills"), { recursive: true });
+    symlinkSync(sharedSkill, join(codexRoot, "skills", "memory-systems"), "junction");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    const reconcileAgentSkills = fakeReconcile();
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, agentSkillsDisconnected: () => false, reconcileAgentSkills, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService;
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+      detect: async () => true,
+      async *scan() {}
+    };
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+
+    expect(reconcileAgentSkills).toHaveBeenCalledWith(expect.objectContaining({
+      skills: [expect.objectContaining({ sourceSkillId: "memory-systems", title: "memory-systems", description: "Design memory for agents." })]
+    }));
+    await executor.dispose();
+  });
+
+  it("reports a retried skill-only Agent as done once its skills import", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    mkdirSync(join(codexRoot, "skills", "sample"), { recursive: true });
+    writeFileSync(join(codexRoot, "skills", "sample", "SKILL.md"), "---\nname: sample-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    let fail = true;
+    const reconcileAgentSkills = fakeReconcile(() => fail ? "failed" : "created");
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, agentSkillsDisconnected: () => false, reconcileAgentSkills, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService;
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+        detect: async () => false,
+        async *scan() {}
+      }])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(executor.scanStatus().error).toContain("skill import failed");
+
+    fail = false;
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+    expect(executor.scanStatus().error).toBeFalsy();
+    await executor.dispose();
+  });
+
+  it("imports skills of an Agent that has no conversation data yet", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    const skillPath = join(codexRoot, "skills", "sample", "SKILL.md");
+    mkdirSync(join(skillPath, ".."), { recursive: true });
+    writeFileSync(skillPath, "---\nname: sample-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    const reconcileAgentSkills = fakeReconcile();
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, agentSkillsDisconnected: () => false, reconcileAgentSkills, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService;
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+      detect: async () => false,
+      async *scan() {}
+    };
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+
+    expect(executor.scanStatus().error).toBeFalsy();
+    expect(reconcileAgentSkills).toHaveBeenCalledWith(expect.objectContaining({
+      skills: [expect.objectContaining({ sourceSkillId: "sample" })]
+    }));
+    await executor.dispose();
+  });
+
+  it("leaves shared skills alone while the Agent that loads them is not installed", async () => {
+    const root = tempRoot();
+    const sharedSkill = join(root, ".agents", "skills", "sample", "SKILL.md");
+    mkdirSync(join(sharedSkill, ".."), { recursive: true });
+    writeFileSync(sharedSkill, "---\nname: sample-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", join(root, ".codex"));
+    vi.stubEnv("HOME", root);
+    const reconcileAgentSkills = fakeReconcile();
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, agentSkillsDisconnected: () => false, reconcileAgentSkills, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService;
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: join(root, ".codex") },
+      detect: async () => false,
+      async *scan() {}
+    };
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter])
+    });
+
+    await executor.startScan({ sourceId: "codex" });
+    await waitForScan(executor);
+
+    expect(reconcileAgentSkills).not.toHaveBeenCalled();
+    await executor.dispose();
+  });
+
+  it("reports a failed skill import without holding back the conversation watermark", async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, ".codex");
+    const skillPath = join(codexRoot, "skills", "failing-skill", "SKILL.md");
+    mkdirSync(join(skillPath, ".."), { recursive: true });
+    writeFileSync(skillPath, "---\nname: failing-skill\n---\n\nBody\n");
+    vi.stubEnv("CODEX_HOME", codexRoot);
+    vi.stubEnv("HOME", root);
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
+      agentSkillsDisconnected: () => false,
+      reconcileAgentSkills: fakeReconcile(() => "failed"),
+      enqueuePendingImportSummaries: vi.fn()
+    } as unknown as MemoryService;
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: codexRoot },
+      detect: async () => true,
+      async *scan() {}
+    };
+    const statePath = join(root, "agent-sources.json");
+    const executor = createAgentSourceExecutor({
+      service,
+      configPath: join(root, "config.yaml"),
+      statePath,
+      sourceRegistry: createSourceRegistry([adapter])
+    });
+
+    await executor.startScan({ sourceId: "codex", mode: "incremental" });
+    await waitForScan(executor);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { sources: Record<string, { lastScannedAt: string | null }> };
+    expect(state.sources.codex?.lastScannedAt).toEqual(expect.any(String));
+    expect(executor.scanStatus().error).toContain("skill:failing-skill: skill import failed");
+    await executor.dispose();
   });
 
   it("emits add analytics only when a scanned skill is newly stored", async () => {
@@ -933,15 +1185,16 @@ describe("standalone Agent source executor", () => {
       mkdirSync(join(skillPath, ".."), { recursive: true });
       writeFileSync(skillPath, `---\nname: ${sourceSkillId}\nversion: 1\n---\n\n${sourceSkillId}\n`);
     }
+    vi.stubEnv("HOME", root);
     vi.stubEnv("CODEX_HOME", codexRoot);
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
-      addMemory: vi.fn((input: { sourceSkillId?: string }) => {
-        if (input.sourceSkillId === "duplicate-skill") return { id: "dup", duplicate: true, status: "activated" };
-        if (input.sourceSkillId === "deleted-skill") return { id: "gone", status: "deleted" };
-        if (input.sourceSkillId === "failing-skill") throw new Error("skill import failed");
-        return { id: "fresh", status: "activated" };
-      }),
+      agentSkillsDisconnected: () => false,
+      reconcileAgentSkills: fakeReconcile((sourceSkillId) => ({
+        "duplicate-skill": "unchanged" as const,
+        "deleted-skill": "deleted_by_user" as const,
+        "failing-skill": "failed" as const
+      })[sourceSkillId] ?? "created"),
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
     const adapter: SourceAdapter = {
@@ -1194,4 +1447,19 @@ function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "memmy-agent-source-runtime-"));
   roots.push(root);
   return root;
+}
+
+/** A stand-in for MemoryService.reconcileAgentSkills that stores every scanned skill. */
+function fakeReconcile(outcome: (sourceSkillId: string) => "created" | "updated" | "unchanged" | "deleted_by_user" | "failed" = () => "created") {
+  return vi.fn((input: { sourceAgentId: string; skills: Array<{ sourceSkillId: string }> }) => ({
+    sourceAgentId: input.sourceAgentId,
+    skills: input.skills.map((skill) => {
+      const result = outcome(skill.sourceSkillId);
+      if (result === "failed") return { sourceSkillId: skill.sourceSkillId, outcome: result, error: "skill import failed" };
+      return { sourceSkillId: skill.sourceSkillId, outcome: result, ...(result === "deleted_by_user" ? {} : { memoryId: `${skill.sourceSkillId}-memory` }) };
+    }),
+    archived: 0,
+    registrations: 0,
+    serverTime: "2026-08-28T01:00:00.000Z"
+  }));
 }

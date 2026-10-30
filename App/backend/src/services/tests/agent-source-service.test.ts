@@ -420,6 +420,33 @@ describe("agent source service", () => {
     );
   });
 
+  it("stops sharing an Agent's skills as soon as its connection is removed", async () => {
+    const repository = createRepository();
+    repository.upsertSource({ sourceId: "cursor", displayName: "Cursor", dataPath: "/tmp/cursor", builtin: true });
+    const reconciled: Parameters<MemoryClient["reconcileAgentSkills"]>[0][] = [];
+    const memoryClient = createMockMemoryClient();
+    const service = createService({
+      repository,
+      memoryClient: {
+        ...memoryClient,
+        async reconcileAgentSkills(input, context) {
+          reconciled.push(input);
+          return memoryClient.reconcileAgentSkills(input, context);
+        }
+      },
+      skillDistributionService: {
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    await service.uninstallSkill("cursor");
+
+    expect(reconciled).toEqual([{ sourceAgentId: "cursor", complete: false, disconnected: true, skills: [] }]);
+  });
+
   it("delegates skill install and uninstall then updates source status", async () => {
     const repository = createRepository();
     repository.upsertSource({

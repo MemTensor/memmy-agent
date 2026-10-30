@@ -175,25 +175,26 @@ describe("unified scan behavior", () => {
     const directory = root();
     mkdirSync(join(directory, "skills", "sample"), { recursive: true });
     writeFileSync(join(directory, "skills", "sample", "SKILL.md"), "---\nname: Sample\nversion: 1\n---\nA sample skill.");
-    const add = vi.fn(() => ({ id: "skill-one", duplicate: true }));
+    const reconcile = vi.fn(() => ({ skills: [{ sourceSkillId: "sample", outcome: "unchanged", memoryId: "skill-one" }] }));
     const worker = vi.fn(async () => ({}));
-    const memory = service({ addMemory: add, runWorkerOnce: worker, memoryProcessingStatus: () => ({ items: [{ memoryId: "skill-one", state: "ready" }] }) });
+    const memory = service({ reconcileAgentSkills: reconcile, agentSkillsDisconnected: () => false, runWorkerOnce: worker, memoryProcessingStatus: () => ({ items: [{ memoryId: "skill-one", state: "ready" }] }) });
     const scan = executor(directory, adapter([]), memory, { resolveAgentSkillRoot: () => directory });
     await scan.startScan({ sourceId: "fixture", waitForProcessing: true });
     expect((await done(scan)).error).toBeNull();
-    expect(add).toHaveBeenCalledWith(expect.objectContaining({ layer: "Skill", sourceAgentId: "fixture", sourceSkillId: "sample", sourceSkillVersion: "1", sourceSkillPath: join(directory, "skills", "sample", "SKILL.md") }));
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ sourceAgentId: "fixture", skills: [expect.objectContaining({ sourceSkillId: "sample", version: "1", sourceSkillPath: join(directory, "skills", "sample", "SKILL.md") })] }));
     expect(worker).not.toHaveBeenCalled();
   });
 
-  it("reports a skill write failure instead of advancing the scan watermark", async () => {
+  it("reports a skill write failure without holding back the conversation watermark", async () => {
     const directory = root();
     mkdirSync(join(directory, "skills", "sample"), { recursive: true });
     writeFileSync(join(directory, "skills", "sample", "SKILL.md"), "A sample skill.");
-    const add = vi.fn((input: { layer: string }) => { if (input.layer === "Skill") throw new Error("skill storage failed"); return { id: "memory-one", duplicate: false }; });
-    const scan = executor(directory, adapter(), service({ addMemory: add }), { resolveAgentSkillRoot: () => directory });
+    // Every scan reconciles the whole skill directory, so a failing skill is retried without replaying conversations.
+    const reconcile = vi.fn(() => ({ skills: [{ sourceSkillId: "sample", outcome: "failed", error: "skill storage failed" }] }));
+    const scan = executor(directory, adapter(), service({ reconcileAgentSkills: reconcile, agentSkillsDisconnected: () => false }), { resolveAgentSkillRoot: () => directory });
     await scan.startScan({ sourceId: "fixture" });
     expect((await done(scan)).error).toContain("skill storage failed");
-    expect(JSON.parse(readFileSync(join(directory, "state.json"), "utf8")).sources.fixture.latestSeenAt).toBeNull();
+    expect(JSON.parse(readFileSync(join(directory, "state.json"), "utf8")).sources.fixture.latestSeenAt).not.toBeNull();
   });
 
   it("keeps background summary failure separate from scan success", async () => {

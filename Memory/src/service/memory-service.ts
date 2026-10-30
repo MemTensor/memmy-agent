@@ -1,3 +1,5 @@
+import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
+import { isImportedSkill } from "../storage/imported-skill.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
 import {
@@ -297,6 +299,7 @@ export class MemoryService {
   private readonly episodeReadModel: EpisodeReadModel;
   private readonly episodeTitle: EpisodeTitleService;
   private readonly importJobs: ImportJobProcessor;
+  private readonly agentSkills: AgentSkillLibrary;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
@@ -550,6 +553,15 @@ export class MemoryService {
       captureClaims: this.repos.captureClaims,
       processing: this.repos.processing,
       runtime: this.repos.runtime
+    });
+    this.agentSkills = new AgentSkillLibrary({
+      repos: this.repos,
+      nowIso,
+      embedAfterCapture: () => importJobOwner.config.algorithm.capture.embedAfterCapture,
+      resolveUserId: (request) => this.resolveContext(request).userId,
+      buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
+      enqueueJob: (input) => this.enqueueJob(input),
+      namespaceIdFromMemory
     });
     const embeddingJobOwner = this;
     this.embeddingJobs = new EmbeddingJobProcessor({
@@ -1733,6 +1745,33 @@ export class MemoryService {
     return this.retrieval.retrievalTuningConfig();
   }
 
+  /** Whether the imported Skills of a source Agent were archived because the user disconnected it. */
+  agentSkillsDisconnected(sourceAgentId: string): boolean {
+    return this.agentSkills.isDisconnected(sourceAgentId);
+  }
+
+  /** Brings the imported Skills of one source Agent in line with one scan of that Agent. */
+  reconcileAgentSkills(request: AgentSkillReconcileRequest): AgentSkillReconcileResult {
+    this.assertMemoryAddEnabled();
+    if (typeof request.sourceAgentId !== "string" || !request.sourceAgentId.trim()) {
+      throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires sourceAgentId");
+    }
+    if (!Array.isArray(request.skills)) {
+      throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires skills");
+    }
+    return this.agentSkills.reconcile(request);
+  }
+
+  /**
+   * Puts back the summary and retrieval text imported skills had before they
+   * switched to their frontmatter description. Run this before rolling the
+   * code back; the next startup re-embeds the affected records.
+   */
+  restoreImportedSkillRetrievalText(limit = 10000): { restored: number } {
+    this.assertMemoryAddEnabled();
+    return { restored: this.agentSkills.restoreRetrievalRepresentation(limit) };
+  }
+
   addMemory(request: MemoryAddRequest): {
     id: string;
     kind: MemoryKind;
@@ -2652,10 +2691,11 @@ export class MemoryService {
     this.assertMemoryInScope(memory, request.namespace);
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const archived = this.repos.memories.archive(memory.id, at);
+    let archived = this.repos.memories.archive(memory.id, at);
     if (!archived) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
+    if (isImportedSkill(archived)) archived = this.agentSkills.markUserArchived(archived, at);
     const changeSeq = this.repos.runtime.appendChange({
       memoryId: archived.id,
       namespaceId: namespaceIdFromMemory(archived),
@@ -2693,6 +2733,65 @@ export class MemoryService {
       auditId: audit.id,
       serverTime: nowIso()
     };
+  }
+
+  /**
+   * Undoes a panel archive of a Skill. Imported skills return to the state
+   * their source implies (see AgentSkillLibrary.restoreUserArchive); other
+   * skills become active again.
+   */
+  reactivateSkill(id: string, request: MemoryGovernanceRequest = {}): {
+    ok: true;
+    id: string;
+    status: MemoryRow["status"];
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    if (memory.memoryLayer !== "Skill") throw new MemoryServiceError("invalid_argument", `not a skill: ${id}`);
+    if (memory.status !== "archived") return { ok: true, id: memory.id, status: memory.status, serverTime: nowIso() };
+    const at = nowIso();
+    let restored: MemoryRow;
+    if (isImportedSkill(memory)) {
+      restored = this.agentSkills.restoreUserArchive(memory, at);
+    } else {
+      const internal = { ...memory.properties.internal_info };
+      if (isRecord(internal.skill)) internal.skill = { ...internal.skill, status: "active" };
+      restored = this.repos.memories.update({
+        ...memory,
+        status: "activated",
+        properties: { ...memory.properties, status: "activated", internal_info: internal },
+        updatedAt: at
+      });
+      this.repos.runtime.appendChange({
+        memoryId: restored.id,
+        namespaceId: namespaceIdFromMemory(restored),
+        kind: kindFromMemory(restored),
+        op: "updated",
+        entityId: restored.id,
+        userId: restored.userId,
+        changeType: "reactivate",
+        version: restored.version,
+        before: memory,
+        after: restored,
+        source: "panel.reactivate",
+        createdAt: at
+      });
+    }
+    this.repos.runtime.insertAudit({
+      userId: restored.userId,
+      sessionId: restored.sessionId,
+      actor: request.namespace ? { ...request.namespace } : {},
+      action: "reactivate",
+      targetKind: kindFromMemory(restored),
+      targetId: restored.id,
+      before: memory,
+      after: restored,
+      meta: { reason: request.reason },
+      createdAt: at
+    });
+    return { ok: true, id: restored.id, status: restored.status, serverTime: nowIso() };
   }
 
   deleteMemory(id: string, request: MemoryGovernanceRequest = {}): {
@@ -2777,6 +2876,8 @@ export class MemoryService {
     }
     const kind = kindFromMemory(memory);
     const at = nowIso();
+    const importedSkill = isImportedSkill(memory);
+    if (importedSkill) this.agentSkills.stripBeforeDelete(memory, at);
     const deleted = strictV2WorldModel
       ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
       : this.repos.memories.softDelete(memory.id, at);
@@ -2817,6 +2918,9 @@ export class MemoryService {
       meta: { reason: request.reason },
       createdAt: deleted.updatedAt
     });
+    // A deleted imported skill keeps only its source identity; its body is
+    // also removed from the log and queue copies written above or earlier.
+    if (importedSkill) this.repos.runtime.scrubImportedSkillCopies(deleted.id);
     this.evolutionJobs.invalidateMemoryDependencies(memory, at);
     return {
       ok: true,
@@ -3428,6 +3532,16 @@ export class MemoryService {
   }
 
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
+    if (this.memoryAddEnabled()) {
+      try {
+        const migration = this.agentSkills.migrateLegacyRecords(nowIso(), limit);
+        if (migration.migrated > 0) serviceLogger.info("agent_skill.legacy_migrated", migration);
+        const upgraded = this.agentSkills.upgradeRetrievalRepresentation(limit);
+        if (upgraded > 0) serviceLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
+      } catch (error) {
+        serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
+      }
+    }
     const result = this.workerRunner.reconcileWorkerStartup(limit);
     this.reconcileAutomaticHistorySkills(nowIso(), limit);
     return result;

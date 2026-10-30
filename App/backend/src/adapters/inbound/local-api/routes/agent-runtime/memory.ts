@@ -99,6 +99,26 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
     })
   );
 
+  app.post(
+    "/api/v1/skills/:id/archive",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      z.object({}).parse(request.body ?? {});
+      return reply.send(await deps.services.memoryClient.archiveSkill(params.id, runtimeContextFromRequest(request, deps.timeZone)));
+    })
+  );
+
+  app.post(
+    "/api/v1/skills/:id/reactivate",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      z.object({}).parse(request.body ?? {});
+      return reply.send(await deps.services.memoryClient.reactivateSkill(params.id, runtimeContextFromRequest(request, deps.timeZone)));
+    })
+  );
+
   app.patch(
     "/api/v1/evidence/skills/:id",
     { preHandler: deps.authenticateRuntimeToken },

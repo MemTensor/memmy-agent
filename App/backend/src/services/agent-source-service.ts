@@ -80,7 +80,7 @@ export interface CreateAgentSourceServiceOptions {
   sourceRegistry: SourceRegistry;
   agentSourceRepository: AgentSourceRepository;
   ingestionService: IngestionService;
-  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "agentSources">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "reconcileAgentSkills" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "agentSources">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
   memoryAddAnalytics?: Pick<
@@ -287,6 +287,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         await options.skillDistributionService.uninstall(sourceId);
         ensureSourceExists(options, sourceId);
         options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
+        await stopSharingAgentSkills(options, sourceId);
         agentSourceAnalytics.trackSkillUninstalled({
           sourceId,
           builtin,
@@ -363,6 +364,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         await options.skillDistributionService.uninstallPlugin(sourceId);
         ensureSourceExists(options, sourceId);
         options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
+        await stopSharingAgentSkills(options, sourceId);
         agentSourceAnalytics.trackPluginUninstalled({
           sourceId,
           permission,
@@ -456,6 +458,18 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
       )
     )
   ];
+}
+
+/** Stops sharing a disconnected Agent's skills right away instead of at the next scan. */
+async function stopSharingAgentSkills(options: CreateAgentSourceServiceOptions, sourceId: string): Promise<void> {
+  try {
+    await options.memoryClient.reconcileAgentSkills({ sourceAgentId: sourceId, complete: false, disconnected: true, skills: [] });
+  } catch (error) {
+    console.warn(`[agent-source] connection.skill_sharing_stop_failed ${JSON.stringify({
+      sourceId,
+      reason: error instanceof Error ? error.message : String(error)
+    })}`);
+  }
 }
 
 function latestMessageCreatedAt(messages: readonly { createdAt: string }[]): string | null {

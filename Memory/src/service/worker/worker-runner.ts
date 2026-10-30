@@ -1,3 +1,4 @@
+import { importedSkillMayEmbed, isImportedSkill } from "../../storage/imported-skill.js";
 import { ModelHttpError } from "../../model/http.js";
 /**
  * Worker scheduling and execution domain.
@@ -433,6 +434,7 @@ export class WorkerRunner {
     for (const memory of retrievalMemories) {
       this.deps.repos.memories.reindexFts(memory);
       if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
+      if (!importedSkillMayEmbed(memory)) continue;
       if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
       const sourceHash = retrievalDocumentSourceHash(memory);
       this.deps.enqueueJob({
@@ -1213,6 +1215,7 @@ export class WorkerRunner {
         results.push({ succeeded: 0, failed: 0, item: null });
         continue;
       }
+      if (this.settleImportedSkillRetry(retry, claim, results)) continue;
       claimed.push({ retry, claim, attemptNo: retry.attempts + 1 });
     }
     const stopHeartbeat = prefetchedClaims ? () => {} : this.startEmbeddingRetryHeartbeat(claimed);
@@ -1279,6 +1282,31 @@ export class WorkerRunner {
     } catch (error) {
       return this.failClaimedEmbeddingRetry(retry, claim, attemptNo, error);
     }
+  }
+
+  /**
+   * Imported skills are checked before the embedding call: a deleted,
+   * archived or identity-only record is settled without one, and a retry
+   * whose text is outdated is replaced by one for the current text.
+   */
+  private settleImportedSkillRetry(
+    retry: EmbeddingRetryRecord,
+    claim: EmbeddingRetryClaim,
+    results: EmbeddingRetryResult[]
+  ): boolean {
+    const memory = this.deps.repos.memories.getIncludingDeleted(retry.targetId);
+    if (!memory || !isImportedSkill(memory)) return false;
+    const mayEmbed = importedSkillMayEmbed(memory);
+    const currentText = embeddingTextForMemory(memory);
+    if (mayEmbed && currentText === retry.sourceText) return false;
+    const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, { ...claim, now: this.nowMs() });
+    if (completed) this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+    if (mayEmbed) {
+      const replacement = this.deps.enqueueEmbeddingRetry(memory, currentText, this.deps.nowIso(), retry.vectorField);
+      this.deps.appendEmbeddingRetryChange(replacement, "queued");
+    }
+    results.push({ succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null });
+    return true;
   }
 
   applyEmbeddingRetryVector(

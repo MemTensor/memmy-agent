@@ -7,6 +7,8 @@ import {
   ScanResultPageSchema,
   OkResponseSchema,
   AddMemoryOutputSchema,
+  AgentSkillReconcileOutputSchema,
+  SkillArchiveStateOutputSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
@@ -220,6 +222,18 @@ export function createHttpMemoryClient(
 
     async addMemory(input, context) {
       return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
+    },
+
+    async reconcileAgentSkills(input, context) {
+      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, { body: input, context });
+    },
+
+    async archiveSkill(skillId, context) {
+      return request("POST", "archiveSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
+    },
+
+    async reactivateSkill(skillId, context) {
+      return request("POST", "reactivateSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
     },
 
     async getMemory(input, context) {
