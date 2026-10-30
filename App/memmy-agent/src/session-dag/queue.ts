@@ -197,8 +197,9 @@ class SessionDagQueue {
         const message = error instanceof Error ? error.message : String(error);
         if (turn.attempt_count + 1 < this.maxUpdateAttempts()) {
           const delayMs = this.manager.retryDelayMs(turn.attempt_count);
-          this.store.markTurnRetry(turn.turn_id, message, new Date(Date.now() + delayMs).toISOString());
-          this.scheduleRetry(delayMs);
+          const dueAt = Date.now() + delayMs;
+          this.store.markTurnRetry(turn.turn_id, message, new Date(dueAt).toISOString());
+          this.scheduleRetry(delayMs, dueAt);
           return;
         }
         try {
@@ -214,13 +215,23 @@ class SessionDagQueue {
     }
   }
 
-  private scheduleRetry(delayMs: number): void {
+  private scheduleRetry(delayMs: number, dueAt = Date.now() + Math.max(0, delayMs)): void {
     if (this.closed) return;
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => {
+    const wakeWhenDue = () => {
       this.retryTimer = null;
+      if (this.closed) return;
+      // Timers can fire before the wall-clock deadline used by the store.
+      // Retain a wake until the retry is eligible for claim.
+      const remaining = dueAt - Date.now();
+      if (remaining > 0) {
+        this.retryTimer = setTimeout(wakeWhenDue, Math.min(2_147_483_647, remaining));
+        this.retryTimer.unref?.();
+        return;
+      }
       this.wake();
-    }, delayMs);
+    };
+    this.retryTimer = setTimeout(wakeWhenDue, Math.min(2_147_483_647, Math.max(0, delayMs)));
     this.retryTimer.unref?.();
   }
 

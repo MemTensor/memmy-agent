@@ -109,12 +109,17 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   });
 
   registerAgentSourceRoutes(app, {
+    isScanAllowed: () => options.services.appConfig?.isScanAllowed?.() ?? true,
     agentSources: options.services.agentSources,
     agentSourceAutoInject: options.services.agentSourceAutoInject,
     progressBus: options.services.progressBus,
     permissionManager: options.permissionManager,
     authenticateRuntimeToken,
     scanClient: options.services.memoryClient?.agentSources
+  });
+  options.services.appConfig?.setScanPermissionReconciler?.(async () => {
+    // Memory reload owns scan cancellation; the backend only drains automatic integration.
+    await options.services.agentSourceAutoInject.reconcilePermission?.();
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,

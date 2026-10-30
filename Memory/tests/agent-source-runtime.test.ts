@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { setImmediate as yieldToIO, setTimeout as waitForIO } from "node:timers/promises";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAgentSourceExecutor,
@@ -152,9 +153,17 @@ describe("standalone Agent source executor", () => {
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(1));
       const cancellation = executor.cancelScan();
+      let secondCancellationSettled = false;
+      const repeatedCancellation = executor.cancelScan().then(result => {
+        secondCancellationSettled = true;
+        return result;
+      });
+      await Promise.resolve();
+      expect(secondCancellationSettled).toBe(false);
       await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Canceling");
       finishFirst();
       await cancellation;
+      expect((await repeatedCancellation).outcome).toBe("applied");
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
       let completed = false;
@@ -1169,12 +1178,14 @@ async function waitForAutomaticScanCompletion(
   executor: ReturnType<typeof createAgentSourceExecutor>,
   previousJobId: string | null
 ): Promise<void> {
+  const deadline = performance.now() + 2_000;
   for (;;) {
     const status = executor.scanStatus();
     if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
       expect(status.error).toBeNull();
       return;
     }
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
     await yieldToIO();
   }
 }

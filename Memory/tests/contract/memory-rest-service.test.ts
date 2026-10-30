@@ -2,7 +2,8 @@ import { assignedEpisodeId } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSourceExecutor } from "../../src/agent-source/runtime.js";
 import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
@@ -1161,8 +1162,10 @@ describe("MemoryService / REST contract", () => {
       config: DEFAULT_MEMMY_CONFIG,
       configLoader: () => ({ config: accountRuntimeConfig() })
     });
+    const reconcileScanPermission = vi.fn(async () => {});
     const server = createMemoryHttpServer({
       service,
+      agentSourceExecutor: { reconcileScanPermission, dispose: async () => {} } as unknown as AgentSourceExecutor,
       auth: {
         scopedApiKeys: {
           "admin-token": {
@@ -1207,6 +1210,7 @@ describe("MemoryService / REST contract", () => {
     const result = await client.reloadConfig({ reason: "profile_switched" });
 
     expect(readerResponse.status).toBe(403);
+    expect(reconcileScanPermission).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       changed: true,
       requiresRestart: false,

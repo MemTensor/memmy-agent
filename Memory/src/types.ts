@@ -175,6 +175,7 @@ export interface MemoryRow {
 
 /** Narrow projection used by aggregate read models without loading memory payloads or vectors. */
 export interface MemoryStatsRow {
+  id: string;
   conversationId?: string;
   sessionId?: string;
   agentId?: string;
@@ -201,6 +202,7 @@ export interface MemoryFilter {
   tags?: string[];
   ids?: string[];
   memoryKind?: MemoryKind | MemoryKind[];
+  excludedMemoryKinds?: MemoryKind[];
   workMemoryUserId?: string;
   workMemoryProjectId?: string | null;
 }
@@ -265,6 +267,8 @@ export interface MemoryListItem {
     value?: number;
     alpha?: number;
     reflectionDone: boolean;
+    valuePending?: boolean;
+    alphaPending?: boolean;
   };
   metadata?: Record<string, unknown>;
   createdAt: IsoTime;

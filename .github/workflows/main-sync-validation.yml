@@ -1,0 +1,143 @@
+name: Validate managed main synchronization
+run-name: Main sync validation ${{ inputs.source_sha }} ${{ inputs.validation_key }}
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Managed synchronization PR number
+        required: true
+        type: string
+      source_sha:
+        description: Exact current PR head
+        required: true
+        type: string
+      base_sha:
+        description: Exact maintained target head
+        required: true
+        type: string
+      validation_key:
+        description: Scheduler-owned snapshot/generation identity
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  source:
+    name: Main sync source
+    if: ${{ github.repository == 'MemTensor/memmy-agent' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      head: ${{ steps.source.outputs.head }}
+      base: ${{ steps.source.outputs.base }}
+      pr: ${{ steps.source.outputs.pr }}
+      validation_key: ${{ steps.source.outputs.validation_key }}
+      head_repository: ${{ steps.source.outputs.head_repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: source
+        name: Verify authoritative current candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_CANDIDATE_SHA: ${{ inputs.source_sha }}
+          SYNC_BASE_SHA: ${{ inputs.base_sha }}
+          SYNC_PR_NUMBER: ${{ inputs.pr_number }}
+          SYNC_VALIDATION_KEY: ${{ inputs.validation_key }}
+        run: node scripts/main-sync/validate-source.mjs
+  linux:
+    name: Main sync Linux
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MEMMY_LEGAL_CN_BASE_URL: https://memmy.cn
+      MEMMY_LEGAL_INTL_BASE_URL: https://memmy.bot
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.source.outputs.head_repository }}
+          ref: ${{ needs.source.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install declared workspace and Agent dependencies
+        run: |-
+          npm ci
+          npm ci --prefix App/memmy-agent
+      - name: Build declared workspaces and Agent
+        run: |-
+          npm run build
+          npm --prefix App/memmy-agent run build
+      - name: Run repository lint and type checks
+        run: |-
+          npm run version:check
+          npm run lint
+          npm run typecheck
+          npm --prefix App/memmy-agent run typecheck
+      - name: Run full repository and standalone Agent suites
+        run: |-
+          npm test
+          npm --prefix App/memmy-agent test
+      - name: Run public critical smoke plans
+        run: |-
+          npm run smoke:memory-layer:test
+          npm run smoke:local-agent-memory:test
+      - name: Require unchanged verified source
+        env:
+          EXPECTED_SOURCE: ${{ needs.source.outputs.head }}
+        run: |-
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+  windows:
+    name: Main sync Windows
+    needs: source
+    uses: MemTensor/memmy-agent/.github/workflows/windows-computer-history-validation.yml@main
+    permissions:
+      contents: read
+    with:
+      source_sha: ${{ needs.source.outputs.head }}
+      source_repository: ${{ needs.source.outputs.head_repository }}
+  record:
+    name: Main sync record
+    needs:
+      - source
+      - linux
+      - windows
+    if: ${{ always() && needs.source.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record provider outcomes for the exact snapshot
+        shell: node {0}
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.head }}
+          BASE_SHA: ${{ needs.source.outputs.base }}
+          PR_NUMBER: ${{ needs.source.outputs.pr }}
+          VALIDATION_KEY: ${{ needs.source.outputs.validation_key }}
+          CONTROLLER_SHA: ${{ github.workflow_sha }}
+          PROVIDER_RUN_ID: ${{ github.run_id }}
+          PROVIDER_ATTEMPT: ${{ github.run_attempt }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |-
+          const fs=require('node:fs');const path=require('node:path');
+          const results=JSON.parse(process.env.JOB_RESULTS);
+          const jobs=Object.fromEntries(['source','linux','windows'].map(name=>[name,results[name].result]));
+          const proof={schemaVersion:1,headSha:process.env.SOURCE_SHA,baseSha:process.env.BASE_SHA,prNumber:Number(process.env.PR_NUMBER),validationKey:process.env.VALIDATION_KEY,controllerSha:process.env.CONTROLLER_SHA,runId:process.env.PROVIDER_RUN_ID,runAttempt:Number(process.env.PROVIDER_ATTEMPT),jobs,passed:Object.values(jobs).every(value=>value==='success'),diagnostics:JSON.stringify(jobs)};
+          const directory=path.join(process.env.RUNNER_TEMP,'main-sync-validation');fs.mkdirSync(directory,{recursive:true});
+          fs.writeFileSync(path.join(directory,'main-sync-validation.json'),JSON.stringify(proof,null,2)+'\n');
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memmy-main-sync-validation-${{ inputs.validation_key }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-sync-validation/main-sync-validation.json
+          if-no-files-found: error
+          retention-days: 30

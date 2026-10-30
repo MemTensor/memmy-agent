@@ -55,9 +55,9 @@ export interface AgentSourceService {
   syncManaged(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   updateManaged(sourceId: string, input: ManagedAgentSourceUpdateInput): Promise<AgentSourceView>;
   remove(sourceId: string): Promise<void>;
-  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">): Promise<void>;
+  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">, beforeInstall?: () => void): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput, beforeInstall?: () => void): Promise<void>;
   uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
@@ -238,7 +238,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       options.agentSourceRepository.removeSource(sourceId);
     },
 
-    async installSkill(sourceId, action = {}) {
+    async installSkill(sourceId, action = {}, beforeInstall) {
       const startedAt = Date.now();
       const installType = normalizePluginInstallType(action.installType);
       const statusBefore = readSourceStatus(options, sourceId);
@@ -246,7 +246,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       const builtin = readSourceBuiltin(options, sourceId);
       try {
         await ensureSourceAvailable(options, sourceId);
-        await options.skillDistributionService.install(sourceId);
+        beforeInstall?.();
+        await (beforeInstall ? options.skillDistributionService.install(sourceId, beforeInstall) : options.skillDistributionService.install(sourceId));
         ensureSourceExists(options, sourceId);
         if (installType === "auto_inject") {
           options.agentSourceRepository.setStatus(sourceId, "skill_installed");
@@ -310,14 +311,15 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       }
     },
 
-    async installPlugin(sourceId, action = {}) {
+    async installPlugin(sourceId, action = {}, beforeInstall) {
       const startedAt = Date.now();
       const installType = normalizePluginInstallType(action.installType);
       const statusBefore = readSourceStatus(options, sourceId);
       const permission = await readScanPermission(options);
       try {
         await ensureSourceAvailable(options, sourceId);
-        await options.skillDistributionService.installPlugin(sourceId);
+        beforeInstall?.();
+        await (beforeInstall ? options.skillDistributionService.installPlugin(sourceId, beforeInstall) : options.skillDistributionService.installPlugin(sourceId));
         ensureSourceExists(options, sourceId);
         if (installType === "auto_inject") {
           options.agentSourceRepository.setStatus(sourceId, "plugin_installed");

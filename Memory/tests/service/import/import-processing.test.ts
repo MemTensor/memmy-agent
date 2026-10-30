@@ -290,7 +290,9 @@ describe("MemoryService / import / processing", () => {
     expect(service.panelItems({ namespace, layer: "L1" }).items[0]?.metrics).toEqual({
       value: 0,
       alpha: 0,
-      reflectionDone: false
+      reflectionDone: false,
+      valuePending: true,
+      alphaPending: true
     });
     const episodeCount = db.db.prepare(
       `SELECT COUNT(*) AS count

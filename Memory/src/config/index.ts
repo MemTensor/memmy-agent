@@ -110,6 +110,8 @@ export interface StorageConfig {
 }
 
 export interface AgentAccessConfig {
+  /** Desktop authorization. Absent for standalone CLI installations. */
+  scanPermission?: "unset" | "none" | "scan_only" | "scan_and_write_skill";
   autoScanKnownAgents: boolean;
   watchFileChanges: boolean;
   autoInjectSkill: boolean;
@@ -838,6 +840,10 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
 
 function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
   return {
+    ...(input.scanPermission !== undefined ? {
+      scanPermission: input.scanPermission === "scan_only" || input.scanPermission === "scan_and_write_skill"
+        ? input.scanPermission : input.scanPermission === "none" ? "none" : "unset"
+    } : {}),
     autoScanKnownAgents: booleanValue(
       input.autoScanKnownAgents,
       DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
