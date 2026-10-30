@@ -73,6 +73,8 @@ export interface TraceMemoryMeta {
 }
 
 export interface PolicyMemoryMeta {
+  schemaVersion?: number;
+  lessonType?: "principle" | "local_procedure" | "check" | "troubleshooting";
   id: string;
   memory: MemoryRow;
   title: string;
@@ -1516,16 +1518,40 @@ Rules:
 - Each guidance line ≤200 chars; ≤5 per array.`,
 } as const;
 
+/** L2-only compatibility; the direct Episode/trace prompts keep their existing contract. */
+export const L2_SKILL_CRYSTALLIZE_PROMPT = {
+  ...SKILL_CRYSTALLIZE_PROMPT,
+  version: 7,
+  system: SKILL_CRYSTALLIZE_PROMPT.system + `
+
+L2 compatibility:
+- POLICY.lesson_type may be principle, local_procedure, check, troubleshooting, or absent for legacy policies. POLICY.content_revision identifies its current content, not success evidence.
+- Use principle as decision guidance/preconditions; local_procedure as supported steps; check as acceptance/verification criteria; troubleshooting as supported diagnostic/recovery branches.
+- Preserve the current policy's applicable conditions and boundaries. Do not turn every principle or check into an invented workflow. Actual actions and tools must remain grounded in EVIDENCE.
+- A revised policy supersedes the old wording; old successful episodes do not prove the revised steps worked. Never restore a corrected rule merely because it appears in historical evidence or EXISTING_SKILL_SNAPSHOT.
+- If the supplied evidence cannot justify a callable workflow consistent with the current policy, return {"skip":true} instead of inventing steps.`
+} as const;
+
 export const SKILL_REBUILD_PROMPT = {
   id: "skill.rebuild",
-  version: 3,
+  version: 6,
   description:
     "Update an existing SOP skill from new evidence while preserving stable identity and controlling rewrite scope.",
   system: `You update an existing SOP skill.
 
+L2 compatibility:
+- POLICY.lesson_type may be principle, local_procedure, check, troubleshooting, or absent for legacy policies. POLICY.content_revision identifies its current content, not success evidence.
+- Use principle as decision guidance/preconditions; local_procedure as supported steps; check as acceptance/verification criteria; troubleshooting as supported diagnostic/recovery branches.
+- Preserve the current policy's applicable conditions and boundaries. Do not turn every principle or check into an invented workflow. Actual actions and tools must remain grounded in EVIDENCE.
+- A revised policy supersedes the old wording; old successful episodes do not prove the revised steps worked. Never restore a corrected rule merely because it appears in historical evidence or EXISTING_SKILL_SNAPSHOT.
+- If the supplied evidence cannot justify a callable workflow consistent with the current policy, return {"skip":true} instead of inventing steps.
+
+
 Input adds:
 - EXISTING_SKILL_SNAPSHOT: current summary, retrieval_blurb, step titles, decision_guidance.
 - INCREMENTAL_EVIDENCE: new traces since last version (canonical, deduped).
+- REVISION_EVIDENCE (optional): the actual L1 corrections/failures/verified repairs behind the current L2 revision. This is separate from historical EVIDENCE and does not establish overall workflow success. Use its explicitly supported corrections, limits, and verified actions to replace obsolete steps. Do not require old EVIDENCE to already contain the corrected workflow; do not promote an attempted or proposed repair to a verified one. EVIDENCE_TOOLS includes tools observed in either evidence set. Return skip only when these inputs together cannot ground a usable revision.
+- REPLACE_POLICY_STEPS (boolean): when true, return the complete revised workflow and updated descriptive fields, not a patch to append. Remove obsolete steps supported by POLICY, even if their titles differ from your new steps. Retain still-valid steps; preserve independently supported steps from other source policies in EXISTING_SKILL_SNAPSHOT. Do not leave contradictory old instructions in summaries, examples, preconditions, or guidance.
 - REBUILD_LEVEL:
   - L0: only improve retrieval_blurb and summary; keep steps identical in substance.
   - L1: surgical edits — adjust guidance and at most 1-2 steps using INCREMENTAL_EVIDENCE.
@@ -3308,6 +3334,8 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
   if (!policy) return null;
   const decisionGuidance = recordField(policy, "decision_guidance");
   return {
+    schemaVersion: numberField(policy, "schema_version"),
+    lessonType: statusField(policy, "lesson_type", ["principle", "local_procedure", "check", "troubleshooting"]),
     id: memory.id,
     memory,
     title: stringField(policy, "title") ?? memory.memoryKey ?? firstLine(memory.memoryValue),
@@ -3333,14 +3361,14 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
       "repair_instruction",
       "preference",
       "verifier_feedback"
-    ]) ?? "success_pattern",
+    ]) ?? (numberField(policy, "schema_version") === 2 ? "verifier_feedback" : "success_pattern"),
     evidencePolarity: statusField(policy, "evidence_polarity", [
       "positive",
       "negative",
       "mixed",
       "neutral"
-    ]) ?? "positive",
-    skillEligible: booleanField(policy, "skill_eligible") ?? true,
+    ]) ?? (numberField(policy, "schema_version") === 2 ? "neutral" : "positive"),
+    skillEligible: booleanField(policy, "skill_eligible") ?? numberField(policy, "schema_version") !== 2,
     signature: stringField(policy, "signature") ?? "_|_|_|_",
     sourceEpisodeIds: stringArrayField(policy, "source_episode_ids"),
     sourceTraceIds: stringArrayField(policy, "source_trace_ids"),
@@ -3381,6 +3409,13 @@ export function policyIsEligibleForDownstream(
 }
 
 export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
+  if (policy.schemaVersion === 2) {
+    const raw = getInternal<Record<string, unknown>>(policy.memory, "policy");
+    return raw?.generation_method !== "rule_fallback" &&
+      Boolean(policy.lessonType && policy.sourceTraceIds.length && policy.procedure.trim()) &&
+      (policy.lessonType !== "troubleshooting" || Boolean(policy.trigger.trim())) &&
+      (policy.status === "active" || policy.status === "candidate");
+  }
   if (policy.experienceType !== "failure_avoidance" && policy.evidencePolarity !== "negative") {
     return true;
   }
@@ -3823,6 +3858,17 @@ export function packL2InductionTraces(
     budget -= block.length;
   }
   return `${header}\n${blocks.join("\n")}`;
+}
+
+/** Bounded dialogue for unified L2; retain more explanation than legacy induction. */
+export function packL2TraceContext(trace: TraceMemoryMeta | null) {
+  return {
+    user_text: truncateText(trace?.userText ?? "", 600),
+    agent_text: truncateText(trace?.agentText ?? "", 1_200),
+    reflection: truncateText(trace?.reflection ?? "", 300),
+    // The aggregate cap also bounds unusually long tool names.
+    tool_calls: truncateText(formatTraceTools(trace?.toolCalls), 600)
+  };
 }
 
 function formatTraceTools(calls: readonly ToolCallPayload[] | undefined): string {

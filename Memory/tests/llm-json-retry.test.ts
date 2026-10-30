@@ -241,6 +241,19 @@ describe("memory summary input budget", () => {
 });
 
 describe("memory LLM JSON length retry", () => {
+  it("rejects parseable but truncated unified extraction after the original retry", async () => {
+    const fetchMock = sequenceFetch([
+      openAiResponse('{"operations":[]}', "length"),
+      openAiResponse('{"operations":[]}', "length")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig());
+    await expect(client.completeJson([{ role: "user", content: "complete evidence" }], {
+      operation: "l2.extraction.v1", maxTokens: 128, requireCompleteJson: true
+    })).rejects.toThrow("remained truncated");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("merges existing system messages into one leading system message", async () => {
     const fetchMock = sequenceFetch([openAiResponse('{"ok":true}', "stop")]);
     vi.stubGlobal("fetch", fetchMock);

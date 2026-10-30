@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { localCalendarDate } from "@memmy/agent-source-core";
+import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import type { Embedder, LlmClient } from "../../../src/model/types.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { memoryVector } from "../../../src/storage/memory-vector-state.js";
@@ -13,7 +14,9 @@ afterEach(cleanup);
 describe("feedback experience worker model admission", () => {
   it.each([false, true])("resumes deferred feedback through refinement and embedding with all permits (separate embedding provider=%s)", async separateProvider => {
     const controller = new WorkerConcurrencyController({}, {});
-    const resumed = byokRuntimeConfig({ tokenBudget: { dailyLimitM: 0, totalLimitM: 0 } });
+    const algorithm = { ...DEFAULT_MEMMY_CONFIG.algorithm,
+      l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" as const } };
+    const resumed = byokRuntimeConfig({ algorithm, tokenBudget: { dailyLimitM: 0, totalLimitM: 0 } });
     const embeddingConfig = { ...resumed.embedding,
       ...(separateProvider ? { endpoint: "https://embedding.test.invalid/v1", sourceProvider: "review-embedding" } : {}) };
     const operations: string[] = [], embedded: Array<{ texts: string[]; role?: string }> = [];
@@ -49,7 +52,7 @@ describe("feedback experience worker model admission", () => {
       status: () => ({ provider: embeddingConfig.provider, model: embeddingConfig.model, configured: true, remote: true })
     };
     const { db, service } = createTestService({ concurrency: controller,
-      config: byokRuntimeConfig({ tokenBudget: { dailyLimitM: 1, totalLimitM: 500 } }),
+      config: byokRuntimeConfig({ algorithm, tokenBudget: { dailyLimitM: 1, totalLimitM: 500 } }),
       configLoader: () => ({ config: resumed }), llm, skillLlm: llm, embedder });
     const repos = new Repositories(db.db);
     repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, { dailyUsed: 1_000_000,

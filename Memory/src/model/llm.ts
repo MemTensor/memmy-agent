@@ -251,6 +251,10 @@ class HttpLlmClient implements LlmClient {
         continue;
       }
 
+      if (truncated && options.requireCompleteJson) {
+        throw new Error("LLM JSON output remained truncated after length retry");
+      }
+
       if (parseError === undefined && parsed !== undefined) {
         if (jsonAttempt > 1) {
           logger.info("json.recovered", {

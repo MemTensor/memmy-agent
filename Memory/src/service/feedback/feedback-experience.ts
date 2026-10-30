@@ -45,6 +45,7 @@ import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
 import { updatePolicyStats } from "../evolution/policy-induction.js";
+import { upsertL2Candidate, type L2CandidateSignal } from "../evolution/l2-candidate-service.js";
 import {
   namespaceForMemory,
   namespaceForSession,
@@ -466,6 +467,7 @@ feedbackContextHash(
     }
 
     const attachedPolicyIds = feedback.polarity !== "negative"
+      && this.deps.config.algorithm.l2Induction.mode !== "unified"
       && this.deps.config.algorithm.feedback.attachToPolicy
       ? this.feedbackCandidatePolicyIds(request, feedback)
       : [];
@@ -566,7 +568,8 @@ maybeCreateDecisionRepair(
       }
     }
 
-    const attachedPolicyIds = this.deps.config.algorithm.feedback.attachToPolicy
+    const attachedPolicyIds = this.deps.config.algorithm.l2Induction.mode !== "unified"
+      && this.deps.config.algorithm.feedback.attachToPolicy
       ? this.feedbackCandidatePolicyIds(request, feedback)
       : [];
     const evidence = this.feedbackRepairEvidence(request, feedback, attachedPolicyIds);
@@ -776,6 +779,50 @@ async maybeCreateFeedbackExperience(
     const significance = feedbackExperienceSignificance(feedback, classification, episode);
     if (significance < 0.5 || !isActionableFeedbackExperience(text, classification.shape)) {
       return [];
+    }
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") {
+      // Admission retains feedback's own significance gate, including low-value L1s.
+      // A feedback record alone is not evidence for an L2 in the first unified version.
+      const candidate = traceMemory && trace && traceMemory.userId === feedback.userId
+        ? upsertL2Candidate(this.deps.repos, {
+          sourceMemoryId: traceMemory.id,
+          userId: feedback.userId,
+          episodeId: feedback.episodeId,
+          route: "feedback",
+          at: feedback.createdAt,
+          signal: {
+            eventId: feedback.id,
+            route: "feedback",
+            feedbackId: feedback.id,
+            polarity: feedback.polarity,
+            text,
+            evidenceStrength: significance,
+            fallback: buildUnifiedFeedbackRuleFallback({
+              feedback, text, classification, significance, episode, trace, traceMemory
+            })
+          }
+        })
+        : null;
+      if (!candidate) {
+        pipelineLogger.info("l2.candidate.skipped_no_l1", {
+          route: "feedback",
+          feedbackId: feedback.id,
+          episodeId: feedback.episodeId,
+          sourceMemoryId: feedback.l1MemoryId
+        });
+        return [];
+      }
+      if (candidate.status !== "pending") return [];
+      return [this.deps.enqueueJob({
+        jobType: "l2_induction",
+        userId: feedback.userId,
+        sessionId: traceMemory!.sessionId ?? feedback.sessionId,
+        episodeId: candidate.episodeId ?? undefined,
+        targetMemoryId: candidate.sourceMemoryId,
+        dedupeKey: `l2.unified:${candidate.sourceMemoryId}:${candidate.sourceVersion}`,
+        payload: { unified: true, reason: "feedback.experience", feedbackId: feedback.id },
+        createdAt: feedback.createdAt
+      })];
     }
     const fallbackDraft = buildFeedbackExperienceDraft({
       feedback,
@@ -1569,6 +1616,8 @@ attachRepairToPolicies(
     antiPattern: string | undefined,
     at: string
   ): string[] {
+    // New L2 content changes require the unified model decision and evidence validation.
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") return [];
     const attached: string[] = [];
     for (const policyId of policyIds) {
       const memory = this.deps.repos.memories.get(policyId);
@@ -2850,6 +2899,46 @@ function isActionableFeedbackExperience(text: string, shape: FeedbackTextShape):
   if (shape !== "unknown" && shape !== "confusion") return true;
   return /\b(next time|should|must|avoid|prefer|instead|do not|don't|pass|fail|failed|success|expected|actual)\b/i.test(text) ||
     /下次|应该|必须|不要|别|成功|失败|反例|期望|实际|改/.test(text);
+}
+
+/** Reuse the existing rule fallback without treating praise or a failed repair as a procedure. */
+function buildUnifiedFeedbackRuleFallback(input: {
+  feedback: FeedbackRecord;
+  text: string;
+  classification: FeedbackTextClassification;
+  significance: number;
+  episode?: EpisodeRecord;
+  trace: TraceMeta;
+  traceMemory: MemoryRow;
+}): L2CandidateSignal["fallback"] {
+  const shape = input.classification.shape;
+  const hasCheck = /\b(check|verify|validate|assert|test|expected|actual)\b|检查|验证|校验|断言|验收|期望|实际/.test(input.text.toLowerCase());
+  const hasInstruction = ["preference", "constraint", "correction", "instruction"].includes(shape)
+    || /\b(should|avoid|do not|don't)\s+\S|应该\s*\S|不要\s*\S|\buse\s+.+\s+instead\s+of\s+|用\s*.+\s*(代替|而不是)/i.test(input.text);
+  // Result-only feedback still enters the pool, but requires the model to find a reusable rule.
+  if (!hasInstruction) return undefined;
+  const type = hasCheck ? "check"
+    : shape === "preference" || shape === "constraint" ? "principle"
+    : "local_procedure";
+  const base = buildFeedbackExperienceDraft(input);
+  const refinement = refineFeedbackExperienceByRules({
+    feedbackText: input.text,
+    polarity: feedbackPolarityForRefinement(input.feedback, base),
+    userRequest: input.trace.userText,
+    episodeContext: feedbackTraceHint(input.trace) ?? ""
+  });
+  const draft = applyFeedbackRefinement(base, refinement);
+  const content = refinement.procedure.startsWith("Continue using this approach:")
+    ? input.text
+    : refinement.procedure;
+  return {
+    type,
+    title: stripFeedbackRefinementPrefix(draft.title, feedbackExperiencePrefix(base.type)),
+    applicability: [draft.trigger],
+    content: [content],
+    verification: refinement.verification ? [refinement.verification] : [],
+    exclusions: dedupeTextLines([draft.boundary, ...refinement.caveats])
+  };
 }
 
 function buildFeedbackExperienceDraft(input: {

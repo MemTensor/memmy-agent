@@ -1,7 +1,7 @@
 import type { JobType } from "../../types.js";
 import { resolveWorkerLeaseOptions, type ResolvedWorkerLeaseOptions } from "./worker-lease-options.js";
 
-export const JOB_POLICY_VERSION = 4;
+export const JOB_POLICY_VERSION = 5;
 export const QUEUE_LANES = ["interactive", "repair_retry", "import", "evolution", "maintenance"] as const;
 export type QueueLane = typeof QUEUE_LANES[number];
 export const RESOURCE_CLASSES = ["summary", "embedding", "evolution_llm", "database", "scan"] as const;
@@ -80,8 +80,10 @@ const DEFINITIONS: Readonly<Record<PolicyJobType, PolicyDefinition>> = Object.fr
   span_big_turn: definition("evolution", "summary", 35, ["summary"]),
   negative_experience: definition("evolution", "evolution_llm", 100, ["evolution"], "episode"),
   decision_repair: definition("repair_retry", "evolution_llm", 25, ["evolution"]),
-  l2_association: definition("evolution", "database", 40, []),
-  l2_induction: definition("evolution", "evolution_llm", 50, ["evolution"]),
+  // Both entry points can run unified extraction, including comparison/revision embeddings.
+  // Reserve the complete call set even when legacy mode uses only a subset.
+  l2_association: definition("evolution", "evolution_llm", 40, ["evolution", "embedding"]),
+  l2_induction: definition("evolution", "evolution_llm", 50, ["evolution", "embedding"]),
   l3_abstraction: definition("evolution", "database", 60, [], "user_project"),
   l3_world_model_update: definition("evolution", "evolution_llm", 60, ["evolution"], "user_project"),
   project_environment_profile: definition("maintenance", "evolution_llm", 55, ["evolution"], "user_project"),

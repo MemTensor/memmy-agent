@@ -414,12 +414,14 @@ describe("memory token budget review regressions", () => {
   it("queues positive feedback refinement while paused and resumes once", async () => {
     const calls: string[] = [];
     const pausedConfig = byokRuntimeConfig({
+      algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm, l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" } },
       tokenBudget: { dailyLimitM: 1, totalLimitM: 500 }
     });
     const { db, service } = createTestService({
       config: pausedConfig,
       configLoader: () => ({
         config: byokRuntimeConfig({
+          algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm, l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" } },
           tokenBudget: { dailyLimitM: 0, totalLimitM: 0 }
         })
       }),
@@ -491,6 +493,7 @@ describe("memory token budget review regressions", () => {
       tokenBudget: { dailyLimitM: 1, totalLimitM: 500 },
       algorithm: {
         ...DEFAULT_MEMMY_CONFIG.algorithm,
+        l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" },
         feedback: {
           ...DEFAULT_MEMMY_CONFIG.algorithm.feedback,
           useLlm: false
